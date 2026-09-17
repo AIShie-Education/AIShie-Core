@@ -16,7 +16,12 @@ src/
     presets.sql          the six built-in permission presets; safe to re-run
   tests/
     constraints_test.sql checks the database-enforced rules; rolls back
+  embed.go               compiles migrations/ and seed/ into the server binary
 ```
+
+The SQL files are the source of truth and stay runnable with plain `psql`, as
+below. The server embeds the same files, so `aishiterud migrate up` and
+`aishiterud seed` do the same thing without needing the repository.
 
 ## Requirements
 
@@ -39,6 +44,22 @@ untouched. Keep `ON_ERROR_STOP=1`: without it psql carries on after the first
 error and buries the real message under a screen of "current transaction is
 aborted".
 
+Or, with the server binary (`make build` at the repository root):
+
+```
+createdb aishiteru
+DATABASE_URL=postgres:///aishiteru bin/aishiterud migrate up
+DATABASE_URL=postgres:///aishiteru bin/aishiterud seed
+```
+
+`aishiterud` records the applied version in a `schema_migrations` table; psql
+does not. A database first built with `psql -f` must be adopted once before
+the binary will manage it: `aishiterud migrate force 1` (the number of the
+last migration applied by hand). Pick one way per database and stay with it.
+
+File names follow `NNNN_name.up.sql` / `NNNN_name.down.sql`. Every migration
+needs both directions; a test enforces it.
+
 ## Test
 
 Use a throwaway database: the test runs in one transaction and rolls back,
@@ -53,6 +74,11 @@ dropdb aishiteru_test
 
 Each check prints `PASS`. The first failure stops the run with `FAIL` and the
 SQLSTATE it expected versus what it got.
+
+`make db-test-sql` at the repository root does all of this against a scratch
+database — every migration up, the seed, the checks, every migration down, a
+check that nothing was left behind, and up again — and is what CI runs on
+PostgreSQL 13 and 18.
 
 ## What the database enforces
 
@@ -117,7 +143,9 @@ unique index.
 
 Executed against PostgreSQL 18.6: up, down and up again apply cleanly, and
 `tests/constraints_test.sql` passes (71 checks). **Not yet run on PostgreSQL
-13**, the stated minimum.
+13**, the stated minimum: CI runs this suite and the Go tests on both 13 and
+18, so the first pipeline run settles it — update this paragraph with the
+result.
 
 The tests cover every row of the table above, plus one structural guard: the
 `perm_*` columns of `permission_preset` and `course_member` must be identical,
