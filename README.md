@@ -11,14 +11,28 @@ out to an agent.
 
 ## Status
 
-The PostgreSQL layer is complete. The Go backend is being built in milestones;
-so far the binary can migrate, seed and serve a health endpoint.
+The PostgreSQL layer is complete. The Go backend is being built in milestones.
+In place so far: `authorize()`, the tool registry, and the action pipeline every
+call goes through — idempotent replay, proposals with re-authorization on
+approval, after-the-fact review, events — with grading as the first tools on
+it. The worked example in docs/schema.md §5 ("an agent grades an essay") runs
+end to end as a test. Still to come: authentication and the REST adapter, the
+rest of the tool catalogue, documents, the MCP adapter, background jobs, SSO.
 
 ## Layout
 
 ```
 cmd/aishiterud/   the server and its operator commands
-internal/         Go packages (config, db, httpapi, testdb, ...)
+internal/
+  domain, apperr, ids, canon   vocabulary, errors, UUID v7, canonical JSON + payload hash
+  db                           pool, migrations, queries/*.sql → dbq (sqlc)
+  authz                        authorize(), exactly as docs/schema.md §3
+  tool                         what a tool is; the registry both adapters are generated from
+  pipeline                     the one road every call takes
+  tools                        the catalogue, one file per noun
+  events, gradecalc            the event feed's writer; grade rollups (pure)
+  httpapi                      REST adapter
+  testdb, testkit              a database per test; course fixtures
 src/              migrations, seed and SQL tests; embedded into the binary
 docs/             design documents
 ```
