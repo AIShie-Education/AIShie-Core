@@ -70,6 +70,12 @@ func deny(r Reason, m *domain.Member) Decision {
 type Target struct {
 	StudentMemberIDs []uuid.UUID
 	AssignmentIDs    []uuid.UUID
+	// SpansAssignments marks a target that belongs to a student but to no
+	// single assignment: a grade on a component, a course total. A member
+	// limited to listed assignments may not touch it. Without this, a grader
+	// listed for HW3 alone could read the whole class's midterm, because a
+	// target naming no assignment would skip step 5 entirely.
+	SpansAssignments bool
 }
 
 // Evaluate is steps 1–3 with everything already loaded. It is pure, so the
@@ -162,6 +168,9 @@ func CheckScope(ctx context.Context, q dbq.Querier, m *domain.Member, t Target) 
 		if int(n) != len(students) {
 			return ReasonStudentScope, nil
 		}
+	}
+	if t.SpansAssignments && m.AssignmentScope != domain.ScopeAll {
+		return ReasonAssignmentScope, nil
 	}
 	if assignments := distinct(t.AssignmentIDs); len(assignments) > 0 && m.AssignmentScope != domain.ScopeAll {
 		n, err := q.CountAssignmentsInScope(ctx, dbq.CountAssignmentsInScopeParams{MemberID: m.ID, AssignmentIds: assignments})

@@ -84,6 +84,7 @@ func (c *cs101) checks() []check {
 	both := authz.Target{StudentMemberIDs: []uuid.UUID{c.yukiM, c.kenM}, AssignmentIDs: []uuid.UUID{c.hw3}}
 	batch := authz.Target{StudentMemberIDs: []uuid.UUID{c.yukiM, c.kenM, c.yukiM}, AssignmentIDs: []uuid.UUID{c.hw3, c.hw3}}
 	none := authz.Target{}
+	yukiMidterm := authz.Target{StudentMemberIDs: []uuid.UUID{c.yukiM}, SpansAssignments: true}
 
 	return []check{
 		// step 1
@@ -111,6 +112,9 @@ func (c *cs101) checks() []check {
 		{"grader proposes for the listed assignment", c.grader, c.course, domain.PermGradeSubmit, true, yukiHW3, domain.ConfirmRequired, ""},
 		{"grader cannot touch an unlisted assignment", c.grader, c.course, domain.PermGradeSubmit, true, yukiHW4, domain.Denied, authz.ReasonAssignmentScope},
 		{"grader: whole class, listed assignment, ids repeated", c.grader, c.course, domain.PermGradeSubmit, true, batch, domain.ConfirmRequired, ""},
+		{"grader listed for HW3 cannot touch a component grade", c.grader, c.course, domain.PermSubmissionRead, false, yukiMidterm, domain.Denied, authz.ReasonAssignmentScope},
+		{"instructor can", c.sato, c.course, domain.PermGradeSubmit, true, yukiMidterm, domain.Autonomous, ""},
+		{"student sees own component grade: assignment scope is all", c.yuki, c.course, domain.PermGradeRead, false, yukiMidterm, domain.Autonomous, ""},
 	}
 }
 

@@ -178,6 +178,19 @@ assignments (an exam) are graded directly and carry `points_possible`.
 Only parameters live here. Weighted means, normalisation and drop-lowest are application
 code, so a new scheme is a code change, not a migration.
 
+The scheme in force (`internal/gradecalc`, a pure function of the tree and one student's
+posted grades):
+
+- An item's fraction is `score / points_possible`.
+- A bucket — a component with assignments — drops its `drop_lowest` lowest fractions, never
+  all of them, and is then `Σscore / Σpoints` over the rest: points-weighted, so a 100-point
+  project outweighs a 10-point quiz.
+- A directly graded component is its one grade over its `points_possible`.
+- Any other component is the weight-averaged fraction of its children, after dropping
+  `drop_lowest` of them.
+- Work with no posted grade is left out and the rest re-normalised — a "grade so far", marked
+  incomplete. `treat_ungraded_as_zero` counts it as zero instead, for final grades.
+
 ### 2.4 Content
 
 ```
@@ -347,6 +360,15 @@ authorize(actor, course, action_type, target) → autonomy_level
 5. if the target belongs to an assignment: same with assignment_scope
 6. return level
 ```
+
+Step 5 has one more case. A target that belongs to a student but to no single assignment — a
+grade on a component, a course total, a whole gradebook — is within scope only for
+`assignment_scope = 'all'`. Otherwise "names no assignment" would mean "skips the check", and
+a grader listed for HW3 alone could read the class's midterm.
+
+Steps 1–3 run before the target is looked up, and the lookup happens only for a caller who
+passed them. A non-member probing ids gets the same recorded denial whether or not the id
+exists.
 
 One indexed lookup plus at most two existence checks. There is no walk, no most-specific-wins
 rule and no cache to invalidate: removing an agent takes effect on its next call.
