@@ -1,8 +1,8 @@
 # src
 
-Database schema for AIshideru Core.
+Database schema for AIshiteru Core.
 
-- Design intent: [../docs/aishideru-core-concepts.md](../docs/aishideru-core-concepts.md)
+- Design intent: [../docs/aishiteru-core-concepts.md](../docs/aishiteru-core-concepts.md)
 - Data model: [../docs/schema.md](../docs/schema.md)
 
 ## Layout
@@ -25,10 +25,10 @@ PostgreSQL 13 or newer. No extensions, no elevated privileges.
 ## Apply and roll back
 
 ```
-createdb aishideru
-psql -v ON_ERROR_STOP=1 -d aishideru -f migrations/0001_init.up.sql
-psql -v ON_ERROR_STOP=1 -d aishideru -f seed/presets.sql
-psql -v ON_ERROR_STOP=1 -d aishideru -f migrations/0001_init.down.sql
+createdb aishiteru
+psql -v ON_ERROR_STOP=1 -d aishiteru -f migrations/0001_init.up.sql
+psql -v ON_ERROR_STOP=1 -d aishiteru -f seed/presets.sql
+psql -v ON_ERROR_STOP=1 -d aishiteru -f migrations/0001_init.down.sql
 ```
 
 The seed is policy, not schema: it inserts the built-in presets and leaves
@@ -45,10 +45,10 @@ Use a throwaway database: the test runs in one transaction and rolls back,
 but its fixtures use fixed ids.
 
 ```
-createdb aishideru_test
-psql -v ON_ERROR_STOP=1 -d aishideru_test -f migrations/0001_init.up.sql
-psql -X -d aishideru_test -f tests/constraints_test.sql
-dropdb aishideru_test
+createdb aishiteru_test
+psql -v ON_ERROR_STOP=1 -d aishiteru_test -f migrations/0001_init.up.sql
+psql -X -d aishiteru_test -f tests/constraints_test.sql
+dropdb aishiteru_test
 ```
 
 Each check prints `PASS`. The first failure stops the run with `FAIL` and the

@@ -1,4 +1,4 @@
--- AIshideru Core — migration 0001 (up)
+-- AIshiteru Core — migration 0001 (up)
 -- Design reference: docs/schema.md
 --
 -- Requires PostgreSQL 13+. gen_random_uuid() is built in from 13, so applying

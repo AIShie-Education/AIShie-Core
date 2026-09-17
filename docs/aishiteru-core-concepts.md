@@ -1,4 +1,4 @@
-# AIshideru — Core Concepts
+# AIshiteru — Core Concepts
 
 *An agent-centered LMS where AI agents are primary actors, not bolted-on features.*
 
@@ -102,7 +102,7 @@ Course material is authored and stored as **ordinary documents** — no graph-au
 
 ## Tech Stack
 
-AIshideru is a **pure orchestration environment** — no model hosting, no inference. All AI is separately hosted and plugged in through MCP. The system itself is state, events, and a tool surface (MCP + UI/API) that external agents connect to. This makes it an I/O-bound, concurrency-heavy system (many simultaneous sessions mostly waiting on external agent calls) rather than a compute-bound one — which drove the language choice.
+AIshiteru is a **pure orchestration environment** — no model hosting, no inference. All AI is separately hosted and plugged in through MCP. The system itself is state, events, and a tool surface (MCP + UI/API) that external agents connect to. This makes it an I/O-bound, concurrency-heavy system (many simultaneous sessions mostly waiting on external agent calls) rather than a compute-bound one — which drove the language choice.
 
 | Layer | Decision | Why |
 |---|---|---|

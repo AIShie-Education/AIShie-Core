@@ -1,13 +1,13 @@
--- AIshideru Core — database-enforced rule tests
+-- AIshiteru Core — database-enforced rule tests
 --
 -- Run against a throwaway database that has the migrations applied. Every
 -- statement runs inside one transaction that is rolled back at the end, but
 -- the fixtures use fixed ids, so do not point this at a database with data.
 --
---   createdb aishideru_test
---   psql -v ON_ERROR_STOP=1 -d aishideru_test -f migrations/0001_init.up.sql
---   psql -X -d aishideru_test -f tests/constraints_test.sql
---   dropdb aishideru_test
+--   createdb aishiteru_test
+--   psql -v ON_ERROR_STOP=1 -d aishiteru_test -f migrations/0001_init.up.sql
+--   psql -X -d aishiteru_test -f tests/constraints_test.sql
+--   dropdb aishiteru_test
 --
 -- Each check prints PASS; the first failure stops the run with FAIL.
 

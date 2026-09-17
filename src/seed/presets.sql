@@ -1,4 +1,4 @@
--- AIshideru Core — built-in permission presets
+-- AIshiteru Core — built-in permission presets
 --
 -- Policy, not schema: what a student, instructor, TA, observer, tutor agent
 -- or grading agent may do by default. Apply after the migrations. Safe to

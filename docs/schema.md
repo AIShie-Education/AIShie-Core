@@ -1,6 +1,6 @@
-# AIshideru — Core Data Schema
+# AIshiteru — Core Data Schema
 
-Derived from [aishideru-core-concepts.md](./aishideru-core-concepts.md). Notation is compact
+Derived from [aishiteru-core-concepts.md](./aishiteru-core-concepts.md). Notation is compact
 pseudo-DDL, not migration SQL: `→` marks a foreign key, `null` marks a nullable column, `[a|b]`
 lists the values a text column may hold. The migration in `src/migrations` is the authority on
 exact types and constraints.

@@ -1,1 +1,1 @@
-# AIShideru-Core
+# AIShiteru-Core

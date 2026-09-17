@@ -1,4 +1,4 @@
--- AIshideru Core — migration 0001 (down)
+-- AIshiteru Core — migration 0001 (down)
 -- Drops everything 0001_init.up.sql creates. Destroys all data.
 --
 -- DROP TABLE does not fire row triggers, so the append-only guards on
