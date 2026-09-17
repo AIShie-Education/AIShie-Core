@@ -1,0 +1,33 @@
+version: "2"
+sql:
+  - engine: postgresql
+    # The migrations are the schema. sqlc skips *.down.sql on its own.
+    schema: src/migrations
+    queries: internal/db/queries
+    gen:
+      go:
+        package: dbq
+        out: internal/db/dbq
+        sql_package: pgx/v5
+        emit_interface: true
+        emit_pointers_for_null_types: true
+        overrides:
+          # Primary keys are UUID v7 made by the application.
+          - db_type: uuid
+            go_type: { import: github.com/google/uuid, type: UUID }
+          - db_type: uuid
+            nullable: true
+            go_type: { import: github.com/google/uuid, type: UUID, pointer: true }
+          # Scores and points: numeric, never float.
+          - db_type: pg_catalog.numeric
+            go_type: { import: github.com/shopspring/decimal, type: Decimal }
+          - db_type: pg_catalog.numeric
+            nullable: true
+            go_type: { import: github.com/shopspring/decimal, type: NullDecimal }
+          - db_type: timestamptz
+            go_type: { import: time, type: Time }
+          - db_type: timestamptz
+            nullable: true
+            go_type: { import: time, type: Time, pointer: true }
+          - db_type: date
+            go_type: { import: time, type: Time }

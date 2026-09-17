@@ -1,0 +1,18 @@
+# macOS
+.DS_Store
+
+# Build output
+/bin/
+/dist/
+
+# Local state (fsstore blobs, scratch databases)
+/var/
+
+# Secrets and local overrides
+.env
+.env.*
+!.env.example
+
+# Test and coverage output
+cover.out
+*.test

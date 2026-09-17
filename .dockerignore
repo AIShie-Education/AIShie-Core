@@ -1,0 +1,10 @@
+.git
+.github
+bin
+dist
+var
+docs
+cover.out
+.env
+.env.*
+.DS_Store
