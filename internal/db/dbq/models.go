@@ -76,6 +76,8 @@ type Action struct {
 	ReviewedAt         *time.Time
 	ExecutedAt         *time.Time
 	CreatedAt          time.Time
+	PayloadHash        string
+	Result             []byte
 }
 
 type Actor struct {
@@ -191,14 +193,16 @@ type DocumentVersion struct {
 }
 
 type Event struct {
-	Seq         int64
-	Type        string
-	CourseID    *uuid.UUID
-	ActionID    *uuid.UUID
-	SubjectType string
-	SubjectID   *uuid.UUID
-	Payload     []byte
-	OccurredAt  time.Time
+	Seq             int64
+	Type            string
+	CourseID        *uuid.UUID
+	ActionID        *uuid.UUID
+	SubjectType     string
+	SubjectID       *uuid.UUID
+	Payload         []byte
+	OccurredAt      time.Time
+	StudentMemberID *uuid.UUID
+	AssignmentID    *uuid.UUID
 }
 
 type Grade struct {

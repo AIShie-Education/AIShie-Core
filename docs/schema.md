@@ -58,7 +58,7 @@ actor(id, kind [human|agent|system], display_name, email null,
       status [active|suspended], platform_role null [root|admin],
       created_by_actor_id null→actor, created_at)
 
-credential(id, actor_id→actor, kind [password|sso|api_token],
+credential(id, actor_id→actor, kind [password|sso|api_token|session],
            secret_hash null, provider null, subject null, token_prefix null,
            label null, last_used_at null, expires_at null, revoked_at null, created_at,
            unique(provider, subject), unique(token_prefix))
@@ -77,9 +77,12 @@ course.
 admins, an admin creates a course and seats its first instructor, the instructor adds everyone
 else. Roster syncs run as a `kind = 'system'` actor so the chain has no gaps.
 
-`credential` covers three kinds of the same thing. SSO rows hold no secret — `provider` and
+`credential` covers four kinds of the same thing. SSO rows hold no secret — `provider` and
 `subject` identify the account at the identity provider (`polyu-adfs` + UPN). API tokens store a
-hash plus a `token_prefix` so the row can be found before the hash is checked.
+hash plus a `token_prefix` so the row can be found before the hash is checked. A browser
+`session` is a short-lived token minted at login and is stored exactly like an API token, so
+there is one verification path and no session table; unlike an API token it must carry an
+`expires_at`.
 
 `course.status = 'archived'` refuses every write, from agents included.
 
@@ -236,18 +239,21 @@ given for never changes underneath it.
 
 ```
 action(id, actor_id→actor, course_id null→course, member_id null→course_member,
-       action_type, target_type, target_id null, payload jsonb, idempotency_key,
-       authz_result autonomy_level,
+       action_type, target_type, target_id null, payload jsonb, payload_hash,
+       idempotency_key, authz_result autonomy_level,
        status [denied|proposed|approved|rejected|cancelled|executed|failed],
        decided_by_member_id null→course_member, decided_at null,
        review_state [none|pending|reviewed|escalated],
        reviewed_by_member_id null→course_member, reviewed_at null,
-       executed_at null, created_at,
+       executed_at null, result jsonb null, created_at,
        unique(actor_id, idempotency_key),
-       check(decided_by_member_id ≠ member_id), check(reviewed_by_member_id ≠ member_id))
+       check(decided_by_member_id ≠ member_id), check(reviewed_by_member_id ≠ member_id),
+       check(status agrees with authz_result), check(executed_at set ⇔ status = 'executed'))
 
 event(seq, type, course_id null→course, action_id null→action,
-      subject_type, subject_id null, payload jsonb, occurred_at)
+      subject_type, subject_id null,
+      student_member_id null→course_member, assignment_id null→assignment,
+      payload jsonb, occurred_at)
 ```
 
 **`action` is an attempt, written before anything happens**, including attempts that were
@@ -258,10 +264,36 @@ and the proposal itself lives in `payload`; nothing else is written until a huma
 `unique(actor_id, idempotency_key)` is not optional. A tool call retried after a timeout would
 otherwise post a second grade silently at 3am.
 
+**The key says the call was seen before; `payload_hash` says whether it was the same call.**
+It is a SHA-256 over the tool name and the canonical JSON of the arguments (rule
+`ais-canon-1`, in `internal/canon`), computed by the server only. Same key and same hash
+replays the stored `result` and does nothing else. Same key and a different hash is a client
+bug — a key reused for new content — and is refused with a conflict, instead of telling the
+caller that a request it never made succeeded. `payload` holds the canonical arguments with
+any secret fields removed; `result` holds what the call returned (secrets removed likewise),
+or `{"error": …}` for a failed or cancelled action and `{"decision": …}` for a rejected one.
+
+**Only state changes are actions.** A read passes `authorize()`, scope included, and writes
+no `action` row: the log stays a record of attempts to change something.
+
+**A proposal is re-authorized when it is approved, and does not wait forever.** Approval
+re-runs `authorize()` for the *proposer* — against the very `course_member` row the proposal
+was made under, not whatever row the actor holds today — and re-resolves the target. If the
+proposer has been removed, paused, expired, re-scoped or downgraded, or the target is gone, the
+proposal becomes `cancelled` and nothing executes. A background sweep cancels proposals older
+than a configured TTL; approval checks the same TTL inline, so correctness never depends on
+when the sweep last ran.
+
 **`event` is something that happened, written after it did**, in the same transaction as the
 state change. Not every event has an action behind it (a due date passing); one action may
 emit several (posting a batch of grades emits one per student). `seq` is the cursor for
 "everything since" — for a student's feed, or an agent rebuilding its picture on cold start.
+
+`student_member_id` and `assignment_id` say whose the event is, so that the feed is
+scope-filtered in SQL exactly as `authorize()` filters a target: null means the event belongs
+to no student (or no assignment) and that scope does not apply. They are filled when the
+event is written and never change. Payloads carry ids and small facts only — never a score or
+feedback text; a reader fetches content through the read tools, which authorize it.
 
 Nobody approves or reviews their own action. The database cannot go further and require the
 decider to be human, because nothing reads `actor.kind`.
@@ -338,7 +370,11 @@ check `actor.platform_role` instead. That is the only place it is read.
 | A published pointer names a version of its own document | composite FK on `document` |
 | Every grade names its action | `created_by_action_id NOT NULL` |
 | A retried call cannot act twice | `unique(actor_id, idempotency_key)` |
+| Every action carries the hash of what was asked | `payload_hash NOT NULL`, 64 hex characters |
 | Nobody decides or reviews their own action | CHECKs on `action` |
+| `denied` status ⇔ `denied` authorization; only a `confirm_required` action is proposed, rejected, cancelled or has a decider; only an executed `pending_review` action is under review | `action_status_matches_authz` |
+| `executed_at` is set exactly when status is `executed` | `action_executed_at_consistent` |
+| A session credential has a lookup prefix and an expiry | CHECKs on `credential` |
 | `document_version` and `event` are append-only | triggers |
 | A submitted submission never changes | trigger |
 | Owner columns match `document.kind`; a version has content; SSO rows carry an identity | CHECKs |
@@ -347,7 +383,14 @@ check `actor.platform_role` instead. That is the only place it is read.
 **Enforced by the application.** Each is a place a bug can hide, and each needs a test.
 
 - `authorize()` itself, including the scope checks in steps 4–5.
-- Which `action.status` values follow which `authz_result`, and the transitions between them.
+- The *transitions* between `action.status` values. The database checks that a row at rest is
+  consistent with its `authz_result`; the order things happen in is application logic.
+- Idempotent replay: same key and same `payload_hash` returns the stored result, same key and
+  a different hash is refused.
+- Re-authorizing the proposer when a proposal is approved, and cancelling proposals past
+  their TTL.
+- Filling `event.student_member_id` and `event.assignment_id` correctly, and filtering the
+  feed by them.
 - The submitting member has `role = 'student'`; `member_*_scope` rows name members and
   assignments of the same course; `assignment.instructions_document_id` and `rubric_document_id`
   are documents of the same course with the right `kind`; `document_version.author_member_id`
@@ -397,11 +440,17 @@ garbage in the grades, full record in the log.
 
 ## 7. Open questions
 
-- **Are reads actions?** Every state change writes an `action`. Whether reads do too — and so
-  count toward a future call budget — is undecided.
-- **Proposal expiry.** A `proposed` action approved a week later executes against a course that
-  may have moved on. Re-authorize at execution, and expire proposals?
-- **Idempotency and payload.** The key alone is checked. Storing a payload hash would catch a
-  retry with different content.
 - **Grade rules beyond weight and drop-lowest** — a `rule jsonb` on `grade_component` when
   the first one arrives.
+- **Scope on `perm_action_decide`.** The permission is unscoped, so a member who may decide
+  sees every proposal's payload in the course, including for students outside their own
+  scope. Narrowing it needs scope columns on `action`.
+
+Settled, and recorded in §2.6 (migration 0002):
+
+- *Are reads actions?* No. Reads are authorized but not logged. A future call budget would
+  count them somewhere cheaper than `action`.
+- *Proposal expiry.* Approval re-authorizes the proposer against the original membership row,
+  and proposals past a TTL are cancelled.
+- *Idempotency and payload.* `payload_hash` is stored; a key reused with different content
+  is a conflict.
