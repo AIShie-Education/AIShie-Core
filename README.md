@@ -12,12 +12,18 @@ out to an agent.
 ## Status
 
 The PostgreSQL layer is complete. The Go backend is being built in milestones.
-In place so far: `authorize()`, the tool registry, and the action pipeline every
-call goes through — idempotent replay, proposals with re-authorization on
-approval, after-the-fact review, events — with grading as the first tools on
-it. The worked example in docs/schema.md §5 ("an agent grades an essay") runs
-end to end as a test. Still to come: authentication and the REST adapter, the
-rest of the tool catalogue, documents, the MCP adapter, background jobs, SSO.
+In place so far:
+
+- `authorize()`, the tool registry, and the action pipeline every call goes
+  through — idempotent replay, proposals with re-authorization on approval,
+  after-the-fact review, events;
+- grading as the first tools on it; the worked example in docs/schema.md §5
+  ("an agent grades an essay") runs end to end as a test;
+- authentication (API tokens for agents, password sessions for people) and
+  the REST API, whose routes are generated from the tool registry.
+
+Still to come: the rest of the tool catalogue (courses, members, assignments,
+submissions, the event feed), documents, the MCP adapter, background jobs, SSO.
 
 ## Layout
 
@@ -31,7 +37,8 @@ internal/
   pipeline                     the one road every call takes
   tools                        the catalogue, one file per noun
   events, gradecalc            the event feed's writer; grade rollups (pure)
-  httpapi                      REST adapter
+  auth                         who is calling: tokens, passwords, sessions, bootstrap
+  httpapi                      REST adapter; routes generated from the registry
   testdb, testkit              a database per test; course fixtures
 src/              migrations, seed and SQL tests; embedded into the binary
 docs/             design documents
@@ -67,12 +74,37 @@ createdb aishiteru
 make build
 bin/aishiterud migrate up
 bin/aishiterud seed
-bin/aishiterud serve          # http://localhost:8080/healthz
+bin/aishiterud bootstrap --name "Your Name" --email you@example.edu --password-stdin
+bin/aishiterud serve          # http://localhost:8080
+```
+
+`bootstrap` runs once. It creates the root actor (and the system actor that
+background jobs run as) and prints root's API token, once:
+
+```
+export TOKEN=ais_...
+curl -H "Authorization: Bearer $TOKEN" localhost:8080/v1/me
+curl localhost:8080/v1/tools            # the whole catalogue, with JSON Schemas
 ```
 
 Configuration is environment variables only; `bin/aishiterud help` lists them.
 `serve` never migrates on its own: `/healthz` reports 503 until the schema
 matches the version the binary was built for.
+
+### The API in one paragraph
+
+Every route is a tool, and `GET /v1/tools` lists them. A tool that changes
+state is a `POST` and needs an `Idempotency-Key` header: send the same key
+with the same body again and you get the first answer back
+(`Idempotency-Replayed: true`) with nothing done twice; send it with a
+different body and you get `409 idempotency_conflict`. The response says what
+became of the call: `200` executed, `202` proposed (it now waits for a human;
+watch the action id), `403` denied, `409`/`422` failed. All four are recorded.
+`400`, `401` and `404` mean the call was never attempted, and nothing was
+recorded. Agents authenticate with `Authorization: Bearer <token>`; browsers
+sign in at `POST /v1/auth/login` and carry a session cookie. Set
+`TRUSTED_ORIGINS` to the web front end's origin so that its browser requests
+are accepted.
 
 ## CI and releases
 

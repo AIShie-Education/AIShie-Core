@@ -30,7 +30,7 @@ func TestHealthz(t *testing.T) {
 
 	t.Run("migrated database is healthy", func(t *testing.T) {
 		pool := testdb.New(t)
-		code, body := get(t, httpapi.NewMux(httpapi.Deps{Pool: pool, LatestSchema: latest}), "/healthz")
+		code, body := get(t, httpapi.NewHandler(httpapi.Deps{Pool: pool, LatestSchema: latest}), "/healthz")
 		if code != http.StatusOK || body["status"] != "ok" {
 			t.Fatalf("got %d %v", code, body)
 		}
@@ -41,7 +41,7 @@ func TestHealthz(t *testing.T) {
 
 	t.Run("unmigrated database is not", func(t *testing.T) {
 		pool, _ := testdb.NewEmpty(t)
-		code, body := get(t, httpapi.NewMux(httpapi.Deps{Pool: pool, LatestSchema: latest}), "/healthz")
+		code, body := get(t, httpapi.NewHandler(httpapi.Deps{Pool: pool, LatestSchema: latest}), "/healthz")
 		if code != http.StatusServiceUnavailable || body["status"] != "unavailable" {
 			t.Fatalf("got %d %v", code, body)
 		}
@@ -49,7 +49,7 @@ func TestHealthz(t *testing.T) {
 
 	t.Run("binary older than the schema is not", func(t *testing.T) {
 		pool := testdb.New(t)
-		code, _ := get(t, httpapi.NewMux(httpapi.Deps{Pool: pool, LatestSchema: latest + 1}), "/healthz")
+		code, _ := get(t, httpapi.NewHandler(httpapi.Deps{Pool: pool, LatestSchema: latest + 1}), "/healthz")
 		if code != http.StatusServiceUnavailable {
 			t.Fatalf("got %d, want 503", code)
 		}
