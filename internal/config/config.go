@@ -31,6 +31,11 @@ type Config struct {
 	// development over http://localhost. Never set it in production.
 	InsecureCookies bool
 
+	// CallsPerMinute and CallsBurst bound one actor's calls, per instance;
+	// SignInsPerMinute bounds sign-in attempts per address and per email.
+	// Zero turns a limit off.
+	CallsPerMinute, CallsBurst, SignInsPerMinute int
+
 	// Jobs turns the background sweeps on. Every instance may leave it on: only
 	// one sweeps at a time. JobsInterval is how often a sweep is attempted.
 	Jobs         bool
@@ -44,13 +49,27 @@ type Config struct {
 	// PublicURL is how clients reach this server. The filesystem store builds
 	// its upload and download URLs from it.
 	PublicURL string
-	// BlobSigningKey signs upload tokens and filesystem-store URLs. It must be
-	// the same on every instance and across restarts; at least 32 characters.
-	// Empty means a random key per process, which is fine for one developer.
-	BlobSigningKey string
+	// SigningKey signs upload tokens, filesystem-store URLs and the
+	// single-sign-on state cookie. It must be the same on every instance and
+	// across restarts; at least 32 characters. Empty means a random key per
+	// process, which is fine for one developer.
+	SigningKey     string
 	MaxUploadBytes int64
 	S3             S3
+
+	// OIDC is single sign-on. It is off unless OIDC_ISSUER is set.
+	OIDC OIDC
 }
+
+// OIDC describes the identity provider. The defaults are PolyU's ADFS, which
+// is what docs/schema.md was written against: the provider is recorded as
+// "polyu-adfs" and an account is known by its UPN.
+type OIDC struct {
+	ProviderName, Issuer, ClientID, ClientSecret, SubjectClaim string
+	Scopes                                                     []string
+}
+
+func (o OIDC) Enabled() bool { return o.Issuer != "" }
 
 type S3 struct {
 	Endpoint, Bucket, Region, AccessKey, SecretKey string
@@ -83,10 +102,21 @@ func FromEnv() (Config, error) {
 			c.TrustedOrigins = append(c.TrustedOrigins, o)
 		}
 	}
+	c.CallsPerMinute, c.CallsBurst, c.SignInsPerMinute = 600, 100, 10
+	for key, dst := range map[string]*int{"RATE_LIMIT_PER_MINUTE": &c.CallsPerMinute, "RATE_LIMIT_BURST": &c.CallsBurst,
+		"SIGN_IN_ATTEMPTS_PER_MINUTE": &c.SignInsPerMinute} {
+		if v := os.Getenv(key); v != "" {
+			n, err := strconv.Atoi(v)
+			if err != nil || n < 0 {
+				return Config{}, fmt.Errorf("%s: %q is not a number, zero or more", key, v)
+			}
+			*dst = n
+		}
+	}
 	c.BlobStore = env("BLOB_STORE", "fs")
 	c.BlobFSRoot = env("BLOB_FS_ROOT", "var/blobs")
 	c.PublicURL = env("PUBLIC_URL", "http://localhost"+portOf(c.HTTPAddr))
-	c.BlobSigningKey = os.Getenv("BLOB_SIGNING_KEY")
+	c.SigningKey = os.Getenv("SIGNING_KEY")
 	c.MaxUploadBytes = 50 << 20
 	if v := os.Getenv("MAX_UPLOAD_BYTES"); v != "" {
 		n, err := strconv.ParseInt(v, 10, 64)
@@ -103,8 +133,8 @@ func FromEnv() (Config, error) {
 		if c.S3.Endpoint == "" || c.S3.Bucket == "" {
 			return Config{}, fmt.Errorf("BLOB_STORE=s3 needs S3_ENDPOINT and S3_BUCKET")
 		}
-		if c.BlobSigningKey == "" {
-			return Config{}, fmt.Errorf("BLOB_STORE=s3 needs BLOB_SIGNING_KEY: upload tokens must verify on every instance")
+		if c.SigningKey == "" {
+			return Config{}, fmt.Errorf("BLOB_STORE=s3 needs SIGNING_KEY: upload tokens must verify on every instance")
 		}
 	default:
 		return Config{}, fmt.Errorf("BLOB_STORE: %q is not fs, s3 or none", c.BlobStore)
@@ -116,6 +146,19 @@ func FromEnv() (Config, error) {
 				return Config{}, fmt.Errorf("%s: %q is not true or false", key, v)
 			}
 			*dst = b
+		}
+	}
+	c.OIDC = OIDC{ProviderName: env("OIDC_PROVIDER_NAME", "polyu-adfs"), Issuer: os.Getenv("OIDC_ISSUER"),
+		ClientID: os.Getenv("OIDC_CLIENT_ID"), ClientSecret: os.Getenv("OIDC_CLIENT_SECRET"),
+		SubjectClaim: env("OIDC_SUBJECT_CLAIM", "upn"), Scopes: strings.Fields(env("OIDC_SCOPES", "openid profile email"))}
+	if c.OIDC.Enabled() {
+		if c.OIDC.ClientID == "" {
+			return Config{}, fmt.Errorf("OIDC_ISSUER is set, so OIDC_CLIENT_ID is needed too")
+		}
+		// The browser may come back to a different instance from the one that
+		// sent it away, or to this one after a restart.
+		if c.SigningKey == "" {
+			return Config{}, fmt.Errorf("single sign-on needs SIGNING_KEY: the sign-in state must verify on every instance")
 		}
 	}
 	if c.JobsInterval < time.Second {

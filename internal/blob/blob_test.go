@@ -158,7 +158,23 @@ func TestUploadTokens(t *testing.T) {
 	if _, err := NewSigner("too short"); err == nil {
 		t.Fatal("a short signing key was accepted")
 	}
-	if r, err := NewSigner(""); err != nil || len(r.secret) != 32 {
+	if _, err := NewSigner(""); err != nil {
 		t.Fatalf("random key: %v", err)
+	}
+}
+
+// An upload token and a store URL are signed with the same key. Neither may
+// ever be taken for the other.
+func TestUploadTokensAndURLsAreNotInterchangeable(t *testing.T) {
+	s, signer := newFS(t)
+	upload := signer.SignUpload(UploadClaim{Key: "courses/c/1", CourseID: uuid.New(), MemberID: uuid.New(), Purpose: "material", Expires: time.Now().Add(time.Hour).Unix()})
+	for _, method := range []string{"PUT", "GET"} {
+		if _, _, err := s.Redeem(upload, method); !errors.Is(err, ErrBadToken) {
+			t.Errorf("an upload token redeemed as a %s URL: %v", method, err)
+		}
+	}
+	url, _, _ := s.PresignPut(context.Background(), "courses/c/1", "text/plain", time.Minute)
+	if _, err := signer.VerifyUpload(strings.TrimPrefix(url, "http://lms.test"+BlobPath)); !errors.Is(err, ErrBadToken) {
+		t.Errorf("a URL token verified as an upload token: %v", err)
 	}
 }

@@ -36,10 +36,20 @@ sees the grade.
 
 - background sweeps, run as the system actor and recorded like any other
   action: stale proposals cancelled, expired memberships removed, missing
-  submissions marked when a due date passes. Every instance may run them;
-  Postgres advisory locks see that one does.
+  submissions marked when a due date passes, uploads that nothing came to
+  point at removed. Every instance may run them; Postgres advisory locks see
+  that one does.
 
-Still to come: SSO, rate limiting, the release workflow.
+- single sign-on over OpenID Connect (written against ADFS), which signs in
+  people who are already registered and creates nobody;
+- the things a server on the open internet needs: a per-actor rate limit
+  shared by REST and MCP, a limit on sign-in attempts, a request log with no
+  credentials in it, and a refusal to start against a schema older than the
+  binary.
+
+Not yet exercised anywhere but a developer's machine: the GitHub Actions
+workflows, PostgreSQL 13, the S3 store against a real object store, and the
+Docker image. The first pull request is what runs them.
 
 ## Layout
 
@@ -110,9 +120,27 @@ curl localhost:8080/v1/tools            # the whole catalogue, with JSON Schemas
 Configuration is environment variables only; `bin/aishiterud help` lists them.
 Files are kept under `var/blobs` by default (`BLOB_STORE=fs`). For more than
 one instance, or for production, use `BLOB_STORE=s3` with the `S3_*` settings
-and a `BLOB_SIGNING_KEY` shared by every instance.
-`serve` never migrates on its own: `/healthz` reports 503 until the schema
-matches the version the binary was built for.
+and a `SIGNING_KEY` shared by every instance. An upload that is not attached
+to a document within `PROPOSAL_TTL` plus two days is removed.
+`serve` never migrates on its own. It refuses to start against a schema older
+than the binary (run `aishiterud migrate up` first), and `/healthz` reports
+503 if the schema falls behind or a migration is left half-done.
+
+### Single sign-on
+
+Set `OIDC_ISSUER`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET` and `SIGNING_KEY`,
+and register `<PUBLIC_URL>/v1/auth/sso/callback` with the provider. The
+defaults are for ADFS: accounts are known by their `upn` claim
+(`OIDC_SUBJECT_CLAIM`) and the provider is recorded as `polyu-adfs`
+(`OIDC_PROVIDER_NAME`). A browser signs in by visiting
+`/v1/auth/sso/start?return_to=/where/to/go/afterwards` and comes back with the
+same session cookie a password sign-in gives.
+
+Signing in creates nobody. An administrator registers the person
+(`actor.register`) and links their identity (`actor.link_sso`, with the
+provider's name and the person's UPN) first; until then the provider vouching
+for someone makes them nobody here. An identity that has opened one account is
+never reassigned to another.
 
 ### Connecting an agent
 
@@ -138,11 +166,12 @@ with the same body again and you get the first answer back
 different body and you get `409 idempotency_conflict`. The response says what
 became of the call: `200` executed, `202` proposed (it now waits for a human;
 watch the action id), `403` denied, `409`/`422` failed. All four are recorded.
-`400`, `401` and `404` mean the call was never attempted, and nothing was
-recorded. Agents authenticate with `Authorization: Bearer <token>`; browsers
-sign in at `POST /v1/auth/login` and carry a session cookie. Set
-`TRUSTED_ORIGINS` to the web front end's origin so that its browser requests
-are accepted.
+`400`, `401`, `404` and `429` mean the call was never attempted, and nothing
+was recorded; `429` carries `Retry-After`. Every answer, including the one for
+a path that does not exist, is JSON. Agents authenticate with
+`Authorization: Bearer <token>`; browsers sign in at `POST /v1/auth/login` (or
+through single sign-on) and carry a session cookie. Set `TRUSTED_ORIGINS` to
+the web front end's origin so that its browser requests are accepted.
 
 ## CI and releases
 
@@ -152,4 +181,9 @@ lint, generated-code drift, the SQL suite and the Go tests on PostgreSQL 13 and
 Each job is a `make` target, so a green `make ci` locally means the same thing.
 
 Nothing is deployed automatically. Release artifacts are built only from
-version tags (`v*.*.*`).
+version tags (`v*.*.*`): [release.yml](.github/workflows/release.yml) checks
+that the tag is on `main`, runs the whole of CI again, and then publishes
+binaries for Linux and macOS with checksums, a multi-architecture image at
+`ghcr.io/aishiteru-lms/aishiteru-core`, and build provenance for both. A
+pre-release tag (`v1.2.3-rc.1`) does not move `:latest`. How to cut one is in
+[CONTRIBUTING.md](CONTRIBUTING.md).

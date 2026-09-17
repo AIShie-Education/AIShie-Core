@@ -80,3 +80,7 @@ SELECT EXISTS (
 
 -- name: StorageKeyInUse :one
 SELECT EXISTS (SELECT 1 FROM document_version WHERE storage_key = $1);
+
+-- name: LockStorageKey :exec
+-- Serialises attaching one upload. Held until the transaction ends.
+SELECT pg_advisory_xact_lock(hashtextextended('storage-key:' || sqlc.arg(storage_key)::text, 0));

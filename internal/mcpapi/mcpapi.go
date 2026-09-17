@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/google/uuid"
@@ -27,6 +28,7 @@ import (
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/auth"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/domain"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/pipeline"
+	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/ratelimit"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/tool"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/version"
 )
@@ -60,6 +62,9 @@ type Deps struct {
 	Pipeline *pipeline.Pipeline
 	Auth     *auth.Authenticator
 	Log      *slog.Logger
+	// Calls is the per-actor limit, shared with REST: one actor, one
+	// allowance, whichever door it uses. Nil means no limit.
+	Calls *ratelimit.Limiter
 }
 
 // NewHandler returns the handler to mount at /mcp.
@@ -92,7 +97,27 @@ func NewHandler(d Deps) http.Handler {
 		return info, nil
 	}
 	// An API token need not expire; it is revoked instead.
-	return sdkauth.RequireBearerToken(verify, &sdkauth.RequireBearerTokenOptions{AllowMissingExpiration: true})(handler)
+	return sdkauth.RequireBearerToken(verify, &sdkauth.RequireBearerTokenOptions{AllowMissingExpiration: true})(limited(d, handler))
+}
+
+// limited refuses an actor that is calling too fast, before anything is
+// attempted or recorded. It is what stops an agent stuck in a loop from
+// writing a denied action per iteration for as long as it likes.
+func limited(d Deps, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if info := sdkauth.TokenInfoFromContext(r.Context()); info != nil {
+			if ok, wait := d.Calls.Allow(info.UserID); !ok {
+				secs := int(wait.Seconds()) + 1
+				w.Header().Set("Retry-After", strconv.Itoa(secs))
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusTooManyRequests)
+				_ = json.NewEncoder(w).Encode(map[string]any{"error": apperr.New(apperr.RateLimited,
+					"too many calls; try again in %d seconds", secs).With("retry_after_seconds", secs)})
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func newServer(d Deps) *mcp.Server {

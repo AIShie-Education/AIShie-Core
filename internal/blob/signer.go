@@ -1,41 +1,44 @@
 package blob
 
 import (
-	"crypto/hmac"
-	"crypto/rand"
-	"crypto/sha256"
-	"encoding/base64"
-	"encoding/json"
 	"errors"
-	"strings"
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/signing"
 )
 
-// Signer makes and checks the two kinds of signed token this package uses.
-// Both are a JSON claim and an HMAC-SHA256 over it, base64url, joined by a
-// dot. There is no table of pending uploads: the token is the record.
+// Signer makes and checks the two kinds of signed token this package uses:
+// upload tokens, and the filesystem store's URLs. There is no table of
+// pending uploads: the token is the record. Each kind is signed for its own
+// purpose, so neither can ever be taken for the other.
 type Signer struct {
-	secret []byte
+	s *signing.Signer
 }
 
-// NewSigner takes the installation's signing key. With an empty key it makes
-// a random one, which works for a single process until it restarts: tokens
-// signed before a restart stop verifying. Production sets BLOB_SIGNING_KEY.
+const (
+	purposeUpload = "blob.upload"
+	purposeURL    = "blob.url"
+)
+
+var (
+	ErrBadToken     = signing.ErrBadToken
+	ErrExpiredToken = signing.ErrExpiredToken
+)
+
+// NewSigner takes the installation's signing key; see signing.New.
 func NewSigner(key string) (*Signer, error) {
-	if key != "" {
-		if len(key) < 32 {
-			return nil, errors.New("blob: the signing key must be at least 32 characters")
-		}
-		return &Signer{secret: []byte(key)}, nil
+	s, err := signing.New(key)
+	if err != nil {
+		return nil, errors.New("blob: the signing key must be at least 32 characters")
 	}
-	b := make([]byte, 32)
-	if _, err := rand.Read(b); err != nil {
-		return nil, err
-	}
-	return &Signer{secret: b}, nil
+	return &Signer{s: s}, nil
 }
+
+// SignerFrom signs with the installation's one signer. Purposes keep this
+// package's tokens apart from whatever else it signs.
+func SignerFrom(s *signing.Signer) *Signer { return &Signer{s: s} }
 
 // UploadClaim says: this member of this course was given this storage key, to
 // hold a file for this purpose.
@@ -54,49 +57,14 @@ type UploadClaim struct {
 	Expires     int64     `json:"e"`
 }
 
-var (
-	ErrBadToken     = errors.New("blob: the token is not valid")
-	ErrExpiredToken = errors.New("blob: the token has expired")
-)
-
-func (s *Signer) sign(claim any) string {
-	body, _ := json.Marshal(claim)
-	mac := hmac.New(sha256.New, s.secret)
-	mac.Write(body)
-	enc := base64.RawURLEncoding
-	return enc.EncodeToString(body) + "." + enc.EncodeToString(mac.Sum(nil))
-}
-
-func (s *Signer) open(token string, claim any) error {
-	body64, mac64, ok := strings.Cut(token, ".")
-	if !ok {
-		return ErrBadToken
-	}
-	enc := base64.RawURLEncoding
-	body, err1 := enc.DecodeString(body64)
-	got, err2 := enc.DecodeString(mac64)
-	if err1 != nil || err2 != nil {
-		return ErrBadToken
-	}
-	mac := hmac.New(sha256.New, s.secret)
-	mac.Write(body)
-	if !hmac.Equal(got, mac.Sum(nil)) {
-		return ErrBadToken
-	}
-	if json.Unmarshal(body, claim) != nil {
-		return ErrBadToken
-	}
-	return nil
-}
-
 // SignUpload issues an upload token.
-func (s *Signer) SignUpload(c UploadClaim) string { return s.sign(c) }
+func (s *Signer) SignUpload(c UploadClaim) string { return s.s.Sign(purposeUpload, c) }
 
 // VerifyUpload checks an upload token's signature. It does not check expiry;
 // see UploadClaim.
 func (s *Signer) VerifyUpload(token string) (UploadClaim, error) {
 	var c UploadClaim
-	if err := s.open(token, &c); err != nil {
+	if err := s.s.Open(purposeUpload, token, &c); err != nil {
 		return UploadClaim{}, err
 	}
 	if c.Key == "" {
@@ -115,12 +83,12 @@ type urlClaim struct {
 }
 
 func (s *Signer) signURL(key, method, contentType string, ttl time.Duration, now time.Time) string {
-	return s.sign(urlClaim{Key: key, Method: method, ContentType: contentType, Expires: now.Add(ttl).Unix()})
+	return s.s.Sign(purposeURL, urlClaim{Key: key, Method: method, ContentType: contentType, Expires: now.Add(ttl).Unix()})
 }
 
 func (s *Signer) verifyURL(token, method string, now time.Time) (urlClaim, error) {
 	var c urlClaim
-	if err := s.open(token, &c); err != nil {
+	if err := s.s.Open(purposeURL, token, &c); err != nil {
 		return urlClaim{}, err
 	}
 	if c.Method != method || c.Key == "" {

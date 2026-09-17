@@ -386,6 +386,16 @@ func (q *Queries) LockDocument(ctx context.Context, id uuid.UUID) error {
 	return err
 }
 
+const lockStorageKey = `-- name: LockStorageKey :exec
+SELECT pg_advisory_xact_lock(hashtextextended('storage-key:' || $1::text, 0))
+`
+
+// Serialises attaching one upload. Held until the transaction ends.
+func (q *Queries) LockStorageKey(ctx context.Context, storageKey string) error {
+	_, err := q.db.Exec(ctx, lockStorageKey, storageKey)
+	return err
+}
+
 const maxVersionSeq = `-- name: MaxVersionSeq :one
 SELECT COALESCE(max(seq), 0)::int FROM document_version WHERE document_id = $1
 `

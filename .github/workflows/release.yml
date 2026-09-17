@@ -1,0 +1,162 @@
+name: Release
+
+# The only place anything is built for release, and it runs on version tags
+# only. Nothing is deployed from here or from anywhere else: a release is
+# binaries on the release page and an image in GHCR, and what runs where is
+# somebody's decision, made elsewhere.
+#
+#   git tag -s v0.1.0 -m "v0.1.0" && git push origin v0.1.0
+#
+# A tag with a hyphen (v0.1.0-rc.1) is a pre-release: it gets its own version
+# tags on the image and leaves :latest alone.
+
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  IMAGE: ghcr.io/aishiteru-lms/aishiteru-core
+  GOLANGCI_LINT_VERSION: v2.13.2
+  SQLC_VERSION: 1.31.1
+  GORELEASER_VERSION: v2.18.2
+  CI: "true"
+
+jobs:
+  # A green run from last week proves nothing about this commit on today's
+  # runners, so everything CI checks is checked again, on the tagged commit.
+  verify:
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 2s --health-timeout 5s --health-retries 30
+    env:
+      PGHOST: localhost
+      PGUSER: postgres
+      PGPASSWORD: postgres
+      TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable
+    outputs:
+      migrations: ${{ steps.migrations.outputs.list }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: The tag must be on main
+        run: |
+          git fetch origin main
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main \
+            || { echo "::error::$GITHUB_REF_NAME does not point at a commit on main"; exit 1; }
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - uses: sqlc-dev/setup-sqlc@bac53b7fb28c039a6c7f5736fd1e89744021bdd6 # v5.0.0
+        with:
+          sqlc-version: ${{ env.SQLC_VERSION }}
+      - name: Install golangci-lint
+        run: |
+          curl -sSfL "https://raw.githubusercontent.com/golangci/golangci-lint/${GOLANGCI_LINT_VERSION}/install.sh" \
+            | sh -s -- -b "$(go env GOPATH)/bin" "${GOLANGCI_LINT_VERSION}"
+      - run: make ci
+      - run: make vuln
+      - name: Migrations new in this release
+        id: migrations
+        run: |
+          prev=$(git describe --tags --abbrev=0 --match 'v[0-9]*' "$GITHUB_SHA^" 2>/dev/null || true)
+          if [ -n "$prev" ]; then
+            list=$(git diff --name-only --diff-filter=A "$prev" "$GITHUB_SHA" -- 'src/migrations/*.up.sql' | xargs -r -n1 basename | paste -sd ' ')
+          else
+            list=$(ls src/migrations/*.up.sql | xargs -n1 basename | paste -sd ' ')
+          fi
+          echo "list=$list" >> "$GITHUB_OUTPUT"
+          echo "new migrations since ${prev:-the beginning}: ${list:-none}"
+
+  binaries:
+    needs: verify
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write      # create the release
+      id-token: write      # sign the provenance
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # the changelog is the commits since the last tag
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: Release notes footer
+        run: |
+          if [ -n "${{ needs.verify.outputs.migrations }}" ]; then
+            printf '## Migrations in this release\n\nRun `aishiterud migrate up` before starting this version:\n\n' > "$RUNNER_TEMP/footer.md"
+            for m in ${{ needs.verify.outputs.migrations }}; do printf -- '- `%s`\n' "$m" >> "$RUNNER_TEMP/footer.md"; done
+          else
+            printf 'No schema changes in this release.\n' > "$RUNNER_TEMP/footer.md"
+          fi
+      - uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
+        with:
+          version: ${{ env.GORELEASER_VERSION }}
+          args: release --clean --release-footer ${{ runner.temp }}/footer.md
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-checksums: dist/checksums.txt
+
+  image:
+    needs: verify
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write      # push to GHCR
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ env.IMAGE }}
+          # 1.2.3 and 1.2 always; latest only for a release that is not a
+          # pre-release, which is what "auto" means here.
+          flavor: latest=auto
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+      - id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ github.ref_name }}
+            COMMIT=${{ github.sha }}
+            DATE=${{ github.event.head_commit.timestamp }}
+          provenance: mode=max
+          sbom: true
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true

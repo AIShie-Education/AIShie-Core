@@ -2,6 +2,7 @@ package jobs_test
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -9,6 +10,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/apperr"
+	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/blob"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/domain"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/jobs"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/pipeline"
@@ -315,5 +317,107 @@ func TestStaleSessionsAreDeleted(t *testing.T) {
 	}
 	if n := f.Count(`SELECT count(*) FROM credential WHERE token_prefix IN ('just-dead', 'alive', 'old-token')`); n != 3 {
 		t.Fatal("something other than a long-dead session was deleted")
+	}
+}
+
+// A file is uploaded first and attached afterwards, so some never are. They
+// are removed — but never one that a version points at, and never one that a
+// proposal still waiting for its decision may yet attach.
+func TestOrphanFilesAreRemoved(t *testing.T) {
+	f := setup(t, 3)
+	f.runner = jobs.New(f.Pool, f.P, f.system, jobs.Config{Blob: f.Blob}, nil)
+	ctx := context.Background()
+	upload := func(actor uuid.UUID, kind, body string) (token, key string) {
+		t.Helper()
+		out := f.MustCall(actor, "document.upload_url", m{"course_id": f.Course, "kind": kind, "content_type": "text/plain"}, "")
+		u := testkit.Result[tools.UploadURLOut](t, out)
+		key, ct, err := f.Blob.Redeem(strings.TrimPrefix(u.UploadURL, "http://lms.test"+blob.BlobPath), "PUT")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.Blob.Put(ctx, key, ct, strings.NewReader(body), 1<<20); err != nil {
+			t.Fatal(err)
+		}
+		return u.UploadToken, key
+	}
+	exists := func(key string) bool {
+		_, err := f.Blob.Stat(ctx, key)
+		return err == nil
+	}
+	yuki, ken, mei := f.Students[0], f.Students[1], f.Students[2]
+
+	// Attached: a file on Yuki's HW4 draft.
+	draft := testkit.Result[tools.SubmissionCreateOut](t, f.MustCall(yuki.Actor, "submission.create", m{"course_id": f.Course, "assignment_id": f.HW4}, "d")).SubmissionID
+	essayToken, essay := upload(yuki.Actor, "submission", "essay")
+	if out := f.MustCall(yuki.Actor, "document.create", m{"course_id": f.Course, "kind": "submission", "title": "essay.txt",
+		"submission_id": draft, "upload_token": essayToken}, "attach"); out.Status != domain.StatusExecuted {
+		t.Fatalf("%+v", out)
+	}
+	// Travelling inside proposals: one that will be approved late, one that
+	// will be rejected.
+	approvedToken, approved := upload(f.Grader, "feedback", "well argued")
+	rejectedToken, rejected := upload(f.Grader, "feedback", "see me")
+	propose := func(s testkit.Student, token, key string) uuid.UUID {
+		t.Helper()
+		out := f.MustCall(f.Grader, "grade.submit", m{"course_id": f.Course, "submission_id": s.HW3, "score": 70,
+			"feedback_files": []m{{"title": "notes.txt", "upload_token": token}}}, key)
+		if out.Status != domain.StatusProposed {
+			t.Fatalf("%+v", out)
+		}
+		return *out.ActionID
+	}
+	toApprove, toReject := propose(ken, approvedToken, "a"), propose(mei, rejectedToken, "r")
+	// Never attached to anything.
+	_, abandoned := upload(ken.Actor, "submission", "closed the tab")
+
+	if rep := f.sweep(t); rep.OrphanFilesRemoved != 0 {
+		t.Fatalf("fresh uploads were removed: %+v", rep)
+	}
+	decide := func(action uuid.UUID, decision string) {
+		t.Helper()
+		if out := f.MustCall(f.Sato, "action.decide", m{"course_id": f.Course, "action_id": action, "decision": decision}, decision); out.Status != domain.StatusExecuted {
+			t.Fatalf("%s: %+v", decision, out)
+		}
+	}
+	decide(toReject, "reject")
+	// Sato approves on the last day. The file has been waiting all that time.
+	f.now = f.now.Add(pipeline.DefaultProposalTTL - time.Hour)
+	if rep := f.sweep(t); rep.OrphanFilesRemoved != 0 {
+		t.Fatalf("removed within the TTL, when a proposal could still attach it: %+v", rep)
+	}
+	decide(toApprove, "approve")
+
+	f.now = f.now.Add(jobs.OrphanGrace + 2*time.Hour)
+	if rep := f.sweep(t); rep.OrphanFilesRemoved != 2 {
+		t.Fatalf("%+v, want the abandoned upload and the rejected proposal's file removed", rep)
+	}
+	if exists(abandoned) || exists(rejected) {
+		t.Fatal("an orphan is still there")
+	}
+	if !exists(essay) || !exists(approved) {
+		t.Fatal("a file that a document version points at was removed")
+	}
+	if n := f.Count(`SELECT count(*) FROM document_version WHERE storage_key = ANY($1)`, []string{essay, approved}); n != 2 {
+		t.Fatalf("%d of the two attached files are recorded", n)
+	}
+
+	// The store is gone through once an hour, not once a tick.
+	_, another := upload(ken.Actor, "submission", "another")
+	if rep := f.sweep(t); rep.OrphanFilesRemoved != 0 || !exists(another) {
+		t.Fatalf("the store was listed again at once: %+v", rep)
+	}
+	f.now = f.now.Add(2 * time.Hour)
+	if rep := f.sweep(t); rep.OrphanFilesRemoved != 1 || exists(another) {
+		t.Fatalf("an hour later: %+v", rep)
+	}
+
+	// Where proposals never expire, a file may be waited on for ever, and
+	// nothing is removed by age.
+	_, kept := upload(ken.Actor, "submission", "kept")
+	patient := pipeline.New(f.Pool, f.P.Registry(), pipeline.Config{})
+	patient.SetClock(func() time.Time { return f.now.Add(1000 * time.Hour) })
+	rep, err := jobs.New(f.Pool, patient, f.system, jobs.Config{Blob: f.Blob}, nil).Sweep(ctx)
+	if err != nil || rep.OrphanFilesRemoved != 0 || !exists(kept) {
+		t.Fatalf("with no proposal TTL: %+v, %v", rep, err)
 	}
 }

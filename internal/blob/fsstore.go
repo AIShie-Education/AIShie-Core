@@ -136,6 +136,41 @@ func (s *FSStore) Open(ctx context.Context, key string) (io.ReadCloser, Info, er
 	return f, info, err
 }
 
+// FinalKey is the staging key itself: a file here is created with O_EXCL, so
+// its upload URL was never good for a second write.
+func (s *FSStore) FinalKey(stagingKey string) string { return stagingKey }
+
+func (s *FSStore) Finalize(ctx context.Context, stagingKey string) (Info, error) {
+	return s.Stat(ctx, stagingKey)
+}
+
+func (s *FSStore) List(ctx context.Context, fn func(key string, modified time.Time) error) error {
+	err := filepath.WalkDir(s.root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() || strings.HasSuffix(p, ".meta") {
+			return err
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		info, err := d.Info()
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil // deleted while we were walking
+		}
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(s.root, p)
+		if err != nil {
+			return err
+		}
+		return fn(filepath.ToSlash(rel), info.ModTime())
+	})
+	if errors.Is(err, ErrStopList) {
+		return nil
+	}
+	return err
+}
+
 func (s *FSStore) Delete(_ context.Context, key string) error {
 	p, err := s.path(key)
 	if err != nil {

@@ -109,7 +109,9 @@ func (a *api) do(client *http.Client, method, path, token string, body any, head
 	defer res.Body.Close()
 	raw, _ := io.ReadAll(res.Body)
 	out := response{Status: res.StatusCode, Header: res.Header, Raw: string(raw)}
-	if len(raw) > 0 {
+	// A redirect's body is a courtesy link for browsers that do not follow
+	// it; everything else this API says, it says in JSON.
+	if len(raw) > 0 && (res.StatusCode < 300 || res.StatusCode >= 400) {
 		if err := json.Unmarshal(raw, &out.Body); err != nil {
 			a.t.Fatalf("%s %s: body is not JSON: %s", method, path, raw)
 		}

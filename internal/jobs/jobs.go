@@ -1,6 +1,6 @@
 // Package jobs runs the background sweeps: proposals that have waited too
 // long, memberships past their expiry, assignments whose due date has passed,
-// sessions long dead.
+// sessions long dead, uploaded files that nothing came to point at.
 //
 // Nothing here is what makes the system correct. authorize() ignores an
 // expired member from the instant of expiry, and approving a stale proposal
@@ -32,6 +32,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/blob"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/db/dbq"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/domain"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/pipeline"
@@ -45,6 +46,12 @@ const (
 	DefaultInterval  = time.Minute
 	defaultBatch     = 200
 	sessionRetention = 7 * 24 * time.Hour
+	// OrphanGrace is how long past the proposal TTL an unattached upload is
+	// kept. See sweepBlobs.
+	OrphanGrace = 48 * time.Hour
+	// blobSweepEvery: listing a whole store is not something to do every
+	// minute.
+	blobSweepEvery = time.Hour
 )
 
 type Config struct {
@@ -53,6 +60,8 @@ type Config struct {
 	// Batch bounds how much one sweep takes on of each kind; the rest waits
 	// for the next tick.
 	Batch int32
+	// Blob is the file store to clear of orphans. Nil means none is cleared.
+	Blob blob.Store
 }
 
 type Runner struct {
@@ -61,6 +70,8 @@ type Runner struct {
 	system uuid.UUID
 	cfg    Config
 	log    *slog.Logger
+	// blobsSwept is when this instance last went through the file store.
+	blobsSwept time.Time
 }
 
 // New returns a runner that acts as the given system actor.
@@ -89,7 +100,8 @@ func (r *Runner) Run(ctx context.Context) {
 			r.log.Error("sweep failed", "err", err)
 		} else if rep.Ran && rep.total() > 0 {
 			r.log.Info("swept", "proposals_expired", rep.ProposalsExpired, "members_expired", rep.MembersExpired,
-				"assignments_closed", rep.AssignmentsClosed, "submissions_missing", rep.SubmissionsMissing, "sessions_deleted", rep.SessionsDeleted)
+				"assignments_closed", rep.AssignmentsClosed, "submissions_missing", rep.SubmissionsMissing, "sessions_deleted", rep.SessionsDeleted,
+				"orphan_files_removed", rep.OrphanFilesRemoved)
 		}
 		select {
 		case <-ctx.Done():
@@ -108,10 +120,11 @@ type Report struct {
 	AssignmentsClosed  int
 	SubmissionsMissing int
 	SessionsDeleted    int64
+	OrphanFilesRemoved int
 }
 
 func (r Report) total() int64 {
-	return int64(r.ProposalsExpired+r.MembersExpired+r.AssignmentsClosed+r.SubmissionsMissing) + r.SessionsDeleted
+	return int64(r.ProposalsExpired+r.MembersExpired+r.AssignmentsClosed+r.SubmissionsMissing+r.OrphanFilesRemoved) + r.SessionsDeleted
 }
 
 // Sweep does one round of everything, if no other instance is doing so.
@@ -193,7 +206,85 @@ func (r *Runner) Sweep(ctx context.Context) (Report, error) {
 	if rep.SessionsDeleted, err = q.DeleteStaleSessions(ctx, &stale); err != nil {
 		return rep, fmt.Errorf("stale sessions: %w", err)
 	}
+	if rep.OrphanFilesRemoved, err = r.sweepBlobs(ctx, now); err != nil {
+		return rep, fmt.Errorf("orphan files: %w", err)
+	}
 	return rep, nil
+}
+
+// sweepBlobs removes files that no document version points at and none will.
+//
+// A file is uploaded first and attached afterwards, so there are always some
+// that are not attached yet, and some never are: the tab was closed, the
+// proposal carrying it was rejected, the attaching transaction rolled back
+// after the object had been moved. Which of the unattached ones are still
+// wanted cannot be read from the database — a proposal names its feedback
+// files by upload token, inside its payload — so age decides it. An upload is
+// made before the proposal that names it, and a proposal is decided or
+// cancelled within the TTL; past TTL + OrphanGrace nothing can still be
+// waiting on the file. Without a TTL a proposal may wait for ever, and then
+// nothing is removed at all.
+//
+// An upload token does not expire for attaching (see blob.UploadClaim), so
+// this is also what bounds it: a file not attached within TTL + OrphanGrace
+// is gone, and attaching it then fails as though it had never been uploaded.
+func (r *Runner) sweepBlobs(ctx context.Context, now time.Time) (int, error) {
+	ttl := r.pl.Config().ProposalTTL
+	if r.cfg.Blob == nil || ttl <= 0 || now.Sub(r.blobsSwept) < blobSweepEvery {
+		return 0, nil
+	}
+	cutoff := now.Add(-ttl - OrphanGrace)
+	var old []string
+	err := r.cfg.Blob.List(ctx, func(key string, modified time.Time) error {
+		if modified.Before(cutoff) {
+			if old = append(old, key); len(old) >= int(r.cfg.Batch) {
+				return blob.ErrStopList
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	removed := 0
+	for _, key := range old {
+		gone, err := r.removeIfOrphan(ctx, key)
+		if err != nil {
+			r.log.Error("sweep step failed", "step", "orphan file", "key", key, "err", err)
+			continue
+		}
+		if gone {
+			removed++
+		}
+	}
+	// A full batch means there may be more; come back on the next tick.
+	if len(old) < int(r.cfg.Batch) {
+		r.blobsSwept = now
+	}
+	return removed, nil
+}
+
+// removeIfOrphan deletes one object unless a version points at it. It holds
+// the lock that attaching takes on the same key, so that "is it attached?"
+// and the deletion are one step: an attach in flight either commits first,
+// and the file is kept, or comes after, and finds nothing uploaded.
+func (r *Runner) removeIfOrphan(ctx context.Context, key string) (bool, error) {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	q := dbq.New(tx)
+	if err := q.LockStorageKey(ctx, key); err != nil {
+		return false, err
+	}
+	if used, err := q.StorageKeyInUse(ctx, &key); err != nil || used {
+		return false, err
+	}
+	if err := r.cfg.Blob.Delete(ctx, key); err != nil {
+		return false, err
+	}
+	return true, tx.Commit(ctx)
 }
 
 // did reports whether a system call actually did something just now, and logs

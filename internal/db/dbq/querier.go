@@ -19,6 +19,8 @@ type Querier interface {
 	ClearAssignmentScope(ctx context.Context, memberID uuid.UUID) error
 	ClearStudentScope(ctx context.Context, memberID uuid.UUID) error
 	ComponentHasGrades(ctx context.Context, componentID *uuid.UUID) (bool, error)
+	// Any origin: an entered grade, or a total written down when it was a parent.
+	ComponentHasLivePostedGrades(ctx context.Context, componentID *uuid.UUID) (bool, error)
 	CountAssignmentsInScope(ctx context.Context, arg CountAssignmentsInScopeParams) (int64, error)
 	CountAssignmentsOfCourse(ctx context.Context, arg CountAssignmentsOfCourseParams) (int64, error)
 	CountBuiltinPresets(ctx context.Context) (int64, error)
@@ -89,6 +91,8 @@ type Querier interface {
 	// Roster facts about a member. This is not authorization: that a grade can
 	// only be given to someone on the roster as a student is a rule about grades.
 	GetRosterEntry(ctx context.Context, arg GetRosterEntryParams) (GetRosterEntryRow, error)
+	// The account an identity provider's subject is linked to, if any.
+	GetSSOCredential(ctx context.Context, arg GetSSOCredentialParams) (GetSSOCredentialRow, error)
 	GetSubmissionFull(ctx context.Context, arg GetSubmissionFullParams) (Submission, error)
 	// Lookups are always "in this course": an id from another course is not found.
 	GetSubmissionInCourse(ctx context.Context, arg GetSubmissionInCourseParams) (GetSubmissionInCourseRow, error)
@@ -190,6 +194,8 @@ type Querier interface {
 	// Held until the transaction ends. See events.Flush for why.
 	LockEventStream(ctx context.Context, arg LockEventStreamParams) error
 	LockGradesInCourse(ctx context.Context, arg LockGradesInCourseParams) ([]uuid.UUID, error)
+	// Serialises attaching one upload. Held until the transaction ends.
+	LockStorageKey(ctx context.Context, storageKey string) error
 	// All of one student's attempts at one assignment, locked, newest first.
 	LockSubmissionsOf(ctx context.Context, arg LockSubmissionsOfParams) ([]LockSubmissionsOfRow, error)
 	MarkActionExecuted(ctx context.Context, arg MarkActionExecutedParams) error
@@ -201,6 +207,8 @@ type Querier interface {
 	// A 'missing' row is a placeholder written when the due date passed with
 	// nothing handed in. Late work takes it over rather than sitting beside it.
 	ReopenMissingSubmission(ctx context.Context, arg ReopenMissingSubmissionParams) error
+	// Linking again an identity that was unlinked from the same actor.
+	ReviveSSOCredential(ctx context.Context, id uuid.UUID) error
 	// Only the owner's own credential; someone else's id changes nothing.
 	RevokeCredential(ctx context.Context, arg RevokeCredentialParams) (int64, error)
 	RevokeCredentialByID(ctx context.Context, arg RevokeCredentialByIDParams) error
@@ -217,6 +225,7 @@ type Querier interface {
 	SetPublishedVersion(ctx context.Context, arg SetPublishedVersionParams) error
 	SetSubmissionLateness(ctx context.Context, arg SetSubmissionLatenessParams) (int64, error)
 	StorageKeyInUse(ctx context.Context, storageKey *string) (bool, error)
+	SubmissionHasGrades(ctx context.Context, submissionID *uuid.UUID) (bool, error)
 	SubmitSubmission(ctx context.Context, arg SubmitSubmissionParams) (int64, error)
 	SupersedeComponentDrafts(ctx context.Context, arg SupersedeComponentDraftsParams) error
 	SupersedeGrade(ctx context.Context, arg SupersedeGradeParams) (int64, error)

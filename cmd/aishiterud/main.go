@@ -27,6 +27,8 @@ import (
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/jobs"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/mcpapi"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/pipeline"
+	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/ratelimit"
+	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/signing"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/tool"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/tools"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/version"
@@ -54,6 +56,9 @@ Environment:
   HTTP_ADDR         default :8080
   SHUTDOWN_GRACE    default 15s
   PROPOSAL_TTL      default 336h (14 days); 0 disables expiry
+  RATE_LIMIT_PER_MINUTE        default 600 calls per actor per instance; 0 for no limit
+  RATE_LIMIT_BURST             default 100
+  SIGN_IN_ATTEMPTS_PER_MINUTE  default 10, per address and per email
   JOBS              default true; background sweeps (only one instance sweeps at a time)
   JOBS_INTERVAL     default 1m
   SESSION_TTL       default 12h
@@ -62,9 +67,15 @@ Environment:
   BLOB_STORE        fs (default), s3 or none
   BLOB_FS_ROOT      default var/blobs
   PUBLIC_URL        how clients reach this server; default http://localhost:8080
-  BLOB_SIGNING_KEY  32+ characters; required with s3, and for more than one instance
+  SIGNING_KEY       32+ characters; required with s3, with single sign-on, and for more than one instance
   MAX_UPLOAD_BYTES  default 52428800 (50 MiB)
   S3_ENDPOINT, S3_BUCKET, S3_REGION, S3_ACCESS_KEY, S3_SECRET_KEY, S3_USE_SSL
+  OIDC_ISSUER       turns single sign-on on; for ADFS, https://<host>/adfs
+  OIDC_CLIENT_ID, OIDC_CLIENT_SECRET
+  OIDC_PROVIDER_NAME   default polyu-adfs; what actor.link_sso calls the provider
+  OIDC_SUBJECT_CLAIM   default upn; the claim an account is known by
+  OIDC_SCOPES          default "openid profile email"
+                       Register <PUBLIC_URL>/v1/auth/sso/callback with the provider.
 `
 
 func main() {
@@ -121,11 +132,24 @@ func serve(cfg config.Config) error {
 	if err != nil {
 		return err
 	}
-
-	signer, err := blob.NewSigner(cfg.BlobSigningKey)
-	if err != nil {
-		return err
+	// serve never migrates on its own: a migration is somebody's decision.
+	// But it does not start against a schema it cannot work with, either.
+	switch have, dirty, err := db.SchemaVersion(ctx, pool); {
+	case err != nil:
+		return fmt.Errorf("read schema version: %w", err)
+	case dirty:
+		return fmt.Errorf("the schema is dirty at version %d: a migration failed half-way; fix it by hand, then `aishiterud migrate force N`", have)
+	case have < latest:
+		return fmt.Errorf("the schema is at version %d and this binary needs %d; run `aishiterud migrate up` first", have, latest)
+	case have > latest:
+		log.Warn("the schema is ahead of this binary; fine during a rolling deploy", "schema", have, "binary", latest)
 	}
+
+	signatures, err := signing.New(cfg.SigningKey)
+	if err != nil {
+		return fmt.Errorf("SIGNING_KEY: %w", err)
+	}
+	signer := blob.SignerFrom(signatures)
 	store, err := openBlobStore(ctx, cfg, signer)
 	if err != nil {
 		return err
@@ -144,19 +168,36 @@ func serve(cfg config.Config) error {
 			log.Warn("background jobs are off: there is no system actor yet; run `aishiterud bootstrap`, then restart")
 		} else {
 			jobsDone = make(chan struct{})
-			runner := jobs.New(pool, pl, system, jobs.Config{Interval: cfg.JobsInterval}, log)
+			runner := jobs.New(pool, pl, system, jobs.Config{Interval: cfg.JobsInterval, Blob: store}, log)
 			go func() { defer close(jobsDone); runner.Run(ctx) }()
 		}
 	}
 
 	authn := auth.NewAuthenticator(pool, cfg.SessionTTL)
+	calls := ratelimit.New(cfg.CallsPerMinute, cfg.CallsBurst)
+	// Single sign-on is discovered at start-up. If the provider cannot be
+	// reached the server does not start: better that than a sign-in page that
+	// fails for everyone with nothing in the log to say why.
+	var sso auth.IdentityProvider
+	if cfg.OIDC.Enabled() {
+		discover, cancel := context.WithTimeout(ctx, 20*time.Second)
+		sso, err = auth.NewOIDC(discover, auth.OIDCConfig{Name: cfg.OIDC.ProviderName, Issuer: cfg.OIDC.Issuer,
+			ClientID: cfg.OIDC.ClientID, ClientSecret: cfg.OIDC.ClientSecret, SubjectClaim: cfg.OIDC.SubjectClaim,
+			Scopes: cfg.OIDC.Scopes, RedirectURL: strings.TrimRight(cfg.PublicURL, "/") + httpapi.SSOCallbackPath})
+		cancel()
+		if err != nil {
+			return err
+		}
+	}
 	srv := &http.Server{
 		Addr: cfg.HTTPAddr,
 		Handler: httpapi.NewHandler(httpapi.Deps{
 			Pool: pool, LatestSchema: latest, Pipeline: pl, Log: log,
-			Auth: authn, MCP: mcpapi.NewHandler(mcpapi.Deps{Pipeline: pl, Auth: authn, Log: log}),
+			Auth: authn, MCP: mcpapi.NewHandler(mcpapi.Deps{Pipeline: pl, Auth: authn, Log: log, Calls: calls}),
+			Calls: calls, SignIns: ratelimit.New(cfg.SignInsPerMinute, cfg.SignInsPerMinute),
 			TrustedOrigins: cfg.TrustedOrigins, InsecureCookies: cfg.InsecureCookies,
 			Blob: store, MaxUploadBytes: cfg.MaxUploadBytes,
+			SSO: sso, Signer: signatures,
 		}),
 		ReadHeaderTimeout: 10 * time.Second,
 	}

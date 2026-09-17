@@ -134,3 +134,10 @@ SELECT component_id, score
 FROM grade
 WHERE student_member_id = $1 AND component_id IS NOT NULL
   AND origin = 'entered' AND posted_at IS NOT NULL AND superseded_by IS NULL;
+
+-- name: SubmissionHasGrades :one
+SELECT EXISTS (SELECT 1 FROM grade WHERE submission_id = $1);
+
+-- name: ComponentHasLivePostedGrades :one
+-- Any origin: an entered grade, or a total written down when it was a parent.
+SELECT EXISTS (SELECT 1 FROM grade WHERE component_id = $1 AND posted_at IS NOT NULL AND superseded_by IS NULL);

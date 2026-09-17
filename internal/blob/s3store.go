@@ -85,6 +85,48 @@ func (s *S3Store) Stat(ctx context.Context, key string) (Info, error) {
 	return Info{Size: o.Size, ContentType: o.ContentType, Checksum: "etag:" + o.ETag}, nil
 }
 
+// attachedPrefix holds objects that document versions point at. No presigned
+// PUT is ever issued under it.
+const attachedPrefix = "attached/"
+
+func (s *S3Store) FinalKey(stagingKey string) string { return attachedPrefix + stagingKey }
+
+// Finalize copies the staged object, server side, to its final key, removes
+// the staged one, and describes the copy. A presigned PUT for the staging key
+// may still be valid afterwards; what it writes is an orphan that no document
+// points at.
+func (s *S3Store) Finalize(ctx context.Context, stagingKey string) (Info, error) {
+	final := s.FinalKey(stagingKey)
+	if _, err := s.client.CopyObject(ctx,
+		minio.CopyDestOptions{Bucket: s.bucket, Object: final},
+		minio.CopySrcOptions{Bucket: s.bucket, Object: stagingKey}); err != nil {
+		if minio.ToErrorResponse(err).StatusCode == http.StatusNotFound {
+			return Info{}, ErrNotFound
+		}
+		return Info{}, err
+	}
+	// Best effort: a staged object left behind is swept as an orphan.
+	_ = s.client.RemoveObject(ctx, s.bucket, stagingKey, minio.RemoveObjectOptions{})
+	return s.Stat(ctx, final)
+}
+
+func (s *S3Store) List(ctx context.Context, fn func(key string, modified time.Time) error) error {
+	// Cancelling is how the client is told to stop paging.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	for obj := range s.client.ListObjects(ctx, s.bucket, minio.ListObjectsOptions{Recursive: true}) {
+		if obj.Err != nil {
+			return obj.Err
+		}
+		if err := fn(obj.Key, obj.LastModified); errors.Is(err, ErrStopList) {
+			return nil
+		} else if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (s *S3Store) Delete(ctx context.Context, key string) error {
 	return s.client.RemoveObject(ctx, s.bucket, key, minio.RemoveObjectOptions{})
 }

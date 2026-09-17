@@ -38,7 +38,35 @@ type Store interface {
 	// Stat describes the object, or returns ErrNotFound.
 	Stat(ctx context.Context, key string) (Info, error)
 	Delete(ctx context.Context, key string) error
+
+	// FinalKey and Finalize make an uploaded object immutable before a
+	// document version points at it.
+	//
+	// An upload URL is a capability to write one key, and with an object
+	// store it stays good until it expires: whoever holds it can PUT again
+	// and replace the bytes. If the document version recorded that same key,
+	// a submitted essay could be swapped after it was handed in, and nothing
+	// in the database would notice. So attaching moves the object to a final
+	// key that no upload URL was ever issued for, and records that.
+	//
+	// FinalKey is where the object uploaded under stagingKey will live. It is
+	// a pure function of the staging key, so that "already attached" can be
+	// checked before anything is copied.
+	FinalKey(stagingKey string) string
+	// Finalize moves the object to its final key and describes what is now
+	// there. The description is of the final object, read after the move: it
+	// is what was attached, whatever is PUT to the staging key afterwards.
+	Finalize(ctx context.Context, stagingKey string) (Info, error)
+
+	// List calls fn for every object in the store, with when it was last
+	// written, until fn returns an error; ErrStopList ends the listing
+	// without being one. It is how uploads that nothing came to point at are
+	// found and removed.
+	List(ctx context.Context, fn func(key string, modified time.Time) error) error
 }
+
+// ErrStopList, returned from a List callback, ends the listing early.
+var ErrStopList = errors.New("blob: stop listing")
 
 // Local is implemented by a store whose URLs point back at this server, which
 // must then serve them. The filesystem store is one; S3 is not.

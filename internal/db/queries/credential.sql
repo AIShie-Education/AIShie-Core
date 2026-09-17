@@ -44,3 +44,14 @@ SELECT id, kind, provider, subject, token_prefix, label, last_used_at, expires_a
 FROM credential
 WHERE actor_id = $1
 ORDER BY created_at DESC, id;
+
+-- name: GetSSOCredential :one
+-- The account an identity provider's subject is linked to, if any.
+SELECT c.id, c.actor_id, c.revoked_at, a.status AS actor_status
+FROM credential c
+JOIN actor a ON a.id = c.actor_id
+WHERE c.kind = 'sso' AND c.provider = $1 AND c.subject = $2;
+
+-- name: ReviveSSOCredential :exec
+-- Linking again an identity that was unlinked from the same actor.
+UPDATE credential SET revoked_at = NULL WHERE id = $1 AND kind = 'sso';

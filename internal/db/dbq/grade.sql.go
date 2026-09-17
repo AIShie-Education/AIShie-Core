@@ -13,6 +13,18 @@ import (
 	"github.com/shopspring/decimal"
 )
 
+const componentHasLivePostedGrades = `-- name: ComponentHasLivePostedGrades :one
+SELECT EXISTS (SELECT 1 FROM grade WHERE component_id = $1 AND posted_at IS NOT NULL AND superseded_by IS NULL)
+`
+
+// Any origin: an entered grade, or a total written down when it was a parent.
+func (q *Queries) ComponentHasLivePostedGrades(ctx context.Context, componentID *uuid.UUID) (bool, error) {
+	row := q.db.QueryRow(ctx, componentHasLivePostedGrades, componentID)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
+}
+
 const countComponentAssignments = `-- name: CountComponentAssignments :one
 SELECT count(*) FROM assignment WHERE component_id = $1
 `
@@ -603,6 +615,17 @@ func (q *Queries) PostGrade(ctx context.Context, arg PostGradeParams) (int64, er
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+const submissionHasGrades = `-- name: SubmissionHasGrades :one
+SELECT EXISTS (SELECT 1 FROM grade WHERE submission_id = $1)
+`
+
+func (q *Queries) SubmissionHasGrades(ctx context.Context, submissionID *uuid.UUID) (bool, error) {
+	row := q.db.QueryRow(ctx, submissionHasGrades, submissionID)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
 }
 
 const supersedeComponentDrafts = `-- name: SupersedeComponentDrafts :exec

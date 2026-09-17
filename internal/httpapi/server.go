@@ -24,6 +24,8 @@ import (
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/blob"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/domain"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/pipeline"
+	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/ratelimit"
+	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/signing"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/tool"
 )
 
@@ -54,6 +56,16 @@ type Deps struct {
 	Blob           blob.Store
 	MaxUploadBytes int64
 
+	// SSO is the identity provider, when single sign-on is configured; Signer
+	// signs the short-lived state cookie a sign-in carries.
+	SSO    auth.IdentityProvider
+	Signer *signing.Signer
+
+	// Calls bounds how fast one actor may call; SignIns bounds sign-in
+	// attempts per address and per email. Nil means no limit.
+	Calls   *ratelimit.Limiter
+	SignIns *ratelimit.Limiter
+
 	// MCP is the agents' door, mounted at /mcp beside the REST routes and
 	// behind the same cross-origin guard. It does its own authentication,
 	// with the same authenticator.
@@ -74,6 +86,13 @@ func NewHandler(d Deps) http.Handler {
 
 	if d.Pipeline != nil {
 		mux.HandleFunc("POST /v1/auth/login", s.login)
+		if d.SSO != nil {
+			if s.Signer == nil {
+				panic("httpapi: single sign-on needs a Signer for its state cookie")
+			}
+			mux.HandleFunc("GET "+ssoStartPath, s.ssoStart)
+			mux.HandleFunc("GET "+ssoReturnPath, s.ssoCallback)
+		}
 		mux.Handle("POST /v1/auth/logout", s.authenticated(s.logout))
 		mux.HandleFunc("GET /v1/tools", s.listTools)
 		mux.Handle("POST /v1/tools/{tool_name}", s.authenticated(s.callByName))
@@ -104,7 +123,55 @@ func NewHandler(d Deps) http.Handler {
 			panic("httpapi: trusted origin " + o + ": " + err.Error())
 		}
 	}
-	return s.cors(guard.Handler(mux))
+	return s.logged(s.cors(guard.Handler(s.routed(mux))))
+}
+
+// routed answers for the routes the mux does not have. The mux's own 404 and
+// 405 are plain text; everything else this API says, it says in JSON, and a
+// client should not need a second parser for a mistyped path.
+func (s *server) routed(mux *http.ServeMux) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h, pattern := mux.Handler(r)
+		if pattern != "" {
+			mux.ServeHTTP(w, r)
+			return
+		}
+		// No route. Ask the mux's own handler whether that is a 404 or a 405
+		// (and which methods it would have taken), and say so in JSON.
+		probe := &probeWriter{header: http.Header{}}
+		h.ServeHTTP(probe, r)
+		switch {
+		case probe.status == http.StatusMethodNotAllowed:
+			w.Header().Set("Allow", probe.header.Get("Allow"))
+			writeJSON(w, http.StatusMethodNotAllowed, errorBody{Error: &apperr.Error{Code: "method_not_allowed",
+				Message: r.Method + " is not something " + r.URL.Path + " takes; it takes " + probe.header.Get("Allow")}})
+		case probe.status >= 300 && probe.status < 400:
+			// The mux tidying a path: /v1//tools → /v1/tools.
+			h.ServeHTTP(w, r)
+		default:
+			s.writeError(w, r, apperr.Missing("no such route; GET /v1/tools lists what there is"))
+		}
+	})
+}
+
+// probeWriter takes a response and keeps only its status and headers.
+type probeWriter struct {
+	header http.Header
+	status int
+}
+
+func (p *probeWriter) Header() http.Header { return p.header }
+func (p *probeWriter) WriteHeader(code int) {
+	if p.status == 0 {
+		p.status = code
+	}
+}
+
+func (p *probeWriter) Write(b []byte) (int, error) {
+	if p.status == 0 {
+		p.status = http.StatusOK
+	}
+	return len(b), nil
 }
 
 type server struct{ Deps }
@@ -190,6 +257,14 @@ func (s *server) authenticated(next http.HandlerFunc) http.Handler {
 			s.writeError(w, r, err)
 			return
 		}
+		// After authentication, so that the limit is the actor's and nobody
+		// can spend it for them; before the pipeline, so that a call refused
+		// here was never attempted and leaves no row.
+		if ok, wait := s.Calls.Allow(p.ActorID.String()); !ok {
+			s.tooMany(w, r, wait)
+			return
+		}
+		noteActor(r, p.ActorID.String())
 		next(w, r.WithContext(contextWith(r.Context(), p)))
 	})
 }
@@ -221,6 +296,15 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, apperr.Invalid("the body must be JSON with email and password"))
 		return
 	}
+	// Guessing is limited twice over: by where it comes from, and by whose
+	// account it is aimed at. Each attempt costs a 64 MiB argon2 hash, so
+	// this protects the server as much as the password.
+	for _, key := range []string{"addr:" + clientAddr(r), "email:" + strings.ToLower(strings.TrimSpace(in.Email))} {
+		if ok, wait := s.SignIns.Allow(key); !ok {
+			s.tooMany(w, r, wait)
+			return
+		}
+	}
 	sess, err := s.Auth.Login(r.Context(), in.Email, in.Password)
 	if err != nil {
 		s.writeError(w, r, err)
@@ -240,19 +324,24 @@ func (s *server) logout(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// sessionCookie is the one place the session cookie is made. HttpOnly keeps it
-// from scripts; SameSite=Lax keeps it off cross-site subrequests; Secure keeps
-// it off plain HTTP. Secure is on unless INSECURE_COOKIES says otherwise,
-// which exists only so that a developer can sign in at http://localhost.
-func (s *server) sessionCookie(value string, expires time.Time) *http.Cookie {
+// cookie is the one place cookies are made. HttpOnly keeps them from scripts;
+// SameSite=Lax keeps them off cross-site subrequests; Secure keeps them off
+// plain HTTP. Secure is on unless INSECURE_COOKIES says otherwise, which
+// exists only so that a developer can sign in at http://localhost. No value
+// means "forget it".
+func (s *server) cookie(name, value, path string, expires time.Time) *http.Cookie {
 	c := &http.Cookie{ //nolint:gosec // Secure is configurable on purpose; see above
-		Name: SessionCookie, Value: value, Path: "/", Expires: expires,
+		Name: name, Value: value, Path: path, Expires: expires,
 		HttpOnly: true, Secure: !s.InsecureCookies, SameSite: http.SameSiteLaxMode,
 	}
 	if value == "" {
-		c.MaxAge = -1 // no value means "forget it": signing out
+		c.MaxAge = -1
 	}
 	return c
+}
+
+func (s *server) sessionCookie(value string, expires time.Time) *http.Cookie {
+	return s.cookie(SessionCookie, value, "/", expires)
 }
 
 // cors lets the trusted front-end origins call with credentials. Any other
@@ -316,6 +405,8 @@ func outcomeStatus(out pipeline.Outcome) int {
 
 func codeStatus(c apperr.Code) int {
 	switch c {
+	case apperr.RateLimited:
+		return http.StatusTooManyRequests
 	case apperr.InvalidArgument:
 		return http.StatusBadRequest
 	case apperr.Unauthenticated:
