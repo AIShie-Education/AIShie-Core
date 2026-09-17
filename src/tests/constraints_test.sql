@@ -5,9 +5,11 @@
 -- the fixtures use fixed ids, so do not point this at a database with data.
 --
 --   createdb aishiteru_test
---   psql -v ON_ERROR_STOP=1 -d aishiteru_test -f migrations/0001_init.up.sql
+--   for f in migrations/*.up.sql; do psql -v ON_ERROR_STOP=1 -d aishiteru_test -f "$f"; done
 --   psql -X -d aishiteru_test -f tests/constraints_test.sql
 --   dropdb aishiteru_test
+--
+-- or `make db-test-sql` at the repository root, which does all of it.
 --
 -- Each check prints PASS; the first failure stops the run with FAIL.
 
@@ -111,6 +113,17 @@ SELECT pg_temp.fails('password credential needs a hash', '23514', $q$
     INSERT INTO credential (actor_id, kind) VALUES ('00000000-0000-0000-0000-000000000034', 'password') $q$);
 SELECT pg_temp.fails('api token needs a lookup prefix', '23514', $q$
     INSERT INTO credential (actor_id, kind, secret_hash) VALUES ('00000000-0000-0000-0000-000000000036', 'api_token', 'h') $q$);
+SELECT pg_temp.ok('login session with a prefix and an expiry', $q$
+    INSERT INTO credential (actor_id, kind, secret_hash, token_prefix, expires_at)
+    VALUES ('00000000-0000-0000-0000-000000000034', 'session', 'h', 'sess-1', now() + interval '12 hours') $q$);
+SELECT pg_temp.fails('session needs a lookup prefix', '23514', $q$
+    INSERT INTO credential (actor_id, kind, secret_hash, expires_at)
+    VALUES ('00000000-0000-0000-0000-000000000034', 'session', 'h', now() + interval '12 hours') $q$);
+SELECT pg_temp.fails('session must expire', '23514', $q$
+    INSERT INTO credential (actor_id, kind, secret_hash, token_prefix)
+    VALUES ('00000000-0000-0000-0000-000000000034', 'session', 'h', 'sess-2') $q$);
+SELECT pg_temp.fails('unknown credential kind is rejected', '23514', $q$
+    INSERT INTO credential (actor_id, kind, secret_hash) VALUES ('00000000-0000-0000-0000-000000000034', 'passkey', 'h') $q$);
 
 -- Courses and membership -----------------------------------------------------
 SELECT pg_temp.fails('same term, code and section twice', '23505', $q$
@@ -280,6 +293,53 @@ SELECT pg_temp.ok('draft can be deleted', $q$
     DELETE FROM submission WHERE id = '00000000-0000-0000-0000-0000000000a3' $q$);
 
 -- Actions --------------------------------------------------------------------
+-- payload_hash has no default in the schema: the application always computes
+-- it. A default for the rest of this transaction keeps each fixture below
+-- about the one rule it tests. Rolled back with everything else.
+ALTER TABLE action ALTER COLUMN payload_hash SET DEFAULT repeat('0', 64);
+
+SELECT pg_temp.fails('payload hash is required', '23502', $q$
+    INSERT INTO action (actor_id, action_type, target_type, idempotency_key, payload_hash, authz_result, status)
+    VALUES ('00000000-0000-0000-0000-000000000034', 'grade.submit', 'submission', 'k-nohash', NULL, 'denied', 'denied') $q$);
+SELECT pg_temp.fails('payload hash is 64 lowercase hex characters', '23514', $q$
+    INSERT INTO action (actor_id, action_type, target_type, idempotency_key, payload_hash, authz_result, status)
+    VALUES ('00000000-0000-0000-0000-000000000034', 'grade.submit', 'submission', 'k-badhash', 'ABC', 'denied', 'denied') $q$);
+SELECT pg_temp.fails('denied authorization cannot carry another status', '23514', $q$
+    INSERT INTO action (actor_id, action_type, target_type, idempotency_key, authz_result, status, executed_at)
+    VALUES ('00000000-0000-0000-0000-000000000034', 'grade.submit', 'submission', 'k-d1', 'denied', 'executed', now()) $q$);
+SELECT pg_temp.fails('denied status needs a denied authorization', '23514', $q$
+    INSERT INTO action (actor_id, action_type, target_type, idempotency_key, authz_result, status)
+    VALUES ('00000000-0000-0000-0000-000000000034', 'grade.submit', 'submission', 'k-d2', 'autonomous', 'denied') $q$);
+SELECT pg_temp.fails('only confirm_required actions are proposed', '23514', $q$
+    INSERT INTO action (actor_id, action_type, target_type, idempotency_key, authz_result, status)
+    VALUES ('00000000-0000-0000-0000-000000000034', 'grade.submit', 'submission', 'k-p1', 'autonomous', 'proposed') $q$);
+SELECT pg_temp.fails('only confirm_required actions have a decider', '23514', $q$
+    INSERT INTO action (actor_id, course_id, member_id, action_type, target_type, idempotency_key, authz_result, status,
+                        executed_at, decided_by_member_id, decided_at)
+    VALUES ('00000000-0000-0000-0000-000000000036', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000000053',
+            'grade.submit', 'submission', 'k-p2', 'autonomous', 'executed', now(), '00000000-0000-0000-0000-000000000051', now()) $q$);
+SELECT pg_temp.fails('only pending_review actions enter review', '23514', $q$
+    INSERT INTO action (actor_id, action_type, target_type, idempotency_key, authz_result, status, executed_at, review_state)
+    VALUES ('00000000-0000-0000-0000-000000000034', 'grade.submit', 'submission', 'k-r1', 'autonomous', 'executed', now(), 'pending') $q$);
+SELECT pg_temp.fails('a failed action is not reviewed', '23514', $q$
+    INSERT INTO action (actor_id, action_type, target_type, idempotency_key, authz_result, status, review_state)
+    VALUES ('00000000-0000-0000-0000-000000000034', 'grade.submit', 'submission', 'k-r2', 'pending_review', 'failed', 'pending') $q$);
+SELECT pg_temp.fails('executed needs executed_at', '23514', $q$
+    INSERT INTO action (actor_id, action_type, target_type, idempotency_key, authz_result, status)
+    VALUES ('00000000-0000-0000-0000-000000000034', 'grade.submit', 'submission', 'k-e1', 'autonomous', 'executed') $q$);
+SELECT pg_temp.fails('executed_at only on executed', '23514', $q$
+    INSERT INTO action (actor_id, action_type, target_type, idempotency_key, authz_result, status, executed_at)
+    VALUES ('00000000-0000-0000-0000-000000000034', 'grade.submit', 'submission', 'k-e2', 'autonomous', 'failed', now()) $q$);
+SELECT pg_temp.ok('pending_review action executes and waits for review, with its result stored', $q$
+    INSERT INTO action (actor_id, course_id, member_id, action_type, target_type, idempotency_key, authz_result, status,
+                        executed_at, review_state, result)
+    VALUES ('00000000-0000-0000-0000-000000000036', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000000053',
+            'grade.submit', 'submission', 'k-pr', 'pending_review', 'executed', now(), 'pending', '{"grade_id": "x"}') $q$);
+SELECT pg_temp.ok('proposal cancelled with a reason', $q$
+    INSERT INTO action (actor_id, course_id, member_id, action_type, target_type, idempotency_key, authz_result, status, result)
+    VALUES ('00000000-0000-0000-0000-000000000036', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000000053',
+            'grade.submit', 'submission', 'k-cancel', 'confirm_required', 'cancelled', '{"error": {"code": "proposal_expired"}}') $q$);
+
 SELECT pg_temp.fails('member cannot approve own proposal', '23514', $q$
     INSERT INTO action (actor_id, course_id, member_id, action_type, target_type, target_id, idempotency_key,
                         authz_result, status, decided_by_member_id, decided_at)
@@ -392,6 +452,18 @@ SELECT pg_temp.ok('event from an action', $q$
     INSERT INTO event (type, course_id, action_id, subject_type, subject_id)
     VALUES ('grade.posted', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-0000000000b1', 'grade',
             '00000000-0000-0000-0000-0000000000d2') $q$);
+SELECT pg_temp.ok('event names the student and assignment it belongs to', $q$
+    INSERT INTO event (type, course_id, subject_type, subject_id, student_member_id, assignment_id)
+    VALUES ('submission.submitted', '00000000-0000-0000-0000-000000000041', 'submission', '00000000-0000-0000-0000-0000000000a1',
+            '00000000-0000-0000-0000-000000000052', '00000000-0000-0000-0000-000000000071') $q$);
+SELECT pg_temp.fails('event student must be a real member', '23503', $q$
+    INSERT INTO event (type, course_id, subject_type, student_member_id)
+    VALUES ('submission.submitted', '00000000-0000-0000-0000-000000000041', 'submission', '00000000-0000-0000-0000-0000000000ff') $q$);
+SELECT pg_temp.fails('event assignment must be a real assignment', '23503', $q$
+    INSERT INTO event (type, course_id, subject_type, assignment_id)
+    VALUES ('submission.submitted', '00000000-0000-0000-0000-000000000041', 'submission', '00000000-0000-0000-0000-0000000000ff') $q$);
+SELECT pg_temp.fails('event scope columns are frozen with the rest of the row', '23001', $q$
+    UPDATE event SET student_member_id = NULL $q$);
 SELECT pg_temp.fails('events are append-only', '23001', $q$
     DELETE FROM event $q$);
 

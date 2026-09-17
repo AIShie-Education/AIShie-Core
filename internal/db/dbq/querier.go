@@ -6,10 +6,25 @@ package dbq
 
 import (
 	"context"
+
+	"github.com/google/uuid"
 )
 
 type Querier interface {
+	CountAssignmentsInScope(ctx context.Context, arg CountAssignmentsInScopeParams) (int64, error)
 	CountBuiltinPresets(ctx context.Context) (int64, error)
+	CountStudentsInScope(ctx context.Context, arg CountStudentsInScopeParams) (int64, error)
+	// Everything authorize() reads. Two columns are deliberately never selected
+	// here: the actor's type and the member's roster role. Authorization does not
+	// branch on either, and a test fails if this file ever names them.
+	GetActorForAuthz(ctx context.Context, id uuid.UUID) (GetActorForAuthzRow, error)
+	GetCourseForAuthz(ctx context.Context, id uuid.UUID) (GetCourseForAuthzRow, error)
+	// The partial unique index allows at most one row per (course, actor) that is
+	// not removed. A paused row is returned so the caller can say why it denied.
+	GetLiveMemberForAuthz(ctx context.Context, arg GetLiveMemberForAuthzParams) (GetLiveMemberForAuthzRow, error)
+	// By id, removed rows included: re-authorizing a proposal checks the very
+	// membership it was made under, not whatever row the actor holds today.
+	GetMemberForAuthz(ctx context.Context, id uuid.UUID) (GetMemberForAuthzRow, error)
 }
 
 var _ Querier = (*Queries)(nil)

@@ -12,6 +12,11 @@ src/
   migrations/
     0001_init.up.sql     creates everything (17 tables)
     0001_init.down.sql   drops everything (destroys all data)
+    0002_action_replay_and_feed_scope.up.sql
+                         what the tool layer needs: action.payload_hash and
+                         result, event scope columns, session credentials,
+                         the action status CHECKs, the member expiry index
+    0002_action_replay_and_feed_scope.down.sql
   seed/
     presets.sql          the six built-in permission presets; safe to re-run
   tests/
@@ -31,9 +36,14 @@ PostgreSQL 13 or newer. No extensions, no elevated privileges.
 
 ```
 createdb aishiteru
-psql -v ON_ERROR_STOP=1 -d aishiteru -f migrations/0001_init.up.sql
+for f in migrations/*.up.sql; do psql -v ON_ERROR_STOP=1 -d aishiteru -f "$f"; done
 psql -v ON_ERROR_STOP=1 -d aishiteru -f seed/presets.sql
-psql -v ON_ERROR_STOP=1 -d aishiteru -f migrations/0001_init.down.sql
+```
+
+Roll back in reverse order, newest first:
+
+```
+for f in $(ls -r migrations/*.down.sql); do psql -v ON_ERROR_STOP=1 -d aishiteru -f "$f"; done
 ```
 
 The seed is policy, not schema: it inserts the built-in presets and leaves
@@ -67,7 +77,7 @@ but its fixtures use fixed ids.
 
 ```
 createdb aishiteru_test
-psql -v ON_ERROR_STOP=1 -d aishiteru_test -f migrations/0001_init.up.sql
+for f in migrations/*.up.sql; do psql -v ON_ERROR_STOP=1 -d aishiteru_test -f "$f"; done
 psql -X -d aishiteru_test -f tests/constraints_test.sql
 dropdb aishiteru_test
 ```
@@ -97,13 +107,16 @@ MCP, these are the invariants that survive a bug in the tool layer.
 | A published pointer names a version of its own document | composite FK to `document_version(id, document_id)` |
 | Every grade names the action that created it | `grade.created_by_action_id NOT NULL` |
 | A retried tool call cannot act twice | `unique(actor_id, idempotency_key)` |
+| Every action carries the hash of what was asked, so a key reused for different content can be told from a retry | `action.payload_hash NOT NULL`, `action_payload_hash_valid` |
+| An action's status agrees with its authorization: `denied` ⇔ `denied`; only `confirm_required` is proposed, rejected, cancelled or decided; only an executed `pending_review` is under review | `action_status_matches_authz` |
+| `executed_at` is set exactly when status is `executed` | `action_executed_at_consistent` |
 | Nobody approves or reviews their own action | `action_not_self_decided`, `action_not_self_reviewed` |
 | `document_version` and `event` are append-only | `reject_mutation()` triggers on UPDATE, DELETE, TRUNCATE |
 | A submitted submission is never changed or deleted, except correcting `submitted` ⇄ `late` | `submission_frozen_after_submit` trigger |
 | A grade has exactly one target | `grade_one_target` |
 | Document owner columns match `kind` | `document_owner_matches_kind` |
 | A version has text or a file; a file has a type and size | `document_version_has_content`, `document_version_file_described` |
-| SSO credentials carry an identity; passwords and tokens carry a hash; tokens carry a lookup prefix | `credential_*` CHECKs |
+| SSO credentials carry an identity; passwords, tokens and sessions carry a hash; tokens and sessions carry a lookup prefix; sessions expire | `credential_*` CHECKs |
 | Status, role, kind and scope columns hold only listed values | `*_valid` CHECKs |
 | Emails are unique regardless of case | unique index on `lower(email)` |
 | Domain rows are never silently cascade-deleted | FKs default to NO ACTION |
@@ -114,8 +127,14 @@ The database cannot express these. Each one is a place a bug can hide.
 
 - **`authorize()` itself**: membership lookup, the permission column, and the
   student / assignment scope checks.
-- **Action status flow**: which `status` values may follow which
-  `authz_result`, and the transitions between them.
+- **Action status flow**: the transitions. The database checks that a row at
+  rest agrees with its `authz_result`; the order things happen in is code.
+- **Idempotent replay**: same key and same `payload_hash` returns the stored
+  `result`; same key and a different hash is refused.
+- **Re-authorizing the proposer** when a proposal is approved, against the
+  membership row it was made under, and cancelling proposals past their TTL.
+- **Event scope**: filling `event.student_member_id` / `assignment_id`
+  correctly, and filtering the feed by them.
 - **Same-course consistency** where no composite key covers it: scope rows
   name members and assignments of the same course; `assignment` instructions
   and rubric are documents of the same course with the right `kind`;
@@ -142,7 +161,7 @@ unique index.
 ## Verification status
 
 Executed against PostgreSQL 18.6: up, down and up again apply cleanly, and
-`tests/constraints_test.sql` passes (71 checks). **Not yet run on PostgreSQL
+`tests/constraints_test.sql` passes (91 checks). **Not yet run on PostgreSQL
 13**, the stated minimum: CI runs this suite and the Go tests on both 13 and
 18, so the first pipeline run settles it — update this paragraph with the
 result.
