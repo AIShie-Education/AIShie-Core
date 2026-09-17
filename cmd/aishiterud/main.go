@@ -24,6 +24,7 @@ import (
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/db"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/db/dbq"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/httpapi"
+	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/mcpapi"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/pipeline"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/tool"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/tools"
@@ -131,11 +132,12 @@ func serve(cfg config.Config) error {
 	pl := pipeline.New(pool, reg, pipeline.Config{ProposalTTL: cfg.ProposalTTL})
 	tools.RegisterAll(reg, tools.Deps{Pipeline: pl, Blob: store, Uploads: signer, MaxUploadBytes: cfg.MaxUploadBytes})
 
+	authn := auth.NewAuthenticator(pool, cfg.SessionTTL)
 	srv := &http.Server{
 		Addr: cfg.HTTPAddr,
 		Handler: httpapi.NewHandler(httpapi.Deps{
 			Pool: pool, LatestSchema: latest, Pipeline: pl, Log: log,
-			Auth:           auth.NewAuthenticator(pool, cfg.SessionTTL),
+			Auth: authn, MCP: mcpapi.NewHandler(mcpapi.Deps{Pipeline: pl, Auth: authn, Log: log}),
 			TrustedOrigins: cfg.TrustedOrigins, InsecureCookies: cfg.InsecureCookies,
 			Blob: store, MaxUploadBytes: cfg.MaxUploadBytes,
 		}),

@@ -159,4 +159,21 @@ call 200 GET "$C/events?since_seq=0" "$GRADER"
 json "$WORK/body" '"action.approved" in [e["type"] for e in d["result"]["events"]] or sys.exit("no action.approved in the agent feed")' >/dev/null
 KEY=yuki-hw3 call 200 POST "$C/grades" "$GRADER" "$GRADE" # the original call, replayed now, reports executed
 
+step "The same server over MCP: an agent's own door, with the same token"
+mcp() { # JSON-RPC body → $WORK/body
+  curl -s -o "$WORK/body" -w '%{http_code}' -X POST "$BASE/mcp" -H "Authorization: Bearer $1" \
+    -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' -d "$2"
+}
+[ "$(mcp not-a-token '{"jsonrpc":"2.0","id":1,"method":"tools/list"}')" = 401 ] || fail "MCP accepted a bad token"
+[ "$(mcp "$GRADER" '{"jsonrpc":"2.0","id":1,"method":"tools/list"}')" = 200 ] || fail "tools/list: $(cat "$WORK/body")"
+json "$WORK/body" '"grade_submit" in [t["name"] for t in d["result"]["tools"]] or sys.exit("grade_submit is not offered over MCP")' >/dev/null
+echo "  tools/list offers $(json "$WORK/body" 'len(d["result"]["tools"])') tools, grade_submit among them"
+# The call REST made earlier, replayed over MCP with the same key: one action, two doors.
+CALL="{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"grade_submit\",\"arguments\":{\"course_id\":\"$COURSE\",\"submission_id\":\"$SUB\",\"score\":85,\"feedback\":\"Clear thesis.\",\"idempotency_key\":\"yuki-hw3\"}}}"
+[ "$(mcp "$GRADER" "$CALL")" = 200 ] || fail "tools/call: $(cat "$WORK/body")"
+[ "$(json "$WORK/body" 'd["result"]["structuredContent"]["action_id"]')" = "$ACTION" ] || fail "MCP and REST did not reach the same action: $(cat "$WORK/body")"
+[ "$(json "$WORK/body" 'd["result"]["structuredContent"]["replayed"]')" = True ] || fail "not a replay"
+echo "  grade_submit over MCP with REST's idempotency key replays REST's action: one tool layer"
+N=$((N + 3))
+
 printf '\n\033[32mPASS\033[0m %d requests\n' "$N"
