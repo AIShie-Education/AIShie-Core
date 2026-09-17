@@ -105,6 +105,31 @@ jobs:
           path: cover.out
           retention-days: 14
 
+  e2e:
+    name: end to end (curl)
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 2s --health-timeout 5s --health-retries 30
+    env:
+      PGHOST: localhost
+      PGUSER: postgres
+      PGPASSWORD: postgres
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      # The real binary, a scratch database and curl: bootstrap, then the
+      # worked example from docs/schema.md §5 over the REST API.
+      - run: make e2e
+
   build:
     runs-on: ubuntu-24.04
     steps:

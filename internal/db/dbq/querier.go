@@ -11,12 +11,26 @@ import (
 )
 
 type Querier interface {
+	AddAssignmentScope(ctx context.Context, arg AddAssignmentScopeParams) error
+	AddStudentScope(ctx context.Context, arg AddStudentScopeParams) error
+	AssignmentHasPostedGrades(ctx context.Context, assignmentID uuid.UUID) (bool, error)
+	CancelProposal(ctx context.Context, arg CancelProposalParams) (int64, error)
+	ClearAssignmentScope(ctx context.Context, memberID uuid.UUID) error
+	ClearStudentScope(ctx context.Context, memberID uuid.UUID) error
+	ComponentHasGrades(ctx context.Context, componentID *uuid.UUID) (bool, error)
 	CountAssignmentsInScope(ctx context.Context, arg CountAssignmentsInScopeParams) (int64, error)
+	CountAssignmentsOfCourse(ctx context.Context, arg CountAssignmentsOfCourseParams) (int64, error)
 	CountBuiltinPresets(ctx context.Context) (int64, error)
 	CountComponentAssignments(ctx context.Context, componentID *uuid.UUID) (int64, error)
 	CountComponentChildren(ctx context.Context, parentID *uuid.UUID) (int64, error)
 	CountRootActors(ctx context.Context) (int64, error)
 	CountStudentsInScope(ctx context.Context, arg CountStudentsInScopeParams) (int64, error)
+	// How many of the given member ids are current students of this course.
+	CountStudentsOfCourse(ctx context.Context, arg CountStudentsOfCourseParams) (int64, error)
+	CountSubmissionDocuments(ctx context.Context, submissionID *uuid.UUID) (int64, error)
+	CourseCodeTaken(ctx context.Context, arg CourseCodeTakenParams) (bool, error)
+	DepartmentExists(ctx context.Context, id uuid.UUID) (bool, error)
+	EmailTaken(ctx context.Context, lower string) (bool, error)
 	// Moves a proposal to its end state. The status guard makes a lost race
 	// between two deciders, or a decider and the expiry sweep, a no-op.
 	FinishProposal(ctx context.Context, arg FinishProposalParams) (int64, error)
@@ -32,15 +46,21 @@ type Querier interface {
 	// branch on either, and a test fails if this file ever names them.
 	GetActorForAuthz(ctx context.Context, id uuid.UUID) (GetActorForAuthzRow, error)
 	GetAssignmentInCourse(ctx context.Context, arg GetAssignmentInCourseParams) (GetAssignmentInCourseRow, error)
+	GetBuiltinPresetByName(ctx context.Context, name string) (PermissionPreset, error)
 	GetComponentInCourse(ctx context.Context, arg GetComponentInCourseParams) (GetComponentInCourseRow, error)
+	GetComponentParent(ctx context.Context, id uuid.UUID) (*uuid.UUID, error)
+	GetCourse(ctx context.Context, id uuid.UUID) (GetCourseRow, error)
 	GetCourseForAuthz(ctx context.Context, id uuid.UUID) (GetCourseForAuthzRow, error)
 	// A token or a session, found by its public prefix before its hash is
 	// checked. Revoked and expired rows are returned too, so that the caller can
 	// tell them from an unknown prefix in its logs; it rejects all three alike.
 	GetCredentialByPrefix(ctx context.Context, tokenPrefix *string) (GetCredentialByPrefixRow, error)
 	GetCredentialForActor(ctx context.Context, arg GetCredentialForActorParams) (GetCredentialForActorRow, error)
+	GetDeptPresetByName(ctx context.Context, arg GetDeptPresetByNameParams) (PermissionPreset, error)
+	GetDocumentInCourse(ctx context.Context, arg GetDocumentInCourseParams) (GetDocumentInCourseRow, error)
 	GetDocumentPublishedVersion(ctx context.Context, id uuid.UUID) (*uuid.UUID, error)
 	GetDocumentVersionOwner(ctx context.Context, id uuid.UUID) (uuid.UUID, error)
+	GetGradeFull(ctx context.Context, arg GetGradeFullParams) (GetGradeFullRow, error)
 	// Grades by id, with the assignment each belongs to (null for a component
 	// grade). A grade's course is its student's course.
 	GetGradesInCourse(ctx context.Context, arg GetGradesInCourseParams) ([]GetGradesInCourseRow, error)
@@ -51,10 +71,13 @@ type Querier interface {
 	// By id, removed rows included: re-authorizing a proposal checks the very
 	// membership it was made under, not whatever row the actor holds today.
 	GetMemberForAuthz(ctx context.Context, id uuid.UUID) (GetMemberForAuthzRow, error)
+	GetMemberInCourse(ctx context.Context, arg GetMemberInCourseParams) (GetMemberInCourseRow, error)
 	GetPasswordCredential(ctx context.Context, actorID uuid.UUID) (GetPasswordCredentialRow, error)
+	GetPreset(ctx context.Context, id uuid.UUID) (PermissionPreset, error)
 	// Roster facts about a member. This is not authorization: that a grade can
 	// only be given to someone on the roster as a student is a rule about grades.
 	GetRosterEntry(ctx context.Context, arg GetRosterEntryParams) (GetRosterEntryRow, error)
+	GetSubmissionFull(ctx context.Context, arg GetSubmissionFullParams) (Submission, error)
 	// Lookups are always "in this course": an id from another course is not found.
 	GetSubmissionInCourse(ctx context.Context, arg GetSubmissionInCourseParams) (GetSubmissionInCourseRow, error)
 	GetSystemActor(ctx context.Context) (uuid.UUID, error)
@@ -63,45 +86,108 @@ type Querier interface {
 	// transaction holding the key, so two simultaneous calls cannot both act.
 	InsertAction(ctx context.Context, arg InsertActionParams) (int64, error)
 	InsertActor(ctx context.Context, arg InsertActorParams) error
+	InsertAssignment(ctx context.Context, arg InsertAssignmentParams) error
+	InsertComponent(ctx context.Context, arg InsertComponentParams) error
+	InsertCourse(ctx context.Context, arg InsertCourseParams) error
 	InsertCredential(ctx context.Context, arg InsertCredentialParams) error
+	InsertDepartment(ctx context.Context, arg InsertDepartmentParams) error
 	InsertEvent(ctx context.Context, arg InsertEventParams) error
 	InsertGrade(ctx context.Context, arg InsertGradeParams) error
+	InsertMember(ctx context.Context, arg InsertMemberParams) error
+	InsertPreset(ctx context.Context, arg InsertPresetParams) error
+	InsertSubmission(ctx context.Context, arg InsertSubmissionParams) error
+	InsertTerm(ctx context.Context, arg InsertTermParams) error
 	ListActionsByMember(ctx context.Context, arg ListActionsByMemberParams) ([]Action, error)
+	ListAssignmentScope(ctx context.Context, memberID uuid.UUID) ([]uuid.UUID, error)
+	// Scope is applied here, not afterwards. A member who may not write
+	// assignments sees only published ones.
+	ListAssignments(ctx context.Context, arg ListAssignmentsParams) ([]Assignment, error)
 	// What gradecalc needs -------------------------------------------------------
 	ListComponents(ctx context.Context, courseID uuid.UUID) ([]ListComponentsRow, error)
+	ListCourses(ctx context.Context, arg ListCoursesParams) ([]ListCoursesRow, error)
 	// Never the hash.
 	ListCredentialsForActor(ctx context.Context, actorID uuid.UUID) ([]ListCredentialsForActorRow, error)
+	ListDepartments(ctx context.Context) ([]Department, error)
 	// The live drafts waiting to be posted for one assignment.
 	ListDraftGradeIDsForAssignment(ctx context.Context, arg ListDraftGradeIDsForAssignmentParams) ([]uuid.UUID, error)
+	// The feed, from a cursor. Three filters, all here rather than afterwards:
+	//   * type: what kinds of event this member's permissions let it see, worked
+	//     out by the caller from the member row — plus, always, the events of
+	//     its own actions, which is how an agent learns what became of a proposal;
+	//   * student scope, exactly as authorize() step 4;
+	//   * assignment scope as step 5, including its extra case: an event that
+	//     names a student but no assignment (a total, a component grade) spans
+	//     assignments and is for members whose assignment scope is the whole course.
+	ListEvents(ctx context.Context, arg ListEventsParams) ([]ListEventsRow, error)
 	ListEventsForAction(ctx context.Context, actionID *uuid.UUID) ([]ListEventsForActionRow, error)
 	// Assignments that count toward the grade.
 	ListGradedAssignments(ctx context.Context, courseID uuid.UUID) ([]ListGradedAssignmentsRow, error)
+	// Scope in SQL. Two more rules ride along:
+	//   * an unposted or superseded grade is shown only to a member who grades
+	//     (include_drafts); everyone else sees live posted grades and nothing else;
+	//   * a grade on a component belongs to no single assignment, so a member
+	//     limited to listed assignments does not see it at all.
+	ListGrades(ctx context.Context, arg ListGradesParams) ([]ListGradesRow, error)
 	// Per assignment, the student's live posted grade on the highest attempt that
 	// has one.
 	ListLiveAssignmentScores(ctx context.Context, arg ListLiveAssignmentScoresParams) ([]ListLiveAssignmentScoresRow, error)
 	ListLiveComponentScores(ctx context.Context, studentMemberID uuid.UUID) ([]ListLiveComponentScoresRow, error)
+	ListMembers(ctx context.Context, arg ListMembersParams) ([]ListMembersRow, error)
 	ListMembershipsForActor(ctx context.Context, actorID uuid.UUID) ([]ListMembershipsForActorRow, error)
 	ListPendingReviewActions(ctx context.Context, arg ListPendingReviewActionsParams) ([]Action, error)
+	// Built-ins, plus one department's own when a department is named.
+	ListPresets(ctx context.Context, deptID *uuid.UUID) ([]PermissionPreset, error)
+	ListProposedActionIDsByMember(ctx context.Context, memberID *uuid.UUID) ([]uuid.UUID, error)
 	ListProposedActions(ctx context.Context, arg ListProposedActionsParams) ([]Action, error)
+	ListStudentScope(ctx context.Context, memberID uuid.UUID) ([]uuid.UUID, error)
+	ListSubmissions(ctx context.Context, arg ListSubmissionsParams) ([]ListSubmissionsRow, error)
+	ListTerms(ctx context.Context) ([]Term, error)
 	LiveComponentGradeExists(ctx context.Context, arg LiveComponentGradeExistsParams) (bool, error)
+	LiveMembershipExists(ctx context.Context, arg LiveMembershipExistsParams) (bool, error)
 	LiveSubmissionGradeExists(ctx context.Context, submissionID *uuid.UUID) (bool, error)
+	// Taken before changing the tree's shape, so that two moves cannot each
+	// check for a cycle and then create one between them.
+	LockCourseComponents(ctx context.Context, courseID uuid.UUID) error
 	// Held until the transaction ends. See events.Flush for why.
 	LockEventStream(ctx context.Context, arg LockEventStreamParams) error
 	LockGradesInCourse(ctx context.Context, arg LockGradesInCourseParams) ([]uuid.UUID, error)
+	// All of one student's attempts at one assignment, locked, newest first.
+	LockSubmissionsOf(ctx context.Context, arg LockSubmissionsOfParams) ([]LockSubmissionsOfRow, error)
 	MarkActionExecuted(ctx context.Context, arg MarkActionExecutedParams) error
 	MarkActionFailed(ctx context.Context, arg MarkActionFailedParams) error
 	PostGrade(ctx context.Context, arg PostGradeParams) (int64, error)
+	PublishAssignment(ctx context.Context, arg PublishAssignmentParams) (int64, error)
+	// A 'missing' row is a placeholder written when the due date passed with
+	// nothing handed in. Late work takes it over rather than sitting beside it.
+	ReopenMissingSubmission(ctx context.Context, arg ReopenMissingSubmissionParams) error
 	// Only the owner's own credential; someone else's id changes nothing.
 	RevokeCredential(ctx context.Context, arg RevokeCredentialParams) (int64, error)
 	RevokeCredentialByID(ctx context.Context, arg RevokeCredentialByIDParams) error
 	RevokePasswordCredentials(ctx context.Context, arg RevokePasswordCredentialsParams) error
 	SetActionReview(ctx context.Context, arg SetActionReviewParams) (int64, error)
+	SetActorStatus(ctx context.Context, arg SetActorStatusParams) (int64, error)
+	SetComponentParent(ctx context.Context, arg SetComponentParentParams) error
+	SetCourseStatus(ctx context.Context, arg SetCourseStatusParams) (int64, error)
+	SetMemberExpiry(ctx context.Context, arg SetMemberExpiryParams) error
+	SetMemberPerms(ctx context.Context, arg SetMemberPermsParams) error
+	SetMemberScopeKinds(ctx context.Context, arg SetMemberScopeKindsParams) error
+	SetMemberStatus(ctx context.Context, arg SetMemberStatusParams) (int64, error)
+	SetSubmissionLateness(ctx context.Context, arg SetSubmissionLatenessParams) (int64, error)
+	SubmitSubmission(ctx context.Context, arg SubmitSubmissionParams) (int64, error)
 	SupersedeComponentDrafts(ctx context.Context, arg SupersedeComponentDraftsParams) error
 	SupersedeGrade(ctx context.Context, arg SupersedeGradeParams) (int64, error)
 	// A new draft replaces earlier drafts for the same submission.
 	SupersedeSubmissionDrafts(ctx context.Context, arg SupersedeSubmissionDraftsParams) error
+	TermExists(ctx context.Context, id uuid.UUID) (bool, error)
 	// At most one write a minute per credential, however busy it is.
 	TouchCredential(ctx context.Context, arg TouchCredentialParams) error
+	UpdateAssignment(ctx context.Context, arg UpdateAssignmentParams) error
+	UpdateComponent(ctx context.Context, arg UpdateComponentParams) error
+	UpdateCourse(ctx context.Context, arg UpdateCourseParams) error
+	// Built-ins (dept_id null) are policy shipped with the system; only a
+	// department's own presets are edited here.
+	UpdatePreset(ctx context.Context, arg UpdatePresetParams) (int64, error)
+	UpdateSubmissionDraft(ctx context.Context, arg UpdateSubmissionDraftParams) (int64, error)
 }
 
 var _ Querier = (*Queries)(nil)

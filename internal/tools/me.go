@@ -165,16 +165,9 @@ func credentialIssueToken() tool.Tool {
 		SecretOut: []string{"token"},
 		Resolve:   noTarget[IssueTokenIn]("credential"),
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in IssueTokenIn) (IssueTokenOut, error) {
-			if in.Label == "" {
-				return IssueTokenOut{}, apperr.Invalid("label is required")
-			}
-			var expires *time.Time
-			if in.ExpiresInDays != nil {
-				if *in.ExpiresInDays < 1 || *in.ExpiresInDays > 3650 {
-					return IssueTokenOut{}, apperr.Invalid("expires_in_days must be between 1 and 3650")
-				}
-				t := ec.Now.AddDate(0, 0, *in.ExpiresInDays)
-				expires = &t
+			expires, err := tokenExpiry(in.Label, in.ExpiresInDays, ec.Now)
+			if err != nil {
+				return IssueTokenOut{}, err
 			}
 			tok, id, err := auth.IssueToken(ctx, ec.Q, ec.Actor.ID, in.Label, expires, ec.Now)
 			if err != nil {

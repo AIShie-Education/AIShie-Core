@@ -6,6 +6,7 @@ package tools
 
 import (
 	"github.com/google/uuid"
+	"github.com/shopspring/decimal"
 
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/pipeline"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/tool"
@@ -20,9 +21,19 @@ type Deps struct {
 // RegisterAll fills the registry.
 func RegisterAll(reg *tool.Registry, d Deps) {
 	reg.Register(meTools()...)
+	reg.Register(platformTools()...)
+	reg.Register(courseTools()...)
+	reg.Register(memberTools()...)
+	reg.Register(componentTools()...)
+	reg.Register(assignmentTools()...)
+	reg.Register(submissionTools()...)
 	reg.Register(gradeTools()...)
+	reg.Register(gradeReadTools()...)
 	reg.Register(actionTools(d)...)
+	reg.Register(eventTools()...)
 }
+
+var one = decimal.NewFromInt(1)
 
 // Page is the paging part of a list tool's input. Lists page by id: ids are
 // UUID v7, so id order is creation order and the last id seen is the cursor.
