@@ -2,6 +2,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"flag"
@@ -11,12 +12,20 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
+	"github.com/google/uuid"
+
+	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/auth"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/config"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/db"
+	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/db/dbq"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/httpapi"
+	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/pipeline"
+	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/tool"
+	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/tools"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/version"
 )
 
@@ -31,12 +40,20 @@ Usage:
   aishiterud migrate version         print the applied and the embedded version
   aishiterud migrate force N         record version N without running anything
   aishiterud seed                    insert the built-in permission presets
+  aishiterud bootstrap --name N [--email E] [--password-stdin]
+                                     create the root actor, once; prints its API token
+  aishiterud token issue --actor ID|EMAIL --label L [--days N]
+                                     issue an API token, e.g. for a newly registered agent
   aishiterud version                 print build information
 
 Environment:
-  DATABASE_URL    default postgres:///aishiteru (local unix socket)
-  HTTP_ADDR       default :8080
-  SHUTDOWN_GRACE  default 15s
+  DATABASE_URL      default postgres:///aishiteru (local unix socket)
+  HTTP_ADDR         default :8080
+  SHUTDOWN_GRACE    default 15s
+  PROPOSAL_TTL      default 336h (14 days); 0 disables expiry
+  SESSION_TTL       default 12h
+  TRUSTED_ORIGINS   the web front end's origins, comma separated
+  INSECURE_COOKIES  true for development over http://localhost only
 `
 
 func main() {
@@ -62,6 +79,10 @@ func run(args []string) error {
 		return migrate(cfg, args[1:])
 	case "seed":
 		return seed(cfg)
+	case "bootstrap":
+		return bootstrap(cfg, args[1:])
+	case "token":
+		return token(cfg, args[1:])
 	case "version":
 		fmt.Println(version.String())
 		return nil
@@ -90,14 +111,22 @@ func serve(cfg config.Config) error {
 		return err
 	}
 
+	reg := tool.NewRegistry()
+	pl := pipeline.New(pool, reg, pipeline.Config{ProposalTTL: cfg.ProposalTTL})
+	tools.RegisterAll(reg, tools.Deps{Pipeline: pl})
+
 	srv := &http.Server{
-		Addr:              cfg.HTTPAddr,
-		Handler:           httpapi.NewMux(httpapi.Deps{Pool: pool, LatestSchema: latest}),
+		Addr: cfg.HTTPAddr,
+		Handler: httpapi.NewHandler(httpapi.Deps{
+			Pool: pool, LatestSchema: latest, Pipeline: pl, Log: log,
+			Auth:           auth.NewAuthenticator(pool, cfg.SessionTTL),
+			TrustedOrigins: cfg.TrustedOrigins, InsecureCookies: cfg.InsecureCookies,
+		}),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	errc := make(chan error, 1)
 	go func() { errc <- srv.ListenAndServe() }()
-	log.Info("listening", "addr", cfg.HTTPAddr, "version", version.Version, "schema_latest", latest)
+	log.Info("listening", "addr", cfg.HTTPAddr, "version", version.Version, "schema_latest", latest, "tools", len(reg.Exposed()))
 
 	select {
 	case err := <-errc:
@@ -191,5 +220,98 @@ func seed(cfg config.Config) error {
 		return err
 	}
 	fmt.Println("built-in presets seeded")
+	return nil
+}
+
+// bootstrap creates the first human of an installation. It runs once.
+func bootstrap(cfg config.Config, args []string) error {
+	fs := flag.NewFlagSet("bootstrap", flag.ContinueOnError)
+	name := fs.String("name", "", "display name of the root actor (required)")
+	email := fs.String("email", "", "email, needed to sign in with a password")
+	pwStdin := fs.Bool("password-stdin", false, "read a password for root from standard input")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *name == "" {
+		return errors.New("bootstrap: --name is required")
+	}
+	in := auth.BootstrapInput{DisplayName: *name, Email: *email}
+	if *pwStdin {
+		if *email == "" {
+			return errors.New("bootstrap: --password-stdin needs --email to sign in with")
+		}
+		line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+		if err != nil && line == "" {
+			return fmt.Errorf("bootstrap: read password: %w", err)
+		}
+		in.Password = strings.TrimRight(line, "\r\n")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	pool, err := db.Open(ctx, cfg.DatabaseURL)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+	res, err := auth.Bootstrap(ctx, pool, in)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "root actor   %s\nsystem actor %s\n\nAPI token for root, shown once:\n", res.RootID, res.SystemID)
+	fmt.Println(res.Token.Full)
+	return nil
+}
+
+// token issues an API token from the command line. Agents cannot sign in to
+// ask for their own first token, so someone with access to the server gives
+// it to them. This is an operator's act outside the tool layer and writes no
+// action row; whoever can run it can already write to the database.
+func token(cfg config.Config, args []string) error {
+	if len(args) == 0 || args[0] != "issue" {
+		return errors.New("token: want `token issue --actor ID|EMAIL --label L`")
+	}
+	fs := flag.NewFlagSet("token issue", flag.ContinueOnError)
+	who := fs.String("actor", "", "actor id or email (required)")
+	label := fs.String("label", "", "what the token is for (required)")
+	days := fs.Int("days", 0, "expire after this many days; 0 means never")
+	if err := fs.Parse(args[1:]); err != nil {
+		return err
+	}
+	if *who == "" || *label == "" {
+		return errors.New("token issue: --actor and --label are required")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	pool, err := db.Open(ctx, cfg.DatabaseURL)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+	q := dbq.New(pool)
+
+	actorID, err := uuid.Parse(*who)
+	if err != nil {
+		a, err := q.GetActorByEmail(ctx, *who)
+		if err != nil {
+			return fmt.Errorf("token issue: no actor with id or email %q", *who)
+		}
+		actorID = a.ID
+	} else if _, err := q.GetActor(ctx, actorID); err != nil {
+		return fmt.Errorf("token issue: no actor %s", actorID)
+	}
+	now := time.Now()
+	var expires *time.Time
+	if *days > 0 {
+		t := now.AddDate(0, 0, *days)
+		expires = &t
+	}
+	tok, _, err := auth.IssueToken(ctx, q, actorID, *label, expires, now)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "API token for actor %s, shown once:\n", actorID)
+	fmt.Println(tok.Full)
 	return nil
 }

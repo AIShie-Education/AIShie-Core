@@ -19,6 +19,7 @@ type Deps struct {
 
 // RegisterAll fills the registry.
 func RegisterAll(reg *tool.Registry, d Deps) {
+	reg.Register(meTools()...)
 	reg.Register(gradeTools()...)
 	reg.Register(actionTools(d)...)
 }

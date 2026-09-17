@@ -77,6 +77,12 @@ course.
 admins, an admin creates a course and seats its first instructor, the instructor adds everyone
 else. Roster syncs run as a `kind = 'system'` actor so the chain has no gaps.
 
+Root and the system actor are created by `aishiterud bootstrap`, once. It is the one state
+change with no `action` row: there is no actor yet for it to be an action of. The operator's
+`aishiterud token issue` is likewise outside the log — it is how a newly registered agent,
+which cannot sign in to ask, gets its first token — and needs the database access that
+already implies everything.
+
 `credential` covers four kinds of the same thing. SSO rows hold no secret — `provider` and
 `subject` identify the account at the identity provider (`polyu-adfs` + UPN). API tokens store a
 hash plus a `token_prefix` so the row can be found before the hash is checked. A browser

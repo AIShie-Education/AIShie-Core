@@ -15,6 +15,7 @@ type Querier interface {
 	CountBuiltinPresets(ctx context.Context) (int64, error)
 	CountComponentAssignments(ctx context.Context, componentID *uuid.UUID) (int64, error)
 	CountComponentChildren(ctx context.Context, parentID *uuid.UUID) (int64, error)
+	CountRootActors(ctx context.Context) (int64, error)
 	CountStudentsInScope(ctx context.Context, arg CountStudentsInScopeParams) (int64, error)
 	// Moves a proposal to its end state. The status guard makes a lost race
 	// between two deciders, or a decider and the expiry sweep, a no-op.
@@ -22,6 +23,10 @@ type Querier interface {
 	GetActionByKey(ctx context.Context, arg GetActionByKeyParams) (Action, error)
 	GetActionInCourse(ctx context.Context, arg GetActionInCourseParams) (Action, error)
 	GetActionInCourseForUpdate(ctx context.Context, arg GetActionInCourseForUpdateParams) (Action, error)
+	// The whole row, for showing an actor. Authorization uses GetActorForAuthz,
+	// which leaves kind out on purpose.
+	GetActor(ctx context.Context, id uuid.UUID) (Actor, error)
+	GetActorByEmail(ctx context.Context, lower string) (GetActorByEmailRow, error)
 	// Everything authorize() reads. Two columns are deliberately never selected
 	// here: the actor's type and the member's roster role. Authorization does not
 	// branch on either, and a test fails if this file ever names them.
@@ -29,6 +34,11 @@ type Querier interface {
 	GetAssignmentInCourse(ctx context.Context, arg GetAssignmentInCourseParams) (GetAssignmentInCourseRow, error)
 	GetComponentInCourse(ctx context.Context, arg GetComponentInCourseParams) (GetComponentInCourseRow, error)
 	GetCourseForAuthz(ctx context.Context, id uuid.UUID) (GetCourseForAuthzRow, error)
+	// A token or a session, found by its public prefix before its hash is
+	// checked. Revoked and expired rows are returned too, so that the caller can
+	// tell them from an unknown prefix in its logs; it rejects all three alike.
+	GetCredentialByPrefix(ctx context.Context, tokenPrefix *string) (GetCredentialByPrefixRow, error)
+	GetCredentialForActor(ctx context.Context, arg GetCredentialForActorParams) (GetCredentialForActorRow, error)
 	GetDocumentPublishedVersion(ctx context.Context, id uuid.UUID) (*uuid.UUID, error)
 	GetDocumentVersionOwner(ctx context.Context, id uuid.UUID) (uuid.UUID, error)
 	// Grades by id, with the assignment each belongs to (null for a component
@@ -41,20 +51,26 @@ type Querier interface {
 	// By id, removed rows included: re-authorizing a proposal checks the very
 	// membership it was made under, not whatever row the actor holds today.
 	GetMemberForAuthz(ctx context.Context, id uuid.UUID) (GetMemberForAuthzRow, error)
+	GetPasswordCredential(ctx context.Context, actorID uuid.UUID) (GetPasswordCredentialRow, error)
 	// Roster facts about a member. This is not authorization: that a grade can
 	// only be given to someone on the roster as a student is a rule about grades.
 	GetRosterEntry(ctx context.Context, arg GetRosterEntryParams) (GetRosterEntryRow, error)
 	// Lookups are always "in this course": an id from another course is not found.
 	GetSubmissionInCourse(ctx context.Context, arg GetSubmissionInCourseParams) (GetSubmissionInCourseRow, error)
+	GetSystemActor(ctx context.Context) (uuid.UUID, error)
 	// Zero rows means another call with the same key got there first; the caller
 	// then reads that row and replays it. ON CONFLICT waits for an in-flight
 	// transaction holding the key, so two simultaneous calls cannot both act.
 	InsertAction(ctx context.Context, arg InsertActionParams) (int64, error)
+	InsertActor(ctx context.Context, arg InsertActorParams) error
+	InsertCredential(ctx context.Context, arg InsertCredentialParams) error
 	InsertEvent(ctx context.Context, arg InsertEventParams) error
 	InsertGrade(ctx context.Context, arg InsertGradeParams) error
 	ListActionsByMember(ctx context.Context, arg ListActionsByMemberParams) ([]Action, error)
 	// What gradecalc needs -------------------------------------------------------
 	ListComponents(ctx context.Context, courseID uuid.UUID) ([]ListComponentsRow, error)
+	// Never the hash.
+	ListCredentialsForActor(ctx context.Context, actorID uuid.UUID) ([]ListCredentialsForActorRow, error)
 	// The live drafts waiting to be posted for one assignment.
 	ListDraftGradeIDsForAssignment(ctx context.Context, arg ListDraftGradeIDsForAssignmentParams) ([]uuid.UUID, error)
 	ListEventsForAction(ctx context.Context, actionID *uuid.UUID) ([]ListEventsForActionRow, error)
@@ -64,6 +80,7 @@ type Querier interface {
 	// has one.
 	ListLiveAssignmentScores(ctx context.Context, arg ListLiveAssignmentScoresParams) ([]ListLiveAssignmentScoresRow, error)
 	ListLiveComponentScores(ctx context.Context, studentMemberID uuid.UUID) ([]ListLiveComponentScoresRow, error)
+	ListMembershipsForActor(ctx context.Context, actorID uuid.UUID) ([]ListMembershipsForActorRow, error)
 	ListPendingReviewActions(ctx context.Context, arg ListPendingReviewActionsParams) ([]Action, error)
 	ListProposedActions(ctx context.Context, arg ListProposedActionsParams) ([]Action, error)
 	LiveComponentGradeExists(ctx context.Context, arg LiveComponentGradeExistsParams) (bool, error)
@@ -74,11 +91,17 @@ type Querier interface {
 	MarkActionExecuted(ctx context.Context, arg MarkActionExecutedParams) error
 	MarkActionFailed(ctx context.Context, arg MarkActionFailedParams) error
 	PostGrade(ctx context.Context, arg PostGradeParams) (int64, error)
+	// Only the owner's own credential; someone else's id changes nothing.
+	RevokeCredential(ctx context.Context, arg RevokeCredentialParams) (int64, error)
+	RevokeCredentialByID(ctx context.Context, arg RevokeCredentialByIDParams) error
+	RevokePasswordCredentials(ctx context.Context, arg RevokePasswordCredentialsParams) error
 	SetActionReview(ctx context.Context, arg SetActionReviewParams) (int64, error)
 	SupersedeComponentDrafts(ctx context.Context, arg SupersedeComponentDraftsParams) error
 	SupersedeGrade(ctx context.Context, arg SupersedeGradeParams) (int64, error)
 	// A new draft replaces earlier drafts for the same submission.
 	SupersedeSubmissionDrafts(ctx context.Context, arg SupersedeSubmissionDraftsParams) error
+	// At most one write a minute per credential, however busy it is.
+	TouchCredential(ctx context.Context, arg TouchCredentialParams) error
 }
 
 var _ Querier = (*Queries)(nil)
