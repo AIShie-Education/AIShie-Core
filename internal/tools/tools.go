@@ -50,6 +50,7 @@ func RegisterAll(reg *tool.Registry, d Deps) {
 	reg.Register(gradeReadTools()...)
 	reg.Register(actionTools(d)...)
 	reg.Register(eventTools()...)
+	reg.Register(systemTools()...)
 }
 
 var one = decimal.NewFromInt(1)

@@ -34,7 +34,12 @@ sees the grade.
 - MCP: agents connect at `/mcp` (stateless streamable HTTP, bearer token) and
   get the same catalogue as REST, tool for tool, through the same pipeline.
 
-Still to come: background jobs (proposal and membership expiry), SSO.
+- background sweeps, run as the system actor and recorded like any other
+  action: stale proposals cancelled, expired memberships removed, missing
+  submissions marked when a due date passes. Every instance may run them;
+  Postgres advisory locks see that one does.
+
+Still to come: SSO, rate limiting, the release workflow.
 
 ## Layout
 
@@ -49,6 +54,7 @@ internal/
   tools                        the catalogue, one file per noun
   events, gradecalc            the event feed's writer; grade rollups (pure)
   blob                         file storage: filesystem and S3, signed upload tokens
+  jobs, members                background sweeps; what removing a member means
   auth                         who is calling: tokens, passwords, sessions, bootstrap
   httpapi                      REST adapter; routes generated from the registry
   mcpapi                       MCP adapter; tools generated from the registry

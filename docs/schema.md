@@ -350,6 +350,18 @@ proposal becomes `cancelled` and nothing executes. A background sweep cancels pr
 than a configured TTL; approval checks the same TTL inline, so correctness never depends on
 when the sweep last ran.
 
+**The sweeps are actions too.** Proposals past their TTL, memberships past `expires_at` and
+assignments past `due_at` are acted on by the `kind = 'system'` actor through the same
+pipeline, as internal tools no adapter exposes (`action.expire`, `member.expire`,
+`submission.mark_missing`): a row with no member, `authz_result = 'autonomous'`, and an
+idempotency key that names the thing swept, so that two instances sweeping at once act once.
+Nobody is authorized because nobody is calling. None of it is what makes the system correct —
+`authorize()` ignores an expired member from the instant of expiry, and approval checks a
+proposal's age itself — it makes those facts visible, and keeps the queues free of entries
+nobody could approve. When a due date passes, every current student with no submission row
+gets one in state `missing`, so that the gap is something a grader can see and grade; late
+work takes that row over.
+
 **`event` is something that happened, written after it did**, in the same transaction as the
 state change. Not every event has an action behind it (a due date passing); one action may
 emit several (posting a batch of grades emits one per student). `seq` is the cursor for

@@ -24,6 +24,7 @@ import (
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/db"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/db/dbq"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/httpapi"
+	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/jobs"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/mcpapi"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/pipeline"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/tool"
@@ -53,6 +54,8 @@ Environment:
   HTTP_ADDR         default :8080
   SHUTDOWN_GRACE    default 15s
   PROPOSAL_TTL      default 336h (14 days); 0 disables expiry
+  JOBS              default true; background sweeps (only one instance sweeps at a time)
+  JOBS_INTERVAL     default 1m
   SESSION_TTL       default 12h
   TRUSTED_ORIGINS   the web front end's origins, comma separated
   INSECURE_COOKIES  true for development over http://localhost only
@@ -132,6 +135,20 @@ func serve(cfg config.Config) error {
 	pl := pipeline.New(pool, reg, pipeline.Config{ProposalTTL: cfg.ProposalTTL})
 	tools.RegisterAll(reg, tools.Deps{Pipeline: pl, Blob: store, Uploads: signer, MaxUploadBytes: cfg.MaxUploadBytes})
 
+	// The sweeps act as the system actor, which bootstrap creates. Before
+	// bootstrap there is nothing to sweep and nobody to sweep as.
+	jobsDone := make(chan struct{})
+	close(jobsDone)
+	if cfg.Jobs {
+		if system, err := dbq.New(pool).GetSystemActor(ctx); err != nil {
+			log.Warn("background jobs are off: there is no system actor yet; run `aishiterud bootstrap`, then restart")
+		} else {
+			jobsDone = make(chan struct{})
+			runner := jobs.New(pool, pl, system, jobs.Config{Interval: cfg.JobsInterval}, log)
+			go func() { defer close(jobsDone); runner.Run(ctx) }()
+		}
+	}
+
 	authn := auth.NewAuthenticator(pool, cfg.SessionTTL)
 	srv := &http.Server{
 		Addr: cfg.HTTPAddr,
@@ -157,6 +174,12 @@ func serve(cfg config.Config) error {
 	defer cancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		return fmt.Errorf("shutdown: %w", err)
+	}
+	// Let a sweep in flight finish its current step and hand its lock back
+	// before the pool closes underneath it.
+	select {
+	case <-jobsDone:
+	case <-shutdownCtx.Done():
 	}
 	return nil
 }

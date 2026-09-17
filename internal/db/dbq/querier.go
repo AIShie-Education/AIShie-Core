@@ -6,6 +6,7 @@ package dbq
 
 import (
 	"context"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -29,12 +30,18 @@ type Querier interface {
 	CountStudentsOfCourse(ctx context.Context, arg CountStudentsOfCourseParams) (int64, error)
 	CountSubmissionDocuments(ctx context.Context, submissionID *uuid.UUID) (int64, error)
 	CourseCodeTaken(ctx context.Context, arg CourseCodeTakenParams) (bool, error)
+	// A session is a credential with a short life. Long after it has expired it
+	// says nothing the action log does not, so it is the one kind of row that is
+	// actually deleted.
+	DeleteStaleSessions(ctx context.Context, expiredBefore *time.Time) (int64, error)
 	DepartmentExists(ctx context.Context, id uuid.UUID) (bool, error)
 	EmailTaken(ctx context.Context, lower string) (bool, error)
 	// Moves a proposal to its end state. The status guard makes a lost race
 	// between two deciders, or a decider and the expiry sweep, a no-op.
 	FinishProposal(ctx context.Context, arg FinishProposalParams) (int64, error)
 	GetActionByKey(ctx context.Context, arg GetActionByKeyParams) (Action, error)
+	GetActionCourse(ctx context.Context, id uuid.UUID) (*uuid.UUID, error)
+	GetActionForUpdate(ctx context.Context, id uuid.UUID) (Action, error)
 	GetActionInCourse(ctx context.Context, arg GetActionInCourseParams) (Action, error)
 	GetActionInCourseForUpdate(ctx context.Context, arg GetActionInCourseForUpdateParams) (Action, error)
 	// The whole row, for showing an actor. Authorization uses GetActorForAuthz,
@@ -75,6 +82,7 @@ type Querier interface {
 	// By id, removed rows included: re-authorizing a proposal checks the very
 	// membership it was made under, not whatever row the actor holds today.
 	GetMemberForAuthz(ctx context.Context, id uuid.UUID) (GetMemberForAuthzRow, error)
+	GetMemberForSweep(ctx context.Context, id uuid.UUID) (GetMemberForSweepRow, error)
 	GetMemberInCourse(ctx context.Context, arg GetMemberInCourseParams) (GetMemberInCourseRow, error)
 	GetPasswordCredential(ctx context.Context, actorID uuid.UUID) (GetPasswordCredentialRow, error)
 	GetPreset(ctx context.Context, id uuid.UUID) (PermissionPreset, error)
@@ -101,6 +109,7 @@ type Querier interface {
 	InsertEvent(ctx context.Context, arg InsertEventParams) error
 	InsertGrade(ctx context.Context, arg InsertGradeParams) error
 	InsertMember(ctx context.Context, arg InsertMemberParams) error
+	InsertMissingSubmission(ctx context.Context, arg InsertMissingSubmissionParams) (int64, error)
 	InsertPreset(ctx context.Context, arg InsertPresetParams) error
 	InsertSubmission(ctx context.Context, arg InsertSubmissionParams) error
 	InsertTerm(ctx context.Context, arg InsertTermParams) error
@@ -109,6 +118,11 @@ type Querier interface {
 	// Scope is applied here, not afterwards. A member who may not write
 	// assignments sees only published ones.
 	ListAssignments(ctx context.Context, arg ListAssignmentsParams) ([]Assignment, error)
+	// Published assignments of open courses whose due date has passed and which
+	// have not been swept for that due date yet. The sweep's own action row is
+	// the marker: its idempotency key names the assignment and the due date, so
+	// moving a due date later makes the assignment due for a sweep again.
+	ListAssignmentsNewlyPastDue(ctx context.Context, arg ListAssignmentsNewlyPastDueParams) ([]ListAssignmentsNewlyPastDueRow, error)
 	// What gradecalc needs -------------------------------------------------------
 	ListComponents(ctx context.Context, courseID uuid.UUID) ([]ListComponentsRow, error)
 	// Course-level documents: material, instructions, rubrics. Owned documents
@@ -130,6 +144,7 @@ type Querier interface {
 	//     assignments and is for members whose assignment scope is the whole course.
 	ListEvents(ctx context.Context, arg ListEventsParams) ([]ListEventsRow, error)
 	ListEventsForAction(ctx context.Context, actionID *uuid.UUID) ([]ListEventsForActionRow, error)
+	ListExpiredMembers(ctx context.Context, arg ListExpiredMembersParams) ([]ListExpiredMembersRow, error)
 	ListGradeDocuments(ctx context.Context, gradeID *uuid.UUID) ([]ListGradeDocumentsRow, error)
 	// Assignments that count toward the grade.
 	ListGradedAssignments(ctx context.Context, courseID uuid.UUID) ([]ListGradedAssignmentsRow, error)
@@ -150,7 +165,16 @@ type Querier interface {
 	ListPresets(ctx context.Context, deptID *uuid.UUID) ([]PermissionPreset, error)
 	ListProposedActionIDsByMember(ctx context.Context, memberID *uuid.UUID) ([]uuid.UUID, error)
 	ListProposedActions(ctx context.Context, arg ListProposedActionsParams) ([]Action, error)
+	// What the background sweeps look for. Each returns a small batch; the sweep
+	// runs again on the next tick. None of these is what makes the system
+	// correct — authorize() ignores an expired member on every call and approval
+	// re-checks a proposal's age inline — they make the state visible and keep
+	// the queues clean.
+	ListStaleProposals(ctx context.Context, arg ListStaleProposalsParams) ([]ListStaleProposalsRow, error)
 	ListStudentScope(ctx context.Context, memberID uuid.UUID) ([]uuid.UUID, error)
+	// Current students of the course with no submission row at all for the
+	// assignment: not a draft, not a hand-in, not an earlier 'missing'.
+	ListStudentsWithoutSubmission(ctx context.Context, arg ListStudentsWithoutSubmissionParams) ([]uuid.UUID, error)
 	ListSubmissionDocuments(ctx context.Context, submissionID *uuid.UUID) ([]ListSubmissionDocumentsRow, error)
 	ListSubmissions(ctx context.Context, arg ListSubmissionsParams) ([]ListSubmissionsRow, error)
 	ListTerms(ctx context.Context) ([]Term, error)
@@ -173,6 +197,7 @@ type Querier interface {
 	MaxVersionSeq(ctx context.Context, documentID uuid.UUID) (int32, error)
 	PostGrade(ctx context.Context, arg PostGradeParams) (int64, error)
 	PublishAssignment(ctx context.Context, arg PublishAssignmentParams) (int64, error)
+	ReleaseJobLock(ctx context.Context, key int64) (bool, error)
 	// A 'missing' row is a placeholder written when the due date passed with
 	// nothing handed in. Late work takes it over rather than sitting beside it.
 	ReopenMissingSubmission(ctx context.Context, arg ReopenMissingSubmissionParams) error
@@ -200,6 +225,7 @@ type Querier interface {
 	TermExists(ctx context.Context, id uuid.UUID) (bool, error)
 	// At most one write a minute per credential, however busy it is.
 	TouchCredential(ctx context.Context, arg TouchCredentialParams) error
+	TryJobLock(ctx context.Context, key int64) (bool, error)
 	UpdateAssignment(ctx context.Context, arg UpdateAssignmentParams) error
 	UpdateComponent(ctx context.Context, arg UpdateComponentParams) error
 	UpdateCourse(ctx context.Context, arg UpdateCourseParams) error

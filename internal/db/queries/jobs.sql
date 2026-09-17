@@ -1,0 +1,71 @@
+-- What the background sweeps look for. Each returns a small batch; the sweep
+-- runs again on the next tick. None of these is what makes the system
+-- correct — authorize() ignores an expired member on every call and approval
+-- re-checks a proposal's age inline — they make the state visible and keep
+-- the queues clean.
+
+-- name: ListStaleProposals :many
+SELECT id, course_id, created_at
+FROM action
+WHERE status = 'proposed' AND created_at < sqlc.arg(created_before)
+ORDER BY created_at
+LIMIT sqlc.arg(max_rows);
+
+-- name: ListExpiredMembers :many
+SELECT id, course_id, expires_at
+FROM course_member
+WHERE status <> 'removed' AND expires_at IS NOT NULL AND expires_at <= sqlc.arg(now)
+ORDER BY expires_at
+LIMIT sqlc.arg(max_rows);
+
+-- name: ListAssignmentsNewlyPastDue :many
+-- Published assignments of open courses whose due date has passed and which
+-- have not been swept for that due date yet. The sweep's own action row is
+-- the marker: its idempotency key names the assignment and the due date, so
+-- moving a due date later makes the assignment due for a sweep again.
+SELECT a.id, a.course_id, a.due_at
+FROM assignment a
+JOIN course c ON c.id = a.course_id
+WHERE a.published_at IS NOT NULL AND a.due_at IS NOT NULL AND a.due_at <= sqlc.arg(now)
+  AND c.status = 'active'
+  AND NOT EXISTS (
+        SELECT 1 FROM action x
+        WHERE x.actor_id = sqlc.arg(system_actor_id)
+          AND x.idempotency_key = 'job:submission.mark_missing:' || a.id::text || ':' || (extract(epoch FROM a.due_at)::bigint)::text)
+ORDER BY a.due_at
+LIMIT sqlc.arg(max_rows);
+
+-- name: ListStudentsWithoutSubmission :many
+-- Current students of the course with no submission row at all for the
+-- assignment: not a draft, not a hand-in, not an earlier 'missing'.
+SELECT m.id
+FROM course_member m
+WHERE m.course_id = $1 AND m.role = 'student' AND m.status = 'active'
+  AND NOT EXISTS (SELECT 1 FROM submission s WHERE s.assignment_id = $2 AND s.student_member_id = m.id)
+ORDER BY m.id;
+
+-- name: InsertMissingSubmission :execrows
+INSERT INTO submission (id, assignment_id, course_id, student_member_id, attempt, state, created_at)
+VALUES ($1, $2, $3, $4, 1, 'missing', $5)
+ON CONFLICT (assignment_id, student_member_id, attempt) DO NOTHING;
+
+-- name: GetActionForUpdate :one
+SELECT * FROM action WHERE id = $1 FOR UPDATE;
+
+-- name: GetMemberForSweep :one
+SELECT id, course_id, status, expires_at FROM course_member WHERE id = $1 FOR UPDATE;
+
+-- name: DeleteStaleSessions :execrows
+-- A session is a credential with a short life. Long after it has expired it
+-- says nothing the action log does not, so it is the one kind of row that is
+-- actually deleted.
+DELETE FROM credential WHERE kind = 'session' AND expires_at < sqlc.arg(expired_before);
+
+-- name: TryJobLock :one
+SELECT pg_try_advisory_lock(sqlc.arg(key)::bigint);
+
+-- name: ReleaseJobLock :one
+SELECT pg_advisory_unlock(sqlc.arg(key)::bigint);
+
+-- name: GetActionCourse :one
+SELECT course_id FROM action WHERE id = $1;

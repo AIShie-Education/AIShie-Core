@@ -31,6 +31,11 @@ type Config struct {
 	// development over http://localhost. Never set it in production.
 	InsecureCookies bool
 
+	// Jobs turns the background sweeps on. Every instance may leave it on: only
+	// one sweeps at a time. JobsInterval is how often a sweep is attempted.
+	Jobs         bool
+	JobsInterval time.Duration
+
 	// BlobStore is where files live: "fs" (this server's disk), "s3", or
 	// "none" (documents hold text only).
 	BlobStore string
@@ -60,8 +65,10 @@ func FromEnv() (Config, error) {
 	}
 	c.ProposalTTL = 14 * 24 * time.Hour
 	c.SessionTTL = 12 * time.Hour
+	c.Jobs, c.JobsInterval = true, time.Minute
 	for key, dst := range map[string]*time.Duration{
 		"SHUTDOWN_GRACE": &c.ShutdownGrace, "PROPOSAL_TTL": &c.ProposalTTL, "SESSION_TTL": &c.SessionTTL,
+		"JOBS_INTERVAL": &c.JobsInterval,
 	} {
 		if v := os.Getenv(key); v != "" {
 			d, err := time.ParseDuration(v)
@@ -102,12 +109,17 @@ func FromEnv() (Config, error) {
 	default:
 		return Config{}, fmt.Errorf("BLOB_STORE: %q is not fs, s3 or none", c.BlobStore)
 	}
-	if v := os.Getenv("INSECURE_COOKIES"); v != "" {
-		b, err := strconv.ParseBool(v)
-		if err != nil {
-			return Config{}, fmt.Errorf("INSECURE_COOKIES: %q is not true or false", v)
+	for key, dst := range map[string]*bool{"INSECURE_COOKIES": &c.InsecureCookies, "JOBS": &c.Jobs} {
+		if v := os.Getenv(key); v != "" {
+			b, err := strconv.ParseBool(v)
+			if err != nil {
+				return Config{}, fmt.Errorf("%s: %q is not true or false", key, v)
+			}
+			*dst = b
 		}
-		c.InsecureCookies = b
+	}
+	if c.JobsInterval < time.Second {
+		return Config{}, fmt.Errorf("JOBS_INTERVAL: %s is too often; at least 1s", c.JobsInterval)
 	}
 	return c, nil
 }
