@@ -56,6 +56,14 @@ var visibility = map[string][]domain.Perm{
 	EventCourseCreated: {domain.PermDocumentRead}, EventCourseUpdated: {domain.PermDocumentRead},
 	EventCourseActivated: {domain.PermDocumentRead}, EventCourseArchived: {domain.PermDocumentRead},
 
+	// A draft of course material is for those who read drafts; publishing is
+	// for everyone who reads that kind of document.
+	EventDocumentCreated: {domain.PermDocumentReadDraft}, EventDocumentVersionAdded: {domain.PermDocumentReadDraft},
+	EventDocumentArchived:  {domain.PermDocumentReadDraft},
+	EventDocumentPublished: {domain.PermDocumentRead}, EventRubricPublished: {domain.PermRubricRead},
+	EventSubmissionFileAdded: {domain.PermSubmissionRead},
+	EventFeedbackFileAdded:   {domain.PermGradeSubmit, domain.PermGradePost},
+
 	// Platform events belong to no course, so they are in no course's feed.
 	// They are listed so that leaving them out is visibly a decision.
 	EventActorRegistered: nil, EventActorSuspended: nil, EventActorReactivated: nil,

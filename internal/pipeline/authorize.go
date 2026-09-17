@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"time"
 
@@ -49,7 +50,18 @@ func (p *Pipeline) authorize(ctx context.Context, q dbq.Querier, t tool.Tool, in
 			return authz.ForActor(ctx, q, actor.ID, cid, perms, write, now)
 		}
 		var err error
-		if a.decision, err = check(t.Gate.Perms); err != nil || !a.decision.Level.Allowed() {
+		if t.Gate.Any {
+			// Enough to hold one of them. Which one governs is the target's
+			// to say, below.
+			for _, perm := range t.Gate.Perms {
+				if a.decision, err = check([]domain.Perm{perm}); err != nil || a.decision.Level.Allowed() {
+					break
+				}
+			}
+		} else {
+			a.decision, err = check(t.Gate.Perms)
+		}
+		if err != nil || !a.decision.Level.Allowed() {
 			return a, err
 		}
 		target, err := t.Resolve(ctx, q, in)
@@ -65,6 +77,9 @@ func (p *Pipeline) authorize(ctx context.Context, q dbq.Querier, t tool.Tool, in
 			target.Type = a.target.Type
 		}
 		a.target = target
+		if t.Gate.Any && len(target.Perms) == 0 {
+			return a, fmt.Errorf("%s: its gate is Any, so its Resolve must name the governing permission", t.Name)
+		}
 		if len(target.Perms) > 0 {
 			if a.decision, err = check(target.Perms); err != nil || !a.decision.Level.Allowed() {
 				return a, err

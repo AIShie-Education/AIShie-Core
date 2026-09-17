@@ -8,6 +8,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/shopspring/decimal"
 
+	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/blob"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/pipeline"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/tool"
 )
@@ -16,10 +17,27 @@ import (
 type Deps struct {
 	// Pipeline runs a proposal on behalf of action.decide.
 	Pipeline *pipeline.Pipeline
+	// Blob is where files live. Nil means the installation has no file
+	// storage: documents can still hold text, and uploads are refused.
+	Blob blob.Store
+	// Uploads signs and checks upload tokens.
+	Uploads *blob.Signer
+	// MaxUploadBytes bounds one file.
+	MaxUploadBytes int64
 }
+
+// DefaultMaxUploadBytes is 50 MiB: a scanned exam script, not a video.
+const DefaultMaxUploadBytes = 50 << 20
 
 // RegisterAll fills the registry.
 func RegisterAll(reg *tool.Registry, d Deps) {
+	if d.MaxUploadBytes <= 0 {
+		d.MaxUploadBytes = DefaultMaxUploadBytes
+	}
+	if d.Uploads == nil {
+		// A random key: fine for one process, until it restarts.
+		d.Uploads, _ = blob.NewSigner("")
+	}
 	reg.Register(meTools()...)
 	reg.Register(platformTools()...)
 	reg.Register(courseTools()...)
@@ -27,7 +45,8 @@ func RegisterAll(reg *tool.Registry, d Deps) {
 	reg.Register(componentTools()...)
 	reg.Register(assignmentTools()...)
 	reg.Register(submissionTools()...)
-	reg.Register(gradeTools()...)
+	reg.Register(documentTools(d)...)
+	reg.Register(gradeTools(d)...)
 	reg.Register(gradeReadTools()...)
 	reg.Register(actionTools(d)...)
 	reg.Register(eventTools()...)

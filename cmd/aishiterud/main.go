@@ -19,6 +19,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/auth"
+	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/blob"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/config"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/db"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/db/dbq"
@@ -54,6 +55,12 @@ Environment:
   SESSION_TTL       default 12h
   TRUSTED_ORIGINS   the web front end's origins, comma separated
   INSECURE_COOKIES  true for development over http://localhost only
+  BLOB_STORE        fs (default), s3 or none
+  BLOB_FS_ROOT      default var/blobs
+  PUBLIC_URL        how clients reach this server; default http://localhost:8080
+  BLOB_SIGNING_KEY  32+ characters; required with s3, and for more than one instance
+  MAX_UPLOAD_BYTES  default 52428800 (50 MiB)
+  S3_ENDPOINT, S3_BUCKET, S3_REGION, S3_ACCESS_KEY, S3_SECRET_KEY, S3_USE_SSL
 `
 
 func main() {
@@ -111,9 +118,18 @@ func serve(cfg config.Config) error {
 		return err
 	}
 
+	signer, err := blob.NewSigner(cfg.BlobSigningKey)
+	if err != nil {
+		return err
+	}
+	store, err := openBlobStore(ctx, cfg, signer)
+	if err != nil {
+		return err
+	}
+
 	reg := tool.NewRegistry()
 	pl := pipeline.New(pool, reg, pipeline.Config{ProposalTTL: cfg.ProposalTTL})
-	tools.RegisterAll(reg, tools.Deps{Pipeline: pl})
+	tools.RegisterAll(reg, tools.Deps{Pipeline: pl, Blob: store, Uploads: signer, MaxUploadBytes: cfg.MaxUploadBytes})
 
 	srv := &http.Server{
 		Addr: cfg.HTTPAddr,
@@ -121,12 +137,13 @@ func serve(cfg config.Config) error {
 			Pool: pool, LatestSchema: latest, Pipeline: pl, Log: log,
 			Auth:           auth.NewAuthenticator(pool, cfg.SessionTTL),
 			TrustedOrigins: cfg.TrustedOrigins, InsecureCookies: cfg.InsecureCookies,
+			Blob: store, MaxUploadBytes: cfg.MaxUploadBytes,
 		}),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	errc := make(chan error, 1)
 	go func() { errc <- srv.ListenAndServe() }()
-	log.Info("listening", "addr", cfg.HTTPAddr, "version", version.Version, "schema_latest", latest, "tools", len(reg.Exposed()))
+	log.Info("listening", "addr", cfg.HTTPAddr, "blob_store", cfg.BlobStore, "version", version.Version, "schema_latest", latest, "tools", len(reg.Exposed()))
 
 	select {
 	case err := <-errc:
@@ -140,6 +157,25 @@ func serve(cfg config.Config) error {
 		return fmt.Errorf("shutdown: %w", err)
 	}
 	return nil
+}
+
+// openBlobStore returns the configured file store, or nil for "none".
+func openBlobStore(ctx context.Context, cfg config.Config, signer *blob.Signer) (blob.Store, error) {
+	switch cfg.BlobStore {
+	case "fs":
+		return blob.NewFSStore(cfg.BlobFSRoot, cfg.PublicURL, signer)
+	case "s3":
+		s, err := blob.NewS3Store(blob.S3Config{Endpoint: cfg.S3.Endpoint, Bucket: cfg.S3.Bucket, Region: cfg.S3.Region,
+			AccessKey: cfg.S3.AccessKey, SecretKey: cfg.S3.SecretKey, UseSSL: cfg.S3.UseSSL})
+		if err != nil {
+			return nil, err
+		}
+		if _, err := s.Stat(ctx, "aishiteru-startup-probe"); err != nil && !errors.Is(err, blob.ErrNotFound) {
+			return nil, fmt.Errorf("the S3 bucket is not reachable: %w", err)
+		}
+		return s, nil
+	}
+	return nil, nil
 }
 
 func migrate(cfg config.Config, args []string) error {

@@ -60,10 +60,14 @@ type Querier interface {
 	GetDocumentInCourse(ctx context.Context, arg GetDocumentInCourseParams) (GetDocumentInCourseRow, error)
 	GetDocumentPublishedVersion(ctx context.Context, id uuid.UUID) (*uuid.UUID, error)
 	GetDocumentVersionOwner(ctx context.Context, id uuid.UUID) (uuid.UUID, error)
+	// A document and, when it is owned, whose it is: a submitted file belongs to
+	// its submission's student and assignment; a feedback file to its grade's.
+	GetDocumentWithOwner(ctx context.Context, arg GetDocumentWithOwnerParams) (GetDocumentWithOwnerRow, error)
 	GetGradeFull(ctx context.Context, arg GetGradeFullParams) (GetGradeFullRow, error)
 	// Grades by id, with the assignment each belongs to (null for a component
 	// grade). A grade's course is its student's course.
 	GetGradesInCourse(ctx context.Context, arg GetGradesInCourseParams) ([]GetGradesInCourseRow, error)
+	GetLatestVersion(ctx context.Context, documentID uuid.UUID) (DocumentVersion, error)
 	GetLiveComputedGrade(ctx context.Context, arg GetLiveComputedGradeParams) (GetLiveComputedGradeRow, error)
 	// The partial unique index allows at most one row per (course, actor) that is
 	// not removed. A paused row is returned so the caller can say why it denied.
@@ -81,6 +85,7 @@ type Querier interface {
 	// Lookups are always "in this course": an id from another course is not found.
 	GetSubmissionInCourse(ctx context.Context, arg GetSubmissionInCourseParams) (GetSubmissionInCourseRow, error)
 	GetSystemActor(ctx context.Context) (uuid.UUID, error)
+	GetVersionOfDocument(ctx context.Context, arg GetVersionOfDocumentParams) (DocumentVersion, error)
 	// Zero rows means another call with the same key got there first; the caller
 	// then reads that row and replays it. ON CONFLICT waits for an in-flight
 	// transaction holding the key, so two simultaneous calls cannot both act.
@@ -91,6 +96,8 @@ type Querier interface {
 	InsertCourse(ctx context.Context, arg InsertCourseParams) error
 	InsertCredential(ctx context.Context, arg InsertCredentialParams) error
 	InsertDepartment(ctx context.Context, arg InsertDepartmentParams) error
+	InsertDocument(ctx context.Context, arg InsertDocumentParams) error
+	InsertDocumentVersion(ctx context.Context, arg InsertDocumentVersionParams) error
 	InsertEvent(ctx context.Context, arg InsertEventParams) error
 	InsertGrade(ctx context.Context, arg InsertGradeParams) error
 	InsertMember(ctx context.Context, arg InsertMemberParams) error
@@ -104,6 +111,9 @@ type Querier interface {
 	ListAssignments(ctx context.Context, arg ListAssignmentsParams) ([]Assignment, error)
 	// What gradecalc needs -------------------------------------------------------
 	ListComponents(ctx context.Context, courseID uuid.UUID) ([]ListComponentsRow, error)
+	// Course-level documents: material, instructions, rubrics. Owned documents
+	// (submitted files, feedback) are reached through their owners instead.
+	ListCourseDocuments(ctx context.Context, arg ListCourseDocumentsParams) ([]ListCourseDocumentsRow, error)
 	ListCourses(ctx context.Context, arg ListCoursesParams) ([]ListCoursesRow, error)
 	// Never the hash.
 	ListCredentialsForActor(ctx context.Context, actorID uuid.UUID) ([]ListCredentialsForActorRow, error)
@@ -120,6 +130,7 @@ type Querier interface {
 	//     assignments and is for members whose assignment scope is the whole course.
 	ListEvents(ctx context.Context, arg ListEventsParams) ([]ListEventsRow, error)
 	ListEventsForAction(ctx context.Context, actionID *uuid.UUID) ([]ListEventsForActionRow, error)
+	ListGradeDocuments(ctx context.Context, gradeID *uuid.UUID) ([]ListGradeDocumentsRow, error)
 	// Assignments that count toward the grade.
 	ListGradedAssignments(ctx context.Context, courseID uuid.UUID) ([]ListGradedAssignmentsRow, error)
 	// Scope in SQL. Two more rules ride along:
@@ -140,14 +151,18 @@ type Querier interface {
 	ListProposedActionIDsByMember(ctx context.Context, memberID *uuid.UUID) ([]uuid.UUID, error)
 	ListProposedActions(ctx context.Context, arg ListProposedActionsParams) ([]Action, error)
 	ListStudentScope(ctx context.Context, memberID uuid.UUID) ([]uuid.UUID, error)
+	ListSubmissionDocuments(ctx context.Context, submissionID *uuid.UUID) ([]ListSubmissionDocumentsRow, error)
 	ListSubmissions(ctx context.Context, arg ListSubmissionsParams) ([]ListSubmissionsRow, error)
 	ListTerms(ctx context.Context) ([]Term, error)
+	ListVersions(ctx context.Context, documentID uuid.UUID) ([]ListVersionsRow, error)
 	LiveComponentGradeExists(ctx context.Context, arg LiveComponentGradeExistsParams) (bool, error)
 	LiveMembershipExists(ctx context.Context, arg LiveMembershipExistsParams) (bool, error)
 	LiveSubmissionGradeExists(ctx context.Context, submissionID *uuid.UUID) (bool, error)
 	// Taken before changing the tree's shape, so that two moves cannot each
 	// check for a cycle and then create one between them.
 	LockCourseComponents(ctx context.Context, courseID uuid.UUID) error
+	// Serialises version numbering: two writers must not both take seq n+1.
+	LockDocument(ctx context.Context, id uuid.UUID) error
 	// Held until the transaction ends. See events.Flush for why.
 	LockEventStream(ctx context.Context, arg LockEventStreamParams) error
 	LockGradesInCourse(ctx context.Context, arg LockGradesInCourseParams) ([]uuid.UUID, error)
@@ -155,6 +170,7 @@ type Querier interface {
 	LockSubmissionsOf(ctx context.Context, arg LockSubmissionsOfParams) ([]LockSubmissionsOfRow, error)
 	MarkActionExecuted(ctx context.Context, arg MarkActionExecutedParams) error
 	MarkActionFailed(ctx context.Context, arg MarkActionFailedParams) error
+	MaxVersionSeq(ctx context.Context, documentID uuid.UUID) (int32, error)
 	PostGrade(ctx context.Context, arg PostGradeParams) (int64, error)
 	PublishAssignment(ctx context.Context, arg PublishAssignmentParams) (int64, error)
 	// A 'missing' row is a placeholder written when the due date passed with
@@ -168,11 +184,14 @@ type Querier interface {
 	SetActorStatus(ctx context.Context, arg SetActorStatusParams) (int64, error)
 	SetComponentParent(ctx context.Context, arg SetComponentParentParams) error
 	SetCourseStatus(ctx context.Context, arg SetCourseStatusParams) (int64, error)
+	SetDocumentStatus(ctx context.Context, arg SetDocumentStatusParams) (int64, error)
 	SetMemberExpiry(ctx context.Context, arg SetMemberExpiryParams) error
 	SetMemberPerms(ctx context.Context, arg SetMemberPermsParams) error
 	SetMemberScopeKinds(ctx context.Context, arg SetMemberScopeKindsParams) error
 	SetMemberStatus(ctx context.Context, arg SetMemberStatusParams) (int64, error)
+	SetPublishedVersion(ctx context.Context, arg SetPublishedVersionParams) error
 	SetSubmissionLateness(ctx context.Context, arg SetSubmissionLatenessParams) (int64, error)
+	StorageKeyInUse(ctx context.Context, storageKey *string) (bool, error)
 	SubmitSubmission(ctx context.Context, arg SubmitSubmissionParams) (int64, error)
 	SupersedeComponentDrafts(ctx context.Context, arg SupersedeComponentDraftsParams) error
 	SupersedeGrade(ctx context.Context, arg SupersedeGradeParams) (int64, error)
@@ -188,6 +207,10 @@ type Querier interface {
 	// department's own presets are edited here.
 	UpdatePreset(ctx context.Context, arg UpdatePresetParams) (int64, error)
 	UpdateSubmissionDraft(ctx context.Context, arg UpdateSubmissionDraftParams) (int64, error)
+	// Is this version the one some submission within the member's scope was
+	// submitted under? Then that member may read it even after the instructions
+	// have moved on: it is what they, or their student, were told.
+	VersionPinnedInScope(ctx context.Context, arg VersionPinnedInScopeParams) (bool, error)
 }
 
 var _ Querier = (*Queries)(nil)

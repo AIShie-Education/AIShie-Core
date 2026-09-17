@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -19,8 +20,55 @@ import (
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/tool"
 )
 
-func gradeTools() []tool.Tool {
-	return []tool.Tool{gradeSubmit(), gradePost(), gradeRegrade(), gradebookGet()}
+func gradeTools(d Deps) []tool.Tool {
+	return []tool.Tool{gradeSubmit(d), gradePost(), gradeRegrade(d), gradebookGet()}
+}
+
+// FeedbackFile is a file returned with a grade: a marked-up script, a
+// recording. It is uploaded first (document.upload_url, kind feedback) and
+// named here, so that it travels with the grade — including through a
+// proposal, where there is no grade yet for a file to be attached to.
+type FeedbackFile struct {
+	Title       string `json:"title"`
+	UploadToken string `json:"upload_token"`
+}
+
+// checkFeedbackFiles verifies each file without recording anything.
+func checkFeedbackFiles(ctx context.Context, d Deps, q dbq.Querier, m *domain.Member, courseID uuid.UUID, files []FeedbackFile) error {
+	seen := map[string]bool{}
+	for _, f := range files {
+		if strings.TrimSpace(f.Title) == "" {
+			return apperr.Invalid("every feedback file needs a title")
+		}
+		if seen[f.UploadToken] {
+			return apperr.Invalid("the same upload is listed twice")
+		}
+		seen[f.UploadToken] = true
+		if _, err := claimUpload(ctx, d, q, m, courseID, kindFeedback, f.UploadToken); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// attachFeedbackFiles records each file as a feedback document of the grade.
+func attachFeedbackFiles(ctx context.Context, d Deps, ec *tool.ExecCtx, courseID, gradeID uuid.UUID, files []FeedbackFile) error {
+	for i, f := range files {
+		doc := ids.New()
+		if err := ec.Q.InsertDocument(ctx, dbq.InsertDocumentParams{ID: doc, CourseID: courseID, Kind: kindFeedback,
+			Title: f.Title, GradeID: &gradeID, SortOrder: int32(i), CreatedAt: ec.Now}); err != nil {
+			return err
+		}
+		token := f.UploadToken
+		v, err := insertVersion(ctx, d, ec, courseID, doc, kindFeedback, 1, Content{UploadToken: &token})
+		if err != nil {
+			return err
+		}
+		if err := ec.Q.SetPublishedVersion(ctx, dbq.SetPublishedVersionParams{ID: doc, PublishedVersionID: &v}); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // BreakdownItem is one line of a grade's per-criterion detail. The rubric is
@@ -41,6 +89,7 @@ type GradeContent struct {
 	Breakdown       []BreakdownItem `json:"breakdown,omitempty"`
 	RubricVersionID *uuid.UUID      `json:"rubric_version_id,omitempty" jsonschema:"the rubric version the grader was shown; defaults to the published one"`
 	AllowExtra      bool            `json:"allow_extra,omitempty" jsonschema:"permit a score above the points possible"`
+	FeedbackFiles   []FeedbackFile  `json:"feedback_files,omitempty" jsonschema:"files to return with the grade, uploaded beforehand"`
 }
 
 // ---------------------------------------------------------------------------
@@ -214,7 +263,7 @@ func breakdownJSON(items []BreakdownItem) ([]byte, error) {
 	return json.Marshal(items)
 }
 
-func gradeSubmit() tool.Tool {
+func gradeSubmit(d Deps) tool.Tool {
 	load := func(ctx context.Context, q dbq.Querier, in GradeSubmitIn) (gradeSubject, error) {
 		return loadSubject(ctx, q, in.CourseID, in.SubmissionID, in.ComponentID, in.StudentMemberID)
 	}
@@ -234,7 +283,7 @@ func gradeSubmit() tool.Tool {
 			}
 			return s.target(in.CourseID), nil
 		},
-		Validate: func(ctx context.Context, q dbq.Querier, _ *domain.Member, in GradeSubmitIn) error {
+		Validate: func(ctx context.Context, q dbq.Querier, m *domain.Member, in GradeSubmitIn) error {
 			s, err := load(ctx, q, in)
 			if err != nil {
 				return err
@@ -242,8 +291,10 @@ func gradeSubmit() tool.Tool {
 			if err := checkSubject(ctx, q, in.CourseID, s); err != nil {
 				return err
 			}
-			_, err = checkContent(ctx, q, s, in.GradeContent)
-			return err
+			if _, err = checkContent(ctx, q, s, in.GradeContent); err != nil {
+				return err
+			}
+			return checkFeedbackFiles(ctx, d, q, m, in.CourseID, in.FeedbackFiles)
 		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in GradeSubmitIn) (GradeSubmitOut, error) {
 			s, err := load(ctx, ec.Q, in)
@@ -282,6 +333,9 @@ func gradeSubmit() tool.Tool {
 				row.ComponentID = &s.component.ID
 			}
 			if err := ec.Q.InsertGrade(ctx, row); err != nil {
+				return GradeSubmitOut{}, err
+			}
+			if err := attachFeedbackFiles(ctx, d, ec, in.CourseID, id, in.FeedbackFiles); err != nil {
 				return GradeSubmitOut{}, err
 			}
 			ec.Emit(ev)
@@ -473,7 +527,7 @@ type GradeRegradeOut struct {
 	Snapshots int       `json:"snapshots"`
 }
 
-func gradeRegrade() tool.Tool {
+func gradeRegrade(d Deps) tool.Tool {
 	load := func(ctx context.Context, q dbq.Querier, in GradeRegradeIn) (dbq.GetGradesInCourseRow, gradeSubject, error) {
 		rows, err := q.GetGradesInCourse(ctx, dbq.GetGradesInCourseParams{Ids: []uuid.UUID{in.GradeID}, CourseID: in.CourseID})
 		if err != nil {
@@ -520,7 +574,7 @@ func gradeRegrade() tool.Tool {
 			t.Type, t.ID = "grade", &g.ID
 			return t, nil
 		},
-		Validate: func(ctx context.Context, q dbq.Querier, _ *domain.Member, in GradeRegradeIn) error {
+		Validate: func(ctx context.Context, q dbq.Querier, m *domain.Member, in GradeRegradeIn) error {
 			g, s, err := load(ctx, q, in)
 			if err != nil {
 				return err
@@ -528,8 +582,10 @@ func gradeRegrade() tool.Tool {
 			if err := check(g); err != nil {
 				return err
 			}
-			_, err = checkContent(ctx, q, s, in.GradeContent)
-			return err
+			if _, err = checkContent(ctx, q, s, in.GradeContent); err != nil {
+				return err
+			}
+			return checkFeedbackFiles(ctx, d, q, m, in.CourseID, in.FeedbackFiles)
 		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in GradeRegradeIn) (GradeRegradeOut, error) {
 			if _, err := ec.Q.LockGradesInCourse(ctx, dbq.LockGradesInCourseParams{Ids: []uuid.UUID{in.GradeID}, CourseID: in.CourseID}); err != nil {
@@ -570,6 +626,9 @@ func gradeRegrade() tool.Tool {
 				GraderMemberID: ec.Member.ID, CreatedByActionID: ec.ActionID,
 				PostedAt: &ec.Now, PostedByMemberID: &ec.Member.ID, CreatedAt: ec.Now,
 			}); err != nil {
+				return GradeRegradeOut{}, err
+			}
+			if err := attachFeedbackFiles(ctx, d, ec, in.CourseID, id, in.FeedbackFiles); err != nil {
 				return GradeRegradeOut{}, err
 			}
 			ec.Emit(events.Event{

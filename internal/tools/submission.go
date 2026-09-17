@@ -44,6 +44,7 @@ type SubmissionView struct {
 	State                 string     `json:"state" jsonschema:"draft, submitted, late or missing"`
 	SubmittedAt           *time.Time `json:"submitted_at,omitempty"`
 	CreatedAt             time.Time  `json:"created_at"`
+	Files                 []FileRef  `json:"files,omitempty" jsonschema:"submitted files; read each with document.get"`
 }
 
 type SubmissionListIn struct {
@@ -118,8 +119,16 @@ func submissionGet() tool.Tool {
 		},
 		Query: func(ctx context.Context, rc *tool.ReadCtx, in SubmissionIDIn) (SubmissionView, error) {
 			s, err := rc.Q.GetSubmissionFull(ctx, dbq.GetSubmissionFullParams{ID: in.SubmissionID, CourseID: in.CourseID})
-			return SubmissionView{ID: s.ID, AssignmentID: s.AssignmentID, StudentMemberID: s.StudentMemberID, Attempt: s.Attempt,
-				Body: s.Body, InstructionsVersionID: s.InstructionsVersionID, State: s.State, SubmittedAt: s.SubmittedAt, CreatedAt: s.CreatedAt}, err
+			if err != nil {
+				return SubmissionView{}, err
+			}
+			v := SubmissionView{ID: s.ID, AssignmentID: s.AssignmentID, StudentMemberID: s.StudentMemberID, Attempt: s.Attempt,
+				Body: s.Body, InstructionsVersionID: s.InstructionsVersionID, State: s.State, SubmittedAt: s.SubmittedAt, CreatedAt: s.CreatedAt}
+			files, err := rc.Q.ListSubmissionDocuments(ctx, &s.ID)
+			for _, f := range files {
+				v.Files = append(v.Files, FileRef{DocumentID: f.ID, Title: f.Title})
+			}
+			return v, err
 		},
 	})
 }

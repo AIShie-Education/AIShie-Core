@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/blob"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/ids"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/pipeline"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/tool"
@@ -132,14 +133,29 @@ func NewCS101(t testing.TB, students int) *CS101 {
 type Platform struct {
 	*World
 	P *pipeline.Pipeline
+	// Blob keeps files in the test's own temporary directory.
+	Blob    *blob.FSStore
+	Uploads *blob.Signer
 }
+
+// MaxUploadBytes is small, so that a test can exceed it.
+const MaxUploadBytes = 1 << 16
 
 func NewPlatform(t testing.TB) *Platform {
 	t.Helper()
 	w := NewWorld(t)
+	signer, err := blob.NewSigner("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := blob.NewFSStore(t.TempDir(), "http://lms.test", signer)
+	if err != nil {
+		t.Fatal(err)
+	}
 	reg := tool.NewRegistry()
-	p := &Platform{World: w, P: pipeline.New(w.Pool, reg, pipeline.Config{ProposalTTL: pipeline.DefaultProposalTTL})}
-	tools.RegisterAll(reg, tools.Deps{Pipeline: p.P})
+	p := &Platform{World: w, Blob: store, Uploads: signer,
+		P: pipeline.New(w.Pool, reg, pipeline.Config{ProposalTTL: pipeline.DefaultProposalTTL})}
+	tools.RegisterAll(reg, tools.Deps{Pipeline: p.P, Blob: store, Uploads: signer, MaxUploadBytes: MaxUploadBytes})
 	return p
 }
 

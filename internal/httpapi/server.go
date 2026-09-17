@@ -21,6 +21,7 @@ import (
 
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/apperr"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/auth"
+	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/blob"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/domain"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/pipeline"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/tool"
@@ -47,6 +48,11 @@ type Deps struct {
 	TrustedOrigins []string
 	// InsecureCookies drops the Secure attribute, for http://localhost.
 	InsecureCookies bool
+
+	// Blob is the file store. When it keeps files on this server's own disk,
+	// the server also serves its upload and download URLs.
+	Blob           blob.Store
+	MaxUploadBytes int64
 }
 
 // NewHandler builds the whole HTTP surface.
@@ -68,6 +74,10 @@ func NewHandler(d Deps) http.Handler {
 				mux.Handle(t.HTTP.Method+" "+t.HTTP.Pattern, s.authenticated(s.callTool(t)))
 			}
 		}
+	}
+	if local, ok := d.Blob.(blob.Local); ok {
+		mux.HandleFunc("PUT "+blob.BlobPath+"{token}", s.blobPut(local))
+		mux.HandleFunc("GET "+blob.BlobPath+"{token}", s.blobGet(local))
 	}
 
 	// A browser sends cookies along with requests a hostile page makes it
@@ -249,7 +259,7 @@ func (s *server) cors(next http.Handler) http.Handler {
 			h.Set("Access-Control-Expose-Headers", HeaderReplayed)
 			h.Add("Vary", "Origin")
 			if r.Method == http.MethodOptions && r.Header.Get("Access-Control-Request-Method") != "" {
-				h.Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+				h.Set("Access-Control-Allow-Methods", "GET, POST, PUT, OPTIONS")
 				h.Set("Access-Control-Allow-Headers", "Authorization, Content-Type, "+HeaderIdempotencyKey)
 				h.Set("Access-Control-Max-Age", "600")
 				w.WriteHeader(http.StatusNoContent)

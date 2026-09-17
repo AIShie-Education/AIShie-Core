@@ -52,6 +52,13 @@ type Gate struct {
 	// Perms are course permissions; the call runs at the lowest of their
 	// levels on the caller's membership. The tool's input carries course_id.
 	Perms []domain.Perm
+	// Any changes what Perms means: holding any one of them is enough to get
+	// as far as looking the target up, and the target then names the
+	// permission that actually governs (Target.Perms, which becomes
+	// required). Reading a document is like this — which permission applies
+	// depends on whether it turns out to be a lecture, a rubric or someone's
+	// submission.
+	Any bool
 	// Platform lists platform roles, for the few operations outside any
 	// course. No ladder applies: allowed outright, or not at all.
 	Platform []string

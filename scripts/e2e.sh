@@ -56,6 +56,7 @@ else
   export DATABASE_URL="postgres:///$DB"
 fi
 export HTTP_ADDR="127.0.0.1:$PORT"
+export BLOB_FS_ROOT="$WORK/blobs" PUBLIC_URL="$BASE"
 "$BIN" migrate up
 "$BIN" seed
 
@@ -110,6 +111,21 @@ call 200 POST "$C/assignments/$HW3/publish" "$SATO"
 call 200 POST "$C/members" "$SATO" "{\"actor_id\":\"$YUKI_ID\",\"preset\":\"student\"}"
 YUKI_M=$(json "$WORK/body" 'd["result"]["member_id"]')
 call 200 POST "$C/members" "$SATO" "{\"actor_id\":\"$GRADER_ID\",\"preset\":\"grader\",\"listed_assignments\":[\"$HW3\"]}"
+
+step "Sato uploads the lecture slides: a URL from a tool call, the bytes by plain PUT, then attach and publish"
+call 200 GET "$C/upload-url?kind=material&content_type=application/pdf" "$SATO"
+PUT_URL=$(json "$WORK/body" 'd["result"]["upload_url"]')
+UPLOAD=$(json "$WORK/body" 'd["result"]["upload_token"]')
+printf '%%PDF-1.7 lecture one' >"$WORK/slides.pdf"
+[ "$(curl -s -o /dev/null -w '%{http_code}' -X PUT -H 'Content-Type: application/pdf' --data-binary "@$WORK/slides.pdf" "$PUT_URL")" = 200 ] || fail "PUT to the upload URL"
+call 200 POST "$C/documents" "$SATO" "{\"kind\":\"material\",\"title\":\"Lecture 1\",\"upload_token\":\"$UPLOAD\"}"
+DOC=$(json "$WORK/body" 'd["result"]["document_id"]')
+call 404 GET "$C/documents/$DOC" "$YUKI" # unpublished: to a student it does not exist yet
+call 200 POST "$C/documents/$DOC/publish" "$SATO"
+call 200 GET "$C/documents/$DOC" "$YUKI"
+curl -sf -o "$WORK/got.pdf" "$(json "$WORK/body" 'd["result"]["version"]["download_url"]')" || fail "download"
+cmp -s "$WORK/slides.pdf" "$WORK/got.pdf" || fail "the student downloaded different bytes"
+echo "  the student downloaded exactly what the instructor uploaded"
 
 step "Yuki hands in her essay"
 call 200 POST "$C/submissions" "$YUKI" "{\"assignment_id\":\"$HW3\",\"body\":\"My essay.\"}"
