@@ -252,6 +252,30 @@ Two ways to attach a document, chosen by shape:
 Material is published by moving `published_version_id`. Students read the published version;
 instructors read the latest. A half-edited lecture is invisible until the pointer moves.
 
+**Which permission governs a document depends on its kind**: material and instructions are
+`perm_document_read` / `perm_document_write`; a rubric is read with `perm_rubric_read`; a
+submitted file follows its submission (`perm_submission_read` / `_write`, scoped to its student
+and assignment); a feedback file follows its grade (`perm_grade_read`, scoped, and invisible
+to non-graders until the grade is posted; written with `perm_grade_submit`). Unpublished
+versions and the version list need `perm_document_read_draft`. One exception, for the reason
+versions are pinned at all: a member may always read the exact version that a submission
+within their scope was handed in under, even after the instructions have moved on.
+
+**Bytes never pass through a tool call.** An MCP agent cannot stream a file through a JSON-RPC
+message. `document.upload_url` returns a short-lived URL and an upload token; the client PUTs
+the bytes to the URL — straight to the object store, or to this server when files are kept on
+its own disk — and hands the token to the tool that attaches the file (`document.create`,
+`document.add_version`, or `feedback_files` on `grade.submit`). The token is a signed claim
+that this member of this course was given this storage key for this purpose; there is no
+table of pending uploads. Its expiry limits the upload, not the attaching: a proposal carrying
+a feedback file may be approved days later, and `unique(storage_key)` is what stops a file
+being attached twice. Reading returns a short-lived download URL the same way. The storage
+key is made by the server and is unguessable; nothing the uploader says goes into it.
+
+Once a submission is handed in, its files are frozen with it. The trigger guards the
+`submission` row; that nothing is added to or archived from its documents afterwards is an
+application rule.
+
 ### 2.5 Assignments and submissions
 
 ```
@@ -454,7 +478,8 @@ check `actor.platform_role` instead. That is the only place it is read.
 - The submitting member has `role = 'student'`; `member_*_scope` rows name members and
   assignments of the same course; `assignment.instructions_document_id` and `rubric_document_id`
   are documents of the same course with the right `kind`; `document_version.author_member_id`
-  is a member of the document's course.
+  is a member of the document's course (it is always the calling member, and the call was
+  authorized in that course).
 - Grade computation, and writing a `computed` snapshot only on post.
 - The component tree is acyclic beyond the self-loop the CHECK blocks.
 - Cancelling pending proposals when a member is removed or expires.

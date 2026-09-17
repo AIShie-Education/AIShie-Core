@@ -19,18 +19,20 @@ In place so far:
   after-the-fact review, events;
 - authentication (API tokens for agents, password sessions for people) and
   the REST API, whose routes are generated from the tool registry;
-- the tool catalogue for everything but documents: actors, terms,
-  departments, presets, courses, members, the grading scheme, assignments,
-  submissions, grades, the approval and review queues, and the event feed —
-  all scope-filtered in SQL.
+- the tool catalogue: actors, terms, departments, presets, courses, members,
+  the grading scheme, assignments, submissions, grades, documents, the
+  approval and review queues, and the event feed — all scope-filtered in SQL;
+- files: versioned documents with publish-by-pointer, uploads and downloads
+  by short-lived URL (this server's disk, or any S3-compatible store), and
+  feedback files that travel with a grade through a proposal.
 
 `make e2e` runs the real binary against a scratch database and, with nothing
 but `curl`, builds the worked example from docs/schema.md §5 from an empty
 installation: an agent grades an essay, a person approves it, the student
 sees the grade.
 
-Still to come: documents and file storage, the MCP adapter, background jobs
-(proposal and membership expiry), SSO.
+Still to come: the MCP adapter, background jobs (proposal and membership
+expiry), SSO.
 
 ## Layout
 
@@ -44,6 +46,7 @@ internal/
   pipeline                     the one road every call takes
   tools                        the catalogue, one file per noun
   events, gradecalc            the event feed's writer; grade rollups (pure)
+  blob                         file storage: filesystem and S3, signed upload tokens
   auth                         who is calling: tokens, passwords, sessions, bootstrap
   httpapi                      REST adapter; routes generated from the registry
   testdb, testkit              a database per test; course fixtures
@@ -96,6 +99,9 @@ curl localhost:8080/v1/tools            # the whole catalogue, with JSON Schemas
 ```
 
 Configuration is environment variables only; `bin/aishiterud help` lists them.
+Files are kept under `var/blobs` by default (`BLOB_STORE=fs`). For more than
+one instance, or for production, use `BLOB_STORE=s3` with the `S3_*` settings
+and a `BLOB_SIGNING_KEY` shared by every instance.
 `serve` never migrates on its own: `/healthz` reports 503 until the schema
 matches the version the binary was built for.
 
