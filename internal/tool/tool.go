@@ -132,6 +132,9 @@ type Spec[In, Out any] struct {
 	// Internal tools are called only by the system actor's background jobs
 	// and are exposed by neither adapter.
 	Internal bool
+	// OnArchived lets a Write act on an archived course. Nothing may, except
+	// what changes whether it is archived.
+	OnArchived bool
 	// SecretIn and SecretOut name top-level fields that must never be
 	// stored: they are removed from the recorded payload (and so from the
 	// payload hash) and from the recorded result.
@@ -158,6 +161,7 @@ type Tool struct {
 	Gate        Gate
 	HTTP        Route
 	Internal    bool
+	OnArchived  bool
 	SecretIn    []string
 	SecretOut   []string
 
@@ -248,7 +252,7 @@ func Define[In, Out any](s Spec[In, Out]) Tool {
 
 	t := Tool{
 		Name: s.Name, Description: s.Description, Kind: s.Kind, Gate: s.Gate, HTTP: s.HTTP,
-		Internal: s.Internal, SecretIn: s.SecretIn, SecretOut: s.SecretOut,
+		Internal: s.Internal, OnArchived: s.OnArchived, SecretIn: s.SecretIn, SecretOut: s.SecretOut,
 		InputSchema: inSchema, OutputSchema: outSchema,
 	}
 	t.Decode = func(raw []byte) (any, error) {

@@ -354,3 +354,157 @@ func TestPinnedVersionsStayReadable(t *testing.T) {
 	hw4 := testkit.Result[tools.IDOut](t, b.do(t, b.sato, "assignment.create", m{"course_id": b.course, "title": "HW4", "points_possible": 10, "instructions_document_id": draftOnly})).ID
 	b.try(t, b.sato, "assignment.publish", m{"course_id": b.course, "assignment_id": hw4}, apperr.FailedPrecondition)
 }
+
+// An upload URL for an object store is good for as many PUTs as its holder
+// cares to make until it expires. What a document version points at must not
+// be reachable through one: a student could otherwise hand in a placeholder on
+// time and swap in the real essay after the deadline, and an agent could swap
+// a feedback file after a human approved it.
+func TestAnAttachedFileCannotBeSwapped(t *testing.T) {
+	var store testkit.ObjectStore
+	b := buildOn(t, testkit.NewPlatformWithStore(t, func(fs *blob.FSStore) blob.Store {
+		store = testkit.ObjectStore{FSStore: fs}
+		return store
+	}))
+	swap := func(u tools.UploadURLOut, with string) {
+		t.Helper()
+		key, ct, err := b.Blob.Redeem(strings.TrimPrefix(u.UploadURL, "http://lms.test"+blob.BlobPath), "PUT")
+		if err != nil {
+			t.Fatalf("the upload URL no longer redeems, so this test proves nothing: %v", err)
+		}
+		if err := store.Overwrite(context.Background(), key, ct, strings.NewReader(with)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Yuki hands in a placeholder on time, then PUTs the real thing.
+	draft := testkit.Result[tools.SubmissionCreateOut](t, b.do(t, b.yuki, "submission.create", m{"course_id": b.course, "assignment_id": b.hw3})).SubmissionID
+	u := testkit.Result[tools.UploadURLOut](t, b.do(t, b.yuki, "document.upload_url", m{"course_id": b.course, "kind": "submission", "content_type": "application/pdf"}))
+	b.put(t, u, []byte("placeholder"))
+	file := testkit.Result[tools.DocumentCreateOut](t, b.do(t, b.yuki, "document.create",
+		m{"course_id": b.course, "kind": "submission", "title": "essay.pdf", "submission_id": draft, "upload_token": u.UploadToken})).DocumentID
+	b.do(t, b.yuki, "submission.submit", m{"course_id": b.course, "submission_id": draft})
+	swap(u, "the essay, finished after the deadline")
+
+	got := b.get(t, b.grader, m{"document_id": file})
+	if string(b.download(t, *got.Version.DownloadURL)) != "placeholder" {
+		t.Fatal("the grader was served bytes that were PUT after the file was handed in")
+	}
+	if n := b.Count(`SELECT count(*) FROM document_version WHERE document_id = $1 AND storage_key LIKE 'attached/%' AND byte_size = 11`, file); n != 1 {
+		t.Fatal("the version does not record the final object")
+	}
+	// The swapped-in object is not something the token can attach either.
+	b.try(t, b.yuki, "document.create", m{"course_id": b.course, "kind": "submission", "title": "again", "submission_id": draft, "upload_token": u.UploadToken}, apperr.Conflict)
+
+	// The same for a file that travelled inside a proposal: what Sato
+	// approved is what Ken downloads.
+	work := b.submit(t, b.ken, "essay")
+	fu := testkit.Result[tools.UploadURLOut](t, b.do(t, b.grader, "document.upload_url", m{"course_id": b.course, "kind": "feedback", "content_type": "text/plain"}))
+	b.put(t, fu, []byte("well argued"))
+	proposed := b.MustCall(b.grader, "grade.submit", m{"course_id": b.course, "submission_id": work, "score": 70,
+		"feedback_files": []m{{"title": "notes.txt", "upload_token": fu.UploadToken}}}, "p")
+	if proposed.Status != domain.StatusProposed {
+		t.Fatalf("%+v", proposed)
+	}
+	v := testkit.Result[pipeline.DecideOut](t, b.do(t, b.sato, "action.decide", m{"course_id": b.course, "action_id": proposed.ActionID, "decision": "approve"}))
+	if v.Outcome != domain.StatusExecuted {
+		t.Fatalf("approval: %+v", v)
+	}
+	swap(fu, "something nobody approved")
+	gradeID := testkit.Result[tools.GradeSubmitOut](t, pipeline.Outcome{Result: v.Result}).GradeID
+	b.do(t, b.sato, "grade.post", m{"course_id": b.course, "grade_ids": []uuid.UUID{gradeID}})
+	g := testkit.Result[tools.GradeView](t, b.do(t, b.ken, "grade.get", m{"course_id": b.course, "grade_id": gradeID}))
+	if len(g.FeedbackFiles) != 1 {
+		t.Fatalf("%d feedback files", len(g.FeedbackFiles))
+	}
+	if got := b.get(t, b.ken, m{"document_id": g.FeedbackFiles[0].DocumentID}); string(b.download(t, *got.Version.DownloadURL)) != "well argued" {
+		t.Fatal("Ken was served feedback that was PUT after the proposal was approved")
+	}
+}
+
+// Feedback on a posted grade is something the student sees at once. Adding to
+// it, or taking it away, is therefore a release, and needs perm_grade_post as
+// well as perm_grade_submit — at the lower of the two levels.
+func TestFeedbackOnAPostedGradeIsARelease(t *testing.T) {
+	b := build(t)
+	// A TA: may grade on their own, may not post.
+	ta := testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", m{"kind": "human", "display_name": "TA"})).ActorID
+	b.do(t, b.sato, "member.add", m{"course_id": b.course, "actor_id": ta, "preset": "ta"})
+	work := b.submit(t, b.yuki, "essay")
+	gradeID := testkit.Result[tools.GradeSubmitOut](t, b.do(t, b.sato, "grade.submit", m{"course_id": b.course, "submission_id": work, "score": 90})).GradeID
+
+	// On a draft grade the TA's note is part of grading.
+	note := testkit.Result[tools.DocumentCreateOut](t, b.do(t, ta, "document.create",
+		m{"course_id": b.course, "kind": "feedback", "title": "TA note", "grade_id": gradeID, "body_md": "check the references"})).DocumentID
+	b.do(t, b.sato, "grade.post", m{"course_id": b.course, "grade_ids": []uuid.UUID{gradeID}})
+
+	// Once posted, it is not.
+	for name, args := range map[string]m{
+		"document.create":      {"course_id": b.course, "kind": "feedback", "title": "afterthought", "grade_id": gradeID, "body_md": "unreviewed remark"},
+		"document.archive":     {"course_id": b.course, "document_id": note},
+		"document.add_version": {"course_id": b.course, "document_id": note, "body_md": "rewritten", "publish": true},
+	} {
+		if out := b.MustCall(ta, name, args, "ta-"+name); out.Status != domain.StatusDenied {
+			t.Fatalf("%s on a posted grade, by someone who cannot post: %+v", name, out)
+		}
+	}
+	if g := testkit.Result[tools.GradeView](t, b.do(t, b.yuki, "grade.get", m{"course_id": b.course, "grade_id": gradeID})); len(g.FeedbackFiles) != 1 {
+		t.Fatalf("Yuki sees %d feedback files, want the one that was posted", len(g.FeedbackFiles))
+	}
+	// Sato may do both.
+	b.do(t, b.sato, "document.create", m{"course_id": b.course, "kind": "feedback", "title": "P.S.", "grade_id": gradeID, "body_md": "see me"})
+
+	// A total is worked out, not given; nothing hangs from it.
+	var computed uuid.UUID
+	if err := b.Pool.QueryRow(t.Context(), `SELECT id FROM grade WHERE origin = 'computed' AND student_member_id = $1 LIMIT 1`, b.yukiM).Scan(&computed); err != nil {
+		t.Fatal(err)
+	}
+	b.try(t, b.sato, "document.create", m{"course_id": b.course, "kind": "feedback", "title": "x", "grade_id": computed, "body_md": "x"}, apperr.FailedPrecondition)
+}
+
+// Archiving withdraws a document. A student who kept its id — it was in the
+// event feed — must not be able to go on reading it.
+func TestAnArchivedDocumentIsWithdrawn(t *testing.T) {
+	b := build(t)
+	publish := func(args m) tools.DocumentCreateOut {
+		t.Helper()
+		args["course_id"] = b.course
+		made := testkit.Result[tools.DocumentCreateOut](t, b.do(t, b.sato, "document.create", args))
+		b.do(t, b.sato, "document.publish", m{"course_id": b.course, "document_id": made.DocumentID})
+		return made
+	}
+	made := publish(m{"kind": "material", "title": "HW3 solutions", "body_md": "answers"})
+	b.get(t, b.yuki, m{"document_id": made.DocumentID})
+	b.do(t, b.sato, "document.archive", m{"course_id": b.course, "document_id": made.DocumentID})
+
+	for _, args := range []m{
+		{"course_id": b.course, "document_id": made.DocumentID},
+		{"course_id": b.course, "document_id": made.DocumentID, "version_id": made.VersionID},
+	} {
+		if _, err := b.Call(b.yuki, "document.get", args, ""); !apperr.Is(err, apperr.NotFound) {
+			t.Fatalf("a student reading a withdrawn document (%v): %v", args, err)
+		}
+	}
+	if out := b.MustCall(b.yuki, "document.versions", m{"course_id": b.course, "document_id": made.DocumentID}, ""); out.Status != domain.StatusDenied {
+		t.Fatalf("a student listing a withdrawn document's versions: %+v", out)
+	}
+	// Whoever may read drafts still can: it is archived, not destroyed.
+	if got := b.get(t, b.sato, m{"document_id": made.DocumentID}); *got.Version.BodyMD != "answers" {
+		t.Fatalf("%+v", got)
+	}
+
+	// What a student was told when they handed in stays readable to them,
+	// archived or not: that is what pinning is for.
+	brief := publish(m{"kind": "instructions", "title": "HW3", "body_md": "Write 1000 words."})
+	b.do(t, b.sato, "assignment.update", m{"course_id": b.course, "assignment_id": b.hw3, "instructions_document_id": brief.DocumentID})
+	b.submit(t, b.yuki, "1000 words")
+	replacement := publish(m{"kind": "instructions", "title": "HW3 (revised)", "body_md": "Write 2000 words."})
+	b.do(t, b.sato, "assignment.update", m{"course_id": b.course, "assignment_id": b.hw3, "instructions_document_id": replacement.DocumentID})
+	b.do(t, b.sato, "document.archive", m{"course_id": b.course, "document_id": brief.DocumentID})
+	if got := b.get(t, b.yuki, m{"document_id": brief.DocumentID, "version_id": brief.VersionID}); *got.Version.BodyMD != "Write 1000 words." {
+		t.Fatalf("pinned: %+v", got.Version)
+	}
+	if _, err := b.Call(b.ken, "document.get", m{"course_id": b.course, "document_id": brief.DocumentID, "version_id": brief.VersionID}, ""); !apperr.Is(err, apperr.NotFound) {
+		t.Fatalf("Ken, who was never pinned to it: %v", err)
+	}
+}

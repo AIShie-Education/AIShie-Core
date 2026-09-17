@@ -111,7 +111,25 @@ func documentTarget(ctx context.Context, q dbq.Querier, courseID, id uuid.UUID, 
 	if err != nil {
 		return tool.Target{}, err
 	}
-	return tool.Target{CourseID: courseID, Type: "document", ID: &id, Scope: ownerScope(d), Perms: []domain.Perm{perm(d.Kind)}}, nil
+	t := tool.Target{CourseID: courseID, Type: "document", ID: &id, Scope: ownerScope(d), Perms: []domain.Perm{perm(d.Kind)}}
+	if d.Kind == kindFeedback && d.GradePostedAt != nil && perm(kindFeedback) == domain.PermGradeSubmit {
+		t.Perms = feedbackWritePerms(true)
+	}
+	return t, nil
+}
+
+// feedbackWritePerms: feedback is part of a grade. While the grade is a draft,
+// writing it takes what writing the grade takes. Once the grade is posted, a
+// change to its feedback is visible to the student the moment it is made, so
+// it takes the right to post as well, and runs at the lower of the two levels
+// — the same reasoning as grade.regrade. Otherwise a TA who "grades but does
+// not post" could put new feedback in front of a student, or take the
+// instructor's away, on their own.
+func feedbackWritePerms(posted bool) []domain.Perm {
+	if posted {
+		return []domain.Perm{domain.PermGradeSubmit, domain.PermGradePost}
+	}
+	return []domain.Perm{domain.PermGradeSubmit}
 }
 
 // ---------------------------------------------------------------------------
@@ -155,6 +173,13 @@ func documentUploadURL(d Deps) tool.Tool {
 			if strings.TrimSpace(in.ContentType) == "" || len(in.ContentType) > 200 {
 				return UploadURLOut{}, apperr.Invalid("content_type is required")
 			}
+			// This is a read — it records nothing — but what it hands out is
+			// the means to write, and an archived course refuses every write.
+			if c, err := rc.Q.GetCourse(ctx, in.CourseID); err != nil {
+				return UploadURLOut{}, err
+			} else if c.Status == domain.CourseArchived {
+				return UploadURLOut{}, apperr.Forbid("the course is archived and takes no new files").With("reason", "course_archived")
+			}
 			// The key is ours and unguessable; nothing the uploader says goes
 			// into it.
 			key := "courses/" + in.CourseID.String() + "/" + ids.New().String()
@@ -181,7 +206,7 @@ type upload struct {
 // claimUpload turns an upload token into a file to attach. The token proves
 // that this member of this course was given the key for this purpose; the
 // store is asked whether anything is actually there, and how big it is.
-func claimUpload(ctx context.Context, d Deps, q dbq.Querier, m *domain.Member, courseID uuid.UUID, kind, token string) (upload, error) {
+func claimUpload(ctx context.Context, d Deps, q dbq.Querier, m *domain.Member, courseID uuid.UUID, kind, token string, finalize bool) (upload, error) {
 	if d.Blob == nil {
 		return upload{}, apperr.Precondition("this installation has no file storage configured")
 	}
@@ -192,12 +217,35 @@ func claimUpload(ctx context.Context, d Deps, q dbq.Querier, m *domain.Member, c
 	if c.CourseID != courseID || c.MemberID != m.ID || c.Purpose != kind {
 		return upload{}, apperr.Forbid("that upload was issued to someone else, or for something else")
 	}
-	if used, err := q.StorageKeyInUse(ctx, &c.Key); err != nil {
+	// An upload URL can be written to again for as long as it is valid, so
+	// the object is moved, on attaching, to a final key that no upload URL
+	// was ever issued for; that key is what the version records. The lock
+	// makes "is it attached already?" and the move one step: without it a
+	// second attach, racing the first, could copy different bytes over an
+	// object a committed version already points at.
+	final := d.Blob.FinalKey(c.Key)
+	if err := q.LockStorageKey(ctx, final); err != nil {
+		return upload{}, err
+	}
+	if used, err := q.StorageKeyInUse(ctx, &final); err != nil {
 		return upload{}, err
 	} else if used {
 		return upload{}, apperr.Conflicts("that upload is already attached to a document")
 	}
-	info, err := d.Blob.Stat(ctx, c.Key)
+	if staged, err := d.Blob.Stat(ctx, c.Key); errors.Is(err, blob.ErrNotFound) {
+		return upload{}, apperr.Precondition("nothing has been uploaded to that URL yet")
+	} else if err != nil {
+		return upload{}, err
+	} else if staged.Size > d.MaxUploadBytes {
+		_ = d.Blob.Delete(ctx, c.Key)
+		return upload{}, apperr.Precondition("the file is %d bytes; the limit is %d", staged.Size, d.MaxUploadBytes)
+	}
+	if !finalize {
+		// A dry run, for Validate: everything is checked and nothing moves.
+		return upload{key: final}, nil
+	}
+	// What is recorded describes the final object, read after the move.
+	info, err := d.Blob.Finalize(ctx, c.Key)
 	if errors.Is(err, blob.ErrNotFound) {
 		return upload{}, apperr.Precondition("nothing has been uploaded to that URL yet")
 	}
@@ -205,13 +253,13 @@ func claimUpload(ctx context.Context, d Deps, q dbq.Querier, m *domain.Member, c
 		return upload{}, err
 	}
 	if info.Size > d.MaxUploadBytes {
-		_ = d.Blob.Delete(ctx, c.Key)
+		_ = d.Blob.Delete(ctx, final)
 		return upload{}, apperr.Precondition("the file is %d bytes; the limit is %d", info.Size, d.MaxUploadBytes)
 	}
 	if info.ContentType == "" {
 		info.ContentType = c.ContentType
 	}
-	return upload{key: c.Key, info: info}, nil
+	return upload{key: final, info: info}, nil
 }
 
 // Content is what a version holds: text, a file, or both.
@@ -230,7 +278,7 @@ func insertVersion(ctx context.Context, d Deps, ec *tool.ExecCtx, courseID, docu
 	row := dbq.InsertDocumentVersionParams{ID: ids.New(), DocumentID: documentID, Seq: seq, BodyMd: c.BodyMD,
 		AuthorMemberID: ec.Member.ID, CreatedAt: ec.Now}
 	if c.UploadToken != nil {
-		up, err := claimUpload(ctx, d, ec.Q, ec.Member, courseID, kind, *c.UploadToken)
+		up, err := claimUpload(ctx, d, ec.Q, ec.Member, courseID, kind, *c.UploadToken, true)
 		if err != nil {
 			return uuid.Nil, err
 		}
@@ -293,6 +341,7 @@ func documentCreate(d Deps) tool.Tool {
 				if err != nil {
 					return t, err
 				}
+				t.Perms = feedbackWritePerms(g.PostedAt != nil)
 				t.Scope = authz.Target{StudentMemberIDs: []uuid.UUID{g.StudentMemberID}}
 				if g.AssignmentID != nil {
 					t.Scope.AssignmentIDs = []uuid.UUID{*g.AssignmentID}
@@ -328,6 +377,9 @@ func documentCreate(d Deps) tool.Tool {
 				}
 				if g.SupersededBy != nil {
 					return DocumentCreateOut{}, apperr.Conflicts("that grade has been replaced; attach feedback to the grade that replaced it")
+				}
+				if g.Origin != "entered" {
+					return DocumentCreateOut{}, apperr.Precondition("a computed total is arithmetic, not a judgement; feedback goes on the grades beneath it")
 				}
 				ev.Type, ev.StudentMemberID, ev.AssignmentID = EventFeedbackFileAdded, &g.StudentMemberID, g.AssignmentID
 			}
@@ -644,6 +696,15 @@ func documentGet(d Deps) tool.Tool {
 			if courseLevel(doc.Kind) && doc.PublishedVersionID == nil && !drafts {
 				return DocumentGetOut{}, apperr.Missing("no such document in this course")
 			}
+			// Archiving is the only way to withdraw something that was
+			// published, so it has to withdraw it: not just from the list, but
+			// from anyone who kept the id. What stays readable is a version
+			// someone's submission is pinned to — named by id, below — because
+			// that is the record of what they were told.
+			withdrawn := courseLevel(doc.Kind) && doc.Status == "archived" && !drafts
+			if withdrawn && in.VersionID == nil {
+				return DocumentGetOut{}, apperr.Missing("no such document in this course")
+			}
 			out := DocumentGetOut{SubmissionID: doc.SubmissionID, GradeID: doc.GradeID,
 				DocumentSummary: DocumentSummary{ID: doc.ID, Kind: doc.Kind, Title: doc.Title, PublishedVersionID: doc.PublishedVersionID,
 					SortOrder: doc.SortOrder, Status: doc.Status, CreatedAt: doc.CreatedAt}}
@@ -652,7 +713,7 @@ func documentGet(d Deps) tool.Tool {
 			switch {
 			case in.VersionID != nil:
 				v, err = rc.Q.GetVersionOfDocument(ctx, dbq.GetVersionOfDocumentParams{ID: *in.VersionID, DocumentID: doc.ID})
-				if err == nil && !drafts && (doc.PublishedVersionID == nil || *doc.PublishedVersionID != v.ID) {
+				if err == nil && !drafts && (withdrawn || doc.PublishedVersionID == nil || *doc.PublishedVersionID != v.ID) {
 					// Not the published one and no right to drafts. One more
 					// way in: it is what the caller's own work was pinned to.
 					pinned, perr := rc.Q.VersionPinnedInScope(ctx, dbq.VersionPinnedInScopeParams{VersionID: &v.ID,

@@ -55,6 +55,30 @@ func TestS3Store(t *testing.T) {
 	if err != nil || info.Size != int64(len(body)) || info.ContentType != "application/pdf" || info.Checksum == "" {
 		t.Fatalf("stat: %+v %v", info, err)
 	}
+	// Attaching moves the object somewhere the upload URL cannot reach. The
+	// URL is still valid, and whoever holds it PUTs again — and changes
+	// nothing that was attached.
+	final := s.FinalKey(key)
+	attached, err := s.Finalize(ctx, key)
+	if err != nil || attached.Size != int64(len(body)) {
+		t.Fatalf("finalize: %+v %v", attached, err)
+	}
+	if _, err := s.Stat(ctx, key); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("the staged object is still there: %v", err)
+	}
+	again, _ := http.NewRequest(http.MethodPut, putURL, bytes.NewReader([]byte("swapped after handing in")))
+	for k, v := range headers {
+		again.Header.Set(k, v)
+	}
+	if res, err := http.DefaultClient.Do(again); err == nil {
+		res.Body.Close()
+	}
+	if after, err := s.Stat(ctx, final); err != nil || after != attached {
+		t.Fatalf("a second PUT to the upload URL changed the attached object: %+v -> %+v (%v)", attached, after, err)
+	}
+	_ = s.Delete(ctx, key) // the orphan the second PUT left
+	key = final
+
 	getURL, err := s.PresignGet(ctx, key, time.Minute)
 	if err != nil {
 		t.Fatal(err)

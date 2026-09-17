@@ -44,7 +44,7 @@ func checkFeedbackFiles(ctx context.Context, d Deps, q dbq.Querier, m *domain.Me
 			return apperr.Invalid("the same upload is listed twice")
 		}
 		seen[f.UploadToken] = true
-		if _, err := claimUpload(ctx, d, q, m, courseID, kindFeedback, f.UploadToken); err != nil {
+		if _, err := claimUpload(ctx, d, q, m, courseID, kindFeedback, f.UploadToken, false); err != nil {
 			return err
 		}
 	}
@@ -197,7 +197,16 @@ func checkSubject(ctx context.Context, q dbq.Querier, courseID uuid.UUID, s grad
 		return nil
 	}
 	// A component takes a grade directly only if it is a leaf with points of
-	// its own: not rolled up from children, not a bucket of assignments.
+	// its own: not rolled up from children, not a bucket of assignments. Checked
+	// under the tree lock, so that it cannot stop being one while we look.
+	if err := q.LockCourseComponents(ctx, courseID); err != nil {
+		return err
+	}
+	fresh, err := q.GetComponentInCourse(ctx, dbq.GetComponentInCourseParams{ID: s.component.ID, CourseID: courseID})
+	if err != nil {
+		return err
+	}
+	s.component = &fresh
 	if !s.component.PointsPossible.Valid {
 		return apperr.Precondition("this component is rolled up from what is beneath it and takes no grade of its own")
 	}

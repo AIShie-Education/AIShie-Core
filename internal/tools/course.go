@@ -134,9 +134,6 @@ func courseUpdate() tool.Tool {
 			if err != nil {
 				return OK{}, err
 			}
-			if c.Status == domain.CourseArchived {
-				return OK{}, apperr.Precondition("an archived course refuses every write")
-			}
 			if in.Title != nil {
 				if strings.TrimSpace(*in.Title) == "" {
 					return OK{}, apperr.Invalid("title cannot be empty")
@@ -162,7 +159,10 @@ type CourseIDIn struct {
 func courseSetStatus(name, desc, path, status, event string) tool.Tool {
 	return tool.Define(tool.Spec[CourseIDIn, OK]{
 		Name: name, Description: desc, Kind: tool.Write, Gate: admins,
-		HTTP: tool.Route{Method: "POST", Pattern: path},
+		// Changing whether a course is archived is the one write an archived
+		// course accepts.
+		OnArchived: true,
+		HTTP:       tool.Route{Method: "POST", Pattern: path},
 		Resolve: func(ctx context.Context, q dbq.Querier, in CourseIDIn) (tool.Target, error) {
 			return platformCourse(ctx, q, in.CourseID)
 		},

@@ -143,6 +143,14 @@ const MaxUploadBytes = 1 << 16
 
 func NewPlatform(t testing.TB) *Platform {
 	t.Helper()
+	return NewPlatformWithStore(t, func(fs *blob.FSStore) blob.Store { return fs })
+}
+
+// NewPlatformWithStore is NewPlatform with the tools talking to whatever wrap
+// makes of the filesystem store. Platform.Blob is still the filesystem store
+// underneath, so a test can PUT and read bytes the way a client would.
+func NewPlatformWithStore(t testing.TB, wrap func(*blob.FSStore) blob.Store) *Platform {
+	t.Helper()
 	w := NewWorld(t)
 	signer, err := blob.NewSigner("")
 	if err != nil {
@@ -155,7 +163,7 @@ func NewPlatform(t testing.TB) *Platform {
 	reg := tool.NewRegistry()
 	p := &Platform{World: w, Blob: store, Uploads: signer,
 		P: pipeline.New(w.Pool, reg, pipeline.Config{ProposalTTL: pipeline.DefaultProposalTTL})}
-	tools.RegisterAll(reg, tools.Deps{Pipeline: p.P, Blob: store, Uploads: signer, MaxUploadBytes: MaxUploadBytes})
+	tools.RegisterAll(reg, tools.Deps{Pipeline: p.P, Blob: wrap(store), Uploads: signer, MaxUploadBytes: MaxUploadBytes})
 	return p
 }
 

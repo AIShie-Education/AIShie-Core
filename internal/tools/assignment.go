@@ -168,7 +168,27 @@ func checkAssignment(ctx context.Context, q dbq.Querier, courseID uuid.UUID, a d
 			return apperr.Precondition("that document is of kind %s, not %s", doc.Kind, d.kind)
 		}
 	}
+	// Published means students can read it. assignment.publish insists the
+	// instructions have a published version; pointing an already published
+	// assignment at instructions that do not would get to the same place by
+	// another door, and every submission from then on would pin nothing.
+	if a.PublishedAt != nil && a.InstructionsDocumentID != nil {
+		v, err := q.GetDocumentPublishedVersion(ctx, *a.InstructionsDocumentID)
+		if err != nil {
+			return err
+		}
+		if v == nil {
+			return apperr.Precondition("the assignment is published, and those instructions have no published version for students to read")
+		}
+	}
 	if a.ComponentID != nil {
+		// The same lock component.create, update and move take. Without it
+		// this check and theirs each see the tree as it was before the other
+		// committed, and a component ends up with both assignments and
+		// children — whose assignments then count toward nothing.
+		if err := q.LockCourseComponents(ctx, courseID); err != nil {
+			return err
+		}
 		c, err := q.GetComponentInCourse(ctx, dbq.GetComponentInCourseParams{ID: *a.ComponentID, CourseID: courseID})
 		if errors.Is(err, pgx.ErrNoRows) {
 			return apperr.Precondition("the component is not part of this course's grading scheme")

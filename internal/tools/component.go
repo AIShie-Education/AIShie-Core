@@ -264,6 +264,18 @@ func componentUpdate() tool.Tool {
 				if c.ParentID == nil {
 					return OK{}, apperr.Precondition("the course total is rolled up, never graded directly")
 				}
+				// A former parent may still carry the totals that were written
+				// down for it when grades beneath it were posted. Those are live
+				// posted grades on this component: an entered grade could then
+				// never be posted over them, nor regraded, and there would be no
+				// way back through the tools.
+				if !c.PointsPossible.Valid {
+					if has, err := ec.Q.ComponentHasLivePostedGrades(ctx, &c.ID); err != nil {
+						return OK{}, err
+					} else if has {
+						return OK{}, apperr.Precondition("%q has posted totals from when it was rolled up; make a new component for what is graded directly", c.Name)
+					}
+				}
 				c.PointsPossible = nullDecimal(in.PointsPossible)
 			}
 			if err := checkComponent(c.Name, c.Weight, c.DropLowest, in.PointsPossible); err != nil {

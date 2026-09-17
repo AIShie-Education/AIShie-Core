@@ -1,10 +1,13 @@
 package tools_test
 
 import (
+	"strconv"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/shopspring/decimal"
 
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/apperr"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/domain"
@@ -275,7 +278,24 @@ func TestPlatformRules(t *testing.T) {
 		t.Fatalf("writing to an archived course: %+v", out)
 	}
 	b.do(t, b.sato, "assignment.list", m{"course_id": b.course}) // still readable
-	b.try(t, b.admin, "course.update", m{"course_id": b.course, "title": "New title"}, apperr.FailedPrecondition)
+	// An admin is no more able to write to it than its instructor is: the
+	// platform tools are refused for the same reason, and the refusal is on
+	// the record like any other.
+	for name, args := range map[string]m{
+		"course.update":          {"course_id": b.course, "title": "New title"},
+		"course.seat_instructor": {"course_id": b.course, "actor_id": b.grader},
+	} {
+		out := b.MustCall(b.admin, name, args, "archived-"+name)
+		if out.Status != domain.StatusDenied || out.Error.Details["reason"] != "course_archived" {
+			t.Fatalf("%s on an archived course: %+v", name, out)
+		}
+	}
+	if n := b.Count(`SELECT count(*) FROM course_member WHERE course_id = $1 AND actor_id = $2 AND role = 'instructor'`, b.course, b.grader); n != 0 {
+		t.Fatal("an instructor was seated in an archived course")
+	}
+	// Archiving it again is a conflict, not a denial; un-archiving is the
+	// one write it accepts.
+	b.try(t, b.admin, "course.archive", m{"course_id": b.course}, apperr.Conflict)
 	b.do(t, b.admin, "course.activate", m{"course_id": b.course})
 
 	// Department presets sit beside the built-ins, and win by name.
@@ -392,5 +412,111 @@ func TestAStudentWithAnEmptiedScopeReachesNobody(t *testing.T) {
 	b.try(t, b.yuki, "submission.create", m{"course_id": b.course, "assignment_id": b.hw3, "body": "x"}, apperr.Forbidden)
 	if out := b.MustCall(b.yuki, "gradebook.get", m{"course_id": b.course, "student_member_id": b.yukiM}, ""); out.Status != domain.StatusDenied {
 		t.Fatalf("scope did not fail closed: %+v", out)
+	}
+}
+
+// A 'missing' row that has been graded is history: the zero, and the reason
+// given for it, describe a submission with nothing in it. Late work goes
+// beside it as a new attempt rather than appearing underneath the grade.
+func TestAGradedMissingRowIsNotTakenOver(t *testing.T) {
+	b := build(t)
+	placeholder := uuid.New()
+	b.Exec(`INSERT INTO submission (id, assignment_id, course_id, student_member_id, state) VALUES ($1, $2, $3, $4, 'missing')`,
+		placeholder, b.hw3, b.course, b.yukiM)
+	zero := testkit.Result[tools.GradeSubmitOut](t, b.do(t, b.sato, "grade.submit",
+		m{"course_id": b.course, "submission_id": placeholder, "score": 0, "feedback": "Nothing handed in."})).GradeID
+
+	// Graded is enough; it need not have been posted yet.
+	late := testkit.Result[tools.SubmissionCreateOut](t, b.do(t, b.yuki, "submission.create", m{"course_id": b.course, "assignment_id": b.hw3, "body": "my late essay"}))
+	if late.SubmissionID == placeholder || late.Attempt != 2 {
+		t.Fatalf("late work went underneath an existing grade: %+v", late)
+	}
+	if n := b.Count(`SELECT count(*) FROM submission WHERE id = $1 AND state = 'missing' AND body IS NULL`, placeholder); n != 1 {
+		t.Fatal("the graded placeholder changed")
+	}
+	b.do(t, b.sato, "grade.post", m{"course_id": b.course, "grade_ids": []uuid.UUID{zero}})
+	b.do(t, b.yuki, "submission.submit", m{"course_id": b.course, "submission_id": late.SubmissionID})
+	// The late attempt is graded in its own right, and is then what counts.
+	better := testkit.Result[tools.GradeSubmitOut](t, b.do(t, b.sato, "grade.submit", m{"course_id": b.course, "submission_id": late.SubmissionID, "score": 60})).GradeID
+	b.do(t, b.sato, "grade.post", m{"course_id": b.course, "grade_ids": []uuid.UUID{better}})
+	book := testkit.Result[tools.GradebookGetOut](t, b.do(t, b.yuki, "gradebook.get", m{"course_id": b.course, "student_member_id": b.yukiM}))
+	for _, c := range book.Components {
+		if c.ComponentID == b.bucket && (c.Percent == nil || !c.Percent.Equal(decimal.NewFromInt(60))) {
+			t.Fatalf("Assignments is %v, want the later attempt's 60", c.Percent)
+		}
+	}
+}
+
+// The checks that keep a component one thing — a bucket of assignments, a
+// parent of other components, or something graded directly — read the tree
+// and then write to it. Two of them at once, each passing on what it read,
+// could leave a component being two things; its assignments would then
+// silently stop counting. They are serialised by the course's tree lock.
+func TestAComponentStaysOneThingUnderConcurrency(t *testing.T) {
+	b := build(t)
+	for round := range 8 {
+		target := testkit.Result[tools.IDOut](t, b.do(t, b.sato, "component.create",
+			m{"course_id": b.course, "parent_id": b.total, "name": "Coursework " + strconv.Itoa(round), "weight": 1})).ID
+		calls := []struct {
+			name string
+			args m
+		}{
+			{"component.create", m{"course_id": b.course, "parent_id": target, "name": "Labs"}},
+			{"assignment.create", m{"course_id": b.course, "title": "HW", "points_possible": 10, "component_id": target}},
+			{"component.update", m{"course_id": b.course, "component_id": target, "points_possible": 50}},
+		}
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		for i, c := range calls {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				if _, err := b.Call(b.sato, c.name, c.args, "race-"+strconv.Itoa(round)+"-"+strconv.Itoa(i)); err != nil {
+					t.Errorf("%s: %v", c.name, err)
+				}
+			}()
+		}
+		close(start)
+		wg.Wait()
+		if n := b.Count(`SELECT (EXISTS (SELECT 1 FROM grade_component WHERE parent_id = $1))::int
+			+ (EXISTS (SELECT 1 FROM assignment WHERE component_id = $1))::int
+			+ (SELECT (points_possible IS NOT NULL)::int FROM grade_component WHERE id = $1)`, target); n != 1 {
+			t.Fatalf("round %d: the component is %d things at once", round, n)
+		}
+	}
+}
+
+// assignment.publish insists on instructions students can read. Changing a
+// published assignment's instructions must insist on the same, or everyone
+// who hands in afterwards is pinned to nothing.
+func TestAPublishedAssignmentKeepsReadableInstructions(t *testing.T) {
+	b := build(t)
+	unpublished := testkit.Result[tools.DocumentCreateOut](t, b.do(t, b.sato, "document.create",
+		m{"course_id": b.course, "kind": "instructions", "title": "HW3, rewritten", "body_md": "tbd"})).DocumentID
+	change := m{"course_id": b.course, "assignment_id": b.hw3, "instructions_document_id": unpublished}
+	b.try(t, b.sato, "assignment.update", change, apperr.FailedPrecondition)
+	if n := b.Count(`SELECT count(*) FROM assignment WHERE id = $1 AND instructions_document_id IS NULL`, b.hw3); n != 1 {
+		t.Fatal("the refused change was kept")
+	}
+	b.do(t, b.sato, "document.publish", m{"course_id": b.course, "document_id": unpublished})
+	b.do(t, b.sato, "assignment.update", change)
+
+	// An assignment nobody can see yet may point at a draft brief.
+	draftBrief := testkit.Result[tools.DocumentCreateOut](t, b.do(t, b.sato, "document.create",
+		m{"course_id": b.course, "kind": "instructions", "title": "HW4", "body_md": "tbd"})).DocumentID
+	hw4 := testkit.Result[tools.IDOut](t, b.do(t, b.sato, "assignment.create", m{"course_id": b.course, "title": "HW4", "points_possible": 10})).ID
+	b.do(t, b.sato, "assignment.update", m{"course_id": b.course, "assignment_id": hw4, "instructions_document_id": draftBrief})
+}
+
+// "An archived course refuses every write" includes the writes that touch no
+// row of ours: an upload URL is somewhere to put a file for a course that is
+// closed.
+func TestAnArchivedCourseIssuesNoUploadURLs(t *testing.T) {
+	b := build(t)
+	b.do(t, b.admin, "course.archive", m{"course_id": b.course})
+	out, err := b.Call(b.sato, "document.upload_url", m{"course_id": b.course, "kind": "material", "content_type": "text/plain"}, "closed")
+	if err == nil && (out.Status == domain.StatusExecuted || out.Status == domain.StatusProposed) {
+		t.Fatalf("an archived course handed out an upload URL: %+v", out)
 	}
 }

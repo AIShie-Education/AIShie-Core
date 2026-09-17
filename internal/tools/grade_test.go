@@ -298,3 +298,39 @@ func TestIdsFromAnotherCourseAreNotFound(t *testing.T) {
 		t.Fatalf("err = %v, want not_found", err)
 	}
 }
+
+// A parent's totals are written down as posted grades on the parent. If the
+// parent is later emptied and turned into something graded directly, those
+// totals would sit in the way for ever: an entered grade could not be posted
+// over them, and students would go on being shown a stale percentage as the
+// grade for it.
+func TestAFormerParentWithPostedTotalsIsNotGradedDirectly(t *testing.T) {
+	b := build(t)
+	exams := testkit.Result[tools.IDOut](t, b.do(t, b.sato, "component.create", m{"course_id": b.course, "parent_id": b.total, "name": "Exams", "weight": 30})).ID
+	final := testkit.Result[tools.IDOut](t, b.do(t, b.sato, "component.create",
+		m{"course_id": b.course, "parent_id": exams, "name": "Final", "points_possible": 100})).ID
+	g := testkit.Result[tools.GradeSubmitOut](t, b.do(t, b.sato, "grade.submit",
+		m{"course_id": b.course, "component_id": final, "student_member_id": b.yukiM, "score": 80})).GradeID
+	b.do(t, b.sato, "grade.post", m{"course_id": b.course, "grade_ids": []uuid.UUID{g}})
+	if n := b.Count(`SELECT count(*) FROM grade WHERE component_id = $1 AND origin = 'computed' AND superseded_by IS NULL`, exams); n != 1 {
+		t.Fatalf("%d live totals on Exams, want Yuki's", n)
+	}
+
+	// Sato flattens the scheme, and tries to reuse Exams as Participation.
+	b.do(t, b.sato, "component.move", m{"course_id": b.course, "component_id": final, "new_parent_id": b.total})
+	reuse := m{"course_id": b.course, "component_id": exams, "name": "Participation", "points_possible": 10}
+	b.try(t, b.sato, "component.update", reuse, apperr.FailedPrecondition)
+	if n := b.Count(`SELECT count(*) FROM grade_component WHERE id = $1 AND name = 'Exams' AND points_possible IS NULL`, exams); n != 1 {
+		t.Fatal("the refused change was kept")
+	}
+	// A new component is the way, and works.
+	part := testkit.Result[tools.IDOut](t, b.do(t, b.sato, "component.create",
+		m{"course_id": b.course, "parent_id": b.total, "name": "Participation", "points_possible": 10})).ID
+	pg := testkit.Result[tools.GradeSubmitOut](t, b.do(t, b.sato, "grade.submit",
+		m{"course_id": b.course, "component_id": part, "student_member_id": b.yukiM, "score": 9})).GradeID
+	b.do(t, b.sato, "grade.post", m{"course_id": b.course, "grade_ids": []uuid.UUID{pg}})
+
+	// One that never had totals written down can still be turned.
+	spare := testkit.Result[tools.IDOut](t, b.do(t, b.sato, "component.create", m{"course_id": b.course, "parent_id": b.total, "name": "Spare"})).ID
+	b.do(t, b.sato, "component.update", m{"course_id": b.course, "component_id": spare, "points_possible": 5})
+}

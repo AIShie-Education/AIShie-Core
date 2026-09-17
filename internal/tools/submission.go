@@ -218,10 +218,23 @@ func submissionCreate() tool.Tool {
 				case stateDraft:
 					return SubmissionCreateOut{}, apperr.Conflicts("there is already an open draft; edit or submit that one").With("submission_id", latest.ID)
 				case stateMissing:
-					if err := ec.Q.ReopenMissingSubmission(ctx, dbq.ReopenMissingSubmissionParams{ID: latest.ID, Body: in.Body}); err != nil {
+					// Late work takes the placeholder over — unless someone has
+					// graded the placeholder. A zero "for handing in nothing"
+					// is a grade of that nothing; the work a grade was given
+					// for never changes underneath it. Then the placeholder
+					// stays as it is, as history, and the late work is a new
+					// attempt with a grade of its own to come.
+					graded, err := ec.Q.SubmissionHasGrades(ctx, &latest.ID)
+					if err != nil {
 						return SubmissionCreateOut{}, err
 					}
-					return SubmissionCreateOut{SubmissionID: latest.ID, Attempt: latest.Attempt}, nil
+					if !graded {
+						if err := ec.Q.ReopenMissingSubmission(ctx, dbq.ReopenMissingSubmissionParams{ID: latest.ID, Body: in.Body}); err != nil {
+							return SubmissionCreateOut{}, err
+						}
+						return SubmissionCreateOut{SubmissionID: latest.ID, Attempt: latest.Attempt}, nil
+					}
+					attempt = latest.Attempt + 1
 				default:
 					attempt = latest.Attempt + 1
 				}
