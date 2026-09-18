@@ -14,11 +14,14 @@ import (
 type Querier interface {
 	AddAssignmentScope(ctx context.Context, arg AddAssignmentScopeParams) error
 	AddStudentScope(ctx context.Context, arg AddStudentScopeParams) error
-	AssignmentHasPostedGrades(ctx context.Context, assignmentID uuid.UUID) (bool, error)
+	// Entered and not replaced: a draft waiting to be posted counts, since what it
+	// was entered against would change under it just the same.
+	AssignmentHasLiveGrades(ctx context.Context, assignmentID uuid.UUID) (bool, error)
 	CancelProposal(ctx context.Context, arg CancelProposalParams) (int64, error)
 	ClearAssignmentScope(ctx context.Context, memberID uuid.UUID) error
 	ClearStudentScope(ctx context.Context, memberID uuid.UUID) error
 	ComponentHasGrades(ctx context.Context, componentID *uuid.UUID) (bool, error)
+	ComponentHasLiveGrades(ctx context.Context, componentID *uuid.UUID) (bool, error)
 	// Any origin: an entered grade, or a total written down when it was a parent.
 	ComponentHasLivePostedGrades(ctx context.Context, componentID *uuid.UUID) (bool, error)
 	CountAssignmentsInScope(ctx context.Context, arg CountAssignmentsInScopeParams) (int64, error)
@@ -37,6 +40,9 @@ type Querier interface {
 	// actually deleted.
 	DeleteStaleSessions(ctx context.Context, expiredBefore *time.Time) (int64, error)
 	DepartmentExists(ctx context.Context, id uuid.UUID) (bool, error)
+	// Whether a published assignment within the member's scope refers to the
+	// document as its instructions or rubric.
+	DocumentInUseByPublishedAssignment(ctx context.Context, arg DocumentInUseByPublishedAssignmentParams) (bool, error)
 	EmailTaken(ctx context.Context, lower string) (bool, error)
 	// Moves a proposal to its end state. The status guard makes a lost race
 	// between two deciders, or a decider and the expiry sweep, a no-op.
@@ -81,11 +87,15 @@ type Querier interface {
 	// The partial unique index allows at most one row per (course, actor) that is
 	// not removed. A paused row is returned so the caller can say why it denied.
 	GetLiveMemberForAuthz(ctx context.Context, arg GetLiveMemberForAuthzParams) (GetLiveMemberForAuthzRow, error)
+	GetLiveMembership(ctx context.Context, arg GetLiveMembershipParams) (GetLiveMembershipRow, error)
 	// By id, removed rows included: re-authorizing a proposal checks the very
 	// membership it was made under, not whatever row the actor holds today.
 	GetMemberForAuthz(ctx context.Context, id uuid.UUID) (GetMemberForAuthzRow, error)
 	GetMemberForSweep(ctx context.Context, id uuid.UUID) (GetMemberForSweepRow, error)
 	GetMemberInCourse(ctx context.Context, arg GetMemberInCourseParams) (GetMemberInCourseRow, error)
+	// The same row, locked for the rest of the transaction: the management tools
+	// read a seat and write it back, and two of them at once must take turns.
+	GetMemberInCourseForUpdate(ctx context.Context, arg GetMemberInCourseForUpdateParams) (GetMemberInCourseForUpdateRow, error)
 	GetPasswordCredential(ctx context.Context, actorID uuid.UUID) (GetPasswordCredentialRow, error)
 	GetPreset(ctx context.Context, id uuid.UUID) (PermissionPreset, error)
 	// Roster facts about a member. This is not authorization: that a grade can
@@ -131,6 +141,9 @@ type Querier interface {
 	ListComponents(ctx context.Context, courseID uuid.UUID) ([]ListComponentsRow, error)
 	// Course-level documents: material, instructions, rubrics. Owned documents
 	// (submitted files, feedback) are reached through their owners instead.
+	// Instructions and rubrics are the assignment's: to anyone who cannot read
+	// drafts they exist only once a published assignment within their scope
+	// refers to them, or a student could read next week's exam by listing.
 	ListCourseDocuments(ctx context.Context, arg ListCourseDocumentsParams) ([]ListCourseDocumentsRow, error)
 	ListCourses(ctx context.Context, arg ListCoursesParams) ([]ListCoursesRow, error)
 	// Never the hash.
@@ -150,7 +163,9 @@ type Querier interface {
 	ListEventsForAction(ctx context.Context, actionID *uuid.UUID) ([]ListEventsForActionRow, error)
 	ListExpiredMembers(ctx context.Context, arg ListExpiredMembersParams) ([]ListExpiredMembersRow, error)
 	ListGradeDocuments(ctx context.Context, gradeID *uuid.UUID) ([]ListGradeDocumentsRow, error)
-	// Assignments that count toward the grade.
+	// Assignments that count toward the grade. An unpublished one cannot have a
+	// submission, so it cannot have a grade; it is left out rather than shown to
+	// every student as something they scored nothing on.
 	ListGradedAssignments(ctx context.Context, courseID uuid.UUID) ([]ListGradedAssignmentsRow, error)
 	// Scope in SQL. Two more rules ride along:
 	//   * an unposted or superseded grade is shown only to a member who grades
@@ -184,7 +199,6 @@ type Querier interface {
 	ListTerms(ctx context.Context) ([]Term, error)
 	ListVersions(ctx context.Context, documentID uuid.UUID) ([]ListVersionsRow, error)
 	LiveComponentGradeExists(ctx context.Context, arg LiveComponentGradeExistsParams) (bool, error)
-	LiveMembershipExists(ctx context.Context, arg LiveMembershipExistsParams) (bool, error)
 	LiveSubmissionGradeExists(ctx context.Context, submissionID *uuid.UUID) (bool, error)
 	// Taken before changing the tree's shape, so that two moves cannot each
 	// check for a cycle and then create one between them.

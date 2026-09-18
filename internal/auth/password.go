@@ -74,8 +74,10 @@ func VerifyPassword(password, phc string) (bool, error) {
 	if _, err := fmt.Sscanf(parts[3], "m=%d,t=%d,p=%d", &p.memoryKiB, &p.passes, &p.lanes); err != nil {
 		return false, errors.New("malformed argon2 parameters")
 	}
-	// A stored hash is ours, but refuse absurd parameters all the same.
-	if p.memoryKiB > 1<<21 || p.passes > 16 || p.lanes == 0 {
+	// A stored hash is ours, but refuse absurd parameters all the same: too
+	// large is a way to exhaust the server, and zero passes or lanes is
+	// something argon2 panics on rather than computes.
+	if p.memoryKiB < 8*uint32(p.lanes) || p.memoryKiB > 1<<21 || p.passes == 0 || p.passes > 16 || p.lanes == 0 || p.lanes > 64 {
 		return false, errors.New("argon2 parameters out of range")
 	}
 	salt, err := base64.RawStdEncoding.DecodeString(parts[4])

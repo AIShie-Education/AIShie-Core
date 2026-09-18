@@ -39,13 +39,15 @@ const (
 	kindMaterial, kindInstructions, kindRubric = "material", "instructions", "rubric"
 	kindSubmission, kindFeedback               = "submission", "feedback"
 
-	EventDocumentCreated      = "document.created"
-	EventDocumentVersionAdded = "document.version_added"
-	EventDocumentPublished    = "document.published"
-	EventRubricPublished      = "document.rubric_published"
-	EventDocumentArchived     = "document.archived"
-	EventSubmissionFileAdded  = "submission.file_added"
-	EventFeedbackFileAdded    = "grade.feedback_added"
+	EventDocumentCreated        = "document.created"
+	EventDocumentVersionAdded   = "document.version_added"
+	EventDocumentPublished      = "document.published"
+	EventRubricPublished        = "document.rubric_published"
+	EventDocumentArchived       = "document.archived"
+	EventSubmissionFileAdded    = "submission.file_added"
+	EventSubmissionFileArchived = "submission.file_archived"
+	EventFeedbackFileAdded      = "grade.feedback_added"
+	EventFeedbackFileArchived   = "grade.feedback_archived"
 
 	uploadWindow = 15 * time.Minute
 	downloadTTL  = 15 * time.Minute
@@ -567,8 +569,18 @@ func documentArchive() tool.Tool {
 			if n == 0 {
 				return OK{}, apperr.Conflicts("the document is already archived")
 			}
-			ec.Emit(events.Event{Type: EventDocumentArchived, CourseID: &in.CourseID, SubjectType: "document", SubjectID: &doc.ID,
-				Payload: map[string]any{"kind": doc.Kind}})
+			// An owned file's event belongs to its student and assignment, as
+			// its creation did, so that feed scope applies to it and those who
+			// read the submission — not those who read drafts — see it go.
+			ev := events.Event{Type: EventDocumentArchived, CourseID: &in.CourseID, SubjectType: "document", SubjectID: &doc.ID,
+				Payload: map[string]any{"kind": doc.Kind}}
+			switch doc.Kind {
+			case kindSubmission:
+				ev.Type, ev.StudentMemberID, ev.AssignmentID = EventSubmissionFileArchived, doc.SubmissionStudent, doc.SubmissionAssignment
+			case kindFeedback:
+				ev.Type, ev.StudentMemberID, ev.AssignmentID = EventFeedbackFileArchived, doc.GradeStudent, doc.GradeAssignment
+			}
+			ec.Emit(ev)
 			return OK{OK: true}, nil
 		},
 	})
@@ -604,8 +616,9 @@ func documentList() tool.Tool {
 	return tool.Define(tool.Spec[DocumentListIn, DocumentListOut]{
 		Name: "document.list",
 		Description: "The course's material, instructions and rubrics — those kinds the caller has permission to read. " +
-			"Documents with no published version are shown only to members who can read drafts. Submitted files and " +
-			"feedback files are not here: they come with submission.get and grade.get.",
+			"Documents with no published version are shown only to members who can read drafts, and so are instructions " +
+			"and rubrics that no published assignment in the caller's scope refers to. Submitted files and feedback files " +
+			"are not here: they come with submission.get and grade.get.",
 		Kind: tool.Read, Gate: tool.Gate{Any: true, Perms: []domain.Perm{domain.PermDocumentRead, domain.PermRubricRead}},
 		HTTP: tool.Route{Method: "GET", Pattern: "/v1/courses/{course_id}/documents"},
 		Resolve: func(_ context.Context, _ dbq.Querier, in DocumentListIn) (tool.Target, error) {
@@ -631,6 +644,7 @@ func documentList() tool.Tool {
 				CourseID: in.CourseID, After: in.after(), MaxRows: in.limit(), Kinds: kinds,
 				IncludeUnpublished: rc.Member.Perm(domain.PermDocumentReadDraft).Allowed(),
 				IncludeArchived:    in.IncludeArchived && rc.Member.Perm(domain.PermDocumentReadDraft).Allowed(),
+				AssignmentAll:      rc.Scope.AssignmentAll, MemberID: rc.Scope.MemberID,
 			})
 			out := DocumentListOut{Documents: make([]DocumentSummary, 0, len(rows))}
 			for _, r := range rows {
@@ -696,12 +710,24 @@ func documentGet(d Deps) tool.Tool {
 			if courseLevel(doc.Kind) && doc.PublishedVersionID == nil && !drafts {
 				return DocumentGetOut{}, apperr.Missing("no such document in this course")
 			}
-			// Archiving is the only way to withdraw something that was
-			// published, so it has to withdraw it: not just from the list, but
-			// from anyone who kept the id. What stays readable is a version
-			// someone's submission is pinned to — named by id, below — because
-			// that is the record of what they were told.
+			// To anyone who cannot read drafts, a course-level document is
+			// there while it is published and not archived — archiving is
+			// the only way to withdraw something published, so it has to
+			// withdraw it from anyone who kept the id — and, for instructions
+			// and a rubric, while a published assignment in their scope
+			// refers to it: they are the assignment's, and the assignment is
+			// what is visible or not. What stays readable regardless is a
+			// version someone's submission is pinned to, named by id below,
+			// because that is the record of what they were told.
 			withdrawn := courseLevel(doc.Kind) && doc.Status == "archived" && !drafts
+			if courseLevel(doc.Kind) && doc.Kind != kindMaterial && !drafts && !withdrawn {
+				inUse, err := rc.Q.DocumentInUseByPublishedAssignment(ctx, dbq.DocumentInUseByPublishedAssignmentParams{
+					DocumentID: &doc.ID, AssignmentAll: rc.Scope.AssignmentAll, MemberID: rc.Scope.MemberID})
+				if err != nil {
+					return DocumentGetOut{}, err
+				}
+				withdrawn = !inUse
+			}
 			if withdrawn && in.VersionID == nil {
 				return DocumentGetOut{}, apperr.Missing("no such document in this course")
 			}

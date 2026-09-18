@@ -24,6 +24,17 @@ func (q *Queries) ComponentHasGrades(ctx context.Context, componentID *uuid.UUID
 	return exists, err
 }
 
+const componentHasLiveGrades = `-- name: ComponentHasLiveGrades :one
+SELECT EXISTS (SELECT 1 FROM grade WHERE component_id = $1 AND origin = 'entered' AND superseded_by IS NULL)
+`
+
+func (q *Queries) ComponentHasLiveGrades(ctx context.Context, componentID *uuid.UUID) (bool, error) {
+	row := q.db.QueryRow(ctx, componentHasLiveGrades, componentID)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
+}
+
 const courseCodeTaken = `-- name: CourseCodeTaken :one
 SELECT EXISTS (SELECT 1 FROM course WHERE term_id = $1 AND code = $2 AND section = $3)
 `

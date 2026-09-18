@@ -12,6 +12,31 @@ import (
 	"github.com/google/uuid"
 )
 
+const documentInUseByPublishedAssignment = `-- name: DocumentInUseByPublishedAssignment :one
+SELECT EXISTS (
+    SELECT 1 FROM assignment a
+    WHERE (a.instructions_document_id = $1 OR a.rubric_document_id = $1)
+      AND a.published_at IS NOT NULL
+      AND ($2::bool OR EXISTS (
+            SELECT 1 FROM member_assignment_scope y WHERE y.member_id = $3 AND y.assignment_id = a.id))
+)
+`
+
+type DocumentInUseByPublishedAssignmentParams struct {
+	DocumentID    *uuid.UUID
+	AssignmentAll bool
+	MemberID      uuid.UUID
+}
+
+// Whether a published assignment within the member's scope refers to the
+// document as its instructions or rubric.
+func (q *Queries) DocumentInUseByPublishedAssignment(ctx context.Context, arg DocumentInUseByPublishedAssignmentParams) (bool, error) {
+	row := q.db.QueryRow(ctx, documentInUseByPublishedAssignment, arg.DocumentID, arg.AssignmentAll, arg.MemberID)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
+}
+
 const getDocumentWithOwner = `-- name: GetDocumentWithOwner :one
 SELECT d.id, d.course_id, d.kind, d.title, d.submission_id, d.grade_id, d.published_version_id,
        d.sort_order, d.status, d.created_at,
@@ -201,8 +226,13 @@ WHERE d.course_id = $1 AND d.id > $2
   AND d.kind = ANY($3::text[])
   AND ($4::bool OR d.published_version_id IS NOT NULL)
   AND ($5::bool OR d.status = 'active')
+  AND ($4::bool OR d.kind = 'material' OR EXISTS (
+        SELECT 1 FROM assignment a
+        WHERE (a.instructions_document_id = d.id OR a.rubric_document_id = d.id) AND a.published_at IS NOT NULL
+          AND ($6::bool OR EXISTS (
+                SELECT 1 FROM member_assignment_scope y WHERE y.member_id = $7 AND y.assignment_id = a.id))))
 ORDER BY d.id
-LIMIT $6
+LIMIT $8
 `
 
 type ListCourseDocumentsParams struct {
@@ -211,6 +241,8 @@ type ListCourseDocumentsParams struct {
 	Kinds              []string
 	IncludeUnpublished bool
 	IncludeArchived    bool
+	AssignmentAll      bool
+	MemberID           uuid.UUID
 	MaxRows            int32
 }
 
@@ -226,6 +258,9 @@ type ListCourseDocumentsRow struct {
 
 // Course-level documents: material, instructions, rubrics. Owned documents
 // (submitted files, feedback) are reached through their owners instead.
+// Instructions and rubrics are the assignment's: to anyone who cannot read
+// drafts they exist only once a published assignment within their scope
+// refers to them, or a student could read next week's exam by listing.
 func (q *Queries) ListCourseDocuments(ctx context.Context, arg ListCourseDocumentsParams) ([]ListCourseDocumentsRow, error) {
 	rows, err := q.db.Query(ctx, listCourseDocuments,
 		arg.CourseID,
@@ -233,6 +268,8 @@ func (q *Queries) ListCourseDocuments(ctx context.Context, arg ListCourseDocumen
 		arg.Kinds,
 		arg.IncludeUnpublished,
 		arg.IncludeArchived,
+		arg.AssignmentAll,
+		arg.MemberID,
 		arg.MaxRows,
 	)
 	if err != nil {

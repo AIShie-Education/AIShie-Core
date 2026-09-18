@@ -248,6 +248,16 @@ func componentUpdate() tool.Tool {
 					return OK{}, apperr.Precondition("%q has grades entered on it and cannot stop being graded directly", c.Name)
 				}
 				c.PointsPossible = decimal.NullDecimal{}
+			case in.PointsPossible != nil && c.PointsPossible.Valid && !c.PointsPossible.Decimal.Equal(*in.PointsPossible):
+				// Already graded directly, and worth something else now. As
+				// for an assignment: once a grade has been entered against
+				// the points possible, they no longer change.
+				if has, err := ec.Q.ComponentHasLiveGrades(ctx, &c.ID); err != nil {
+					return OK{}, err
+				} else if has {
+					return OK{}, apperr.Precondition("grades have been entered for %q; its points possible no longer change", c.Name)
+				}
+				c.PointsPossible = nullDecimal(in.PointsPossible)
 			case in.PointsPossible != nil:
 				// Becoming directly graded: it must be a leaf with nothing
 				// hanging from it.

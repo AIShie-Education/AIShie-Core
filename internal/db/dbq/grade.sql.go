@@ -427,7 +427,7 @@ func (q *Queries) ListDraftGradeIDsForAssignment(ctx context.Context, arg ListDr
 const listGradedAssignments = `-- name: ListGradedAssignments :many
 SELECT id, component_id, points_possible
 FROM assignment
-WHERE course_id = $1 AND component_id IS NOT NULL
+WHERE course_id = $1 AND component_id IS NOT NULL AND published_at IS NOT NULL
 ORDER BY id
 `
 
@@ -437,7 +437,9 @@ type ListGradedAssignmentsRow struct {
 	PointsPossible decimal.Decimal
 }
 
-// Assignments that count toward the grade.
+// Assignments that count toward the grade. An unpublished one cannot have a
+// submission, so it cannot have a grade; it is left out rather than shown to
+// every student as something they scored nothing on.
 func (q *Queries) ListGradedAssignments(ctx context.Context, courseID uuid.UUID) ([]ListGradedAssignmentsRow, error) {
 	rows, err := q.db.Query(ctx, listGradedAssignments, courseID)
 	if err != nil {

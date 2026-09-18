@@ -2,6 +2,8 @@ package tools_test
 
 import (
 	"context"
+	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -333,4 +335,68 @@ func TestAFormerParentWithPostedTotalsIsNotGradedDirectly(t *testing.T) {
 	// One that never had totals written down can still be turned.
 	spare := testkit.Result[tools.IDOut](t, b.do(t, b.sato, "component.create", m{"course_id": b.course, "parent_id": b.total, "name": "Spare"})).ID
 	b.do(t, b.sato, "component.update", m{"course_id": b.course, "component_id": spare, "points_possible": 5})
+}
+
+// "An unpublished assignment is visible only to holders of
+// perm_assignment_write." Nobody can submit to one, so it can never carry a
+// grade; the gradebook and the totals written down at posting leave it out,
+// rather than naming it to every student and counting a zero nobody could
+// have avoided.
+func TestAnUnpublishedAssignmentStaysOutOfTheGradebook(t *testing.T) {
+	b := build(t)
+	work := b.submit(t, b.yuki, "essay")
+	hidden := testkit.Result[tools.IDOut](t, b.do(t, b.sato, "assignment.create",
+		m{"course_id": b.course, "title": "SECRET final project", "points_possible": 300, "component_id": b.bucket})).ID
+
+	book := func() tools.GradebookGetOut {
+		return testkit.Result[tools.GradebookGetOut](t, b.do(t, b.yuki, "gradebook.get", m{"course_id": b.course, "student_member_id": b.yukiM}))
+	}
+	names := func(out tools.GradebookGetOut) string {
+		raw, _ := json.Marshal(out)
+		return string(raw)
+	}
+	if strings.Contains(names(book()), hidden.String()) {
+		t.Fatal("Yuki's gradebook names an assignment she cannot see")
+	}
+	g := testkit.Result[tools.GradeSubmitOut](t, b.do(t, b.sato, "grade.submit", m{"course_id": b.course, "submission_id": work, "score": 80})).GradeID
+	b.do(t, b.sato, "grade.post", m{"course_id": b.course, "grade_ids": []uuid.UUID{g}, "treat_ungraded_as_zero": true})
+	for _, line := range book().Components {
+		if line.ComponentID == b.bucket && (line.Percent == nil || !line.Percent.Equal(decimal.NewFromInt(80))) {
+			t.Fatalf("Assignments = %v, want 80: the unpublished project was counted", line.Percent)
+		}
+	}
+	if n := b.Count(`SELECT count(*) FROM grade WHERE origin = 'computed' AND student_member_id = $1 AND superseded_by IS NULL AND breakdown::text LIKE '%' || $2 || '%'`, b.yukiM, hidden.String()); n != 0 {
+		t.Fatal("a posted total's breakdown names the unpublished assignment")
+	}
+	// Published, it counts from then on.
+	b.do(t, b.sato, "assignment.publish", m{"course_id": b.course, "assignment_id": hidden})
+	if !strings.Contains(names(book()), hidden.String()) {
+		t.Fatal("the published project is not in the gradebook")
+	}
+}
+
+// A score is a score out of the points possible when it was given. Once any
+// grade has been entered — a draft waiting to be posted as much as a posted
+// one — what the work is worth no longer changes under it: a 95 entered out
+// of 100 must not be posted out of 50 with nobody having said so.
+func TestPointsAreFixedOnceAGradeIsEntered(t *testing.T) {
+	b := build(t)
+	// Before anything is entered, an assignment can be rescaled.
+	b.do(t, b.sato, "assignment.update", m{"course_id": b.course, "assignment_id": b.hw3, "points_possible": 100})
+	work := b.submit(t, b.yuki, "essay")
+	draft := testkit.Result[tools.GradeSubmitOut](t, b.do(t, b.sato, "grade.submit", m{"course_id": b.course, "submission_id": work, "score": 95})).GradeID
+	b.try(t, b.sato, "assignment.update", m{"course_id": b.course, "assignment_id": b.hw3, "points_possible": 50}, apperr.FailedPrecondition)
+	b.try(t, b.sato, "assignment.update", m{"course_id": b.course, "assignment_id": b.hw3, "points_possible": 200}, apperr.FailedPrecondition)
+	b.try(t, b.sato, "assignment.update", m{"course_id": b.course, "assignment_id": b.hw3, "component_id": b.midterm}, apperr.FailedPrecondition)
+	// What is not about the grade still changes.
+	b.do(t, b.sato, "assignment.update", m{"course_id": b.course, "assignment_id": b.hw3, "title": "HW3 (revised brief)"})
+	b.do(t, b.sato, "grade.post", m{"course_id": b.course, "grade_ids": []uuid.UUID{draft}})
+	if n := b.Count(`SELECT count(*) FROM grade WHERE id = $1 AND posted_at IS NOT NULL AND score = 95`, draft); n != 1 {
+		t.Fatal("the draft was not posted as entered")
+	}
+	// A directly graded component is held to the same rule.
+	b.do(t, b.sato, "component.update", m{"course_id": b.course, "component_id": b.midterm, "points_possible": 50})
+	b.do(t, b.sato, "grade.submit", m{"course_id": b.course, "component_id": b.midterm, "student_member_id": b.yukiM, "score": 45})
+	b.try(t, b.sato, "component.update", m{"course_id": b.course, "component_id": b.midterm, "points_possible": 100}, apperr.FailedPrecondition)
+	b.do(t, b.sato, "component.update", m{"course_id": b.course, "component_id": b.midterm, "name": "Midterm exam"})
 }

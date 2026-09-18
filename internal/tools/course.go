@@ -310,9 +310,17 @@ func seat(ctx context.Context, ec *tool.ExecCtx, s seating) (uuid.UUID, error) {
 	if a.Kind == "system" {
 		return uuid.Nil, apperr.Precondition("the system actor is not seated in courses")
 	}
-	if exists, err := ec.Q.LiveMembershipExists(ctx, dbq.LiveMembershipExistsParams{CourseID: s.courseID, ActorID: s.actorID}); err != nil {
+	// A seat whose expiry has passed is removed now rather than by the next
+	// sweep: it is in the way of the fresh one, and it was over anyway.
+	switch live, err := ec.Q.GetLiveMembership(ctx, dbq.GetLiveMembershipParams{CourseID: s.courseID, ActorID: s.actorID}); {
+	case errors.Is(err, pgx.ErrNoRows):
+	case err != nil:
 		return uuid.Nil, err
-	} else if exists {
+	case live.ExpiresAt != nil && !live.ExpiresAt.After(ec.Now):
+		if _, err := members.Remove(ctx, ec.Q, ec.Emit, s.courseID, live.ID, members.ReasonExpired); err != nil {
+			return uuid.Nil, err
+		}
+	default:
 		return uuid.Nil, apperr.Conflicts("the actor already has a seat in this course; change it, or remove it and add again for a fresh start")
 	}
 	if s.expiresAt != nil && !s.expiresAt.After(ec.Now) {
@@ -359,12 +367,16 @@ func seat(ctx context.Context, ec *tool.ExecCtx, s seating) (uuid.UUID, error) {
 // must belong to this course: a scope row naming another course's student
 // would be a quiet hole in the wall between courses.
 func writeScope(ctx context.Context, q *dbq.Queries, courseID, memberID uuid.UUID, studentScope string, students []uuid.UUID, assignmentScope string, assignments []uuid.UUID) error {
-	students, assignments = dedupe(students), dedupe(assignments)
+	if err := writeStudentScope(ctx, q, courseID, memberID, studentScope, students); err != nil {
+		return err
+	}
+	return writeAssignmentScope(ctx, q, courseID, memberID, assignmentScope, assignments)
+}
+
+func writeStudentScope(ctx context.Context, q *dbq.Queries, courseID, memberID uuid.UUID, studentScope string, students []uuid.UUID) error {
+	students = dedupe(students)
 	if studentScope != domain.ScopeListed && len(students) > 0 {
 		return apperr.Invalid("listed_students only makes sense with student_scope = listed")
-	}
-	if assignmentScope != domain.ScopeListed && len(assignments) > 0 {
-		return apperr.Invalid("listed_assignments only makes sense with assignment_scope = listed")
 	}
 	if len(students) > 0 {
 		// The member itself may be in its own list before its row is visible
@@ -383,6 +395,22 @@ func writeScope(ctx context.Context, q *dbq.Queries, courseID, memberID uuid.UUI
 			return apperr.Precondition("listed_students must all be current students of this course")
 		}
 	}
+	if err := q.ClearStudentScope(ctx, memberID); err != nil {
+		return err
+	}
+	for _, s := range students {
+		if err := q.AddStudentScope(ctx, dbq.AddStudentScopeParams{MemberID: memberID, StudentMemberID: s}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func writeAssignmentScope(ctx context.Context, q *dbq.Queries, courseID, memberID uuid.UUID, assignmentScope string, assignments []uuid.UUID) error {
+	assignments = dedupe(assignments)
+	if assignmentScope != domain.ScopeListed && len(assignments) > 0 {
+		return apperr.Invalid("listed_assignments only makes sense with assignment_scope = listed")
+	}
 	if len(assignments) > 0 {
 		n, err := q.CountAssignmentsOfCourse(ctx, dbq.CountAssignmentsOfCourseParams{CourseID: courseID, AssignmentIds: assignments})
 		if err != nil {
@@ -392,16 +420,8 @@ func writeScope(ctx context.Context, q *dbq.Queries, courseID, memberID uuid.UUI
 			return apperr.Precondition("listed_assignments must all be assignments of this course")
 		}
 	}
-	if err := q.ClearStudentScope(ctx, memberID); err != nil {
-		return err
-	}
 	if err := q.ClearAssignmentScope(ctx, memberID); err != nil {
 		return err
-	}
-	for _, s := range students {
-		if err := q.AddStudentScope(ctx, dbq.AddStudentScopeParams{MemberID: memberID, StudentMemberID: s}); err != nil {
-			return err
-		}
 	}
 	for _, a := range assignments {
 		if err := q.AddAssignmentScope(ctx, dbq.AddAssignmentScopeParams{MemberID: memberID, AssignmentID: a}); err != nil {

@@ -135,6 +135,14 @@ func TestDocumentPermissionFollowsKind(t *testing.T) {
 		return id
 	}
 	lecture, rubric := mk("material", "Lecture"), mk("rubric", "HW3 rubric")
+	// A rubric is an assignment's: until a published assignment in the
+	// reader's scope refers to it, it is not there to anyone who cannot read
+	// drafts. A lecture is not a rubric.
+	if _, err := b.Call(b.grader, "document.get", m{"course_id": b.course, "document_id": rubric}, ""); !apperr.Is(err, apperr.NotFound) {
+		t.Fatalf("the grader reading a rubric no assignment refers to: %v", err)
+	}
+	b.try(t, b.sato, "assignment.update", m{"course_id": b.course, "assignment_id": b.hw3, "rubric_document_id": lecture}, apperr.FailedPrecondition)
+	b.do(t, b.sato, "assignment.update", m{"course_id": b.course, "assignment_id": b.hw3, "rubric_document_id": rubric})
 
 	// The student preset reads material and not rubrics; the grader both.
 	b.get(t, b.yuki, m{"document_id": lecture})
@@ -167,9 +175,6 @@ func TestDocumentPermissionFollowsKind(t *testing.T) {
 	if out := b.MustCall(b.yuki, "document.add_version", m{"course_id": b.course, "document_id": lecture, "body_md": "defaced"}, "y2"); out.Status != domain.StatusDenied {
 		t.Fatalf("a student editing a lecture: %+v", out)
 	}
-	// The assignment can now point at the rubric; a lecture is not a rubric.
-	b.do(t, b.sato, "assignment.update", m{"course_id": b.course, "assignment_id": b.hw3, "rubric_document_id": rubric})
-	b.try(t, b.sato, "assignment.update", m{"course_id": b.course, "assignment_id": b.hw3, "rubric_document_id": lecture}, apperr.FailedPrecondition)
 }
 
 func TestFilesRoundTrip(t *testing.T) {
@@ -506,5 +511,50 @@ func TestAnArchivedDocumentIsWithdrawn(t *testing.T) {
 	}
 	if _, err := b.Call(b.ken, "document.get", m{"course_id": b.course, "document_id": brief.DocumentID, "version_id": brief.VersionID}, ""); !apperr.Is(err, apperr.NotFound) {
 		t.Fatalf("Ken, who was never pinned to it: %v", err)
+	}
+}
+
+// Instructions are the assignment's. Publishing them is a step on the way to
+// publishing the assignment — assignment.publish insists on it — and must not
+// itself put next week's exam in front of the class.
+func TestInstructionsAppearWithTheirAssignment(t *testing.T) {
+	b := build(t)
+	brief := testkit.Result[tools.DocumentCreateOut](t, b.do(t, b.sato, "document.create",
+		m{"course_id": b.course, "kind": "instructions", "title": "Take-home exam", "body_md": "Question 1: ..."})).DocumentID
+	b.do(t, b.sato, "document.publish", m{"course_id": b.course, "document_id": brief})
+	exam := testkit.Result[tools.IDOut](t, b.do(t, b.sato, "assignment.create",
+		m{"course_id": b.course, "title": "Take-home exam", "points_possible": 100, "instructions_document_id": brief})).ID
+
+	listed := func(actor uuid.UUID) bool {
+		for _, d := range testkit.Result[tools.DocumentListOut](t, b.do(t, actor, "document.list", m{"course_id": b.course})).Documents {
+			if d.ID == brief {
+				return true
+			}
+		}
+		return false
+	}
+	if listed(b.yuki) {
+		t.Fatal("the exam is listed before the assignment is published")
+	}
+	if _, err := b.Call(b.yuki, "document.get", m{"course_id": b.course, "document_id": brief}, ""); !apperr.Is(err, apperr.NotFound) {
+		t.Fatalf("a student reading the exam before the assignment is published: %v", err)
+	}
+	// Sato, who reads drafts, sees it as always.
+	b.get(t, b.sato, m{"document_id": brief})
+
+	b.do(t, b.sato, "assignment.publish", m{"course_id": b.course, "assignment_id": exam})
+	if !listed(b.yuki) {
+		t.Fatal("the exam is not listed once the assignment is published")
+	}
+	if got := b.get(t, b.yuki, m{"document_id": brief}); *got.Version.BodyMD != "Question 1: ..." {
+		t.Fatalf("%+v", got.Version)
+	}
+	// The grader is listed for HW3 alone: the exam is not its business,
+	// just as the assignment itself is not.
+	if listed(b.grader) {
+		t.Fatal("the grader, listed for HW3, sees the exam's instructions")
+	}
+	if _, err := b.Call(b.grader, "document.get", m{"course_id": b.course, "document_id": brief}, ""); !apperr.Is(err, apperr.NotFound) {
+		t.Fatalf("the grader reading instructions outside its scope: %v", err)
 	}
 }

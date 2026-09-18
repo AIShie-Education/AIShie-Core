@@ -113,10 +113,12 @@ WHERE course_id = $1
 ORDER BY sort_order, id;
 
 -- name: ListGradedAssignments :many
--- Assignments that count toward the grade.
+-- Assignments that count toward the grade. An unpublished one cannot have a
+-- submission, so it cannot have a grade; it is left out rather than shown to
+-- every student as something they scored nothing on.
 SELECT id, component_id, points_possible
 FROM assignment
-WHERE course_id = $1 AND component_id IS NOT NULL
+WHERE course_id = $1 AND component_id IS NOT NULL AND published_at IS NOT NULL
 ORDER BY id;
 
 -- name: ListLiveAssignmentScores :many

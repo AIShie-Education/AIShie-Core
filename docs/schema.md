@@ -164,7 +164,10 @@ the nearest one, and the choice is recorded here so that it is a decision and no
 An unposted grade, and a superseded one, is visible only to a member holding `perm_grade_submit`
 or `perm_grade_post`; everyone else sees live posted grades. That is the rule for students,
 stated without asking whether anyone is a student. An unpublished assignment is likewise
-visible only to holders of `perm_assignment_write`.
+visible only to holders of `perm_assignment_write` — and so are its instructions and rubric,
+which to anyone else exist only once a published assignment within their scope refers to
+them, and the gradebook, which counts only published assignments. Feedback on a posted grade
+is a release: adding to it or withdrawing it needs `perm_grade_post` as well.
 
 **Presets are rows of `permission_preset`**, with the same `perm_*` columns plus a default role
 and scope. Six built-ins (`student`, `observer`, `ta`, `instructor`, `tutor`, `grader`) are
@@ -181,10 +184,15 @@ case. Scope filters only things that belong to a student or an assignment: a tut
 Yuki still reads all course material but sees only Yuki's work.
 
 **Nobody hands out more than they hold.** `perm_member_manage` would otherwise quietly be every
-permission: seat a second account as instructor and use that. So `member.add`,
-`member.update_perms` and `member.rescope` refuse to grant any permission above the granter's
-own level on that column, and a granter whose own scope is a list may only grant `listed`,
-from within their own list. Lowering is always allowed. Nobody manages their own seat.
+permission: seat a second account as instructor and use that. A level is held over a scope for
+a time, so the three are measured together: any change that widens a seat — a level raised, a
+scope opened or a list added to, an expiry extended or cleared, a paused seat resumed — is a
+grant of the whole of what the seat will then hold, and the whole of it must be within the
+granter's own: no level above the granter's on any column, no reach beyond a list-scoped
+granter's own list, no life past the granter's own `expires_at`. Narrowing is always allowed,
+whatever the granter holds. Nobody manages their own seat, and a seat whose `expires_at` has
+passed is as good as removed whether or not the sweep has got to it: it is not revived, and
+seating the actor again is a fresh row.
 
 **Lifecycle**: add (new row, preset copied), pause (`status = 'paused'`, same id survives),
 remove (`status = 'removed'`, pending proposals cancelled, history kept), re-add (new row, new
@@ -219,6 +227,9 @@ posted grades):
   `drop_lowest` of them.
 - Work with no posted grade is left out and the rest re-normalised — a "grade so far", marked
   incomplete. `treat_ungraded_as_zero` counts it as zero instead, for final grades.
+- A score is a score out of the points possible when it was given: once any grade has been
+  entered for an assignment or a directly graded component — a draft as much as a posted one —
+  its `points_possible` and its place in the tree no longer change.
 
 ### 2.4 Content
 

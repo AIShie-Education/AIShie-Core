@@ -284,8 +284,8 @@ type AssignmentUpdateIn struct {
 func assignmentUpdate() tool.Tool {
 	return tool.Define(tool.Spec[AssignmentUpdateIn, OK]{
 		Name: "assignment.update",
-		Description: "Change an assignment. Once grades for it have been posted, what it is worth and where it counts are " +
-			"fixed: changing them would silently change totals students have already been shown.",
+		Description: "Change an assignment. Once any grade has been entered for it, what it is worth and where it counts " +
+			"are fixed: a score is a score out of the points possible when it was given.",
 		Kind: tool.Write, Gate: writeAssignments,
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/assignments/{assignment_id}"},
 		Resolve: func(ctx context.Context, q dbq.Querier, in AssignmentUpdateIn) (tool.Target, error) {
@@ -304,12 +304,17 @@ func assignmentUpdate() tool.Tool {
 			if in.ClearComponent {
 				a.ComponentID = nil
 			}
+			// A score is a score out of the points possible at the time it was
+			// given. Once any grade has been entered — posted, or a draft
+			// waiting to be — what the assignment is worth, and where it
+			// counts, no longer change: a 95 entered out of 100 would
+			// otherwise be posted out of 50, with nobody having said so.
 			movedInScheme := !a.PointsPossible.Equal(before.PointsPossible) || !sameID(a.ComponentID, before.ComponentID)
 			if movedInScheme {
-				if posted, err := ec.Q.AssignmentHasPostedGrades(ctx, a.ID); err != nil {
+				if graded, err := ec.Q.AssignmentHasLiveGrades(ctx, a.ID); err != nil {
 					return OK{}, err
-				} else if posted {
-					return OK{}, apperr.Precondition("grades for this assignment have been posted; its points and component no longer change")
+				} else if graded {
+					return OK{}, apperr.Precondition("grades have been entered for this assignment; its points and component no longer change")
 				}
 			}
 			if err := checkAssignment(ctx, ec.Q, in.CourseID, a); err != nil {

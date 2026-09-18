@@ -109,6 +109,28 @@ func (q *Queries) CountStudentsOfCourse(ctx context.Context, arg CountStudentsOf
 	return count, err
 }
 
+const getLiveMembership = `-- name: GetLiveMembership :one
+SELECT id, status, expires_at FROM course_member WHERE course_id = $1 AND actor_id = $2 AND status <> 'removed'
+`
+
+type GetLiveMembershipParams struct {
+	CourseID uuid.UUID
+	ActorID  uuid.UUID
+}
+
+type GetLiveMembershipRow struct {
+	ID        uuid.UUID
+	Status    string
+	ExpiresAt *time.Time
+}
+
+func (q *Queries) GetLiveMembership(ctx context.Context, arg GetLiveMembershipParams) (GetLiveMembershipRow, error) {
+	row := q.db.QueryRow(ctx, getLiveMembership, arg.CourseID, arg.ActorID)
+	var i GetLiveMembershipRow
+	err := row.Scan(&i.ID, &i.Status, &i.ExpiresAt)
+	return i, err
+}
+
 const getMemberInCourse = `-- name: GetMemberInCourse :one
 SELECT m.id, m.course_id, m.actor_id, m.role, m.status, m.preset_id, m.added_by_actor_id, m.expires_at, m.student_scope, m.assignment_scope, m.perm_document_read, m.perm_document_read_draft, m.perm_document_write, m.perm_rubric_read, m.perm_assignment_write, m.perm_submission_read, m.perm_submission_write, m.perm_grade_read, m.perm_grade_submit, m.perm_grade_post, m.perm_member_read, m.perm_member_manage, m.perm_action_decide, m.created_at, a.display_name, a.kind AS actor_kind
 FROM course_member m
@@ -153,6 +175,84 @@ type GetMemberInCourseRow struct {
 func (q *Queries) GetMemberInCourse(ctx context.Context, arg GetMemberInCourseParams) (GetMemberInCourseRow, error) {
 	row := q.db.QueryRow(ctx, getMemberInCourse, arg.ID, arg.CourseID)
 	var i GetMemberInCourseRow
+	err := row.Scan(
+		&i.ID,
+		&i.CourseID,
+		&i.ActorID,
+		&i.Role,
+		&i.Status,
+		&i.PresetID,
+		&i.AddedByActorID,
+		&i.ExpiresAt,
+		&i.StudentScope,
+		&i.AssignmentScope,
+		&i.PermDocumentRead,
+		&i.PermDocumentReadDraft,
+		&i.PermDocumentWrite,
+		&i.PermRubricRead,
+		&i.PermAssignmentWrite,
+		&i.PermSubmissionRead,
+		&i.PermSubmissionWrite,
+		&i.PermGradeRead,
+		&i.PermGradeSubmit,
+		&i.PermGradePost,
+		&i.PermMemberRead,
+		&i.PermMemberManage,
+		&i.PermActionDecide,
+		&i.CreatedAt,
+		&i.DisplayName,
+		&i.ActorKind,
+	)
+	return i, err
+}
+
+const getMemberInCourseForUpdate = `-- name: GetMemberInCourseForUpdate :one
+SELECT m.id, m.course_id, m.actor_id, m.role, m.status, m.preset_id, m.added_by_actor_id, m.expires_at, m.student_scope, m.assignment_scope, m.perm_document_read, m.perm_document_read_draft, m.perm_document_write, m.perm_rubric_read, m.perm_assignment_write, m.perm_submission_read, m.perm_submission_write, m.perm_grade_read, m.perm_grade_submit, m.perm_grade_post, m.perm_member_read, m.perm_member_manage, m.perm_action_decide, m.created_at, a.display_name, a.kind AS actor_kind
+FROM course_member m
+JOIN actor a ON a.id = m.actor_id
+WHERE m.id = $1 AND m.course_id = $2
+FOR UPDATE OF m
+`
+
+type GetMemberInCourseForUpdateParams struct {
+	ID       uuid.UUID
+	CourseID uuid.UUID
+}
+
+type GetMemberInCourseForUpdateRow struct {
+	ID                    uuid.UUID
+	CourseID              uuid.UUID
+	ActorID               uuid.UUID
+	Role                  string
+	Status                string
+	PresetID              *uuid.UUID
+	AddedByActorID        uuid.UUID
+	ExpiresAt             *time.Time
+	StudentScope          string
+	AssignmentScope       string
+	PermDocumentRead      AutonomyLevel
+	PermDocumentReadDraft AutonomyLevel
+	PermDocumentWrite     AutonomyLevel
+	PermRubricRead        AutonomyLevel
+	PermAssignmentWrite   AutonomyLevel
+	PermSubmissionRead    AutonomyLevel
+	PermSubmissionWrite   AutonomyLevel
+	PermGradeRead         AutonomyLevel
+	PermGradeSubmit       AutonomyLevel
+	PermGradePost         AutonomyLevel
+	PermMemberRead        AutonomyLevel
+	PermMemberManage      AutonomyLevel
+	PermActionDecide      AutonomyLevel
+	CreatedAt             time.Time
+	DisplayName           string
+	ActorKind             string
+}
+
+// The same row, locked for the rest of the transaction: the management tools
+// read a seat and write it back, and two of them at once must take turns.
+func (q *Queries) GetMemberInCourseForUpdate(ctx context.Context, arg GetMemberInCourseForUpdateParams) (GetMemberInCourseForUpdateRow, error) {
+	row := q.db.QueryRow(ctx, getMemberInCourseForUpdate, arg.ID, arg.CourseID)
+	var i GetMemberInCourseForUpdateRow
 	err := row.Scan(
 		&i.ID,
 		&i.CourseID,
@@ -419,22 +519,6 @@ func (q *Queries) ListStudentScope(ctx context.Context, memberID uuid.UUID) ([]u
 		return nil, err
 	}
 	return items, nil
-}
-
-const liveMembershipExists = `-- name: LiveMembershipExists :one
-SELECT EXISTS (SELECT 1 FROM course_member WHERE course_id = $1 AND actor_id = $2 AND status <> 'removed')
-`
-
-type LiveMembershipExistsParams struct {
-	CourseID uuid.UUID
-	ActorID  uuid.UUID
-}
-
-func (q *Queries) LiveMembershipExists(ctx context.Context, arg LiveMembershipExistsParams) (bool, error) {
-	row := q.db.QueryRow(ctx, liveMembershipExists, arg.CourseID, arg.ActorID)
-	var exists bool
-	err := row.Scan(&exists)
-	return exists, err
 }
 
 const setMemberExpiry = `-- name: SetMemberExpiry :exec

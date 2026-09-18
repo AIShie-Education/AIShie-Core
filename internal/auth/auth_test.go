@@ -58,7 +58,12 @@ func TestPasswordHashing(t *testing.T) {
 			t.Errorf("HashPassword(%d chars): %v", len(weak), err)
 		}
 	}
-	for _, bad := range []string{"", "plaintext", "$bcrypt$x$y$z$w", "$argon2id$v=19$m=999999999,t=3,p=4$AAAA$AAAA"} {
+	// Parameters argon2 would panic on, or that would exhaust the server,
+	// are an error, not a crash: a stored hash is trusted only so far.
+	salted := "$" + strings.Repeat("A", 22) + "$" + strings.Repeat("A", 43)
+	for _, bad := range []string{"", "plaintext", "$bcrypt$x$y$z$w", "$argon2id$v=19$m=999999999,t=3,p=4$AAAA$AAAA",
+		"$argon2id$v=19$m=65536,t=0,p=4" + salted, "$argon2id$v=19$m=65536,t=3,p=0" + salted,
+		"$argon2id$v=19$m=8,t=3,p=4" + salted, "$argon2id$v=19$m=65536,t=3,p=255" + salted} {
 		if ok, err := auth.VerifyPassword("x", bad); ok || err == nil {
 			t.Errorf("VerifyPassword against %q = %v, %v; want an error", bad, ok, err)
 		}
