@@ -71,7 +71,9 @@ course(id, dept_id→department, term_id→term, code, section = '', title, desc
 
 `actor.kind` is for display and audit. **Nothing branches on it.** What an actor may do is
 entirely on its `course_member` rows; `platform_role` covers the few operations outside any
-course.
+course. The one exception is `kind = 'system'`, the actor the background sweeps run as: it is
+never seated in a course, and no token is issued for it and no identity linked to it, so that
+its authority cannot be borrowed. Those two refusals read `kind`; nothing that grants does.
 
 `created_by_actor_id` is the delegation chain: root (seeded at install, the only null) creates
 admins, an admin creates a course and seats its first instructor, the instructor adds everyone
