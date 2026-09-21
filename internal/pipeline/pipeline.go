@@ -33,7 +33,9 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/apperr"
+	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/canon"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/domain"
+	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/signing"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/tool"
 )
 
@@ -42,6 +44,12 @@ type Config struct {
 	// checks it inline, so it holds whether or not the sweep has run. Zero
 	// means proposals do not expire.
 	ProposalTTL time.Duration
+	// Secrets seals the secret fields of a call (a password) into its payload
+	// hash, so that a key reused with a different secret is caught like any
+	// other reuse, while the hash gives nothing away to whoever reads the
+	// database. It must be the same on every instance, or a retry landing
+	// elsewhere reads as a conflict; nil makes one for this process alone.
+	Secrets *signing.Signer
 }
 
 // DefaultProposalTTL is two weeks: long enough to survive a holiday, short
@@ -59,7 +67,38 @@ type Pipeline struct {
 }
 
 func New(pool *pgxpool.Pool, reg *tool.Registry, cfg Config) *Pipeline {
+	if cfg.Secrets == nil {
+		s, err := signing.New("")
+		if err != nil {
+			panic("pipeline: " + err.Error())
+		}
+		cfg.Secrets = s
+	}
 	return &Pipeline{pool: pool, reg: reg, cfg: cfg, now: time.Now}
+}
+
+// secretPurpose keeps the sealed secrets apart from every other digest the
+// signer makes.
+const secretPurpose = "action.secret"
+
+// payload returns what is stored for a call and what is hashed for it. The
+// two differ only where the tool takes a secret: the stored form drops it,
+// the hashed form carries a keyed digest of it.
+func (p *Pipeline) payload(t tool.Tool, raw []byte) (canonical []byte, hash string, err error) {
+	canonical, err = canon.Canonicalize(raw, t.SecretIn...)
+	if err != nil {
+		return nil, "", err
+	}
+	hashed := canonical
+	if len(t.SecretIn) > 0 {
+		hashed, err = canon.Sealed(raw, func(field string, value []byte) string {
+			return p.cfg.Secrets.Digest(secretPurpose, append([]byte(field+"\n"), value...))
+		}, t.SecretIn...)
+		if err != nil {
+			return nil, "", err
+		}
+	}
+	return canonical, canon.Hash(t.Name, hashed), nil
 }
 
 // SetClock replaces the clock, for tests of expiry.

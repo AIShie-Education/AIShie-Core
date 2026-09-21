@@ -99,10 +99,36 @@ UPDATE grade SET posted_at = $2, posted_by_member_id = $3
 WHERE id = $1 AND posted_at IS NULL AND superseded_by IS NULL;
 
 -- name: GetLiveComputedGrade :one
-SELECT id, score
+SELECT id, score, breakdown
 FROM grade
 WHERE component_id = $1 AND student_member_id = $2 AND origin = 'computed'
   AND posted_at IS NOT NULL AND superseded_by IS NULL;
+
+-- Serialising what races -------------------------------------------------------
+
+-- name: LockSubmissionForGrading :exec
+-- A row lock, not an UPDATE: the freeze trigger does not fire. Two drafts for
+-- one submission entered at once would otherwise both be live.
+SELECT 1 FROM submission WHERE id = $1 FOR UPDATE;
+
+-- name: LockComponentGradeTarget :exec
+SELECT pg_advisory_xact_lock(hashtextextended(
+    'grade-target:' || (sqlc.arg(component_id)::uuid)::text || ':' || (sqlc.arg(student_member_id)::uuid)::text, 0));
+
+-- name: LockStudentTotals :exec
+-- One writer of a student's rolled-up totals at a time.
+SELECT pg_advisory_xact_lock(hashtextextended(
+    'totals:' || (sqlc.arg(course_id)::uuid)::text || ':' || (sqlc.arg(student_member_id)::uuid)::text, 0));
+
+-- name: NewestSubmissionDraftAt :one
+SELECT created_at FROM grade
+WHERE submission_id = $1 AND origin = 'entered' AND posted_at IS NULL AND superseded_by IS NULL
+ORDER BY created_at DESC LIMIT 1;
+
+-- name: NewestComponentDraftAt :one
+SELECT created_at FROM grade
+WHERE component_id = $1 AND student_member_id = $2 AND origin = 'entered' AND posted_at IS NULL AND superseded_by IS NULL
+ORDER BY created_at DESC LIMIT 1;
 
 -- What gradecalc needs -------------------------------------------------------
 

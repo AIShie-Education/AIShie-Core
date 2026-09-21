@@ -27,11 +27,10 @@ func (p *Pipeline) invokeWrite(ctx context.Context, caller Caller, t tool.Tool, 
 	case len(key) > MaxIdempotencyKeyLen:
 		return Outcome{}, apperr.Invalid("the idempotency key is longer than %d characters", MaxIdempotencyKeyLen)
 	}
-	canonical, err := canon.Canonicalize(rawArgs, t.SecretIn...)
+	canonical, hash, err := p.payload(t, rawArgs)
 	if err != nil {
 		return Outcome{}, apperr.Invalid("%v", err)
 	}
-	hash := canon.Hash(t.Name, canonical)
 
 	var out Outcome
 	err = db.InTx(ctx, p.pool, func(tx pgx.Tx) error {
@@ -94,6 +93,25 @@ func (p *Pipeline) write(ctx context.Context, tx pgx.Tx, caller Caller, t tool.T
 	if failure != nil {
 		result = errorResult(failure)
 	}
+	// A proposal is carried out later, against a world that may have moved.
+	// What it must be carried out against as it stands now is pinned into
+	// the stored payload; the hash stays that of the call as it was made,
+	// which is what a retry of it presents.
+	if status == domain.StatusProposed && t.Pin != nil {
+		pinned, err := t.Pin(ctx, q, in)
+		if err != nil {
+			e, ok := isCallerFault(err)
+			if !ok {
+				return Outcome{}, err
+			}
+			status, failure = domain.StatusFailed, e
+			result = errorResult(failure)
+		} else if raw, err := json.Marshal(pinned); err != nil {
+			return Outcome{}, fmt.Errorf("%s: pinned arguments: %w", t.Name, err)
+		} else if canonical, err = canon.Canonicalize(raw, t.SecretIn...); err != nil {
+			return Outcome{}, fmt.Errorf("%s: pinned arguments: %w", t.Name, err)
+		}
+	}
 
 	actionID := ids.New()
 	row := dbq.InsertActionParams{
@@ -150,7 +168,7 @@ func (p *Pipeline) write(ctx context.Context, tx pgx.Tx, caller Caller, t tool.T
 	res, err := savepoint(ctx, tx, func(sp pgx.Tx) (any, error) {
 		return t.Execute(ctx, &tool.ExecCtx{
 			Tx: sp, Q: dbq.New(sp), Actor: actor, Member: a.decision.Member,
-			ActionID: actionID, Now: now, Emit: stamp(buf, actionID),
+			ActionID: actionID, Now: now, ActionCreatedAt: now, Emit: stamp(buf, actionID),
 		}, in)
 	})
 	if err != nil {
@@ -215,10 +233,17 @@ func replay(a dbq.Action, hash string) (Outcome, error) {
 		ReviewState: domain.ReviewState(a.ReviewState),
 		Replayed:    true,
 	}
-	if e := storedError(a.Result); e != nil {
-		out.Error = e
-	} else if len(a.Result) > 0 {
-		out.Result = a.Result
+	// What result holds is fixed by the status, not by its shape: a failed,
+	// denied or cancelled row stores {"error": …}; an executed one stores the
+	// tool's result, which is free to have an "error" field of its own — a
+	// decision whose proposal was cancelled reports exactly that.
+	switch out.Status {
+	case domain.StatusDenied, domain.StatusFailed, domain.StatusCancelled:
+		out.Error = storedError(a.Result)
+	default:
+		if len(a.Result) > 0 {
+			out.Result = a.Result
+		}
 	}
 	return out, nil
 }

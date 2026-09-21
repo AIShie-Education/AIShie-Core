@@ -14,6 +14,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -55,6 +56,13 @@ func (s *Signer) mac(purpose string, body []byte) []byte {
 	m.Write([]byte{0}) // a purpose cannot contain it, so "ab"+"c" is never "a"+"bc"
 	m.Write(body)
 	return m.Sum(nil)
+}
+
+// Digest is a keyed digest of body for purpose, in hex. Where a plain hash
+// of a secret would let anyone holding the database try guesses against it
+// at hashing speed, this needs the key as well.
+func (s *Signer) Digest(purpose string, body []byte) string {
+	return hex.EncodeToString(s.mac(purpose, body))
 }
 
 // Sign returns a token carrying claim, good only for purpose.

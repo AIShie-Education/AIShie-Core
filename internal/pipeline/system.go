@@ -11,7 +11,6 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/apperr"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/canon"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/db"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/db/dbq"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/domain"
@@ -51,11 +50,10 @@ func (p *Pipeline) InvokeSystem(ctx context.Context, systemActor uuid.UUID, name
 	if err != nil {
 		return Outcome{}, err
 	}
-	canonical, err := canon.Canonicalize(raw, t.SecretIn...)
+	canonical, hash, err := p.payload(t, raw)
 	if err != nil {
 		return Outcome{}, err
 	}
-	hash := canon.Hash(t.Name, canonical)
 
 	var out Outcome
 	err = db.InTx(ctx, p.pool, func(tx pgx.Tx) error {
@@ -104,7 +102,7 @@ func (p *Pipeline) InvokeSystem(ctx context.Context, systemActor uuid.UUID, name
 		res, err := savepoint(ctx, tx, func(sp pgx.Tx) (any, error) {
 			return t.Execute(ctx, &tool.ExecCtx{
 				Tx: sp, Q: dbq.New(sp), Actor: domain.Actor{ID: systemActor, DisplayName: "system", Status: domain.ActorActive},
-				ActionID: actionID, Now: now, Emit: stamp(buf, actionID),
+				ActionID: actionID, Now: now, ActionCreatedAt: now, Emit: stamp(buf, actionID),
 			}, in)
 		})
 		if err != nil {

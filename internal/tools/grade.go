@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -232,6 +233,22 @@ func checkSubject(ctx context.Context, q dbq.Querier, courseID uuid.UUID, s grad
 	return nil
 }
 
+// pinRubric fills in the rubric version a grade is against when the caller
+// left it to default: the rubric's published version as it stands now. It is
+// a Pin, run when a proposal is made, so that a proposal approved after the
+// rubric has moved on still records the version the grader was shown.
+func pinRubric(ctx context.Context, q dbq.Querier, s gradeSubject, c *GradeContent) error {
+	if c.RubricVersionID != nil || s.assignment == nil || s.assignment.RubricDocumentID == nil {
+		return nil
+	}
+	v, err := q.GetDocumentPublishedVersion(ctx, *s.assignment.RubricDocumentID)
+	if err != nil {
+		return err
+	}
+	c.RubricVersionID = v
+	return nil
+}
+
 // checkContent holds the rules about the grade itself, and returns the rubric
 // version to pin: the one named, or the rubric's published version.
 func checkContent(ctx context.Context, q dbq.Querier, s gradeSubject, c GradeContent) (*uuid.UUID, error) {
@@ -305,6 +322,13 @@ func gradeSubmit(d Deps) tool.Tool {
 			}
 			return checkFeedbackFiles(ctx, d, q, m, in.CourseID, in.FeedbackFiles)
 		},
+		Pin: func(ctx context.Context, q dbq.Querier, in GradeSubmitIn) (GradeSubmitIn, error) {
+			s, err := load(ctx, q, in)
+			if err != nil {
+				return in, err
+			}
+			return in, pinRubric(ctx, q, s, &in.GradeContent)
+		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in GradeSubmitIn) (GradeSubmitOut, error) {
 			s, err := load(ctx, ec.Q, in)
 			if err != nil {
@@ -316,6 +340,20 @@ func gradeSubmit(d Deps) tool.Tool {
 			}
 			breakdown, err := breakdownJSON(in.Breakdown)
 			if err != nil {
+				return GradeSubmitOut{}, err
+			}
+			// One draft at a time for one piece of work: the target is locked
+			// before the earlier drafts are looked at, or two graders at once
+			// would each see none and leave two live drafts, which nothing
+			// could then post.
+			if err := lockGradeTarget(ctx, ec.Q, s); err != nil {
+				return GradeSubmitOut{}, err
+			}
+			// A new draft replaces earlier ones — but this draft is as old as
+			// the call that made it. A proposal approved on Wednesday must
+			// not replace a draft somebody entered on Tuesday: the approver
+			// saw the proposal, not the draft.
+			if err := noNewerDraft(ctx, ec, s); err != nil {
 				return GradeSubmitOut{}, err
 			}
 			id := ids.New()
@@ -353,6 +391,40 @@ func gradeSubmit(d Deps) tool.Tool {
 	})
 }
 
+// lockGradeTarget serialises the writers of one piece of work's grades.
+func lockGradeTarget(ctx context.Context, q *dbq.Queries, s gradeSubject) error {
+	if s.submission != nil {
+		return q.LockSubmissionForGrading(ctx, s.submission.ID)
+	}
+	return q.LockComponentGradeTarget(ctx, dbq.LockComponentGradeTargetParams{ComponentID: s.component.ID, StudentMemberID: s.student})
+}
+
+// noNewerDraft refuses to replace a draft entered after this call was made.
+// A direct call is as new as anything: it applies to a proposal being
+// carried out later than it was made.
+func noNewerDraft(ctx context.Context, ec *tool.ExecCtx, s gradeSubject) error {
+	if !ec.ActionCreatedAt.Before(ec.Now) {
+		return nil
+	}
+	var newest time.Time
+	var err error
+	if s.submission != nil {
+		newest, err = ec.Q.NewestSubmissionDraftAt(ctx, &s.submission.ID)
+	} else {
+		newest, err = ec.Q.NewestComponentDraftAt(ctx, dbq.NewestComponentDraftAtParams{ComponentID: &s.component.ID, StudentMemberID: s.student})
+	}
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if newest.After(ec.ActionCreatedAt) {
+		return apperr.Precondition("a newer draft was entered for this work after this grade was proposed; look at it, and propose again if it should still be replaced")
+	}
+	return nil
+}
+
 // ---------------------------------------------------------------------------
 // grade.post
 // ---------------------------------------------------------------------------
@@ -361,7 +433,7 @@ type GradePostIn struct {
 	tool.InCourse
 	GradeIDs            []uuid.UUID `json:"grade_ids,omitempty" jsonschema:"the draft grades to post; or give assignment_id"`
 	AssignmentID        *uuid.UUID  `json:"assignment_id,omitempty" jsonschema:"post every draft grade waiting for this assignment"`
-	TreatUngradedAsZero bool        `json:"treat_ungraded_as_zero,omitempty" jsonschema:"for final grades: count ungraded work as zero in the totals"`
+	TreatUngradedAsZero bool        `json:"treat_ungraded_as_zero,omitempty" jsonschema:"for final grades: count ungraded work as zero in the totals. Once a student's totals have been written this way they stay final: later posts and regrades keep counting ungraded work as zero"`
 }
 
 type GradePostOut struct {
@@ -415,17 +487,17 @@ func gradePost() tool.Tool {
 			if err != nil {
 				return tool.Target{}, err
 			}
-			t := tool.Target{CourseID: in.CourseID, Type: "grade"}
-			if len(rows) == 1 {
+			t := tool.Target{CourseID: in.CourseID, Type: "grade", Scope: postScope(rows)}
+			switch {
+			case in.AssignmentID != nil:
+				// The assignment is the target whether or not anything is
+				// waiting on it: an assignment outside the caller's scope is
+				// out of scope before the drafts are counted, so the count
+				// tells them nothing.
+				t.Type, t.ID = "assignment", in.AssignmentID
+				t.Scope.AssignmentIDs = append(t.Scope.AssignmentIDs, *in.AssignmentID)
+			case len(rows) == 1:
 				t.ID = &rows[0].ID
-			}
-			for _, g := range rows {
-				t.Scope.StudentMemberIDs = append(t.Scope.StudentMemberIDs, g.StudentMemberID)
-				if g.AssignmentID != nil {
-					t.Scope.AssignmentIDs = append(t.Scope.AssignmentIDs, *g.AssignmentID)
-				} else {
-					t.Scope.SpansAssignments = true
-				}
 			}
 			return t, nil
 		},
@@ -461,6 +533,15 @@ func gradePost() tool.Tool {
 			if err := checkPostable(ctx, ec.Q, rows); err != nil {
 				return GradePostOut{}, err
 			}
+			// With assignment_id the batch is whatever is a draft now, which
+			// may be more than what authorize() scope-checked: a draft entered
+			// in between, for a student the caller does not reach. Checked
+			// again against the rows that are actually about to be posted.
+			if reason, err := authz.CheckScope(ctx, ec.Q, ec.Member, postScope(rows)); err != nil {
+				return GradePostOut{}, err
+			} else if reason != authz.ReasonNone {
+				return GradePostOut{}, apperr.Forbid("a draft entered since this call was authorized is outside your scope; call again").With("reason", string(reason))
+			}
 
 			out := GradePostOut{Posted: make([]uuid.UUID, 0, len(rows))}
 			changed := map[uuid.UUID][]uuid.UUID{}
@@ -490,10 +571,37 @@ func gradePost() tool.Tool {
 	})
 }
 
+// postScope is steps 4 and 5 for a batch: every student and assignment in it.
+func postScope(rows []dbq.GetGradesInCourseRow) authz.Target {
+	var t authz.Target
+	for _, g := range rows {
+		t.StudentMemberIDs = append(t.StudentMemberIDs, g.StudentMemberID)
+		if g.AssignmentID != nil {
+			t.AssignmentIDs = append(t.AssignmentIDs, *g.AssignmentID)
+		} else {
+			t.SpansAssignments = true
+		}
+	}
+	return t
+}
+
 // checkPostable: a grade is posted once. Each must be a live entered draft,
 // and its target must not already have a live posted grade.
 func checkPostable(ctx context.Context, q dbq.Querier, rows []dbq.GetGradesInCourseRow) error {
+	targets := map[string]uuid.UUID{}
 	for _, g := range rows {
+		// Two drafts for one piece of work in one batch: whichever is
+		// posted second would collide with the first. Said plainly instead.
+		key := g.StudentMemberID.String()
+		if g.SubmissionID != nil {
+			key = "s:" + g.SubmissionID.String()
+		} else if g.ComponentID != nil {
+			key += ":c:" + g.ComponentID.String()
+		}
+		if other, dup := targets[key]; dup {
+			return apperr.Precondition("grades %s and %s are both drafts for the same work; enter one draft for it and post that", other, g.ID)
+		}
+		targets[key] = g.ID
 		switch {
 		case g.Origin != "entered":
 			return apperr.Precondition("grade %s is a computed total; totals are written by posting, not posted", g.ID)
@@ -595,6 +703,13 @@ func gradeRegrade(d Deps) tool.Tool {
 				return err
 			}
 			return checkFeedbackFiles(ctx, d, q, m, in.CourseID, in.FeedbackFiles)
+		},
+		Pin: func(ctx context.Context, q dbq.Querier, in GradeRegradeIn) (GradeRegradeIn, error) {
+			_, s, err := load(ctx, q, in)
+			if err != nil {
+				return in, err
+			}
+			return in, pinRubric(ctx, q, s, &in.GradeContent)
 		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in GradeRegradeIn) (GradeRegradeOut, error) {
 			if _, err := ec.Q.LockGradesInCourse(ctx, dbq.LockGradesInCourseParams{Ids: []uuid.UUID{in.GradeID}, CourseID: in.CourseID}); err != nil {

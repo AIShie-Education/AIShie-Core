@@ -48,7 +48,7 @@ Every tool that changes something takes an idempotency_key: any string you choos
 
 Every result has a status:
 - executed: done.
-- proposed: NOT done. Your permission for this action requires a person's confirmation first, so it has been queued for one. This is normal and is not an error; do not retry it under a new key. Note the action_id and carry on. You learn the decision from event_list (action.approved, action.rejected or action.cancelled carrying that action_id) or action_list_mine.
+- proposed: NOT done. Your permission for this action requires a person's confirmation first, so it has been queued for one. This is normal and is not an error; do not retry it under a new key. Note the action_id and carry on. You learn the decision from event_list (action.approved, action.rejected or action.cancelled carrying that action_id; action.approved's payload says whether the outcome was executed or failed) or action_list_mine.
 - denied: you are not permitted to do this here. The attempt is on record. Retrying will not help.
 - failed: permitted, but a rule prevented it; the error says which.
 
@@ -219,7 +219,7 @@ type envelope struct {
 const proposedNote = "Not executed. This action needs a person's confirmation and has been queued as the action_id above. " +
 	"This is the normal outcome at your permission level, not an error: do not retry it under a new idempotency key. " +
 	"Carry on with other work, and look for action.approved, action.rejected or action.cancelled carrying this action_id " +
-	"in event_list, or check action_list_mine."
+	"in event_list, or check action_list_mine. action.approved says in its payload whether the outcome was executed or failed."
 
 func handle(d Deps, t tool.Tool) mcp.ToolHandler {
 	return func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {

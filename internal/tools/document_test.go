@@ -558,3 +558,44 @@ func TestInstructionsAppearWithTheirAssignment(t *testing.T) {
 		t.Fatalf("the grader reading instructions outside its scope: %v", err)
 	}
 }
+
+// With an object store, attaching moves the object before the transaction
+// commits, and the move is not undone if the transaction then is. A retry
+// with the same token — which is what a caller is told to do after a fault
+// of ours — must find the object where the earlier attempt left it and
+// attach it, not be told nothing was ever uploaded.
+func TestARetriedAttachFindsTheMovedObject(t *testing.T) {
+	var store testkit.ObjectStore
+	b := buildOn(t, testkit.NewPlatformWithStore(t, func(fs *blob.FSStore) blob.Store {
+		store = testkit.ObjectStore{FSStore: fs}
+		return store
+	}))
+	draft := testkit.Result[tools.SubmissionCreateOut](t, b.do(t, b.yuki, "submission.create", m{"course_id": b.course, "assignment_id": b.hw3})).SubmissionID
+	u := testkit.Result[tools.UploadURLOut](t, b.do(t, b.yuki, "document.upload_url", m{"course_id": b.course, "kind": "submission", "content_type": "text/plain"}))
+	b.put(t, u, []byte("my essay"))
+	key, _, err := b.Blob.Redeem(strings.TrimPrefix(u.UploadURL, "http://lms.test"+blob.BlobPath), "PUT")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The earlier attempt: the object was moved, and then nothing was
+	// recorded.
+	if _, err := store.Finalize(context.Background(), key); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.Blob.Stat(context.Background(), key); err == nil {
+		t.Fatal("the staging object is still there; this test would prove nothing")
+	}
+
+	file := testkit.Result[tools.DocumentCreateOut](t, b.do(t, b.yuki, "document.create",
+		m{"course_id": b.course, "kind": "submission", "title": "essay.txt", "submission_id": draft, "upload_token": u.UploadToken})).DocumentID
+	got := b.get(t, b.yuki, m{"document_id": file})
+	if string(b.download(t, *got.Version.DownloadURL)) != "my essay" {
+		t.Fatal("the retried attach did not attach the moved object")
+	}
+	if n := b.Count(`SELECT count(*) FROM document_version WHERE document_id = $1 AND storage_key = $2 AND byte_size = 8`, file, store.FinalKey(key)); n != 1 {
+		t.Fatal("the version does not record the final object")
+	}
+	// A token whose object was never uploaded is still refused.
+	never := testkit.Result[tools.UploadURLOut](t, b.do(t, b.yuki, "document.upload_url", m{"course_id": b.course, "kind": "submission", "content_type": "text/plain"}))
+	b.try(t, b.yuki, "document.create", m{"course_id": b.course, "kind": "submission", "title": "x", "submission_id": draft, "upload_token": never.UploadToken}, apperr.FailedPrecondition)
+}

@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"reflect"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/google/jsonschema-go/jsonschema"
@@ -104,7 +105,13 @@ type ExecCtx struct {
 	Actor    domain.Actor
 	Member   *domain.Member
 	ActionID uuid.UUID
-	Now      time.Time
+	// Now is when this is being executed. ActionCreatedAt is when the call
+	// was made: the same moment for a direct call, and the moment of the
+	// proposal for an approval, which may be days later. A tool that must
+	// not overwrite what was done in between compares against it, and can
+	// tell an approval from a direct call by its being earlier than Now.
+	Now             time.Time
+	ActionCreatedAt time.Time
 	// Emit queues an event. It is written, with ActionID filled in, only if
 	// the action executes.
 	Emit func(events.Event)
@@ -148,6 +155,11 @@ type Spec[In, Out any] struct {
 	// before Execute, and before a proposal is queued, so that nobody is
 	// asked to approve something that could never run.
 	Validate func(ctx context.Context, q dbq.Querier, m *domain.Member, in In) error
+	// Pin fills in defaults that must be fixed when a proposal is made rather
+	// than when it is approved — the rubric version a grade is against, say,
+	// which may have moved on by then. It runs only for a call that is being
+	// queued as a proposal; what it returns is the payload stored with it.
+	Pin func(ctx context.Context, q dbq.Querier, in In) (In, error)
 	// Execute is set for a Write, Query for a Read.
 	Execute func(ctx context.Context, ec *ExecCtx, in In) (Out, error)
 	Query   func(ctx context.Context, rc *ReadCtx, in In) (Out, error)
@@ -174,8 +186,30 @@ type Tool struct {
 	CourseID func(in any) uuid.UUID
 	Resolve  func(ctx context.Context, q dbq.Querier, in any) (Target, error)
 	Validate func(ctx context.Context, q dbq.Querier, m *domain.Member, in any) error
+	Pin      func(ctx context.Context, q dbq.Querier, in any) (any, error)
 	Execute  func(ctx context.Context, ec *ExecCtx, in any) (any, error)
 	Query    func(ctx context.Context, rc *ReadCtx, in any) (any, error)
+}
+
+// hasNUL walks a decoded JSON value looking for a string with U+0000 in it.
+func hasNUL(v any) bool {
+	switch x := v.(type) {
+	case string:
+		return strings.ContainsRune(x, 0)
+	case []any:
+		for _, e := range x {
+			if hasNUL(e) {
+				return true
+			}
+		}
+	case map[string]any:
+		for k, e := range x {
+			if strings.ContainsRune(k, 0) || hasNUL(e) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // InCourse is embedded by the input of every course-scoped tool, so that the
@@ -266,6 +300,11 @@ func Define[In, Out any](s Spec[In, Out]) Tool {
 		if err := resolved.Validate(instance); err != nil {
 			return nil, apperr.Invalid("arguments do not match the schema of %s: %v", s.Name, err)
 		}
+		if hasNUL(instance) {
+			// The database cannot hold it, in a payload or in a column, so
+			// it is refused here, as any other malformed argument is.
+			return nil, apperr.Invalid("arguments cannot contain U+0000")
+		}
 		var in In
 		if err := json.Unmarshal(raw, &in); err != nil {
 			return nil, apperr.Invalid("arguments: %v", err)
@@ -284,6 +323,11 @@ func Define[In, Out any](s Spec[In, Out]) Tool {
 	if s.Validate != nil {
 		t.Validate = func(ctx context.Context, q dbq.Querier, m *domain.Member, in any) error {
 			return s.Validate(ctx, q, m, in.(In))
+		}
+	}
+	if s.Pin != nil {
+		t.Pin = func(ctx context.Context, q dbq.Querier, in any) (any, error) {
+			return s.Pin(ctx, q, in.(In))
 		}
 	}
 	if s.Execute != nil {

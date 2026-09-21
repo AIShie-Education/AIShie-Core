@@ -206,7 +206,7 @@ func (q *Queries) GetGradesInCourse(ctx context.Context, arg GetGradesInCoursePa
 }
 
 const getLiveComputedGrade = `-- name: GetLiveComputedGrade :one
-SELECT id, score
+SELECT id, score, breakdown
 FROM grade
 WHERE component_id = $1 AND student_member_id = $2 AND origin = 'computed'
   AND posted_at IS NOT NULL AND superseded_by IS NULL
@@ -218,14 +218,15 @@ type GetLiveComputedGradeParams struct {
 }
 
 type GetLiveComputedGradeRow struct {
-	ID    uuid.UUID
-	Score decimal.Decimal
+	ID        uuid.UUID
+	Score     decimal.Decimal
+	Breakdown []byte
 }
 
 func (q *Queries) GetLiveComputedGrade(ctx context.Context, arg GetLiveComputedGradeParams) (GetLiveComputedGradeRow, error) {
 	row := q.db.QueryRow(ctx, getLiveComputedGrade, arg.ComponentID, arg.StudentMemberID)
 	var i GetLiveComputedGradeRow
-	err := row.Scan(&i.ID, &i.Score)
+	err := row.Scan(&i.ID, &i.Score, &i.Breakdown)
 	return i, err
 }
 
@@ -566,6 +567,21 @@ func (q *Queries) LiveSubmissionGradeExists(ctx context.Context, submissionID *u
 	return exists, err
 }
 
+const lockComponentGradeTarget = `-- name: LockComponentGradeTarget :exec
+SELECT pg_advisory_xact_lock(hashtextextended(
+    'grade-target:' || ($1::uuid)::text || ':' || ($2::uuid)::text, 0))
+`
+
+type LockComponentGradeTargetParams struct {
+	ComponentID     uuid.UUID
+	StudentMemberID uuid.UUID
+}
+
+func (q *Queries) LockComponentGradeTarget(ctx context.Context, arg LockComponentGradeTargetParams) error {
+	_, err := q.db.Exec(ctx, lockComponentGradeTarget, arg.ComponentID, arg.StudentMemberID)
+	return err
+}
+
 const lockGradesInCourse = `-- name: LockGradesInCourse :many
 SELECT g.id
 FROM grade g
@@ -598,6 +614,66 @@ func (q *Queries) LockGradesInCourse(ctx context.Context, arg LockGradesInCourse
 		return nil, err
 	}
 	return items, nil
+}
+
+const lockStudentTotals = `-- name: LockStudentTotals :exec
+SELECT pg_advisory_xact_lock(hashtextextended(
+    'totals:' || ($1::uuid)::text || ':' || ($2::uuid)::text, 0))
+`
+
+type LockStudentTotalsParams struct {
+	CourseID        uuid.UUID
+	StudentMemberID uuid.UUID
+}
+
+// One writer of a student's rolled-up totals at a time.
+func (q *Queries) LockStudentTotals(ctx context.Context, arg LockStudentTotalsParams) error {
+	_, err := q.db.Exec(ctx, lockStudentTotals, arg.CourseID, arg.StudentMemberID)
+	return err
+}
+
+const lockSubmissionForGrading = `-- name: LockSubmissionForGrading :exec
+
+SELECT 1 FROM submission WHERE id = $1 FOR UPDATE
+`
+
+// Serialising what races -------------------------------------------------------
+// A row lock, not an UPDATE: the freeze trigger does not fire. Two drafts for
+// one submission entered at once would otherwise both be live.
+func (q *Queries) LockSubmissionForGrading(ctx context.Context, id uuid.UUID) error {
+	_, err := q.db.Exec(ctx, lockSubmissionForGrading, id)
+	return err
+}
+
+const newestComponentDraftAt = `-- name: NewestComponentDraftAt :one
+SELECT created_at FROM grade
+WHERE component_id = $1 AND student_member_id = $2 AND origin = 'entered' AND posted_at IS NULL AND superseded_by IS NULL
+ORDER BY created_at DESC LIMIT 1
+`
+
+type NewestComponentDraftAtParams struct {
+	ComponentID     *uuid.UUID
+	StudentMemberID uuid.UUID
+}
+
+func (q *Queries) NewestComponentDraftAt(ctx context.Context, arg NewestComponentDraftAtParams) (time.Time, error) {
+	row := q.db.QueryRow(ctx, newestComponentDraftAt, arg.ComponentID, arg.StudentMemberID)
+	var created_at time.Time
+	err := row.Scan(&created_at)
+	return created_at, err
+}
+
+const newestSubmissionDraftAt = `-- name: NewestSubmissionDraftAt :one
+SELECT created_at FROM grade
+WHERE submission_id = $1 AND origin = 'entered' AND posted_at IS NULL AND superseded_by IS NULL
+ORDER BY created_at DESC LIMIT 1
+`
+
+func (q *Queries) NewestSubmissionDraftAt(ctx context.Context, submissionID *uuid.UUID) (time.Time, error) {
+	row := q.db.QueryRow(ctx, newestSubmissionDraftAt, submissionID)
+	var created_at time.Time
+	err := row.Scan(&created_at)
+	return created_at, err
 }
 
 const postGrade = `-- name: PostGrade :execrows

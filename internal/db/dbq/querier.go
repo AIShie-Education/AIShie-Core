@@ -200,6 +200,7 @@ type Querier interface {
 	ListVersions(ctx context.Context, documentID uuid.UUID) ([]ListVersionsRow, error)
 	LiveComponentGradeExists(ctx context.Context, arg LiveComponentGradeExistsParams) (bool, error)
 	LiveSubmissionGradeExists(ctx context.Context, submissionID *uuid.UUID) (bool, error)
+	LockComponentGradeTarget(ctx context.Context, arg LockComponentGradeTargetParams) error
 	// Taken before changing the tree's shape, so that two moves cannot each
 	// check for a cycle and then create one between them.
 	LockCourseComponents(ctx context.Context, courseID uuid.UUID) error
@@ -210,11 +211,19 @@ type Querier interface {
 	LockGradesInCourse(ctx context.Context, arg LockGradesInCourseParams) ([]uuid.UUID, error)
 	// Serialises attaching one upload. Held until the transaction ends.
 	LockStorageKey(ctx context.Context, storageKey string) error
+	// One writer of a student's rolled-up totals at a time.
+	LockStudentTotals(ctx context.Context, arg LockStudentTotalsParams) error
+	// Serialising what races -------------------------------------------------------
+	// A row lock, not an UPDATE: the freeze trigger does not fire. Two drafts for
+	// one submission entered at once would otherwise both be live.
+	LockSubmissionForGrading(ctx context.Context, id uuid.UUID) error
 	// All of one student's attempts at one assignment, locked, newest first.
 	LockSubmissionsOf(ctx context.Context, arg LockSubmissionsOfParams) ([]LockSubmissionsOfRow, error)
 	MarkActionExecuted(ctx context.Context, arg MarkActionExecutedParams) error
 	MarkActionFailed(ctx context.Context, arg MarkActionFailedParams) error
 	MaxVersionSeq(ctx context.Context, documentID uuid.UUID) (int32, error)
+	NewestComponentDraftAt(ctx context.Context, arg NewestComponentDraftAtParams) (time.Time, error)
+	NewestSubmissionDraftAt(ctx context.Context, submissionID *uuid.UUID) (time.Time, error)
 	PostGrade(ctx context.Context, arg PostGradeParams) (int64, error)
 	PublishAssignment(ctx context.Context, arg PublishAssignmentParams) (int64, error)
 	ReleaseJobLock(ctx context.Context, key int64) (bool, error)

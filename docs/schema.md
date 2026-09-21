@@ -232,6 +232,12 @@ posted grades):
 - A score is a score out of the points possible when it was given: once any grade has been
   entered for an assignment or a directly graded component — a draft as much as a posted one —
   its `points_possible` and its place in the tree no longer change.
+- Final is final. The policy a snapshot was worked out under travels with it (`breakdown`
+  carries `ungraded_as_zero`), and once a student's totals have been written with ungraded
+  work counted as zero, every later post or regrade beneath them keeps counting it so.
+- A draft is as old as the call that made it. An approved proposal replaces the drafts that
+  were there when it was proposed, and fails — rather than silently overwriting — if a newer
+  draft has been entered for the same work since.
 
 ### 2.4 Content
 
@@ -349,8 +355,14 @@ It is a SHA-256 over the tool name and the canonical JSON of the arguments (rule
 replays the stored `result` and does nothing else. Same key and a different hash is a client
 bug — a key reused for new content — and is refused with a conflict, instead of telling the
 caller that a request it never made succeeded. `payload` holds the canonical arguments with
-any secret fields removed; `result` holds what the call returned (secrets removed likewise),
-or `{"error": …}` for a failed or cancelled action and `{"decision": …}` for a rejected one.
+any secret fields removed; a secret (a password) still counts in the hash, through a keyed
+digest under `SIGNING_KEY`, so that a key reused with a different secret is caught too while
+the hash gives nothing away to whoever reads the table. For a proposal, `payload` also carries
+the defaults that had to be fixed when it was made rather than when it is approved — the rubric
+version a grade is against — while the hash stays that of the call as the caller made it.
+`result` holds what the call returned (secrets removed likewise), or `{"error": …}` for a
+failed, denied or cancelled action and `{"decision": …}` for a rejected one; which of those it
+is follows from `status`, never from the shape of `result`.
 
 **Only state changes are actions.** A read passes `authorize()`, scope included, and writes
 no `action` row: the log stays a record of attempts to change something.
@@ -387,7 +399,9 @@ a draft to those who grade, the roster to `perm_member_read`, the action log to
 `perm_action_decide`); a type with no rule is visible to nobody. On top of that, the events of
 a member's *own* actions are always visible to it: `action.approved`, `action.rejected` and
 `action.cancelled` are filed under the proposal's id, which is how a pull-based agent learns
-what became of what it proposed. Then scope, per row, as below.
+what became of what it proposed. `action.approved` carries an `outcome` — `executed`, or
+`failed` when the approved call was refused by the domain — so that the two are never taken
+for one another. Then scope, per row, as below.
 
 `student_member_id` and `assignment_id` say whose the event is, so that the feed is
 scope-filtered in SQL exactly as `authorize()` filters a target: null means the event belongs

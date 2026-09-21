@@ -235,7 +235,23 @@ func claimUpload(ctx context.Context, d Deps, q dbq.Querier, m *domain.Member, c
 		return upload{}, apperr.Conflicts("that upload is already attached to a document")
 	}
 	if staged, err := d.Blob.Stat(ctx, c.Key); errors.Is(err, blob.ErrNotFound) {
-		return upload{}, apperr.Precondition("nothing has been uploaded to that URL yet")
+		// Nothing staged: either nothing was uploaded, or an earlier attach
+		// moved it and then its transaction did not commit — the move is
+		// outside the transaction. The object is then at the final key,
+		// which nothing points at (checked above, under the lock) and no
+		// upload URL was ever issued for: it can only be this token's own
+		// upload, and is attached as it is.
+		info, err := d.Blob.Stat(ctx, final)
+		if errors.Is(err, blob.ErrNotFound) {
+			return upload{}, apperr.Precondition("nothing has been uploaded to that URL yet")
+		}
+		if err != nil {
+			return upload{}, err
+		}
+		if info.ContentType == "" {
+			info.ContentType = c.ContentType
+		}
+		return upload{key: final, info: info}, nil
 	} else if err != nil {
 		return upload{}, err
 	} else if staged.Size > d.MaxUploadBytes {

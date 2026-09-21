@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/shopspring/decimal"
 
+	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/apperr"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/db/dbq"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/events"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/gradecalc"
@@ -102,11 +103,31 @@ func snapshot(ctx context.Context, ec *tool.ExecCtx, courseID uuid.UUID, changed
 	written := 0
 	for _, student := range students {
 		items := changed[student]
+		// One writer of a student's totals at a time: two posts touching the
+		// same student would otherwise each read the other's not-yet-written
+		// snapshot as absent and collide on the one live total.
+		if err := ec.Q.LockStudentTotals(ctx, dbq.LockStudentTotalsParams{CourseID: courseID, StudentMemberID: student}); err != nil {
+			return 0, err
+		}
 		scores, err := loadScores(ctx, ec.Q, courseID, student)
 		if err != nil {
 			return 0, err
 		}
-		results := gradecalc.Compute(root, scores, policy)
+		// Final is final. Once a student's totals have been written with
+		// ungraded work counted as zero, a later post or regrade beneath
+		// them — made without saying so again — must not quietly turn them
+		// back into a grade so far. The policy travels with the snapshot.
+		studentPolicy := policy
+		if !studentPolicy.UngradedAsZero {
+			live, err := ec.Q.GetLiveComputedGrade(ctx, dbq.GetLiveComputedGradeParams{ComponentID: &root.ID, StudentMemberID: student})
+			if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+				return 0, err
+			}
+			if err == nil && storedPolicy(live.Breakdown).UngradedAsZero {
+				studentPolicy.UngradedAsZero = true
+			}
+		}
+		results := gradecalc.Compute(root, scores, studentPolicy)
 
 		seen := map[uuid.UUID]bool{}
 		for _, item := range items {
@@ -119,7 +140,7 @@ func snapshot(ctx context.Context, ec *tool.ExecCtx, courseID uuid.UUID, changed
 				if r.Fraction == nil {
 					continue
 				}
-				wrote, err := writeSnapshot(ctx, ec, courseID, student, componentID, r)
+				wrote, err := writeSnapshot(ctx, ec, courseID, student, componentID, r, studentPolicy)
 				if err != nil {
 					return 0, err
 				}
@@ -132,7 +153,20 @@ func snapshot(ctx context.Context, ec *tool.ExecCtx, courseID uuid.UUID, changed
 	return written, nil
 }
 
-func writeSnapshot(ctx context.Context, ec *tool.ExecCtx, courseID, student, componentID uuid.UUID, r gradecalc.Result) (bool, error) {
+// snapshotWorking is what a computed grade's breakdown holds: the working,
+// and the policy it was worked out under.
+type snapshotWorking struct {
+	gradecalc.Result
+	UngradedAsZero bool `json:"ungraded_as_zero,omitempty"`
+}
+
+func storedPolicy(breakdown []byte) gradecalc.Policy {
+	var w snapshotWorking
+	_ = json.Unmarshal(breakdown, &w)
+	return gradecalc.Policy{UngradedAsZero: w.UngradedAsZero}
+}
+
+func writeSnapshot(ctx context.Context, ec *tool.ExecCtx, courseID, student, componentID uuid.UUID, r gradecalc.Result, policy gradecalc.Policy) (bool, error) {
 	score := gradecalc.Percent(*r.Fraction)
 	newID := ids.New()
 
@@ -141,16 +175,20 @@ func writeSnapshot(ctx context.Context, ec *tool.ExecCtx, courseID, student, com
 	case errors.Is(err, pgx.ErrNoRows):
 	case err != nil:
 		return false, err
-	case live.Score.Equal(score):
+	case live.Score.Equal(score) && storedPolicy(live.Breakdown) == policy:
 		return false, nil
 	default:
 		// Old row first, then the new one: the other order would briefly be
 		// two live grades for one target, which the unique index refuses.
-		if _, err := ec.Q.SupersedeGrade(ctx, dbq.SupersedeGradeParams{ID: live.ID, NewID: &newID}); err != nil {
+		n, err := ec.Q.SupersedeGrade(ctx, dbq.SupersedeGradeParams{ID: live.ID, NewID: &newID})
+		if err != nil {
 			return false, err
 		}
+		if n == 0 {
+			return false, apperr.Conflicts("the student's totals were written by someone else just now; try again")
+		}
 	}
-	working, err := json.Marshal(r)
+	working, err := json.Marshal(snapshotWorking{Result: r, UngradedAsZero: policy.UngradedAsZero})
 	if err != nil {
 		return false, err
 	}

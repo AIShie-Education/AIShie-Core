@@ -156,7 +156,7 @@ func serve(cfg config.Config) error {
 	}
 
 	reg := tool.NewRegistry()
-	pl := pipeline.New(pool, reg, pipeline.Config{ProposalTTL: cfg.ProposalTTL})
+	pl := pipeline.New(pool, reg, pipeline.Config{ProposalTTL: cfg.ProposalTTL, Secrets: signatures})
 	tools.RegisterAll(reg, tools.Deps{Pipeline: pl, Blob: store, Uploads: signer, MaxUploadBytes: cfg.MaxUploadBytes})
 
 	// The sweeps act as the system actor, which bootstrap creates. Before
