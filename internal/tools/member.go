@@ -182,6 +182,9 @@ func memberAdd() tool.Tool {
 			if err := withinGranter(ctx, ec, s.perms, s.role, s.studentScope, s.listedStudents, s.assignmentScope, s.listedAssignments); err != nil {
 				return MemberIDOut{}, err
 			}
+			if err := outlastsGranter(ec, s.expiresAt); err != nil {
+				return MemberIDOut{}, err
+			}
 			id, err := seat(ctx, ec, s)
 			return MemberIDOut{MemberID: id}, err
 		},
@@ -224,7 +227,13 @@ func findPreset(ctx context.Context, q *dbq.Queries, courseID uuid.UUID, name *s
 //
 // Permissions: none above the granter's own level. Scope: a granter limited
 // to listed students may only give 'listed', from within their own list; the
-// same for assignments.
+// same for assignments. Lifetime is outlastsGranter, beside it.
+//
+// The three are measured together, on the whole of what the member will
+// hold, because a level is held over a scope for a time: raising a level on
+// a member who reaches the whole class, or widening the reach of a member
+// who holds a level, or extending the life of either, hands out the product,
+// and the product is what must be within the granter's own.
 func withinGranter(ctx context.Context, ec *tool.ExecCtx, perms permSet, role, studentScope string, students []uuid.UUID, assignmentScope string, assignments []uuid.UUID) error {
 	g := ec.Member
 	if p, over := perms.exceeds(g); over {
@@ -258,15 +267,33 @@ func withinGranter(ctx context.Context, ec *tool.ExecCtx, perms permSet, role, s
 	return nil
 }
 
+// outlastsGranter refuses a seat that would still be there after the
+// granter's own has ended: a manager seated until the end of term hands out
+// nothing that lasts longer.
+func outlastsGranter(ec *tool.ExecCtx, expiresAt *time.Time) error {
+	if g := ec.Member.ExpiresAt; g != nil && (expiresAt == nil || expiresAt.After(*g)) {
+		return apperr.Forbid("your own membership ends at %s; you cannot give one that lasts longer", g.UTC().Format(time.RFC3339))
+	}
+	return nil
+}
+
 // ---------------------------------------------------------------------------
 // Changing a member
 // ---------------------------------------------------------------------------
 
-// loadOther loads the member a management tool acts on, and refuses the
-// caller acting on their own seat: nobody raises, narrows, pauses or removes
-// themselves by accident, or on purpose.
+// loadOther loads the member a management tool acts on, locked for the rest
+// of the action so that two managers editing the same seat take turns, and
+// refuses the caller acting on their own seat: nobody raises, narrows, pauses
+// or removes themselves by accident, or on purpose.
+//
+// A seat whose expiry has passed is as good as removed, whether or not the
+// sweep has got to it yet: authorize() stopped honouring it at that moment,
+// and what a removed seat needs is a fresh one. Otherwise whether it could
+// be revived — with everything it held — would depend on when the sweep last
+// ran.
 func loadOther(ctx context.Context, ec *tool.ExecCtx, courseID, memberID uuid.UUID) (dbq.GetMemberInCourseRow, error) {
-	m, err := ec.Q.GetMemberInCourse(ctx, dbq.GetMemberInCourseParams{ID: memberID, CourseID: courseID})
+	row, err := ec.Q.GetMemberInCourseForUpdate(ctx, dbq.GetMemberInCourseForUpdateParams{ID: memberID, CourseID: courseID})
+	m := dbq.GetMemberInCourseRow(row)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return m, apperr.Missing("no such member in this course")
 	}
@@ -276,10 +303,78 @@ func loadOther(ctx context.Context, ec *tool.ExecCtx, courseID, memberID uuid.UU
 	if m.ID == ec.Member.ID {
 		return m, apperr.Forbid("not on your own membership")
 	}
-	if m.Status == domain.MemberRemoved {
+	if m.Status == domain.MemberRemoved || (m.ExpiresAt != nil && !m.ExpiresAt.After(ec.Now)) {
 		return m, apperr.Conflicts("the member has been removed; seat the actor again for a fresh start")
 	}
 	return m, nil
+}
+
+// shape is what a seat amounts to: levels, held over a reach, for a time.
+type shape struct {
+	perms                         permSet
+	studentScope, assignmentScope string
+	students, assignments         []uuid.UUID // the student list without the member itself
+	expiresAt                     *time.Time
+}
+
+func shapeOf(ctx context.Context, q *dbq.Queries, m dbq.GetMemberInCourseRow) (shape, error) {
+	s := shape{perms: memberPerms(m), studentScope: m.StudentScope, assignmentScope: m.AssignmentScope, expiresAt: m.ExpiresAt}
+	var err error
+	if s.students, err = q.ListStudentScope(ctx, m.ID); err != nil {
+		return s, err
+	}
+	s.students = withoutSelf(s.students, m.ID)
+	s.assignments, err = q.ListAssignmentScope(ctx, m.ID)
+	return s, err
+}
+
+// widens reports whether after reaches anything before did not: a level
+// raised, a scope opened or a list added to, a life extended. Such a change
+// is a grant, and is measured like one; any other is a narrowing, which
+// anyone who manages members may do, whatever they hold themselves.
+func (after shape) widens(before shape) bool {
+	for p, l := range after.perms {
+		if l > before.perms[p] {
+			return true
+		}
+	}
+	if opens(before.studentScope, before.students, after.studentScope, after.students) ||
+		opens(before.assignmentScope, before.assignments, after.assignmentScope, after.assignments) {
+		return true
+	}
+	return before.expiresAt != nil && (after.expiresAt == nil || after.expiresAt.After(*before.expiresAt))
+}
+
+func opens(fromKind string, from []uuid.UUID, toKind string, to []uuid.UUID) bool {
+	if fromKind == domain.ScopeAll {
+		return false
+	}
+	if toKind == domain.ScopeAll {
+		return true
+	}
+	had := map[uuid.UUID]bool{}
+	for _, id := range from {
+		had[id] = true
+	}
+	for _, id := range to {
+		if !had[id] {
+			return true
+		}
+	}
+	return false
+}
+
+// grant is the one check every change to a seat goes through: if the change
+// widens anything, the whole of what the member will then hold must be
+// within the granter's own.
+func grant(ctx context.Context, ec *tool.ExecCtx, before, after shape) error {
+	if !after.widens(before) {
+		return nil
+	}
+	if err := withinGranter(ctx, ec, after.perms, "", after.studentScope, after.students, after.assignmentScope, after.assignments); err != nil {
+		return err
+	}
+	return outlastsGranter(ec, after.expiresAt)
 }
 
 type MemberUpdatePermsIn struct {
@@ -292,7 +387,8 @@ func memberUpdatePerms() tool.Tool {
 	return tool.Define(tool.Spec[MemberUpdatePermsIn, OK]{
 		Name: "member.update_perms",
 		Description: "Change individual permissions on a member. It takes effect on their next call: nothing is cached. " +
-			"You cannot raise a permission above your own level.",
+			"Raising one is a grant: everything the member will then hold — every permission, over their whole scope, " +
+			"for as long as their seat lasts — must be within what you hold yourself. Lowering is always allowed.",
 		Kind: tool.Write, Gate: manageMembers,
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/members/{member_id}/perms"},
 		Resolve: func(ctx context.Context, q dbq.Querier, in MemberUpdatePermsIn) (tool.Target, error) {
@@ -306,27 +402,26 @@ func memberUpdatePerms() tool.Tool {
 			if len(in.Perms) == 0 {
 				return OK{}, apperr.Invalid("perms is empty: nothing to change")
 			}
-			before := memberPerms(m)
-			after := memberPerms(m)
-			if err := after.apply(in.Perms); err != nil {
+			before, err := shapeOf(ctx, ec.Q, m)
+			if err != nil {
 				return OK{}, err
 			}
-			// Only what is being raised is measured against the granter. A
-			// manager may still lower, or leave alone, a permission that
-			// someone else set higher than the manager's own.
-			for _, p := range domain.AllPerms {
-				if after[p] > before[p] && after[p] > ec.Member.Perm(p) {
-					return OK{}, apperr.Forbid("you hold %s at %s and cannot raise it to %s", p, ec.Member.Perm(p), after[p]).With("permission", string(p))
-				}
+			after := before
+			after.perms = memberPerms(m)
+			if err := after.perms.apply(in.Perms); err != nil {
+				return OK{}, err
+			}
+			if err := grant(ctx, ec, before, after); err != nil {
+				return OK{}, err
 			}
 			if err := ec.Q.SetMemberPerms(ctx, dbq.SetMemberPermsParams{ID: m.ID,
-				PermDocumentRead: after.col(domain.PermDocumentRead), PermDocumentReadDraft: after.col(domain.PermDocumentReadDraft),
-				PermDocumentWrite: after.col(domain.PermDocumentWrite), PermRubricRead: after.col(domain.PermRubricRead),
-				PermAssignmentWrite: after.col(domain.PermAssignmentWrite), PermSubmissionRead: after.col(domain.PermSubmissionRead),
-				PermSubmissionWrite: after.col(domain.PermSubmissionWrite), PermGradeRead: after.col(domain.PermGradeRead),
-				PermGradeSubmit: after.col(domain.PermGradeSubmit), PermGradePost: after.col(domain.PermGradePost),
-				PermMemberRead: after.col(domain.PermMemberRead), PermMemberManage: after.col(domain.PermMemberManage),
-				PermActionDecide: after.col(domain.PermActionDecide),
+				PermDocumentRead: after.perms.col(domain.PermDocumentRead), PermDocumentReadDraft: after.perms.col(domain.PermDocumentReadDraft),
+				PermDocumentWrite: after.perms.col(domain.PermDocumentWrite), PermRubricRead: after.perms.col(domain.PermRubricRead),
+				PermAssignmentWrite: after.perms.col(domain.PermAssignmentWrite), PermSubmissionRead: after.perms.col(domain.PermSubmissionRead),
+				PermSubmissionWrite: after.perms.col(domain.PermSubmissionWrite), PermGradeRead: after.perms.col(domain.PermGradeRead),
+				PermGradeSubmit: after.perms.col(domain.PermGradeSubmit), PermGradePost: after.perms.col(domain.PermGradePost),
+				PermMemberRead: after.perms.col(domain.PermMemberRead), PermMemberManage: after.perms.col(domain.PermMemberManage),
+				PermActionDecide: after.perms.col(domain.PermActionDecide),
 			}); err != nil {
 				return OK{}, err
 			}
@@ -351,7 +446,8 @@ func memberRescope() tool.Tool {
 	return tool.Define(tool.Spec[MemberRescopeIn, OK]{
 		Name: "member.rescope",
 		Description: "Change which students and assignments a member's permissions reach, or when the membership expires. " +
-			"'listed' with an empty list reaches nobody. You cannot give a scope wider than your own.",
+			"'listed' with an empty list reaches nobody. Widening a scope, or extending or clearing an expiry, is a grant: " +
+			"everything the member will then hold must be within what you hold yourself. Narrowing is always allowed.",
 		Kind: tool.Write, Gate: manageMembers,
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/members/{member_id}/scope"},
 		Resolve: func(ctx context.Context, q dbq.Querier, in MemberRescopeIn) (tool.Target, error) {
@@ -362,45 +458,61 @@ func memberRescope() tool.Tool {
 			if err != nil {
 				return OK{}, err
 			}
-			studentScope, assignmentScope := m.StudentScope, m.AssignmentScope
-			if in.StudentScope != nil {
-				studentScope = *in.StudentScope
-			}
-			if in.AssignmentScope != nil {
-				assignmentScope = *in.AssignmentScope
-			}
-			if !validScope(studentScope) || !validScope(assignmentScope) {
-				return OK{}, apperr.Invalid("a scope is all or listed")
-			}
-			// A list that was not sent is kept, unless the scope it belongs
-			// to is no longer a list at all.
-			students, assignments := in.ListedStudents, in.ListedAssignments
-			if students == nil && studentScope == domain.ScopeListed {
-				if students, err = ec.Q.ListStudentScope(ctx, m.ID); err != nil {
-					return OK{}, err
-				}
-			}
-			if assignments == nil && assignmentScope == domain.ScopeListed {
-				if assignments, err = ec.Q.ListAssignmentScope(ctx, m.ID); err != nil {
-					return OK{}, err
-				}
-			}
-			if err := withinGranter(ctx, ec, permSet{}, "", studentScope, withoutSelf(students, m.ID), assignmentScope, assignments); err != nil {
-				return OK{}, err
-			}
-			if err := ec.Q.SetMemberScopeKinds(ctx, dbq.SetMemberScopeKindsParams{ID: m.ID, StudentScope: studentScope, AssignmentScope: assignmentScope}); err != nil {
-				return OK{}, err
-			}
-			if err := writeScope(ctx, ec.Q, in.CourseID, m.ID, studentScope, students, assignmentScope, assignments); err != nil {
-				return OK{}, err
-			}
 			switch {
 			case in.ClearExpiry && in.ExpiresAt != nil:
 				return OK{}, apperr.Invalid("give expires_at or clear_expiry, not both")
 			case in.ExpiresAt != nil && !in.ExpiresAt.After(ec.Now):
 				return OK{}, apperr.Invalid("expires_at is in the past; to end a membership now, remove it")
-			case in.ClearExpiry || in.ExpiresAt != nil:
-				if err := ec.Q.SetMemberExpiry(ctx, dbq.SetMemberExpiryParams{ID: m.ID, ExpiresAt: in.ExpiresAt}); err != nil {
+			}
+			before, err := shapeOf(ctx, ec.Q, m)
+			if err != nil {
+				return OK{}, err
+			}
+			after := before
+			if in.StudentScope != nil {
+				after.studentScope = *in.StudentScope
+			}
+			if in.AssignmentScope != nil {
+				after.assignmentScope = *in.AssignmentScope
+			}
+			if !validScope(after.studentScope) || !validScope(after.assignmentScope) {
+				return OK{}, apperr.Invalid("a scope is all or listed")
+			}
+			// A list that was not sent is kept as it is — not re-checked, so
+			// a student who has since left does not make an unrelated change
+			// fail — unless the scope it belongs to is no longer a list.
+			students, assignments := in.ListedStudents, in.ListedAssignments
+			if students != nil || after.studentScope != domain.ScopeListed {
+				after.students = withoutSelf(dedupe(students), m.ID)
+			}
+			if assignments != nil || after.assignmentScope != domain.ScopeListed {
+				after.assignments = dedupe(assignments)
+			}
+			switch {
+			case in.ClearExpiry:
+				after.expiresAt = nil
+			case in.ExpiresAt != nil:
+				after.expiresAt = in.ExpiresAt
+			}
+			if err := grant(ctx, ec, before, after); err != nil {
+				return OK{}, err
+			}
+
+			if err := ec.Q.SetMemberScopeKinds(ctx, dbq.SetMemberScopeKindsParams{ID: m.ID, StudentScope: after.studentScope, AssignmentScope: after.assignmentScope}); err != nil {
+				return OK{}, err
+			}
+			if students != nil || after.studentScope != domain.ScopeListed {
+				if err := writeStudentScope(ctx, ec.Q, in.CourseID, m.ID, after.studentScope, students); err != nil {
+					return OK{}, err
+				}
+			}
+			if assignments != nil || after.assignmentScope != domain.ScopeListed {
+				if err := writeAssignmentScope(ctx, ec.Q, in.CourseID, m.ID, after.assignmentScope, assignments); err != nil {
+					return OK{}, err
+				}
+			}
+			if in.ClearExpiry || in.ExpiresAt != nil {
+				if err := ec.Q.SetMemberExpiry(ctx, dbq.SetMemberExpiryParams{ID: m.ID, ExpiresAt: after.expiresAt}); err != nil {
 					return OK{}, err
 				}
 			}
@@ -435,6 +547,17 @@ func memberSetStatus(name, desc, path, from, to, event string) tool.Tool {
 			if err != nil {
 				return OK{}, err
 			}
+			if to == domain.MemberActive {
+				// Resuming gives back everything the seat holds: a grant of
+				// the whole of it.
+				held, err := shapeOf(ctx, ec.Q, m)
+				if err != nil {
+					return OK{}, err
+				}
+				if err := grant(ctx, ec, shape{}, held); err != nil {
+					return OK{}, err
+				}
+			}
 			n, err := ec.Q.SetMemberStatus(ctx, dbq.SetMemberStatusParams{ID: m.ID, Status: to, FromStatus: from})
 			if err != nil {
 				return OK{}, err
@@ -457,7 +580,8 @@ func memberPause() tool.Tool {
 }
 
 func memberResume() tool.Tool {
-	return memberSetStatus("member.resume", "Resume a paused member, exactly as they were.",
+	return memberSetStatus("member.resume", "Resume a paused member, exactly as they were. That is a grant of everything they hold, "+
+		"which must be within what you hold yourself.",
 		"/v1/courses/{course_id}/members/{member_id}/resume", domain.MemberPaused, domain.MemberActive, members.EventResumed)
 }
 

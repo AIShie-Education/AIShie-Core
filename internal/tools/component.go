@@ -248,6 +248,16 @@ func componentUpdate() tool.Tool {
 					return OK{}, apperr.Precondition("%q has grades entered on it and cannot stop being graded directly", c.Name)
 				}
 				c.PointsPossible = decimal.NullDecimal{}
+			case in.PointsPossible != nil && c.PointsPossible.Valid && !c.PointsPossible.Decimal.Equal(*in.PointsPossible):
+				// Already graded directly, and worth something else now. As
+				// for an assignment: once a grade has been entered against
+				// the points possible, they no longer change.
+				if has, err := ec.Q.ComponentHasLiveGrades(ctx, &c.ID); err != nil {
+					return OK{}, err
+				} else if has {
+					return OK{}, apperr.Precondition("grades have been entered for %q; its points possible no longer change", c.Name)
+				}
+				c.PointsPossible = nullDecimal(in.PointsPossible)
 			case in.PointsPossible != nil:
 				// Becoming directly graded: it must be a leaf with nothing
 				// hanging from it.
@@ -263,6 +273,18 @@ func componentUpdate() tool.Tool {
 				}
 				if c.ParentID == nil {
 					return OK{}, apperr.Precondition("the course total is rolled up, never graded directly")
+				}
+				// A former parent may still carry the totals that were written
+				// down for it when grades beneath it were posted. Those are live
+				// posted grades on this component: an entered grade could then
+				// never be posted over them, nor regraded, and there would be no
+				// way back through the tools.
+				if !c.PointsPossible.Valid {
+					if has, err := ec.Q.ComponentHasLivePostedGrades(ctx, &c.ID); err != nil {
+						return OK{}, err
+					} else if has {
+						return OK{}, apperr.Precondition("%q has posted totals from when it was rolled up; make a new component for what is graded directly", c.Name)
+					}
 				}
 				c.PointsPossible = nullDecimal(in.PointsPossible)
 			}
@@ -287,9 +309,10 @@ type ComponentMoveIn struct {
 
 func componentMove() tool.Tool {
 	return tool.Define(tool.Spec[ComponentMoveIn, OK]{
-		Name:        "component.move",
-		Description: "Move a component, with everything beneath it, under a different parent in the same course.",
-		Kind:        tool.Write, Gate: writeScheme,
+		Name: "component.move",
+		Description: "Move a component, with everything beneath it, under a different parent in the same course. " +
+			"Once any grade has been entered beneath it, its place in the scheme is fixed.",
+		Kind: tool.Write, Gate: writeScheme,
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/components/{component_id}/move"},
 		Resolve: func(ctx context.Context, q dbq.Querier, in ComponentMoveIn) (tool.Target, error) {
 			if _, err := componentTarget(ctx, q, in.CourseID, in.NewParentID); err != nil {
@@ -309,6 +332,14 @@ func componentMove() tool.Tool {
 			}
 			if c.ParentID == nil {
 				return OK{}, apperr.Precondition("the course total is the root and stays there")
+			}
+			// A score is a score in the scheme it was given under. Once a
+			// grade has been entered anywhere beneath a component, moving it
+			// would change what every one of those grades counts toward.
+			if graded, err := ec.Q.ComponentSubtreeHasLiveGrades(ctx, c.ID); err != nil {
+				return OK{}, err
+			} else if graded {
+				return OK{}, apperr.Precondition("grades have been entered beneath %q; its place in the scheme no longer changes", c.Name)
 			}
 			parent, err := ec.Q.GetComponentInCourse(ctx, dbq.GetComponentInCourseParams{ID: in.NewParentID, CourseID: in.CourseID})
 			if err != nil {

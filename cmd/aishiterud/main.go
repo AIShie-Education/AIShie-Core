@@ -19,11 +19,16 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/auth"
+	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/blob"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/config"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/db"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/db/dbq"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/httpapi"
+	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/jobs"
+	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/mcpapi"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/pipeline"
+	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/ratelimit"
+	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/signing"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/tool"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/tools"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/version"
@@ -51,9 +56,29 @@ Environment:
   HTTP_ADDR         default :8080
   SHUTDOWN_GRACE    default 15s
   PROPOSAL_TTL      default 336h (14 days); 0 disables expiry
+  RATE_LIMIT_PER_MINUTE        default 600 calls per actor per instance; 0 for no limit
+  RATE_LIMIT_BURST             default 100
+  SIGN_IN_ATTEMPTS_PER_MINUTE  default 10, per address and per email
+  JOBS              default true; background sweeps (only one instance sweeps at a time)
+  JOBS_INTERVAL     default 1m
   SESSION_TTL       default 12h
   TRUSTED_ORIGINS   the web front end's origins, comma separated
+  TRUSTED_PROXIES   CIDRs of the reverse proxies in front of this server, comma separated;
+                    a request from one is attributed to the client in X-Forwarded-For
+  COOKIE_SAMESITE   lax (default) when the front end is same-site with this server; none otherwise
   INSECURE_COOKIES  true for development over http://localhost only
+  BLOB_STORE        fs (default), s3 or none
+  BLOB_FS_ROOT      default var/blobs
+  PUBLIC_URL        how clients reach this server; default http://localhost:8080
+  SIGNING_KEY       32+ characters; required with s3, with single sign-on, and for more than one instance
+  MAX_UPLOAD_BYTES  default 52428800 (50 MiB)
+  S3_ENDPOINT, S3_BUCKET, S3_REGION, S3_ACCESS_KEY, S3_SECRET_KEY, S3_USE_SSL
+  OIDC_ISSUER       turns single sign-on on; for ADFS, https://<host>/adfs
+  OIDC_CLIENT_ID, OIDC_CLIENT_SECRET
+  OIDC_PROVIDER_NAME   default polyu-adfs; what actor.link_sso calls the provider
+  OIDC_SUBJECT_CLAIM   default upn; the claim an account is known by
+  OIDC_SCOPES          default "openid profile email"
+                       Register <PUBLIC_URL>/v1/auth/sso/callback with the provider.
 `
 
 func main() {
@@ -110,23 +135,82 @@ func serve(cfg config.Config) error {
 	if err != nil {
 		return err
 	}
+	// serve never migrates on its own: a migration is somebody's decision.
+	// But it does not start against a schema it cannot work with, either.
+	switch have, dirty, err := db.SchemaVersion(ctx, pool); {
+	case err != nil:
+		return fmt.Errorf("read schema version: %w", err)
+	case dirty:
+		return fmt.Errorf("the schema is dirty at version %d: a migration failed half-way; fix it by hand, then `aishiterud migrate force N`", have)
+	case have < latest:
+		return fmt.Errorf("the schema is at version %d and this binary needs %d; run `aishiterud migrate up` first", have, latest)
+	case have > latest:
+		log.Warn("the schema is ahead of this binary; fine during a rolling deploy", "schema", have, "binary", latest)
+	}
+
+	signatures, err := signing.New(cfg.SigningKey)
+	if err != nil {
+		return fmt.Errorf("SIGNING_KEY: %w", err)
+	}
+	signer := blob.SignerFrom(signatures)
+	store, err := openBlobStore(ctx, cfg, signer)
+	if err != nil {
+		return err
+	}
 
 	reg := tool.NewRegistry()
-	pl := pipeline.New(pool, reg, pipeline.Config{ProposalTTL: cfg.ProposalTTL})
-	tools.RegisterAll(reg, tools.Deps{Pipeline: pl})
+	pl := pipeline.New(pool, reg, pipeline.Config{ProposalTTL: cfg.ProposalTTL, Secrets: signatures})
+	tools.RegisterAll(reg, tools.Deps{Pipeline: pl, Blob: store, Uploads: signer, MaxUploadBytes: cfg.MaxUploadBytes})
 
+	// The sweeps act as the system actor, which bootstrap creates. Before
+	// bootstrap there is nothing to sweep and nobody to sweep as.
+	jobsDone := make(chan struct{})
+	close(jobsDone)
+	if cfg.Jobs {
+		if system, err := dbq.New(pool).GetSystemActor(ctx); err != nil {
+			log.Warn("background jobs are off: there is no system actor yet; run `aishiterud bootstrap`, then restart")
+		} else {
+			jobsDone = make(chan struct{})
+			runner := jobs.New(pool, pl, system, jobs.Config{Interval: cfg.JobsInterval, Blob: store}, log)
+			go func() { defer close(jobsDone); runner.Run(ctx) }()
+		}
+	}
+
+	authn := auth.NewAuthenticator(pool, cfg.SessionTTL)
+	calls := ratelimit.New(cfg.CallsPerMinute, cfg.CallsBurst)
+	// Single sign-on is discovered at start-up. If the provider cannot be
+	// reached the server does not start: better that than a sign-in page that
+	// fails for everyone with nothing in the log to say why.
+	var sso auth.IdentityProvider
+	if cfg.OIDC.Enabled() {
+		discover, cancel := context.WithTimeout(ctx, 20*time.Second)
+		sso, err = auth.NewOIDC(discover, auth.OIDCConfig{Name: cfg.OIDC.ProviderName, Issuer: cfg.OIDC.Issuer,
+			ClientID: cfg.OIDC.ClientID, ClientSecret: cfg.OIDC.ClientSecret, SubjectClaim: cfg.OIDC.SubjectClaim,
+			Scopes: cfg.OIDC.Scopes, RedirectURL: strings.TrimRight(cfg.PublicURL, "/") + httpapi.SSOCallbackPath})
+		cancel()
+		if err != nil {
+			return err
+		}
+	}
 	srv := &http.Server{
 		Addr: cfg.HTTPAddr,
 		Handler: httpapi.NewHandler(httpapi.Deps{
 			Pool: pool, LatestSchema: latest, Pipeline: pl, Log: log,
-			Auth:           auth.NewAuthenticator(pool, cfg.SessionTTL),
-			TrustedOrigins: cfg.TrustedOrigins, InsecureCookies: cfg.InsecureCookies,
+			Auth: authn, MCP: mcpapi.NewHandler(mcpapi.Deps{Pipeline: pl, Auth: authn, Log: log, Calls: calls}),
+			Calls: calls, SignIns: ratelimit.New(cfg.SignInsPerMinute, cfg.SignInsPerMinute),
+			TrustedOrigins: cfg.TrustedOrigins, TrustedProxies: cfg.TrustedProxies,
+			InsecureCookies: cfg.InsecureCookies, CookieSameSite: sameSite(cfg.CookieSameSite),
+			Blob: store, MaxUploadBytes: cfg.MaxUploadBytes,
+			SSO: sso, Signer: signatures,
 		}),
+		// Headers within ten seconds, an idle keep-alive for two minutes; the
+		// body and the response are bounded per request by the handler.
 		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       2 * time.Minute,
 	}
 	errc := make(chan error, 1)
 	go func() { errc <- srv.ListenAndServe() }()
-	log.Info("listening", "addr", cfg.HTTPAddr, "version", version.Version, "schema_latest", latest, "tools", len(reg.Exposed()))
+	log.Info("listening", "addr", cfg.HTTPAddr, "blob_store", cfg.BlobStore, "version", version.Version, "schema_latest", latest, "tools", len(reg.Exposed()))
 
 	select {
 	case err := <-errc:
@@ -139,7 +223,39 @@ func serve(cfg config.Config) error {
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		return fmt.Errorf("shutdown: %w", err)
 	}
+	// Let a sweep in flight finish its current step and hand its lock back
+	// before the pool closes underneath it.
+	select {
+	case <-jobsDone:
+	case <-shutdownCtx.Done():
+	}
 	return nil
+}
+
+func sameSite(mode string) http.SameSite {
+	if mode == "none" {
+		return http.SameSiteNoneMode
+	}
+	return http.SameSiteLaxMode
+}
+
+// openBlobStore returns the configured file store, or nil for "none".
+func openBlobStore(ctx context.Context, cfg config.Config, signer *blob.Signer) (blob.Store, error) {
+	switch cfg.BlobStore {
+	case "fs":
+		return blob.NewFSStore(cfg.BlobFSRoot, cfg.PublicURL, signer)
+	case "s3":
+		s, err := blob.NewS3Store(blob.S3Config{Endpoint: cfg.S3.Endpoint, Bucket: cfg.S3.Bucket, Region: cfg.S3.Region,
+			AccessKey: cfg.S3.AccessKey, SecretKey: cfg.S3.SecretKey, UseSSL: cfg.S3.UseSSL})
+		if err != nil {
+			return nil, err
+		}
+		if _, err := s.Stat(ctx, "aishiteru-startup-probe"); err != nil && !errors.Is(err, blob.ErrNotFound) {
+			return nil, fmt.Errorf("the S3 bucket is not reachable: %w", err)
+		}
+		return s, nil
+	}
+	return nil, nil
 }
 
 func migrate(cfg config.Config, args []string) error {

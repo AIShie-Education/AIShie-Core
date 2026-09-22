@@ -1,0 +1,101 @@
+package blob
+
+import (
+	"errors"
+	"time"
+
+	"github.com/google/uuid"
+
+	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/signing"
+)
+
+// Signer makes and checks the two kinds of signed token this package uses:
+// upload tokens, and the filesystem store's URLs. There is no table of
+// pending uploads: the token is the record. Each kind is signed for its own
+// purpose, so neither can ever be taken for the other.
+type Signer struct {
+	s *signing.Signer
+}
+
+const (
+	purposeUpload = "blob.upload"
+	purposeURL    = "blob.url"
+)
+
+var (
+	ErrBadToken     = signing.ErrBadToken
+	ErrExpiredToken = signing.ErrExpiredToken
+)
+
+// NewSigner takes the installation's signing key; see signing.New.
+func NewSigner(key string) (*Signer, error) {
+	s, err := signing.New(key)
+	if err != nil {
+		return nil, errors.New("blob: the signing key must be at least 32 characters")
+	}
+	return &Signer{s: s}, nil
+}
+
+// SignerFrom signs with the installation's one signer. Purposes keep this
+// package's tokens apart from whatever else it signs.
+func SignerFrom(s *signing.Signer) *Signer { return &Signer{s: s} }
+
+// UploadClaim says: this member of this course was given this storage key, to
+// hold a file for this purpose.
+//
+// It is checked twice. When the bytes are PUT, it must not have expired: the
+// upload window is short. When the upload is attached to a document, expiry is
+// not checked: a proposal carrying a feedback file may be approved days later,
+// and the file it names is no less the proposer's for that. What stops reuse
+// is the database — a storage key is unique across document versions.
+type UploadClaim struct {
+	Key         string    `json:"k"`
+	CourseID    uuid.UUID `json:"c"`
+	MemberID    uuid.UUID `json:"m"`
+	Purpose     string    `json:"p"`
+	ContentType string    `json:"t"`
+	Expires     int64     `json:"e"`
+}
+
+// SignUpload issues an upload token.
+func (s *Signer) SignUpload(c UploadClaim) string { return s.s.Sign(purposeUpload, c) }
+
+// VerifyUpload checks an upload token's signature. It does not check expiry;
+// see UploadClaim.
+func (s *Signer) VerifyUpload(token string) (UploadClaim, error) {
+	var c UploadClaim
+	if err := s.s.Open(purposeUpload, token, &c); err != nil {
+		return UploadClaim{}, err
+	}
+	if c.Key == "" {
+		return UploadClaim{}, ErrBadToken
+	}
+	return c, nil
+}
+
+// urlClaim is what a filesystem-store URL carries: one method, one key, for
+// a while.
+type urlClaim struct {
+	Key         string `json:"k"`
+	Method      string `json:"v"`
+	ContentType string `json:"t,omitempty"`
+	Expires     int64  `json:"e"`
+}
+
+func (s *Signer) signURL(key, method, contentType string, ttl time.Duration, now time.Time) string {
+	return s.s.Sign(purposeURL, urlClaim{Key: key, Method: method, ContentType: contentType, Expires: now.Add(ttl).Unix()})
+}
+
+func (s *Signer) verifyURL(token, method string, now time.Time) (urlClaim, error) {
+	var c urlClaim
+	if err := s.s.Open(purposeURL, token, &c); err != nil {
+		return urlClaim{}, err
+	}
+	if c.Method != method || c.Key == "" {
+		return urlClaim{}, ErrBadToken
+	}
+	if now.Unix() > c.Expires {
+		return urlClaim{}, ErrExpiredToken
+	}
+	return c, nil
+}

@@ -43,6 +43,7 @@ func newAPI(t *testing.T, students int) *api {
 		Pool: c.Pool, LatestSchema: latest, Pipeline: c.P,
 		Auth:           auth.NewAuthenticator(c.Pool, time.Hour),
 		TrustedOrigins: []string{frontEnd}, InsecureCookies: true,
+		Blob: c.Blob, MaxUploadBytes: testkit.MaxUploadBytes,
 	}))
 	t.Cleanup(srv.Close)
 	return &api{t: t, c: c, srv: srv}
@@ -108,7 +109,9 @@ func (a *api) do(client *http.Client, method, path, token string, body any, head
 	defer res.Body.Close()
 	raw, _ := io.ReadAll(res.Body)
 	out := response{Status: res.StatusCode, Header: res.Header, Raw: string(raw)}
-	if len(raw) > 0 {
+	// A redirect's body is a courtesy link for browsers that do not follow
+	// it; everything else this API says, it says in JSON.
+	if len(raw) > 0 && (res.StatusCode < 300 || res.StatusCode >= 400) {
 		if err := json.Unmarshal(raw, &out.Body); err != nil {
 			a.t.Fatalf("%s %s: body is not JSON: %s", method, path, raw)
 		}
@@ -334,4 +337,105 @@ func mustURL(t *testing.T, raw string) *url.URL {
 		t.Fatal(err)
 	}
 	return u
+}
+
+// raw sends a request whose body is not JSON, and returns the response as is.
+func (a *api) raw(method, url, contentType string, body []byte, headers ...string) (rawResponse, []byte) {
+	a.t.Helper()
+	req, err := http.NewRequest(method, url, bytes.NewReader(body))
+	if err != nil {
+		a.t.Fatal(err)
+	}
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
+	for i := 0; i+1 < len(headers); i += 2 {
+		req.Header.Set(headers[i], headers[i+1])
+	}
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		a.t.Fatal(err)
+	}
+	defer res.Body.Close()
+	got, _ := io.ReadAll(res.Body)
+	return rawResponse{StatusCode: res.StatusCode, Header: res.Header}, got
+}
+
+// rawResponse is what a test needs of a response once its body has been read
+// and closed.
+type rawResponse struct {
+	StatusCode int
+	Header     http.Header
+}
+
+// here rewrites a store URL, which names the public host, to the test server.
+func (a *api) here(storeURL string) string {
+	return a.srv.URL + strings.TrimPrefix(storeURL, "http://lms.test")
+}
+
+// A file, over HTTP all the way: ask for a URL, PUT the bytes with no
+// credential but the URL, attach it, read it back as a student.
+func TestFileUploadOverHTTP(t *testing.T) {
+	a := newAPI(t, 1)
+	c := a.c
+	sato, yuki := a.tokenFor(c.Sato), a.tokenFor(c.Students[0].Actor)
+	course := "/v1/courses/" + c.Course.String()
+
+	ask := a.do(nil, "GET", course+"/upload-url?kind=material&content_type=application/pdf", sato, nil)
+	if ask.Status != 200 {
+		t.Fatalf("upload-url: %d %s", ask.Status, ask.Raw)
+	}
+	putURL, token := a.here(ask.str("result", "upload_url")), ask.str("result", "upload_token")
+	pdf := []byte("%PDF-1.7 slides")
+
+	// The slot was signed for a PDF. It does not take HTML.
+	if res, body := a.raw("PUT", putURL, "text/html", []byte("<script>alert(1)</script>")); res.StatusCode != 400 {
+		t.Fatalf("wrong content type: %d %s", res.StatusCode, body)
+	}
+	if res, body := a.raw("PUT", putURL, "application/pdf", pdf); res.StatusCode != 200 || !strings.Contains(string(body), "sha256:") {
+		t.Fatalf("PUT: %d %s", res.StatusCode, body)
+	}
+	// Written once. What a version points at cannot be swapped.
+	if res, _ := a.raw("PUT", putURL, "application/pdf", []byte("other bytes")); res.StatusCode != 409 {
+		t.Fatalf("a second PUT: %d", res.StatusCode)
+	}
+	if res, _ := a.raw("PUT", putURL[:len(putURL)-3]+"AAA", "application/pdf", pdf); res.StatusCode != 403 {
+		t.Fatalf("a forged upload URL: %d", res.StatusCode)
+	}
+	if res, _ := a.raw("GET", putURL, "", nil); res.StatusCode != 403 { // a PUT URL is not a GET URL
+		t.Fatalf("GET on a PUT URL: %d", res.StatusCode)
+	}
+
+	made := a.do(nil, "POST", course+"/documents", sato, m{"kind": "material", "title": "Slides", "upload_token": token}, "Idempotency-Key", "doc-1")
+	if made.Status != 200 {
+		t.Fatalf("document.create: %d %s", made.Status, made.Raw)
+	}
+	doc := made.str("result", "document_id")
+	if r := a.do(nil, "POST", course+"/documents/"+doc+"/publish", sato, m{}, "Idempotency-Key", "pub-1"); r.Status != 200 {
+		t.Fatalf("publish: %d %s", r.Status, r.Raw)
+	}
+
+	read := a.do(nil, "GET", course+"/documents/"+doc, yuki, nil)
+	if read.Status != 200 {
+		t.Fatalf("document.get: %d %s", read.Status, read.Raw)
+	}
+	res, got := a.raw("GET", a.here(read.str("result", "version", "download_url")), "", nil)
+	if res.StatusCode != 200 || !bytes.Equal(got, pdf) || res.Header.Get("Content-Type") != "application/pdf" {
+		t.Fatalf("download: %d %q %s", res.StatusCode, res.Header.Get("Content-Type"), got)
+	}
+	// Other people's bytes, from the API's own origin: a download, never a page.
+	if res.Header.Get("Content-Disposition") != "attachment" || res.Header.Get("X-Content-Type-Options") != "nosniff" ||
+		!strings.Contains(res.Header.Get("Content-Security-Policy"), "sandbox") {
+		t.Fatalf("download headers: %v", res.Header)
+	}
+
+	// Too large is refused at the door, and nothing is kept.
+	big := a.do(nil, "GET", course+"/upload-url?kind=material&content_type=application/zip", sato, nil)
+	if res, _ := a.raw("PUT", a.here(big.str("result", "upload_url")), "application/zip", bytes.Repeat([]byte("z"), testkit.MaxUploadBytes+1)); res.StatusCode != 400 {
+		t.Fatalf("oversized PUT: %d", res.StatusCode)
+	}
+	attach := a.do(nil, "POST", course+"/documents", sato, m{"kind": "material", "title": "Big", "upload_token": big.str("result", "upload_token")}, "Idempotency-Key", "doc-2")
+	if attach.Status != 422 {
+		t.Fatalf("attaching an upload that was refused: %d %s", attach.Status, attach.Raw)
+	}
 }

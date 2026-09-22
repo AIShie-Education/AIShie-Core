@@ -230,3 +230,35 @@ func TestScopedLists(t *testing.T) {
 		t.Fatalf("submitting to an unpublished assignment: %+v", out)
 	}
 }
+
+// A file archived from a submission or a grade is that student's business,
+// like its creation: the event carries the student and the assignment, so
+// scope applies, and it is seen by those who read the submission rather than
+// by those who read drafts.
+func TestArchivedFileEventsStayInScope(t *testing.T) {
+	b := build(t)
+	draft := testkit.Result[tools.SubmissionCreateOut](t, b.do(t, b.ken, "submission.create", m{"course_id": b.course, "assignment_id": b.hw3})).SubmissionID
+	file := testkit.Result[tools.DocumentCreateOut](t, b.do(t, b.ken, "document.create",
+		m{"course_id": b.course, "kind": "submission", "title": "oops.txt", "submission_id": draft, "body_md": "wrong file"})).DocumentID
+	b.do(t, b.ken, "document.archive", m{"course_id": b.course, "document_id": file})
+	if n := b.Count(`SELECT count(*) FROM event WHERE type = 'submission.file_archived' AND subject_id = $1 AND student_member_id = $2 AND assignment_id = $3`, file, b.kenM, b.hw3); n != 1 {
+		t.Fatal("the archived-file event does not say whose it is")
+	}
+	// The tutor is listed for Yuki and may read drafts; Ken's file is not
+	// its business. The grader, listed for HW3, reads the submission.
+	b.do(t, b.sato, "member.update_perms", m{"course_id": b.course, "member_id": b.tutorM, "perms": m{"document_read_draft": "autonomous"}})
+	sees := func(actor uuid.UUID) bool {
+		for _, ev := range feed(t, b, actor) {
+			if ev.SubjectID != nil && *ev.SubjectID == file {
+				return true
+			}
+		}
+		return false
+	}
+	if sees(b.tutor) {
+		t.Fatal("the tutor saw Ken's file go, out of its scope")
+	}
+	if !sees(b.grader) || !sees(b.ken) {
+		t.Fatal("those who read the submission did not see its file go")
+	}
+}

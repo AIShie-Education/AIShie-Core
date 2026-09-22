@@ -121,11 +121,15 @@ func (p *Pipeline) Decide(ctx context.Context, ec *tool.ExecCtx, in DecideIn) (D
 		return p.cancel(ctx, ec, prop, CancelReauthorization, map[string]any{"authz_reason": string(a.decision.Reason)})
 	}
 
+	// Approved says what the approver did; outcome says what came of it. A
+	// proposer reading the feed must be able to tell an approval that ran
+	// from one that was refused by the domain, or it would take the second
+	// for the first.
 	fail := func(e *apperr.Error) (DecideOut, error) {
 		if err := finish(ctx, ec.Q, prop.ID, domain.StatusFailed, &ec.Member.ID, ec, false, errorResult(e)); err != nil {
 			return DecideOut{}, err
 		}
-		ec.Emit(proposalEvent(events.ActionApproved, prop, ec.ActionID, nil))
+		ec.Emit(proposalEvent(events.ActionApproved, prop, ec.ActionID, map[string]any{"outcome": domain.StatusFailed, "error": e.Code}))
 		out.Outcome, out.Error = domain.StatusFailed, e
 		return out, nil
 	}
@@ -146,7 +150,7 @@ func (p *Pipeline) Decide(ctx context.Context, ec *tool.ExecCtx, in DecideIn) (D
 	res, err := savepoint(ctx, ec.Tx, func(sp pgx.Tx) (any, error) {
 		return t.Execute(ctx, &tool.ExecCtx{
 			Tx: sp, Q: dbq.New(sp), Actor: proposer, Member: a.decision.Member,
-			ActionID: prop.ID, Now: ec.Now, Emit: stamp(child, prop.ID),
+			ActionID: prop.ID, Now: ec.Now, ActionCreatedAt: prop.CreatedAt, Emit: stamp(child, prop.ID),
 		}, args)
 	})
 	if err != nil {
@@ -163,7 +167,7 @@ func (p *Pipeline) Decide(ctx context.Context, ec *tool.ExecCtx, in DecideIn) (D
 	if err := finish(ctx, ec.Q, prop.ID, domain.StatusExecuted, &ec.Member.ID, ec, true, stripTopLevel(full, t.SecretOut)); err != nil {
 		return DecideOut{}, err
 	}
-	ec.Emit(proposalEvent(events.ActionApproved, prop, ec.ActionID, nil))
+	ec.Emit(proposalEvent(events.ActionApproved, prop, ec.ActionID, map[string]any{"outcome": domain.StatusExecuted}))
 	child.Drain(ec.Emit)
 	out.Outcome, out.Result = domain.StatusExecuted, full
 	return out, nil

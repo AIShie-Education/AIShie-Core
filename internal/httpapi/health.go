@@ -19,8 +19,11 @@ type healthResponse struct {
 	Error         string `json:"error,omitempty"`
 }
 
-// healthz is 200 only when the database answers and its schema is exactly the
-// one this binary was built for.
+// healthz is 200 when the database answers and its schema is at least the one
+// this binary was built for. A schema that is ahead is what a rolling deploy
+// looks like from the old binary's side — migrations keep the previous
+// release working — so it is healthy. A schema that is behind is not: the
+// binary would issue statements the database does not understand.
 func (s *server) healthz(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 	defer cancel()
@@ -40,8 +43,8 @@ func (s *server) healthz(w http.ResponseWriter, r *http.Request) {
 		resp.Status, resp.Error, code = "unavailable", "database unreachable", http.StatusServiceUnavailable
 	case dirty:
 		resp.Status, resp.Error, code = "unavailable", "schema is dirty", http.StatusServiceUnavailable
-	case v != s.LatestSchema:
-		resp.Status, resp.Error, code = "unavailable", "schema version mismatch; run `aishiterud migrate up`", http.StatusServiceUnavailable
+	case v < s.LatestSchema:
+		resp.Status, resp.Error, code = "unavailable", "the schema is behind this binary; run `aishiterud migrate up`", http.StatusServiceUnavailable
 	}
 
 	w.Header().Set("Content-Type", "application/json")

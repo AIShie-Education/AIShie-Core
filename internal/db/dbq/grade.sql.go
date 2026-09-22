@@ -13,6 +13,18 @@ import (
 	"github.com/shopspring/decimal"
 )
 
+const componentHasLivePostedGrades = `-- name: ComponentHasLivePostedGrades :one
+SELECT EXISTS (SELECT 1 FROM grade WHERE component_id = $1 AND posted_at IS NOT NULL AND superseded_by IS NULL)
+`
+
+// Any origin: an entered grade, or a total written down when it was a parent.
+func (q *Queries) ComponentHasLivePostedGrades(ctx context.Context, componentID *uuid.UUID) (bool, error) {
+	row := q.db.QueryRow(ctx, componentHasLivePostedGrades, componentID)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
+}
+
 const countComponentAssignments = `-- name: CountComponentAssignments :one
 SELECT count(*) FROM assignment WHERE component_id = $1
 `
@@ -194,7 +206,7 @@ func (q *Queries) GetGradesInCourse(ctx context.Context, arg GetGradesInCoursePa
 }
 
 const getLiveComputedGrade = `-- name: GetLiveComputedGrade :one
-SELECT id, score
+SELECT id, score, breakdown
 FROM grade
 WHERE component_id = $1 AND student_member_id = $2 AND origin = 'computed'
   AND posted_at IS NOT NULL AND superseded_by IS NULL
@@ -206,14 +218,15 @@ type GetLiveComputedGradeParams struct {
 }
 
 type GetLiveComputedGradeRow struct {
-	ID    uuid.UUID
-	Score decimal.Decimal
+	ID        uuid.UUID
+	Score     decimal.Decimal
+	Breakdown []byte
 }
 
 func (q *Queries) GetLiveComputedGrade(ctx context.Context, arg GetLiveComputedGradeParams) (GetLiveComputedGradeRow, error) {
 	row := q.db.QueryRow(ctx, getLiveComputedGrade, arg.ComponentID, arg.StudentMemberID)
 	var i GetLiveComputedGradeRow
-	err := row.Scan(&i.ID, &i.Score)
+	err := row.Scan(&i.ID, &i.Score, &i.Breakdown)
 	return i, err
 }
 
@@ -415,7 +428,7 @@ func (q *Queries) ListDraftGradeIDsForAssignment(ctx context.Context, arg ListDr
 const listGradedAssignments = `-- name: ListGradedAssignments :many
 SELECT id, component_id, points_possible
 FROM assignment
-WHERE course_id = $1 AND component_id IS NOT NULL
+WHERE course_id = $1 AND component_id IS NOT NULL AND published_at IS NOT NULL
 ORDER BY id
 `
 
@@ -425,7 +438,9 @@ type ListGradedAssignmentsRow struct {
 	PointsPossible decimal.Decimal
 }
 
-// Assignments that count toward the grade.
+// Assignments that count toward the grade. An unpublished one cannot have a
+// submission, so it cannot have a grade; it is left out rather than shown to
+// every student as something they scored nothing on.
 func (q *Queries) ListGradedAssignments(ctx context.Context, courseID uuid.UUID) ([]ListGradedAssignmentsRow, error) {
 	rows, err := q.db.Query(ctx, listGradedAssignments, courseID)
 	if err != nil {
@@ -552,6 +567,21 @@ func (q *Queries) LiveSubmissionGradeExists(ctx context.Context, submissionID *u
 	return exists, err
 }
 
+const lockComponentGradeTarget = `-- name: LockComponentGradeTarget :exec
+SELECT pg_advisory_xact_lock(hashtextextended(
+    'grade-target:' || ($1::uuid)::text || ':' || ($2::uuid)::text, 0))
+`
+
+type LockComponentGradeTargetParams struct {
+	ComponentID     uuid.UUID
+	StudentMemberID uuid.UUID
+}
+
+func (q *Queries) LockComponentGradeTarget(ctx context.Context, arg LockComponentGradeTargetParams) error {
+	_, err := q.db.Exec(ctx, lockComponentGradeTarget, arg.ComponentID, arg.StudentMemberID)
+	return err
+}
+
 const lockGradesInCourse = `-- name: LockGradesInCourse :many
 SELECT g.id
 FROM grade g
@@ -586,6 +616,66 @@ func (q *Queries) LockGradesInCourse(ctx context.Context, arg LockGradesInCourse
 	return items, nil
 }
 
+const lockStudentTotals = `-- name: LockStudentTotals :exec
+SELECT pg_advisory_xact_lock(hashtextextended(
+    'totals:' || ($1::uuid)::text || ':' || ($2::uuid)::text, 0))
+`
+
+type LockStudentTotalsParams struct {
+	CourseID        uuid.UUID
+	StudentMemberID uuid.UUID
+}
+
+// One writer of a student's rolled-up totals at a time.
+func (q *Queries) LockStudentTotals(ctx context.Context, arg LockStudentTotalsParams) error {
+	_, err := q.db.Exec(ctx, lockStudentTotals, arg.CourseID, arg.StudentMemberID)
+	return err
+}
+
+const lockSubmissionForGrading = `-- name: LockSubmissionForGrading :exec
+
+SELECT 1 FROM submission WHERE id = $1 FOR UPDATE
+`
+
+// Serialising what races -------------------------------------------------------
+// A row lock, not an UPDATE: the freeze trigger does not fire. Two drafts for
+// one submission entered at once would otherwise both be live.
+func (q *Queries) LockSubmissionForGrading(ctx context.Context, id uuid.UUID) error {
+	_, err := q.db.Exec(ctx, lockSubmissionForGrading, id)
+	return err
+}
+
+const newestComponentDraftAt = `-- name: NewestComponentDraftAt :one
+SELECT created_at FROM grade
+WHERE component_id = $1 AND student_member_id = $2 AND origin = 'entered' AND posted_at IS NULL AND superseded_by IS NULL
+ORDER BY created_at DESC LIMIT 1
+`
+
+type NewestComponentDraftAtParams struct {
+	ComponentID     *uuid.UUID
+	StudentMemberID uuid.UUID
+}
+
+func (q *Queries) NewestComponentDraftAt(ctx context.Context, arg NewestComponentDraftAtParams) (time.Time, error) {
+	row := q.db.QueryRow(ctx, newestComponentDraftAt, arg.ComponentID, arg.StudentMemberID)
+	var created_at time.Time
+	err := row.Scan(&created_at)
+	return created_at, err
+}
+
+const newestSubmissionDraftAt = `-- name: NewestSubmissionDraftAt :one
+SELECT created_at FROM grade
+WHERE submission_id = $1 AND origin = 'entered' AND posted_at IS NULL AND superseded_by IS NULL
+ORDER BY created_at DESC LIMIT 1
+`
+
+func (q *Queries) NewestSubmissionDraftAt(ctx context.Context, submissionID *uuid.UUID) (time.Time, error) {
+	row := q.db.QueryRow(ctx, newestSubmissionDraftAt, submissionID)
+	var created_at time.Time
+	err := row.Scan(&created_at)
+	return created_at, err
+}
+
 const postGrade = `-- name: PostGrade :execrows
 UPDATE grade SET posted_at = $2, posted_by_member_id = $3
 WHERE id = $1 AND posted_at IS NULL AND superseded_by IS NULL
@@ -603,6 +693,17 @@ func (q *Queries) PostGrade(ctx context.Context, arg PostGradeParams) (int64, er
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+const submissionHasGrades = `-- name: SubmissionHasGrades :one
+SELECT EXISTS (SELECT 1 FROM grade WHERE submission_id = $1)
+`
+
+func (q *Queries) SubmissionHasGrades(ctx context.Context, submissionID *uuid.UUID) (bool, error) {
+	row := q.db.QueryRow(ctx, submissionHasGrades, submissionID)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
 }
 
 const supersedeComponentDrafts = `-- name: SupersedeComponentDrafts :exec

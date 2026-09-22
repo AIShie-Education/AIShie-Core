@@ -45,6 +45,19 @@ const (
 // Canonicalize returns the canonical form of raw with the named top-level
 // fields removed.
 func Canonicalize(raw []byte, strip ...string) ([]byte, error) {
+	return canonicalize(raw, strip, nil)
+}
+
+// Sealed returns the canonical form of raw with each named top-level field's
+// value replaced by seal(field, canonical value of it) — a string that stands
+// for the value without being it. It is how a call that carries a secret gets
+// a payload hash that still tells one secret from another: the stored payload
+// (Canonicalize) drops the secret; the hash (Sealed) commits to it.
+func Sealed(raw []byte, seal func(field string, value []byte) string, fields ...string) ([]byte, error) {
+	return canonicalize(raw, fields, seal)
+}
+
+func canonicalize(raw []byte, fields []string, seal func(string, []byte) string) ([]byte, error) {
 	if len(bytes.TrimSpace(raw)) == 0 {
 		return []byte("{}"), nil
 	}
@@ -61,8 +74,17 @@ func Canonicalize(raw []byte, strip ...string) ([]byte, error) {
 	if !ok {
 		return nil, fmt.Errorf("arguments must be a JSON object")
 	}
-	for _, k := range strip {
-		delete(obj, k)
+	for _, k := range fields {
+		val, present := obj[k]
+		if seal == nil || !present {
+			delete(obj, k)
+			continue
+		}
+		var one bytes.Buffer
+		if err := write(&one, val); err != nil {
+			return nil, err
+		}
+		obj[k] = seal(k, one.Bytes())
 	}
 	var buf bytes.Buffer
 	if err := write(&buf, obj); err != nil {
@@ -132,6 +154,12 @@ func write(buf *bytes.Buffer, v any) error {
 }
 
 func writeString(buf *bytes.Buffer, s string) error {
+	// PostgreSQL's jsonb cannot hold U+0000, so a payload with one could
+	// never be recorded; refusing it here makes that the caller's mistake
+	// rather than a server fault to retry for ever.
+	if strings.ContainsRune(s, 0) {
+		return fmt.Errorf("strings cannot contain U+0000")
+	}
 	enc := json.NewEncoder(buf)
 	enc.SetEscapeHTML(false)
 	if err := enc.Encode(s); err != nil {

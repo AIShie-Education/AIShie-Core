@@ -42,7 +42,13 @@ func (b *built) do(t *testing.T, actor uuid.UUID, name string, args m) pipeline.
 
 func build(t *testing.T) *built {
 	t.Helper()
-	b := &built{Platform: testkit.NewPlatform(t)}
+	return buildOn(t, testkit.NewPlatform(t))
+}
+
+// buildOn is build on a platform the test has set up itself.
+func buildOn(t *testing.T, p *testkit.Platform) *built {
+	t.Helper()
+	b := &built{Platform: p}
 	root := b.Root
 
 	// Root makes an admin; the admin does the rest of the platform's work.

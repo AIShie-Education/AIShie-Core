@@ -25,7 +25,7 @@ import (
 
 func platformTools() []tool.Tool {
 	return []tool.Tool{
-		actorRegister(), actorGet(), actorSuspend(), actorReactivate(), actorIssueToken(),
+		actorRegister(), actorGet(), actorSuspend(), actorReactivate(), actorIssueToken(), actorLinkSSO(),
 		termCreate(), termList(), departmentCreate(), departmentList(),
 		presetList(), presetCreate(), presetUpdate(),
 	}
@@ -229,6 +229,63 @@ func actorIssueToken() tool.Tool {
 				return IssueTokenOut{}, err
 			}
 			return IssueTokenOut{CredentialID: id, Token: tok.Full, TokenPrefix: tok.Prefix, ExpiresAt: expires}, nil
+		},
+	})
+}
+
+type ActorLinkSSOIn struct {
+	ActorID  uuid.UUID `json:"actor_id"`
+	Provider string    `json:"provider" jsonschema:"this installation's name for the identity provider, e.g. polyu-adfs"`
+	Subject  string    `json:"subject" jsonschema:"the account at the provider: for ADFS, the UPN, e.g. yuki@connect.polyu.hk"`
+}
+
+type CredentialIDOut struct {
+	CredentialID uuid.UUID `json:"credential_id"`
+}
+
+func actorLinkSSO() tool.Tool {
+	return tool.Define(tool.Spec[ActorLinkSSOIn, CredentialIDOut]{
+		Name: "actor.link_sso",
+		Description: "Let a registered person sign in through the identity provider, by linking their account there to their " +
+			"actor here. Accounts are not created on first sign-in: until this is done, someone the provider vouches for is " +
+			"still nobody here. One identity links to one actor.",
+		Kind: tool.Write, Gate: admins,
+		HTTP: tool.Route{Method: "POST", Pattern: "/v1/actors/{actor_id}/sso"},
+		Resolve: func(ctx context.Context, q dbq.Querier, in ActorLinkSSOIn) (tool.Target, error) {
+			return resolveActor(ctx, q, ActorIDIn{ActorID: in.ActorID})
+		},
+		Execute: func(ctx context.Context, ec *tool.ExecCtx, in ActorLinkSSOIn) (CredentialIDOut, error) {
+			provider, subject := strings.TrimSpace(in.Provider), auth.NormalizeSubject(in.Subject)
+			if provider == "" || subject == "" {
+				return CredentialIDOut{}, apperr.Invalid("provider and subject are required")
+			}
+			// Linking an identity is handing over the keys to the account, so
+			// it is held to the same rule as issuing a token for it.
+			if in.ActorID != ec.Actor.ID {
+				if err := mayActOn(ctx, ec, in.ActorID); err != nil {
+					return CredentialIDOut{}, err
+				}
+			}
+			// One identity, one row, for good: the database keeps (provider,
+			// subject) unique across revoked links as well, so that an
+			// identity which once opened one account can never quietly come
+			// to open another. Linking it again to the same actor revives
+			// the row.
+			switch held, err := ec.Q.GetSSOCredential(ctx, dbq.GetSSOCredentialParams{Provider: &provider, Subject: &subject}); {
+			case errors.Is(err, pgx.ErrNoRows):
+			case err != nil:
+				return CredentialIDOut{}, err
+			case held.ActorID == in.ActorID && held.RevokedAt != nil:
+				return CredentialIDOut{CredentialID: held.ID}, ec.Q.ReviveSSOCredential(ctx, held.ID)
+			case held.ActorID == in.ActorID:
+				return CredentialIDOut{}, apperr.Conflicts("that identity is already linked to this actor")
+			default:
+				return CredentialIDOut{}, apperr.Conflicts("that identity is, or once was, linked to another actor; identities are not reassigned")
+			}
+			id := ids.New()
+			label := "linked by " + ec.Actor.DisplayName
+			return CredentialIDOut{CredentialID: id}, ec.Q.InsertCredential(ctx, dbq.InsertCredentialParams{
+				ID: id, ActorID: in.ActorID, Kind: auth.KindSSO, Provider: &provider, Subject: &subject, Label: &label, CreatedAt: ec.Now})
 		},
 	})
 }

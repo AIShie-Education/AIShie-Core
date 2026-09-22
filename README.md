@@ -19,18 +19,37 @@ In place so far:
   after-the-fact review, events;
 - authentication (API tokens for agents, password sessions for people) and
   the REST API, whose routes are generated from the tool registry;
-- the tool catalogue for everything but documents: actors, terms,
-  departments, presets, courses, members, the grading scheme, assignments,
-  submissions, grades, the approval and review queues, and the event feed —
-  all scope-filtered in SQL.
+- the tool catalogue: actors, terms, departments, presets, courses, members,
+  the grading scheme, assignments, submissions, grades, documents, the
+  approval and review queues, and the event feed — all scope-filtered in SQL;
+- files: versioned documents with publish-by-pointer, uploads and downloads
+  by short-lived URL (this server's disk, or any S3-compatible store), and
+  feedback files that travel with a grade through a proposal.
 
 `make e2e` runs the real binary against a scratch database and, with nothing
 but `curl`, builds the worked example from docs/schema.md §5 from an empty
 installation: an agent grades an essay, a person approves it, the student
 sees the grade.
 
-Still to come: documents and file storage, the MCP adapter, background jobs
-(proposal and membership expiry), SSO.
+- MCP: agents connect at `/mcp` (stateless streamable HTTP, bearer token) and
+  get the same catalogue as REST, tool for tool, through the same pipeline.
+
+- background sweeps, run as the system actor and recorded like any other
+  action: stale proposals cancelled, expired memberships removed, missing
+  submissions marked when a due date passes, uploads that nothing came to
+  point at removed. Every instance may run them; Postgres advisory locks see
+  that one does.
+
+- single sign-on over OpenID Connect (written against ADFS), which signs in
+  people who are already registered and creates nobody;
+- the things a server on the open internet needs: a per-actor rate limit
+  shared by REST and MCP, a limit on sign-in attempts, a request log with no
+  credentials in it, and a refusal to start against a schema older than the
+  binary.
+
+Not yet exercised anywhere but a developer's machine: the GitHub Actions
+workflows, PostgreSQL 13, the S3 store against a real object store, and the
+Docker image. The first pull request is what runs them.
 
 ## Layout
 
@@ -44,8 +63,11 @@ internal/
   pipeline                     the one road every call takes
   tools                        the catalogue, one file per noun
   events, gradecalc            the event feed's writer; grade rollups (pure)
+  blob                         file storage: filesystem and S3, signed upload tokens
+  jobs, members                background sweeps; what removing a member means
   auth                         who is calling: tokens, passwords, sessions, bootstrap
   httpapi                      REST adapter; routes generated from the registry
+  mcpapi                       MCP adapter; tools generated from the registry
   testdb, testkit              a database per test; course fixtures
 src/              migrations, seed and SQL tests; embedded into the binary
 docs/             design documents
@@ -96,8 +118,44 @@ curl localhost:8080/v1/tools            # the whole catalogue, with JSON Schemas
 ```
 
 Configuration is environment variables only; `bin/aishiterud help` lists them.
-`serve` never migrates on its own: `/healthz` reports 503 until the schema
-matches the version the binary was built for.
+Files are kept under `var/blobs` by default (`BLOB_STORE=fs`). For more than
+one instance, or for production, use `BLOB_STORE=s3` with the `S3_*` settings
+and a `SIGNING_KEY` shared by every instance. An upload that is not attached
+to a document within `PROPOSAL_TTL` plus two days is removed.
+`serve` never migrates on its own. It refuses to start against a schema older
+than the binary (run `aishiterud migrate up` first), and `/healthz` reports
+503 if the schema falls behind or a migration is left half-done.
+
+### Single sign-on
+
+Set `OIDC_ISSUER`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET` and `SIGNING_KEY`,
+and register `<PUBLIC_URL>/v1/auth/sso/callback` with the provider. The
+defaults are for ADFS: accounts are known by their `upn` claim
+(`OIDC_SUBJECT_CLAIM`) and the provider is recorded as `polyu-adfs`
+(`OIDC_PROVIDER_NAME`). A browser signs in by visiting
+`/v1/auth/sso/start?return_to=/where/to/go/afterwards` and comes back with the
+same session cookie a password sign-in gives.
+
+Signing in creates nobody. An administrator registers the person
+(`actor.register`) and links their identity (`actor.link_sso`, with the
+provider's name and the person's UPN) first; until then the provider vouching
+for someone makes them nobody here. An identity that has opened one account is
+never reassigned to another.
+
+### Connecting an agent
+
+Register the agent and give it a token (`actor.register`, `actor.issue_token`,
+or `aishiterud token issue`), seat it in a course (`member.add` with a preset
+such as `grader` or `tutor`), and point its MCP client at
+`https://<host>/mcp` with `Authorization: Bearer <token>`. Tool names are the
+registry's with the dot turned to an underscore (`grade_submit`). Every tool
+that changes something takes an `idempotency_key` argument. A result whose
+status is `proposed` is not an error: the action waits for a person, and the
+agent learns the decision by polling `event_list`. The server's MCP
+instructions tell a connecting model all of this.
+
+To look around by hand: `npx @modelcontextprotocol/inspector`, transport
+"Streamable HTTP", URL `http://localhost:8080/mcp`, and the bearer token.
 
 ### The API in one paragraph
 
@@ -108,11 +166,21 @@ with the same body again and you get the first answer back
 different body and you get `409 idempotency_conflict`. The response says what
 became of the call: `200` executed, `202` proposed (it now waits for a human;
 watch the action id), `403` denied, `409`/`422` failed. All four are recorded.
-`400`, `401` and `404` mean the call was never attempted, and nothing was
-recorded. Agents authenticate with `Authorization: Bearer <token>`; browsers
-sign in at `POST /v1/auth/login` and carry a session cookie. Set
-`TRUSTED_ORIGINS` to the web front end's origin so that its browser requests
-are accepted.
+`400`, `401`, `404` and `429` mean the call was never attempted, and nothing
+was recorded; `429` carries `Retry-After`. Every answer, including the one for
+a path that does not exist, is JSON. Agents authenticate with
+`Authorization: Bearer <token>`; browsers sign in at `POST /v1/auth/login` (or
+through single sign-on) and carry a session cookie. Set `TRUSTED_ORIGINS` to
+the web front end's origin so that its browser requests are accepted. The
+front end is expected to be same-site with this server (the session cookie is
+`SameSite=Lax`); a front end on another site needs `COOKIE_SAMESITE=none`.
+
+The server speaks plain HTTP and expects a reverse proxy to terminate TLS.
+Name the proxy's address range in `TRUSTED_PROXIES` (CIDRs), or every
+request looks like it comes from the proxy and the per-address limit on
+sign-in attempts becomes one bucket for the whole installation; with the
+proxy named, the client is the one it forwards in `X-Forwarded-For`, and that
+header is ignored from anywhere else.
 
 ## CI and releases
 
@@ -122,4 +190,9 @@ lint, generated-code drift, the SQL suite and the Go tests on PostgreSQL 13 and
 Each job is a `make` target, so a green `make ci` locally means the same thing.
 
 Nothing is deployed automatically. Release artifacts are built only from
-version tags (`v*.*.*`).
+version tags (`v*.*.*`): [release.yml](.github/workflows/release.yml) checks
+that the tag is on `main`, runs the whole of CI again, and then publishes
+binaries for Linux and macOS with checksums, a multi-architecture image at
+`ghcr.io/aishiteru-lms/aishiteru-core`, and build provenance for both. A
+pre-release tag (`v1.2.3-rc.1`) does not move `:latest`. How to cut one is in
+[CONTRIBUTING.md](CONTRIBUTING.md).

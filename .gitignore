@@ -16,3 +16,6 @@
 # Test and coverage output
 cover.out
 *.test
+
+# Local agent state (review worktrees)
+/.claude/

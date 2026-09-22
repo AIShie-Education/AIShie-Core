@@ -85,6 +85,38 @@ func (q *Queries) GetPasswordCredential(ctx context.Context, actorID uuid.UUID) 
 	return i, err
 }
 
+const getSSOCredential = `-- name: GetSSOCredential :one
+SELECT c.id, c.actor_id, c.revoked_at, a.status AS actor_status
+FROM credential c
+JOIN actor a ON a.id = c.actor_id
+WHERE c.kind = 'sso' AND c.provider = $1 AND c.subject = $2
+`
+
+type GetSSOCredentialParams struct {
+	Provider *string
+	Subject  *string
+}
+
+type GetSSOCredentialRow struct {
+	ID          uuid.UUID
+	ActorID     uuid.UUID
+	RevokedAt   *time.Time
+	ActorStatus string
+}
+
+// The account an identity provider's subject is linked to, if any.
+func (q *Queries) GetSSOCredential(ctx context.Context, arg GetSSOCredentialParams) (GetSSOCredentialRow, error) {
+	row := q.db.QueryRow(ctx, getSSOCredential, arg.Provider, arg.Subject)
+	var i GetSSOCredentialRow
+	err := row.Scan(
+		&i.ID,
+		&i.ActorID,
+		&i.RevokedAt,
+		&i.ActorStatus,
+	)
+	return i, err
+}
+
 const insertCredential = `-- name: InsertCredential :exec
 INSERT INTO credential (id, actor_id, kind, secret_hash, provider, subject, token_prefix, label, expires_at, created_at)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
@@ -169,6 +201,16 @@ func (q *Queries) ListCredentialsForActor(ctx context.Context, actorID uuid.UUID
 		return nil, err
 	}
 	return items, nil
+}
+
+const reviveSSOCredential = `-- name: ReviveSSOCredential :exec
+UPDATE credential SET revoked_at = NULL WHERE id = $1 AND kind = 'sso'
+`
+
+// Linking again an identity that was unlinked from the same actor.
+func (q *Queries) ReviveSSOCredential(ctx context.Context, id uuid.UUID) error {
+	_, err := q.db.Exec(ctx, reviveSSOCredential, id)
+	return err
 }
 
 const revokeCredential = `-- name: RevokeCredential :execrows

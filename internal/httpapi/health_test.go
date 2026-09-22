@@ -47,11 +47,19 @@ func TestHealthz(t *testing.T) {
 		}
 	})
 
-	t.Run("binary older than the schema is not", func(t *testing.T) {
+	t.Run("a schema behind the binary is not", func(t *testing.T) {
 		pool := testdb.New(t)
 		code, _ := get(t, httpapi.NewHandler(httpapi.Deps{Pool: pool, LatestSchema: latest + 1}), "/healthz")
 		if code != http.StatusServiceUnavailable {
 			t.Fatalf("got %d, want 503", code)
+		}
+	})
+
+	t.Run("a schema ahead of the binary is a rolling deploy, and healthy", func(t *testing.T) {
+		pool := testdb.New(t)
+		code, body := get(t, httpapi.NewHandler(httpapi.Deps{Pool: pool, LatestSchema: latest - 1}), "/healthz")
+		if code != http.StatusOK || body["status"] != "ok" {
+			t.Fatalf("got %d %v", code, body)
 		}
 	})
 }

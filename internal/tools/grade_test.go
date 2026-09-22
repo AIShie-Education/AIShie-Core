@@ -2,6 +2,10 @@ package tools_test
 
 import (
 	"context"
+	"encoding/json"
+	"strconv"
+	"strings"
+	"sync"
 	"testing"
 
 	"github.com/google/uuid"
@@ -296,5 +300,356 @@ func TestIdsFromAnotherCourseAreNotFound(t *testing.T) {
 	_, err := c.Call(c.Sato, "grade.submit", m{"course_id": other, "submission_id": c.Students[0].HW3, "score": 1}, "k")
 	if !apperr.Is(err, apperr.NotFound) {
 		t.Fatalf("err = %v, want not_found", err)
+	}
+}
+
+// A score is a score in the scheme it was given under. Once a grade has been
+// entered beneath a component, its place in the scheme is fixed: moving it
+// would change what every one of those grades counts toward. And a parent's
+// totals, once written down, keep it from ever being graded directly.
+func TestAGradedComponentKeepsItsPlace(t *testing.T) {
+	b := build(t)
+	exams := testkit.Result[tools.IDOut](t, b.do(t, b.sato, "component.create", m{"course_id": b.course, "parent_id": b.total, "name": "Exams", "weight": 30})).ID
+	final := testkit.Result[tools.IDOut](t, b.do(t, b.sato, "component.create",
+		m{"course_id": b.course, "parent_id": exams, "name": "Final", "points_possible": 100})).ID
+	quiz := testkit.Result[tools.IDOut](t, b.do(t, b.sato, "component.create",
+		m{"course_id": b.course, "parent_id": exams, "name": "Quiz", "points_possible": 10})).ID
+	move := func(id, under uuid.UUID) m {
+		return m{"course_id": b.course, "component_id": id, "new_parent_id": under}
+	}
+	// Nothing entered yet: the scheme is still being arranged.
+	b.do(t, b.sato, "component.move", move(quiz, b.total))
+	b.do(t, b.sato, "component.move", move(quiz, exams))
+
+	// A draft is enough.
+	g := testkit.Result[tools.GradeSubmitOut](t, b.do(t, b.sato, "grade.submit",
+		m{"course_id": b.course, "component_id": final, "student_member_id": b.yukiM, "score": 80})).GradeID
+	b.try(t, b.sato, "component.move", move(final, b.total), apperr.FailedPrecondition)
+	b.try(t, b.sato, "component.move", move(exams, b.bucket), apperr.FailedPrecondition) // graded beneath it
+	b.do(t, b.sato, "component.move", move(quiz, b.total))                               // nothing entered for the quiz
+	// The same for a bucket once one of its assignments is graded.
+	work := b.submit(t, b.yuki, "essay")
+	b.do(t, b.sato, "grade.submit", m{"course_id": b.course, "submission_id": work, "score": 70})
+	b.try(t, b.sato, "component.move", move(b.bucket, exams), apperr.FailedPrecondition)
+
+	b.do(t, b.sato, "grade.post", m{"course_id": b.course, "grade_ids": []uuid.UUID{g}})
+	if n := b.Count(`SELECT count(*) FROM grade WHERE component_id = $1 AND origin = 'computed' AND superseded_by IS NULL`, exams); n != 1 {
+		t.Fatalf("%d live totals on Exams, want Yuki's", n)
+	}
+	// A parent whose totals were written down can never become something
+	// graded directly, where those totals would sit in the way for ever.
+	// The tools no longer let a parent be emptied once graded; a scheme from
+	// before that rule still might be.
+	legacy := testkit.Result[tools.IDOut](t, b.do(t, b.sato, "component.create", m{"course_id": b.course, "parent_id": b.total, "name": "Legacy"})).ID
+	b.Exec(`INSERT INTO grade (id, student_member_id, component_id, origin, score, grader_member_id, created_by_action_id, posted_at, posted_by_member_id)
+		SELECT $1, student_member_id, $2, 'computed', score, grader_member_id, created_by_action_id, posted_at, posted_by_member_id
+		FROM grade WHERE component_id = $3 AND origin = 'computed' AND superseded_by IS NULL`, uuid.New(), legacy, exams)
+	b.try(t, b.sato, "component.update", m{"course_id": b.course, "component_id": legacy, "name": "Participation", "points_possible": 10}, apperr.FailedPrecondition)
+	if n := b.Count(`SELECT count(*) FROM grade_component WHERE id = $1 AND name = 'Legacy' AND points_possible IS NULL`, legacy); n != 1 {
+		t.Fatal("the refused change was kept")
+	}
+	// One that never had totals written down can still be turned.
+	spare := testkit.Result[tools.IDOut](t, b.do(t, b.sato, "component.create", m{"course_id": b.course, "parent_id": b.total, "name": "Spare"})).ID
+	b.do(t, b.sato, "component.update", m{"course_id": b.course, "component_id": spare, "points_possible": 5})
+}
+
+// "An unpublished assignment is visible only to holders of
+// perm_assignment_write." Nobody can submit to one, so it can never carry a
+// grade; the gradebook and the totals written down at posting leave it out,
+// rather than naming it to every student and counting a zero nobody could
+// have avoided.
+func TestAnUnpublishedAssignmentStaysOutOfTheGradebook(t *testing.T) {
+	b := build(t)
+	work := b.submit(t, b.yuki, "essay")
+	hidden := testkit.Result[tools.IDOut](t, b.do(t, b.sato, "assignment.create",
+		m{"course_id": b.course, "title": "SECRET final project", "points_possible": 300, "component_id": b.bucket})).ID
+
+	book := func() tools.GradebookGetOut {
+		return testkit.Result[tools.GradebookGetOut](t, b.do(t, b.yuki, "gradebook.get", m{"course_id": b.course, "student_member_id": b.yukiM}))
+	}
+	names := func(out tools.GradebookGetOut) string {
+		raw, _ := json.Marshal(out)
+		return string(raw)
+	}
+	if strings.Contains(names(book()), hidden.String()) {
+		t.Fatal("Yuki's gradebook names an assignment she cannot see")
+	}
+	g := testkit.Result[tools.GradeSubmitOut](t, b.do(t, b.sato, "grade.submit", m{"course_id": b.course, "submission_id": work, "score": 80})).GradeID
+	b.do(t, b.sato, "grade.post", m{"course_id": b.course, "grade_ids": []uuid.UUID{g}, "treat_ungraded_as_zero": true})
+	for _, line := range book().Components {
+		if line.ComponentID == b.bucket && (line.Percent == nil || !line.Percent.Equal(decimal.NewFromInt(80))) {
+			t.Fatalf("Assignments = %v, want 80: the unpublished project was counted", line.Percent)
+		}
+	}
+	if n := b.Count(`SELECT count(*) FROM grade WHERE origin = 'computed' AND student_member_id = $1 AND superseded_by IS NULL AND breakdown::text LIKE '%' || $2 || '%'`, b.yukiM, hidden.String()); n != 0 {
+		t.Fatal("a posted total's breakdown names the unpublished assignment")
+	}
+	// Published, it counts from then on.
+	b.do(t, b.sato, "assignment.publish", m{"course_id": b.course, "assignment_id": hidden})
+	if !strings.Contains(names(book()), hidden.String()) {
+		t.Fatal("the published project is not in the gradebook")
+	}
+}
+
+// A score is a score out of the points possible when it was given. Once any
+// grade has been entered — a draft waiting to be posted as much as a posted
+// one — what the work is worth no longer changes under it: a 95 entered out
+// of 100 must not be posted out of 50 with nobody having said so.
+func TestPointsAreFixedOnceAGradeIsEntered(t *testing.T) {
+	b := build(t)
+	// Before anything is entered, an assignment can be rescaled.
+	b.do(t, b.sato, "assignment.update", m{"course_id": b.course, "assignment_id": b.hw3, "points_possible": 100})
+	work := b.submit(t, b.yuki, "essay")
+	draft := testkit.Result[tools.GradeSubmitOut](t, b.do(t, b.sato, "grade.submit", m{"course_id": b.course, "submission_id": work, "score": 95})).GradeID
+	b.try(t, b.sato, "assignment.update", m{"course_id": b.course, "assignment_id": b.hw3, "points_possible": 50}, apperr.FailedPrecondition)
+	b.try(t, b.sato, "assignment.update", m{"course_id": b.course, "assignment_id": b.hw3, "points_possible": 200}, apperr.FailedPrecondition)
+	b.try(t, b.sato, "assignment.update", m{"course_id": b.course, "assignment_id": b.hw3, "component_id": b.midterm}, apperr.FailedPrecondition)
+	// What is not about the grade still changes.
+	b.do(t, b.sato, "assignment.update", m{"course_id": b.course, "assignment_id": b.hw3, "title": "HW3 (revised brief)"})
+	b.do(t, b.sato, "grade.post", m{"course_id": b.course, "grade_ids": []uuid.UUID{draft}})
+	if n := b.Count(`SELECT count(*) FROM grade WHERE id = $1 AND posted_at IS NOT NULL AND score = 95`, draft); n != 1 {
+		t.Fatal("the draft was not posted as entered")
+	}
+	// A directly graded component is held to the same rule.
+	b.do(t, b.sato, "component.update", m{"course_id": b.course, "component_id": b.midterm, "points_possible": 50})
+	b.do(t, b.sato, "grade.submit", m{"course_id": b.course, "component_id": b.midterm, "student_member_id": b.yukiM, "score": 45})
+	b.try(t, b.sato, "component.update", m{"course_id": b.course, "component_id": b.midterm, "points_possible": 100}, apperr.FailedPrecondition)
+	b.do(t, b.sato, "component.update", m{"course_id": b.course, "component_id": b.midterm, "name": "Midterm exam"})
+}
+
+// Two graders entering a draft for the same work at the same time must leave
+// one live draft, not two: nothing could post two.
+func TestOneLiveDraftUnderConcurrency(t *testing.T) {
+	b := build(t)
+	work := b.submit(t, b.yuki, "essay")
+	b.do(t, b.sato, "member.update_perms", m{"course_id": b.course, "member_id": b.graderM, "perms": m{"grade_submit": "autonomous"}})
+	for round := range 8 {
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		for i, actor := range []uuid.UUID{b.sato, b.grader, b.sato, b.grader} {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				args := m{"course_id": b.course, "submission_id": work, "score": 50 + i}
+				if out, err := b.Call(actor, "grade.submit", args, "race-"+strconv.Itoa(round)+"-"+strconv.Itoa(i)); err != nil || out.Status != domain.StatusExecuted {
+					t.Errorf("grade.submit: %v %+v", err, out)
+				}
+			}()
+		}
+		close(start)
+		wg.Wait()
+		if n := b.Count(`SELECT count(*) FROM grade WHERE submission_id = $1 AND posted_at IS NULL AND superseded_by IS NULL`, work); n != 1 {
+			t.Fatalf("round %d: %d live drafts", round, n)
+		}
+	}
+	// And posting the assignment then works.
+	b.do(t, b.sato, "grade.post", m{"course_id": b.course, "assignment_id": b.hw3})
+}
+
+// Two posts touching one student at once — an assignment posted while an
+// exam is regraded — both write the student's totals. They take turns rather
+// than colliding on the one live total.
+func TestTotalsAreWrittenByOneAtATime(t *testing.T) {
+	b := build(t)
+	mid := testkit.Result[tools.GradeSubmitOut](t, b.do(t, b.sato, "grade.submit",
+		m{"course_id": b.course, "component_id": b.midterm, "student_member_id": b.yukiM, "score": 70})).GradeID
+	b.do(t, b.sato, "grade.post", m{"course_id": b.course, "grade_ids": []uuid.UUID{mid}})
+	for round := range 8 {
+		// A fresh attempt each round, so that each round posts a new grade.
+		work := b.submit(t, b.yuki, "essay "+strconv.Itoa(round))
+		hw := testkit.Result[tools.GradeSubmitOut](t, b.do(t, b.sato, "grade.submit", m{"course_id": b.course, "submission_id": work, "score": 60 + round})).GradeID
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		var regraded uuid.UUID
+		for i, c := range []struct {
+			name string
+			args m
+		}{
+			{"grade.post", m{"course_id": b.course, "grade_ids": []uuid.UUID{hw}}},
+			{"grade.regrade", m{"course_id": b.course, "grade_id": mid, "score": 71 + round}},
+		} {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				out, err := b.Call(b.sato, c.name, c.args, "turns-"+strconv.Itoa(round)+"-"+strconv.Itoa(i))
+				if err != nil || out.Status != domain.StatusExecuted {
+					t.Errorf("round %d %s: %v %+v", round, c.name, err, out)
+					return
+				}
+				if c.name == "grade.regrade" {
+					regraded = testkit.Result[tools.GradeRegradeOut](t, out).GradeID
+				}
+			}()
+		}
+		close(start)
+		wg.Wait()
+		if t.Failed() {
+			t.FailNow()
+		}
+		mid = regraded
+		if n := b.Count(`SELECT count(*) FROM grade WHERE student_member_id = $1 AND origin = 'computed' AND component_id = $2 AND superseded_by IS NULL`, b.yukiM, b.total); n != 1 {
+			t.Fatalf("round %d: %d live totals", round, n)
+		}
+	}
+	// And the total that stands is the one both changes lead to.
+	book := testkit.Result[tools.GradebookGetOut](t, b.do(t, b.sato, "gradebook.get", m{"course_id": b.course, "student_member_id": b.yukiM}))
+	for _, l := range book.Components {
+		if l.ComponentID == b.total {
+			if n := b.Count(`SELECT count(*) FROM grade WHERE student_member_id = $1 AND component_id = $2 AND origin = 'computed' AND superseded_by IS NULL AND score = $3`, b.yukiM, b.total, *l.Percent); n != 1 {
+				t.Fatalf("the live total is not %s", *l.Percent)
+			}
+		}
+	}
+}
+
+// Final is final. Once a student's totals have been written with ungraded
+// work counted as zero, a later post or regrade beneath them — made without
+// saying so — keeps counting it as zero, rather than quietly turning the
+// final grade back into a grade so far.
+func TestFinalTotalsStayFinal(t *testing.T) {
+	b := build(t)
+	work := b.submit(t, b.yuki, "essay")
+	hw := testkit.Result[tools.GradeSubmitOut](t, b.do(t, b.sato, "grade.submit", m{"course_id": b.course, "submission_id": work, "score": 80})).GradeID
+	book := func(zero bool) *decimal.Decimal {
+		out := testkit.Result[tools.GradebookGetOut](t, b.do(t, b.sato, "gradebook.get", m{"course_id": b.course, "student_member_id": b.yukiM, "treat_ungraded_as_zero": zero}))
+		for _, l := range out.Components {
+			if l.ComponentID == b.total {
+				return l.Percent
+			}
+		}
+		return nil
+	}
+	total := func() (decimal.Decimal, bool) {
+		var score decimal.Decimal
+		var breakdown []byte
+		if err := b.Pool.QueryRow(t.Context(), `SELECT score, breakdown FROM grade WHERE student_member_id = $1 AND component_id = $2 AND origin = 'computed' AND superseded_by IS NULL`, b.yukiM, b.total).Scan(&score, &breakdown); err != nil {
+			t.Fatal(err)
+		}
+		var working struct {
+			UngradedAsZero bool `json:"ungraded_as_zero"`
+		}
+		if err := json.Unmarshal(breakdown, &working); err != nil {
+			t.Fatal(err)
+		}
+		return score, working.UngradedAsZero
+	}
+
+	// Posted as final: the midterm, never sat, counts as zero.
+	b.do(t, b.sato, "grade.post", m{"course_id": b.course, "grade_ids": []uuid.UUID{hw}, "treat_ungraded_as_zero": true})
+	if got, final := total(); !final || !got.Equal(*book(true)) {
+		t.Fatalf("posted as final: %s (final: %v), want %s", got, final, *book(true))
+	}
+	// A regrade made without the flag keeps it final.
+	b.do(t, b.sato, "grade.regrade", m{"course_id": b.course, "grade_id": hw, "score": 90})
+	if got, final := total(); !final || !got.Equal(*book(true)) || got.Equal(*book(false)) {
+		t.Fatalf("after a regrade: %s (final: %v), want %s and not the grade so far %s", got, final, *book(true), *book(false))
+	}
+	// So does a later post beneath it.
+	mid := testkit.Result[tools.GradeSubmitOut](t, b.do(t, b.sato, "grade.submit",
+		m{"course_id": b.course, "component_id": b.midterm, "student_member_id": b.yukiM, "score": 50})).GradeID
+	b.do(t, b.sato, "grade.post", m{"course_id": b.course, "grade_ids": []uuid.UUID{mid}})
+	if got, final := total(); !final {
+		t.Fatalf("after a post: %s is no longer final", got)
+	}
+	// Another student, never finalised, still gets a grade so far.
+	kens := b.submit(t, b.ken, "essay")
+	kg := testkit.Result[tools.GradeSubmitOut](t, b.do(t, b.sato, "grade.submit", m{"course_id": b.course, "submission_id": kens, "score": 80})).GradeID
+	b.do(t, b.sato, "grade.post", m{"course_id": b.course, "grade_ids": []uuid.UUID{kg}})
+	if n := b.Count(`SELECT count(*) FROM grade WHERE student_member_id = $1 AND component_id = $2 AND origin = 'computed' AND superseded_by IS NULL AND breakdown::text LIKE '%ungraded_as_zero%'`, b.kenM, b.total); n != 0 {
+		t.Fatal("Ken's totals were written as final; nobody said so")
+	}
+}
+
+// The rubric version a grade is against is the one the grader was shown. For
+// a proposal that is the rubric as published when the proposal was made, not
+// when it was approved: it is pinned into the proposal.
+func TestAProposalPinsTheRubricItWasMadeAgainst(t *testing.T) {
+	b := build(t)
+	rubric := testkit.Result[tools.DocumentCreateOut](t, b.do(t, b.sato, "document.create",
+		m{"course_id": b.course, "kind": "rubric", "title": "HW3 rubric", "body_md": "v1"}))
+	b.do(t, b.sato, "document.publish", m{"course_id": b.course, "document_id": rubric.DocumentID})
+	b.do(t, b.sato, "assignment.update", m{"course_id": b.course, "assignment_id": b.hw3, "rubric_document_id": rubric.DocumentID})
+	work := b.submit(t, b.yuki, "essay")
+
+	proposed := b.MustCall(b.grader, "grade.submit", m{"course_id": b.course, "submission_id": work, "score": 85}, "p")
+	if proposed.Status != domain.StatusProposed {
+		t.Fatalf("%+v", proposed)
+	}
+	if n := b.Count(`SELECT count(*) FROM action WHERE id = $1 AND payload->>'rubric_version_id' = $2`, *proposed.ActionID, rubric.VersionID.String()); n != 1 {
+		t.Fatal("the proposal does not carry the rubric version it was made against")
+	}
+	// The rubric moves on before anyone decides.
+	b.do(t, b.sato, "document.add_version", m{"course_id": b.course, "document_id": rubric.DocumentID, "body_md": "v2", "publish": true})
+	v := testkit.Result[pipeline.DecideOut](t, b.do(t, b.sato, "action.decide", m{"course_id": b.course, "action_id": proposed.ActionID, "decision": "approve"}))
+	if v.Outcome != domain.StatusExecuted {
+		t.Fatalf("%+v", v)
+	}
+	gradeID := testkit.Result[tools.GradeSubmitOut](t, pipeline.Outcome{Result: v.Result}).GradeID
+	if n := b.Count(`SELECT count(*) FROM grade WHERE id = $1 AND rubric_version_id = $2`, gradeID, *rubric.VersionID); n != 1 {
+		t.Fatal("the approved grade is pinned to a rubric version the grader never saw")
+	}
+	// A direct call is against the rubric as it stands.
+	kens := b.submit(t, b.ken, "essay")
+	direct := testkit.Result[tools.GradeSubmitOut](t, b.do(t, b.sato, "grade.submit", m{"course_id": b.course, "submission_id": kens, "score": 70})).GradeID
+	if n := b.Count(`SELECT count(*) FROM grade WHERE id = $1 AND rubric_version_id = $2`, direct, *rubric.VersionID); n != 0 {
+		t.Fatal("a direct grade was pinned to the old rubric")
+	}
+}
+
+// Posting by assignment is about the assignment: one outside the caller's
+// scope is out of scope whether or not anything is waiting on it, so the
+// refusal tells them nothing about what is. And the batch is checked again
+// against what is actually about to be posted, which may be more than what
+// was there when the call was authorized.
+func TestPostingByAssignmentIsScopedToTheAssignment(t *testing.T) {
+	b := build(t)
+	hw4 := testkit.Result[tools.IDOut](t, b.do(t, b.sato, "assignment.create", m{"course_id": b.course, "title": "HW4", "points_possible": 10, "component_id": b.bucket})).ID
+	b.do(t, b.sato, "assignment.publish", m{"course_id": b.course, "assignment_id": hw4})
+	b.do(t, b.sato, "member.update_perms", m{"course_id": b.course, "member_id": b.graderM, "perms": m{"grade_submit": "autonomous", "grade_post": "autonomous"}})
+	// The grader is listed for HW3. HW4, with nothing waiting: denied, and
+	// recorded against the assignment.
+	out := b.MustCall(b.grader, "grade.post", m{"course_id": b.course, "assignment_id": hw4}, "hw4")
+	if out.Status != domain.StatusDenied || out.Error.Details["reason"] != "assignment_out_of_scope" {
+		t.Fatalf("posting an assignment outside the grader's scope: %+v", out)
+	}
+	if n := b.Count(`SELECT count(*) FROM action WHERE id = $1 AND target_type = 'assignment' AND target_id = $2`, *out.ActionID, hw4); n != 1 {
+		t.Fatal("the denial is not recorded against the assignment")
+	}
+
+	// A grader listed for Yuki alone posts HW3 by assignment while Sato
+	// keeps entering drafts for Ken. Whatever the timing, none of Ken's
+	// grades is ever posted by the grader.
+	b.do(t, b.sato, "member.rescope", m{"course_id": b.course, "member_id": b.graderM, "student_scope": "listed", "listed_students": []uuid.UUID{b.yukiM}})
+	for round := range 12 {
+		yukis, kens := b.submit(t, b.yuki, "essay"), b.submit(t, b.ken, "essay")
+		b.do(t, b.sato, "grade.submit", m{"course_id": b.course, "submission_id": yukis, "score": 80})
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			<-start
+			if _, err := b.Call(b.grader, "grade.post", m{"course_id": b.course, "assignment_id": b.hw3}, "post-"+strconv.Itoa(round)); err != nil {
+				t.Error(err)
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			<-start
+			if _, err := b.Call(b.sato, "grade.submit", m{"course_id": b.course, "submission_id": kens, "score": 60}, "ken-"+strconv.Itoa(round)); err != nil {
+				t.Error(err)
+			}
+		}()
+		close(start)
+		wg.Wait()
+		if n := b.Count(`SELECT count(*) FROM grade WHERE student_member_id = $1 AND posted_by_member_id = $2`, b.kenM, b.graderM); n != 0 {
+			t.Fatalf("round %d: the grader posted Ken's grade, outside its scope", round)
+		}
+		// Whatever is still a draft, Sato posts, so the next round starts clean.
+		if _, err := b.Call(b.sato, "grade.post", m{"course_id": b.course, "assignment_id": b.hw3}, "clean-"+strconv.Itoa(round)); err != nil {
+			t.Fatal(err)
+		}
 	}
 }

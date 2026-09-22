@@ -1,0 +1,52 @@
+# Release binaries. Images are built by release.yml with buildx, so that they
+# share the Dockerfile CI already proves builds.
+version: 2
+
+project_name: aishiterud
+
+before:
+  hooks:
+    - go mod download
+
+builds:
+  - id: aishiterud
+    main: ./cmd/aishiterud
+    binary: aishiterud
+    env: [CGO_ENABLED=0]
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+    flags: [-trimpath]
+    ldflags:
+      - -s -w
+      - -X github.com/AIShiteru-LMS/AIShiteru-Core/internal/version.Version={{ .Version }}
+      - -X github.com/AIShiteru-LMS/AIShiteru-Core/internal/version.Commit={{ .ShortCommit }}
+      - -X github.com/AIShiteru-LMS/AIShiteru-Core/internal/version.Date={{ .CommitDate }}
+    mod_timestamp: "{{ .CommitTimestamp }}" # reproducible: the same commit gives the same bytes
+
+archives:
+  - formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files: [README.md, docs/*.md]
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  use: git
+  sort: asc
+  groups:
+    - { title: "Schema — run `aishiterud migrate up` before starting this version", regexp: '(?i)migration', order: 0 }
+    - { title: Changes, order: 999 }
+  filters:
+    exclude: ['^Merge ']
+
+release:
+  # A tag like v1.2.3-rc.1 is published as a pre-release and leaves "latest" alone.
+  prerelease: auto
+  header: |
+    Binaries for Linux and macOS, and a multi-architecture image at
+    `ghcr.io/aishiteru-lms/aishiteru-core:{{ .Version }}`.
+
+    `serve` never migrates on its own. If this version carries new migrations
+    (the release workflow lists them below when it does), run
+    `aishiterud migrate up` before starting it.

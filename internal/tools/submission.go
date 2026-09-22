@@ -44,6 +44,7 @@ type SubmissionView struct {
 	State                 string     `json:"state" jsonschema:"draft, submitted, late or missing"`
 	SubmittedAt           *time.Time `json:"submitted_at,omitempty"`
 	CreatedAt             time.Time  `json:"created_at"`
+	Files                 []FileRef  `json:"files,omitempty" jsonschema:"submitted files; read each with document.get"`
 }
 
 type SubmissionListIn struct {
@@ -118,8 +119,16 @@ func submissionGet() tool.Tool {
 		},
 		Query: func(ctx context.Context, rc *tool.ReadCtx, in SubmissionIDIn) (SubmissionView, error) {
 			s, err := rc.Q.GetSubmissionFull(ctx, dbq.GetSubmissionFullParams{ID: in.SubmissionID, CourseID: in.CourseID})
-			return SubmissionView{ID: s.ID, AssignmentID: s.AssignmentID, StudentMemberID: s.StudentMemberID, Attempt: s.Attempt,
-				Body: s.Body, InstructionsVersionID: s.InstructionsVersionID, State: s.State, SubmittedAt: s.SubmittedAt, CreatedAt: s.CreatedAt}, err
+			if err != nil {
+				return SubmissionView{}, err
+			}
+			v := SubmissionView{ID: s.ID, AssignmentID: s.AssignmentID, StudentMemberID: s.StudentMemberID, Attempt: s.Attempt,
+				Body: s.Body, InstructionsVersionID: s.InstructionsVersionID, State: s.State, SubmittedAt: s.SubmittedAt, CreatedAt: s.CreatedAt}
+			files, err := rc.Q.ListSubmissionDocuments(ctx, &s.ID)
+			for _, f := range files {
+				v.Files = append(v.Files, FileRef{DocumentID: f.ID, Title: f.Title})
+			}
+			return v, err
 		},
 	})
 }
@@ -209,10 +218,23 @@ func submissionCreate() tool.Tool {
 				case stateDraft:
 					return SubmissionCreateOut{}, apperr.Conflicts("there is already an open draft; edit or submit that one").With("submission_id", latest.ID)
 				case stateMissing:
-					if err := ec.Q.ReopenMissingSubmission(ctx, dbq.ReopenMissingSubmissionParams{ID: latest.ID, Body: in.Body}); err != nil {
+					// Late work takes the placeholder over — unless someone has
+					// graded the placeholder. A zero "for handing in nothing"
+					// is a grade of that nothing; the work a grade was given
+					// for never changes underneath it. Then the placeholder
+					// stays as it is, as history, and the late work is a new
+					// attempt with a grade of its own to come.
+					graded, err := ec.Q.SubmissionHasGrades(ctx, &latest.ID)
+					if err != nil {
 						return SubmissionCreateOut{}, err
 					}
-					return SubmissionCreateOut{SubmissionID: latest.ID, Attempt: latest.Attempt}, nil
+					if !graded {
+						if err := ec.Q.ReopenMissingSubmission(ctx, dbq.ReopenMissingSubmissionParams{ID: latest.ID, Body: in.Body}); err != nil {
+							return SubmissionCreateOut{}, err
+						}
+						return SubmissionCreateOut{SubmissionID: latest.ID, Attempt: latest.Attempt}, nil
+					}
+					attempt = latest.Attempt + 1
 				default:
 					attempt = latest.Attempt + 1
 				}

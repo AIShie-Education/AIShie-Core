@@ -1,10 +1,13 @@
 package tools_test
 
 import (
+	"strconv"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/shopspring/decimal"
 
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/apperr"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/domain"
@@ -275,7 +278,24 @@ func TestPlatformRules(t *testing.T) {
 		t.Fatalf("writing to an archived course: %+v", out)
 	}
 	b.do(t, b.sato, "assignment.list", m{"course_id": b.course}) // still readable
-	b.try(t, b.admin, "course.update", m{"course_id": b.course, "title": "New title"}, apperr.FailedPrecondition)
+	// An admin is no more able to write to it than its instructor is: the
+	// platform tools are refused for the same reason, and the refusal is on
+	// the record like any other.
+	for name, args := range map[string]m{
+		"course.update":          {"course_id": b.course, "title": "New title"},
+		"course.seat_instructor": {"course_id": b.course, "actor_id": b.grader},
+	} {
+		out := b.MustCall(b.admin, name, args, "archived-"+name)
+		if out.Status != domain.StatusDenied || out.Error.Details["reason"] != "course_archived" {
+			t.Fatalf("%s on an archived course: %+v", name, out)
+		}
+	}
+	if n := b.Count(`SELECT count(*) FROM course_member WHERE course_id = $1 AND actor_id = $2 AND role = 'instructor'`, b.course, b.grader); n != 0 {
+		t.Fatal("an instructor was seated in an archived course")
+	}
+	// Archiving it again is a conflict, not a denial; un-archiving is the
+	// one write it accepts.
+	b.try(t, b.admin, "course.archive", m{"course_id": b.course}, apperr.Conflict)
 	b.do(t, b.admin, "course.activate", m{"course_id": b.course})
 
 	// Department presets sit beside the built-ins, and win by name.
@@ -393,4 +413,271 @@ func TestAStudentWithAnEmptiedScopeReachesNobody(t *testing.T) {
 	if out := b.MustCall(b.yuki, "gradebook.get", m{"course_id": b.course, "student_member_id": b.yukiM}, ""); out.Status != domain.StatusDenied {
 		t.Fatalf("scope did not fail closed: %+v", out)
 	}
+}
+
+// A 'missing' row that has been graded is history: the zero, and the reason
+// given for it, describe a submission with nothing in it. Late work goes
+// beside it as a new attempt rather than appearing underneath the grade.
+func TestAGradedMissingRowIsNotTakenOver(t *testing.T) {
+	b := build(t)
+	placeholder := uuid.New()
+	b.Exec(`INSERT INTO submission (id, assignment_id, course_id, student_member_id, state) VALUES ($1, $2, $3, $4, 'missing')`,
+		placeholder, b.hw3, b.course, b.yukiM)
+	zero := testkit.Result[tools.GradeSubmitOut](t, b.do(t, b.sato, "grade.submit",
+		m{"course_id": b.course, "submission_id": placeholder, "score": 0, "feedback": "Nothing handed in."})).GradeID
+
+	// Graded is enough; it need not have been posted yet.
+	late := testkit.Result[tools.SubmissionCreateOut](t, b.do(t, b.yuki, "submission.create", m{"course_id": b.course, "assignment_id": b.hw3, "body": "my late essay"}))
+	if late.SubmissionID == placeholder || late.Attempt != 2 {
+		t.Fatalf("late work went underneath an existing grade: %+v", late)
+	}
+	if n := b.Count(`SELECT count(*) FROM submission WHERE id = $1 AND state = 'missing' AND body IS NULL`, placeholder); n != 1 {
+		t.Fatal("the graded placeholder changed")
+	}
+	b.do(t, b.sato, "grade.post", m{"course_id": b.course, "grade_ids": []uuid.UUID{zero}})
+	b.do(t, b.yuki, "submission.submit", m{"course_id": b.course, "submission_id": late.SubmissionID})
+	// The late attempt is graded in its own right, and is then what counts.
+	better := testkit.Result[tools.GradeSubmitOut](t, b.do(t, b.sato, "grade.submit", m{"course_id": b.course, "submission_id": late.SubmissionID, "score": 60})).GradeID
+	b.do(t, b.sato, "grade.post", m{"course_id": b.course, "grade_ids": []uuid.UUID{better}})
+	book := testkit.Result[tools.GradebookGetOut](t, b.do(t, b.yuki, "gradebook.get", m{"course_id": b.course, "student_member_id": b.yukiM}))
+	for _, c := range book.Components {
+		if c.ComponentID == b.bucket && (c.Percent == nil || !c.Percent.Equal(decimal.NewFromInt(60))) {
+			t.Fatalf("Assignments is %v, want the later attempt's 60", c.Percent)
+		}
+	}
+}
+
+// The checks that keep a component one thing — a bucket of assignments, a
+// parent of other components, or something graded directly — read the tree
+// and then write to it. Two of them at once, each passing on what it read,
+// could leave a component being two things; its assignments would then
+// silently stop counting. They are serialised by the course's tree lock.
+func TestAComponentStaysOneThingUnderConcurrency(t *testing.T) {
+	b := build(t)
+	for round := range 8 {
+		target := testkit.Result[tools.IDOut](t, b.do(t, b.sato, "component.create",
+			m{"course_id": b.course, "parent_id": b.total, "name": "Coursework " + strconv.Itoa(round), "weight": 1})).ID
+		calls := []struct {
+			name string
+			args m
+		}{
+			{"component.create", m{"course_id": b.course, "parent_id": target, "name": "Labs"}},
+			{"assignment.create", m{"course_id": b.course, "title": "HW", "points_possible": 10, "component_id": target}},
+			{"component.update", m{"course_id": b.course, "component_id": target, "points_possible": 50}},
+		}
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		for i, c := range calls {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				if _, err := b.Call(b.sato, c.name, c.args, "race-"+strconv.Itoa(round)+"-"+strconv.Itoa(i)); err != nil {
+					t.Errorf("%s: %v", c.name, err)
+				}
+			}()
+		}
+		close(start)
+		wg.Wait()
+		if n := b.Count(`SELECT (EXISTS (SELECT 1 FROM grade_component WHERE parent_id = $1))::int
+			+ (EXISTS (SELECT 1 FROM assignment WHERE component_id = $1))::int
+			+ (SELECT (points_possible IS NOT NULL)::int FROM grade_component WHERE id = $1)`, target); n != 1 {
+			t.Fatalf("round %d: the component is %d things at once", round, n)
+		}
+	}
+}
+
+// assignment.publish insists on instructions students can read. Changing a
+// published assignment's instructions must insist on the same, or everyone
+// who hands in afterwards is pinned to nothing.
+func TestAPublishedAssignmentKeepsReadableInstructions(t *testing.T) {
+	b := build(t)
+	unpublished := testkit.Result[tools.DocumentCreateOut](t, b.do(t, b.sato, "document.create",
+		m{"course_id": b.course, "kind": "instructions", "title": "HW3, rewritten", "body_md": "tbd"})).DocumentID
+	change := m{"course_id": b.course, "assignment_id": b.hw3, "instructions_document_id": unpublished}
+	b.try(t, b.sato, "assignment.update", change, apperr.FailedPrecondition)
+	if n := b.Count(`SELECT count(*) FROM assignment WHERE id = $1 AND instructions_document_id IS NULL`, b.hw3); n != 1 {
+		t.Fatal("the refused change was kept")
+	}
+	b.do(t, b.sato, "document.publish", m{"course_id": b.course, "document_id": unpublished})
+	b.do(t, b.sato, "assignment.update", change)
+
+	// An assignment nobody can see yet may point at a draft brief.
+	draftBrief := testkit.Result[tools.DocumentCreateOut](t, b.do(t, b.sato, "document.create",
+		m{"course_id": b.course, "kind": "instructions", "title": "HW4", "body_md": "tbd"})).DocumentID
+	hw4 := testkit.Result[tools.IDOut](t, b.do(t, b.sato, "assignment.create", m{"course_id": b.course, "title": "HW4", "points_possible": 10})).ID
+	b.do(t, b.sato, "assignment.update", m{"course_id": b.course, "assignment_id": hw4, "instructions_document_id": draftBrief})
+}
+
+// "An archived course refuses every write" includes the writes that touch no
+// row of ours: an upload URL is somewhere to put a file for a course that is
+// closed.
+func TestAnArchivedCourseIssuesNoUploadURLs(t *testing.T) {
+	b := build(t)
+	b.do(t, b.admin, "course.archive", m{"course_id": b.course})
+	out, err := b.Call(b.sato, "document.upload_url", m{"course_id": b.course, "kind": "material", "content_type": "text/plain"}, "closed")
+	if err == nil && (out.Status == domain.StatusExecuted || out.Status == domain.StatusProposed) {
+		t.Fatalf("an archived course handed out an upload URL: %+v", out)
+	}
+}
+
+// A level is held over a scope for a time. Raising a level on a member who
+// reaches the whole class, widening the reach of a member who holds a level,
+// or extending the life of either, hands out the product — and the product is
+// what must be within the granter's own.
+func TestAWideningChangeIsAGrantOfTheWhole(t *testing.T) {
+	b := build(t)
+	register := func(kind, name string) uuid.UUID {
+		return testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", m{"kind": kind, "display_name": name})).ActorID
+	}
+	seat := func(as uuid.UUID, actor uuid.UUID, args m) uuid.UUID {
+		args["course_id"], args["actor_id"] = b.course, actor
+		return testkit.Result[tools.MemberIDOut](t, b.do(t, as, "member.add", args)).MemberID
+	}
+	denied := func(what string, actor uuid.UUID, name string, args m) {
+		t.Helper()
+		args["course_id"] = b.course
+		if out := b.MustCall(actor, name, args, "denied-"+uuid.NewString()); out.Status != domain.StatusFailed || out.Error.Code != apperr.Forbidden {
+			t.Fatalf("%s: %+v", what, out)
+		}
+	}
+	// Helper: a TA who manages members, grades on their own, cannot post,
+	// and is limited to Yuki. Sato also pilots an agent, limited to Yuki.
+	helper := register("human", "Helper")
+	seat(b.sato, helper, m{"preset": "ta", "perms": m{"member_manage": "autonomous"}, "student_scope": "listed", "listed_students": []uuid.UUID{b.yukiM}})
+	pilot := seat(b.sato, register("agent", "pilot"), m{"preset": "ta", "student_scope": "listed", "listed_students": []uuid.UUID{b.yukiM}})
+
+	// (1) Widening a scope hands the member's levels to more students.
+	denied("widening the pilot to the class", helper, "member.rescope", m{"member_id": pilot, "student_scope": "all"})
+	denied("adding Ken to the pilot", helper, "member.rescope", m{"member_id": pilot, "listed_students": []uuid.UUID{b.yukiM, b.kenM}})
+	// (2) Raising a level on a member whose reach is the class.
+	observer := seat(b.sato, register("agent", "observer"), m{"preset": "observer"})
+	denied("raising a level on someone who reaches the class", helper, "member.update_perms", m{"member_id": observer, "perms": m{"submission_read": "autonomous"}})
+	denied("raising an agent's grading to autonomous for the class", helper, "member.update_perms", m{"member_id": b.graderM, "perms": m{"grade_submit": "autonomous"}})
+	// (3) Two steps: give a friend member_manage, have the friend widen you.
+	friend := register("human", "Friend")
+	friendM := seat(b.sato, friend, m{"preset": "observer", "student_scope": "listed", "listed_students": []uuid.UUID{b.yukiM}})
+	b.do(t, helper, "member.update_perms", m{"course_id": b.course, "member_id": friendM, "perms": m{"member_manage": "autonomous"}})
+	var helperM uuid.UUID
+	if err := b.Pool.QueryRow(t.Context(), `SELECT id FROM course_member WHERE actor_id = $1`, helper).Scan(&helperM); err != nil {
+		t.Fatal(err)
+	}
+	if out := b.MustCall(friend, "member.rescope", m{"course_id": b.course, "member_id": helperM, "student_scope": "all"}, "friend"); out.Status != domain.StatusFailed {
+		t.Fatalf("the friend widened the helper: %+v", out)
+	}
+	if out := b.MustCall(helper, "submission.list", m{"course_id": b.course, "assignment_id": b.hw3}, ""); out.Status != domain.StatusExecuted {
+		t.Fatalf("%+v", out)
+	} else if n := len(testkit.Result[tools.SubmissionListOut](t, out).Submissions); n != 0 {
+		t.Fatalf("the helper reaches %d submissions it was never given", n)
+	}
+
+	// (4) Narrowing is always allowed, whatever the manager holds: the
+	// grader reaches the class, the helper does not, and may still narrow it
+	// or shorten its life.
+	b.do(t, helper, "member.rescope", m{"course_id": b.course, "member_id": b.graderM, "expires_at": time.Now().Add(time.Hour)})
+	b.do(t, helper, "member.rescope", m{"course_id": b.course, "member_id": b.graderM, "assignment_scope": "listed", "listed_assignments": []uuid.UUID{}})
+	b.do(t, helper, "member.update_perms", m{"course_id": b.course, "member_id": b.graderM, "perms": m{"grade_submit": "denied"}})
+	// But not lengthen it, nor clear it: that gives back what it held.
+	denied("extending the grader's life", helper, "member.rescope", m{"member_id": b.graderM, "expires_at": time.Now().Add(48 * time.Hour)})
+	denied("making the grader permanent", helper, "member.rescope", m{"member_id": b.graderM, "clear_expiry": true})
+
+	// (5) Nor resume a seat that holds more: pausing and resuming would
+	// otherwise be a way to hand out anything at all.
+	b.do(t, helper, "member.pause", m{"course_id": b.course, "member_id": observer})
+	denied("resuming a seat that reaches the class", helper, "member.resume", m{"member_id": observer})
+	b.do(t, b.sato, "member.resume", m{"course_id": b.course, "member_id": observer})
+}
+
+// Time is held to the same rule as everything else: a manager seated until
+// Friday hands out nothing that lasts past Friday, and cannot be made to last
+// longer by someone they seated.
+func TestATemporaryManagerHandsOutNothingPermanent(t *testing.T) {
+	b := build(t)
+	friday := time.Now().Add(72 * time.Hour)
+	temp := testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", m{"kind": "human", "display_name": "Temp"})).ActorID
+	tempM := testkit.Result[tools.MemberIDOut](t, b.do(t, b.sato, "member.add", m{"course_id": b.course, "actor_id": temp, "preset": "ta",
+		"perms": m{"member_manage": "autonomous"}, "expires_at": friday})).MemberID
+	puppet := testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", m{"kind": "agent", "display_name": "Puppet"})).ActorID
+
+	seat := m{"course_id": b.course, "actor_id": puppet, "preset": "ta", "perms": m{"member_manage": "autonomous"}}
+	b.try(t, temp, "member.add", seat, apperr.Forbidden) // no expiry: for ever
+	seat["expires_at"] = friday.Add(time.Hour)
+	b.try(t, temp, "member.add", seat, apperr.Forbidden)
+	seat["expires_at"] = friday
+	puppetM := testkit.Result[tools.MemberIDOut](t, b.do(t, temp, "member.add", seat)).MemberID
+
+	// The puppet cannot make its maker permanent, nor itself.
+	b.try(t, puppet, "member.rescope", m{"course_id": b.course, "member_id": tempM, "clear_expiry": true}, apperr.Forbidden)
+	b.try(t, puppet, "member.rescope", m{"course_id": b.course, "member_id": tempM, "expires_at": friday.Add(time.Hour)}, apperr.Forbidden)
+	b.try(t, puppet, "member.rescope", m{"course_id": b.course, "member_id": puppetM, "clear_expiry": true}, apperr.Forbidden)
+	// Sato, who lasts, can.
+	b.do(t, b.sato, "member.rescope", m{"course_id": b.course, "member_id": tempM, "clear_expiry": true})
+
+	// An expired seat is as good as removed, whether or not the sweep has
+	// got to it: it is not revived, and a fresh seat takes its place.
+	b.P.SetClock(func() time.Time { return friday.Add(time.Minute) })
+	b.try(t, b.sato, "member.rescope", m{"course_id": b.course, "member_id": puppetM, "clear_expiry": true}, apperr.Conflict)
+	b.try(t, b.sato, "member.resume", m{"course_id": b.course, "member_id": puppetM}, apperr.Conflict)
+	b.try(t, b.sato, "member.update_perms", m{"course_id": b.course, "member_id": puppetM, "perms": m{"grade_post": "denied"}}, apperr.Conflict)
+	again := testkit.Result[tools.MemberIDOut](t, b.do(t, b.sato, "member.add", m{"course_id": b.course, "actor_id": puppet, "preset": "observer"})).MemberID
+	if again == puppetM {
+		t.Fatal("the expired seat was reused")
+	}
+	if n := b.Count(`SELECT count(*) FROM course_member WHERE id = $1 AND status = 'removed'`, puppetM); n != 1 {
+		t.Fatal("the expired seat was not removed when the fresh one was made")
+	}
+	if n := b.Count(`SELECT count(*) FROM event WHERE type = 'member.removed' AND subject_id = $1 AND payload->>'reason' = 'expired'`, puppetM); n != 1 {
+		t.Fatal("no member.removed event for the expired seat")
+	}
+}
+
+// Two managers editing the same seat at once take turns, so that a
+// revocation that reports executed is not undone by a change that never
+// meant to touch it.
+func TestConcurrentEditsToASeatTakeTurns(t *testing.T) {
+	b := build(t)
+	for round := range 6 {
+		actor := testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", m{"kind": "agent", "display_name": "a" + strconv.Itoa(round)})).ActorID
+		seated := testkit.Result[tools.MemberIDOut](t, b.do(t, b.sato, "member.add", m{"course_id": b.course, "actor_id": actor, "preset": "ta",
+			"perms": m{"grade_post": "autonomous"}, "student_scope": "listed", "listed_students": []uuid.UUID{b.yukiM, b.kenM}})).MemberID
+		calls := []struct {
+			name string
+			args m
+		}{
+			{"member.update_perms", m{"course_id": b.course, "member_id": seated, "perms": m{"grade_post": "denied"}}},
+			{"member.update_perms", m{"course_id": b.course, "member_id": seated, "perms": m{"member_read": "autonomous"}}},
+			{"member.rescope", m{"course_id": b.course, "member_id": seated, "listed_students": []uuid.UUID{b.yukiM}}},
+			{"member.rescope", m{"course_id": b.course, "member_id": seated, "assignment_scope": "listed", "listed_assignments": []uuid.UUID{b.hw3}}},
+		}
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		for i, c := range calls {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				if out, err := b.Call(b.sato, c.name, c.args, "turns-"+strconv.Itoa(round)+"-"+strconv.Itoa(i)); err != nil || out.Status != domain.StatusExecuted {
+					t.Errorf("%s: %v %+v", c.name, err, out)
+				}
+			}()
+		}
+		close(start)
+		wg.Wait()
+		got := testkit.Result[tools.MemberView](t, b.do(t, b.sato, "member.get", m{"course_id": b.course, "member_id": seated}))
+		if got.Perms["grade_post"] != "denied" || got.Perms["member_read"] != "autonomous" ||
+			len(got.ListedStudents) != 1 || got.AssignmentScope != "listed" || len(got.ListedAssignments) != 1 {
+			t.Fatalf("round %d: an edit was lost: %+v", round, got)
+		}
+	}
+}
+
+// A change that leaves a list alone does not re-check it: a student who has
+// since left the course must not make an unrelated change fail.
+func TestAKeptListIsNotReValidated(t *testing.T) {
+	b := build(t)
+	b.do(t, b.sato, "member.remove", m{"course_id": b.course, "member_id": b.yukiM})
+	b.do(t, b.sato, "member.rescope", m{"course_id": b.course, "member_id": b.tutorM, "expires_at": time.Now().Add(time.Hour)})
+	b.do(t, b.sato, "member.rescope", m{"course_id": b.course, "member_id": b.tutorM, "assignment_scope": "listed", "listed_assignments": []uuid.UUID{b.hw3}})
+	// Sending the list does check it.
+	b.try(t, b.sato, "member.rescope", m{"course_id": b.course, "member_id": b.tutorM, "listed_students": []uuid.UUID{b.yukiM}}, apperr.FailedPrecondition)
 }

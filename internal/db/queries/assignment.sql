@@ -16,10 +16,12 @@ UPDATE assignment SET published_at = $2 WHERE id = $1 AND published_at IS NULL;
 SELECT id, course_id, kind, title, status, published_version_id
 FROM document WHERE id = $1 AND course_id = $2;
 
--- name: AssignmentHasPostedGrades :one
+-- name: AssignmentHasLiveGrades :one
+-- Entered and not replaced: a draft waiting to be posted counts, since what it
+-- was entered against would change under it just the same.
 SELECT EXISTS (
     SELECT 1 FROM grade g JOIN submission s ON s.id = g.submission_id
-    WHERE s.assignment_id = $1 AND g.posted_at IS NOT NULL
+    WHERE s.assignment_id = $1 AND g.origin = 'entered' AND g.superseded_by IS NULL
 );
 
 -- name: ListAssignments :many

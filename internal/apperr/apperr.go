@@ -20,6 +20,7 @@ const (
 	Conflict            Code = "conflict"             // the current state does not allow this
 	IdempotencyConflict Code = "idempotency_conflict" // same key, different content
 	FailedPrecondition  Code = "failed_precondition"  // a rule of the domain says no
+	RateLimited         Code = "rate_limited"         // too many calls; never attempted, nothing recorded
 )
 
 type Error struct {

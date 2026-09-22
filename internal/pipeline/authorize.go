@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"time"
 
@@ -49,7 +50,18 @@ func (p *Pipeline) authorize(ctx context.Context, q dbq.Querier, t tool.Tool, in
 			return authz.ForActor(ctx, q, actor.ID, cid, perms, write, now)
 		}
 		var err error
-		if a.decision, err = check(t.Gate.Perms); err != nil || !a.decision.Level.Allowed() {
+		if t.Gate.Any {
+			// Enough to hold one of them. Which one governs is the target's
+			// to say, below.
+			for _, perm := range t.Gate.Perms {
+				if a.decision, err = check([]domain.Perm{perm}); err != nil || a.decision.Level.Allowed() {
+					break
+				}
+			}
+		} else {
+			a.decision, err = check(t.Gate.Perms)
+		}
+		if err != nil || !a.decision.Level.Allowed() {
 			return a, err
 		}
 		target, err := t.Resolve(ctx, q, in)
@@ -65,6 +77,9 @@ func (p *Pipeline) authorize(ctx context.Context, q dbq.Querier, t tool.Tool, in
 			target.Type = a.target.Type
 		}
 		a.target = target
+		if t.Gate.Any && len(target.Perms) == 0 {
+			return a, fmt.Errorf("%s: its gate is Any, so its Resolve must name the governing permission", t.Name)
+		}
 		if len(target.Perms) > 0 {
 			if a.decision, err = check(target.Perms); err != nil || !a.decision.Level.Allowed() {
 				return a, err
@@ -107,6 +122,20 @@ func (p *Pipeline) authorize(ctx context.Context, q dbq.Querier, t tool.Tool, in
 	if target.CourseID != uuid.Nil {
 		cid := target.CourseID
 		a.courseID = &cid
+		// "course.status = 'archived' refuses every write." For a member
+		// that is step 1 of authorize(). A platform tool is not gated by
+		// membership and never reaches step 1, so the same rule is applied
+		// here: an admin is no more able to write to an archived course than
+		// its instructor is. Un-archiving is the one exception.
+		if write && !t.OnArchived {
+			course, err := q.GetCourseForAuthz(ctx, cid)
+			if err != nil {
+				return a, fmt.Errorf("load course: %w", err)
+			}
+			if course.Status == domain.CourseArchived {
+				a.decision = authz.Decision{Level: domain.Denied, Reason: authz.ReasonCourseArchived}
+			}
+		}
 	}
 	return a, nil
 }

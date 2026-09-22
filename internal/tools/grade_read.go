@@ -38,6 +38,13 @@ type GradeView struct {
 	PostedAt          *time.Time      `json:"posted_at,omitempty"`
 	SupersededBy      *uuid.UUID      `json:"superseded_by,omitempty"`
 	CreatedAt         time.Time       `json:"created_at"`
+	FeedbackFiles     []FileRef       `json:"feedback_files,omitempty" jsonschema:"read each with document.get"`
+}
+
+// FileRef points at an owned document: a submitted file, a feedback file.
+type FileRef struct {
+	DocumentID uuid.UUID `json:"document_id"`
+	Title      string    `json:"title"`
 }
 
 func viewGrade(g dbq.GetGradeFullRow) GradeView {
@@ -139,7 +146,12 @@ func gradeGet() tool.Tool {
 				// To a student an unposted grade does not exist yet.
 				return GradeView{}, apperr.Missing("no such grade in this course")
 			}
-			return viewGrade(g), nil
+			v := viewGrade(g)
+			files, err := rc.Q.ListGradeDocuments(ctx, &g.ID)
+			for _, f := range files {
+				v.FeedbackFiles = append(v.FeedbackFiles, FileRef{DocumentID: f.ID, Title: f.Title})
+			}
+			return v, err
 		},
 	})
 }

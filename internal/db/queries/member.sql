@@ -12,8 +12,17 @@ FROM course_member m
 JOIN actor a ON a.id = m.actor_id
 WHERE m.id = $1 AND m.course_id = $2;
 
--- name: LiveMembershipExists :one
-SELECT EXISTS (SELECT 1 FROM course_member WHERE course_id = $1 AND actor_id = $2 AND status <> 'removed');
+-- name: GetMemberInCourseForUpdate :one
+-- The same row, locked for the rest of the transaction: the management tools
+-- read a seat and write it back, and two of them at once must take turns.
+SELECT m.*, a.display_name, a.kind AS actor_kind
+FROM course_member m
+JOIN actor a ON a.id = m.actor_id
+WHERE m.id = $1 AND m.course_id = $2
+FOR UPDATE OF m;
+
+-- name: GetLiveMembership :one
+SELECT id, status, expires_at FROM course_member WHERE course_id = $1 AND actor_id = $2 AND status <> 'removed';
 
 -- name: ListMembers :many
 SELECT m.*, a.display_name, a.kind AS actor_kind

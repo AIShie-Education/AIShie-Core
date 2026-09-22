@@ -71,7 +71,9 @@ course(id, dept_id→department, term_id→term, code, section = '', title, desc
 
 `actor.kind` is for display and audit. **Nothing branches on it.** What an actor may do is
 entirely on its `course_member` rows; `platform_role` covers the few operations outside any
-course.
+course. The one exception is `kind = 'system'`, the actor the background sweeps run as: it is
+never seated in a course, and no token is issued for it and no identity linked to it, so that
+its authority cannot be borrowed. Those two refusals read `kind`; nothing that grants does.
 
 `created_by_actor_id` is the delegation chain: root (seeded at install, the only null) creates
 admins, an admin creates a course and seats its first instructor, the instructor adds everyone
@@ -164,7 +166,10 @@ the nearest one, and the choice is recorded here so that it is a decision and no
 An unposted grade, and a superseded one, is visible only to a member holding `perm_grade_submit`
 or `perm_grade_post`; everyone else sees live posted grades. That is the rule for students,
 stated without asking whether anyone is a student. An unpublished assignment is likewise
-visible only to holders of `perm_assignment_write`.
+visible only to holders of `perm_assignment_write` — and so are its instructions and rubric,
+which to anyone else exist only once a published assignment within their scope refers to
+them, and the gradebook, which counts only published assignments. Feedback on a posted grade
+is a release: adding to it or withdrawing it needs `perm_grade_post` as well.
 
 **Presets are rows of `permission_preset`**, with the same `perm_*` columns plus a default role
 and scope. Six built-ins (`student`, `observer`, `ta`, `instructor`, `tutor`, `grader`) are
@@ -181,10 +186,15 @@ case. Scope filters only things that belong to a student or an assignment: a tut
 Yuki still reads all course material but sees only Yuki's work.
 
 **Nobody hands out more than they hold.** `perm_member_manage` would otherwise quietly be every
-permission: seat a second account as instructor and use that. So `member.add`,
-`member.update_perms` and `member.rescope` refuse to grant any permission above the granter's
-own level on that column, and a granter whose own scope is a list may only grant `listed`,
-from within their own list. Lowering is always allowed. Nobody manages their own seat.
+permission: seat a second account as instructor and use that. A level is held over a scope for
+a time, so the three are measured together: any change that widens a seat — a level raised, a
+scope opened or a list added to, an expiry extended or cleared, a paused seat resumed — is a
+grant of the whole of what the seat will then hold, and the whole of it must be within the
+granter's own: no level above the granter's on any column, no reach beyond a list-scoped
+granter's own list, no life past the granter's own `expires_at`. Narrowing is always allowed,
+whatever the granter holds. Nobody manages their own seat, and a seat whose `expires_at` has
+passed is as good as removed whether or not the sweep has got to it: it is not revived, and
+seating the actor again is a fresh row.
 
 **Lifecycle**: add (new row, preset copied), pause (`status = 'paused'`, same id survives),
 remove (`status = 'removed'`, pending proposals cancelled, history kept), re-add (new row, new
@@ -219,6 +229,15 @@ posted grades):
   `drop_lowest` of them.
 - Work with no posted grade is left out and the rest re-normalised — a "grade so far", marked
   incomplete. `treat_ungraded_as_zero` counts it as zero instead, for final grades.
+- A score is a score out of the points possible when it was given: once any grade has been
+  entered for an assignment or a directly graded component — a draft as much as a posted one —
+  its `points_possible` and its place in the tree no longer change.
+- Final is final. The policy a snapshot was worked out under travels with it (`breakdown`
+  carries `ungraded_as_zero`), and once a student's totals have been written with ungraded
+  work counted as zero, every later post or regrade beneath them keeps counting it so.
+- A draft is as old as the call that made it. An approved proposal replaces the drafts that
+  were there when it was proposed, and fails — rather than silently overwriting — if a newer
+  draft has been entered for the same work since.
 
 ### 2.4 Content
 
@@ -251,6 +270,30 @@ Two ways to attach a document, chosen by shape:
 
 Material is published by moving `published_version_id`. Students read the published version;
 instructors read the latest. A half-edited lecture is invisible until the pointer moves.
+
+**Which permission governs a document depends on its kind**: material and instructions are
+`perm_document_read` / `perm_document_write`; a rubric is read with `perm_rubric_read`; a
+submitted file follows its submission (`perm_submission_read` / `_write`, scoped to its student
+and assignment); a feedback file follows its grade (`perm_grade_read`, scoped, and invisible
+to non-graders until the grade is posted; written with `perm_grade_submit`). Unpublished
+versions and the version list need `perm_document_read_draft`. One exception, for the reason
+versions are pinned at all: a member may always read the exact version that a submission
+within their scope was handed in under, even after the instructions have moved on.
+
+**Bytes never pass through a tool call.** An MCP agent cannot stream a file through a JSON-RPC
+message. `document.upload_url` returns a short-lived URL and an upload token; the client PUTs
+the bytes to the URL — straight to the object store, or to this server when files are kept on
+its own disk — and hands the token to the tool that attaches the file (`document.create`,
+`document.add_version`, or `feedback_files` on `grade.submit`). The token is a signed claim
+that this member of this course was given this storage key for this purpose; there is no
+table of pending uploads. Its expiry limits the upload, not the attaching: a proposal carrying
+a feedback file may be approved days later, and `unique(storage_key)` is what stops a file
+being attached twice. Reading returns a short-lived download URL the same way. The storage
+key is made by the server and is unguessable; nothing the uploader says goes into it.
+
+Once a submission is handed in, its files are frozen with it. The trigger guards the
+`submission` row; that nothing is added to or archived from its documents afterwards is an
+application rule.
 
 ### 2.5 Assignments and submissions
 
@@ -301,7 +344,8 @@ event(seq, type, course_id null→course, action_id null→action,
 **`action` is an attempt, written before anything happens**, including attempts that were
 denied. `confirm_required` needs no approval table — the queue is `WHERE status = 'proposed'`,
 and the proposal itself lives in `payload`; nothing else is written until a human approves.
-`pending_review` needs no review table — the queue is `WHERE review_state = 'pending'`.
+`pending_review` needs no review table — the queue is `WHERE review_state IN ('pending', 'escalated')`,
+an escalated action still waiting for its second reviewer.
 
 `unique(actor_id, idempotency_key)` is not optional. A tool call retried after a timeout would
 otherwise post a second grade silently at 3am.
@@ -312,8 +356,14 @@ It is a SHA-256 over the tool name and the canonical JSON of the arguments (rule
 replays the stored `result` and does nothing else. Same key and a different hash is a client
 bug — a key reused for new content — and is refused with a conflict, instead of telling the
 caller that a request it never made succeeded. `payload` holds the canonical arguments with
-any secret fields removed; `result` holds what the call returned (secrets removed likewise),
-or `{"error": …}` for a failed or cancelled action and `{"decision": …}` for a rejected one.
+any secret fields removed; a secret (a password) still counts in the hash, through a keyed
+digest under `SIGNING_KEY`, so that a key reused with a different secret is caught too while
+the hash gives nothing away to whoever reads the table. For a proposal, `payload` also carries
+the defaults that had to be fixed when it was made rather than when it is approved — the rubric
+version a grade is against — while the hash stays that of the call as the caller made it.
+`result` holds what the call returned (secrets removed likewise), or `{"error": …}` for a
+failed, denied or cancelled action and `{"decision": …}` for a rejected one; which of those it
+is follows from `status`, never from the shape of `result`.
 
 **Only state changes are actions.** A read passes `authorize()`, scope included, and writes
 no `action` row: the log stays a record of attempts to change something.
@@ -325,6 +375,18 @@ proposer has been removed, paused, expired, re-scoped or downgraded, or the targ
 proposal becomes `cancelled` and nothing executes. A background sweep cancels proposals older
 than a configured TTL; approval checks the same TTL inline, so correctness never depends on
 when the sweep last ran.
+
+**The sweeps are actions too.** Proposals past their TTL, memberships past `expires_at` and
+assignments past `due_at` are acted on by the `kind = 'system'` actor through the same
+pipeline, as internal tools no adapter exposes (`action.expire`, `member.expire`,
+`submission.mark_missing`): a row with no member, `authz_result = 'autonomous'`, and an
+idempotency key that names the thing swept, so that two instances sweeping at once act once.
+Nobody is authorized because nobody is calling. None of it is what makes the system correct —
+`authorize()` ignores an expired member from the instant of expiry, and approval checks a
+proposal's age itself — it makes those facts visible, and keeps the queues free of entries
+nobody could approve. When a due date passes, every current student with no submission row
+gets one in state `missing`, so that the gap is something a grader can see and grade; late
+work takes that row over.
 
 **`event` is something that happened, written after it did**, in the same transaction as the
 state change. Not every event has an action behind it (a due date passing); one action may
@@ -338,7 +400,9 @@ a draft to those who grade, the roster to `perm_member_read`, the action log to
 `perm_action_decide`); a type with no rule is visible to nobody. On top of that, the events of
 a member's *own* actions are always visible to it: `action.approved`, `action.rejected` and
 `action.cancelled` are filed under the proposal's id, which is how a pull-based agent learns
-what became of what it proposed. Then scope, per row, as below.
+what became of what it proposed. `action.approved` carries an `outcome` — `executed`, or
+`failed` when the approved call was refused by the domain — so that the two are never taken
+for one another. Then scope, per row, as below.
 
 `student_member_id` and `assignment_id` say whose the event is, so that the feed is
 scope-filtered in SQL exactly as `authorize()` filters a target: null means the event belongs
@@ -454,7 +518,8 @@ check `actor.platform_role` instead. That is the only place it is read.
 - The submitting member has `role = 'student'`; `member_*_scope` rows name members and
   assignments of the same course; `assignment.instructions_document_id` and `rubric_document_id`
   are documents of the same course with the right `kind`; `document_version.author_member_id`
-  is a member of the document's course.
+  is a member of the document's course (it is always the calling member, and the call was
+  authorized in that course).
 - Grade computation, and writing a `computed` snapshot only on post.
 - The component tree is acyclic beyond the self-loop the CHECK blocks.
 - Cancelling pending proposals when a member is removed or expires.

@@ -49,6 +49,9 @@ func buildArgs(t tool.Tool, r *http.Request) ([]byte, error) {
 			if err := dec.Decode(&args); err != nil {
 				return nil, apperr.Invalid("the body must be a JSON object: %v", err)
 			}
+			if args == nil { // the literal null decodes into a map as nil
+				return nil, apperr.Invalid("the body must be a JSON object, not null")
+			}
 		}
 	}
 

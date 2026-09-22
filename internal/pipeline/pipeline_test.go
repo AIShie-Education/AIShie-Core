@@ -3,6 +3,7 @@ package pipeline_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -526,17 +527,22 @@ func TestApprovalReauthorizesTheProposer(t *testing.T) {
 	}
 }
 
-// A proposal approved after someone else drafted a grade for the same work
-// runs as what it is: a newer draft, which replaces the earlier one.
-func TestApprovedProposalReplacesAnEarlierDraft(t *testing.T) {
-	c := testkit.NewCS101(t, 1)
-	yuki := c.Students[0]
+// A draft is as old as the call that made it. A proposal replaces the drafts
+// that were there when it was made, and not one entered after it: on
+// Wednesday the approver sees the proposal, not Tuesday's draft, and must not
+// wipe out a judgement nobody put in front of them.
+func TestAnApprovedProposalReplacesOnlyWhatCameBefore(t *testing.T) {
+	c := testkit.NewCS101(t, 2)
+	yuki, ken := c.Students[0], c.Students[1]
+	approve := func(action *uuid.UUID, key string) pipeline.DecideOut {
+		t.Helper()
+		return testkit.Result[pipeline.DecideOut](t, c.MustCall(c.Sato, "action.decide", m{"course_id": c.Course, "action_id": action, "decision": "approve"}, key))
+	}
 
-	proposed := c.MustCall(c.Grader, "grade.submit", submitArgs(c, yuki, 85), "p")
+	// Before: Sato's draft, then the agent's proposal, then the approval.
 	satos := testkit.Result[tools.GradeSubmitOut](t, c.MustCall(c.Sato, "grade.submit", submitArgs(c, yuki, 70), "sato")).GradeID
-
-	decided := c.MustCall(c.Sato, "action.decide", m{"course_id": c.Course, "action_id": proposed.ActionID, "decision": "approve"}, "d")
-	v := testkit.Result[pipeline.DecideOut](t, decided)
+	proposed := c.MustCall(c.Grader, "grade.submit", submitArgs(c, yuki, 85), "p")
+	v := approve(proposed.ActionID, "d")
 	if v.Outcome != domain.StatusExecuted {
 		t.Fatalf("outcome: %+v", v)
 	}
@@ -544,8 +550,27 @@ func TestApprovedProposalReplacesAnEarlierDraft(t *testing.T) {
 	if n := c.Count(`SELECT count(*) FROM grade WHERE id = $1 AND superseded_by = $2`, satos, agents); n != 1 {
 		t.Fatal("the earlier draft was not superseded by the approved one")
 	}
-	if n := c.Count(`SELECT count(*) FROM grade WHERE superseded_by IS NULL`); n != 1 {
-		t.Fatalf("%d live drafts, want 1", n)
+
+	// After: the agent's proposal, then Sato's draft, then the approval.
+	proposed = c.MustCall(c.Grader, "grade.submit", submitArgs(c, ken, 85), "p2")
+	c.P.SetClock(func() time.Time { return time.Now().Add(time.Hour) })
+	kens := testkit.Result[tools.GradeSubmitOut](t, c.MustCall(c.Sato, "grade.submit", submitArgs(c, ken, 60), "sato2")).GradeID
+	c.P.SetClock(func() time.Time { return time.Now().Add(2 * time.Hour) })
+	if v := approve(proposed.ActionID, "d2"); v.Outcome != domain.StatusFailed || v.Error == nil || !strings.Contains(v.Error.Message, "newer draft") {
+		t.Fatalf("approving over a newer draft: %+v", v)
+	}
+	if n := c.Count(`SELECT count(*) FROM grade WHERE id = $1 AND superseded_by IS NULL`, kens); n != 1 {
+		t.Fatal("the newer draft was replaced by an older judgement")
+	}
+	if n := c.Count(`SELECT count(*) FROM action WHERE id = $1 AND status = 'failed'`, *proposed.ActionID); n != 1 {
+		t.Fatal("the proposal is not recorded as failed")
+	}
+	// The proposer can tell from the feed that the approval came to nothing.
+	if n := c.Count(`SELECT count(*) FROM event WHERE type = 'action.approved' AND action_id = $1 AND payload->>'outcome' = 'failed'`, *proposed.ActionID); n != 1 {
+		t.Fatal("the action.approved event does not say the proposal failed")
+	}
+	if n := c.Count(`SELECT count(*) FROM event WHERE type = 'action.approved' AND payload->>'outcome' = 'executed'`); n != 1 {
+		t.Fatal("the action.approved event for the one that ran does not say so")
 	}
 }
 
@@ -667,5 +692,70 @@ func TestFeedCursorNeverSkips(t *testing.T) {
 	}
 	if total := c.Count(`SELECT count(*) FROM event WHERE course_id = $1`, c.Course); len(seen) != total || total != 40 {
 		t.Fatalf("the reader saw %d of %d events", len(seen), total)
+	}
+}
+
+// What a replay returns is fixed by the row's status, not by the shape of
+// what it stored: an executed decision whose proposal was cancelled stores a
+// result with an "error" field of its own, and a retry of that decision must
+// get the result back as it was, not be told the decision errored.
+func TestAReplayedDecisionKeepsItsResult(t *testing.T) {
+	c := testkit.NewCS101(t, 1)
+	proposed := c.MustCall(c.Grader, "grade.submit", submitArgs(c, c.Students[0], 85), "p")
+	c.Exec(`UPDATE course_member SET perm_grade_submit = 'denied' WHERE id = $1`, c.GraderM)
+
+	decide := m{"course_id": c.Course, "action_id": proposed.ActionID, "decision": "approve"}
+	first := c.MustCall(c.Sato, "action.decide", decide, "d")
+	again := c.MustCall(c.Sato, "action.decide", decide, "d")
+	if first.Status != domain.StatusExecuted || first.Error != nil || len(first.Result) == 0 {
+		t.Fatalf("first: %+v", first)
+	}
+	if !again.Replayed || again.Status != first.Status || again.Error != nil {
+		t.Fatalf("replay: %+v\nfirst:  %+v", again, first)
+	}
+	was, now := testkit.Result[pipeline.DecideOut](t, first), testkit.Result[pipeline.DecideOut](t, again)
+	if now.Outcome != domain.StatusCancelled || now.ActionID != *proposed.ActionID || now.Error == nil ||
+		now.Outcome != was.Outcome || now.ActionID != was.ActionID || now.Error.Details["reason"] != was.Error.Details["reason"] {
+		t.Fatalf("replayed decision: %+v, want %+v", now, was)
+	}
+}
+
+// A key reused with a different secret is caught like any other reuse. The
+// secret is not stored, so the hash commits to it through a keyed digest
+// instead — which also means the hash gives nothing away about the password.
+func TestAKeyReusedWithADifferentSecretIsRefused(t *testing.T) {
+	c := testkit.NewCS101(t, 0)
+	set := func(password string) (pipeline.Outcome, error) {
+		return c.Call(c.Sato, "credential.set_password", m{"password": password}, "pw")
+	}
+	if out, err := set("correct horse battery staple"); err != nil || out.Status != domain.StatusExecuted {
+		t.Fatalf("first: %+v %v", out, err)
+	}
+	if out, err := set("correct horse battery staple"); err != nil || !out.Replayed {
+		t.Fatalf("the same password again: %+v %v", out, err)
+	}
+	if _, err := set("a different password entirely"); !apperr.Is(err, apperr.IdempotencyConflict) {
+		t.Fatalf("a different password under the same key: %v", err)
+	}
+	if n := c.Count(`SELECT count(*) FROM action WHERE action_type = 'credential.set_password' AND (payload::text LIKE '%horse%' OR payload::text LIKE '%different%')`); n != 0 {
+		t.Fatal("a password reached the action log")
+	}
+	if n := c.Count(`SELECT count(*) FROM action WHERE action_type = 'credential.set_password' AND payload_hash = encode(sha256(('credential.set_password' || chr(10) || '{}')::bytea), 'hex')`); n != 0 {
+		t.Fatal("the hash does not commit to the password at all")
+	}
+}
+
+// A NUL character cannot be stored by the database, so a call carrying one
+// is refused as malformed before anything is attempted, rather than failing
+// on our side and inviting a retry that fails the same way.
+func TestANulCharacterIsRefusedAsInput(t *testing.T) {
+	c := testkit.NewCS101(t, 1)
+	args := submitArgs(c, c.Students[0], 85)
+	args["feedback"] = "well\x00argued"
+	if _, err := c.Call(c.Sato, "grade.submit", args, "nul"); !apperr.Is(err, apperr.InvalidArgument) {
+		t.Fatalf("a NUL in an argument: %v", err)
+	}
+	if n := c.Count(`SELECT count(*) FROM action`); n != 0 {
+		t.Fatal("something was recorded")
 	}
 }
