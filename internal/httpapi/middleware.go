@@ -2,9 +2,12 @@ package httpapi
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"math"
 	"net"
 	"net/http"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"time"
@@ -24,15 +27,70 @@ func (s *server) tooMany(w http.ResponseWriter, r *http.Request, wait time.Durat
 	s.writeError(w, r, apperr.New(apperr.RateLimited, "too many calls; try again in %d seconds", secs).With("retry_after_seconds", secs))
 }
 
-// clientAddr is the address a request came from, without the port. Behind a
-// proxy this is the proxy: X-Forwarded-For is deliberately not trusted here,
-// since anyone can send it. The per-email limit is what holds in that case.
-func clientAddr(r *http.Request) string {
+// clientAddr is the address a request came from, as far as it can be known.
+//
+// Reached directly, that is the peer. Reached through a proxy the operator
+// has named in TrustedProxies, it is the last hop of X-Forwarded-For that is
+// not itself a trusted proxy — the one the proxy appended, which the client
+// could not forge. From anywhere else X-Forwarded-For is ignored, since
+// anyone can send it. When a trusted proxy names no client, the address is
+// unknown, and the caller must not key a limit on it: behind a proxy that
+// would be one bucket for the whole installation.
+func (s *server) clientAddr(r *http.Request) (addr string, known bool) {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
-		return r.RemoteAddr
+		host = r.RemoteAddr
 	}
-	return host
+	if !s.trustedProxy(host) {
+		return host, host != ""
+	}
+	hops := strings.Split(r.Header.Get("X-Forwarded-For"), ",")
+	for i := len(hops) - 1; i >= 0; i-- {
+		hop := strings.TrimSpace(hops[i])
+		if hop == "" || s.trustedProxy(hop) {
+			continue
+		}
+		if ip := net.ParseIP(hop); ip != nil {
+			return ip.String(), true
+		}
+		return "", false // not an address: something is forging headers
+	}
+	return "", false
+}
+
+// parseCIDR is net.ParseCIDR, here so that a test in this package can build
+// a server's proxies without going through NewHandler.
+var parseCIDR = net.ParseCIDR
+
+func (s *server) trustedProxy(host string) bool {
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	for _, n := range s.proxies {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// recovered turns a panic in a handler into a logged 500 with a JSON body,
+// rather than a dropped connection with nothing in our log. The server's own
+// recovery would log it, but the client would get no answer at all.
+func (s *server) recovered(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if v := recover(); v != nil {
+				if err, ok := v.(error); ok && errors.Is(err, http.ErrAbortHandler) {
+					panic(v) // the handler meant to abort; let the server see it
+				}
+				s.Log.Error("panic in handler", "method", r.Method, "path", safePath(r.URL.Path), "panic", fmt.Sprint(v), "stack", string(debug.Stack()))
+				s.writeError(w, r, fmt.Errorf("panic: %v", v))
+			}
+		}()
+		next.ServeHTTP(w, r)
+	})
 }
 
 // requestInfo is filled in as a request moves through the handlers, so that
@@ -84,6 +142,13 @@ func (w *statusRecorder) Unwrap() http.ResponseWriter { return w.ResponseWriter 
 func (s *server) logged(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
+		// The rest of the request, and the response, have until then; a
+		// handler moving a file asks for longer. Set on every request, so
+		// nothing carries over to the next one on the connection.
+		rc := http.NewResponseController(w)
+
+		_ = rc.SetReadDeadline(start.Add(s.BodyTimeout))
+		_ = rc.SetWriteDeadline(start.Add(s.BodyTimeout))
 		info := &requestInfo{}
 		rec := &statusRecorder{ResponseWriter: w}
 		next.ServeHTTP(rec, r.WithContext(context.WithValue(r.Context(), requestInfoKey{}, info)))

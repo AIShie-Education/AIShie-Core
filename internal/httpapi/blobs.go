@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/apperr"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/blob"
@@ -30,12 +31,18 @@ func (s *server) blobPut(local blob.Local) http.HandlerFunc {
 			s.writeError(w, r, apperr.Invalid("this URL takes Content-Type %q, not %q", contentType, got))
 			return
 		}
+		// A file takes longer to arrive than a JSON body does.
+		_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(s.TransferTimeout))
 		info, err := local.Put(r.Context(), key, contentType, r.Body, s.MaxUploadBytes)
 		switch {
 		case errors.Is(err, blob.ErrTooLarge):
 			s.writeError(w, r, apperr.Invalid("the file is larger than %d bytes", s.MaxUploadBytes))
+		case errors.Is(err, blob.ErrExists):
+			s.writeError(w, r, apperr.Conflicts("this URL has been uploaded to already; a file is written once"))
 		case err != nil:
-			s.writeError(w, r, apperr.Conflicts("the upload could not be stored: %v", err))
+			// Ours: a full disk, a permission, a path. Logged in full, and
+			// the holder of an upload URL is told nothing of it.
+			s.writeError(w, r, err)
 		default:
 			writeJSON(w, http.StatusOK, map[string]any{"byte_size": info.Size, "checksum": info.Checksum})
 		}
@@ -59,6 +66,7 @@ func (s *server) blobGet(local blob.Local) http.HandlerFunc {
 			return
 		}
 		defer func() { _ = f.Close() }()
+		_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(s.TransferTimeout))
 		h := w.Header()
 		h.Set("Content-Type", info.ContentType)
 		h.Set("Content-Length", strconv.FormatInt(info.Size, 10))

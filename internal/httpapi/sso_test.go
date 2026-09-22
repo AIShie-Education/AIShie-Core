@@ -127,6 +127,11 @@ type ssoAPI struct {
 
 func newSSO(t *testing.T) *ssoAPI {
 	t.Helper()
+	return newSSOWith(t, ratelimit.New(0, 0))
+}
+
+func newSSOWith(t *testing.T, signIns *ratelimit.Limiter) *ssoAPI {
+	t.Helper()
 	idp := newFakeIdP(t)
 	c := testkit.NewCS101(t, 0)
 	latest, err := db.LatestEmbedded()
@@ -149,7 +154,7 @@ func newSSO(t *testing.T) *ssoAPI {
 	mux.Handle("/", httpapi.NewHandler(httpapi.Deps{
 		Pool: c.Pool, LatestSchema: latest, Pipeline: c.P, Auth: auth.NewAuthenticator(c.Pool, time.Hour),
 		TrustedOrigins: []string{frontEnd}, InsecureCookies: true, SSO: provider, Signer: signer,
-		SignIns: ratelimit.New(0, 0),
+		SignIns: signIns,
 	}))
 	return &ssoAPI{api: &api{t: t, c: c, srv: srv}, idp: idp}
 }
@@ -383,5 +388,22 @@ func TestSingleSignOnIsOffByDefault(t *testing.T) {
 	a := newAPI(t, 0)
 	if r := a.do(browser(), "GET", "/v1/auth/sso/start", "", nil); r.Status != http.StatusNotFound {
 		t.Fatalf("start with no provider configured: %d %s", r.Status, r.Raw)
+	}
+}
+
+// Forty students in a lecture hall click "sign in" within the same minute,
+// and all forty come back from the provider through the one reverse proxy.
+// The callback is bound by the state cookie and the provider's single-use
+// code, not by a per-address limit that would turn the hall into a queue of
+// burnt sign-ins.
+func TestALectureHallSignsInAtOnce(t *testing.T) {
+	a := newSSOWith(t, ratelimit.New(10, 10)) // as serve builds it
+	a.link(a.c.Sato, "sato@polyu.edu.hk")
+	for i := range 40 {
+		b := browser()
+		q := a.start(b, "")
+		if r := a.callback(b, a.idp.grant("sato@polyu.edu.hk", q.Get("nonce"), nil), q.Get("state")); r.Status != http.StatusFound || !hasSession(r) {
+			t.Fatalf("student %d: %d %s", i+1, r.Status, r.Raw)
+		}
 	}
 }

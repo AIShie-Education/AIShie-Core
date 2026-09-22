@@ -5,6 +5,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -30,6 +31,17 @@ type Config struct {
 	// InsecureCookies drops the Secure attribute from the session cookie, for
 	// development over http://localhost. Never set it in production.
 	InsecureCookies bool
+	// CookieSameSite is "lax" (the default) or "none". Lax keeps the session
+	// cookie off cross-site requests, which is right when the front end is
+	// same-site with this server. A front end on another site needs "none",
+	// which needs Secure.
+	CookieSameSite string
+	// TrustedProxies are the address ranges (CIDRs) of the reverse proxies in
+	// front of this server. A request from one of them is attributed to the
+	// client named in X-Forwarded-For; from anywhere else that header is
+	// ignored, since anyone can send it. Empty means the server is reached
+	// directly.
+	TrustedProxies []string
 
 	// CallsPerMinute and CallsBurst bound one actor's calls, per instance;
 	// SignInsPerMinute bounds sign-in attempts per address and per email.
@@ -102,6 +114,15 @@ func FromEnv() (Config, error) {
 			c.TrustedOrigins = append(c.TrustedOrigins, o)
 		}
 	}
+	for _, r := range strings.Split(os.Getenv("TRUSTED_PROXIES"), ",") {
+		if r = strings.TrimSpace(r); r != "" {
+			if _, _, err := net.ParseCIDR(r); err != nil {
+				return Config{}, fmt.Errorf("TRUSTED_PROXIES: %q is not a CIDR such as 10.0.0.0/8", r)
+			}
+			c.TrustedProxies = append(c.TrustedProxies, r)
+		}
+	}
+	c.CookieSameSite = env("COOKIE_SAMESITE", "lax")
 	c.CallsPerMinute, c.CallsBurst, c.SignInsPerMinute = 600, 100, 10
 	for key, dst := range map[string]*int{"RATE_LIMIT_PER_MINUTE": &c.CallsPerMinute, "RATE_LIMIT_BURST": &c.CallsBurst,
 		"SIGN_IN_ATTEMPTS_PER_MINUTE": &c.SignInsPerMinute} {
@@ -160,6 +181,15 @@ func FromEnv() (Config, error) {
 		if c.SigningKey == "" {
 			return Config{}, fmt.Errorf("single sign-on needs SIGNING_KEY: the sign-in state must verify on every instance")
 		}
+	}
+	switch c.CookieSameSite {
+	case "lax":
+	case "none":
+		if c.InsecureCookies {
+			return Config{}, fmt.Errorf("COOKIE_SAMESITE=none needs Secure cookies; it cannot go with INSECURE_COOKIES")
+		}
+	default:
+		return Config{}, fmt.Errorf("COOKIE_SAMESITE: %q is not lax or none", c.CookieSameSite)
 	}
 	if c.JobsInterval < time.Second {
 		return Config{}, fmt.Errorf("JOBS_INTERVAL: %s is too often; at least 1s", c.JobsInterval)

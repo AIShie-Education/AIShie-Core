@@ -11,6 +11,7 @@ import (
 
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/apperr"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/blob"
+	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/db/dbq"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/domain"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/jobs"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/pipeline"
@@ -419,5 +420,29 @@ func TestOrphanFilesAreRemoved(t *testing.T) {
 	rep, err := jobs.New(f.Pool, patient, f.system, jobs.Config{Blob: f.Blob}, nil).Sweep(ctx)
 	if err != nil || rep.OrphanFilesRemoved != 0 || !exists(kept) {
 		t.Fatalf("with no proposal TTL: %+v, %v", rep, err)
+	}
+}
+
+// The sweep names what it swept in its idempotency key, and the query that
+// finds what is newly due looks for that key. The two must spell the due
+// date the same way — Go floors to the second, SQL must not round — or an
+// assignment due at half past a second is found again on every tick, and
+// with enough of them the batch is nothing but repeats.
+func TestADueDateWithAFractionOfASecondIsSweptOnce(t *testing.T) {
+	f := setup(t, 2)
+	for i, fraction := range []time.Duration{750 * time.Millisecond, 250 * time.Millisecond, 500 * time.Millisecond} {
+		due := f.now.Add(time.Duration(i+1) * time.Hour).Truncate(time.Second).Add(fraction)
+		f.Exec(`UPDATE assignment SET due_at = $2 WHERE id = $1`, f.HW4, due)
+		f.now = due.Add(time.Minute)
+		if rep := f.sweep(t); rep.AssignmentsClosed != 1 {
+			t.Fatalf("fraction %s: %+v, want HW4 closed", fraction, rep)
+		}
+		still, err := f.Q.ListAssignmentsNewlyPastDue(context.Background(), dbq.ListAssignmentsNewlyPastDueParams{Now: &f.now, SystemActorID: f.system, MaxRows: 10})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(still) != 0 {
+			t.Fatalf("fraction %s: HW4 is still found as newly due after being swept", fraction)
+		}
 	}
 }

@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -48,8 +49,18 @@ type Deps struct {
 	// TrustedOrigins are the origins of the web front end. They may call
 	// with cookies (CORS) and are exempt from the cross-origin check.
 	TrustedOrigins []string
+	// TrustedProxies are the CIDRs of the reverse proxies in front of this
+	// server; see clientAddr.
+	TrustedProxies []string
 	// InsecureCookies drops the Secure attribute, for http://localhost.
 	InsecureCookies bool
+	// CookieSameSite is the session cookie's SameSite; zero means Lax.
+	CookieSameSite http.SameSite
+
+	// BodyTimeout bounds reading one request's body; TransferTimeout bounds
+	// a file upload or download. Zero means the defaults below. Whoever
+	// holds a connection open must not hold it for ever.
+	BodyTimeout, TransferTimeout time.Duration
 
 	// Blob is the file store. When it keeps files on this server's own disk,
 	// the server also serves its upload and download URLs.
@@ -81,6 +92,22 @@ func NewHandler(d Deps) http.Handler {
 		d.Log = slog.New(slog.DiscardHandler)
 	}
 	s := &server{Deps: d}
+	if s.BodyTimeout <= 0 {
+		s.BodyTimeout = DefaultBodyTimeout
+	}
+	if s.TransferTimeout <= 0 {
+		s.TransferTimeout = DefaultTransferTimeout
+	}
+	if s.CookieSameSite == 0 {
+		s.CookieSameSite = http.SameSiteLaxMode
+	}
+	for _, cidr := range d.TrustedProxies {
+		_, ipnet, err := net.ParseCIDR(cidr)
+		if err != nil {
+			panic("httpapi: trusted proxy " + cidr + ": " + err.Error())
+		}
+		s.proxies = append(s.proxies, ipnet)
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.healthz)
 
@@ -123,8 +150,18 @@ func NewHandler(d Deps) http.Handler {
 			panic("httpapi: trusted origin " + o + ": " + err.Error())
 		}
 	}
-	return s.logged(s.cors(guard.Handler(s.routed(mux))))
+	return s.logged(s.recovered(s.cors(guard.Handler(s.routed(mux)))))
 }
+
+// Deadlines, per request. The server's ReadHeaderTimeout bounds the headers;
+// these bound the rest, so that a client trickling a body a byte at a time,
+// or never reading its response, holds a connection for minutes, not for
+// ever. A file transfer gets longer; everything else this API reads is under
+// a megabyte.
+const (
+	DefaultBodyTimeout     = 30 * time.Second
+	DefaultTransferTimeout = 10 * time.Minute
+)
 
 // routed answers for the routes the mux does not have. The mux's own 404 and
 // 405 are plain text; everything else this API says, it says in JSON, and a
@@ -174,7 +211,10 @@ func (p *probeWriter) Write(b []byte) (int, error) {
 	return len(b), nil
 }
 
-type server struct{ Deps }
+type server struct {
+	Deps
+	proxies []*net.IPNet
+}
 
 // ---------------------------------------------------------------------------
 // Calling tools
@@ -299,7 +339,11 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 	// Guessing is limited twice over: by where it comes from, and by whose
 	// account it is aimed at. Each attempt costs a 64 MiB argon2 hash, so
 	// this protects the server as much as the password.
-	for _, key := range []string{"addr:" + clientAddr(r), "email:" + strings.ToLower(strings.TrimSpace(in.Email))} {
+	keys := []string{"email:" + strings.ToLower(strings.TrimSpace(in.Email))}
+	if addr, known := s.clientAddr(r); known {
+		keys = append(keys, "addr:"+addr)
+	}
+	for _, key := range keys {
 		if ok, wait := s.SignIns.Allow(key); !ok {
 			s.tooMany(w, r, wait)
 			return
@@ -325,14 +369,16 @@ func (s *server) logout(w http.ResponseWriter, r *http.Request) {
 }
 
 // cookie is the one place cookies are made. HttpOnly keeps them from scripts;
-// SameSite=Lax keeps them off cross-site subrequests; Secure keeps them off
-// plain HTTP. Secure is on unless INSECURE_COOKIES says otherwise, which
-// exists only so that a developer can sign in at http://localhost. No value
-// means "forget it".
+// SameSite=Lax keeps them off cross-site subrequests, which is right when the
+// front end is same-site with this server, and is None (with Secure) when it
+// is not — the cross-origin guard is what stands against CSRF then; Secure
+// keeps them off plain HTTP. Secure is on unless INSECURE_COOKIES says
+// otherwise, which exists only so that a developer can sign in at
+// http://localhost. No value means "forget it".
 func (s *server) cookie(name, value, path string, expires time.Time) *http.Cookie {
 	c := &http.Cookie{ //nolint:gosec // Secure is configurable on purpose; see above
 		Name: name, Value: value, Path: path, Expires: expires,
-		HttpOnly: true, Secure: !s.InsecureCookies, SameSite: http.SameSiteLaxMode,
+		HttpOnly: true, Secure: !s.InsecureCookies, SameSite: s.CookieSameSite,
 	}
 	if value == "" {
 		c.MaxAge = -1

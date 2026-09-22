@@ -3,6 +3,8 @@ package mcpapi_test
 import (
 	"context"
 	"encoding/json"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
@@ -12,6 +14,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/auth"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/db"
@@ -326,5 +330,46 @@ func TestToolsListIsTheRegistry(t *testing.T) {
 		if tl.OutputSchema == nil {
 			t.Errorf("%s: no output schema", tl.Name)
 		}
+	}
+}
+
+// When the credential cannot be checked — the database is away — the agent
+// gets a 500 with a fixed sentence, not the text of our error, which names
+// hosts and databases; and not "invalid token", which would have it throw a
+// perfectly good token away.
+func TestAFaultCheckingTheCredentialIsNotDescribedToTheAgent(t *testing.T) {
+	c := testkit.NewCS101(t, 0)
+	latest, err := db.LatestEmbedded()
+	if err != nil {
+		t.Fatal(err)
+	}
+	away, err := pgxpool.New(context.Background(), c.Pool.Config().ConnString())
+	if err != nil {
+		t.Fatal(err)
+	}
+	away.Close()
+	var log strings.Builder
+	authn := auth.NewAuthenticator(away, time.Hour)
+	srv := httptest.NewServer(httpapi.NewHandler(httpapi.Deps{
+		Pool: c.Pool, LatestSchema: latest, Pipeline: c.P, Auth: authn,
+		MCP: mcpapi.NewHandler(mcpapi.Deps{Pipeline: c.P, Auth: authn, Log: slog.New(slog.NewTextHandler(&log, nil))}),
+	}))
+	t.Cleanup(srv.Close)
+
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+httpapi.MCPPath, strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))
+	req.Header.Set("Authorization", "Bearer ais_aaaaaaaaaaaa_"+strings.Repeat("A", 43))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	body, _ := io.ReadAll(res.Body)
+	if res.StatusCode != http.StatusInternalServerError || strings.Contains(strings.ToLower(string(body)), "pool") || strings.Contains(string(body), "closed") || !strings.Contains(string(body), "could not be checked") {
+		t.Fatalf("%d %s", res.StatusCode, body)
+	}
+	if !strings.Contains(log.String(), "closed pool") {
+		t.Fatalf("the cause is not in the log: %s", log.String())
 	}
 }

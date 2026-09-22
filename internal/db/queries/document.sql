@@ -50,16 +50,16 @@ UPDATE document SET status = $2 WHERE id = $1 AND status <> $2;
 -- name: ListCourseDocuments :many
 -- Course-level documents: material, instructions, rubrics. Owned documents
 -- (submitted files, feedback) are reached through their owners instead.
--- Instructions and rubrics are the assignment's: to anyone who cannot read
--- drafts they exist only once a published assignment within their scope
--- refers to them, or a student could read next week's exam by listing.
+-- Instructions and rubrics are the assignment's: to anyone who does not
+-- write assignments they exist only once a published assignment within their
+-- scope refers to them, or a student could read next week's exam by listing.
 SELECT id, kind, title, published_version_id, sort_order, status, created_at
 FROM document d
 WHERE d.course_id = $1 AND d.id > sqlc.arg(after)
   AND d.kind = ANY(sqlc.arg(kinds)::text[])
   AND (sqlc.arg(include_unpublished)::bool OR d.published_version_id IS NOT NULL)
   AND (sqlc.arg(include_archived)::bool OR d.status = 'active')
-  AND (sqlc.arg(include_unpublished)::bool OR d.kind = 'material' OR EXISTS (
+  AND (sqlc.arg(writes_assignments)::bool OR d.kind = 'material' OR EXISTS (
         SELECT 1 FROM assignment a
         WHERE (a.instructions_document_id = d.id OR a.rubric_document_id = d.id) AND a.published_at IS NOT NULL
           AND (sqlc.arg(assignment_all)::bool OR EXISTS (

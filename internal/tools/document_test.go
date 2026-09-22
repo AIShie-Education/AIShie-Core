@@ -539,10 +539,31 @@ func TestInstructionsAppearWithTheirAssignment(t *testing.T) {
 	if _, err := b.Call(b.yuki, "document.get", m{"course_id": b.course, "document_id": brief}, ""); !apperr.Is(err, apperr.NotFound) {
 		t.Fatalf("a student reading the exam before the assignment is published: %v", err)
 	}
-	// Sato, who reads drafts, sees it as always.
+	// Sato, who writes assignments, sees it as always. A TA reads drafts
+	// of material but does not write assignments: the exam is the
+	// assignment's, and the assignment is not there yet — by any road.
 	b.get(t, b.sato, m{"document_id": brief})
+	ta := testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", m{"kind": "human", "display_name": "TA"})).ActorID
+	b.do(t, b.sato, "member.add", m{"course_id": b.course, "actor_id": ta, "preset": "ta"})
+	if listed(ta) {
+		t.Fatal("a TA who does not write assignments lists the exam before it is published")
+	}
+	for _, args := range []m{
+		{"course_id": b.course, "document_id": brief},
+		{"course_id": b.course, "document_id": brief, "version_id": testkit.Result[tools.DocumentGetOut](t, b.do(t, b.sato, "document.get", m{"course_id": b.course, "document_id": brief})).Version.ID},
+	} {
+		if _, err := b.Call(ta, "document.get", args, ""); !apperr.Is(err, apperr.NotFound) {
+			t.Fatalf("a TA reading the exam before the assignment is published (%v): %v", args, err)
+		}
+	}
+	if _, err := b.Call(ta, "document.versions", m{"course_id": b.course, "document_id": brief}, ""); !apperr.Is(err, apperr.NotFound) {
+		t.Fatalf("a TA listing the exam's versions before the assignment is published: %v", err)
+	}
 
 	b.do(t, b.sato, "assignment.publish", m{"course_id": b.course, "assignment_id": exam})
+	if !listed(ta) {
+		t.Fatal("the TA does not see the exam once the assignment is published")
+	}
 	if !listed(b.yuki) {
 		t.Fatal("the exam is not listed once the assignment is published")
 	}

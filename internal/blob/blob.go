@@ -80,3 +80,6 @@ type Local interface {
 
 // ErrTooLarge means an upload went past the limit.
 var ErrTooLarge = errors.New("blob: upload is larger than allowed")
+
+// ErrExists means the key has been written already: a key is written once.
+var ErrExists = errors.New("blob: the object already exists; a key is written once")

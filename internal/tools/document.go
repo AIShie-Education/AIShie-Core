@@ -632,9 +632,10 @@ func documentList() tool.Tool {
 	return tool.Define(tool.Spec[DocumentListIn, DocumentListOut]{
 		Name: "document.list",
 		Description: "The course's material, instructions and rubrics — those kinds the caller has permission to read. " +
-			"Documents with no published version are shown only to members who can read drafts, and so are instructions " +
-			"and rubrics that no published assignment in the caller's scope refers to. Submitted files and feedback files " +
-			"are not here: they come with submission.get and grade.get.",
+			"Documents with no published version are shown only to members who can read drafts. Instructions and rubrics " +
+			"follow their assignment: unless the caller writes assignments, they are shown only once a published assignment " +
+			"in the caller's scope refers to them. Submitted files and feedback files are not here: they come with " +
+			"submission.get and grade.get.",
 		Kind: tool.Read, Gate: tool.Gate{Any: true, Perms: []domain.Perm{domain.PermDocumentRead, domain.PermRubricRead}},
 		HTTP: tool.Route{Method: "GET", Pattern: "/v1/courses/{course_id}/documents"},
 		Resolve: func(_ context.Context, _ dbq.Querier, in DocumentListIn) (tool.Target, error) {
@@ -660,6 +661,7 @@ func documentList() tool.Tool {
 				CourseID: in.CourseID, After: in.after(), MaxRows: in.limit(), Kinds: kinds,
 				IncludeUnpublished: rc.Member.Perm(domain.PermDocumentReadDraft).Allowed(),
 				IncludeArchived:    in.IncludeArchived && rc.Member.Perm(domain.PermDocumentReadDraft).Allowed(),
+				WritesAssignments:  canSeeUnpublished(rc.Member),
 				AssignmentAll:      rc.Scope.AssignmentAll, MemberID: rc.Scope.MemberID,
 			})
 			out := DocumentListOut{Documents: make([]DocumentSummary, 0, len(rows))}
@@ -729,20 +731,19 @@ func documentGet(d Deps) tool.Tool {
 			// To anyone who cannot read drafts, a course-level document is
 			// there while it is published and not archived — archiving is
 			// the only way to withdraw something published, so it has to
-			// withdraw it from anyone who kept the id — and, for instructions
-			// and a rubric, while a published assignment in their scope
-			// refers to it: they are the assignment's, and the assignment is
-			// what is visible or not. What stays readable regardless is a
-			// version someone's submission is pinned to, named by id below,
-			// because that is the record of what they were told.
+			// withdraw it from anyone who kept the id. Instructions and a
+			// rubric are the assignment's, and follow it: to anyone who does
+			// not write assignments they are there only while a published
+			// assignment in their scope refers to them, drafts or no drafts.
+			// What stays readable regardless is a version someone's
+			// submission is pinned to, named by id below, because that is
+			// the record of what they were told.
 			withdrawn := courseLevel(doc.Kind) && doc.Status == "archived" && !drafts
-			if courseLevel(doc.Kind) && doc.Kind != kindMaterial && !drafts && !withdrawn {
-				inUse, err := rc.Q.DocumentInUseByPublishedAssignment(ctx, dbq.DocumentInUseByPublishedAssignmentParams{
-					DocumentID: &doc.ID, AssignmentAll: rc.Scope.AssignmentAll, MemberID: rc.Scope.MemberID})
+			if courseLevel(doc.Kind) && doc.Kind != kindMaterial && !withdrawn {
+				withdrawn, err = assignmentWithheld(ctx, rc, doc.ID)
 				if err != nil {
 					return DocumentGetOut{}, err
 				}
-				withdrawn = !inUse
 			}
 			if withdrawn && in.VersionID == nil {
 				return DocumentGetOut{}, apperr.Missing("no such document in this course")
@@ -755,7 +756,7 @@ func documentGet(d Deps) tool.Tool {
 			switch {
 			case in.VersionID != nil:
 				v, err = rc.Q.GetVersionOfDocument(ctx, dbq.GetVersionOfDocumentParams{ID: *in.VersionID, DocumentID: doc.ID})
-				if err == nil && !drafts && (withdrawn || doc.PublishedVersionID == nil || *doc.PublishedVersionID != v.ID) {
+				if err == nil && (withdrawn || (!drafts && (doc.PublishedVersionID == nil || *doc.PublishedVersionID != v.ID))) {
 					// Not the published one and no right to drafts. One more
 					// way in: it is what the caller's own work was pinned to.
 					pinned, perr := rc.Q.VersionPinnedInScope(ctx, dbq.VersionPinnedInScopeParams{VersionID: &v.ID,
@@ -814,6 +815,19 @@ type DocumentVersionsOut struct {
 	Versions []VersionSummary `json:"versions"`
 }
 
+// assignmentWithheld: an instructions or rubric document is withheld from a
+// member who does not write assignments unless a published assignment in
+// their scope refers to it — the document is visible exactly when the
+// assignment is.
+func assignmentWithheld(ctx context.Context, rc *tool.ReadCtx, docID uuid.UUID) (bool, error) {
+	if canSeeUnpublished(rc.Member) {
+		return false, nil
+	}
+	inUse, err := rc.Q.DocumentInUseByPublishedAssignment(ctx, dbq.DocumentInUseByPublishedAssignmentParams{
+		DocumentID: &docID, AssignmentAll: rc.Scope.AssignmentAll, MemberID: rc.Scope.MemberID})
+	return !inUse, err
+}
+
 func documentVersions() tool.Tool {
 	return tool.Define(tool.Spec[DocumentIDIn, DocumentVersionsOut]{
 		Name:        "document.versions",
@@ -830,6 +844,13 @@ func documentVersions() tool.Tool {
 			doc, err := loadDocument(ctx, rc.Q, in.CourseID, in.DocumentID)
 			if err != nil {
 				return DocumentVersionsOut{}, err
+			}
+			if courseLevel(doc.Kind) && doc.Kind != kindMaterial {
+				if withheld, err := assignmentWithheld(ctx, rc, doc.ID); err != nil {
+					return DocumentVersionsOut{}, err
+				} else if withheld {
+					return DocumentVersionsOut{}, apperr.Missing("no such document in this course")
+				}
 			}
 			rows, err := rc.Q.ListVersions(ctx, doc.ID)
 			out := DocumentVersionsOut{Versions: make([]VersionSummary, 0, len(rows))}

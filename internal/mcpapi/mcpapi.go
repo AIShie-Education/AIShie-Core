@@ -14,6 +14,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -67,6 +68,8 @@ type Deps struct {
 	Calls *ratelimit.Limiter
 }
 
+var errCredentialCheck = errors.New("the credential could not be checked just now; retry")
+
 // NewHandler returns the handler to mount at /mcp.
 func NewHandler(d Deps) http.Handler {
 	if d.Log == nil {
@@ -88,7 +91,12 @@ func NewHandler(d Deps) http.Handler {
 			if apperr.Is(err, apperr.Unauthenticated) {
 				return nil, fmt.Errorf("%w: %s", sdkauth.ErrInvalidToken, "the credential is missing or not valid")
 			}
-			return nil, err
+			// Ours — the database is down, say. The SDK writes whatever
+			// error it gets straight to the client, so it gets a fixed
+			// sentence; the cause goes to the log, as REST does it. Not
+			// ErrInvalidToken: the token may be perfectly good.
+			d.Log.Error("credential check failed", "err", err)
+			return nil, errCredentialCheck
 		}
 		info := &sdkauth.TokenInfo{UserID: p.ActorID.String(), Extra: map[string]any{"credential_id": p.CredentialID.String()}}
 		if p.ExpiresAt != nil {

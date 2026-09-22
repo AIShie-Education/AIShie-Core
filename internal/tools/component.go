@@ -309,9 +309,10 @@ type ComponentMoveIn struct {
 
 func componentMove() tool.Tool {
 	return tool.Define(tool.Spec[ComponentMoveIn, OK]{
-		Name:        "component.move",
-		Description: "Move a component, with everything beneath it, under a different parent in the same course.",
-		Kind:        tool.Write, Gate: writeScheme,
+		Name: "component.move",
+		Description: "Move a component, with everything beneath it, under a different parent in the same course. " +
+			"Once any grade has been entered beneath it, its place in the scheme is fixed.",
+		Kind: tool.Write, Gate: writeScheme,
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/components/{component_id}/move"},
 		Resolve: func(ctx context.Context, q dbq.Querier, in ComponentMoveIn) (tool.Target, error) {
 			if _, err := componentTarget(ctx, q, in.CourseID, in.NewParentID); err != nil {
@@ -331,6 +332,14 @@ func componentMove() tool.Tool {
 			}
 			if c.ParentID == nil {
 				return OK{}, apperr.Precondition("the course total is the root and stays there")
+			}
+			// A score is a score in the scheme it was given under. Once a
+			// grade has been entered anywhere beneath a component, moving it
+			// would change what every one of those grades counts toward.
+			if graded, err := ec.Q.ComponentSubtreeHasLiveGrades(ctx, c.ID); err != nil {
+				return OK{}, err
+			} else if graded {
+				return OK{}, apperr.Precondition("grades have been entered beneath %q; its place in the scheme no longer changes", c.Name)
 			}
 			parent, err := ec.Q.GetComponentInCourse(ctx, dbq.GetComponentInCourseParams{ID: in.NewParentID, CourseID: in.CourseID})
 			if err != nil {

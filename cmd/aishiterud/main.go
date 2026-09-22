@@ -63,6 +63,9 @@ Environment:
   JOBS_INTERVAL     default 1m
   SESSION_TTL       default 12h
   TRUSTED_ORIGINS   the web front end's origins, comma separated
+  TRUSTED_PROXIES   CIDRs of the reverse proxies in front of this server, comma separated;
+                    a request from one is attributed to the client in X-Forwarded-For
+  COOKIE_SAMESITE   lax (default) when the front end is same-site with this server; none otherwise
   INSECURE_COOKIES  true for development over http://localhost only
   BLOB_STORE        fs (default), s3 or none
   BLOB_FS_ROOT      default var/blobs
@@ -195,11 +198,15 @@ func serve(cfg config.Config) error {
 			Pool: pool, LatestSchema: latest, Pipeline: pl, Log: log,
 			Auth: authn, MCP: mcpapi.NewHandler(mcpapi.Deps{Pipeline: pl, Auth: authn, Log: log, Calls: calls}),
 			Calls: calls, SignIns: ratelimit.New(cfg.SignInsPerMinute, cfg.SignInsPerMinute),
-			TrustedOrigins: cfg.TrustedOrigins, InsecureCookies: cfg.InsecureCookies,
+			TrustedOrigins: cfg.TrustedOrigins, TrustedProxies: cfg.TrustedProxies,
+			InsecureCookies: cfg.InsecureCookies, CookieSameSite: sameSite(cfg.CookieSameSite),
 			Blob: store, MaxUploadBytes: cfg.MaxUploadBytes,
 			SSO: sso, Signer: signatures,
 		}),
+		// Headers within ten seconds, an idle keep-alive for two minutes; the
+		// body and the response are bounded per request by the handler.
 		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       2 * time.Minute,
 	}
 	errc := make(chan error, 1)
 	go func() { errc <- srv.ListenAndServe() }()
@@ -223,6 +230,13 @@ func serve(cfg config.Config) error {
 	case <-shutdownCtx.Done():
 	}
 	return nil
+}
+
+func sameSite(mode string) http.SameSite {
+	if mode == "none" {
+		return http.SameSiteNoneMode
+	}
+	return http.SameSiteLaxMode
 }
 
 // openBlobStore returns the configured file store, or nil for "none".

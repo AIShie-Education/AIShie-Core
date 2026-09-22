@@ -24,6 +24,9 @@ type Querier interface {
 	ComponentHasLiveGrades(ctx context.Context, componentID *uuid.UUID) (bool, error)
 	// Any origin: an entered grade, or a total written down when it was a parent.
 	ComponentHasLivePostedGrades(ctx context.Context, componentID *uuid.UUID) (bool, error)
+	// Any entered grade, live, on the component, on a component beneath it, or
+	// on a submission to an assignment beneath it.
+	ComponentSubtreeHasLiveGrades(ctx context.Context, componentID uuid.UUID) (bool, error)
 	CountAssignmentsInScope(ctx context.Context, arg CountAssignmentsInScopeParams) (int64, error)
 	CountAssignmentsOfCourse(ctx context.Context, arg CountAssignmentsOfCourseParams) (int64, error)
 	CountBuiltinPresets(ctx context.Context) (int64, error)
@@ -141,9 +144,9 @@ type Querier interface {
 	ListComponents(ctx context.Context, courseID uuid.UUID) ([]ListComponentsRow, error)
 	// Course-level documents: material, instructions, rubrics. Owned documents
 	// (submitted files, feedback) are reached through their owners instead.
-	// Instructions and rubrics are the assignment's: to anyone who cannot read
-	// drafts they exist only once a published assignment within their scope
-	// refers to them, or a student could read next week's exam by listing.
+	// Instructions and rubrics are the assignment's: to anyone who does not
+	// write assignments they exist only once a published assignment within their
+	// scope refers to them, or a student could read next week's exam by listing.
 	ListCourseDocuments(ctx context.Context, arg ListCourseDocumentsParams) ([]ListCourseDocumentsRow, error)
 	ListCourses(ctx context.Context, arg ListCoursesParams) ([]ListCoursesRow, error)
 	// Never the hash.

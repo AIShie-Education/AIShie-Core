@@ -78,10 +78,11 @@ func (s *server) ssoCallback(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, apperr.New(apperr.Unauthenticated, "the identity provider refused the sign-in (%s)", e))
 		return
 	}
-	if ok, wait := s.SignIns.Allow("addr:" + clientAddr(r)); !ok {
-		s.tooMany(w, r, wait)
-		return
-	}
+	// No sign-in limit here: the signed, single-use state cookie and the
+	// provider's single-use code already bind this to one sign-in that this
+	// browser started, and the exchange is one call to the provider, not an
+	// argon2 hash. A limit would only turn a lecture hall returning from the
+	// provider at once into a queue of burnt sign-ins.
 	id, err := s.SSO.Exchange(r.Context(), q.Get("code"), st.Nonce)
 	if err != nil {
 		s.Log.Warn("sso exchange failed", "err", err)

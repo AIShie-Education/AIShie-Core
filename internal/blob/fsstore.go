@@ -39,6 +39,9 @@ func NewFSStore(root, publicURL string, signer *Signer) (*FSStore, error) {
 // BlobPath is where the server mounts the store's URLs.
 const BlobPath = "/v1/blobs/"
 
+// Root is the directory the store keeps its files under.
+func (s *FSStore) Root() string { return s.root }
+
 func (s *FSStore) PresignPut(_ context.Context, key, contentType string, ttl time.Duration) (string, map[string]string, error) {
 	if _, err := s.path(key); err != nil {
 		return "", nil, err
@@ -85,7 +88,7 @@ func (s *FSStore) Put(_ context.Context, key, contentType string, r io.Reader, m
 	// change what a document version already points at.
 	f, err := os.OpenFile(p, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o640) //nolint:gosec // p is confined to root by path()
 	if errors.Is(err, fs.ErrExist) {
-		return Info{}, errors.New("blob: the object already exists; a key is written once")
+		return Info{}, ErrExists
 	}
 	if err != nil {
 		return Info{}, err

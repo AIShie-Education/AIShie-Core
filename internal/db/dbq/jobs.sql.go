@@ -130,7 +130,9 @@ WHERE a.published_at IS NOT NULL AND a.due_at IS NOT NULL AND a.due_at <= $1
   AND NOT EXISTS (
         SELECT 1 FROM action x
         WHERE x.actor_id = $2
-          AND x.idempotency_key = 'job:submission.mark_missing:' || a.id::text || ':' || (extract(epoch FROM a.due_at)::bigint)::text)
+          -- floor, as Go's time.Unix() does; a plain ::bigint cast rounds, and
+          -- a due date with a fractional second would then be swept every tick.
+          AND x.idempotency_key = 'job:submission.mark_missing:' || a.id::text || ':' || floor(extract(epoch FROM a.due_at))::bigint::text)
 ORDER BY a.due_at
 LIMIT $3
 `

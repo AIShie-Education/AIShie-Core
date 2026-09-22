@@ -17,6 +17,11 @@ src/
                          result, event scope columns, session credentials,
                          the action status CHECKs, the member expiry index
     0002_action_replay_and_feed_scope.down.sql
+    0003_queue_and_course_indexes.up.sql
+                         the review-queue index as the queue is actually
+                         queried (pending or escalated, by id), and a
+                         course index on submission
+    0003_queue_and_course_indexes.down.sql
   seed/
     presets.sql          the six built-in permission presets; safe to re-run
   tests/

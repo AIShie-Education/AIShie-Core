@@ -303,37 +303,51 @@ func TestIdsFromAnotherCourseAreNotFound(t *testing.T) {
 	}
 }
 
-// A parent's totals are written down as posted grades on the parent. If the
-// parent is later emptied and turned into something graded directly, those
-// totals would sit in the way for ever: an entered grade could not be posted
-// over them, and students would go on being shown a stale percentage as the
-// grade for it.
-func TestAFormerParentWithPostedTotalsIsNotGradedDirectly(t *testing.T) {
+// A score is a score in the scheme it was given under. Once a grade has been
+// entered beneath a component, its place in the scheme is fixed: moving it
+// would change what every one of those grades counts toward. And a parent's
+// totals, once written down, keep it from ever being graded directly.
+func TestAGradedComponentKeepsItsPlace(t *testing.T) {
 	b := build(t)
 	exams := testkit.Result[tools.IDOut](t, b.do(t, b.sato, "component.create", m{"course_id": b.course, "parent_id": b.total, "name": "Exams", "weight": 30})).ID
 	final := testkit.Result[tools.IDOut](t, b.do(t, b.sato, "component.create",
 		m{"course_id": b.course, "parent_id": exams, "name": "Final", "points_possible": 100})).ID
+	quiz := testkit.Result[tools.IDOut](t, b.do(t, b.sato, "component.create",
+		m{"course_id": b.course, "parent_id": exams, "name": "Quiz", "points_possible": 10})).ID
+	move := func(id, under uuid.UUID) m {
+		return m{"course_id": b.course, "component_id": id, "new_parent_id": under}
+	}
+	// Nothing entered yet: the scheme is still being arranged.
+	b.do(t, b.sato, "component.move", move(quiz, b.total))
+	b.do(t, b.sato, "component.move", move(quiz, exams))
+
+	// A draft is enough.
 	g := testkit.Result[tools.GradeSubmitOut](t, b.do(t, b.sato, "grade.submit",
 		m{"course_id": b.course, "component_id": final, "student_member_id": b.yukiM, "score": 80})).GradeID
+	b.try(t, b.sato, "component.move", move(final, b.total), apperr.FailedPrecondition)
+	b.try(t, b.sato, "component.move", move(exams, b.bucket), apperr.FailedPrecondition) // graded beneath it
+	b.do(t, b.sato, "component.move", move(quiz, b.total))                               // nothing entered for the quiz
+	// The same for a bucket once one of its assignments is graded.
+	work := b.submit(t, b.yuki, "essay")
+	b.do(t, b.sato, "grade.submit", m{"course_id": b.course, "submission_id": work, "score": 70})
+	b.try(t, b.sato, "component.move", move(b.bucket, exams), apperr.FailedPrecondition)
+
 	b.do(t, b.sato, "grade.post", m{"course_id": b.course, "grade_ids": []uuid.UUID{g}})
 	if n := b.Count(`SELECT count(*) FROM grade WHERE component_id = $1 AND origin = 'computed' AND superseded_by IS NULL`, exams); n != 1 {
 		t.Fatalf("%d live totals on Exams, want Yuki's", n)
 	}
-
-	// Sato flattens the scheme, and tries to reuse Exams as Participation.
-	b.do(t, b.sato, "component.move", m{"course_id": b.course, "component_id": final, "new_parent_id": b.total})
-	reuse := m{"course_id": b.course, "component_id": exams, "name": "Participation", "points_possible": 10}
-	b.try(t, b.sato, "component.update", reuse, apperr.FailedPrecondition)
-	if n := b.Count(`SELECT count(*) FROM grade_component WHERE id = $1 AND name = 'Exams' AND points_possible IS NULL`, exams); n != 1 {
+	// A parent whose totals were written down can never become something
+	// graded directly, where those totals would sit in the way for ever.
+	// The tools no longer let a parent be emptied once graded; a scheme from
+	// before that rule still might be.
+	legacy := testkit.Result[tools.IDOut](t, b.do(t, b.sato, "component.create", m{"course_id": b.course, "parent_id": b.total, "name": "Legacy"})).ID
+	b.Exec(`INSERT INTO grade (id, student_member_id, component_id, origin, score, grader_member_id, created_by_action_id, posted_at, posted_by_member_id)
+		SELECT $1, student_member_id, $2, 'computed', score, grader_member_id, created_by_action_id, posted_at, posted_by_member_id
+		FROM grade WHERE component_id = $3 AND origin = 'computed' AND superseded_by IS NULL`, uuid.New(), legacy, exams)
+	b.try(t, b.sato, "component.update", m{"course_id": b.course, "component_id": legacy, "name": "Participation", "points_possible": 10}, apperr.FailedPrecondition)
+	if n := b.Count(`SELECT count(*) FROM grade_component WHERE id = $1 AND name = 'Legacy' AND points_possible IS NULL`, legacy); n != 1 {
 		t.Fatal("the refused change was kept")
 	}
-	// A new component is the way, and works.
-	part := testkit.Result[tools.IDOut](t, b.do(t, b.sato, "component.create",
-		m{"course_id": b.course, "parent_id": b.total, "name": "Participation", "points_possible": 10})).ID
-	pg := testkit.Result[tools.GradeSubmitOut](t, b.do(t, b.sato, "grade.submit",
-		m{"course_id": b.course, "component_id": part, "student_member_id": b.yukiM, "score": 9})).GradeID
-	b.do(t, b.sato, "grade.post", m{"course_id": b.course, "grade_ids": []uuid.UUID{pg}})
-
 	// One that never had totals written down can still be turned.
 	spare := testkit.Result[tools.IDOut](t, b.do(t, b.sato, "component.create", m{"course_id": b.course, "parent_id": b.total, "name": "Spare"})).ID
 	b.do(t, b.sato, "component.update", m{"course_id": b.course, "component_id": spare, "points_possible": 5})

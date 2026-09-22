@@ -171,7 +171,16 @@ was recorded; `429` carries `Retry-After`. Every answer, including the one for
 a path that does not exist, is JSON. Agents authenticate with
 `Authorization: Bearer <token>`; browsers sign in at `POST /v1/auth/login` (or
 through single sign-on) and carry a session cookie. Set `TRUSTED_ORIGINS` to
-the web front end's origin so that its browser requests are accepted.
+the web front end's origin so that its browser requests are accepted. The
+front end is expected to be same-site with this server (the session cookie is
+`SameSite=Lax`); a front end on another site needs `COOKIE_SAMESITE=none`.
+
+The server speaks plain HTTP and expects a reverse proxy to terminate TLS.
+Name the proxy's address range in `TRUSTED_PROXIES` (CIDRs), or every
+request looks like it comes from the proxy and the per-address limit on
+sign-in attempts becomes one bucket for the whole installation; with the
+proxy named, the client is the one it forwards in `X-Forwarded-For`, and that
+header is ignored from anywhere else.
 
 ## CI and releases
 

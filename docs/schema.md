@@ -344,7 +344,8 @@ event(seq, type, course_id null→course, action_id null→action,
 **`action` is an attempt, written before anything happens**, including attempts that were
 denied. `confirm_required` needs no approval table — the queue is `WHERE status = 'proposed'`,
 and the proposal itself lives in `payload`; nothing else is written until a human approves.
-`pending_review` needs no review table — the queue is `WHERE review_state = 'pending'`.
+`pending_review` needs no review table — the queue is `WHERE review_state IN ('pending', 'escalated')`,
+an escalated action still waiting for its second reviewer.
 
 `unique(actor_id, idempotency_key)` is not optional. A tool call retried after a timeout would
 otherwise post a second grade silently at 3am.
