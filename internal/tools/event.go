@@ -1,0 +1,145 @@
+package tools
+
+import (
+	"context"
+	"encoding/json"
+	"time"
+
+	"github.com/google/uuid"
+
+	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/db/dbq"
+	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/domain"
+	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/events"
+	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/members"
+	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/tool"
+)
+
+func eventTools() []tool.Tool { return []tool.Tool{eventList()} }
+
+// visibility says who may see each type of event: holding ANY of the listed
+// permissions is enough. Scope is applied on top, per row, in SQL.
+//
+// A type that is not in this table is visible to nobody but the member whose
+// action caused it. A new event type is therefore private until someone
+// decides otherwise here, which is the safe way round; a test checks that
+// every type the tools emit has made that decision.
+var visibility = map[string][]domain.Perm{
+	// The action log belongs to those who decide. A proposer still sees what
+	// became of its own proposals, by the own-action rule.
+	events.ActionProposed: {domain.PermActionDecide}, events.ActionApproved: {domain.PermActionDecide},
+	events.ActionRejected: {domain.PermActionDecide}, events.ActionCancelled: {domain.PermActionDecide},
+	events.ActionReviewed: {domain.PermActionDecide}, events.ActionEscalated: {domain.PermActionDecide},
+
+	// A draft grade is for graders; a posted one for whoever may read grades.
+	events.GradeCreated:      {domain.PermGradeSubmit, domain.PermGradePost},
+	events.GradePosted:       {domain.PermGradeRead},
+	events.GradeRegraded:     {domain.PermGradeRead},
+	events.GradeTotalUpdated: {domain.PermGradeRead},
+
+	EventSubmissionSubmitted: {domain.PermSubmissionRead},
+	EventSubmissionLateness:  {domain.PermSubmissionRead},
+	EventSubmissionMissing:   {domain.PermSubmissionRead},
+
+	// Unpublished work is for those who write assignments.
+	EventAssignmentCreated:   {domain.PermAssignmentWrite},
+	EventAssignmentUpdated:   {domain.PermAssignmentWrite},
+	EventAssignmentPublished: {domain.PermDocumentRead},
+	EventAssignmentDuePassed: {domain.PermDocumentRead},
+
+	EventComponentCreated: {domain.PermGradeRead}, EventComponentUpdated: {domain.PermGradeRead},
+	EventComponentMoved: {domain.PermGradeRead},
+
+	members.EventAdded: {domain.PermMemberRead}, members.EventUpdated: {domain.PermMemberRead},
+	members.EventPaused: {domain.PermMemberRead}, members.EventResumed: {domain.PermMemberRead},
+	members.EventRemoved: {domain.PermMemberRead}, members.EventRescoped: {domain.PermMemberRead},
+
+	EventCourseCreated: {domain.PermDocumentRead}, EventCourseUpdated: {domain.PermDocumentRead},
+	EventCourseActivated: {domain.PermDocumentRead}, EventCourseArchived: {domain.PermDocumentRead},
+
+	// Platform events belong to no course, so they are in no course's feed.
+	// They are listed so that leaving them out is visibly a decision.
+	EventActorRegistered: nil, EventActorSuspended: nil, EventActorReactivated: nil,
+}
+
+// KnownEventTypes lists every event type that has a visibility rule.
+func KnownEventTypes() []string {
+	out := make([]string, 0, len(visibility))
+	for t := range visibility {
+		out = append(out, t)
+	}
+	return out
+}
+
+func visibleTypes(m *domain.Member) []string {
+	out := []string{}
+	for typ, perms := range visibility {
+		for _, p := range perms {
+			if m.Perm(p).Allowed() {
+				out = append(out, typ)
+				break
+			}
+		}
+	}
+	return out
+}
+
+type EventListIn struct {
+	tool.InCourse
+	SinceSeq int64 `json:"since_seq,omitempty" jsonschema:"the seq of the last event already seen; 0 for the beginning"`
+	Limit    int   `json:"limit,omitempty" jsonschema:"default 100, maximum 500"`
+}
+
+type EventView struct {
+	Seq             int64           `json:"seq"`
+	Type            string          `json:"type"`
+	ActionID        *uuid.UUID      `json:"action_id,omitempty"`
+	SubjectType     string          `json:"subject_type"`
+	SubjectID       *uuid.UUID      `json:"subject_id,omitempty"`
+	StudentMemberID *uuid.UUID      `json:"student_member_id,omitempty"`
+	AssignmentID    *uuid.UUID      `json:"assignment_id,omitempty"`
+	Payload         json.RawMessage `json:"payload"`
+	OccurredAt      time.Time       `json:"occurred_at"`
+}
+
+type EventListOut struct {
+	Events []EventView `json:"events"`
+	// NextSeq is what to pass as since_seq next time. It moves even when the
+	// page is empty of events the caller may see.
+	NextSeq int64 `json:"next_seq"`
+	More    bool  `json:"more" jsonschema:"true when the page was full and there may be more right now"`
+}
+
+func eventList() tool.Tool {
+	return tool.Define(tool.Spec[EventListIn, EventListOut]{
+		Name: "event.list",
+		Description: "The course's event feed from a cursor: everything that has happened since since_seq that the caller is " +
+			"allowed to know about. Events carry ids, never content — fetch what they point to with the read tools. " +
+			"The events of your own actions are always included, which is how you learn that a proposal was approved, " +
+			"rejected or cancelled. Core never calls out: poll this.",
+		Kind: tool.Read,
+		// Any seat in the course can read the feed; what it shows is decided
+		// per event type and per row.
+		Gate: tool.Gate{Perms: []domain.Perm{domain.PermDocumentRead}},
+		HTTP: tool.Route{Method: "GET", Pattern: "/v1/courses/{course_id}/events"},
+		Resolve: func(_ context.Context, _ dbq.Querier, in EventListIn) (tool.Target, error) {
+			return tool.Target{CourseID: in.CourseID, Type: "event"}, nil
+		},
+		Query: func(ctx context.Context, rc *tool.ReadCtx, in EventListIn) (EventListOut, error) {
+			limit := int32(100)
+			if in.Limit > 0 {
+				limit = int32(min(in.Limit, 500))
+			}
+			rows, err := rc.Q.ListEvents(ctx, dbq.ListEventsParams{
+				CourseID: &in.CourseID, SinceSeq: in.SinceSeq, MaxRows: limit, VisibleTypes: visibleTypes(rc.Member),
+				MemberID: &rc.Scope.MemberID, StudentAll: rc.Scope.StudentAll, AssignmentAll: rc.Scope.AssignmentAll,
+			})
+			out := EventListOut{Events: make([]EventView, 0, len(rows)), NextSeq: in.SinceSeq, More: len(rows) == int(limit)}
+			for _, r := range rows {
+				out.Events = append(out.Events, EventView{Seq: r.Seq, Type: r.Type, ActionID: r.ActionID, SubjectType: r.SubjectType,
+					SubjectID: r.SubjectID, StudentMemberID: r.StudentMemberID, AssignmentID: r.AssignmentID, Payload: r.Payload, OccurredAt: r.OccurredAt})
+				out.NextSeq = r.Seq
+			}
+			return out, err
+		},
+	})
+}

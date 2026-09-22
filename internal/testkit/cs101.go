@@ -83,8 +83,7 @@ type Student struct {
 // preset — perm_grade_submit = confirm_required — and listed for HW3 only.
 // Every student has submitted HW3. Yuki is Students[0], Ken is Students[1].
 type CS101 struct {
-	*World
-	P *pipeline.Pipeline
+	*Platform
 
 	Course                      uuid.UUID
 	Total, Assignments, Midterm uuid.UUID
@@ -96,12 +95,9 @@ type CS101 struct {
 
 func NewCS101(t testing.TB, students int) *CS101 {
 	t.Helper()
-	w := NewWorld(t)
-	c := &CS101{World: w}
-
-	reg := tool.NewRegistry()
-	c.P = pipeline.New(w.Pool, reg, pipeline.Config{ProposalTTL: pipeline.DefaultProposalTTL})
-	tools.RegisterAll(reg, tools.Deps{Pipeline: c.P})
+	p := NewPlatform(t)
+	w := p.World
+	c := &CS101{Platform: p}
 
 	c.Course = w.Course("CS101")
 	c.Total = w.RootComponent(c.Course)
@@ -130,8 +126,25 @@ func NewCS101(t testing.TB, students int) *CS101 {
 	return c
 }
 
+// Platform is a fresh database with the whole tool catalogue on a pipeline,
+// and nothing in it but root, a term and a department. Tests that build their
+// world through the tools themselves start here.
+type Platform struct {
+	*World
+	P *pipeline.Pipeline
+}
+
+func NewPlatform(t testing.TB) *Platform {
+	t.Helper()
+	w := NewWorld(t)
+	reg := tool.NewRegistry()
+	p := &Platform{World: w, P: pipeline.New(w.Pool, reg, pipeline.Config{ProposalTTL: pipeline.DefaultProposalTTL})}
+	tools.RegisterAll(reg, tools.Deps{Pipeline: p.P})
+	return p
+}
+
 // Call invokes a tool as actor. args is marshalled to JSON.
-func (c *CS101) Call(actor uuid.UUID, name string, args any, key string) (pipeline.Outcome, error) {
+func (c *Platform) Call(actor uuid.UUID, name string, args any, key string) (pipeline.Outcome, error) {
 	c.T.Helper()
 	raw, err := json.Marshal(args)
 	if err != nil {
@@ -142,7 +155,7 @@ func (c *CS101) Call(actor uuid.UUID, name string, args any, key string) (pipeli
 
 // MustCall is Call for calls that are expected to be attempted: it fails the
 // test on an error (as opposed to a recorded denial or failure).
-func (c *CS101) MustCall(actor uuid.UUID, name string, args any, key string) pipeline.Outcome {
+func (c *Platform) MustCall(actor uuid.UUID, name string, args any, key string) pipeline.Outcome {
 	c.T.Helper()
 	out, err := c.Call(actor, name, args, key)
 	if err != nil {

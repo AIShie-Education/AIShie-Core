@@ -52,6 +52,10 @@ db-test-sql: ## psql suite: migrations up, seed, constraint tests, down, up agai
 	[ "$$left" = "0" ] || { echo "down left $$left tables behind"; exit 1; }; \
 	for f in $$ups; do echo "up    $$f"; $(PSQL) -d $(SQLTEST_DB) -f $$f; done
 
+.PHONY: e2e
+e2e: build ## the real binary and curl: bootstrap, then docs/schema.md §5 over the REST API
+	scripts/e2e.sh
+
 .PHONY: fmt-check
 fmt-check: ## fail if any file needs gofmt
 	@out=$$(gofmt -l . | grep -v '^internal/db/dbq/' || true); \
@@ -83,7 +87,7 @@ docker: ## build the image locally; never pushes
 	docker build --build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) --build-arg DATE=$(DATE) -t aishiteru-core:dev .
 
 .PHONY: ci
-ci: lint sqlc-check db-test-sql test build ## everything CI runs, except docker and vuln
+ci: lint sqlc-check db-test-sql test e2e ## everything CI runs, except docker and vuln
 
 .PHONY: dev-db
 dev-db: ## Postgres and MinIO in Docker, for machines without a local server

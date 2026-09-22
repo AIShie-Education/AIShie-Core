@@ -1,0 +1,36 @@
+-- name: InsertAssignment :exec
+INSERT INTO assignment (id, course_id, component_id, title, instructions_document_id, rubric_document_id,
+                        points_possible, due_at, created_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9);
+
+-- name: UpdateAssignment :exec
+UPDATE assignment
+SET component_id = $2, title = $3, instructions_document_id = $4, rubric_document_id = $5,
+    points_possible = $6, due_at = $7
+WHERE id = $1;
+
+-- name: PublishAssignment :execrows
+UPDATE assignment SET published_at = $2 WHERE id = $1 AND published_at IS NULL;
+
+-- name: GetDocumentInCourse :one
+SELECT id, course_id, kind, title, status, published_version_id
+FROM document WHERE id = $1 AND course_id = $2;
+
+-- name: AssignmentHasPostedGrades :one
+SELECT EXISTS (
+    SELECT 1 FROM grade g JOIN submission s ON s.id = g.submission_id
+    WHERE s.assignment_id = $1 AND g.posted_at IS NOT NULL
+);
+
+-- name: ListAssignments :many
+-- Scope is applied here, not afterwards. A member who may not write
+-- assignments sees only published ones.
+SELECT id, course_id, component_id, title, instructions_document_id, rubric_document_id,
+       points_possible, due_at, published_at, created_at
+FROM assignment a
+WHERE a.course_id = $1 AND a.id > sqlc.arg(after)
+  AND (sqlc.arg(include_unpublished)::bool OR a.published_at IS NOT NULL)
+  AND (sqlc.arg(assignment_all)::bool OR EXISTS (
+        SELECT 1 FROM member_assignment_scope y WHERE y.member_id = sqlc.arg(member_id) AND y.assignment_id = a.id))
+ORDER BY a.id
+LIMIT sqlc.arg(max_rows);

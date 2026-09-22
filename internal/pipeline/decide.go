@@ -172,15 +172,24 @@ func (p *Pipeline) Decide(ctx context.Context, ec *tool.ExecCtx, in DecideIn) (D
 // cancel ends a proposal without executing it and without blaming anyone: it
 // was fine when it was made and is not any more.
 func (p *Pipeline) cancel(ctx context.Context, ec *tool.ExecCtx, prop dbq.Action, code string, details map[string]any) (DecideOut, error) {
-	e := apperr.Precondition("the proposal can no longer be carried out").With("reason", code)
-	for k, v := range details {
-		e = e.With(k, v)
-	}
-	if err := finish(ctx, ec.Q, prop.ID, domain.StatusCancelled, nil, ec, false, errorResult(e)); err != nil {
+	e, stored := Cancellation(code, details)
+	if err := finish(ctx, ec.Q, prop.ID, domain.StatusCancelled, nil, ec, false, stored); err != nil {
 		return DecideOut{}, err
 	}
 	ec.Emit(proposalEvent(events.ActionCancelled, prop, ec.ActionID, map[string]any{"reason": code}))
 	return DecideOut{ActionID: prop.ID, Outcome: domain.StatusCancelled, Error: e}, nil
+}
+
+// Cancellation builds the error a cancelled proposal carries, and the form of
+// it stored in action.result. Whoever cancels a proposal — a decision that
+// found it stale, the removal of its proposer, the expiry sweep — records it
+// the same way, so a replay reads the same whichever it was.
+func Cancellation(code string, details map[string]any) (*apperr.Error, []byte) {
+	e := apperr.Precondition("the proposal can no longer be carried out").With("reason", code)
+	for k, v := range details {
+		e = e.With(k, v)
+	}
+	return e, errorResult(e)
 }
 
 // finish moves a proposal to its end state.

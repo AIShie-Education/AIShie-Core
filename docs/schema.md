@@ -149,6 +149,23 @@ teaching assistant. Role is not read by authorization.
 Columns rather than rows because the action-type list lives in code anyway: adding one is a
 deploy, and a migration alongside it is no extra ceremony. The column list is the catalogue.
 
+Thirteen columns do not name every operation. Where a tool has no column of its own it borrows
+the nearest one, and the choice is recorded here so that it is a decision and not an accident:
+
+| Operation | Gated by | Why |
+|---|---|---|
+| Editing the grading scheme (`component.*`) | `perm_assignment_write` | the scheme is where assignments hang, and is set up by whoever sets them up |
+| Reading assignments, the course, the event feed | `perm_document_read` | the most basic permission a seated member holds; what the feed *shows* is decided per event |
+| Reading the grading scheme | `perm_grade_read` | |
+| Correcting lateness (`submission.set_lateness`) | `perm_grade_submit` | not `perm_submission_write`, or a student could un-late themselves |
+| Regrading | the lower of `perm_grade_submit` and `perm_grade_post` | it writes a grade and makes it visible in one step |
+| Course settings, status, first instructor | `platform_role` | outside the course by definition |
+
+An unposted grade, and a superseded one, is visible only to a member holding `perm_grade_submit`
+or `perm_grade_post`; everyone else sees live posted grades. That is the rule for students,
+stated without asking whether anyone is a student. An unpublished assignment is likewise
+visible only to holders of `perm_assignment_write`.
+
 **Presets are rows of `permission_preset`**, with the same `perm_*` columns plus a default role
 and scope. Six built-ins (`student`, `observer`, `ta`, `instructor`, `tutor`, `grader`) are
 seeded from `src/seed/presets.sql` with `dept_id` null; a department may add its own under any
@@ -162,6 +179,12 @@ seated, and any single value on a member can be overridden. A test asserts that 
 A student is `listed` with a single row pointing at itself; there is no self-access special
 case. Scope filters only things that belong to a student or an assignment: a tutor listed for
 Yuki still reads all course material but sees only Yuki's work.
+
+**Nobody hands out more than they hold.** `perm_member_manage` would otherwise quietly be every
+permission: seat a second account as instructor and use that. So `member.add`,
+`member.update_perms` and `member.rescope` refuse to grant any permission above the granter's
+own level on that column, and a granter whose own scope is a list may only grant `listed`,
+from within their own list. Lowering is always allowed. Nobody manages their own seat.
 
 **Lifecycle**: add (new row, preset copied), pause (`status = 'paused'`, same id survives),
 remove (`status = 'removed'`, pending proposals cancelled, history kept), re-add (new row, new
@@ -307,6 +330,15 @@ when the sweep last ran.
 state change. Not every event has an action behind it (a due date passing); one action may
 emit several (posting a batch of grades emits one per student). `seq` is the cursor for
 "everything since" — for a student's feed, or an agent rebuilding its picture on cold start.
+
+**The feed is pulled, and filtered three ways.** Core never calls out, so `event.list` from a
+cursor is how anyone — a student's page, an agent starting cold — learns what happened. Each
+event type is visible to holders of certain permissions (a posted grade to `perm_grade_read`,
+a draft to those who grade, the roster to `perm_member_read`, the action log to
+`perm_action_decide`); a type with no rule is visible to nobody. On top of that, the events of
+a member's *own* actions are always visible to it: `action.approved`, `action.rejected` and
+`action.cancelled` are filed under the proposal's id, which is how a pull-based agent learns
+what became of what it proposed. Then scope, per row, as below.
 
 `student_member_id` and `assignment_id` say whose the event is, so that the feed is
 scope-filtered in SQL exactly as `authorize()` filters a target: null means the event belongs

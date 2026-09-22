@@ -1,0 +1,58 @@
+-- name: InsertTerm :exec
+INSERT INTO term (id, name, starts_on, ends_on) VALUES ($1, $2, $3, $4);
+
+-- name: ListTerms :many
+SELECT id, name, starts_on, ends_on FROM term ORDER BY starts_on DESC, id;
+
+-- name: TermExists :one
+SELECT EXISTS (SELECT 1 FROM term WHERE id = $1);
+
+-- name: InsertDepartment :exec
+INSERT INTO department (id, name, created_at) VALUES ($1, $2, $3);
+
+-- name: ListDepartments :many
+SELECT id, name, created_at FROM department ORDER BY name, id;
+
+-- name: DepartmentExists :one
+SELECT EXISTS (SELECT 1 FROM department WHERE id = $1);
+
+-- name: SetActorStatus :execrows
+UPDATE actor SET status = $2 WHERE id = $1 AND status <> $2;
+
+-- name: EmailTaken :one
+SELECT EXISTS (SELECT 1 FROM actor WHERE lower(email) = lower($1));
+
+-- name: GetPreset :one
+SELECT * FROM permission_preset WHERE id = $1;
+
+-- name: GetBuiltinPresetByName :one
+SELECT * FROM permission_preset WHERE name = $1 AND dept_id IS NULL;
+
+-- name: GetDeptPresetByName :one
+SELECT * FROM permission_preset WHERE name = $1 AND dept_id = $2;
+
+-- name: ListPresets :many
+-- Built-ins, plus one department's own when a department is named.
+SELECT * FROM permission_preset
+WHERE dept_id IS NULL OR dept_id = sqlc.narg(dept_id)
+ORDER BY dept_id NULLS FIRST, name;
+
+-- name: InsertPreset :exec
+INSERT INTO permission_preset (
+    id, dept_id, name, description, role, student_scope, assignment_scope,
+    perm_document_read, perm_document_read_draft, perm_document_write, perm_rubric_read,
+    perm_assignment_write, perm_submission_read, perm_submission_write, perm_grade_read,
+    perm_grade_submit, perm_grade_post, perm_member_read, perm_member_manage, perm_action_decide,
+    created_by_actor_id, created_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22);
+
+-- name: UpdatePreset :execrows
+-- Built-ins (dept_id null) are policy shipped with the system; only a
+-- department's own presets are edited here.
+UPDATE permission_preset SET
+    description = $2, role = $3, student_scope = $4, assignment_scope = $5,
+    perm_document_read = $6, perm_document_read_draft = $7, perm_document_write = $8, perm_rubric_read = $9,
+    perm_assignment_write = $10, perm_submission_read = $11, perm_submission_write = $12, perm_grade_read = $13,
+    perm_grade_submit = $14, perm_grade_post = $15, perm_member_read = $16, perm_member_manage = $17,
+    perm_action_decide = $18
+WHERE id = $1 AND dept_id IS NOT NULL;

@@ -17,13 +17,20 @@ In place so far:
 - `authorize()`, the tool registry, and the action pipeline every call goes
   through — idempotent replay, proposals with re-authorization on approval,
   after-the-fact review, events;
-- grading as the first tools on it; the worked example in docs/schema.md §5
-  ("an agent grades an essay") runs end to end as a test;
 - authentication (API tokens for agents, password sessions for people) and
-  the REST API, whose routes are generated from the tool registry.
+  the REST API, whose routes are generated from the tool registry;
+- the tool catalogue for everything but documents: actors, terms,
+  departments, presets, courses, members, the grading scheme, assignments,
+  submissions, grades, the approval and review queues, and the event feed —
+  all scope-filtered in SQL.
 
-Still to come: the rest of the tool catalogue (courses, members, assignments,
-submissions, the event feed), documents, the MCP adapter, background jobs, SSO.
+`make e2e` runs the real binary against a scratch database and, with nothing
+but `curl`, builds the worked example from docs/schema.md §5 from an empty
+installation: an agent grades an essay, a person approves it, the student
+sees the grade.
+
+Still to come: documents and file storage, the MCP adapter, background jobs
+(proposal and membership expiry), SSO.
 
 ## Layout
 
@@ -57,6 +64,7 @@ make help          # every target, with a one-line description
 make ci            # everything CI runs: lint, generated code, SQL suite, Go tests, build
 make test          # Go tests only
 make db-test-sql   # psql suite only
+make e2e           # the real binary and curl, end to end
 make sqlc          # regenerate internal/db/dbq after editing SQL
 ```
 
