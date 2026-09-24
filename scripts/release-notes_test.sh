@@ -21,9 +21,9 @@ commit() {
 failed=0
 expect() {
   local tag=$1 prev=$2 migrations=$3 got
-  got=$(cd "$repo" && "$here/release-notes.sh" "$tag")
+  got=$(cd "$repo" && "$here/release-notes.sh" "$tag" 2>&1) || got="failed: $got"
   if [ "$got" != "$(printf 'prev=%s\nmigrations=%s' "$prev" "$migrations")" ]; then
-    printf 'FAIL %s\n  got:  %s\n  want: prev=%s migrations=%s\n' "$tag" "$(echo "$got" | paste -sd ' ')" "$prev" "$migrations" >&2
+    printf 'FAIL %s\n  got:  %s\n  want: prev=%s migrations=%s\n' "$tag" "$(echo "$got" | paste -sd ' ' -)" "$prev" "$migrations" >&2
     failed=1
   fi
 }
@@ -59,9 +59,19 @@ g tag v1.1.0
 expect v1.1.0 v1.0.1 "0004_later.up.sql"
 expect v1.1.0-rc.1 v1.0.1 "0004_later.up.sql"
 
-# A commit that is no tag, as publish.yml asks about main.
+# A commit that is no tag, as publish.yml asks about main, is compared with
+# the last stable tag, past a pre-release in between. A quote in a file name
+# is only a character.
 commit src/migrations/0005_after.up.sql
-expect "$(g rev-parse HEAD)" v1.1.0 "0005_after.up.sql"
+g tag v1.2.0-rc.1
+commit "src/migrations/0006_don't.up.sql"
+expect "$(g rev-parse HEAD)" v1.1.0 "0005_after.up.sql 0006_don't.up.sql"
+
+# A name that is no commit is an error, not a release with no migrations.
+if got=$(cd "$repo" && "$here/release-notes.sh" v9.9.9 2>&1); then
+  printf 'FAIL v9.9.9 is no tag, but release-notes.sh said:\n  %s\n' "$(echo "$got" | paste -sd ' ' -)" >&2
+  failed=1
+fi
 
 [ "$failed" = 0 ] && echo "release-notes.sh: ok"
 exit "$failed"
