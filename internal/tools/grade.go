@@ -502,7 +502,7 @@ func noNewerDraft(ctx context.Context, ec *tool.ExecCtx, s gradeSubject) error {
 type GradePostIn struct {
 	tool.InCourse
 	GradeIDs            []uuid.UUID `json:"grade_ids,omitempty" jsonschema:"the draft grades to post; or give assignment_id"`
-	AssignmentID        *uuid.UUID  `json:"assignment_id,omitempty" jsonschema:"post every draft grade waiting for this assignment; a proposal posts those that were waiting when it was made"`
+	AssignmentID        *uuid.UUID  `json:"assignment_id,omitempty" jsonschema:"post every draft grade waiting for this assignment. A proposal records the drafts that were waiting when it was made, as grade_ids beside this: approving it posts those of them still waiting, passes over any posted since, and fails if one has been replaced"`
 	TreatUngradedAsZero bool        `json:"treat_ungraded_as_zero,omitempty" jsonschema:"for final grades: count ungraded work as zero in the totals. Once a student's totals have been written this way they stay final: later posts and regrades keep counting ungraded work as zero. It decides the course total, so it needs an assignment scope of the whole course"`
 }
 
@@ -511,18 +511,30 @@ type GradePostOut struct {
 	Snapshots int         `json:"snapshots" jsonschema:"how many rolled-up totals were written or changed"`
 }
 
-// gradesToPost finds the drafts a post call is about.
+// pinned reports whether in is what a proposal to post an assignment
+// stores: the assignment, and beside it the drafts that were waiting for it
+// when the proposal was made. Pin is the only thing that writes both; a call
+// gives one or the other.
+func (in GradePostIn) pinned() bool {
+	return in.AssignmentID != nil && len(in.GradeIDs) > 0
+}
+
+// gradesToPost finds the drafts a post call is about. For a pinned proposal
+// that is every draft it names, posted since or not: whatever it goes on to
+// post, it is authorized over all of them, as it was when it was made.
 func gradesToPost(ctx context.Context, q dbq.Querier, in GradePostIn) ([]dbq.GetGradesInCourseRow, error) {
-	idsToPost := in.GradeIDs
-	switch {
-	case (len(in.GradeIDs) == 0) == (in.AssignmentID == nil):
+	if len(in.GradeIDs) == 0 && in.AssignmentID == nil {
 		return nil, apperr.Invalid("give exactly one of grade_ids and assignment_id")
-	case in.AssignmentID != nil:
+	}
+	idsToPost := in.GradeIDs
+	if in.AssignmentID != nil {
 		if _, err := q.GetAssignmentInCourse(ctx, dbq.GetAssignmentInCourseParams{ID: *in.AssignmentID, CourseID: in.CourseID}); errors.Is(err, pgx.ErrNoRows) {
 			return nil, apperr.Missing("no such assignment in this course")
 		} else if err != nil {
 			return nil, err
 		}
+	}
+	if len(idsToPost) == 0 {
 		var err error
 		if idsToPost, err = q.ListDraftGradeIDsForAssignment(ctx, dbq.ListDraftGradeIDsForAssignmentParams{AssignmentID: *in.AssignmentID, CourseID: in.CourseID}); err != nil {
 			return nil, err
@@ -540,6 +552,30 @@ func gradesToPost(ctx context.Context, q dbq.Querier, in GradePostIn) ([]dbq.Get
 		return nil, apperr.Missing("one or more of those grades do not exist in this course")
 	}
 	return rows, nil
+}
+
+// stillWaiting is what approving a pinned proposal posts: the drafts it
+// names, less any posted by hand while it waited. Those are out already, as
+// what was proposed, and the rest were in front of whoever proposed
+// releasing them as they are now. A draft replaced meanwhile fails the
+// approval instead. Its replacement has been in front of nobody who asked
+// for it to be released, and posting the others without it is not what was
+// proposed either.
+func stillWaiting(rows []dbq.GetGradesInCourseRow) ([]dbq.GetGradesInCourseRow, error) {
+	waiting := make([]dbq.GetGradesInCourseRow, 0, len(rows))
+	for _, g := range rows {
+		switch {
+		case g.SupersededBy != nil:
+			return nil, apperr.Conflicts("grade %s, one of the drafts this proposal was made about, has been replaced since it was proposed; propose posting again", g.ID)
+		case g.PostedAt != nil:
+			continue
+		}
+		waiting = append(waiting, g)
+	}
+	if len(waiting) == 0 {
+		return nil, apperr.Precondition("every draft this proposal was made about has been posted since it was proposed; there is nothing left for it to post")
+	}
+	return waiting, nil
 }
 
 func gradePost() tool.Tool {
@@ -576,6 +612,14 @@ func gradePost() tool.Tool {
 			if err != nil {
 				return err
 			}
+			// What a pinned proposal may post is worked out in Execute, the
+			// one place that can tell its approval, which passes over a
+			// draft posted meanwhile, from a call giving both, which is
+			// refused. Approving it runs Execute straight after this, and
+			// fails there as it would have here.
+			if in.pinned() {
+				return nil
+			}
 			if len(rows) == 0 {
 				return apperr.Precondition("there are no draft grades to post")
 			}
@@ -584,32 +628,48 @@ func gradePost() tool.Tool {
 		// A proposal to post an assignment is about the drafts waiting when
 		// it was made. One entered while it waits has been in front of
 		// nobody who could release it, so the proposal names the drafts it
-		// was made about; one of them replaced since fails the approval, as
-		// any named grade that is no longer a draft does.
+		// was made about, beside the assignment; stillWaiting is what
+		// approving it posts of them.
 		Pin: func(ctx context.Context, q dbq.Querier, in GradePostIn) (GradePostIn, error) {
 			if in.AssignmentID == nil {
 				return in, nil
+			}
+			if len(in.GradeIDs) > 0 {
+				return in, apperr.Invalid("give exactly one of grade_ids and assignment_id")
 			}
 			rows, err := gradesToPost(ctx, q, in)
 			if err != nil {
 				return in, err
 			}
 			// Validate found some, but they may have been posted since. A
-			// proposal about none would name nothing, and could never be
-			// carried out.
+			// proposal about none would name no draft, and approving it
+			// would post whatever was waiting by then.
 			if len(rows) == 0 {
 				return in, apperr.Precondition("there are no draft grades to post")
 			}
-			in.GradeIDs, in.AssignmentID = make([]uuid.UUID, len(rows)), nil
+			in.GradeIDs = make([]uuid.UUID, len(rows))
 			for i, g := range rows {
 				in.GradeIDs[i] = g.ID
 			}
 			return in, nil
 		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in GradePostIn) (GradePostOut, error) {
+			// Grade ids beside the assignment are what Pin stores, and only
+			// approving that passes over a draft posted meanwhile. A call
+			// giving both is refused, and one naming a grade that is already
+			// posted is told so by checkPostable.
+			pinned := in.pinned()
+			if pinned && !ec.ActionCreatedAt.Before(ec.Now) {
+				return GradePostOut{}, apperr.Invalid("give exactly one of grade_ids and assignment_id")
+			}
 			rows, err := gradesToPost(ctx, ec.Q, in)
 			if err != nil {
 				return GradePostOut{}, err
+			}
+			if pinned {
+				if rows, err = stillWaiting(rows); err != nil {
+					return GradePostOut{}, err
+				}
 			}
 			if len(rows) == 0 {
 				return GradePostOut{}, apperr.Precondition("there are no draft grades to post")
@@ -625,10 +685,15 @@ func gradePost() tool.Tool {
 			if rows, err = ec.Q.GetGradesInCourse(ctx, dbq.GetGradesInCourseParams{Ids: gradeIDs, CourseID: in.CourseID}); err != nil {
 				return GradePostOut{}, err
 			}
+			if pinned {
+				if rows, err = stillWaiting(rows); err != nil {
+					return GradePostOut{}, err
+				}
+			}
 			if err := checkPostable(ctx, ec.Q, rows); err != nil {
 				return GradePostOut{}, err
 			}
-			// With assignment_id — a direct call; a proposal names its
+			// With assignment_id alone — a direct call; a proposal names its
 			// drafts — the batch is whatever is a draft now, which may be
 			// more than what authorize() scope-checked: a draft entered in
 			// between, for a student the caller does not reach. Checked
