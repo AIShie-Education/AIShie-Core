@@ -90,9 +90,17 @@ tidy-check: ## fail if go.mod or go.sum is not tidy
 	go mod tidy -diff
 
 .PHONY: lint
-lint: fmt-check tidy-check ## gofmt, go mod tidy, go vet, golangci-lint
+lint: fmt-check tidy-check actionlint ## gofmt, go mod tidy, the workflows, go vet, golangci-lint
 	go vet ./...
 	golangci-lint run
+
+# actionlint also runs shellcheck over every `run:` block when shellcheck is
+# installed, as it is on GitHub's runners.
+ACTIONLINT_VERSION ?= v1.7.12
+
+.PHONY: actionlint
+actionlint: ## the GitHub Actions workflows
+	go run github.com/rhysd/actionlint/cmd/actionlint@$(ACTIONLINT_VERSION)
 
 .PHONY: script-test
 script-test: ## the tests of scripts/
