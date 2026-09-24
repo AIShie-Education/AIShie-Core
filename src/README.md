@@ -22,6 +22,10 @@ src/
                          queried (pending or escalated, by id), and a
                          course index on submission
     0003_queue_and_course_indexes.down.sql
+    0004_no_credential_for_system_actor.up.sql
+                         a trigger refusing to write a credential for the
+                         system actor
+    0004_no_credential_for_system_actor.down.sql
   seed/
     presets.sql          the six built-in permission presets; safe to re-run
   tests/
@@ -122,6 +126,7 @@ MCP, these are the invariants that survive a bug in the tool layer.
 | Document owner columns match `kind` | `document_owner_matches_kind` |
 | A version has text or a file; a file has a type and size | `document_version_has_content`, `document_version_file_described` |
 | SSO credentials carry an identity; passwords, tokens and sessions carry a hash; tokens and sessions carry a lookup prefix; sessions expire | `credential_*` CHECKs |
+| No credential is written for the system actor, nor moved to it | `credential_not_for_system_actor` trigger |
 | Status, role, kind and scope columns hold only listed values | `*_valid` CHECKs |
 | Emails are unique regardless of case | unique index on `lower(email)` |
 | Domain rows are never silently cascade-deleted | FKs default to NO ACTION |
@@ -150,6 +155,8 @@ The database cannot express these. Each one is a place a bug can hide.
   when a rolled-up component or the course total is posted.
 - **Component tree acyclicity**: the CHECK blocks only a self-loop.
 - **Cancelling pending proposals** when a member is removed or expires.
+- **A token of the system actor's** written before migration 0004 refused
+  them authenticates nobody.
 - **`actor.kind` and `course_member.role` are never read by authorization.**
 
 ## Regrading
@@ -166,7 +173,7 @@ unique index.
 ## Verification status
 
 Executed against PostgreSQL 18.6: up, down and up again apply cleanly, and
-`tests/constraints_test.sql` passes (91 checks). **Not yet run on PostgreSQL
+`tests/constraints_test.sql` passes (93 checks). **Not yet run on PostgreSQL
 13**, the stated minimum: CI runs this suite and the Go tests on both 13 and
 18, so the first pipeline run settles it — update this paragraph with the
 result.

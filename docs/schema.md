@@ -73,7 +73,9 @@ course(id, dept_id→department, term_id→term, code, section = '', title, desc
 entirely on its `course_member` rows; `platform_role` covers the few operations outside any
 course. The one exception is `kind = 'system'`, the actor the background sweeps run as: it is
 never seated in a course, and no token is issued for it and no identity linked to it, so that
-its authority cannot be borrowed. Those two refusals read `kind`; nothing that grants does.
+its authority cannot be borrowed. The database takes no credential for it, and a token it was
+given before migration 0004 authenticates nobody. Those refusals read `kind`; nothing that
+grants does.
 
 `created_by_actor_id` is the delegation chain: root (seeded at install, the only null) creates
 admins, an admin creates a course and seats its first instructor, the instructor adds everyone
@@ -83,7 +85,7 @@ Root and the system actor are created by `aishiterud bootstrap`, once. It is the
 change with no `action` row: there is no actor yet for it to be an action of. The operator's
 `aishiterud token issue` is likewise outside the log — it is how a newly registered agent,
 which cannot sign in to ask, gets its first token — and needs the database access that
-already implies everything.
+already implies everything. Like the tools, it refuses the system actor.
 
 `credential` covers four kinds of the same thing. SSO rows hold no secret — `provider` and
 `subject` identify the account at the identity provider (`polyu-adfs` + UPN). API tokens store a
@@ -528,6 +530,7 @@ check `actor.platform_role` instead. That is the only place it is read.
 | `denied` status ⇔ `denied` authorization; only a `confirm_required` action is proposed, rejected, cancelled or has a decider; only an executed `pending_review` action is under review | `action_status_matches_authz` |
 | `executed_at` is set exactly when status is `executed` | `action_executed_at_consistent` |
 | A session credential has a lookup prefix and an expiry | CHECKs on `credential` |
+| No credential is written for the system actor | trigger on `credential` |
 | `document_version` and `event` are append-only | triggers |
 | A submitted submission never changes | trigger |
 | Owner columns match `document.kind`; a version has content; SSO rows carry an identity | CHECKs |
@@ -573,6 +576,7 @@ check `actor.platform_role` instead. That is the only place it is read.
 - A write takes its caller's seat before anything else and holds it to the end: removing or
   changing a seat waits for the member's calls in flight, or they wait for it and are refused,
   so nothing is proposed from a seat that is being removed.
+- A token the system actor was given before the database refused them authenticates nobody.
 - `actor.kind` and `course_member.role` are never read by authorization.
 
 ## 5. Worked example: an agent grades an essay

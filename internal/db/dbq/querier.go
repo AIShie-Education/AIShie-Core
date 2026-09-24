@@ -81,6 +81,8 @@ type Querier interface {
 	// A token or a session, found by its public prefix before its hash is
 	// checked. Revoked and expired rows are returned too, so that the caller can
 	// tell them from an unknown prefix in its logs; it rejects all three alike.
+	// The actor's kind comes with it: a credential of the system actor's is
+	// rejected the same way.
 	GetCredentialByPrefix(ctx context.Context, tokenPrefix *string) (GetCredentialByPrefixRow, error)
 	GetCredentialForActor(ctx context.Context, arg GetCredentialForActorParams) (GetCredentialForActorRow, error)
 	GetDeptPresetByName(ctx context.Context, arg GetDeptPresetByNameParams) (PermissionPreset, error)
