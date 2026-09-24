@@ -231,7 +231,15 @@ func (r *Runner) Sweep(ctx context.Context) (Report, error) {
 //
 // An upload token does not expire for attaching (see blob.UploadClaim), so
 // this is also what bounds it: a file not attached within TTL + OrphanGrace
-// is gone, and attaching it then fails as though it had never been uploaded.
+// is gone at the next pass through the store, and attaching it then fails
+// as though it had never been uploaded. A pass starts blobSweepEvery after
+// the last one ended and takes a tick for every batch of orphans it removes;
+// the files it keeps, attached or another deployment's, are put to the
+// database a page at a time and take no place in the batch. So an orphan is
+// gone about an hour after TTL + OrphanGrace however many files are kept,
+// later only when orphans are made faster than a batch a tick. The price is
+// that one tick may list the whole store, which is why passes are an hour
+// apart. How far a pass has got is kept in memory: a restart starts it over.
 //
 // Only the server's own files are looked at. The bucket or directory may be
 // shared with other things — a backup, another program's objects — and their
@@ -246,11 +254,13 @@ func (r *Runner) sweepBlobs(ctx context.Context, now time.Time) (int, error) {
 		return 0, nil
 	}
 	cutoff := now.Add(-ttl - OrphanGrace)
-	// A pass through the store takes a batch of old files a tick, and each
-	// tick goes on from where the last one stopped. Most old files are
-	// attached, and kept; a pass that started over every tick would take on
-	// the same attached files each time and never reach what lies behind
-	// them. The prefixes before the one it stopped in are done with.
+	batch := int(r.cfg.Batch)
+	// A tick takes on a batch of orphans, and the next goes on from the last
+	// one it took. What is listed is put to the database a page of old files
+	// at a time, one query to a page, and only what that finds to be orphans
+	// counts: most old files are attached, and are kept, and they must not
+	// fill the batch, or a pass would take a tick for every batch of them.
+	// The prefixes before the one a tick stopped in are done with.
 	prefixes := r.blobPrefixes()
 	from := 0
 	for i, prefix := range prefixes {
@@ -258,7 +268,15 @@ func (r *Runner) sweepBlobs(ctx context.Context, now time.Time) (int, error) {
 			from = i
 		}
 	}
-	var old []upload
+	var page, orphans []upload
+	check := func() error {
+		if len(page) == 0 {
+			return nil
+		}
+		found, err := orphansAmong(ctx, dbq.New(r.pool), page)
+		orphans, page = append(orphans, found...), page[:0]
+		return err
+	}
 	for i, prefix := range prefixes[from:] {
 		after := ""
 		if i == 0 {
@@ -269,7 +287,13 @@ func (r *Runner) sweepBlobs(ctx context.Context, now time.Time) (int, error) {
 			if !ok || !modified.Before(cutoff) {
 				return nil
 			}
-			if old = append(old, upload{key, course}); len(old) >= int(r.cfg.Batch) {
+			if page = append(page, upload{key, course}); len(page) < batch {
+				return nil
+			}
+			if err := check(); err != nil {
+				return err
+			}
+			if len(orphans) >= batch {
 				return blob.ErrStopList
 			}
 			return nil
@@ -277,12 +301,22 @@ func (r *Runner) sweepBlobs(ctx context.Context, now time.Time) (int, error) {
 		if err != nil {
 			return 0, err
 		}
-		if len(old) >= int(r.cfg.Batch) {
+		if len(orphans) >= batch {
 			break
 		}
 	}
+	if err := check(); err != nil {
+		return 0, err
+	}
+	// A full batch means there may be more; the next tick goes on after the
+	// last orphan taken, and lists again what came after it in its page.
+	// Anything short of one is the end of the store.
+	done := len(orphans) < batch
+	if !done {
+		orphans = orphans[:batch]
+	}
 	removed := 0
-	for _, u := range old {
+	for _, u := range orphans {
 		gone, err := r.removeIfOrphan(ctx, u)
 		if err != nil {
 			r.log.Error("sweep step failed", "step", "orphan file", "key", u.key, "err", err)
@@ -292,12 +326,10 @@ func (r *Runner) sweepBlobs(ctx context.Context, now time.Time) (int, error) {
 			removed++
 		}
 	}
-	// A full batch means there may be more; the next tick goes on after the
-	// last key taken. Anything short of one is the end of the store.
-	if len(old) < int(r.cfg.Batch) {
+	if done {
 		r.blobsSwept, r.blobsAt = now, ""
 	} else {
-		r.blobsAt = old[len(old)-1].key
+		r.blobsAt = orphans[batch-1].key
 	}
 	return removed, nil
 }
@@ -313,7 +345,7 @@ func (r *Runner) blobPrefixes() []string {
 	return prefixes
 }
 
-// upload is an old file the sweep has found under one of its prefixes, and
+// upload is an old file the sweep has listed under one of its prefixes, and
 // the course its key names.
 type upload struct {
 	key    string
@@ -336,11 +368,28 @@ func canonicalUUID(s string) (uuid.UUID, bool) {
 	return u, err == nil && u.String() == s
 }
 
+// orphansAmong returns those of the uploads that are orphans, in the order
+// they were given: under a course this database has, and attached to
+// nothing. See ListOrphanUploads.
+func orphansAmong(ctx context.Context, q *dbq.Queries, uploads []upload) ([]upload, error) {
+	arg := dbq.ListOrphanUploadsParams{StorageKeys: make([]string, len(uploads)), CourseIds: make([]uuid.UUID, len(uploads))}
+	for i, u := range uploads {
+		arg.StorageKeys[i], arg.CourseIds[i] = u.key, u.course
+	}
+	rows, err := q.ListOrphanUploads(ctx, arg)
+	found := make([]upload, len(rows))
+	for i, row := range rows {
+		found[i] = upload{row.StorageKey, row.CourseID}
+	}
+	return found, err
+}
+
 // removeIfOrphan deletes one object unless a version points at it, or it is
-// another deployment's (see UploadIsOrphan). It holds the lock that attaching
-// takes on the same key, so that "is it attached?" and the deletion are one
-// step: an attach in flight either commits first, and the file is kept, or
-// comes after, and finds nothing uploaded.
+// another deployment's. The page it was listed in said it was neither, but
+// an attach may have committed since: it asks again, holding the lock that
+// attaching takes on the same key, so that "is it attached?" and the
+// deletion are one step. An attach in flight either commits first, and the
+// file is kept, or comes after, and finds nothing uploaded.
 func (r *Runner) removeIfOrphan(ctx context.Context, u upload) (bool, error) {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
@@ -351,7 +400,7 @@ func (r *Runner) removeIfOrphan(ctx context.Context, u upload) (bool, error) {
 	if err := q.LockStorageKey(ctx, u.key); err != nil {
 		return false, err
 	}
-	if orphan, err := q.UploadIsOrphan(ctx, dbq.UploadIsOrphanParams{CourseID: u.course, StorageKey: u.key}); err != nil || !orphan {
+	if found, err := orphansAmong(ctx, q, []upload{u}); err != nil || len(found) == 0 {
 		return false, err
 	}
 	if err := r.cfg.Blob.Delete(ctx, u.key); err != nil {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -514,11 +515,13 @@ func TestTheSweepRemovesOnlyTheServersOwnFiles(t *testing.T) {
 	}
 }
 
-// A sweep takes on a batch of old files at a time, and most old files are
-// attached: they stay, and that batch has removed nothing. The next sweep
-// must go on from there. Were it to start again from the beginning, it would
-// find the same attached files, and once there were a batch of them ahead of
-// an orphan, that orphan would never be removed.
+// A sweep takes on a batch of orphans at a time. Most old files are not
+// orphans — they are attached, or another deployment's — and they must not
+// use up the batch: were they to, a pass through a store of many of them
+// would take a tick for every batch, and an orphan behind them would outlive
+// TTL + OrphanGrace by as long, its upload token good for attaching all the
+// while. However many files the sweep keeps, it finds the orphans behind them
+// at once.
 func TestTheSweepGetsPastAttachedFiles(t *testing.T) {
 	for name, wrap := range stores {
 		t.Run(name, func(t *testing.T) {
@@ -526,43 +529,57 @@ func TestTheSweepGetsPastAttachedFiles(t *testing.T) {
 			store := wrap(f.Blob)
 			f.runner = jobs.New(f.Pool, f.P, f.system, jobs.Config{Blob: store, Batch: 2}, nil)
 			ctx := context.Background()
-			// A batch of attached files, uploaded first, so they come first.
-			var attached []string
-			for i := range 2 {
+			// Another deployment's files, under a course it made long ago
+			// and so listed before ours.
+			var kept []string
+			elsewhere := "courses/00000000-0000-7000-8000-000000000000/"
+			for range 3 {
+				key := store.FinalKey(elsewhere + uuid.Must(uuid.NewV7()).String())
+				p := filepath.Join(f.Blob.Root(), filepath.FromSlash(key))
+				if err := os.MkdirAll(filepath.Dir(p), 0o750); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(p, []byte("attached over there"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				kept = append(kept, key)
+			}
+			// Attached files, uploaded first, so they come first.
+			for i := range 5 {
 				token, key := f.upload(t)
 				if out := f.MustCall(f.Sato, "document.create", m{"course_id": f.Course, "kind": "material",
 					"title": fmt.Sprintf("week %d", i+1), "upload_token": token}, fmt.Sprint("attach", i)); out.Status != domain.StatusExecuted {
 					t.Fatalf("%+v", out)
 				}
-				attached = append(attached, store.FinalKey(key))
+				kept = append(kept, store.FinalKey(key))
 			}
-			// Behind them, an upload nobody attached, and one moved to its
-			// final key by an attach that then did not commit.
-			_, staged := f.upload(t)
-			_, moved := f.upload(t)
-			if _, err := store.Finalize(ctx, moved); err != nil {
-				t.Fatal(err)
+			// Behind them, three orphans: uploads moved to their final keys
+			// by attaches that then did not commit.
+			var orphans []string
+			for range 3 {
+				_, key := f.upload(t)
+				if _, err := store.Finalize(ctx, key); err != nil {
+					t.Fatal(err)
+				}
+				orphans = append(orphans, store.FinalKey(key))
 			}
-			orphans := []string{staged, store.FinalKey(moved)}
 
 			f.now = f.now.Add(pipeline.DefaultProposalTTL + jobs.OrphanGrace + time.Hour)
 			gone := func(key string) bool {
-				_, err := f.Blob.Stat(ctx, key)
-				return errors.Is(err, blob.ErrNotFound)
+				_, err := os.Stat(filepath.Join(f.Blob.Root(), filepath.FromSlash(key)))
+				return errors.Is(err, fs.ErrNotExist)
 			}
-			// Four files in batches of two: three sweeps at most, the last
-			// finding nothing more. A sweep that starts over each time
-			// never gets there.
-			removed := 0
-			for range 3 {
-				removed += f.sweep(t).OrphanFilesRemoved
+			// A batch of orphans in the first sweep, the one left in the
+			// second, which reaches the end of the store.
+			if rep := f.sweep(t); rep.OrphanFilesRemoved != 2 || !gone(orphans[0]) || !gone(orphans[1]) {
+				t.Fatalf("%+v, want the first two orphans, behind eight files that are kept, removed at once", rep)
 			}
-			if removed != 2 || !gone(orphans[0]) || !gone(orphans[1]) {
-				t.Fatalf("%d removed, want both orphans behind the attached files", removed)
+			if rep := f.sweep(t); rep.OrphanFilesRemoved != 1 || !gone(orphans[2]) {
+				t.Fatalf("%+v, want the third orphan removed next", rep)
 			}
-			for _, key := range attached {
+			for _, key := range kept {
 				if gone(key) {
-					t.Fatalf("%s, which a version points at, was removed", key)
+					t.Fatalf("%s, which is not an orphan, was removed", key)
 				}
 			}
 			// The store has been gone through; the next pass waits its hour.
@@ -571,6 +588,47 @@ func TestTheSweepGetsPastAttachedFiles(t *testing.T) {
 				t.Fatalf("the store was gone through again at once: %+v", rep)
 			}
 		})
+	}
+}
+
+// stubborn is a store that will not delete some of its files: a permission
+// set wrong, an object under a legal hold.
+type stubborn struct {
+	blob.Store
+	keep map[string]bool
+}
+
+func (s stubborn) Delete(ctx context.Context, key string) error {
+	if s.keep[key] {
+		return errors.New("access denied")
+	}
+	return s.Store.Delete(ctx, key)
+}
+
+// An orphan the store will not delete is logged and passed over, and the next
+// sweep goes on after it. Were it to start from the beginning again, it would
+// take on the same orphans each time, and once there were a batch of them,
+// nothing behind them would ever be removed.
+func TestTheSweepGetsPastFilesItCannotRemove(t *testing.T) {
+	f := setup(t, 1)
+	store := stubborn{Store: f.Blob, keep: map[string]bool{}}
+	f.runner = jobs.New(f.Pool, f.P, f.system, jobs.Config{Blob: store, Batch: 2}, nil)
+	var orphans []string
+	for range 3 {
+		_, key := f.upload(t)
+		orphans = append(orphans, key)
+	}
+	store.keep[orphans[0]], store.keep[orphans[1]] = true, true
+
+	f.now = f.now.Add(pipeline.DefaultProposalTTL + jobs.OrphanGrace + time.Hour)
+	if rep := f.sweep(t); rep.OrphanFilesRemoved != 0 {
+		t.Fatalf("%+v, and the store deletes neither of the first two", rep)
+	}
+	if rep := f.sweep(t); rep.OrphanFilesRemoved != 1 {
+		t.Fatalf("%+v, want the orphan behind the two that would not go removed", rep)
+	}
+	if _, err := f.Blob.Stat(context.Background(), orphans[2]); !errors.Is(err, blob.ErrNotFound) {
+		t.Fatalf("%s is still there: %v", orphans[2], err)
 	}
 }
 

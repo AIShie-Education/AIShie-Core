@@ -72,14 +72,19 @@ SELECT pg_advisory_unlock(sqlc.arg(key)::bigint);
 -- name: GetActionCourse :one
 SELECT course_id FROM action WHERE id = $1;
 
--- name: UploadIsOrphan :one
--- Is the file under this key one of this deployment's uploads that no
--- version points at? The course its key names must be one this database
--- has. document.upload_url issues keys only under courses that exist, and a
--- course is never deleted, so a key under any other course was written by
--- another deployment keeping its files in the same place: it is not ours to
--- remove, however old it is and whatever points at it there.
-SELECT EXISTS (
-    SELECT 1 FROM course c
-    WHERE c.id = sqlc.arg(course_id)
-      AND NOT EXISTS (SELECT 1 FROM document_version v WHERE v.storage_key = sqlc.arg(storage_key)::text));
+-- name: ListOrphanUploads :many
+-- Which of these uploads, each given with the course its key names, are
+-- this deployment's and attached to nothing? The course must be one this
+-- database has. document.upload_url issues keys only under courses that
+-- exist, and a course is never deleted, so a key under any other course was
+-- written by another deployment keeping its files in the same place: it is
+-- not ours to remove, however old it is and whatever points at it there.
+-- What is left comes back in the order it was given. The orphan sweep puts
+-- a page of listed files at a time to it, and asks again about each one it
+-- removes, under the lock attaching takes.
+SELECT k.storage_key::text AS storage_key, o.course_id::uuid AS course_id
+FROM unnest(sqlc.arg(storage_keys)::text[]) WITH ORDINALITY AS k(storage_key, n)
+JOIN unnest(sqlc.arg(course_ids)::uuid[]) WITH ORDINALITY AS o(course_id, n) ON o.n = k.n
+WHERE EXISTS (SELECT 1 FROM course c WHERE c.id = o.course_id)
+  AND NOT EXISTS (SELECT 1 FROM document_version v WHERE v.storage_key = k.storage_key)
+ORDER BY k.n;

@@ -212,6 +212,54 @@ func (q *Queries) ListExpiredMembers(ctx context.Context, arg ListExpiredMembers
 	return items, nil
 }
 
+const listOrphanUploads = `-- name: ListOrphanUploads :many
+SELECT k.storage_key::text AS storage_key, o.course_id::uuid AS course_id
+FROM unnest($1::text[]) WITH ORDINALITY AS k(storage_key, n)
+JOIN unnest($2::uuid[]) WITH ORDINALITY AS o(course_id, n) ON o.n = k.n
+WHERE EXISTS (SELECT 1 FROM course c WHERE c.id = o.course_id)
+  AND NOT EXISTS (SELECT 1 FROM document_version v WHERE v.storage_key = k.storage_key)
+ORDER BY k.n
+`
+
+type ListOrphanUploadsParams struct {
+	StorageKeys []string
+	CourseIds   []uuid.UUID
+}
+
+type ListOrphanUploadsRow struct {
+	StorageKey string
+	CourseID   uuid.UUID
+}
+
+// Which of these uploads, each given with the course its key names, are
+// this deployment's and attached to nothing? The course must be one this
+// database has. document.upload_url issues keys only under courses that
+// exist, and a course is never deleted, so a key under any other course was
+// written by another deployment keeping its files in the same place: it is
+// not ours to remove, however old it is and whatever points at it there.
+// What is left comes back in the order it was given. The orphan sweep puts
+// a page of listed files at a time to it, and asks again about each one it
+// removes, under the lock attaching takes.
+func (q *Queries) ListOrphanUploads(ctx context.Context, arg ListOrphanUploadsParams) ([]ListOrphanUploadsRow, error) {
+	rows, err := q.db.Query(ctx, listOrphanUploads, arg.StorageKeys, arg.CourseIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListOrphanUploadsRow
+	for rows.Next() {
+		var i ListOrphanUploadsRow
+		if err := rows.Scan(&i.StorageKey, &i.CourseID); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listStaleProposals = `-- name: ListStaleProposals :many
 
 SELECT id, course_id, created_at
@@ -312,29 +360,4 @@ func (q *Queries) TryJobLock(ctx context.Context, key int64) (bool, error) {
 	var pg_try_advisory_lock bool
 	err := row.Scan(&pg_try_advisory_lock)
 	return pg_try_advisory_lock, err
-}
-
-const uploadIsOrphan = `-- name: UploadIsOrphan :one
-SELECT EXISTS (
-    SELECT 1 FROM course c
-    WHERE c.id = $1
-      AND NOT EXISTS (SELECT 1 FROM document_version v WHERE v.storage_key = $2::text))
-`
-
-type UploadIsOrphanParams struct {
-	CourseID   uuid.UUID
-	StorageKey string
-}
-
-// Is the file under this key one of this deployment's uploads that no
-// version points at? The course its key names must be one this database
-// has. document.upload_url issues keys only under courses that exist, and a
-// course is never deleted, so a key under any other course was written by
-// another deployment keeping its files in the same place: it is not ours to
-// remove, however old it is and whatever points at it there.
-func (q *Queries) UploadIsOrphan(ctx context.Context, arg UploadIsOrphanParams) (bool, error) {
-	row := q.db.QueryRow(ctx, uploadIsOrphan, arg.CourseID, arg.StorageKey)
-	var exists bool
-	err := row.Scan(&exists)
-	return exists, err
 }
