@@ -34,6 +34,12 @@ func NewFSStore(root, publicURL string, signer *Signer) (*FSStore, error) {
 	if err != nil {
 		return nil, err
 	}
+	// The root may be a symlink to where the files are. A walk from the
+	// link stops at it, so the store keeps the directory it leads to, or the
+	// path as given when that cannot be worked out.
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+		abs = resolved
+	}
 	return &FSStore{root: abs, baseURL: strings.TrimRight(publicURL, "/"), signer: signer, now: time.Now}, nil
 }
 
