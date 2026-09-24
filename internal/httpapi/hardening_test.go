@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -259,18 +260,33 @@ func TestTheRequestLogCarriesNoCredentials(t *testing.T) {
 	a.raw("PUT", putURL, "text/plain", []byte("student work"))
 	a.do(nil, "POST", "/v1/auth/login", "", m{"email": "sato@example.edu", "password": "hunter2-hunter2"})
 	a.do(nil, "GET", "/healthz", "", nil)
+	// An upload given up half way, and a download of a file whose bytes have
+	// gone from the disk, have more said of them in the log. Their URLs are
+	// credentials all the same, and still good.
+	cut := a.here(a.do(nil, "GET", course+"/upload-url?kind=material&content_type=text/plain", token, nil).str("result", "upload_url"))
+	a.putHalf(cut)
+	if err := os.WriteFile(filepath.Join(c.Blob.Root(), "lost.meta"), []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	lost, err := c.Blob.PresignGet(context.Background(), "lost", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.raw("GET", a.here(lost), "", nil)
 
 	log := buf.String()
 	for name, secret := range map[string]string{
 		"an API token": token, "its secret half": token[17:], "a blob URL token": putURL[strings.LastIndex(putURL, "/")+1:],
 		"an upload token": ask.str("result", "upload_token"), "a password": "hunter2", "a query string": "private-query-string",
-		"an uploaded file": "student work",
+		"an uploaded file": "student work", "a cut-off upload's URL token": cut[strings.LastIndex(cut, "/")+1:],
+		"a failed download's URL token": lost[strings.LastIndex(lost, "/")+1:],
 	} {
 		if secret != "" && strings.Contains(log, secret) {
 			t.Errorf("the log contains %s", name)
 		}
 	}
-	for _, want := range []string{`"path":"/v1/me"`, `"actor":"` + c.Sato.String() + `"`, `"status":200`, `"path":"/v1/blobs/…"`, `"path":"/v1/auth/login"`, `"status":401`} {
+	for _, want := range []string{`"path":"/v1/me"`, `"actor":"` + c.Sato.String() + `"`, `"status":200`, `"path":"/v1/blobs/…"`, `"path":"/v1/auth/login"`, `"status":401`,
+		`"msg":"internal error","method":"GET","path":"/v1/blobs/…"`} {
 		if !strings.Contains(log, want) {
 			t.Errorf("the log lacks %s\n%s", want, log)
 		}
@@ -278,6 +294,27 @@ func TestTheRequestLogCarriesNoCredentials(t *testing.T) {
 	if strings.Contains(log, "/healthz") {
 		t.Error("a healthy probe was logged")
 	}
+}
+
+// putHalf starts a PUT of a hundred bytes to url, sends ten, and hangs up.
+// It returns the answer, which is not written until the request is logged.
+func (a *api) putHalf(url string) (int, string) {
+	a.t.Helper()
+	conn, err := net.Dial("tcp", strings.TrimPrefix(a.srv.URL, "http://"))
+	if err != nil {
+		a.t.Fatal(err)
+	}
+	defer conn.Close()
+	_, _ = fmt.Fprintf(conn, "PUT %s HTTP/1.1\r\nHost: lms.test\r\nContent-Type: text/plain\r\nContent-Length: 100\r\n\r\nhalf a fil", strings.TrimPrefix(url, a.srv.URL))
+	_ = conn.(*net.TCPConn).CloseWrite()
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	res, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	if err != nil {
+		a.t.Fatalf("a PUT cut off half way got no answer: %v", err)
+	}
+	defer res.Body.Close()
+	body, _ := io.ReadAll(res.Body)
+	return res.StatusCode, string(body)
 }
 
 // Behind a reverse proxy every request arrives from the proxy's address.

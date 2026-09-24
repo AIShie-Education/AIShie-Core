@@ -520,7 +520,7 @@ func (s *server) writeError(w http.ResponseWriter, r *http.Request, err error) {
 	}
 	e, ok := apperr.As(err)
 	if !ok {
-		s.Log.Error("internal error", "method", r.Method, "path", r.URL.Path, "err", err)
+		s.Log.Error("internal error", "method", r.Method, "path", safePath(r.URL.Path), "err", err)
 		e = &apperr.Error{Code: "internal", Message: "something went wrong on our side; the call can be retried with the same idempotency key"}
 	}
 	if e.Code == apperr.Unauthenticated {
