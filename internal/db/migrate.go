@@ -52,7 +52,29 @@ func (g *Migrator) Close() error {
 }
 
 // Up applies every pending migration. Already current is not an error.
-func (g *Migrator) Up() error { return ignoreNoChange(g.m.Up()) }
+//
+// A database already past the newest migration the binary carries is left as
+// it is: a newer release has migrated it, and this binary is older — a
+// rollback. There is nothing here to apply, and golang-migrate would fail
+// looking for the file of a version it does not know. serve starts against a
+// schema that is ahead (that is what a rolling deploy looks like), so the
+// `migrate up` a deploy runs first must not be what stops a rollback.
+func (g *Migrator) Up() error {
+	v, dirty, err := g.Version()
+	if err != nil {
+		return err
+	}
+	if !dirty {
+		latest, err := LatestEmbedded()
+		if err != nil {
+			return err
+		}
+		if v > latest {
+			return nil
+		}
+	}
+	return ignoreNoChange(g.m.Up())
+}
 
 // Down reverts every applied migration and destroys all data.
 func (g *Migrator) Down() error { return ignoreNoChange(g.m.Down()) }
