@@ -110,20 +110,30 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      - id: go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
-      # A service container cannot be given the `server /data` command MinIO
-      # needs, so it is started by hand. Docker Hub no longer has minio/minio;
-      # quay.io keeps the last community release, and the same one is in
-      # docker-compose.yml.
+          # MinIO's modules would otherwise land in the cache every Go job
+          # restores.
+          cache: false
+      # MinIO no longer publishes an image anyone can pull, nor binaries, so
+      # `make minio` builds it from source at the commit the Makefile pins.
+      # That takes minutes; the binary is cached per commit and Go version.
+      - id: minio
+        run: echo "version=$(make -s minio-version)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: bin/minio
+          key: minio-${{ steps.minio.outputs.version }}-${{ runner.os }}-${{ runner.arch }}-go${{ steps.go.outputs.go-version }}
+      - run: make minio
       - name: Start MinIO
         run: |
-          docker run -d --name minio -p 9000:9000 \
-            -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
-            quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z server /data
+          mkdir -p "$RUNNER_TEMP/minio"
+          MINIO_ROOT_USER=minioadmin MINIO_ROOT_PASSWORD=minioadmin \
+            nohup bin/minio server "$RUNNER_TEMP/minio" > "$RUNNER_TEMP/minio.log" 2>&1 &
           for _ in $(seq 1 30); do curl -sf http://localhost:9000/minio/health/live && exit 0; sleep 1; done
-          docker logs minio; exit 1
+          cat "$RUNNER_TEMP/minio.log"; exit 1
       - run: make test-s3
         env:
           S3_TEST_ENDPOINT: localhost:9000
