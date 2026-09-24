@@ -40,10 +40,11 @@ func actionTarget(ctx context.Context, q dbq.Querier, courseID, actionID uuid.UU
 
 func actionDecide(d Deps) tool.Tool {
 	return tool.Define(tool.Spec[pipeline.DecideIn, pipeline.DecideOut]{
-		Name: "action.decide",
+		Name: pipeline.ToolActionDecide,
 		Description: "Approve or reject a proposal: an action that was blocked before execution because its proposer " +
 			"needs confirmation. Approving runs it now, as the proposer, after checking that the proposer is still " +
-			"allowed to do it; if not, or if the proposal is too old, it is cancelled instead. Nobody decides their own proposal.",
+			"allowed to do it; if not, or if the proposal is too old, it is cancelled instead. Nobody decides their own proposal, " +
+			"nor a decision someone else proposed about it.",
 		Kind: tool.Write,
 		Gate: decidePerm,
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/actions/{action_id}/decide"},
@@ -58,7 +59,7 @@ func actionDecide(d Deps) tool.Tool {
 
 func actionReview(d Deps) tool.Tool {
 	return tool.Define(tool.Spec[pipeline.ReviewIn, pipeline.ReviewOut]{
-		Name: "action.review",
+		Name: pipeline.ToolActionReview,
 		Description: "Record that an action which executed pending review has been looked at: reviewed, or escalated " +
 			"for someone else to look at. Reviewing undoes nothing; putting something right is a separate action.",
 		Kind: tool.Write,

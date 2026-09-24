@@ -109,10 +109,15 @@ type ExecCtx struct {
 	// Now is when this is being executed. ActionCreatedAt is when the call
 	// was made: the same moment for a direct call, and the moment of the
 	// proposal for an approval, which may be days later. A tool that must
-	// not overwrite what was done in between compares against it, and can
-	// tell an approval from a direct call by its being earlier than Now.
+	// not overwrite what was done in between compares against it.
 	Now             time.Time
 	ActionCreatedAt time.Time
+	// Approved says the call is carrying out a proposal that has just been
+	// approved, rather than being made directly. A tool tells the two apart
+	// by this, never by ActionCreatedAt being earlier than Now: the proposal
+	// was dated by whichever instance stored it, and that instance's clock
+	// may run ahead of this one's.
+	Approved bool
 	// Emit queues an event. It is written, with ActionID filled in, only if
 	// the action executes.
 	Emit func(events.Event)
@@ -159,8 +164,10 @@ type Spec[In, Out any] struct {
 	// Pin fills in defaults that must be fixed when a proposal is made rather
 	// than when it is approved — the rubric version a grade is against, say,
 	// which may have moved on by then. It runs only for a call that is being
-	// queued as a proposal; what it returns is the payload stored with it.
-	Pin func(ctx context.Context, q dbq.Querier, in In) (In, error)
+	// queued as a proposal, and now is when that is; what it returns is the
+	// payload stored with it. It may refuse the call instead, for what could
+	// not wait as long as a proposal may: an upload too old to outlast it.
+	Pin func(ctx context.Context, q dbq.Querier, now time.Time, in In) (In, error)
 	// Execute is set for a Write, Query for a Read.
 	Execute func(ctx context.Context, ec *ExecCtx, in In) (Out, error)
 	Query   func(ctx context.Context, rc *ReadCtx, in In) (Out, error)
@@ -187,7 +194,7 @@ type Tool struct {
 	CourseID func(in any) uuid.UUID
 	Resolve  func(ctx context.Context, q dbq.Querier, in any) (Target, error)
 	Validate func(ctx context.Context, q dbq.Querier, m *domain.Member, in any) error
-	Pin      func(ctx context.Context, q dbq.Querier, in any) (any, error)
+	Pin      func(ctx context.Context, q dbq.Querier, now time.Time, in any) (any, error)
 	Execute  func(ctx context.Context, ec *ExecCtx, in any) (any, error)
 	Query    func(ctx context.Context, rc *ReadCtx, in any) (any, error)
 }
@@ -333,8 +340,8 @@ func Define[In, Out any](s Spec[In, Out]) Tool {
 		}
 	}
 	if s.Pin != nil {
-		t.Pin = func(ctx context.Context, q dbq.Querier, in any) (any, error) {
-			return s.Pin(ctx, q, in.(In))
+		t.Pin = func(ctx context.Context, q dbq.Querier, now time.Time, in any) (any, error) {
+			return s.Pin(ctx, q, now, in.(In))
 		}
 	}
 	if s.Execute != nil {

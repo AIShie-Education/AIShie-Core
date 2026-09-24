@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 )
@@ -104,7 +105,12 @@ func (s *FSStore) Put(_ context.Context, key, contentType string, r io.Reader, m
 		_ = os.Remove(p)
 		return Info{}, ErrTooLarge
 	}
-	info := Info{Size: n, ContentType: contentType, Checksum: "sha256:" + hex.EncodeToString(h.Sum(nil))}
+	written, err := os.Stat(p)
+	if err != nil {
+		_ = os.Remove(p)
+		return Info{}, err
+	}
+	info := Info{Size: n, ContentType: contentType, Checksum: "sha256:" + hex.EncodeToString(h.Sum(nil)), Modified: written.ModTime()}
 	meta, _ := json.Marshal(info)
 	if err := os.WriteFile(p+".meta", meta, 0o640); err != nil { //nolint:gosec // as above
 		_ = os.Remove(p)
@@ -126,7 +132,19 @@ func (s *FSStore) Stat(_ context.Context, key string) (Info, error) {
 		return Info{}, err
 	}
 	var info Info
-	return info, json.Unmarshal(meta, &info)
+	if err := json.Unmarshal(meta, &info); err != nil {
+		return Info{}, err
+	}
+	// When it was written is the file's own, as List reports it. The .meta
+	// is written after the bytes and removed before them (Delete), so bytes
+	// missing under a .meta were lost, not half written or half deleted:
+	// that is a fault, and is not reported as nothing there.
+	written, err := os.Stat(p)
+	if err != nil {
+		return Info{}, err
+	}
+	info.Modified = written.ModTime()
+	return info, nil
 }
 
 func (s *FSStore) Open(ctx context.Context, key string) (io.ReadCloser, Info, error) {
@@ -147,13 +165,47 @@ func (s *FSStore) Finalize(ctx context.Context, stagingKey string) (Info, error)
 	return s.Stat(ctx, stagingKey)
 }
 
-func (s *FSStore) List(ctx context.Context, fn func(key string, modified time.Time) error) error {
-	err := filepath.WalkDir(s.root, func(p string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() || strings.HasSuffix(p, ".meta") {
+// List goes in the order the directory tree is walked in, name by name at
+// each level (see walkOrder), and skips whatever comes before after.
+func (s *FSStore) List(ctx context.Context, prefix, after string, fn func(key string, modified time.Time) error) error {
+	// Only the directory the prefix names is walked, not the whole root:
+	// whatever else is kept there is not ours to go through.
+	start := s.root
+	if dir := prefix[:strings.LastIndex(prefix, "/")+1]; dir != "" {
+		var err error
+		if start, err = s.path(dir); err != nil {
+			return err
+		}
+	}
+	err := filepath.WalkDir(start, func(p string, d fs.DirEntry, err error) error {
+		if p == start && errors.Is(err, fs.ErrNotExist) {
+			return nil // nothing has been written under the prefix yet
+		}
+		if err != nil {
 			return err
 		}
 		if err := ctx.Err(); err != nil {
 			return err
+		}
+		rel, err := filepath.Rel(s.root, p)
+		if err != nil {
+			return err
+		}
+		key := filepath.ToSlash(rel)
+		if d.IsDir() {
+			// A directory whose every key comes before after is not gone
+			// into, so that taking a listing up again does not walk again
+			// through all it has passed.
+			if after != "" && p != s.root && walkOrder(key, after) < 0 && !strings.HasPrefix(after, key+"/") {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if strings.HasSuffix(key, ".meta") || !strings.HasPrefix(key, prefix) {
+			return nil
+		}
+		if after != "" && walkOrder(key, after) <= 0 {
+			return nil // listed already
 		}
 		info, err := d.Info()
 		if errors.Is(err, fs.ErrNotExist) {
@@ -162,11 +214,7 @@ func (s *FSStore) List(ctx context.Context, fn func(key string, modified time.Ti
 		if err != nil {
 			return err
 		}
-		rel, err := filepath.Rel(s.root, p)
-		if err != nil {
-			return err
-		}
-		return fn(filepath.ToSlash(rel), info.ModTime())
+		return fn(key, info.ModTime())
 	})
 	if errors.Is(err, ErrStopList) {
 		return nil
@@ -174,12 +222,23 @@ func (s *FSStore) List(ctx context.Context, fn func(key string, modified time.Ti
 	return err
 }
 
+// walkOrder compares keys in the order filepath.WalkDir comes to them: path
+// element by path element, each by name, a directory before what is in it.
+// It is not the order of the keys as strings: courses-old/x comes after
+// courses/y here, because courses comes before courses-old.
+func walkOrder(a, b string) int {
+	return slices.Compare(strings.Split(a, "/"), strings.Split(b, "/"))
+}
+
 func (s *FSStore) Delete(_ context.Context, key string) error {
 	p, err := s.path(key)
 	if err != nil {
 		return err
 	}
-	for _, f := range []string{p, p + ".meta"} {
+	// The .meta goes first, as it is written last: it is what says the file
+	// is whole. Stopped half way, a delete leaves bytes without one, which
+	// List still finds and a sweep deletes again.
+	for _, f := range []string{p + ".meta", p} {
 		if err := os.Remove(f); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return err
 		}

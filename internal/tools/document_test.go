@@ -126,6 +126,45 @@ func TestMaterialIsInvisibleUntilPublished(t *testing.T) {
 	}
 }
 
+// A proposal to publish "the latest" means the latest its proposer read. A
+// version added while it waits has been read by nobody who asked for it to be
+// published, and approving the proposal must not put that half-edited draft
+// in front of the class.
+func TestAPublishProposalPublishesWhatWasProposed(t *testing.T) {
+	b := build(t)
+	editor := testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", m{"kind": "agent", "display_name": "editor"})).ActorID
+	b.do(t, b.sato, "member.add", m{"course_id": b.course, "actor_id": editor, "preset": "ta", "perms": m{"document_write": "confirm_required"}})
+	made := testkit.Result[tools.DocumentCreateOut](t, b.do(t, b.sato, "document.create",
+		m{"course_id": b.course, "kind": "material", "title": "Lecture 1", "body_md": "v1: reviewed"}))
+
+	proposed := b.MustCall(editor, "document.publish", m{"course_id": b.course, "document_id": made.DocumentID}, "publish")
+	if proposed.Status != domain.StatusProposed {
+		t.Fatalf("the editor's proposal: %+v", proposed)
+	}
+	b.do(t, b.sato, "document.add_version", m{"course_id": b.course, "document_id": made.DocumentID, "body_md": "v2: HALF-EDITED, answers inline"})
+	v := testkit.Result[pipeline.DecideOut](t, b.do(t, b.sato, "action.decide", m{"course_id": b.course, "action_id": proposed.ActionID, "decision": "approve"}))
+	if v.Outcome != domain.StatusExecuted {
+		t.Fatalf("approval: %+v", v)
+	}
+	if got := b.get(t, b.yuki, m{"document_id": made.DocumentID}).Version; got == nil || got.BodyMD == nil {
+		t.Fatalf("students read nothing: %+v", got)
+	} else if *got.BodyMD != "v1: reviewed" {
+		t.Fatalf("students read %q, want the version that was proposed", *got.BodyMD)
+	}
+	// The approver was shown which version it was.
+	if n := b.Count(`SELECT count(*) FROM action WHERE id = $1 AND payload->>'version_id' = $2`, *proposed.ActionID, made.VersionID.String()); n != 1 {
+		t.Fatal("the proposal does not name the version it was made about")
+	}
+
+	// A proposal to publish a document with nothing in it is refused at
+	// once: there is nothing it could be about.
+	empty := testkit.Result[tools.DocumentCreateOut](t, b.do(t, b.sato, "document.create",
+		m{"course_id": b.course, "kind": "material", "title": "Lecture 2"}))
+	if out := b.MustCall(editor, "document.publish", m{"course_id": b.course, "document_id": empty.DocumentID}, "publish-empty"); out.Status != domain.StatusFailed || out.Error.Code != apperr.FailedPrecondition {
+		t.Fatalf("proposing to publish an empty document: %+v", out)
+	}
+}
+
 // Which permission governs depends on what kind of document it is.
 func TestDocumentPermissionFollowsKind(t *testing.T) {
 	b := build(t)
@@ -324,6 +363,115 @@ func TestFeedbackFilesTravelWithAProposal(t *testing.T) {
 		"feedback_files": []m{{"title": "x", "upload_token": never.UploadToken}}}, apperr.FailedPrecondition)
 }
 
+// An upload that nothing has attached is removed once it is PROPOSAL_TTL +
+// OrphanGrace old, and a proposal may wait the whole TTL for its decision.
+// So a call that would carry an upload into a proposal is refused, as the
+// caller's error, once the upload is more than OrphanGrace old, and nothing
+// is queued: the file could be gone before the proposal was approved. Only a
+// proposal is held to it. A direct call attaches the file there and then,
+// and approving a proposal that was made in time attaches its file however
+// old that has grown while it waited. Every tool that attaches an upload is
+// held to the same.
+func TestAProposalIsNotMadeAboutAnUploadItMayOutlive(t *testing.T) {
+	b := build(t)
+	editor := testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", m{"kind": "agent", "display_name": "editor"})).ActorID
+	b.do(t, b.sato, "member.add", m{"course_id": b.course, "actor_id": editor, "preset": "ta", "perms": m{"document_write": "confirm_required"}})
+	b.do(t, b.sato, "member.update_perms", m{"course_id": b.course, "member_id": b.graderM, "perms": m{"grade_post": "confirm_required"}})
+	lecture := testkit.Result[tools.DocumentCreateOut](t, b.do(t, b.sato, "document.create",
+		m{"course_id": b.course, "kind": "material", "title": "Lecture 1", "body_md": "v1"})).DocumentID
+	posted := func() uuid.UUID {
+		work := b.submit(t, b.yuki, "essay")
+		g := testkit.Result[tools.GradeSubmitOut](t, b.do(t, b.sato, "grade.submit", m{"course_id": b.course, "submission_id": work, "score": 60})).GradeID
+		b.do(t, b.sato, "grade.post", m{"course_id": b.course, "grade_ids": []uuid.UUID{g}})
+		return g
+	}
+	aged := time.Now().Add(tools.OrphanGrace + time.Hour)
+	defer b.P.SetClock(time.Now)
+
+	for _, c := range []struct {
+		tool, kind string
+		proposer   uuid.UUID
+		args       func(token string) m
+	}{
+		{"document.create", "material", editor, func(token string) m {
+			return m{"kind": "material", "title": "Lecture 2", "upload_token": token}
+		}},
+		{"document.add_version", "material", editor, func(token string) m {
+			return m{"document_id": lecture, "upload_token": token}
+		}},
+		{"grade.submit", "feedback", b.grader, func(token string) m {
+			return m{"submission_id": b.submit(t, b.yuki, "essay"), "score": 70, "feedback_files": []m{{"title": "notes.txt", "upload_token": token}}}
+		}},
+		{"grade.regrade", "feedback", b.grader, func(token string) m {
+			return m{"grade_id": posted(), "score": 75, "feedback_files": []m{{"title": "notes.txt", "upload_token": token}}}
+		}},
+	} {
+		t.Run(c.tool, func(t *testing.T) {
+			// A file uploaded now, and the call made with the clock where the
+			// test has put it.
+			call := func(actor uuid.UUID, key string, at time.Time) pipeline.Outcome {
+				t.Helper()
+				b.P.SetClock(time.Now)
+				args := c.args(b.upload(t, actor, c.kind, "text/plain", []byte("notes")))
+				args["course_id"] = b.course
+				b.P.SetClock(func() time.Time { return at })
+				return b.MustCall(actor, c.tool, args, c.tool+key)
+			}
+
+			versions := b.Count(`SELECT count(*) FROM document_version`)
+			out := call(c.proposer, "old", aged)
+			if out.Status != domain.StatusFailed || out.Error.Code != apperr.FailedPrecondition || !strings.Contains(out.Error.Message, "upload the file again") {
+				t.Fatalf("a proposal naming an upload more than %v old: %+v", tools.OrphanGrace, out)
+			}
+			if n := b.Count(`SELECT count(*) FROM action WHERE action_type = $1 AND status = 'proposed'`, c.tool); n != 0 {
+				t.Fatal("the proposal was queued")
+			}
+			if n := b.Count(`SELECT count(*) FROM document_version`); n != versions {
+				t.Fatal("a refused proposal attached its file")
+			}
+
+			proposed := call(c.proposer, "fresh", time.Now())
+			if proposed.Status != domain.StatusProposed {
+				t.Fatalf("a proposal naming a fresh upload: %+v", proposed)
+			}
+			b.P.SetClock(func() time.Time { return aged })
+			decided := testkit.Result[pipeline.DecideOut](t, b.do(t, b.sato, "action.decide", m{"course_id": b.course, "action_id": proposed.ActionID, "decision": "approve"}))
+			if decided.Outcome != domain.StatusExecuted {
+				t.Fatalf("approving it once its upload is more than %v old: %+v", tools.OrphanGrace, decided)
+			}
+
+			if out := call(b.sato, "direct", aged); out.Status != domain.StatusExecuted {
+				t.Fatalf("attaching an upload more than %v old directly: %+v", tools.OrphanGrace, out)
+			}
+		})
+	}
+}
+
+// Where proposals do not expire (PROPOSAL_TTL=0) the sweep removes no upload
+// for its age, so no proposal can outlive the file it names. A proposal
+// naming an upload of any age is queued, and approving it attaches the file;
+// nor does document.upload_url speak of a refusal that will not come.
+func TestWhereProposalsDoNotExpireAnUploadOfAnyAgeMayBeProposed(t *testing.T) {
+	b := buildOn(t, testkit.NewPlatformWithConfig(t, pipeline.Config{}))
+	editor := testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", m{"kind": "agent", "display_name": "editor"})).ActorID
+	b.do(t, b.sato, "member.add", m{"course_id": b.course, "actor_id": editor, "preset": "ta", "perms": m{"document_write": "confirm_required"}})
+	token := b.upload(t, editor, "material", "text/plain", []byte("notes"))
+	b.P.SetClock(func() time.Time { return time.Now().Add(tools.OrphanGrace + time.Hour) })
+	defer b.P.SetClock(time.Now)
+
+	out := b.MustCall(editor, "document.create", m{"course_id": b.course, "kind": "material", "title": "Lecture 2", "upload_token": token}, "propose")
+	if out.Status != domain.StatusProposed {
+		t.Fatalf("with no proposal TTL, a proposal naming an upload more than %v old: %+v", tools.OrphanGrace, out)
+	}
+	decided := testkit.Result[pipeline.DecideOut](t, b.do(t, b.sato, "action.decide", m{"course_id": b.course, "action_id": out.ActionID, "decision": "approve"}))
+	if decided.Outcome != domain.StatusExecuted {
+		t.Fatalf("approving it: %+v", decided)
+	}
+	if uploadURL, _ := b.P.Registry().Get("document.upload_url"); strings.Contains(uploadURL.Description, "refused") {
+		t.Fatalf("document.upload_url says an old upload is refused: %q", uploadURL.Description)
+	}
+}
+
 // "submission pins instructions_version_id ... so a dispute can show exactly
 // what the student was told."
 func TestPinnedVersionsStayReadable(t *testing.T) {
@@ -511,6 +659,43 @@ func TestAnArchivedDocumentIsWithdrawn(t *testing.T) {
 	}
 	if _, err := b.Call(b.ken, "document.get", m{"course_id": b.course, "document_id": brief.DocumentID, "version_id": brief.VersionID}, ""); !apperr.Is(err, apperr.NotFound) {
 		t.Fatalf("Ken, who was never pinned to it: %v", err)
+	}
+}
+
+// Feedback on a posted grade is a release, and archiving it is how the release
+// is taken back. Yuki and her tutor, who were handed the file's id with the
+// grade, must not go on reading it, or fetching fresh download URLs for it.
+func TestWithdrawnFeedbackIsWithdrawn(t *testing.T) {
+	b := build(t)
+	work := b.submit(t, b.yuki, "essay")
+	gradeID := testkit.Result[tools.GradeSubmitOut](t, b.do(t, b.sato, "grade.submit", m{"course_id": b.course, "submission_id": work, "score": 90})).GradeID
+	token := b.upload(t, b.sato, "feedback", "application/pdf", []byte("%PDF Ken's marked-up essay"))
+	wrong := testkit.Result[tools.DocumentCreateOut](t, b.do(t, b.sato, "document.create", m{"course_id": b.course, "kind": "feedback",
+		"title": "essay-marked.pdf", "grade_id": gradeID, "body_md": "notes for Ken", "upload_token": token}))
+	b.do(t, b.sato, "grade.post", m{"course_id": b.course, "grade_ids": []uuid.UUID{gradeID}})
+	for _, reader := range []uuid.UUID{b.yuki, b.tutor} {
+		if got := b.get(t, reader, m{"document_id": wrong.DocumentID}); got.Version == nil || got.Version.DownloadURL == nil {
+			t.Fatalf("posted feedback: %+v", got)
+		}
+	}
+
+	b.do(t, b.sato, "document.archive", m{"course_id": b.course, "document_id": wrong.DocumentID})
+	if g := testkit.Result[tools.GradeView](t, b.do(t, b.yuki, "grade.get", m{"course_id": b.course, "grade_id": gradeID})); len(g.FeedbackFiles) != 0 {
+		t.Fatalf("grade.get lists %d feedback files after the withdrawal", len(g.FeedbackFiles))
+	}
+	for _, reader := range []uuid.UUID{b.yuki, b.tutor} {
+		for _, args := range []m{
+			{"course_id": b.course, "document_id": wrong.DocumentID},
+			{"course_id": b.course, "document_id": wrong.DocumentID, "version_id": wrong.VersionID},
+		} {
+			if _, err := b.Call(reader, "document.get", args, ""); !apperr.Is(err, apperr.NotFound) {
+				t.Fatalf("reading withdrawn feedback (%v): %v", args, err)
+			}
+		}
+	}
+	// Whoever grades still can: it is archived, not destroyed.
+	if got := b.get(t, b.sato, m{"document_id": wrong.DocumentID}); got.Version == nil || *got.Version.BodyMD != "notes for Ken" {
+		t.Fatalf("Sato reading the withdrawn feedback: %+v", got)
 	}
 }
 

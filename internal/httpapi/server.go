@@ -10,11 +10,14 @@
 package httpapi
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"path"
 	"strings"
 	"time"
@@ -74,13 +77,14 @@ type Deps struct {
 	Signer *signing.Signer
 
 	// Calls bounds how fast one actor may call; SignIns bounds sign-in
-	// attempts per address and per email. Nil means no limit.
+	// attempts per email, and per address those that fail. Nil means no
+	// limit.
 	Calls   *ratelimit.Limiter
 	SignIns *ratelimit.Limiter
 
 	// MCP is the agents' door, mounted at /mcp beside the REST routes and
-	// behind the same cross-origin guard. It does its own authentication,
-	// with the same authenticator.
+	// behind the same cross-origin guard, and behind notRebound. It does its
+	// own authentication, with the same authenticator.
 	MCP http.Handler
 }
 
@@ -131,7 +135,7 @@ func NewHandler(d Deps) http.Handler {
 		}
 	}
 	if d.MCP != nil {
-		mux.Handle(MCPPath, d.MCP)
+		mux.Handle(MCPPath, s.notRebound(d.MCP))
 	}
 	if local, ok := d.Blob.(blob.Local); ok {
 		mux.HandleFunc("PUT "+blob.BlobPath+"{token}", s.blobPut(local))
@@ -363,10 +367,16 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 	// Guessing is limited twice over: by where it comes from, and by whose
 	// account it is aimed at. Each attempt costs a 64 MiB argon2 hash, so
 	// this protects the server as much as the password.
-	keys := []string{"email:" + strings.ToLower(strings.TrimSpace(in.Email))}
-	if addr, known := s.clientAddr(r); known {
-		keys = append(keys, "addr:"+addr)
+	//
+	// The address is asked first, so that an attempt it refuses touches
+	// nothing under the email: it neither spends the allowance of the account
+	// it was aimed at nor leaves a bucket behind for ten minutes.
+	var keys []string
+	addr, known := s.clientAddr(r)
+	if known {
+		keys = append(keys, addrKey(addr))
 	}
+	keys = append(keys, emailKey(in.Email))
 	for _, key := range keys {
 		if ok, wait := s.SignIns.Allow(key); !ok {
 			s.tooMany(w, r, wait)
@@ -378,8 +388,55 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, err)
 		return
 	}
+	// A sign-in that succeeds was no guess, and its address has it back. One
+	// address may be a whole lecture hall (an IPv4 address behind a NAT, or
+	// a campus LAN's /64), and the students in it signing in must not use up
+	// what it is allowed and lock out the next one with the right password.
+	// It is taken first all the same, so that no more attempts from one
+	// address are hashed at once than it is allowed. The account keeps it
+	// spent: nobody signs in to one account that often.
+	if known {
+		s.SignIns.Refund(addrKey(addr))
+	}
 	http.SetCookie(w, s.sessionCookie(sess.Token, sess.ExpiresAt))
 	writeJSON(w, http.StatusOK, loginOut{ActorID: sess.ActorID.String(), ExpiresAt: sess.ExpiresAt})
+}
+
+// addrKey is the sign-in limit's key for an address. An IPv6 address is
+// keyed by its /64, the least one network is given: whoever holds it may
+// send from any address in it, and keyed alone, each would be a fresh
+// bucket. A /64 may as well be a LAN of many people, as an IPv4 address
+// behind a NAT may be; they share only their guesses (see login). The zone
+// a link-local peer comes with names our interface, not the peer, and is
+// no part of the key. An IPv4 address written as IPv6 (::ffff:203.0.113.7),
+// or shown to an IPv6-only server through NAT64 (64:ff9b::203.0.113.7), is
+// that IPv4 address.
+func addrKey(addr string) string {
+	ip, err := netip.ParseAddr(addr)
+	if err != nil {
+		return "addr:" + addr
+	}
+	ip = ip.WithZone("").Unmap()
+	if nat64.Contains(ip) {
+		a := ip.As16()
+		ip = netip.AddrFrom4([4]byte(a[12:]))
+	}
+	if ip.Is4() {
+		return "addr:" + ip.String()
+	}
+	return "addr:" + netip.PrefixFrom(ip, 64).Masked().String()
+}
+
+// nat64 is the well-known prefix (RFC 6052) under which NAT64 and SIIT show
+// an IPv4 client to an IPv6-only server, with its address in the last 32
+// bits. Keyed by its /64, every IPv4 client would share one bucket.
+var nat64 = netip.MustParsePrefix("64:ff9b::/96")
+
+// emailKey is the sign-in limit's key for an email: one key for an account
+// however its email is typed, and a small one however long the body made it.
+func emailKey(email string) string {
+	sum := sha256.Sum256([]byte(strings.ToLower(strings.TrimSpace(email))))
+	return "email:" + hex.EncodeToString(sum[:])
 }
 
 func (s *server) logout(w http.ResponseWriter, r *http.Request) {
@@ -506,7 +563,7 @@ func (s *server) writeError(w http.ResponseWriter, r *http.Request, err error) {
 	}
 	e, ok := apperr.As(err)
 	if !ok {
-		s.Log.Error("internal error", "method", r.Method, "path", r.URL.Path, "err", err)
+		s.Log.Error("internal error", "method", r.Method, "path", safePath(r.URL.Path), "err", err)
 		e = &apperr.Error{Code: "internal", Message: "something went wrong on our side; the call can be retried with the same idempotency key"}
 	}
 	if e.Code == apperr.Unauthenticated {

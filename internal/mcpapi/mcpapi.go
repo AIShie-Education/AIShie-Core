@@ -75,6 +75,14 @@ type Deps struct {
 var errCredentialCheck = errors.New("the credential could not be checked just now; retry")
 
 // NewHandler returns the handler to mount at /mcp.
+//
+// It makes no check against DNS rebinding of its own: the SDK's is switched
+// off (DisableLocalhostProtection, below), because it cannot tell a rebound
+// page from a reverse proxy on the same machine. It must be mounted through
+// httpapi.NewHandler, as httpapi.Deps.MCP, which makes that check knowing
+// which proxies are trusted, and makes it before the token is looked at.
+// Served any other way, it is open to a page in a browser on the server's
+// machine that reaches it by DNS rebinding.
 func NewHandler(d Deps) http.Handler {
 	if d.Log == nil {
 		d.Log = slog.New(slog.DiscardHandler)
@@ -87,6 +95,12 @@ func NewHandler(d Deps) http.Handler {
 		Stateless:           true,
 		JSONResponse:        true,
 		MaxRequestBodyBytes: maxBody,
+		// The SDK refuses a request that came in over loopback naming a
+		// host that is not loopback, against DNS rebinding. A reverse proxy
+		// on the same machine sends exactly that, for every agent. httpapi,
+		// which must mount this handler, makes the check knowing which
+		// proxies are trusted.
+		DisableLocalhostProtection: true,
 	})
 	// The same verification path as REST. It runs on every request, so a
 	// revoked token stops working on the agent's very next call.

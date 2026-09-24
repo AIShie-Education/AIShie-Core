@@ -457,6 +457,94 @@ func TestPendingReview(t *testing.T) {
 	}
 }
 
+// A decision can wait for a decision of its own: a triage agent whose
+// approvals a human confirms. Confirming it is deciding what it decides, so
+// the proposer of the action underneath is not the one who may confirm it —
+// or the four eyes on the TA's grade would be the TA's own two and an
+// agent's. The same goes for a review, and for a chain of any length.
+func TestNobodyDecidesTheirOwnActionAtOneRemove(t *testing.T) {
+	c := testkit.NewCS101(t, 2)
+	ta := c.Actor("human", "TA")
+	taM := c.Member(c.Course, ta, "ta",
+		testkit.WithPerm(domain.PermGradeSubmit, domain.ConfirmRequired),
+		testkit.WithPerm(domain.PermActionDecide, domain.Autonomous))
+	triage := c.Actor("agent", "triage")
+	triageM := c.Member(c.Course, triage, "ta", testkit.WithPerm(domain.PermActionDecide, domain.ConfirmRequired))
+	second := c.Actor("agent", "second opinion")
+	c.Member(c.Course, second, "ta", testkit.WithPerm(domain.PermActionDecide, domain.ConfirmRequired))
+
+	decide := func(actor uuid.UUID, action *uuid.UUID, decision, key string) pipeline.Outcome {
+		t.Helper()
+		return c.MustCall(actor, "action.decide", m{"course_id": c.Course, "action_id": action, "decision": decision}, key)
+	}
+	refused := func(what string, out pipeline.Outcome) {
+		t.Helper()
+		if out.Status != domain.StatusFailed || out.Error == nil || out.Error.Code != apperr.Forbidden {
+			t.Fatalf("%s: %+v", what, out)
+		}
+	}
+
+	proposed := c.MustCall(ta, "grade.submit", submitArgs(c, c.Students[0], 99), "p")
+	refused("the TA deciding her own proposal", decide(ta, proposed.ActionID, "approve", "self"))
+	nested := decide(triage, proposed.ActionID, "approve", "t")
+	if nested.Status != domain.StatusProposed {
+		t.Fatalf("the agent's approval: %+v", nested)
+	}
+	refused("the TA confirming the approval of her own proposal", decide(ta, nested.ActionID, "approve", "ta-approve"))
+	refused("the TA rejecting the approval of her own proposal", decide(ta, nested.ActionID, "reject", "ta-reject"))
+	// Two removes are one remove twice.
+	deeper := decide(second, nested.ActionID, "approve", "s")
+	if deeper.Status != domain.StatusProposed {
+		t.Fatalf("the second agent's approval: %+v", deeper)
+	}
+	refused("the TA at two removes", decide(ta, deeper.ActionID, "approve", "ta-deeper"))
+	// Every link counts, not only the last: the agent, trusted to decide on
+	// its own since, confirming the approval of its own approval.
+	c.Exec(`UPDATE course_member SET perm_action_decide = 'autonomous' WHERE id = $1`, triageM)
+	refused("the agent confirming the approval of its own decision", decide(triage, deeper.ActionID, "approve", "t-deeper"))
+	if n := c.Count(`SELECT count(*) FROM grade`); n != 0 {
+		t.Fatal("the TA's own proposal was carried out on her own say-so")
+	}
+	// Someone else confirms, and the chain says who.
+	if v := testkit.Result[pipeline.DecideOut](t, decide(c.Sato, nested.ActionID, "approve", "sato")); v.Outcome != domain.StatusExecuted {
+		t.Fatalf("Sato confirming the approval: %+v", v)
+	}
+	if n := c.Count(`SELECT count(*) FROM action WHERE id = $1 AND status = 'executed' AND decided_by_member_id = $2`, *proposed.ActionID, triageM); n != 1 {
+		t.Fatal("the TA's proposal is not recorded as decided by the agent")
+	}
+	if n := c.Count(`SELECT count(*) FROM action WHERE id = $1 AND decided_by_member_id = $2`, *nested.ActionID, c.SatoM); n != 1 {
+		t.Fatal("the agent's approval is not recorded as confirmed by Sato")
+	}
+
+	// A review is the same: the triage agent marks the TA's grade reviewed,
+	// which waits for a human, and that human is not the TA.
+	c.Exec(`UPDATE course_member SET perm_grade_submit = 'pending_review' WHERE id = $1`, taM)
+	c.Exec(`UPDATE course_member SET perm_action_decide = 'confirm_required' WHERE id = $1`, triageM)
+	done := c.MustCall(ta, "grade.submit", submitArgs(c, c.Students[1], 70), "p2")
+	if done.ReviewState != domain.ReviewPending {
+		t.Fatalf("the TA's grade: %+v", done)
+	}
+	review := c.MustCall(triage, "action.review", m{"course_id": c.Course, "action_id": done.ActionID, "outcome": "reviewed"}, "t2")
+	if review.Status != domain.StatusProposed {
+		t.Fatalf("the agent's review: %+v", review)
+	}
+	refused("the TA confirming the review of her own grade", decide(ta, review.ActionID, "approve", "ta-review"))
+	if n := c.Count(`SELECT count(*) FROM action WHERE id = $1 AND review_state = 'pending'`, *done.ActionID); n != 1 {
+		t.Fatal("the TA's grade was marked reviewed on her own say-so")
+	}
+	// And a decision that is itself under review is not reviewed by whoever
+	// it decided for.
+	c.Exec(`UPDATE course_member SET perm_grade_submit = 'confirm_required' WHERE id = $1`, taM)
+	c.Exec(`UPDATE course_member SET perm_action_decide = 'pending_review' WHERE id = $1`, triageM)
+	again := c.MustCall(ta, "grade.submit", submitArgs(c, c.Students[1], 72), "p3")
+	approval := decide(triage, again.ActionID, "approve", "t3")
+	if approval.Status != domain.StatusExecuted || approval.ReviewState != domain.ReviewPending {
+		t.Fatalf("the agent's approval under review: %+v", approval)
+	}
+	refused("the TA reviewing the approval of her own proposal",
+		c.MustCall(ta, "action.review", m{"course_id": c.Course, "action_id": approval.ActionID, "outcome": "reviewed"}, "ta-r"))
+}
+
 // ---------------------------------------------------------------------------
 // Proposals: re-authorization and expiry
 // ---------------------------------------------------------------------------
@@ -572,6 +660,57 @@ func TestAnApprovedProposalReplacesOnlyWhatCameBefore(t *testing.T) {
 	}
 	if n := c.Count(`SELECT count(*) FROM event WHERE type = 'action.approved' AND payload->>'outcome' = 'executed'`); n != 1 {
 		t.Fatal("the action.approved event for the one that ran does not say so")
+	}
+}
+
+// The draft an approved proposal writes is as old as the proposal, not the
+// approval. Two proposals for the same work, approved in the order the queue
+// lists them, oldest first, leave the later one standing: it was made after
+// the first, so it replaces it, and which of them survives does not depend
+// on the order the approver happens to work in.
+func TestAnApprovedDraftIsAsOldAsItsProposal(t *testing.T) {
+	c := testkit.NewCS101(t, 1)
+	yuki := c.Students[0]
+	first := c.MustCall(c.Grader, "grade.submit", submitArgs(c, yuki, 70), "p1")
+	c.P.SetClock(func() time.Time { return time.Now().Add(time.Minute) })
+	second := c.MustCall(c.Grader, "grade.submit", submitArgs(c, yuki, 85), "p2")
+	for i, key := range []string{"d1", "d2"} {
+		c.P.SetClock(func() time.Time { return time.Now().Add(time.Duration(i+1) * time.Hour) })
+		proposal := []pipeline.Outcome{first, second}[i]
+		v := testkit.Result[pipeline.DecideOut](t, c.MustCall(c.Sato, "action.decide", m{"course_id": c.Course, "action_id": proposal.ActionID, "decision": "approve"}, key))
+		if v.Outcome != domain.StatusExecuted {
+			t.Fatalf("approving the proposals oldest first, number %d: %+v", i+1, v)
+		}
+	}
+	if n := c.Count(`SELECT count(*) FROM grade WHERE submission_id = $1 AND score = 85 AND posted_at IS NULL AND superseded_by IS NULL`, yuki.HW3); n != 1 {
+		t.Fatal("the later proposal's draft is not the live one")
+	}
+	if n := c.Count(`SELECT count(*) FROM grade g JOIN action a ON a.id = g.created_by_action_id
+		WHERE g.submission_id = $1 AND g.created_at <> a.created_at`, yuki.HW3); n != 0 {
+		t.Fatal("a draft is dated when it was approved, not when the call that made it was made")
+	}
+}
+
+// The same, when the instances of a server do not share a clock. The agent
+// proposes on one whose clock runs ahead, Sato enters a draft there after
+// it, and the proposal is approved on one whose clock is behind both. It is
+// still an approval, and still must not replace the draft entered after it.
+func TestAnApprovalOnASlowerClockReplacesOnlyWhatCameBefore(t *testing.T) {
+	c := testkit.NewCS101(t, 1)
+	yuki := c.Students[0]
+	base := time.Now()
+	clock := func(d time.Duration) { c.P.SetClock(func() time.Time { return base.Add(d) }) }
+	clock(3 * time.Minute)
+	proposed := c.MustCall(c.Grader, "grade.submit", submitArgs(c, yuki, 85), "p")
+	clock(4 * time.Minute)
+	satos := testkit.Result[tools.GradeSubmitOut](t, c.MustCall(c.Sato, "grade.submit", submitArgs(c, yuki, 60), "sato")).GradeID
+	clock(time.Minute)
+	v := testkit.Result[pipeline.DecideOut](t, c.MustCall(c.Sato, "action.decide", m{"course_id": c.Course, "action_id": proposed.ActionID, "decision": "approve"}, "d"))
+	if v.Outcome != domain.StatusFailed || v.Error == nil || !strings.Contains(v.Error.Message, "newer draft") {
+		t.Fatalf("approving over a newer draft on a clock behind the proposer's: %+v", v)
+	}
+	if n := c.Count(`SELECT count(*) FROM grade WHERE id = $1 AND superseded_by IS NULL`, satos); n != 1 {
+		t.Fatal("the newer draft was replaced by an older judgement")
 	}
 }
 

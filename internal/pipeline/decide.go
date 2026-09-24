@@ -22,6 +22,13 @@ import (
 // its own row. The logic lives here, beside the rest of the status table; the
 // tools in package tools are thin wrappers.
 
+// The names of the two tools. A decision can be about a decision, so the
+// pipeline has to tell them from the rest (judgesOwn).
+const (
+	ToolActionDecide = "action.decide"
+	ToolActionReview = "action.review"
+)
+
 const (
 	DecisionApprove = "approve"
 	DecisionReject  = "reject"
@@ -88,6 +95,11 @@ func (p *Pipeline) Decide(ctx context.Context, ec *tool.ExecCtx, in DecideIn) (D
 	if *prop.MemberID == ec.Member.ID {
 		// The database refuses this too; saying so here is kinder.
 		return DecideOut{}, apperr.Forbid("nobody decides their own proposal")
+	}
+	if own, err := judgesOwn(ctx, ec.Q, prop, ec.Member.ID); err != nil {
+		return DecideOut{}, err
+	} else if own {
+		return DecideOut{}, apperr.Forbid("nobody decides their own proposal, even at one remove: this one decides or reviews an action of yours")
 	}
 	out := DecideOut{ActionID: prop.ID}
 
@@ -167,7 +179,7 @@ func (p *Pipeline) Decide(ctx context.Context, ec *tool.ExecCtx, in DecideIn) (D
 	res, err := savepoint(ctx, ec.Tx, func(sp pgx.Tx) (any, error) {
 		return t.Execute(ctx, &tool.ExecCtx{
 			Tx: sp, Q: dbq.New(sp), Actor: proposer, Member: a.decision.Member,
-			ActionID: prop.ID, Now: ec.Now, ActionCreatedAt: prop.CreatedAt, Emit: stamp(child, prop.ID),
+			ActionID: prop.ID, Now: ec.Now, ActionCreatedAt: prop.CreatedAt, Approved: true, Emit: stamp(child, prop.ID),
 		}, args)
 	})
 	if err != nil {
@@ -191,6 +203,31 @@ func (p *Pipeline) Decide(ctx context.Context, ec *tool.ExecCtx, in DecideIn) (D
 	child.Drain(ec.Emit)
 	out.Outcome, out.Result = domain.StatusExecuted, full
 	return out, nil
+}
+
+// judgesOwn reports whether a is a decision or a review about an action of
+// member's, at any remove. The CHECKs on action compare a row with its own
+// decider only, and a decision can itself wait for a decision, or be under
+// review: a triage agent whose approvals a human confirms. Confirming that
+// approval is what carries out the proposal underneath, so if the proposer
+// could confirm it, the four eyes on their proposal would be their own two
+// and an agent's. The chain runs back in time — an action can only be about
+// one that was there before it — so it ends.
+func judgesOwn(ctx context.Context, q *dbq.Queries, a dbq.Action, member uuid.UUID) (bool, error) {
+	for (a.ActionType == ToolActionDecide || a.ActionType == ToolActionReview) && a.TargetID != nil {
+		about, err := q.GetActionInCourse(ctx, dbq.GetActionInCourseParams{ID: *a.TargetID, CourseID: a.CourseID})
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		if about.MemberID != nil && *about.MemberID == member {
+			return true, nil
+		}
+		a = about
+	}
+	return false, nil
 }
 
 // cancel ends a proposal without executing it and without blaming anyone: it
@@ -295,6 +332,11 @@ func (p *Pipeline) Review(ctx context.Context, ec *tool.ExecCtx, in ReviewIn) (R
 	}
 	if row.MemberID != nil && *row.MemberID == ec.Member.ID {
 		return ReviewOut{}, apperr.Forbid("nobody reviews their own action")
+	}
+	if own, err := judgesOwn(ctx, ec.Q, row, ec.Member.ID); err != nil {
+		return ReviewOut{}, err
+	} else if own {
+		return ReviewOut{}, apperr.Forbid("nobody reviews their own action, even at one remove: this one decides or reviews an action of yours")
 	}
 	n, err := ec.Q.SetActionReview(ctx, dbq.SetActionReviewParams{
 		ID: row.ID, ReviewState: in.Outcome, ReviewedByMemberID: &ec.Member.ID, ReviewedAt: &ec.Now,

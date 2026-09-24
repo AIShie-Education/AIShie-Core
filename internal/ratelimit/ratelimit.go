@@ -12,15 +12,13 @@ package ratelimit
 import (
 	"sync"
 	"time"
-
-	"golang.org/x/time/rate"
 )
 
 // Limiter holds one token bucket per key: an actor id, or for sign-in
 // attempts an address or an email.
 type Limiter struct {
-	perSecond rate.Limit
-	burst     int
+	perSecond float64
+	burst     float64
 
 	mu      sync.Mutex
 	buckets map[string]*bucket
@@ -28,9 +26,11 @@ type Limiter struct {
 	swept   time.Time
 }
 
+// bucket is what a key may still call, as of when it was last seen. It fills
+// by perSecond a second, up to burst.
 type bucket struct {
-	lim  *rate.Limiter
-	seen time.Time
+	tokens float64
+	seen   time.Time
 }
 
 // idleAfter is how long a key may go unseen before its bucket is forgotten.
@@ -47,7 +47,7 @@ func New(perMinute, burst int) *Limiter {
 	if burst <= 0 {
 		burst = 1
 	}
-	return &Limiter{perSecond: rate.Limit(float64(perMinute) / 60), burst: burst, buckets: map[string]*bucket{}, now: time.Now}
+	return &Limiter{perSecond: float64(perMinute) / 60, burst: float64(burst), buckets: map[string]*bucket{}, now: time.Now}
 }
 
 // Allow reports whether key may make a call now and, if not, how long until
@@ -56,26 +56,46 @@ func (l *Limiter) Allow(key string) (ok bool, retryAfter time.Duration) {
 	if l == nil {
 		return true, 0
 	}
-	now := l.now()
 	l.mu.Lock()
+	defer l.mu.Unlock()
+	now := l.now()
 	b := l.buckets[key]
 	if b == nil {
-		b = &bucket{lim: rate.NewLimiter(l.perSecond, l.burst)}
+		b = &bucket{tokens: l.burst, seen: now}
 		l.buckets[key] = b
 	}
-	b.seen = now
+	l.fill(b, now)
 	l.sweep(now)
-	l.mu.Unlock()
-
-	r := b.lim.ReserveN(now, 1)
-	if !r.OK() {
-		return false, time.Minute
+	if b.tokens < 1 {
+		// We refuse rather than wait, and a refusal takes nothing.
+		return false, time.Duration((1 - b.tokens) / l.perSecond * float64(time.Second))
 	}
-	if d := r.DelayFrom(now); d > 0 {
-		r.CancelAt(now) // we refuse rather than wait, so the token goes back
-		return false, d
-	}
+	b.tokens--
 	return true, 0
+}
+
+// Refund gives key back a call Allow let it make, when that call turned out
+// not to be what the limit is for. It never fills a bucket past its burst,
+// and makes none for a key that has none: a new bucket starts full.
+func (l *Limiter) Refund(key string) {
+	if l == nil {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if b := l.buckets[key]; b != nil {
+		l.fill(b, l.now())
+		b.tokens = min(b.tokens+1, l.burst)
+	}
+}
+
+// fill gives b what it has earned since it was last seen. Called with the
+// lock held.
+func (l *Limiter) fill(b *bucket, now time.Time) {
+	if now.After(b.seen) {
+		b.tokens = min(b.tokens+now.Sub(b.seen).Seconds()*l.perSecond, l.burst)
+		b.seen = now
+	}
 }
 
 // sweep forgets buckets nobody has used for a while, so that the map does not

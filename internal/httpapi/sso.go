@@ -129,8 +129,13 @@ func (s *server) safeReturn(want string) string {
 		return def
 	}
 	if u.Scheme == "" && u.Host == "" {
-		// "/path" is ours. "//host/path" and "/\host" are not paths at all.
-		if strings.HasPrefix(want, "/") && !strings.HasPrefix(want, "//") && !strings.HasPrefix(want, "/\\") {
+		// "/path" is ours. "//host/path" is not a path at all, and nor is
+		// "/\host", which a browser reads as "//host". A backslash is refused
+		// wherever it is: http.Redirect cleans the path before it sends it,
+		// so "/./\host" or "/x/../\host" would go out as "/\host". With no
+		// backslash, and no control character (url.Parse refuses those),
+		// nothing the cleaning does can make two slashes of the start.
+		if strings.HasPrefix(want, "/") && !strings.HasPrefix(want, "//") && !strings.Contains(want, `\`) {
 			return want
 		}
 		return def

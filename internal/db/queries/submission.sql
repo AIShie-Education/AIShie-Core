@@ -7,6 +7,15 @@ SELECT id, assignment_id, course_id, student_member_id, attempt, body, instructi
        state, submitted_at, created_at
 FROM submission WHERE id = $1 AND course_id = $2;
 
+-- name: GetSubmissionFullForUpdate :one
+-- GetSubmissionFull, locked until the hand-in is written, so that what
+-- submission.submit checks is what it hands in: an edit to the draft
+-- meanwhile waits, and then finds it handed in.
+SELECT id, assignment_id, course_id, student_member_id, attempt, body, instructions_version_id,
+       state, submitted_at, created_at
+FROM submission WHERE id = $1 AND course_id = $2
+FOR UPDATE;
+
 -- name: LockSubmissionsOf :many
 -- All of one student's attempts at one assignment, locked, newest first.
 SELECT id, attempt, state FROM submission
@@ -29,9 +38,6 @@ WHERE id = $1 AND state = 'draft';
 
 -- name: SetSubmissionLateness :execrows
 UPDATE submission SET state = $2 WHERE id = $1 AND state IN ('submitted', 'late') AND state <> $2;
-
--- name: CountSubmissionDocuments :one
-SELECT count(*) FROM document WHERE submission_id = $1 AND status = 'active';
 
 -- name: ListSubmissions :many
 SELECT s.id, s.assignment_id, s.course_id, s.student_member_id, s.attempt, s.state, s.submitted_at, s.created_at

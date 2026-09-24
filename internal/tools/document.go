@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"errors"
+	"strconv"
 	"strings"
 	"time"
 
@@ -152,13 +153,37 @@ type UploadURLOut struct {
 	MaxBytes    int64             `json:"max_bytes"`
 }
 
+// UploadPrefix begins the key of every upload: courses/<course>/<upload>.
+// These keys, and the final keys that attaching moves them to, are all the
+// server ever writes to the store. The orphan sweep looks at nothing else, so
+// a bucket or directory that holds other things as well loses none of them.
+const UploadPrefix = "courses/"
+
+// OrphanGrace is how long past the proposal TTL the orphan sweep keeps an
+// upload that nothing has attached (see jobs.sweepBlobs), and so how old an
+// upload may be when a proposal that would attach it is made: a proposal is
+// decided within the TTL, and the file it names is there all that time.
+const OrphanGrace = 48 * time.Hour
+
+// proposalsExpire says whether a proposal is cancelled once it has waited the
+// TTL. Only then does the orphan sweep remove uploads, and only then can a
+// proposal outlive the file it names.
+func proposalsExpire(d Deps) bool {
+	return d.Pipeline.Config().ProposalTTL > 0
+}
+
 func documentUploadURL(d Deps) tool.Tool {
+	description := "Get somewhere to upload a file. Files do not travel through tool calls: PUT the bytes to the URL this " +
+		"returns, then pass the upload_token to the tool that attaches it. Nothing is recorded until then, and an upload " +
+		"that is never attached is eventually discarded."
+	if proposalsExpire(d) {
+		description += " A call that would attach it by way of a proposal is refused once the upload is more than " +
+			strconv.Itoa(int(OrphanGrace.Hours())) + " hours old."
+	}
 	return tool.Define(tool.Spec[UploadURLIn, UploadURLOut]{
-		Name: "document.upload_url",
-		Description: "Get somewhere to upload a file. Files do not travel through tool calls: PUT the bytes to the URL this " +
-			"returns, then pass the upload_token to the tool that attaches it. Nothing is recorded until then, and an upload " +
-			"that is never attached is eventually discarded.",
-		Kind: tool.Read, Gate: anyDocumentWrite,
+		Name:        "document.upload_url",
+		Description: description,
+		Kind:        tool.Read, Gate: anyDocumentWrite,
 		HTTP: tool.Route{Method: "GET", Pattern: "/v1/courses/{course_id}/upload-url"},
 		Resolve: func(_ context.Context, _ dbq.Querier, in UploadURLIn) (tool.Target, error) {
 			if !courseLevel(in.Kind) && in.Kind != kindSubmission && in.Kind != kindFeedback {
@@ -183,8 +208,9 @@ func documentUploadURL(d Deps) tool.Tool {
 				return UploadURLOut{}, apperr.Forbid("the course is archived and takes no new files").With("reason", "course_archived")
 			}
 			// The key is ours and unguessable; nothing the uploader says goes
-			// into it.
-			key := "courses/" + in.CourseID.String() + "/" + ids.New().String()
+			// into it. The orphan sweep knows the server's own keys by this
+			// shape.
+			key := UploadPrefix + in.CourseID.String() + "/" + ids.New().String()
 			url, headers, err := d.Blob.PresignPut(ctx, key, in.ContentType, uploadWindow)
 			if err != nil {
 				return UploadURLOut{}, err
@@ -280,6 +306,48 @@ func claimUpload(ctx context.Context, d Deps, q dbq.Querier, m *domain.Member, c
 	return upload{key: final, info: info}, nil
 }
 
+// checkUploadAge refuses uploads that a proposal made now could outlive. A
+// proposal waits up to the TTL for its decision, and the sweep removes an
+// upload nothing has attached once it is TTL + OrphanGrace old, so what a
+// proposal names must be no older than OrphanGrace when it is made. The age
+// is the store's, which is what the sweep goes by.
+//
+// It is for Pin. A direct call attaches the file there and then, and an
+// approval carries out a proposal that was held to this when it was made,
+// however old the file is by the time it is approved. A token that is not
+// good, or names nothing uploaded yet, is let by: the call that attaches it
+// says what is wrong, and an upload still to come is younger than the
+// proposal. Where proposals do not expire nothing is swept, and any upload
+// may be proposed.
+func checkUploadAge(ctx context.Context, d Deps, now time.Time, tokens ...string) error {
+	if d.Blob == nil || !proposalsExpire(d) {
+		return nil
+	}
+	for _, token := range tokens {
+		c, err := d.Uploads.VerifyUpload(token)
+		if err != nil {
+			continue
+		}
+		info, err := d.Blob.Stat(ctx, c.Key)
+		if errors.Is(err, blob.ErrNotFound) {
+			// Moved already, by an attach that did not commit; see
+			// claimUpload.
+			info, err = d.Blob.Stat(ctx, d.Blob.FinalKey(c.Key))
+		}
+		if errors.Is(err, blob.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if info.Modified.Before(now.Add(-OrphanGrace)) {
+			return apperr.Precondition("that upload is more than %d hours old and may be discarded before the proposal is decided; upload the file again",
+				int(OrphanGrace.Hours()))
+		}
+	}
+	return nil
+}
+
 // Content is what a version holds: text, a file, or both.
 type Content struct {
 	BodyMD      *string `json:"body_md,omitempty" jsonschema:"markdown text"`
@@ -287,6 +355,14 @@ type Content struct {
 }
 
 func (c Content) empty() bool { return (c.BodyMD == nil || *c.BodyMD == "") && c.UploadToken == nil }
+
+// uploads is the upload token the content names, if any, for checkUploadAge.
+func (c Content) uploads() []string {
+	if c.UploadToken == nil {
+		return nil
+	}
+	return []string{*c.UploadToken}
+}
 
 // insertVersion writes one version. The author is the calling member, who is
 // a member of the document's course because the call was authorized in it —
@@ -370,6 +446,10 @@ func documentCreate(d Deps) tool.Tool {
 				return t, apperr.Invalid("kind must be material, instructions, rubric, submission or feedback")
 			}
 			return t, nil
+		},
+		// The file must still be there when the proposal is approved.
+		Pin: func(ctx context.Context, _ dbq.Querier, now time.Time, in DocumentCreateIn) (DocumentCreateIn, error) {
+			return in, checkUploadAge(ctx, d, now, in.uploads()...)
 		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in DocumentCreateIn) (DocumentCreateOut, error) {
 			if strings.TrimSpace(in.Title) == "" {
@@ -457,6 +537,10 @@ func documentAddVersion(d Deps) tool.Tool {
 		Resolve: func(ctx context.Context, q dbq.Querier, in DocumentAddVersionIn) (tool.Target, error) {
 			return documentTarget(ctx, q, in.CourseID, in.DocumentID, writePerm)
 		},
+		// As document.create.
+		Pin: func(ctx context.Context, _ dbq.Querier, now time.Time, in DocumentAddVersionIn) (DocumentAddVersionIn, error) {
+			return in, checkUploadAge(ctx, d, now, in.uploads()...)
+		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in DocumentAddVersionIn) (DocumentVersionOut, error) {
 			if err := ec.Q.LockDocument(ctx, in.DocumentID); err != nil {
 				return DocumentVersionOut{}, err
@@ -511,7 +595,7 @@ func publish(ctx context.Context, ec *tool.ExecCtx, courseID uuid.UUID, doc dbq.
 type DocumentPublishIn struct {
 	tool.InCourse
 	DocumentID uuid.UUID  `json:"document_id"`
-	VersionID  *uuid.UUID `json:"version_id,omitempty" jsonschema:"which version to publish; the latest if omitted"`
+	VersionID  *uuid.UUID `json:"version_id,omitempty" jsonschema:"which version to publish; if omitted, the latest when the call was made (for a proposal, when it was proposed)"`
 }
 
 func documentPublish() tool.Tool {
@@ -523,6 +607,24 @@ func documentPublish() tool.Tool {
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/documents/{document_id}/publish"},
 		Resolve: func(ctx context.Context, q dbq.Querier, in DocumentPublishIn) (tool.Target, error) {
 			return documentTarget(ctx, q, in.CourseID, in.DocumentID, writePerm)
+		},
+		// "The latest" is the latest the proposer read. A version added while
+		// the proposal waits has been read by nobody who asked for it to be
+		// published, and approving must not put it in front of the class, so
+		// the proposal names the version it was made about.
+		Pin: func(ctx context.Context, q dbq.Querier, _ time.Time, in DocumentPublishIn) (DocumentPublishIn, error) {
+			if in.VersionID != nil {
+				return in, nil
+			}
+			v, err := q.GetLatestVersion(ctx, in.DocumentID)
+			if errors.Is(err, pgx.ErrNoRows) {
+				return in, apperr.Precondition("there is no such version of this document to publish")
+			}
+			if err != nil {
+				return in, err
+			}
+			in.VersionID = &v.ID
+			return in, nil
 		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in DocumentPublishIn) (DocumentVersionOut, error) {
 			doc, err := loadDocument(ctx, ec.Q, in.CourseID, in.DocumentID)
@@ -720,8 +822,11 @@ func documentGet(d Deps) tool.Tool {
 				return DocumentGetOut{}, err
 			}
 			// Feedback on a grade the student cannot see yet is not theirs to
-			// read either.
-			if doc.Kind == kindFeedback && (doc.GradePostedAt == nil || doc.GradeSupersededBy != nil) && !seesDrafts(rc.Member) {
+			// read either. Nor is feedback archived from a posted grade:
+			// archiving it takes back a release (feedbackWritePerms), so like
+			// withdrawn material below it is withdrawn from anyone who kept
+			// the id. Those who grade still read it.
+			if doc.Kind == kindFeedback && (doc.GradePostedAt == nil || doc.GradeSupersededBy != nil || doc.Status == "archived") && !seesDrafts(rc.Member) {
 				return DocumentGetOut{}, apperr.Missing("no such document in this course")
 			}
 			drafts := rc.Member.Perm(domain.PermDocumentReadDraft).Allowed()

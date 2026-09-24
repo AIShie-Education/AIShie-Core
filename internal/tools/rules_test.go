@@ -1,6 +1,7 @@
 package tools_test
 
 import (
+	"context"
 	"hash/fnv"
 	"strconv"
 	"strings"
@@ -33,6 +34,51 @@ func (b *built) try(t *testing.T, actor uuid.UUID, name string, args m, want app
 		t.Fatalf("%s went through (%s), want %s", name, out.Status, want)
 	case out.Error == nil || out.Error.Code != want:
 		t.Fatalf("%s: %+v, want %s", name, out.Error, want)
+	}
+}
+
+// start makes a call in the background; its outcome arrives on done.
+func (b *built) start(t *testing.T, done chan<- pipeline.Outcome, actor uuid.UUID, name string, args m) {
+	go func() {
+		out, err := b.Call(actor, name, args, "bg-"+uuid.NewString())
+		if err != nil {
+			t.Errorf("%s: %v", name, err)
+		}
+		done <- out
+	}()
+}
+
+// hold locks rows the way a change already under way would, until release
+// is called; calls made meanwhile queue behind it.
+func (b *built) hold(t *testing.T, sql string, args ...any) (release func()) {
+	t.Helper()
+	ctx := context.Background()
+	tx, err := b.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = tx.Rollback(ctx) })
+	if _, err := tx.Exec(ctx, sql, args...); err != nil {
+		t.Fatal(err)
+	}
+	return func() {
+		if err := tx.Commit(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// blocked waits until n calls are waiting for a lock in this test's
+// database. It stops early once done holds an outcome: a call that should
+// have waited finished instead, and what came of it is for the test to say.
+func (b *built) blocked(t *testing.T, n int, done chan pipeline.Outcome) {
+	t.Helper()
+	for deadline := time.Now().Add(10 * time.Second); len(done) == 0 && b.Count(`SELECT count(*) FROM pg_locks l
+		JOIN pg_stat_activity a ON a.pid = l.pid WHERE NOT l.granted AND a.datname = current_database()`) < n; {
+		if time.Now().After(deadline) {
+			t.Fatalf("%d calls never came to wait for a lock", n)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
@@ -711,6 +757,157 @@ func TestSubmissionLifecycle(t *testing.T) {
 	}
 }
 
+// A hand-in that waits for approval counts from when it was asked for. Yuki
+// asked before the due date, under the instructions then published; the
+// approver's delay does not make her late, nor pin instructions published
+// afterwards. And what is handed in is what was asked for: Ken, who also
+// asked in time, cannot go on rewriting his draft after the due date and
+// have that handed in as of before it.
+func TestAProposedHandInCountsFromWhenItWasAsked(t *testing.T) {
+	b := build(t)
+	base := time.Now()
+	later := func(d time.Duration) { b.P.SetClock(func() time.Time { return base.Add(d) }) }
+	brief := testkit.Result[tools.DocumentCreateOut](t, b.do(t, b.sato, "document.create",
+		m{"course_id": b.course, "kind": "instructions", "title": "HW3", "body_md": "v1: 1000 words"}))
+	b.do(t, b.sato, "document.publish", m{"course_id": b.course, "document_id": brief.DocumentID})
+	b.do(t, b.sato, "assignment.update", m{"course_id": b.course, "assignment_id": b.hw3,
+		"instructions_document_id": brief.DocumentID, "due_at": base.Add(time.Hour)})
+	// Each writes a draft, and then may only ask for it to be handed in.
+	handIn := func(student, member uuid.UUID) (uuid.UUID, *uuid.UUID) {
+		t.Helper()
+		work := testkit.Result[tools.SubmissionCreateOut](t, b.do(t, student, "submission.create",
+			m{"course_id": b.course, "assignment_id": b.hw3, "body": "my essay"})).SubmissionID
+		b.do(t, b.sato, "member.update_perms", m{"course_id": b.course, "member_id": member, "perms": m{"submission_write": "confirm_required"}})
+		out := b.MustCall(student, "submission.submit", m{"course_id": b.course, "submission_id": work}, "hand-in-"+work.String())
+		if out.Status != domain.StatusProposed {
+			t.Fatalf("%+v", out)
+		}
+		return work, out.ActionID
+	}
+	approve := func(action *uuid.UUID) pipeline.DecideOut {
+		t.Helper()
+		return testkit.Result[pipeline.DecideOut](t, b.do(t, b.sato, "action.decide", m{"course_id": b.course, "action_id": action, "decision": "approve"}))
+	}
+	yukis, yukisAsk := handIn(b.yuki, b.yukiM)
+	kens, kensAsk := handIn(b.ken, b.kenM)
+
+	later(2 * time.Hour)
+	b.do(t, b.sato, "document.add_version", m{"course_id": b.course, "document_id": brief.DocumentID, "body_md": "v2: 3000 words", "publish": true})
+	later(3 * time.Hour)
+	if v := approve(yukisAsk); v.Outcome != domain.StatusExecuted {
+		t.Fatalf("%+v", v)
+	}
+	if n := b.Count(`SELECT count(*) FROM submission s JOIN action a ON a.id = $2
+		WHERE s.id = $1 AND s.state = 'submitted' AND s.submitted_at = a.created_at AND s.instructions_version_id = $3`,
+		yukis, *yukisAsk, *brief.VersionID); n != 1 {
+		t.Fatal("the hand-in was judged, dated or pinned as of its approval, not as of when it was asked for")
+	}
+
+	b.do(t, b.sato, "submission.update_draft", m{"course_id": b.course, "submission_id": kens, "body": "rewritten after the due date"})
+	if v := approve(kensAsk); v.Outcome != domain.StatusFailed || v.Error == nil || v.Error.Code != apperr.FailedPrecondition {
+		t.Fatalf("approving a hand-in of a draft that has changed since: %+v", v)
+	}
+	if n := b.Count(`SELECT count(*) FROM submission WHERE id = $1 AND state = 'draft'`, kens); n != 1 {
+		t.Fatal("a draft changed after it was asked to be handed in was handed in")
+	}
+	// A direct call may say what it hands in, and is held to it.
+	b.try(t, b.sato, "submission.submit", m{"course_id": b.course, "submission_id": kens, "body": "my essay"}, apperr.FailedPrecondition)
+	b.try(t, b.sato, "submission.submit", m{"course_id": b.course, "submission_id": kens, "instructions_version_id": brief.VersionID}, apperr.FailedPrecondition)
+	if got := testkit.Result[tools.SubmissionSubmitOut](t, b.do(t, b.sato, "submission.submit",
+		m{"course_id": b.course, "submission_id": kens, "body": "rewritten after the due date", "files": []uuid.UUID{}})); got.State != "late" {
+		t.Fatalf("handed in now, after the due date: %+v", got)
+	}
+}
+
+// The instances of a server do not share a clock. Yuki asks to hand in on
+// one whose clock runs a few minutes ahead, and Sato approves on one whose
+// clock is behind, so that by the approver's clock she has not asked yet.
+// It is still an approval, not a direct call: it is dated when she asked and
+// handed in under the instructions she was reading, not held to those Sato
+// published in between.
+func TestAHandInApprovedOnASlowerClockIsStillAnApproval(t *testing.T) {
+	b := build(t)
+	base := time.Now()
+	clock := func(d time.Duration) { b.P.SetClock(func() time.Time { return base.Add(d) }) }
+	brief := testkit.Result[tools.DocumentCreateOut](t, b.do(t, b.sato, "document.create",
+		m{"course_id": b.course, "kind": "instructions", "title": "HW3", "body_md": "v1: 1000 words"}))
+	b.do(t, b.sato, "document.publish", m{"course_id": b.course, "document_id": brief.DocumentID})
+	b.do(t, b.sato, "assignment.update", m{"course_id": b.course, "assignment_id": b.hw3, "instructions_document_id": brief.DocumentID})
+	work := testkit.Result[tools.SubmissionCreateOut](t, b.do(t, b.yuki, "submission.create",
+		m{"course_id": b.course, "assignment_id": b.hw3, "body": "my essay"})).SubmissionID
+	b.do(t, b.sato, "member.update_perms", m{"course_id": b.course, "member_id": b.yukiM, "perms": m{"submission_write": "confirm_required"}})
+
+	clock(3 * time.Minute)
+	asked := b.MustCall(b.yuki, "submission.submit", m{"course_id": b.course, "submission_id": work}, "hand-in")
+	if asked.Status != domain.StatusProposed {
+		t.Fatalf("%+v", asked)
+	}
+	clock(time.Minute)
+	b.do(t, b.sato, "document.add_version", m{"course_id": b.course, "document_id": brief.DocumentID, "body_md": "v2: 3000 words", "publish": true})
+	v := testkit.Result[pipeline.DecideOut](t, b.do(t, b.sato, "action.decide", m{"course_id": b.course, "action_id": asked.ActionID, "decision": "approve"}))
+	if v.Outcome != domain.StatusExecuted {
+		t.Fatalf("approving on a clock behind the proposer's: %+v", v)
+	}
+	if n := b.Count(`SELECT count(*) FROM submission s JOIN action a ON a.id = $2
+		WHERE s.id = $1 AND s.submitted_at = a.created_at AND s.instructions_version_id = $3`,
+		work, *asked.ActionID, *brief.VersionID); n != 1 {
+		t.Fatal("the hand-in was carried out as a direct call at the approval, not as of when it was asked for")
+	}
+}
+
+// A hand-in that waits for approval is of the draft as it was when asked
+// for. Yuki, who may only propose, asks for an edit to her draft and then for
+// it to be handed in, and Sato approves them in the order they came. The edit
+// goes through; the hand-in is then refused, plainly, since the draft is no
+// longer what was asked to be handed in, and nothing is handed in. Asked for
+// again once the edit has been decided, it hands in the edited draft.
+func TestAHandInQueuedBehindAnEditIsOfTheDraftBeforeIt(t *testing.T) {
+	b := build(t)
+	work := testkit.Result[tools.SubmissionCreateOut](t, b.do(t, b.yuki, "submission.create",
+		m{"course_id": b.course, "assignment_id": b.hw3, "body": "draft v1"})).SubmissionID
+	b.do(t, b.sato, "member.update_perms", m{"course_id": b.course, "member_id": b.yukiM, "perms": m{"submission_write": "confirm_required"}})
+	ask := func(name string, args m, key string) *uuid.UUID {
+		t.Helper()
+		out := b.MustCall(b.yuki, name, args, key)
+		if out.Status != domain.StatusProposed {
+			t.Fatalf("%s: %+v", name, out)
+		}
+		return out.ActionID
+	}
+	approve := func(action *uuid.UUID) pipeline.DecideOut {
+		t.Helper()
+		return testkit.Result[pipeline.DecideOut](t, b.do(t, b.sato, "action.decide", m{"course_id": b.course, "action_id": action, "decision": "approve"}))
+	}
+	stored := func() (state, body string) {
+		t.Helper()
+		if err := b.Pool.QueryRow(t.Context(), `SELECT state, coalesce(body, '') FROM submission WHERE id = $1`, work).Scan(&state, &body); err != nil {
+			t.Fatal(err)
+		}
+		return state, body
+	}
+	handIn := m{"course_id": b.course, "submission_id": work}
+
+	edit := ask("submission.update_draft", m{"course_id": b.course, "submission_id": work, "body": "final"}, "edit")
+	asked := ask("submission.submit", handIn, "hand-in")
+	if v := approve(edit); v.Outcome != domain.StatusExecuted {
+		t.Fatalf("approving the edit: %+v", v)
+	}
+	if v := approve(asked); v.Outcome != domain.StatusFailed || v.Error == nil || v.Error.Code != apperr.FailedPrecondition ||
+		!strings.Contains(v.Error.Message, "the draft does not hold what this call says it hands in") {
+		t.Fatalf("approving the hand-in asked for before the edit: %+v", v)
+	}
+	if state, body := stored(); state != "draft" || body != "final" {
+		t.Fatalf("after the refused hand-in the submission is %s with %q, want the edited draft", state, body)
+	}
+
+	if v := approve(ask("submission.submit", handIn, "hand-in-again")); v.Outcome != domain.StatusExecuted {
+		t.Fatalf("approving the hand-in asked for after the edit: %+v", v)
+	}
+	if state, body := stored(); state != "submitted" || body != "final" {
+		t.Fatalf("the submission is %s with %q, want the edited draft handed in", state, body)
+	}
+}
+
 func TestAStudentWithAnEmptiedScopeReachesNobody(t *testing.T) {
 	b := build(t)
 	b.Exec(`DELETE FROM member_student_scope WHERE member_id = $1`, b.yukiM)
@@ -812,6 +1009,64 @@ func TestAPublishedAssignmentKeepsReadableInstructions(t *testing.T) {
 		m{"course_id": b.course, "kind": "instructions", "title": "HW4", "body_md": "tbd"})).DocumentID
 	hw4 := testkit.Result[tools.IDOut](t, b.do(t, b.sato, "assignment.create", m{"course_id": b.course, "title": "HW4", "points_possible": 10})).ID
 	b.do(t, b.sato, "assignment.update", m{"course_id": b.course, "assignment_id": hw4, "instructions_document_id": draftBrief})
+}
+
+// Changing an assignment reads it, checks it and writes all of it back. Two
+// changes at once take turns on its row, or the second would write back the
+// copy it read before the first committed: a rename and a new due date made
+// together would leave one of them undone, both reported done. Publishing
+// takes the same turn, so that it and a change of instructions cannot each
+// pass on what the other has not done yet.
+func TestChangesToAnAssignmentTakeTurns(t *testing.T) {
+	b := build(t)
+	const lockRow = `SELECT 1 FROM assignment WHERE id = $1 FOR UPDATE`
+	done := make(chan pipeline.Outcome, 2)
+
+	due := time.Now().Add(72 * time.Hour).Truncate(time.Second)
+	release := b.hold(t, lockRow, b.hw3)
+	for i, change := range []m{{"title": "HW3 (revised)"}, {"due_at": due}} {
+		change["course_id"], change["assignment_id"] = b.course, b.hw3
+		b.start(t, done, b.sato, "assignment.update", change)
+		b.blocked(t, i+1, done)
+	}
+	release()
+	for range 2 {
+		if out := <-done; out.Status != domain.StatusExecuted {
+			t.Fatalf("assignment.update: %+v", out)
+		}
+	}
+	if n := b.Count(`SELECT count(*) FROM assignment WHERE id = $1 AND title = 'HW3 (revised)' AND due_at = $2`, b.hw3, due); n != 1 {
+		t.Fatal("of two changes made at once, one was undone by the other")
+	}
+
+	// HW4 is published while its instructions are pointed at a brief
+	// nobody can read yet.
+	brief := testkit.Result[tools.DocumentCreateOut](t, b.do(t, b.sato, "document.create",
+		m{"course_id": b.course, "kind": "instructions", "title": "HW4", "body_md": "Write 1000 words."})).DocumentID
+	b.do(t, b.sato, "document.publish", m{"course_id": b.course, "document_id": brief})
+	rewrite := testkit.Result[tools.DocumentCreateOut](t, b.do(t, b.sato, "document.create",
+		m{"course_id": b.course, "kind": "instructions", "title": "HW4, rewritten", "body_md": "tbd"})).DocumentID
+	hw4 := testkit.Result[tools.IDOut](t, b.do(t, b.sato, "assignment.create",
+		m{"course_id": b.course, "title": "HW4", "points_possible": 10, "instructions_document_id": brief})).ID
+	release = b.hold(t, lockRow, hw4)
+	b.start(t, done, b.sato, "assignment.update", m{"course_id": b.course, "assignment_id": hw4, "instructions_document_id": rewrite})
+	b.blocked(t, 1, done)
+	b.start(t, done, b.sato, "assignment.publish", m{"course_id": b.course, "assignment_id": hw4})
+	b.blocked(t, 2, done)
+	release()
+	executed := 0
+	for range 2 {
+		if out := <-done; out.Status == domain.StatusExecuted {
+			executed++
+		}
+	}
+	if n := b.Count(`SELECT count(*) FROM assignment a JOIN document d ON d.id = a.instructions_document_id
+		WHERE a.id = $1 AND a.published_at IS NOT NULL AND d.published_version_id IS NULL`, hw4); n != 0 {
+		t.Fatal("the assignment was published with instructions students cannot read")
+	}
+	if executed != 1 {
+		t.Fatalf("%d of the two went through; whichever came second should have been refused", executed)
+	}
 }
 
 // "An archived course refuses every write" includes the writes that touch no

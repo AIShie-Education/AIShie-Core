@@ -44,11 +44,48 @@ func TestLimiter(t *testing.T) {
 	}
 }
 
+// A call given back is the key's to make again. A refund never fills a
+// bucket past its burst, nor makes one for a key that has none.
+func TestACallGivenBackCanBeMadeAgain(t *testing.T) {
+	now := time.Now()
+	l := New(60, 2)
+	l.SetClock(func() time.Time { return now })
+
+	l.Refund("agent")
+	if n := l.Len(); n != 0 {
+		t.Fatalf("a refund to a key never seen: %d keys tracked, want none", n)
+	}
+	l.Allow("agent")
+	l.Allow("agent")
+	if ok, _ := l.Allow("agent"); ok {
+		t.Fatal("a third call got through a burst of two")
+	}
+	l.Refund("agent")
+	if ok, _ := l.Allow("agent"); !ok {
+		t.Fatal("the call given back was refused")
+	}
+	if ok, _ := l.Allow("agent"); ok {
+		t.Fatal("one call given back let two through")
+	}
+	for range 5 {
+		l.Refund("agent")
+	}
+	for i := range 2 {
+		if ok, _ := l.Allow("agent"); !ok {
+			t.Fatalf("call %d after five refunds was refused", i+1)
+		}
+	}
+	if ok, _ := l.Allow("agent"); ok {
+		t.Fatal("five refunds filled a bucket of two past its burst")
+	}
+}
+
 func TestNoLimit(t *testing.T) {
 	l := New(0, 0)
 	for range 1000 {
 		if ok, _ := l.Allow("x"); !ok {
 			t.Fatal("a nil limiter refused")
 		}
+		l.Refund("x")
 	}
 }

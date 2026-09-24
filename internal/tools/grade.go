@@ -85,12 +85,22 @@ type BreakdownItem struct {
 // Exported because it is embedded in tool inputs: schema inference and
 // encoding/json both need to see through it.
 type GradeContent struct {
-	Score           decimal.Decimal `json:"score"`
-	Feedback        *string         `json:"feedback,omitempty"`
-	Breakdown       []BreakdownItem `json:"breakdown,omitempty"`
-	RubricVersionID *uuid.UUID      `json:"rubric_version_id,omitempty" jsonschema:"the rubric version the grader was shown; defaults to the published one"`
-	AllowExtra      bool            `json:"allow_extra,omitempty" jsonschema:"permit a score above the points possible"`
-	FeedbackFiles   []FeedbackFile  `json:"feedback_files,omitempty" jsonschema:"files to return with the grade, uploaded beforehand"`
+	Score           decimal.Decimal  `json:"score"`
+	Feedback        *string          `json:"feedback,omitempty"`
+	Breakdown       []BreakdownItem  `json:"breakdown,omitempty"`
+	RubricVersionID *uuid.UUID       `json:"rubric_version_id,omitempty" jsonschema:"the rubric version the grader was shown; defaults to the published one"`
+	OutOf           *decimal.Decimal `json:"out_of,omitempty" jsonschema:"the points possible the score is out of; defaults to what the work is worth now. A proposal records it, and is refused on approval if the work has been rescaled since"`
+	AllowExtra      bool             `json:"allow_extra,omitempty" jsonschema:"permit a score above the points possible"`
+	FeedbackFiles   []FeedbackFile   `json:"feedback_files,omitempty" jsonschema:"files to return with the grade, uploaded beforehand"`
+}
+
+// uploads are the feedback files' upload tokens, for checkUploadAge.
+func (c GradeContent) uploads() []string {
+	tokens := make([]string, len(c.FeedbackFiles))
+	for i, f := range c.FeedbackFiles {
+		tokens[i] = f.UploadToken
+	}
+	return tokens
 }
 
 // ---------------------------------------------------------------------------
@@ -193,26 +203,24 @@ func loadSubject(ctx context.Context, q dbq.Querier, courseID uuid.UUID, submiss
 	return s, nil
 }
 
-// checkSubject holds the rules about what may be graded at all. forMissing is
-// what the grade was given for, when that was pinned.
-func checkSubject(ctx context.Context, q dbq.Querier, courseID uuid.UUID, s gradeSubject, forMissing *bool) error {
+// checkSubject holds the rules about what may be graded at all. It takes the
+// grade's locks and reads s again under them, so what is checked here and in
+// checkContent after it is what the grade is written against — and a
+// proposal made for a 'missing' placeholder is on record before any takeover
+// can look for it (SubmissionHasGrades). The work must still be what the
+// grade was given for: nothing, if it was a placeholder when first read here
+// or, as forMissing says when it was pinned, when the grade was proposed.
+func checkSubject(ctx context.Context, q dbq.Querier, courseID uuid.UUID, s *gradeSubject, forMissing *bool) error {
 	if s.submission != nil {
-		// Read under the submission's lock, which is held to the end of the
-		// call. Late work taking a 'missing' placeholder over takes the same
-		// lock, so the state read here is the state the grade is written
-		// against, and a proposal made for the placeholder is on record
-		// before any takeover can look for it (SubmissionHasGrades). The work
-		// must still be what the grade was given for: nothing, if it was a
-		// placeholder when first read here or when the grade was proposed.
-		state, err := q.LockSubmissionForGrading(ctx, s.submission.ID)
-		if err != nil {
+		seen := s.submission.State
+		if err := lockGradeTarget(ctx, q, courseID, s); err != nil {
 			return err
 		}
-		missing := state == stateMissing
+		missing := s.submission.State == stateMissing
 		switch {
-		case state == stateDraft:
+		case s.submission.State == stateDraft:
 			return apperr.Precondition("the submission has not been submitted yet")
-		case missing != (s.submission.State == stateMissing), forMissing != nil && *forMissing && !missing:
+		case missing != (seen == stateMissing), forMissing != nil && *forMissing && !missing:
 			return apperr.Precondition("this grade was given for nothing handed in, and there is work here now; look at it, and grade it again")
 		case forMissing != nil && !*forMissing && missing:
 			return apperr.Precondition("this grade was given for work handed in, and nothing was; look at it, and grade it again")
@@ -255,11 +263,17 @@ func checkSubject(ctx context.Context, q dbq.Querier, courseID uuid.UUID, s grad
 	return nil
 }
 
-// pinRubric fills in the rubric version a grade is against when the caller
-// left it to default: the rubric's published version as it stands now. It is
-// a Pin, run when a proposal is made, so that a proposal approved after the
-// rubric has moved on still records the version the grader was shown.
-func pinRubric(ctx context.Context, q dbq.Querier, s gradeSubject, c *GradeContent) error {
+// pinContent fills in what a grade is against when the caller left it to
+// default: the points possible the score is out of, and the rubric's
+// published version, as they stand now. It is a Pin, run when a proposal is
+// made. A proposal approved after the rubric has moved on still records the
+// version the grader was shown; one approved after the work was rescaled is
+// refused, rather than its 95 out of 100 being carried out as 95 out of 200.
+func pinContent(ctx context.Context, q dbq.Querier, s gradeSubject, c *GradeContent) error {
+	if c.OutOf == nil {
+		max := s.pointsPossible()
+		c.OutOf = &max
+	}
 	if c.RubricVersionID != nil || s.assignment == nil || s.assignment.RubricDocumentID == nil {
 		return nil
 	}
@@ -277,7 +291,11 @@ func checkContent(ctx context.Context, q dbq.Querier, s gradeSubject, c GradeCon
 	if c.Score.IsNegative() {
 		return nil, apperr.Invalid("score cannot be negative")
 	}
-	if max := s.pointsPossible(); c.Score.GreaterThan(max) && !c.AllowExtra {
+	max := s.pointsPossible()
+	if c.OutOf != nil && !c.OutOf.Equal(max) {
+		return nil, apperr.Precondition("the score was given out of %s, and the work is worth %s now; grade it again out of what it is worth", *c.OutOf, max)
+	}
+	if c.Score.GreaterThan(max) && !c.AllowExtra {
 		return nil, apperr.Precondition("score %s is above the %s points possible; set allow_extra to permit it", c.Score, max)
 	}
 	for _, b := range c.Breakdown {
@@ -344,13 +362,16 @@ func gradeSubmit(d Deps) tool.Tool {
 			if err := checkFeedbackFiles(ctx, d, q, m, in.CourseID, in.FeedbackFiles); err != nil {
 				return err
 			}
-			if err := checkSubject(ctx, q, in.CourseID, s, in.ForMissing); err != nil {
+			if err := checkSubject(ctx, q, in.CourseID, &s, in.ForMissing); err != nil {
 				return err
 			}
 			_, err = checkContent(ctx, q, s, in.GradeContent)
 			return err
 		},
-		Pin: func(ctx context.Context, q dbq.Querier, in GradeSubmitIn) (GradeSubmitIn, error) {
+		Pin: func(ctx context.Context, q dbq.Querier, now time.Time, in GradeSubmitIn) (GradeSubmitIn, error) {
+			if err := checkUploadAge(ctx, d, now, in.uploads()...); err != nil {
+				return in, err
+			}
 			s, err := load(ctx, q, in)
 			if err != nil {
 				return in, err
@@ -359,11 +380,19 @@ func gradeSubmit(d Deps) tool.Tool {
 				forMissing := s.submission.State == stateMissing
 				in.ForMissing = &forMissing
 			}
-			return in, pinRubric(ctx, q, s, &in.GradeContent)
+			return in, pinContent(ctx, q, s, &in.GradeContent)
 		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in GradeSubmitIn) (GradeSubmitOut, error) {
 			s, err := load(ctx, ec.Q, in)
 			if err != nil {
+				return GradeSubmitOut{}, err
+			}
+			// One draft at a time for one piece of work: the target is locked
+			// before the earlier drafts are looked at, or two graders at once
+			// would each see none and leave two live drafts, which nothing
+			// could then post. The lock also holds still what the grade is
+			// out of, and the score is checked against that.
+			if err := lockGradeTarget(ctx, ec.Q, in.CourseID, &s); err != nil {
 				return GradeSubmitOut{}, err
 			}
 			rubric, err := checkContent(ctx, ec.Q, s, in.GradeContent)
@@ -372,13 +401,6 @@ func gradeSubmit(d Deps) tool.Tool {
 			}
 			breakdown, err := breakdownJSON(in.Breakdown)
 			if err != nil {
-				return GradeSubmitOut{}, err
-			}
-			// One draft at a time for one piece of work: the target is locked
-			// before the earlier drafts are looked at, or two graders at once
-			// would each see none and leave two live drafts, which nothing
-			// could then post.
-			if err := lockGradeTarget(ctx, ec.Q, s); err != nil {
 				return GradeSubmitOut{}, err
 			}
 			// A new draft replaces earlier ones — but this draft is as old as
@@ -397,10 +419,14 @@ func gradeSubmit(d Deps) tool.Tool {
 			if err != nil {
 				return GradeSubmitOut{}, err
 			}
+			// Dated when the call was made, not when it was approved: the
+			// next proposal measures itself against this draft as this one
+			// was measured, and one made after this was proposed replaces it
+			// even if it is approved after this was.
 			row := dbq.InsertGradeParams{
 				ID: id, StudentMemberID: s.student, Origin: "entered", Score: in.Score,
 				Feedback: in.Feedback, Breakdown: breakdown, RubricVersionID: rubric,
-				GraderMemberID: ec.Member.ID, CreatedByActionID: ec.ActionID, CreatedAt: ec.Now,
+				GraderMemberID: ec.Member.ID, CreatedByActionID: ec.ActionID, CreatedAt: ec.ActionCreatedAt,
 			}
 			ev := events.Event{
 				Type: events.GradeCreated, CourseID: &in.CourseID,
@@ -423,20 +449,43 @@ func gradeSubmit(d Deps) tool.Tool {
 	})
 }
 
-// lockGradeTarget serialises the writers of one piece of work's grades.
-func lockGradeTarget(ctx context.Context, q *dbq.Queries, s gradeSubject) error {
+// lockGradeTarget serialises the writers of one piece of work's grades, and
+// holds still what they are checked against; checkSubject takes it, in
+// Validate, and it is held to the end of the call.
+//
+// For a submission it first holds the assignment still, shared, and reads it
+// again into s. The score is checked against the points possible, and they
+// must not change between that check and the grade being there for
+// assignment.update's own check to find: it locks the row before it looks,
+// so one of the two waits for the other, and a 95 is never entered on work
+// that has meanwhile become worth 50. Then it locks the submission and reads
+// its state into s: late work taking a 'missing' placeholder over takes the
+// same lock, so the state is the one the grade is written against. The
+// assignment is locked before its submission, never the other way round. A
+// component's points are held still by the tree lock checkSubject takes.
+func lockGradeTarget(ctx context.Context, q dbq.Querier, courseID uuid.UUID, s *gradeSubject) error {
 	if s.submission != nil {
-		_, err := q.LockSubmissionForGrading(ctx, s.submission.ID)
-		return err
+		a, err := q.ShareAssignmentForGrading(ctx, dbq.ShareAssignmentForGradingParams{ID: s.assignment.ID, CourseID: courseID})
+		if err != nil {
+			return err
+		}
+		fresh := dbq.GetAssignmentInCourseRow(a)
+		s.assignment = &fresh
+		state, err := q.LockSubmissionForGrading(ctx, s.submission.ID)
+		if err != nil {
+			return err
+		}
+		s.submission.State = state
+		return nil
 	}
 	return q.LockComponentGradeTarget(ctx, dbq.LockComponentGradeTargetParams{ComponentID: s.component.ID, StudentMemberID: s.student})
 }
 
 // noNewerDraft refuses to replace a draft entered after this call was made.
 // A direct call is as new as anything: it applies to a proposal being
-// carried out later than it was made.
+// carried out on its approval.
 func noNewerDraft(ctx context.Context, ec *tool.ExecCtx, s gradeSubject) error {
-	if !ec.ActionCreatedAt.Before(ec.Now) {
+	if !ec.Approved {
 		return nil
 	}
 	var newest time.Time
@@ -464,9 +513,9 @@ func noNewerDraft(ctx context.Context, ec *tool.ExecCtx, s gradeSubject) error {
 
 type GradePostIn struct {
 	tool.InCourse
-	GradeIDs            []uuid.UUID `json:"grade_ids,omitempty" jsonschema:"the draft grades to post; or give assignment_id"`
-	AssignmentID        *uuid.UUID  `json:"assignment_id,omitempty" jsonschema:"post every draft grade waiting for this assignment"`
-	TreatUngradedAsZero bool        `json:"treat_ungraded_as_zero,omitempty" jsonschema:"for final grades: count ungraded work as zero in the totals. Once a student's totals have been written this way they stay final: later posts and regrades keep counting ungraded work as zero"`
+	GradeIDs            []uuid.UUID `json:"grade_ids,omitempty" jsonschema:"the draft grades to post; or give assignment_id. Approving a proposal to post them posts those still waiting, passes over any posted since, and fails if one has been replaced"`
+	AssignmentID        *uuid.UUID  `json:"assignment_id,omitempty" jsonschema:"post every draft grade waiting for this assignment. A proposal records the drafts that were waiting when it was made, as grade_ids beside this: approving it posts those of them still waiting, passes over any posted since, and fails if one has been replaced"`
+	TreatUngradedAsZero bool        `json:"treat_ungraded_as_zero,omitempty" jsonschema:"for final grades: count ungraded work as zero in the totals. Once a student's totals have been written this way they stay final: later posts and regrades keep counting ungraded work as zero. It decides the course total, so it needs an assignment scope of the whole course"`
 }
 
 type GradePostOut struct {
@@ -474,18 +523,30 @@ type GradePostOut struct {
 	Snapshots int         `json:"snapshots" jsonschema:"how many rolled-up totals were written or changed"`
 }
 
-// gradesToPost finds the drafts a post call is about.
+// pinned reports whether in is what a proposal to post an assignment
+// stores: the assignment, and beside it the drafts that were waiting for it
+// when the proposal was made. Pin is the only thing that writes both; a call
+// gives one or the other.
+func (in GradePostIn) pinned() bool {
+	return in.AssignmentID != nil && len(in.GradeIDs) > 0
+}
+
+// gradesToPost finds the drafts a post call is about. For a pinned proposal
+// that is every draft it names, posted since or not: whatever it goes on to
+// post, it is authorized over all of them, as it was when it was made.
 func gradesToPost(ctx context.Context, q dbq.Querier, in GradePostIn) ([]dbq.GetGradesInCourseRow, error) {
-	idsToPost := in.GradeIDs
-	switch {
-	case (len(in.GradeIDs) == 0) == (in.AssignmentID == nil):
+	if len(in.GradeIDs) == 0 && in.AssignmentID == nil {
 		return nil, apperr.Invalid("give exactly one of grade_ids and assignment_id")
-	case in.AssignmentID != nil:
+	}
+	idsToPost := in.GradeIDs
+	if in.AssignmentID != nil {
 		if _, err := q.GetAssignmentInCourse(ctx, dbq.GetAssignmentInCourseParams{ID: *in.AssignmentID, CourseID: in.CourseID}); errors.Is(err, pgx.ErrNoRows) {
 			return nil, apperr.Missing("no such assignment in this course")
 		} else if err != nil {
 			return nil, err
 		}
+	}
+	if len(idsToPost) == 0 {
 		var err error
 		if idsToPost, err = q.ListDraftGradeIDsForAssignment(ctx, dbq.ListDraftGradeIDsForAssignmentParams{AssignmentID: *in.AssignmentID, CourseID: in.CourseID}); err != nil {
 			return nil, err
@@ -505,6 +566,30 @@ func gradesToPost(ctx context.Context, q dbq.Querier, in GradePostIn) ([]dbq.Get
 	return rows, nil
 }
 
+// stillWaiting is what approving a proposal posts: the drafts it names,
+// less any posted by hand while it waited. Those are out already, as
+// what was proposed, and the rest were in front of whoever proposed
+// releasing them as they are now. A draft replaced meanwhile fails the
+// approval instead. Its replacement has been in front of nobody who asked
+// for it to be released, and posting the others without it is not what was
+// proposed either.
+func stillWaiting(rows []dbq.GetGradesInCourseRow) ([]dbq.GetGradesInCourseRow, error) {
+	waiting := make([]dbq.GetGradesInCourseRow, 0, len(rows))
+	for _, g := range rows {
+		switch {
+		case g.SupersededBy != nil:
+			return nil, apperr.Conflicts("grade %s, one of the drafts this proposal was made about, has been replaced since it was proposed; propose posting again", g.ID)
+		case g.PostedAt != nil:
+			continue
+		}
+		waiting = append(waiting, g)
+	}
+	if len(waiting) == 0 {
+		return nil, apperr.Precondition("every draft this proposal was made about has been posted since it was proposed; there is nothing left for it to post")
+	}
+	return waiting, nil
+}
+
 func gradePost() tool.Tool {
 	return tool.Define(tool.Spec[GradePostIn, GradePostOut]{
 		Name: "grade.post",
@@ -520,7 +605,7 @@ func gradePost() tool.Tool {
 			if err != nil {
 				return tool.Target{}, err
 			}
-			t := tool.Target{CourseID: in.CourseID, Type: "grade", Scope: postScope(rows)}
+			t := tool.Target{CourseID: in.CourseID, Type: "grade", Scope: postScope(rows, in.TreatUngradedAsZero)}
 			switch {
 			case in.AssignmentID != nil:
 				// The assignment is the target whether or not anything is
@@ -539,15 +624,75 @@ func gradePost() tool.Tool {
 			if err != nil {
 				return err
 			}
+			// Drafts named by id, alone or beside the assignment as Pin
+			// records them, are checked in Execute: it is the one place
+			// that can tell an approval, which passes over one posted
+			// meanwhile, from a call, which is told that it is posted or
+			// refused for giving both. Pin checks them for a proposal as it
+			// is made. Execute runs straight after this, for a call and an
+			// approval alike, and refuses there what would have been
+			// refused here.
+			if len(in.GradeIDs) > 0 {
+				return nil
+			}
 			if len(rows) == 0 {
 				return apperr.Precondition("there are no draft grades to post")
 			}
 			return checkPostable(ctx, q, rows)
 		},
+		// A proposal to post an assignment is about the drafts waiting when
+		// it was made. One entered while it waits has been in front of
+		// nobody who could release it, so the proposal names the drafts it
+		// was made about, beside the assignment; stillWaiting is what
+		// approving it posts of them.
+		Pin: func(ctx context.Context, q dbq.Querier, _ time.Time, in GradePostIn) (GradePostIn, error) {
+			if in.AssignmentID == nil {
+				// Validate left the drafts named to Execute. A proposal
+				// being made is not an approval, and is held to them as a
+				// call is: nobody is asked to approve posting what could
+				// not be posted.
+				rows, err := gradesToPost(ctx, q, in)
+				if err != nil {
+					return in, err
+				}
+				return in, checkPostable(ctx, q, rows)
+			}
+			if len(in.GradeIDs) > 0 {
+				return in, apperr.Invalid("give exactly one of grade_ids and assignment_id")
+			}
+			rows, err := gradesToPost(ctx, q, in)
+			if err != nil {
+				return in, err
+			}
+			// Validate found some, but they may have been posted since. A
+			// proposal about none would name no draft, and approving it
+			// would post whatever was waiting by then.
+			if len(rows) == 0 {
+				return in, apperr.Precondition("there are no draft grades to post")
+			}
+			in.GradeIDs = make([]uuid.UUID, len(rows))
+			for i, g := range rows {
+				in.GradeIDs[i] = g.ID
+			}
+			return in, nil
+		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in GradePostIn) (GradePostOut, error) {
+			// Grade ids beside the assignment are what Pin stores, and a
+			// call giving both is refused. Approving a proposal, whether it
+			// named its drafts or had them pinned, passes over one posted
+			// meanwhile; a call naming a grade that is already posted is
+			// told so by checkPostable.
+			if in.pinned() && !ec.Approved {
+				return GradePostOut{}, apperr.Invalid("give exactly one of grade_ids and assignment_id")
+			}
 			rows, err := gradesToPost(ctx, ec.Q, in)
 			if err != nil {
 				return GradePostOut{}, err
+			}
+			if ec.Approved {
+				if rows, err = stillWaiting(rows); err != nil {
+					return GradePostOut{}, err
+				}
 			}
 			if len(rows) == 0 {
 				return GradePostOut{}, apperr.Precondition("there are no draft grades to post")
@@ -563,14 +708,20 @@ func gradePost() tool.Tool {
 			if rows, err = ec.Q.GetGradesInCourse(ctx, dbq.GetGradesInCourseParams{Ids: gradeIDs, CourseID: in.CourseID}); err != nil {
 				return GradePostOut{}, err
 			}
+			if ec.Approved {
+				if rows, err = stillWaiting(rows); err != nil {
+					return GradePostOut{}, err
+				}
+			}
 			if err := checkPostable(ctx, ec.Q, rows); err != nil {
 				return GradePostOut{}, err
 			}
-			// With assignment_id the batch is whatever is a draft now, which
-			// may be more than what authorize() scope-checked: a draft entered
-			// in between, for a student the caller does not reach. Checked
+			// With assignment_id alone — a direct call; a proposal names its
+			// drafts — the batch is whatever is a draft now, which may be
+			// more than what authorize() scope-checked: a draft entered in
+			// between, for a student the caller does not reach. Checked
 			// again against the rows that are actually about to be posted.
-			if reason, err := authz.CheckScope(ctx, ec.Q, ec.Member, postScope(rows)); err != nil {
+			if reason, err := authz.CheckScope(ctx, ec.Q, ec.Member, postScope(rows, in.TreatUngradedAsZero)); err != nil {
 				return GradePostOut{}, err
 			} else if reason != authz.ReasonNone {
 				return GradePostOut{}, apperr.Forbid("a draft entered since this call was authorized is outside your scope; call again").With("reason", string(reason))
@@ -605,8 +756,11 @@ func gradePost() tool.Tool {
 }
 
 // postScope is steps 4 and 5 for a batch: every student and assignment in it.
-func postScope(rows []dbq.GetGradesInCourseRow) authz.Target {
-	var t authz.Target
+// Posting as final is a decision about the course total as well — every other
+// assignment's ungraded work becomes a zero, for good — so it spans
+// assignments whatever is in the batch.
+func postScope(rows []dbq.GetGradesInCourseRow, final bool) authz.Target {
+	t := authz.Target{SpansAssignments: final}
 	for _, g := range rows {
 		t.StudentMemberIDs = append(t.StudentMemberIDs, g.StudentMemberID)
 		if g.AssignmentID != nil {
@@ -722,6 +876,11 @@ func gradeRegrade(d Deps) tool.Tool {
 			}
 			t := s.target(in.CourseID)
 			t.Type, t.ID = "grade", &g.ID
+			// Regrading as final decides the course total, as posting as
+			// final does (postScope).
+			if in.TreatUngradedAsZero {
+				t.Scope.SpansAssignments = true
+			}
 			return t, nil
 		},
 		Validate: func(ctx context.Context, q dbq.Querier, m *domain.Member, in GradeRegradeIn) error {
@@ -737,12 +896,15 @@ func gradeRegrade(d Deps) tool.Tool {
 			}
 			return checkFeedbackFiles(ctx, d, q, m, in.CourseID, in.FeedbackFiles)
 		},
-		Pin: func(ctx context.Context, q dbq.Querier, in GradeRegradeIn) (GradeRegradeIn, error) {
+		Pin: func(ctx context.Context, q dbq.Querier, now time.Time, in GradeRegradeIn) (GradeRegradeIn, error) {
+			if err := checkUploadAge(ctx, d, now, in.uploads()...); err != nil {
+				return in, err
+			}
 			_, s, err := load(ctx, q, in)
 			if err != nil {
 				return in, err
 			}
-			return in, pinRubric(ctx, q, s, &in.GradeContent)
+			return in, pinContent(ctx, q, s, &in.GradeContent)
 		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in GradeRegradeIn) (GradeRegradeOut, error) {
 			if _, err := ec.Q.LockGradesInCourse(ctx, dbq.LockGradesInCourseParams{Ids: []uuid.UUID{in.GradeID}, CourseID: in.CourseID}); err != nil {

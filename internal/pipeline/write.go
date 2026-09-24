@@ -106,7 +106,7 @@ func (p *Pipeline) write(ctx context.Context, tx pgx.Tx, caller Caller, t tool.T
 	// the stored payload; the hash stays that of the call as it was made,
 	// which is what a retry of it presents.
 	if status == domain.StatusProposed && t.Pin != nil {
-		pinned, err := t.Pin(ctx, q, in)
+		pinned, err := t.Pin(ctx, q, now, in)
 		if err != nil {
 			e, ok := isCallerFault(err)
 			if !ok {

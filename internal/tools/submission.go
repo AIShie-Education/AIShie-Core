@@ -278,23 +278,138 @@ func submissionUpdateDraft() tool.Tool {
 	})
 }
 
+// SubmissionSubmitIn names the draft to hand in, and may say what it is
+// being handed in as. A proposal always says: Pin records it as it stands
+// when the proposal is made, so that approving it hands in what was asked
+// for, as of when it was asked.
+type SubmissionSubmitIn struct {
+	SubmissionIDIn
+	Body                  *string     `json:"body,omitempty" jsonschema:"the text being handed in; if given, the draft must hold exactly this. A proposal records it, and is refused on approval if the draft has changed since"`
+	Files                 []uuid.UUID `json:"files,omitzero" jsonschema:"the submitted files being handed in, by document id; as for body"`
+	InstructionsVersionID *uuid.UUID  `json:"instructions_version_id,omitempty" jsonschema:"the version of the instructions the work is handed in under; if given, it must be the one students read now. A proposal records it, and is handed in under it when approved"`
+}
+
 type SubmissionSubmitOut struct {
 	State       string    `json:"state" jsonschema:"submitted, or late if the due date had passed"`
 	SubmittedAt time.Time `json:"submitted_at"`
 }
 
+// sameDraft refuses to hand in anything but what the call says it is
+// handing in. What it does not say is not checked. The refusal is worded
+// for both ways of coming to it: a direct call that names other text or
+// other files than the draft's, and an approval of a hand-in whose draft
+// has changed since it was asked for.
+func (in SubmissionSubmitIn) sameDraft(body *string, files []uuid.UUID) error {
+	if in.Body != nil && *in.Body != textOf(body) || in.Files != nil && !sameFiles(in.Files, files) {
+		return apperr.Precondition("the draft does not hold what this call says it hands in; if the hand-in waited for approval, " +
+			"the draft has changed since it was asked for. Look at it, and hand it in again")
+	}
+	return nil
+}
+
+// sameInstructions refuses to hand the work in under instructions other than
+// those students read now.
+func (in SubmissionSubmitIn) sameInstructions(inForce *uuid.UUID) error {
+	if in.InstructionsVersionID != nil && !sameID(in.InstructionsVersionID, inForce) {
+		return apperr.Precondition("instructions_version_id is not the version of the instructions students read now")
+	}
+	return nil
+}
+
+func textOf(body *string) string {
+	if body == nil {
+		return ""
+	}
+	return *body
+}
+
+// draftFiles is the ids of a draft's files. It is never nil: a proposal
+// records "no files" as an empty list, which is not the same as not saying.
+func draftFiles(ctx context.Context, q dbq.Querier, id uuid.UUID) ([]uuid.UUID, error) {
+	docs, err := q.ListSubmissionDocuments(ctx, &id)
+	files := make([]uuid.UUID, 0, len(docs))
+	for _, d := range docs {
+		files = append(files, d.ID)
+	}
+	return files, err
+}
+
+// sameFiles: the same documents, in any order.
+func sameFiles(said, has []uuid.UUID) bool {
+	said = dedupe(said)
+	if len(said) != len(has) {
+		return false
+	}
+	in := make(map[uuid.UUID]bool, len(has))
+	for _, id := range has {
+		in[id] = true
+	}
+	for _, id := range said {
+		if !in[id] {
+			return false
+		}
+	}
+	return true
+}
+
+// instructionsInForce is the version of an assignment's instructions that
+// students read now: the published one, or none.
+func instructionsInForce(ctx context.Context, q dbq.Querier, a dbq.GetAssignmentInCourseRow) (*uuid.UUID, error) {
+	if a.InstructionsDocumentID == nil {
+		return nil, nil
+	}
+	return q.GetDocumentPublishedVersion(ctx, *a.InstructionsDocumentID)
+}
+
 func submissionSubmit() tool.Tool {
-	return tool.Define(tool.Spec[SubmissionIDIn, SubmissionSubmitOut]{
+	return tool.Define(tool.Spec[SubmissionSubmitIn, SubmissionSubmitOut]{
 		Name: "submission.submit",
 		Description: "Hand a draft in. It is marked late if the due date has passed, the version of the instructions in " +
-			"force right now is recorded with it, and from this moment it never changes.",
+			"force right now is recorded with it, and from this moment it never changes. A hand-in that waits for " +
+			"approval counts from when it was asked for: it is judged late or not, and recorded under the instructions " +
+			"then in force, as of that moment. It hands in the draft as it was then, and is refused on approval if the " +
+			"draft has changed meanwhile, so propose it only after any change to the draft that is waiting for approval " +
+			"has been decided.",
 		Kind: tool.Write, Gate: writeSubmissions,
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/submissions/{submission_id}/submit"},
-		Resolve: func(ctx context.Context, q dbq.Querier, in SubmissionIDIn) (tool.Target, error) {
+		Resolve: func(ctx context.Context, q dbq.Querier, in SubmissionSubmitIn) (tool.Target, error) {
 			return submissionTarget(ctx, q, in.CourseID, in.SubmissionID)
 		},
-		Execute: func(ctx context.Context, ec *tool.ExecCtx, in SubmissionIDIn) (SubmissionSubmitOut, error) {
-			s, err := ec.Q.GetSubmissionFull(ctx, dbq.GetSubmissionFullParams{ID: in.SubmissionID, CourseID: in.CourseID})
+		// The student asks to hand in now, under the instructions they are
+		// reading now. Approved on Thursday, it was still handed in on
+		// Tuesday, so it must still be what it was on Tuesday.
+		Pin: func(ctx context.Context, q dbq.Querier, _ time.Time, in SubmissionSubmitIn) (SubmissionSubmitIn, error) {
+			s, err := q.GetSubmissionFull(ctx, dbq.GetSubmissionFullParams{ID: in.SubmissionID, CourseID: in.CourseID})
+			if err != nil {
+				return in, err
+			}
+			if s.State != stateDraft {
+				return in, apperr.Conflicts("the submission is %s, not a draft", s.State)
+			}
+			a, err := q.GetAssignmentInCourse(ctx, dbq.GetAssignmentInCourseParams{ID: s.AssignmentID, CourseID: in.CourseID})
+			if err != nil {
+				return in, err
+			}
+			files, err := draftFiles(ctx, q, s.ID)
+			if err != nil {
+				return in, err
+			}
+			inForce, err := instructionsInForce(ctx, q, a)
+			if err != nil {
+				return in, err
+			}
+			if err := in.sameDraft(s.Body, files); err != nil {
+				return in, err
+			}
+			if err := in.sameInstructions(inForce); err != nil {
+				return in, err
+			}
+			text := textOf(s.Body)
+			in.Body, in.Files, in.InstructionsVersionID = &text, files, inForce
+			return in, nil
+		},
+		Execute: func(ctx context.Context, ec *tool.ExecCtx, in SubmissionSubmitIn) (SubmissionSubmitOut, error) {
+			s, err := ec.Q.GetSubmissionFullForUpdate(ctx, dbq.GetSubmissionFullForUpdateParams{ID: in.SubmissionID, CourseID: in.CourseID})
 			if err != nil {
 				return SubmissionSubmitOut{}, err
 			}
@@ -302,26 +417,45 @@ func submissionSubmit() tool.Tool {
 			if err != nil {
 				return SubmissionSubmitOut{}, err
 			}
-			files, err := ec.Q.CountSubmissionDocuments(ctx, &s.ID)
+			files, err := draftFiles(ctx, ec.Q, s.ID)
 			if err != nil {
 				return SubmissionSubmitOut{}, err
 			}
-			if (s.Body == nil || *s.Body == "") && files == 0 {
+			if (s.Body == nil || *s.Body == "") && len(files) == 0 {
 				return SubmissionSubmitOut{}, apperr.Precondition("there is nothing to hand in: the draft has no text and no files")
 			}
-			out := SubmissionSubmitOut{State: stateSubmitted, SubmittedAt: ec.Now}
-			if a.DueAt != nil && ec.Now.After(*a.DueAt) {
-				out.State = stateLate
+			if err := in.sameDraft(s.Body, files); err != nil {
+				return SubmissionSubmitOut{}, err
 			}
 			// Pin what the student was told. If the instructions are edited
 			// tomorrow, a dispute can still show exactly what they said today.
-			var pinned *uuid.UUID
-			if a.InstructionsDocumentID != nil {
-				if pinned, err = ec.Q.GetDocumentPublishedVersion(ctx, *a.InstructionsDocumentID); err != nil {
+			pinned, err := instructionsInForce(ctx, ec.Q, a)
+			if err != nil {
+				return SubmissionSubmitOut{}, err
+			}
+			at := ec.Now
+			switch {
+			case !ec.Approved:
+				if err := in.sameInstructions(pinned); err != nil {
 					return SubmissionSubmitOut{}, err
 				}
+			case in.Body != nil && in.Files != nil:
+				// An approved proposal counts from when it was asked for,
+				// under the instructions it recorded as then in force: the
+				// student is not made late by the approver's delay, nor held
+				// to instructions published afterwards. That is safe only
+				// because the draft has just been found to hold what the
+				// proposal recorded; a draft changed after it was proposed
+				// would otherwise be handed in as of before the change. Every
+				// proposal records it; one made before proposals did is
+				// handed in as of now.
+				at, pinned = ec.ActionCreatedAt, in.InstructionsVersionID
 			}
-			n, err := ec.Q.SubmitSubmission(ctx, dbq.SubmitSubmissionParams{ID: s.ID, State: out.State, SubmittedAt: &ec.Now, InstructionsVersionID: pinned})
+			out := SubmissionSubmitOut{State: stateSubmitted, SubmittedAt: at}
+			if a.DueAt != nil && at.After(*a.DueAt) {
+				out.State = stateLate
+			}
+			n, err := ec.Q.SubmitSubmission(ctx, dbq.SubmitSubmissionParams{ID: s.ID, State: out.State, SubmittedAt: &at, InstructionsVersionID: pinned})
 			if err != nil {
 				return SubmissionSubmitOut{}, err
 			}

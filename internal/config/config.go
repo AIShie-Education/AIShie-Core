@@ -44,8 +44,8 @@ type Config struct {
 	TrustedProxies []string
 
 	// CallsPerMinute and CallsBurst bound one actor's calls, per instance;
-	// SignInsPerMinute bounds sign-in attempts per address and per email.
-	// Zero turns a limit off.
+	// SignInsPerMinute bounds sign-in attempts per email, and per address
+	// those that fail. Zero turns a limit off.
 	CallsPerMinute, CallsBurst, SignInsPerMinute int
 
 	// Jobs turns the background sweeps on. Every instance may leave it on: only

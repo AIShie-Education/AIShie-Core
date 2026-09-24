@@ -82,7 +82,7 @@ func (s *S3Store) Stat(ctx context.Context, key string) (Info, error) {
 	}
 	// A presigned PUT gives the store no chance to demand a SHA-256, so the
 	// object's ETag is what there is. It still changes when the bytes do.
-	return Info{Size: o.Size, ContentType: o.ContentType, Checksum: "etag:" + o.ETag}, nil
+	return Info{Size: o.Size, ContentType: o.ContentType, Checksum: "etag:" + o.ETag, Modified: o.LastModified}, nil
 }
 
 // attachedPrefix holds objects that document versions point at. No presigned
@@ -110,11 +110,13 @@ func (s *S3Store) Finalize(ctx context.Context, stagingKey string) (Info, error)
 	return s.Stat(ctx, final)
 }
 
-func (s *S3Store) List(ctx context.Context, fn func(key string, modified time.Time) error) error {
-	// Cancelling is how the client is told to stop paging.
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	for obj := range s.client.ListObjects(ctx, s.bucket, minio.ListObjectsOptions{Recursive: true}) {
+// List goes in key order, byte by byte, which is how S3 lists and what its
+// StartAfter means.
+func (s *S3Store) List(ctx context.Context, prefix, after string, fn func(key string, modified time.Time) error) error {
+	// The iterator pages as it is ranged over, and leaving the loop stops
+	// it. ListObjects would page in a goroutine of its own, which stays
+	// blocked, holding its page, unless whoever stops reading drains it.
+	for obj := range s.client.ListObjectsIter(ctx, s.bucket, minio.ListObjectsOptions{Prefix: prefix, StartAfter: after, Recursive: true}) {
 		if obj.Err != nil {
 			return obj.Err
 		}
@@ -124,7 +126,9 @@ func (s *S3Store) List(ctx context.Context, fn func(key string, modified time.Ti
 			return err
 		}
 	}
-	return nil
+	// A cancelled context ends the iterator between pages without a word,
+	// which is not the end of the listing.
+	return ctx.Err()
 }
 
 func (s *S3Store) Delete(ctx context.Context, key string) error {
