@@ -582,6 +582,10 @@ check `actor.platform_role` instead. That is the only place it is read.
   changing a seat waits for the member's calls in flight, or they wait for it and are refused,
   so nothing is proposed from a seat that is being removed.
 - A token the system actor was given before the database refused them authenticates nobody.
+- A call that loses a deadlock — two managers changing each other's seats at once — is made
+  again, once, in a fresh transaction, and is recorded as failed ("try again") only if it loses
+  again. A sweep's call that loses twice is not recorded at all: its key names what it sweeps,
+  and a failure stored under it would be replayed on every sweep after.
 - `actor.kind` and `course_member.role` are never read by authorization.
 
 ## 5. Worked example: an agent grades an essay

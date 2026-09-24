@@ -11,7 +11,6 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/apperr"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/db"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/db/dbq"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/domain"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/events"
@@ -33,7 +32,10 @@ import (
 //
 // The idempotency key is chosen by the sweep and is deterministic — it names
 // the thing swept — so that two instances sweeping at once, or one sweep run
-// twice, act once.
+// twice, act once. So a lost deadlock is never recorded: stored under that
+// key as failed, it would be replayed for ever, and the thing never swept.
+// The call is made again, as any write is, and if it loses again the error
+// is returned with nothing recorded, for the next sweep to try.
 func (p *Pipeline) InvokeSystem(ctx context.Context, systemActor uuid.UUID, name string, args any, key string) (Outcome, error) {
 	t, ok := p.reg.Get(name)
 	if !ok || !t.Internal {
@@ -46,17 +48,17 @@ func (p *Pipeline) InvokeSystem(ctx context.Context, systemActor uuid.UUID, name
 	if err != nil {
 		return Outcome{}, err
 	}
-	in, err := t.Decode(raw)
-	if err != nil {
-		return Outcome{}, err
-	}
 	canonical, hash, err := p.payload(t, raw)
 	if err != nil {
 		return Outcome{}, err
 	}
 
 	var out Outcome
-	err = db.InTx(ctx, p.pool, func(tx pgx.Tx) error {
+	err = p.inTx(ctx, func(tx pgx.Tx, _ bool) error {
+		in, err := t.Decode(raw)
+		if err != nil {
+			return err
+		}
 		q := dbq.New(tx)
 		now := p.now()
 
@@ -107,7 +109,7 @@ func (p *Pipeline) InvokeSystem(ctx context.Context, systemActor uuid.UUID, name
 		})
 		if err != nil {
 			e, ok := isCallerFault(err)
-			if !ok {
+			if !ok || transient(err) { // a lost deadlock is not recorded; see above
 				return fmt.Errorf("%s: %w", t.Name, err)
 			}
 			out.Status, out.Error = domain.StatusFailed, e

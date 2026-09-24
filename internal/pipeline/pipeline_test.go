@@ -978,8 +978,9 @@ type flakyIn struct {
 }
 
 // A deadlock lost while an approval re-checks its proposal says nothing about
-// the proposal: the decision is undone, the proposal still waits, and
-// deciding again works. It is not failed for good with "try again".
+// the proposal. The decision is made again; lost again, it is recorded as
+// failed, "try again", but the proposal still waits, and deciding again
+// works. The proposal is not failed for good.
 func TestAnApprovalThatLosesADeadlockLeavesTheProposalWaiting(t *testing.T) {
 	c := testkit.NewCS101(t, 0)
 	flaky := false
@@ -1013,5 +1014,61 @@ func TestAnApprovalThatLosesADeadlockLeavesTheProposalWaiting(t *testing.T) {
 	flaky = false
 	if out := decide("d2"); out.Status != domain.StatusExecuted || !strings.Contains(string(out.Result), `"outcome":"executed"`) {
 		t.Fatalf("deciding again: %+v", out)
+	}
+}
+
+type onceIn struct {
+	tool.InCourse
+	LoseIn string `json:"lose_in"`
+}
+
+// A call that loses a deadlock is made again, once, in a fresh transaction:
+// nothing was wrong with it, and its key is not spent on a failure saying
+// "try again". Here a tool loses one the first time through its Validate,
+// its Pin or its Execute, and the call goes through all the same, once.
+func TestACallThatLosesADeadlockIsMadeAgain(t *testing.T) {
+	c := testkit.NewCS101(t, 0)
+	lost := map[string]int{}
+	lose := func(where string, in onceIn) error {
+		if in.LoseIn != where || lost[where] > 0 {
+			return nil
+		}
+		lost[where]++
+		return &pgconn.PgError{Code: "40P01", Message: "deadlock detected"}
+	}
+	c.P.Registry().Register(tool.Define(tool.Spec[onceIn, probeOut]{
+		Name: "probe.once", Kind: tool.Write, Gate: tool.Gate{Perms: []domain.Perm{domain.PermGradeSubmit}},
+		Resolve: func(_ context.Context, _ dbq.Querier, in onceIn) (tool.Target, error) {
+			return tool.Target{CourseID: in.CourseID, Type: "course"}, nil
+		},
+		Validate: func(_ context.Context, _ dbq.Querier, _ *domain.Member, in onceIn) error {
+			return lose("validate", in)
+		},
+		Pin: func(_ context.Context, _ dbq.Querier, _ time.Time, in onceIn) (onceIn, error) {
+			return in, lose("pin", in)
+		},
+		Execute: func(_ context.Context, _ *tool.ExecCtx, in onceIn) (probeOut, error) {
+			return probeOut{OK: true}, lose("execute", in)
+		},
+	}))
+	for _, tc := range []struct {
+		where  string
+		caller uuid.UUID
+		want   domain.ActionStatus
+	}{
+		{"validate", c.Sato, domain.StatusExecuted},
+		{"execute", c.Sato, domain.StatusExecuted},
+		{"pin", c.Grader, domain.StatusProposed}, // only a proposal is pinned
+	} {
+		out, err := c.Call(tc.caller, "probe.once", m{"course_id": c.Course, "lose_in": tc.where}, tc.where)
+		if err != nil || out.Status != tc.want || out.Replayed || lost[tc.where] != 1 {
+			t.Fatalf("losing a deadlock in %s: %+v %v (lost %d)", tc.where, out, err, lost[tc.where])
+		}
+		if n := c.Count(`SELECT count(*) FROM action WHERE idempotency_key = $1 AND status = $2`, tc.where, string(tc.want)); n != 1 {
+			t.Fatalf("losing a deadlock in %s: %d actions recorded as %s, want the one", tc.where, n, tc.want)
+		}
+	}
+	if n := c.Count(`SELECT count(*) FROM action`); n != 3 {
+		t.Fatalf("%d actions recorded, want one a call", n)
 	}
 }

@@ -14,6 +14,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/apperr"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/blob"
@@ -22,6 +23,7 @@ import (
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/jobs"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/pipeline"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/testkit"
+	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/tool"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/tools"
 )
 
@@ -387,6 +389,46 @@ func TestASweepLosesRacesQuietly(t *testing.T) {
 	out, err = f.P.InvokeSystem(context.Background(), f.system, tools.ToolMemberExpire, tools.MemberExpireIn{CourseID: f.Course, MemberID: f.GraderM}, "job:member.expire:x")
 	if err != nil || testkit.Result[tools.MemberExpireOut](t, out).Done {
 		t.Fatalf("%+v %v, want a no-op", out, err)
+	}
+}
+
+// A sweep step that loses a deadlock is made again, and one that loses
+// twice is not recorded at all: its key names the thing swept, so a failure
+// stored under it would be replayed on every tick after, and the thing never
+// swept. The next tick sweeps it.
+func TestASweepStepThatLosesADeadlockIsSweptNextTick(t *testing.T) {
+	f := setup(t, 0)
+	f.Exec(`UPDATE course_member SET expires_at = $2 WHERE id = $1`, f.GraderM, f.now.Add(-time.Hour))
+	losses := 2
+	reg := tool.NewRegistry()
+	for _, tl := range f.P.Registry().All() {
+		if tl.Name == tools.ToolMemberExpire {
+			execute := tl.Execute
+			tl.Execute = func(ctx context.Context, ec *tool.ExecCtx, in any) (any, error) {
+				if losses > 0 {
+					losses--
+					return nil, &pgconn.PgError{Code: "40P01", Message: "deadlock detected"}
+				}
+				return execute(ctx, ec, in)
+			}
+		}
+		reg.Register(tl)
+	}
+	pl := pipeline.New(f.Pool, reg, f.P.Config())
+	pl.SetClock(func() time.Time { return f.now })
+	runner := jobs.New(f.Pool, pl, f.system, jobs.Config{}, nil)
+
+	if rep, err := runner.Sweep(context.Background()); err != nil || rep.MembersExpired != 0 || losses != 0 {
+		t.Fatalf("%+v %v, %d deadlocks still to lose: want the step made twice and not done", rep, err, losses)
+	}
+	if n := f.Count(`SELECT count(*) FROM action WHERE action_type = $1`, tools.ToolMemberExpire); n != 0 {
+		t.Fatal("a sweep step that lost a deadlock twice was recorded")
+	}
+	if rep, err := runner.Sweep(context.Background()); err != nil || rep.MembersExpired != 1 {
+		t.Fatalf("the next tick: %+v %v, want the grader removed", rep, err)
+	}
+	if n := f.Count(`SELECT count(*) FROM course_member WHERE id = $1 AND status = 'removed'`, f.GraderM); n != 1 {
+		t.Fatal("the expired member is not removed")
 	}
 }
 

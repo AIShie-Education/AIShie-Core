@@ -10,11 +10,11 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/apperr"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/authz"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/canon"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/db"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/db/dbq"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/domain"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/events"
@@ -38,9 +38,18 @@ func (p *Pipeline) invokeWrite(ctx context.Context, caller Caller, t tool.Tool, 
 	}
 
 	var out Outcome
-	err = db.InTx(ctx, p.pool, func(tx pgx.Tx) error {
+	again := false
+	err = p.inTx(ctx, func(tx pgx.Tx, final bool) error {
 		var err error
-		out, err = p.write(ctx, tx, caller, t, in, canonical, hash, key)
+		if again {
+			// Made again, it is made from what the caller sent, not from what
+			// the first attempt's tool may have made of it.
+			if in, err = t.Decode(rawArgs); err != nil {
+				return err
+			}
+		}
+		again = true
+		out, err = p.write(ctx, tx, caller, t, in, canonical, hash, key, final)
 		return err
 	})
 	if err != nil {
@@ -51,8 +60,10 @@ func (p *Pipeline) invokeWrite(ctx context.Context, caller Caller, t tool.Tool, 
 
 // write is the body of one Write, inside its transaction. Returning an error
 // rolls everything back and records nothing. Every recorded outcome, denied
-// and failed included, is a nil error and a commit.
-func (p *Pipeline) write(ctx context.Context, tx pgx.Tx, caller Caller, t tool.Tool, in any, canonical []byte, hash, key string) (Outcome, error) {
+// and failed included, is a nil error and a commit. A deadlock lost on an
+// attempt that is not the final one is returned as it is, for inTx to make
+// the call again; lost on the final one, it is recorded as failed.
+func (p *Pipeline) write(ctx context.Context, tx pgx.Tx, caller Caller, t tool.Tool, in any, canonical []byte, hash, key string, final bool) (Outcome, error) {
 	q := dbq.New(tx)
 	now := p.now()
 
@@ -91,6 +102,9 @@ func (p *Pipeline) write(ctx context.Context, tx pgx.Tx, caller Caller, t tool.T
 		failure = denial(a.decision.Reason)
 	case t.Validate != nil:
 		if err := validate(ctx, tx, t, a.decision.Member, in); err != nil {
+			if !final && transient(err) {
+				return Outcome{}, err
+			}
 			e, ok := isCallerFault(err)
 			if !ok {
 				return Outcome{}, err
@@ -107,6 +121,14 @@ func (p *Pipeline) write(ctx context.Context, tx pgx.Tx, caller Caller, t tool.T
 	// which is what a retry of it presents.
 	if status == domain.StatusProposed && t.Pin != nil {
 		pinned, err := t.Pin(ctx, q, now, in)
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) {
+			// Pin runs in the transaction itself, not in a savepoint, so an
+			// error from the database has aborted it and nothing can be
+			// recorded in it. Returned as it is, a lost deadlock is made
+			// again, and anything else is the fault of ours it is.
+			return Outcome{}, err
+		}
 		if err != nil {
 			e, ok := isCallerFault(err)
 			if !ok {
@@ -180,6 +202,9 @@ func (p *Pipeline) write(ctx context.Context, tx pgx.Tx, caller Caller, t tool.T
 		}, in)
 	})
 	if err != nil {
+		if !final && transient(err) {
+			return Outcome{}, fmt.Errorf("%s: %w", t.Name, err)
+		}
 		e, ok := isCallerFault(err)
 		if !ok {
 			return Outcome{}, fmt.Errorf("%s: %w", t.Name, err)

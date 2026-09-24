@@ -162,8 +162,10 @@ func (p *Pipeline) Decide(ctx context.Context, ec *tool.ExecCtx, in DecideIn) (D
 		if err := validate(ctx, ec.Tx, t, a.decision.Member, args); err != nil {
 			if transient(err) {
 				// Lost a deadlock: nothing is wrong with the proposal. The
-				// decision is undone, the proposal still waits, and deciding
-				// again can work.
+				// decision is undone and made again, once, in a fresh
+				// transaction (see inTx). If it loses again it is recorded
+				// as failed, the proposal still waits, and deciding again
+				// can work.
 				return DecideOut{}, err
 			}
 			e, ok := isCallerFault(err)
