@@ -51,9 +51,17 @@ commit docs/notes.md
 g tag v1.0.1
 expect v1.0.1 v1.0.0 ""
 
-# A commit that is no tag, as publish.yml asks about main.
+# A release candidate released as it is: the stable tag on the candidate's
+# own commit. Each tag is compared as if the other were not there.
 commit src/migrations/0004_later.up.sql
-expect "$(g rev-parse HEAD)" v1.0.1 "0004_later.up.sql"
+g tag v1.1.0-rc.1
+g tag v1.1.0
+expect v1.1.0 v1.0.1 "0004_later.up.sql"
+expect v1.1.0-rc.1 v1.0.1 "0004_later.up.sql"
+
+# A commit that is no tag, as publish.yml asks about main.
+commit src/migrations/0005_after.up.sql
+expect "$(g rev-parse HEAD)" v1.1.0 "0005_after.up.sql"
 
 [ "$failed" = 0 ] && echo "release-notes.sh: ok"
 exit "$failed"

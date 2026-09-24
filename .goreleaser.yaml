@@ -17,7 +17,7 @@ builds:
     goarch: [amd64, arm64]
     flags: [-trimpath]
     # The same version, commit and date as the image (release.yml passes the
-    # last two in) and as `make build`: v1.2.3, not 1.2.3.
+    # last two in), and the version as `make build` has it: v1.2.3, not 1.2.3.
     ldflags:
       - -s -w
       - -X github.com/AIShiteru-LMS/AIShiteru-Core/internal/version.Version={{ if .IsSnapshot }}{{ .Version }}{{ else }}{{ .Tag }}{{ end }}

@@ -126,6 +126,11 @@ jobs:
           args: release --clean --release-footer ${{ runner.temp }}/footer.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # The tag that was pushed. GoReleaser otherwise takes the highest of
+          # the tags on the commit, and git ranks v1.0.0-rc.2 above v1.0.0: a
+          # stable release tagged on its release candidate's commit would be
+          # built and released as the candidate.
+          GORELEASER_CURRENT_TAG: ${{ github.ref_name }}
           SHORT_COMMIT: ${{ needs.verify.outputs.commit }}
           COMMIT_DATE: ${{ needs.verify.outputs.date }}
       # Artifact attestations need GitHub Enterprise Cloud on a private
