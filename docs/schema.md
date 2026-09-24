@@ -300,8 +300,10 @@ being attached twice. What limits the attaching is the sweep, which removes an u
 nothing has attached once it is `PROPOSAL_TTL` plus two days old; and a call that would attach
 one by way of a proposal is refused once the upload is two days old, so that the proposal is
 decided while its files are there. With `PROPOSAL_TTL=0` proposals wait for ever, and neither
-is done. Reading returns a short-lived download URL the same way. The storage
-key is made by the server and is unguessable; nothing the uploader says goes into it.
+is done. Reading returns a short-lived download URL the same way, and the file is served as a
+download, never as a page, whichever store keeps it: a student's `essay.html` does not run as
+script for whoever opens it. The storage key is made by the server and is unguessable; nothing
+the uploader says goes into it.
 
 Once a submission is handed in, its files are frozen with it. The trigger guards the
 `submission` row; that nothing is added to or archived from its documents afterwards is an
