@@ -185,28 +185,49 @@ func TestARequestCarriesOneMessage(t *testing.T) {
 	}
 }
 
-// Over MCP a refusal is written twice, as text and as structured content,
-// and the text is escaped once more on the way: a megabyte of input would
-// come back as thirteen. It is held to a few kilobytes all the same, and
-// still says where the schema was not met.
+// Over MCP a refusal of ours is written twice, as text and as structured
+// content, and the text is escaped once more on the way: a megabyte of input
+// would come back as thirteen. The SDK words some refusals itself — a tool
+// or a method it does not know, params that do not decode, a protocol
+// version the header does not match — quoting what it refuses with %q, which
+// makes each DEL four bytes before JSON escapes the backslash. Every one is
+// held to a few kilobytes all the same and still says what was wrong; what
+// could not be cut short — an id, which every answer repeats, or a listen,
+// whose answer is a stream — is not taken.
 func TestARefusalOverMCPRepeatsLittleOfWhatItRefuses(t *testing.T) {
 	f := serve(t, 1)
 	c, yuki := f.c, f.c.Students[0]
-	body := `{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "grade_submit", "arguments": {"course_id": "` +
-		c.Course.String() + `", "submission_id": "` + yuki.HW3.String() + `", "score": "` + strings.Repeat("<", 1<<20) +
-		`", "idempotency_key": "big"}}}`
-	req, _ := http.NewRequest(http.MethodPost, f.srv.URL+httpapi.MCPPath, strings.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+f.token(t, yuki.Actor))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json, text/event-stream")
-	res, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer res.Body.Close()
-	out, _ := io.ReadAll(res.Body)
-	if res.StatusCode != http.StatusOK || len(out) > 8<<10 || !strings.Contains(string(out), "invalid_argument") || !strings.Contains(string(out), "/properties/score") {
-		t.Fatalf("%d, %d bytes: %.300s", res.StatusCode, len(out), out)
+	token := f.token(t, yuki.Actor)
+	del := strings.Repeat("\x7f", 1<<20)
+	for _, tc := range []struct {
+		what, body, version string
+		status              int
+		says                string
+	}{
+		{"a score that is no number", `{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "grade_submit", "arguments": {"course_id": "` +
+			c.Course.String() + `", "submission_id": "` + yuki.HW3.String() + `", "score": "` + strings.Repeat("<", 1<<20) + `", "idempotency_key": "big"}}}`,
+			"", http.StatusOK, "/properties/score"},
+		{"a tool there is not", `{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "` + del + `", "arguments": {}}}`,
+			"", http.StatusOK, "unknown tool"},
+		{"a method there is not", `{"jsonrpc": "2.0", "id": 1, "method": "` + del + `", "params": {}}`,
+			"", http.StatusBadRequest, "JSON RPC not handled"},
+		{"params that do not decode", `{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": 5, "arguments": {"x": "` + del + `"}}}`,
+			"", http.StatusOK, "unmarshaling"},
+		{"a version the header does not match", `{"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {"_meta": {"io.modelcontextprotocol/protocolVersion": "` + del + `"}}}`,
+			"2025-06-18", http.StatusBadRequest, "does not match"},
+		{"an id", `{"jsonrpc": "2.0", "id": "` + del + `", "method": "tools/list"}`,
+			"", http.StatusBadRequest, "the id is longer than"},
+		{"a listen", `{"jsonrpc": "2.0", "id": 1, "method": "subscriptions/listen", "params": {"notifications": 5, "x": "` + del + `"}}`,
+			"", http.StatusBadRequest, "poll event_list"},
+	} {
+		var headers []string
+		if tc.version != "" {
+			headers = []string{"Mcp-Protocol-Version", tc.version}
+		}
+		res, out := post(t, f, token, tc.body, headers...)
+		if res.StatusCode != tc.status || len(out) > 8<<10 || !strings.Contains(string(out), tc.says) {
+			t.Errorf("%s: %d, %d bytes: %.300q", tc.what, res.StatusCode, len(out), out)
+		}
 	}
 }
 

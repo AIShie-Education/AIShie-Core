@@ -45,7 +45,7 @@ func (e *Error) With(key string, value any) *Error {
 
 // New makes an Error, its message held to maxMessage.
 func New(code Code, format string, args ...any) *Error {
-	return &Error{Code: code, Message: clip(fmt.Sprintf(format, args...))}
+	return &Error{Code: code, Message: Clip(fmt.Sprintf(format, args...))}
 }
 
 // maxMessage bounds a message, in bytes. Many repeat something of what they
@@ -55,7 +55,9 @@ func New(code Code, format string, args ...any) *Error {
 // are well under it; a value repeated in full is cut off, its start kept.
 const maxMessage = 400
 
-func clip(s string) string {
+// Clip holds s to maxMessage as New holds a message. It is for words that
+// are not made by New: a library's that answers in its own.
+func Clip(s string) string {
 	if len(s) <= maxMessage {
 		return s
 	}

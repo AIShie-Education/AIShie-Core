@@ -109,12 +109,16 @@ func NewHandler(d Deps) http.Handler {
 		return info, nil
 	}
 	// An API token need not expire; it is revoked instead.
-	return sdkauth.RequireBearerToken(verify, &sdkauth.RequireBearerTokenOptions{AllowMissingExpiration: true})(limited(d, screened(handler)))
+	return sdkauth.RequireBearerToken(verify, &sdkauth.RequireBearerTokenOptions{AllowMissingExpiration: true})(limited(d, screened(bounded(handler))))
 }
 
 // maxBody is the most one request may carry. It is the SDK's own default,
 // named here because screened reads the body before the SDK does.
 const maxBody = mcp.DefaultMaxRequestBodyBytes
+
+// maxID bounds a request's id, as written. Every answer repeats the id, and
+// an answer cannot be cut short of it; ids are numbers or short strings.
+const maxID = 256
 
 // screened looks at what a request carries before the SDK is given it.
 //
@@ -122,6 +126,13 @@ const maxBody = mcp.DefaultMaxRequestBodyBytes
 // before 2025-06-18 let a client send one, but the per-actor limit counts
 // requests: a batch would be as many calls as it held for the price of one,
 // and as many answers to one request, each tools/list the whole catalogue.
+//
+// Nor anything whose answer bounded could not keep short: an id longer than
+// maxID, or subscriptions/listen, whose answer is a stream that stays open.
+// Nothing is pushed from here, so a listen would carry only its own
+// acknowledgement, or a refusal the SDK words for it. Every "id" and
+// "method" in the message is looked at, so that a key given twice is caught
+// whichever of the two the SDK keeps.
 func screened(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -142,9 +153,115 @@ func screened(next http.Handler) http.Handler {
 			refuse(w, jsonrpc.CodeInvalidRequest, "one message per request; a batch is not taken")
 			return
 		}
+		dec := json.NewDecoder(bytes.NewReader(body))
+		if t, err := dec.Token(); err == nil && t == json.Delim('{') {
+			for dec.More() {
+				key, err := dec.Token()
+				var value json.RawMessage
+				if err != nil || dec.Decode(&value) != nil {
+					refuse(w, jsonrpc.CodeParseError, "the request is not JSON")
+					return
+				}
+				var method string
+				switch {
+				case key == "id" && len(value) > maxID:
+					refuse(w, jsonrpc.CodeInvalidRequest, fmt.Sprintf("the id is longer than %d bytes", maxID))
+					return
+				case key == "method" && json.Unmarshal(value, &method) == nil && method == "subscriptions/listen":
+					refuse(w, jsonrpc.CodeMethodNotFound, "nothing is pushed from here; poll event_list with the next_seq it last returned")
+					return
+				}
+			}
+		}
 		r.Body = io.NopCloser(bytes.NewReader(body))
 		next.ServeHTTP(w, r)
 	})
+}
+
+// bounded holds what the SDK says in refusal to what a message of ours may
+// be. The SDK words some refusals itself, instead of calling a tool — a tool
+// or a method it does not know, params that do not decode, a header that
+// does not match the body — and many quote what they refuse whole, with %q,
+// before JSON escapes that again: a megabyte sent would be five back. So an
+// answer is held until it is complete. The message of a JSON-RPC error is
+// cut as apperr.Clip cuts one of ours, and its data left out if Clip would
+// cut that too, since JSON cannot be cut; a refusal in plain text is cut the
+// same way. Any other answer is passed on as it is.
+func bounded(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		held := &heldResponse{header: w.Header()}
+		next.ServeHTTP(held, r)
+		if held.status == 0 {
+			held.status = http.StatusOK
+		}
+		body := held.body.Bytes()
+		var cut bool
+		if strings.HasPrefix(held.header.Get("Content-Type"), "application/json") {
+			body, cut = clippedError(body)
+		} else if held.status >= 400 {
+			text := strings.TrimSuffix(string(body), "\n")
+			if short := apperr.Clip(text); short != text {
+				body, cut = []byte(short+"\n"), true
+			}
+		}
+		if cut {
+			w.Header().Del("Content-Length")
+		}
+		w.WriteHeader(held.status)
+		_, _ = w.Write(body)
+	})
+}
+
+// clippedError is body with its error's message cut, if it is a JSON-RPC
+// error and that needs cutting. Any other answer is passed on as written.
+func clippedError(body []byte) ([]byte, bool) {
+	var m struct {
+		JSONRPC json.RawMessage `json:"jsonrpc"`
+		ID      json.RawMessage `json:"id"`
+		Error   *struct {
+			Code    json.RawMessage `json:"code"`
+			Message string          `json:"message"`
+			Data    json.RawMessage `json:"data,omitempty"`
+		} `json:"error"`
+	}
+	if json.Unmarshal(body, &m) != nil || m.Error == nil {
+		return body, false
+	}
+	message := apperr.Clip(m.Error.Message)
+	longData := apperr.Clip(string(m.Error.Data)) != string(m.Error.Data)
+	if message == m.Error.Message && !longData {
+		return body, false
+	}
+	m.Error.Message = message
+	if longData {
+		m.Error.Data = nil
+	}
+	out, err := json.Marshal(m)
+	if err != nil {
+		return body, false
+	}
+	return out, true
+}
+
+// heldResponse keeps a response until bounded has looked at it.
+type heldResponse struct {
+	header http.Header
+	status int
+	body   bytes.Buffer
+}
+
+func (h *heldResponse) Header() http.Header { return h.header }
+func (h *heldResponse) WriteHeader(code int) {
+	if h.status == 0 {
+		h.status = code
+	}
+}
+
+func (h *heldResponse) Write(b []byte) (int, error) {
+	if h.status == 0 {
+		h.status = http.StatusOK
+	}
+	return h.body.Write(b)
 }
 
 // refuse answers, as JSON-RPC, a request the SDK is not given. The id is
