@@ -84,11 +84,16 @@ type BreakdownItem struct {
 // GradeContent is the part of a grade that submitting and regrading share.
 // Exported because it is embedded in tool inputs: schema inference and
 // encoding/json both need to see through it.
+//
+// NoRubric is pinned when a grade is proposed and there is no rubric version
+// to pin, as ForMissing is: an empty rubric_version_id would otherwise mean
+// whatever is published when the proposal is approved.
 type GradeContent struct {
 	Score           decimal.Decimal  `json:"score"`
 	Feedback        *string          `json:"feedback,omitempty"`
 	Breakdown       []BreakdownItem  `json:"breakdown,omitempty"`
-	RubricVersionID *uuid.UUID       `json:"rubric_version_id,omitempty" jsonschema:"the rubric version the grader was shown; defaults to the published one"`
+	RubricVersionID *uuid.UUID       `json:"rubric_version_id,omitempty" jsonschema:"the rubric version the grader was shown; defaults to the published one. A proposal records it, or no_rubric if none was published when it was made"`
+	NoRubric        bool             `json:"no_rubric,omitempty" jsonschema:"that the grader was shown no rubric; filled in when the grade is proposed and no rubric is published, and the grade then records none, whatever is published before it is approved. A call giving it is refused if a rubric is published"`
 	OutOf           *decimal.Decimal `json:"out_of,omitempty" jsonschema:"the points possible the score is out of; defaults to what the work is worth now. A proposal records it, and is refused on approval if the work has been rescaled since"`
 	AllowExtra      bool             `json:"allow_extra,omitempty" jsonschema:"permit a score above the points possible"`
 	FeedbackFiles   []FeedbackFile   `json:"feedback_files,omitempty" jsonschema:"files to return with the grade, uploaded beforehand"`
@@ -265,29 +270,47 @@ func checkSubject(ctx context.Context, q dbq.Querier, courseID uuid.UUID, s *gra
 
 // pinContent fills in what a grade is against when the caller left it to
 // default: the points possible the score is out of, and the rubric's
-// published version, as they stand now. It is a Pin, run when a proposal is
-// made. A proposal approved after the rubric has moved on still records the
-// version the grader was shown; one approved after the work was rescaled is
+// published version, as they stand now, or no_rubric where there is none.
+// It is a Pin, run when a proposal is made. A proposal approved after the
+// rubric has moved on still records the version the grader was shown, and
+// one made with no rubric in force records none, though one has been
+// published or attached since; one approved after the work was rescaled is
 // refused, rather than its 95 out of 100 being carried out as 95 out of 200.
 func pinContent(ctx context.Context, q dbq.Querier, s gradeSubject, c *GradeContent) error {
 	if c.OutOf == nil {
 		max := s.pointsPossible()
 		c.OutOf = &max
 	}
-	if c.RubricVersionID != nil || s.assignment == nil || s.assignment.RubricDocumentID == nil {
+	if c.RubricVersionID != nil || s.assignment == nil {
 		return nil
 	}
-	v, err := q.GetDocumentPublishedVersion(ctx, *s.assignment.RubricDocumentID)
-	if err != nil {
+	if c.NoRubric {
+		// Given by the caller. Approving it records no rubric whatever is
+		// in force then, so it is held to what is in force now, as a call
+		// giving it is.
+		_, err := checkContent(ctx, q, s, *c, false)
 		return err
 	}
-	c.RubricVersionID = v
+	var v *uuid.UUID
+	if s.assignment.RubricDocumentID != nil {
+		var err error
+		if v, err = q.GetDocumentPublishedVersion(ctx, *s.assignment.RubricDocumentID); err != nil {
+			return err
+		}
+	}
+	c.RubricVersionID, c.NoRubric = v, v == nil
 	return nil
 }
 
 // checkContent holds the rules about the grade itself, and returns the rubric
-// version to pin: the one named, or the rubric's published version.
-func checkContent(ctx context.Context, q dbq.Querier, s gradeSubject, c GradeContent) (*uuid.UUID, error) {
+// version to pin: the one named, none where no_rubric says the grader was
+// shown none, or the rubric's published version. approved says the grade is
+// a proposal being carried out, whose no_rubric was pinned when it was made:
+// it records none, whatever has been published or attached since. A call's
+// no_rubric says no rubric is in force now, and is refused if one is.
+// Validate cannot tell the two apart and passes true; Execute, straight
+// after it, holds a call to it, and Pin a proposal as it is made.
+func checkContent(ctx context.Context, q dbq.Querier, s gradeSubject, c GradeContent, approved bool) (*uuid.UUID, error) {
 	if c.Score.IsNegative() {
 		return nil, apperr.Invalid("score cannot be negative")
 	}
@@ -303,14 +326,24 @@ func checkContent(ctx context.Context, q dbq.Querier, s gradeSubject, c GradeCon
 			return nil, apperr.Invalid("breakdown points cannot be negative")
 		}
 	}
+	if c.NoRubric && c.RubricVersionID != nil {
+		return nil, apperr.Invalid("give rubric_version_id or no_rubric, not both")
+	}
 	if s.assignment == nil || s.assignment.RubricDocumentID == nil {
 		if c.RubricVersionID != nil {
 			return nil, apperr.Precondition("there is no rubric here for rubric_version_id to be a version of")
 		}
 		return nil, nil
 	}
-	if c.RubricVersionID == nil {
-		return q.GetDocumentPublishedVersion(ctx, *s.assignment.RubricDocumentID)
+	switch {
+	case c.NoRubric && approved:
+		return nil, nil
+	case c.RubricVersionID == nil:
+		v, err := q.GetDocumentPublishedVersion(ctx, *s.assignment.RubricDocumentID)
+		if err == nil && v != nil && c.NoRubric {
+			return nil, apperr.Precondition("no_rubric says there is no rubric in force, and this assignment's rubric is published; grade against it")
+		}
+		return v, err
 	}
 	owner, err := q.GetDocumentVersionOwner(ctx, *c.RubricVersionID)
 	if errors.Is(err, pgx.ErrNoRows) || (err == nil && owner != *s.assignment.RubricDocumentID) {
@@ -365,7 +398,9 @@ func gradeSubmit(d Deps) tool.Tool {
 			if err := checkSubject(ctx, q, in.CourseID, &s, in.ForMissing); err != nil {
 				return err
 			}
-			_, err = checkContent(ctx, q, s, in.GradeContent)
+			// Validate cannot tell an approval from a call: Execute holds a
+			// call's no_rubric to the rubric in force.
+			_, err = checkContent(ctx, q, s, in.GradeContent, true)
 			return err
 		},
 		Pin: func(ctx context.Context, q dbq.Querier, now time.Time, in GradeSubmitIn) (GradeSubmitIn, error) {
@@ -395,7 +430,7 @@ func gradeSubmit(d Deps) tool.Tool {
 			if err := lockGradeTarget(ctx, ec.Q, in.CourseID, &s); err != nil {
 				return GradeSubmitOut{}, err
 			}
-			rubric, err := checkContent(ctx, ec.Q, s, in.GradeContent)
+			rubric, err := checkContent(ctx, ec.Q, s, in.GradeContent, ec.Approved)
 			if err != nil {
 				return GradeSubmitOut{}, err
 			}
@@ -891,7 +926,9 @@ func gradeRegrade(d Deps) tool.Tool {
 			if err := check(g); err != nil {
 				return err
 			}
-			if _, err = checkContent(ctx, q, s, in.GradeContent); err != nil {
+			// As for grade.submit: Execute holds a call's no_rubric to the
+			// rubric in force.
+			if _, err = checkContent(ctx, q, s, in.GradeContent, true); err != nil {
 				return err
 			}
 			return checkFeedbackFiles(ctx, d, q, m, in.CourseID, in.FeedbackFiles)
@@ -917,7 +954,7 @@ func gradeRegrade(d Deps) tool.Tool {
 			if err := check(old); err != nil {
 				return GradeRegradeOut{}, err
 			}
-			rubric, err := checkContent(ctx, ec.Q, s, in.GradeContent)
+			rubric, err := checkContent(ctx, ec.Q, s, in.GradeContent, ec.Approved)
 			if err != nil {
 				return GradeRegradeOut{}, err
 			}

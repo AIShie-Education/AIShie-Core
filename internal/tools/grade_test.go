@@ -738,6 +738,68 @@ func TestAProposalPinsTheRubricItWasMadeAgainst(t *testing.T) {
 	}
 }
 
+// The same when no rubric was in force when the proposal was made: the grader
+// was shown none, and the grade approved from it records none, whether the
+// rubric was attached and published while it waited or was attached already
+// and published only then, and for a regrade as for a grade. A call says so
+// only while it is true: no_rubric with a rubric published is refused, from a
+// call and from a proposal as it is made, and so is no_rubric beside a
+// rubric version.
+func TestAProposalMadeWithNoRubricRecordsNone(t *testing.T) {
+	b := build(t)
+	b.do(t, b.sato, "member.update_perms", m{"course_id": b.course, "member_id": b.graderM, "perms": m{"grade_post": "confirm_required"}})
+	propose := func(name string, args m) *uuid.UUID {
+		t.Helper()
+		args["course_id"] = b.course
+		out := b.MustCall(b.grader, name, args, "propose-"+uuid.NewString())
+		if out.Status != domain.StatusProposed {
+			t.Fatalf("the grader's %s: %+v", name, out)
+		}
+		return out.ActionID
+	}
+	approve := func(action *uuid.UUID) uuid.UUID {
+		t.Helper()
+		v := testkit.Result[pipeline.DecideOut](t, b.do(t, b.sato, "action.decide", m{"course_id": b.course, "action_id": action, "decision": "approve"}))
+		if v.Outcome != domain.StatusExecuted {
+			t.Fatalf("approval: %+v", v.Error)
+		}
+		return testkit.Result[tools.GradeSubmitOut](t, pipeline.Outcome{Result: v.Result}).GradeID
+	}
+	shownNone := func(what string, grade uuid.UUID) {
+		t.Helper()
+		if n := b.Count(`SELECT count(*) FROM grade WHERE id = $1 AND rubric_version_id IS NULL`, grade); n != 1 {
+			t.Errorf("%s is pinned to a rubric the grader never saw", what)
+		}
+	}
+	posted := testkit.Result[tools.GradeSubmitOut](t, b.do(t, b.sato, "grade.submit", m{"course_id": b.course, "submission_id": b.submit(t, b.yuki, "essay"), "score": 60})).GradeID
+	b.do(t, b.sato, "grade.post", m{"course_id": b.course, "grade_ids": []uuid.UUID{posted}})
+	kens := b.submit(t, b.ken, "essay")
+
+	// HW3 has no rubric.
+	graded := propose("grade.submit", m{"submission_id": kens, "score": 85})
+	regraded := propose("grade.regrade", m{"grade_id": posted, "score": 65})
+	if n := b.Count(`SELECT count(*) FROM action WHERE id IN ($1, $2) AND payload->>'no_rubric' = 'true'`, graded, regraded); n != 2 {
+		t.Error("a proposal made with no rubric does not say so")
+	}
+	// Then it has one, not yet published.
+	rubric := testkit.Result[tools.DocumentCreateOut](t, b.do(t, b.sato, "document.create",
+		m{"course_id": b.course, "kind": "rubric", "title": "HW3 rubric", "body_md": "v1"}))
+	b.do(t, b.sato, "assignment.update", m{"course_id": b.course, "assignment_id": b.hw3, "rubric_document_id": rubric.DocumentID})
+	unpublished := propose("grade.submit", m{"submission_id": b.submit(t, b.yuki, "revised"), "score": 90})
+	// And then it is published, before anyone decides.
+	b.do(t, b.sato, "document.publish", m{"course_id": b.course, "document_id": rubric.DocumentID})
+	shownNone("Ken's grade, proposed before HW3 had a rubric,", approve(graded))
+	regrade := approve(regraded)
+	shownNone("Yuki's regrade, proposed before HW3 had a rubric,", regrade)
+	shownNone("Yuki's grade, proposed while HW3's rubric was unpublished,", approve(unpublished))
+
+	// A call is against the rubric as it stands.
+	b.try(t, b.sato, "grade.submit", m{"course_id": b.course, "submission_id": kens, "score": 70, "no_rubric": true}, apperr.FailedPrecondition)
+	b.try(t, b.sato, "grade.regrade", m{"course_id": b.course, "grade_id": regrade, "score": 70, "no_rubric": true}, apperr.FailedPrecondition)
+	b.try(t, b.grader, "grade.submit", m{"course_id": b.course, "submission_id": kens, "score": 70, "no_rubric": true}, apperr.FailedPrecondition)
+	b.try(t, b.sato, "grade.submit", m{"course_id": b.course, "submission_id": kens, "score": 70, "no_rubric": true, "rubric_version_id": rubric.VersionID}, apperr.InvalidArgument)
+}
+
 // A proposal to post an assignment's drafts is about the drafts that were
 // waiting when it was made. One a TA enters while it waits — the TA grades
 // but does not post — has been in front of nobody who could release it, and

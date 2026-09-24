@@ -377,14 +377,16 @@ any secret fields removed; a secret (a password) still counts in the hash, throu
 digest under `SIGNING_KEY`, so that a key reused with a different secret is caught too while
 the hash gives nothing away to whoever reads the table. For a proposal, `payload` also carries
 the defaults that had to be fixed when it was made rather than when it is approved — the rubric
-version a grade is against, the points possible its score is out of, the draft a hand-in is of
-and the instructions it is handed in under, the version that "publish the latest" means, the
-drafts that "post this assignment" means — while the hash stays that of the call as the caller
-made it. A version or a draft that arrives while a proposal waits has been in front of nobody
-who asked for it, and approving the proposal does not release it. A draft that a proposal to
-post grades names, by id or as one that was waiting for the assignment, and that is posted by
-hand meanwhile is out already, as proposed, and the approval posts the rest, failing if there
-are none; one replaced meanwhile fails the approval.
+version a grade is against, or `no_rubric` where none was published, the points possible its
+score is out of, the draft a hand-in is of and the instructions it is handed in under, the
+version that "publish the latest" means, the drafts that "post this assignment" means — while
+the hash stays that of the call as the caller made it. A version or a draft that arrives while
+a proposal waits has been in front of nobody who asked for it, and approving the proposal does
+not release it. A grade proposed with no rubric in force records none, though a rubric is
+attached or published before it is approved. A draft that a proposal to post grades names, by
+id or as one that was waiting for the assignment, and that is posted by hand meanwhile is out
+already, as proposed, and the approval posts the rest, failing if there are none; one replaced
+meanwhile fails the approval.
 `result` holds what the call returned (secrets removed likewise), or `{"error": …}` for a
 failed, denied or cancelled action and `{"decision": …}` for a rejected one; which of those it
 is follows from `status`, never from the shape of `result`.
@@ -589,6 +591,9 @@ check `actor.platform_role` instead. That is the only place it is read.
   carried out only against the points possible it was proposed out of.
 - A draft is as old as the call that made it (§2.3), a draft written by an approved proposal
   included: an approval replaces only what came before the proposal.
+- A grade's `rubric_version_id` is the rubric its grader was shown (§2.4): for a proposal, the
+  version published when it was made, or none if none was, whatever is published by the time
+  it is approved. A call that says there is no rubric is refused if one is published.
 - A hand-in approved later counts from when it was asked for, and only if the draft still
   holds what was asked to be handed in (§2.5).
 - Nothing is added to or archived from a handed-in submission's files (§2.4): the state is
