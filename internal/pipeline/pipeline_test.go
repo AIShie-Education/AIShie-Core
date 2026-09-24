@@ -775,6 +775,26 @@ func TestAnUnstorableKeyIsRefusedAsInput(t *testing.T) {
 	}
 }
 
+// A key is held to its length in characters, as MCP clients are told,
+// however many bytes they take; and one that is not UTF-8 is refused as
+// that, however long it is.
+func TestAKeyIsCountedInCharacters(t *testing.T) {
+	c := testkit.NewCS101(t, 1)
+	long := strings.Repeat("あ", pipeline.MaxIdempotencyKeyLen) // three bytes each
+	if out, err := c.Call(c.Sato, "grade.submit", submitArgs(c, c.Students[0], 85), long); err != nil || out.Status != domain.StatusExecuted {
+		t.Fatalf("%d characters: %+v %v", pipeline.MaxIdempotencyKeyLen, out, err)
+	}
+	if _, err := c.Call(c.Sato, "grade.submit", submitArgs(c, c.Students[0], 85), long+"あ"); !apperr.Is(err, apperr.InvalidArgument) {
+		t.Fatalf("%d characters: %v", pipeline.MaxIdempotencyKeyLen+1, err)
+	}
+	if _, err := c.Call(c.Sato, "grade.submit", submitArgs(c, c.Students[0], 85), strings.Repeat("\xff", 3*pipeline.MaxIdempotencyKeyLen)); !apperr.Is(err, apperr.InvalidArgument) || !strings.Contains(err.Error(), "UTF-8") {
+		t.Fatalf("a long key that is not UTF-8: %v", err)
+	}
+	if n := c.Count(`SELECT count(*) FROM action`); n != 1 {
+		t.Fatalf("%d actions recorded, want the one", n)
+	}
+}
+
 type flakyIn struct {
 	tool.InCourse
 }

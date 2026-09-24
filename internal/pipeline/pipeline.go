@@ -58,7 +58,9 @@ type Config struct {
 // enough that an approval still means what the proposer meant.
 const DefaultProposalTTL = 14 * 24 * time.Hour
 
-// MaxIdempotencyKeyLen bounds the key; it is indexed.
+// MaxIdempotencyKeyLen bounds the key, in characters, as the schema MCP
+// clients are given counts them. The column has no length of its own; 200
+// characters are at most 800 bytes, well within what its index can hold.
 const MaxIdempotencyKeyLen = 200
 
 type Pipeline struct {
