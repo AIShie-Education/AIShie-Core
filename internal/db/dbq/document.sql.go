@@ -42,7 +42,6 @@ SELECT d.id, d.course_id, d.kind, d.title, d.submission_id, d.grade_id, d.publis
        d.sort_order, d.status, d.created_at,
        s.student_member_id  AS submission_student,
        s.assignment_id      AS submission_assignment,
-       s.state              AS submission_state,
        g.student_member_id  AS grade_student,
        gs.assignment_id     AS grade_assignment,
        g.posted_at          AS grade_posted_at,
@@ -72,7 +71,6 @@ type GetDocumentWithOwnerRow struct {
 	CreatedAt            time.Time
 	SubmissionStudent    *uuid.UUID
 	SubmissionAssignment *uuid.UUID
-	SubmissionState      *string
 	GradeStudent         *uuid.UUID
 	GradeAssignment      *uuid.UUID
 	GradePostedAt        *time.Time
@@ -97,7 +95,6 @@ func (q *Queries) GetDocumentWithOwner(ctx context.Context, arg GetDocumentWithO
 		&i.CreatedAt,
 		&i.SubmissionStudent,
 		&i.SubmissionAssignment,
-		&i.SubmissionState,
 		&i.GradeStudent,
 		&i.GradeAssignment,
 		&i.GradePostedAt,

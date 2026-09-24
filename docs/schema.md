@@ -575,6 +575,9 @@ check `actor.platform_role` instead. That is the only place it is read.
   included: an approval replaces only what came before the proposal.
 - A hand-in approved later counts from when it was asked for, and only if the draft still
   holds what was asked to be handed in (§2.5).
+- Nothing is added to or archived from a handed-in submission's files (§2.4): the state is
+  read under the submission's lock, so a file that comes during the hand-in waits for it and
+  is then refused.
 - The component tree is acyclic beyond the self-loop the CHECK blocks.
 - Cancelling pending proposals when a member is removed or expires.
 - Nobody hands out more than they hold (§2.2): any change that widens a seat is measured as

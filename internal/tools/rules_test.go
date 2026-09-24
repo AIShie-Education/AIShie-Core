@@ -1413,6 +1413,62 @@ func TestAnEventNamingAStudentTakesTheSeatFirst(t *testing.T) {
 	}
 }
 
+// A file is added to a submission, or archived from it, only while it is a
+// draft, and the state that says so is read under the submission's lock. A
+// file that comes while the draft is being handed in waits for the hand-in,
+// and then finds the work handed in: it does not land on it afterwards, nor
+// take away a file the hand-in counted. Here the hand-in holds the
+// submission and waits for the course's event stream.
+func TestAFileRacingTheHandInFindsItHandedIn(t *testing.T) {
+	b := build(t)
+	busy := func() (release func()) {
+		h := fnv.New32a()
+		_, _ = h.Write(b.course[:])
+		return heldBy(t, b, `SELECT pg_advisory_xact_lock($1::int4, $2::int4)`, int32(0x41495345), int32(h.Sum32()))
+	}
+
+	// Yuki attaches an appendix as her essay is handed in.
+	essay := testkit.Result[tools.SubmissionCreateOut](t, b.do(t, b.yuki, "submission.create",
+		m{"course_id": b.course, "assignment_id": b.hw3, "body": "essay"})).SubmissionID
+	release := busy()
+	submit := b.inFlight(b.yuki, "submission.submit", m{"course_id": b.course, "submission_id": essay}, "submit-essay")
+	b.waitingFor(t, 1, submit)
+	attach := b.inFlight(b.yuki, "document.create", m{"course_id": b.course, "kind": "submission", "title": "appendix.txt",
+		"submission_id": essay, "body_md": "second thoughts"}, "appendix")
+	b.waitingFor(t, 2, submit, attach)
+	release()
+	if out := settled(t, submit); out.Status != domain.StatusExecuted {
+		t.Fatalf("the hand-in: %+v", out)
+	}
+	if out := settled(t, attach); out.Error == nil || out.Error.Code != apperr.Conflict {
+		t.Fatalf("a file added as the work was handed in: %+v", out)
+	}
+	if n := b.Count(`SELECT count(*) FROM document WHERE submission_id = $1`, essay); n != 0 {
+		t.Fatalf("the handed-in work has %d files; it was handed in with none", n)
+	}
+
+	// Ken archives his only file as his work is handed in.
+	work := testkit.Result[tools.SubmissionCreateOut](t, b.do(t, b.ken, "submission.create",
+		m{"course_id": b.course, "assignment_id": b.hw3})).SubmissionID
+	file := testkit.Result[tools.DocumentCreateOut](t, b.do(t, b.ken, "document.create", m{"course_id": b.course, "kind": "submission",
+		"title": "essay.txt", "submission_id": work, "body_md": "Ken's essay"})).DocumentID
+	release = busy()
+	submit = b.inFlight(b.ken, "submission.submit", m{"course_id": b.course, "submission_id": work}, "submit-work")
+	b.waitingFor(t, 1, submit)
+	archive := b.inFlight(b.ken, "document.archive", m{"course_id": b.course, "document_id": file}, "archive")
+	b.waitingFor(t, 2, submit, archive)
+	release()
+	if out := settled(t, submit); out.Status != domain.StatusExecuted {
+		t.Fatalf("the hand-in: %+v", out)
+	}
+	if out := settled(t, archive); out.Error == nil || out.Error.Code != apperr.Conflict {
+		t.Fatalf("a file archived as the work was handed in: %+v", out)
+	}
+	if n := b.Count(`SELECT count(*) FROM document WHERE id = $1 AND status = 'active'`, file); n != 1 {
+		t.Fatal("the handed-in work lost the file it was handed in with")
+	}
+}
+
 // Seating an actor over their expired seat removes that seat as any removal
 // does: after the member's calls in flight, cancelling what they proposed. A
 // seat the sweep removes meanwhile is simply out of the way; one whose expiry

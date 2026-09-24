@@ -459,8 +459,11 @@ func documentCreate(d Deps) tool.Tool {
 			switch in.Kind {
 			case kindSubmission:
 				// The freeze trigger guards the submission row, not the files
-				// beside it. Once handed in, nothing more may be added.
-				s, err := ec.Q.GetSubmissionInCourse(ctx, dbq.GetSubmissionInCourseParams{ID: *in.SubmissionID, CourseID: in.CourseID})
+				// beside it. Once handed in, nothing more may be added. The
+				// state is read under the row's lock, the one the hand-in
+				// takes: a file that comes while the draft is being handed in
+				// waits for it, and then finds it handed in.
+				s, err := ec.Q.GetSubmissionFullForUpdate(ctx, dbq.GetSubmissionFullForUpdateParams{ID: *in.SubmissionID, CourseID: in.CourseID})
 				if err != nil {
 					return DocumentCreateOut{}, err
 				}
@@ -677,8 +680,18 @@ func documentArchive() tool.Tool {
 			if err != nil {
 				return OK{}, err
 			}
-			if doc.SubmissionState != nil && *doc.SubmissionState != stateDraft {
-				return OK{}, apperr.Conflicts("the submission has been handed in; its files no longer change")
+			// A submitted file is archived only while its submission is a
+			// draft, and the state is read under the submission's lock, as
+			// document.create reads it: an archive during the hand-in waits
+			// for it, rather than taking away a file the hand-in counted.
+			if doc.SubmissionID != nil {
+				s, err := ec.Q.GetSubmissionFullForUpdate(ctx, dbq.GetSubmissionFullForUpdateParams{ID: *doc.SubmissionID, CourseID: in.CourseID})
+				if err != nil {
+					return OK{}, err
+				}
+				if s.State != stateDraft {
+					return OK{}, apperr.Conflicts("the submission has been handed in; its files no longer change")
+				}
 			}
 			n, err := ec.Q.SetDocumentStatus(ctx, dbq.SetDocumentStatusParams{ID: doc.ID, Status: "archived"})
 			if err != nil {

@@ -53,9 +53,10 @@ type GetSubmissionFullForUpdateParams struct {
 	CourseID uuid.UUID
 }
 
-// GetSubmissionFull, locked until the hand-in is written, so that what
-// submission.submit checks is what it hands in: an edit to the draft
-// meanwhile waits, and then finds it handed in.
+// GetSubmissionFull, locked until the transaction ends, so that what
+// submission.submit checks is what it hands in: an edit to the draft, or a
+// file added to it or archived from it, meanwhile waits, and then finds it
+// handed in.
 func (q *Queries) GetSubmissionFullForUpdate(ctx context.Context, arg GetSubmissionFullForUpdateParams) (Submission, error) {
 	row := q.db.QueryRow(ctx, getSubmissionFullForUpdate, arg.ID, arg.CourseID)
 	var i Submission

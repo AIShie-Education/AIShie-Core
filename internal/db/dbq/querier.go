@@ -128,9 +128,10 @@ type Querier interface {
 	// The account an identity provider's subject is linked to, if any.
 	GetSSOCredential(ctx context.Context, arg GetSSOCredentialParams) (GetSSOCredentialRow, error)
 	GetSubmissionFull(ctx context.Context, arg GetSubmissionFullParams) (Submission, error)
-	// GetSubmissionFull, locked until the hand-in is written, so that what
-	// submission.submit checks is what it hands in: an edit to the draft
-	// meanwhile waits, and then finds it handed in.
+	// GetSubmissionFull, locked until the transaction ends, so that what
+	// submission.submit checks is what it hands in: an edit to the draft, or a
+	// file added to it or archived from it, meanwhile waits, and then finds it
+	// handed in.
 	GetSubmissionFullForUpdate(ctx context.Context, arg GetSubmissionFullForUpdateParams) (Submission, error)
 	// Lookups are always "in this course": an id from another course is not found.
 	GetSubmissionInCourse(ctx context.Context, arg GetSubmissionInCourseParams) (GetSubmissionInCourseRow, error)
