@@ -397,6 +397,49 @@ func TestATrickledBodyIsCutOff(t *testing.T) {
 	}
 }
 
+// A file may take longer than the body timeout to arrive; that is what the
+// transfer timeout is for. Once it is in, the uploader is told so. A client
+// that sent the whole file and heard nothing back would take the upload for
+// failed, and its retry would find the URL already used.
+func TestASlowUploadIsAnswered(t *testing.T) {
+	const bodyTimeout = 300 * time.Millisecond
+	a := hardenedWith(t, nil, nil, nil, func(d *httpapi.Deps) { d.BodyTimeout = bodyTimeout })
+	ask := a.do(nil, "GET", "/v1/courses/"+a.c.Course.String()+"/upload-url?kind=material&content_type=text/plain", a.tokenFor(a.c.Sato), nil)
+	if ask.Status != 200 {
+		t.Fatalf("upload-url: %d %s", ask.Status, ask.Raw)
+	}
+	// A byte at a time, until well past the body timeout: slow, not stuck.
+	body, w := io.Pipe()
+	sent := make(chan int, 1)
+	go func() {
+		n := 0
+		tick := time.NewTicker(bodyTimeout / 10)
+		defer tick.Stop()
+		for start := time.Now(); time.Since(start) < 3*bodyTimeout; n++ {
+			<-tick.C
+			if _, err := w.Write([]byte("x")); err != nil {
+				break
+			}
+		}
+		sent <- n
+		_ = w.Close()
+	}()
+	req, err := http.NewRequest("PUT", a.here(ask.str("result", "upload_url")), body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "text/plain")
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("the slow upload got no answer: %v", err)
+	}
+	defer res.Body.Close()
+	got, _ := io.ReadAll(res.Body)
+	if n := <-sent; res.StatusCode != 200 || !strings.Contains(string(got), fmt.Sprintf(`"byte_size":%d`, n)) {
+		t.Fatalf("the slow upload of %d bytes: %d %s", n, res.StatusCode, got)
+	}
+}
+
 // A front end on another site needs SameSite=None, with Secure.
 func TestCookiesForACrossSiteFrontEnd(t *testing.T) {
 	a := hardenedWith(t, nil, nil, nil, func(d *httpapi.Deps) { d.CookieSameSite = http.SameSiteNoneMode })

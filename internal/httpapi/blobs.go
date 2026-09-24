@@ -31,9 +31,15 @@ func (s *server) blobPut(local blob.Local) http.HandlerFunc {
 			s.writeError(w, r, apperr.Invalid("this URL takes Content-Type %q, not %q", contentType, got))
 			return
 		}
-		// A file takes longer to arrive than a JSON body does.
-		_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(s.TransferTimeout))
+		// A file takes longer to arrive than a JSON body does. The answer
+		// then has as long as any other, from when the file is in: the time
+		// the request started with may have gone on the file, and a client
+		// that sent it all and heard nothing back would find, on retrying,
+		// that the URL has been used.
+		rc := http.NewResponseController(w)
+		_ = rc.SetReadDeadline(time.Now().Add(s.TransferTimeout))
 		info, err := local.Put(r.Context(), key, contentType, r.Body, s.MaxUploadBytes)
+		_ = rc.SetWriteDeadline(time.Now().Add(s.BodyTimeout))
 		switch {
 		case errors.Is(err, blob.ErrTooLarge):
 			s.writeError(w, r, apperr.Invalid("the file is larger than %d bytes", s.MaxUploadBytes))
