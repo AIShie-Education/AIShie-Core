@@ -293,6 +293,12 @@ type seating struct {
 	expiresAt                     *time.Time
 }
 
+// listsItself reports whether the seat's student list will be the seat
+// itself, as a student's is unless someone else is named.
+func (s seating) listsItself() bool {
+	return s.role == "student" && s.studentScope == domain.ScopeListed && len(s.listedStudents) == 0
+}
+
 // seat adds a member: a new course_member row with the preset copied onto it.
 // preset_id is kept as provenance only — nothing reads it afterwards, so
 // editing the preset later changes nobody already seated.
@@ -350,7 +356,7 @@ func seat(ctx context.Context, ec *tool.ExecCtx, s seating) (uuid.UUID, error) {
 	// self-access special case anywhere: a student sees their own work for
 	// the same reason a tutor listed for them does.
 	students := s.listedStudents
-	if s.role == "student" && s.studentScope == domain.ScopeListed && len(students) == 0 {
+	if s.listsItself() {
 		students = []uuid.UUID{id}
 	}
 	if err := writeScope(ctx, ec.Q, s.courseID, id, s.studentScope, students, s.assignmentScope, s.listedAssignments); err != nil {

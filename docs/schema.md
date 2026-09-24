@@ -191,7 +191,9 @@ a time, so the three are measured together: any change that widens a seat — a 
 scope opened or a list added to, an expiry extended or cleared, a paused seat resumed — is a
 grant of the whole of what the seat will then hold, and the whole of it must be within the
 granter's own: no level above the granter's on any column, no reach beyond a list-scoped
-granter's own list, no life past the granter's own `expires_at`. Narrowing is always allowed,
+granter's own list, no life past the granter's own `expires_at`. A student's seat reaches that
+student, so a list-scoped granter raises nothing on the seat of a student outside the list, and
+seats no new student at all: nobody can have listed them yet. Narrowing is always allowed,
 whatever the granter holds. Nobody manages their own seat, and a seat whose `expires_at` has
 passed is as good as removed whether or not the sweep has got to it: it is not revived, and
 seating the actor again is a fresh row.
@@ -523,6 +525,8 @@ check `actor.platform_role` instead. That is the only place it is read.
 - Grade computation, and writing a `computed` snapshot only on post.
 - The component tree is acyclic beyond the self-loop the CHECK blocks.
 - Cancelling pending proposals when a member is removed or expires.
+- Nobody hands out more than they hold (§2.2): any change that widens a seat is measured as
+  the whole of what it will then hold, a student's seat reaching the student included.
 - `actor.kind` and `course_member.role` are never read by authorization.
 
 ## 5. Worked example: an agent grades an essay

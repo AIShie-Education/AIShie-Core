@@ -87,6 +87,37 @@ func TestMemberManagementCannotEscalate(t *testing.T) {
 	b.try(t, b.sato, "member.update_perms", m{"course_id": b.course, "member_id": seated, "perms": m{"grade_submit": "sometimes"}}, apperr.InvalidArgument)
 }
 
+// A student's seat reaches that student, so a level on it is a level over
+// that student's work: raising one, resuming the seat or seating a new
+// student is held to the granter's own list like any other grant. Otherwise
+// a manager listed for Yuki could give Ken grade_post over Ken, and Ken
+// would post his own grade.
+func TestAStudentsSeatReachesTheStudent(t *testing.T) {
+	b := build(t)
+	register := func(name string) uuid.UUID {
+		return testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", m{"kind": "human", "display_name": name})).ActorID
+	}
+	helper := register("Helper")
+	b.do(t, b.sato, "member.add", m{"course_id": b.course, "actor_id": helper, "preset": "ta",
+		"perms":         m{"member_manage": "autonomous", "grade_post": "autonomous", "submission_write": "autonomous"},
+		"student_scope": "listed", "listed_students": []uuid.UUID{b.yukiM}})
+
+	// Ken is not on the helper's list: nothing that widens his seat.
+	b.try(t, helper, "member.update_perms", m{"course_id": b.course, "member_id": b.kenM,
+		"perms": m{"grade_submit": "autonomous", "grade_post": "autonomous"}}, apperr.Forbidden)
+	b.do(t, b.sato, "member.pause", m{"course_id": b.course, "member_id": b.kenM})
+	b.try(t, helper, "member.resume", m{"course_id": b.course, "member_id": b.kenM}, apperr.Forbidden)
+	b.do(t, b.sato, "member.resume", m{"course_id": b.course, "member_id": b.kenM})
+	// Nor a new student, whom no list can have named yet.
+	b.try(t, helper, "member.add", m{"course_id": b.course, "actor_id": register("Newbie"), "preset": "student"}, apperr.Forbidden)
+
+	// Narrowing Ken is allowed, as always; taking it back is a grant again.
+	b.do(t, helper, "member.update_perms", m{"course_id": b.course, "member_id": b.kenM, "perms": m{"grade_read": "denied"}})
+	b.try(t, helper, "member.update_perms", m{"course_id": b.course, "member_id": b.kenM, "perms": m{"grade_read": "autonomous"}}, apperr.Forbidden)
+	// Yuki is on the list, and her seat may be raised within the helper's own.
+	b.do(t, helper, "member.update_perms", m{"course_id": b.course, "member_id": b.yukiM, "perms": m{"rubric_read": "autonomous"}})
+}
+
 // ---------------------------------------------------------------------------
 // docs/schema.md §4, "enforced by the application", one by one
 // ---------------------------------------------------------------------------

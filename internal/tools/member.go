@@ -179,7 +179,7 @@ func memberAdd() tool.Tool {
 			if err := s.perms.apply(in.Perms); err != nil {
 				return MemberIDOut{}, err
 			}
-			if err := withinGranter(ctx, ec, s.perms, s.role, s.studentScope, s.listedStudents, s.assignmentScope, s.listedAssignments); err != nil {
+			if err := withinGranter(ctx, ec, s.perms, s.listsItself(), s.studentScope, s.listedStudents, s.assignmentScope, s.listedAssignments); err != nil {
 				return MemberIDOut{}, err
 			}
 			if err := outlastsGranter(ec, s.expiresAt); err != nil {
@@ -234,24 +234,29 @@ func findPreset(ctx context.Context, q *dbq.Queries, courseID uuid.UUID, name *s
 // a member who reaches the whole class, or widening the reach of a member
 // who holds a level, or extending the life of either, hands out the product,
 // and the product is what must be within the granter's own.
-func withinGranter(ctx context.Context, ec *tool.ExecCtx, perms permSet, role, studentScope string, students []uuid.UUID, assignmentScope string, assignments []uuid.UUID) error {
+//
+// A seat that lists itself reaches itself, like any other listed student:
+// levels on a student's seat are levels over that student's work. There is
+// no self-access special case here either, or a manager listed for Yuki
+// could give Ken grade_post, over Ken, by raising it on Ken's own seat.
+// listsItself says the list is about to gain the new seat's own id, which no
+// granter can have listed yet.
+func withinGranter(ctx context.Context, ec *tool.ExecCtx, perms permSet, listsItself bool, studentScope string, students []uuid.UUID, assignmentScope string, assignments []uuid.UUID) error {
 	g := ec.Member
 	if p, over := perms.exceeds(g); over {
 		return apperr.Forbid("you hold %s at %s and cannot grant it at %s", p, g.Perm(p), perms[p]).With("permission", string(p))
 	}
 	if g.StudentScope == domain.ScopeListed {
-		// A student's default list is themselves, which the granter need not
-		// have been listed for in advance.
-		implicitSelf := role == "student" && studentScope == domain.ScopeListed && len(students) == 0
 		if studentScope != domain.ScopeListed {
 			return apperr.Forbid("your own student scope is a list; you cannot grant the whole class")
 		}
-		if !implicitSelf {
-			if reason, err := authz.CheckScope(ctx, ec.Q, g, authz.Target{StudentMemberIDs: students}); err != nil {
-				return err
-			} else if reason != authz.ReasonNone {
-				return apperr.Forbid("you can only list students who are in your own scope")
-			}
+		if listsItself {
+			return apperr.Forbid("your own student scope is a list; a new student's seat reaches that student, who is not on it")
+		}
+		if reason, err := authz.CheckScope(ctx, ec.Q, g, authz.Target{StudentMemberIDs: students}); err != nil {
+			return err
+		} else if reason != authz.ReasonNone {
+			return apperr.Forbid("you can only give a seat that reaches students who are in your own scope")
 		}
 	}
 	if g.AssignmentScope == domain.ScopeListed {
@@ -326,7 +331,7 @@ func loadOther(ctx context.Context, ec *tool.ExecCtx, courseID, memberID uuid.UU
 type shape struct {
 	perms                         permSet
 	studentScope, assignmentScope string
-	students, assignments         []uuid.UUID // the student list without the member itself
+	students, assignments         []uuid.UUID // a student's own seat is on its list: it reaches itself
 	expiresAt                     *time.Time
 }
 
@@ -336,7 +341,6 @@ func shapeOf(ctx context.Context, q *dbq.Queries, m dbq.GetMemberInCourseRow) (s
 	if s.students, err = q.ListStudentScope(ctx, m.ID); err != nil {
 		return s, err
 	}
-	s.students = withoutSelf(s.students, m.ID)
 	s.assignments, err = q.ListAssignmentScope(ctx, m.ID)
 	return s, err
 }
@@ -384,7 +388,7 @@ func grant(ctx context.Context, ec *tool.ExecCtx, before, after shape) error {
 	if !after.widens(before) {
 		return nil
 	}
-	if err := withinGranter(ctx, ec, after.perms, "", after.studentScope, after.students, after.assignmentScope, after.assignments); err != nil {
+	if err := withinGranter(ctx, ec, after.perms, false, after.studentScope, after.students, after.assignmentScope, after.assignments); err != nil {
 		return err
 	}
 	return outlastsGranter(ec, after.expiresAt)
@@ -496,7 +500,7 @@ func memberRescope() tool.Tool {
 			// fail — unless the scope it belongs to is no longer a list.
 			students, assignments := in.ListedStudents, in.ListedAssignments
 			if students != nil || after.studentScope != domain.ScopeListed {
-				after.students = withoutSelf(dedupe(students), m.ID)
+				after.students = dedupe(students)
 			}
 			if assignments != nil || after.assignmentScope != domain.ScopeListed {
 				after.assignments = dedupe(assignments)
@@ -533,19 +537,6 @@ func memberRescope() tool.Tool {
 			return OK{OK: true}, nil
 		},
 	})
-}
-
-// withoutSelf drops a member's own id from its student list before the list
-// is measured against the granter's scope: a student listing themselves is
-// the normal case, not a grant.
-func withoutSelf(ids []uuid.UUID, self uuid.UUID) []uuid.UUID {
-	out := make([]uuid.UUID, 0, len(ids))
-	for _, id := range ids {
-		if id != self {
-			out = append(out, id)
-		}
-	}
-	return out
 }
 
 func memberSetStatus(name, desc, path, from, to, event string) tool.Tool {
