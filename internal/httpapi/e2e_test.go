@@ -200,7 +200,8 @@ func TestStatusCodes(t *testing.T) {
 
 	// A TA whose grades wait for someone else's approval, and who approves
 	// others'; one of the agent's proposals rejected, and one cancelled when
-	// its seat is taken away; and HW4 not published after all.
+	// its seat is taken away; a grade of Sato's refused, on record under its
+	// key; and HW4 not published after all.
 	ta := c.Actor("human", "TA")
 	c.Member(c.Course, ta, "ta",
 		testkit.WithPerm(domain.PermGradeSubmit, domain.ConfirmRequired),
@@ -212,6 +213,7 @@ func TestStatusCodes(t *testing.T) {
 	toCancel := m{"submission_id": yuki.HW3, "score": 70}
 	c.MustCall(c.Grader, "grade.submit", m{"course_id": c.Course, "submission_id": yuki.HW3, "score": 70}, "to-cancel")
 	c.MustCall(c.Sato, "member.remove", m{"course_id": c.Course, "member_id": c.GraderM}, "rm-grader")
+	c.MustCall(c.Sato, "grade.submit", m{"course_id": c.Course, "submission_id": yuki.HW3, "score": -1}, "refused")
 	c.Exec(`UPDATE assignment SET published_at = NULL WHERE id = $1`, c.HW4)
 
 	cases := []struct {
@@ -239,7 +241,7 @@ func TestStatusCodes(t *testing.T) {
 		{"unknown query parameter", "GET", course + "/actions/proposed?sudo=1", sato, nil, nil, 400, "invalid_argument", false},
 		{"denied", "POST", course + "/grades", student, m{"submission_id": yuki.HW3, "score": 100}, key("i"), 403, "forbidden", true},
 		{"an argument the tool refuses", "POST", course + "/grades", sato, m{"submission_id": yuki.HW3, "score": -1}, key("j"), 400, "invalid_argument", true},
-		{"a key used for another call", "POST", course + "/grades", sato, m{"submission_id": yuki.HW3, "score": 1}, key("j"), 409, "idempotency_conflict", false},
+		{"a key used for another call", "POST", course + "/grades", sato, m{"submission_id": yuki.HW3, "score": 1}, key("refused"), 409, "idempotency_conflict", false},
 		{"something the tool does not find", "POST", course + "/submissions", student, m{"assignment_id": c.HW4}, key("k"), 404, "not_found", true},
 		{"something the tool forbids", "POST", course + "/actions/" + own.ActionID.String() + "/decide", a.tokenFor(ta), m{"decision": "approve"}, key("l"), 403, "forbidden", true},
 		{"a rejected proposal, replayed", "POST", course + "/grades", grader, toReject, key("to-reject"), 409, "", true},
