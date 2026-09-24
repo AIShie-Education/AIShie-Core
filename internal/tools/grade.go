@@ -193,26 +193,24 @@ func loadSubject(ctx context.Context, q dbq.Querier, courseID uuid.UUID, submiss
 	return s, nil
 }
 
-// checkSubject holds the rules about what may be graded at all. forMissing is
-// what the grade was given for, when that was pinned.
-func checkSubject(ctx context.Context, q dbq.Querier, courseID uuid.UUID, s gradeSubject, forMissing *bool) error {
+// checkSubject holds the rules about what may be graded at all. It takes the
+// grade's locks and reads s again under them, so what is checked here and in
+// checkContent after it is what the grade is written against — and a
+// proposal made for a 'missing' placeholder is on record before any takeover
+// can look for it (SubmissionHasGrades). The work must still be what the
+// grade was given for: nothing, if it was a placeholder when first read here
+// or, as forMissing says when it was pinned, when the grade was proposed.
+func checkSubject(ctx context.Context, q dbq.Querier, courseID uuid.UUID, s *gradeSubject, forMissing *bool) error {
 	if s.submission != nil {
-		// Read under the submission's lock, which is held to the end of the
-		// call. Late work taking a 'missing' placeholder over takes the same
-		// lock, so the state read here is the state the grade is written
-		// against, and a proposal made for the placeholder is on record
-		// before any takeover can look for it (SubmissionHasGrades). The work
-		// must still be what the grade was given for: nothing, if it was a
-		// placeholder when first read here or when the grade was proposed.
-		state, err := q.LockSubmissionForGrading(ctx, s.submission.ID)
-		if err != nil {
+		seen := s.submission.State
+		if err := lockGradeTarget(ctx, q, courseID, s); err != nil {
 			return err
 		}
-		missing := state == stateMissing
+		missing := s.submission.State == stateMissing
 		switch {
-		case state == stateDraft:
+		case s.submission.State == stateDraft:
 			return apperr.Precondition("the submission has not been submitted yet")
-		case missing != (s.submission.State == stateMissing), forMissing != nil && *forMissing && !missing:
+		case missing != (seen == stateMissing), forMissing != nil && *forMissing && !missing:
 			return apperr.Precondition("this grade was given for nothing handed in, and there is work here now; look at it, and grade it again")
 		case forMissing != nil && !*forMissing && missing:
 			return apperr.Precondition("this grade was given for work handed in, and nothing was; look at it, and grade it again")
@@ -344,7 +342,7 @@ func gradeSubmit(d Deps) tool.Tool {
 			if err := checkFeedbackFiles(ctx, d, q, m, in.CourseID, in.FeedbackFiles); err != nil {
 				return err
 			}
-			if err := checkSubject(ctx, q, in.CourseID, s, in.ForMissing); err != nil {
+			if err := checkSubject(ctx, q, in.CourseID, &s, in.ForMissing); err != nil {
 				return err
 			}
 			_, err = checkContent(ctx, q, s, in.GradeContent)
@@ -366,19 +364,20 @@ func gradeSubmit(d Deps) tool.Tool {
 			if err != nil {
 				return GradeSubmitOut{}, err
 			}
+			// One draft at a time for one piece of work: the target is locked
+			// before the earlier drafts are looked at, or two graders at once
+			// would each see none and leave two live drafts, which nothing
+			// could then post. The lock also holds still what the grade is
+			// out of, and the score is checked against that.
+			if err := lockGradeTarget(ctx, ec.Q, in.CourseID, &s); err != nil {
+				return GradeSubmitOut{}, err
+			}
 			rubric, err := checkContent(ctx, ec.Q, s, in.GradeContent)
 			if err != nil {
 				return GradeSubmitOut{}, err
 			}
 			breakdown, err := breakdownJSON(in.Breakdown)
 			if err != nil {
-				return GradeSubmitOut{}, err
-			}
-			// One draft at a time for one piece of work: the target is locked
-			// before the earlier drafts are looked at, or two graders at once
-			// would each see none and leave two live drafts, which nothing
-			// could then post.
-			if err := lockGradeTarget(ctx, ec.Q, s); err != nil {
 				return GradeSubmitOut{}, err
 			}
 			// A new draft replaces earlier ones — but this draft is as old as
@@ -423,11 +422,34 @@ func gradeSubmit(d Deps) tool.Tool {
 	})
 }
 
-// lockGradeTarget serialises the writers of one piece of work's grades.
-func lockGradeTarget(ctx context.Context, q *dbq.Queries, s gradeSubject) error {
+// lockGradeTarget serialises the writers of one piece of work's grades, and
+// holds still what they are checked against; checkSubject takes it, in
+// Validate, and it is held to the end of the call.
+//
+// For a submission it first holds the assignment still, shared, and reads it
+// again into s. The score is checked against the points possible, and they
+// must not change between that check and the grade being there for
+// assignment.update's own check to find: it locks the row before it looks,
+// so one of the two waits for the other, and a 95 is never entered on work
+// that has meanwhile become worth 50. Then it locks the submission and reads
+// its state into s: late work taking a 'missing' placeholder over takes the
+// same lock, so the state is the one the grade is written against. The
+// assignment is locked before its submission, never the other way round. A
+// component's points are held still by the tree lock checkSubject takes.
+func lockGradeTarget(ctx context.Context, q dbq.Querier, courseID uuid.UUID, s *gradeSubject) error {
 	if s.submission != nil {
-		_, err := q.LockSubmissionForGrading(ctx, s.submission.ID)
-		return err
+		a, err := q.ShareAssignmentForGrading(ctx, dbq.ShareAssignmentForGradingParams{ID: s.assignment.ID, CourseID: courseID})
+		if err != nil {
+			return err
+		}
+		fresh := dbq.GetAssignmentInCourseRow(a)
+		s.assignment = &fresh
+		state, err := q.LockSubmissionForGrading(ctx, s.submission.ID)
+		if err != nil {
+			return err
+		}
+		s.submission.State = state
+		return nil
 	}
 	return q.LockComponentGradeTarget(ctx, dbq.LockComponentGradeTargetParams{ComponentID: s.component.ID, StudentMemberID: s.student})
 }

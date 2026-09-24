@@ -633,11 +633,9 @@ func (q *Queries) LockStudentTotals(ctx context.Context, arg LockStudentTotalsPa
 }
 
 const lockSubmissionForGrading = `-- name: LockSubmissionForGrading :one
-
 SELECT state FROM submission WHERE id = $1 FOR UPDATE
 `
 
-// Serialising what races -------------------------------------------------------
 // A row lock, not an UPDATE: the freeze trigger does not fire. Two drafts for
 // one submission entered at once would otherwise both be live, and late work
 // taking a 'missing' placeholder over takes the same lock. The state is read
@@ -697,6 +695,54 @@ func (q *Queries) PostGrade(ctx context.Context, arg PostGradeParams) (int64, er
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+const shareAssignmentForGrading = `-- name: ShareAssignmentForGrading :one
+
+SELECT id, course_id, component_id, title, instructions_document_id, rubric_document_id,
+       points_possible, due_at, published_at
+FROM assignment
+WHERE id = $1 AND course_id = $2
+FOR SHARE
+`
+
+type ShareAssignmentForGradingParams struct {
+	ID       uuid.UUID
+	CourseID uuid.UUID
+}
+
+type ShareAssignmentForGradingRow struct {
+	ID                     uuid.UUID
+	CourseID               uuid.UUID
+	ComponentID            *uuid.UUID
+	Title                  string
+	InstructionsDocumentID *uuid.UUID
+	RubricDocumentID       *uuid.UUID
+	PointsPossible         decimal.Decimal
+	DueAt                  *time.Time
+	PublishedAt            *time.Time
+}
+
+// Serialising what races -------------------------------------------------------
+// The assignment a submission's grade is out of, read again and held still
+// until the grade is in. FOR SHARE waits for an assignment.update under way,
+// and holds the next one off until the grade is there for its check to find.
+// Graders of the same assignment do not wait for one another.
+func (q *Queries) ShareAssignmentForGrading(ctx context.Context, arg ShareAssignmentForGradingParams) (ShareAssignmentForGradingRow, error) {
+	row := q.db.QueryRow(ctx, shareAssignmentForGrading, arg.ID, arg.CourseID)
+	var i ShareAssignmentForGradingRow
+	err := row.Scan(
+		&i.ID,
+		&i.CourseID,
+		&i.ComponentID,
+		&i.Title,
+		&i.InstructionsDocumentID,
+		&i.RubricDocumentID,
+		&i.PointsPossible,
+		&i.DueAt,
+		&i.PublishedAt,
+	)
+	return i, err
 }
 
 const submissionHasGrades = `-- name: SubmissionHasGrades :one

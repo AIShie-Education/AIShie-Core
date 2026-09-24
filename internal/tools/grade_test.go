@@ -417,6 +417,38 @@ func TestPointsAreFixedOnceAGradeIsEntered(t *testing.T) {
 	b.do(t, b.sato, "component.update", m{"course_id": b.course, "component_id": b.midterm, "name": "Midterm exam"})
 }
 
+// The same when the grade and the rescaling come at once. Each checks before
+// it writes — the score against the points possible, the points against the
+// grades entered — and neither may pass on what the other has not written
+// yet, or a 95 stands on an assignment worth 50.
+func TestPointsStayFixedWhileAGradeIsEntered(t *testing.T) {
+	b := build(t)
+	work := b.submit(t, b.yuki, "essay")
+	done := make(chan pipeline.Outcome, 2)
+	// The grade is on its way, its score checked against 100 and waiting to
+	// be written (its foreign key to the student's seat, held here), when
+	// the assignment is rescaled.
+	release := b.hold(t, `SELECT 1 FROM course_member WHERE id = $1 FOR UPDATE`, b.yukiM)
+	b.start(t, done, b.sato, "grade.submit", m{"course_id": b.course, "submission_id": work, "score": 95})
+	b.blocked(t, 1, done)
+	b.start(t, done, b.sato, "assignment.update", m{"course_id": b.course, "assignment_id": b.hw3, "points_possible": 50})
+	b.blocked(t, 2, done)
+	release()
+	executed := 0
+	for range 2 {
+		if out := <-done; out.Status == domain.StatusExecuted {
+			executed++
+		}
+	}
+	if n := b.Count(`SELECT count(*) FROM grade g JOIN submission s ON s.id = g.submission_id JOIN assignment a ON a.id = s.assignment_id
+		WHERE g.superseded_by IS NULL AND g.score > a.points_possible`); n != 0 {
+		t.Fatal("a 95 was entered on an assignment worth 50")
+	}
+	if executed != 1 {
+		t.Fatalf("%d of the two went through; whichever came second should have been refused", executed)
+	}
+}
+
 // Two graders entering a draft for the same work at the same time must leave
 // one live draft, not two: nothing could post two.
 func TestOneLiveDraftUnderConcurrency(t *testing.T) {

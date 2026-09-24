@@ -539,6 +539,9 @@ check `actor.platform_role` instead. That is the only place it is read.
 - A published assignment's instructions have a published version, for students to read and for
   each submission to pin (§2.4), however publishing and a change of instructions interleave.
 - Grade computation, and writing a `computed` snapshot only on post.
+- Once a grade has been entered for an assignment or a directly graded component, a draft as
+  much as a posted one, its `points_possible` and its place in the tree stay as they are
+  (§2.3), even when the grade and the change come at the same moment.
 - The component tree is acyclic beyond the self-loop the CHECK blocks.
 - Cancelling pending proposals when a member is removed or expires.
 - Nobody hands out more than they hold (§2.2): any change that widens a seat is measured as

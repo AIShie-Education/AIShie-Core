@@ -238,7 +238,6 @@ type Querier interface {
 	LockStorageKey(ctx context.Context, storageKey string) error
 	// One writer of a student's rolled-up totals at a time.
 	LockStudentTotals(ctx context.Context, arg LockStudentTotalsParams) error
-	// Serialising what races -------------------------------------------------------
 	// A row lock, not an UPDATE: the freeze trigger does not fire. Two drafts for
 	// one submission entered at once would otherwise both be live, and late work
 	// taking a 'missing' placeholder over takes the same lock. The state is read
@@ -274,6 +273,12 @@ type Querier interface {
 	SetMemberStatus(ctx context.Context, arg SetMemberStatusParams) (int64, error)
 	SetPublishedVersion(ctx context.Context, arg SetPublishedVersionParams) error
 	SetSubmissionLateness(ctx context.Context, arg SetSubmissionLatenessParams) (int64, error)
+	// Serialising what races -------------------------------------------------------
+	// The assignment a submission's grade is out of, read again and held still
+	// until the grade is in. FOR SHARE waits for an assignment.update under way,
+	// and holds the next one off until the grade is there for its check to find.
+	// Graders of the same assignment do not wait for one another.
+	ShareAssignmentForGrading(ctx context.Context, arg ShareAssignmentForGradingParams) (ShareAssignmentForGradingRow, error)
 	// KEY SHARE on the given seats, in id order: what taking them before some
 	// other lock looks like, where that lock would otherwise be held while one of
 	// them is waited for.

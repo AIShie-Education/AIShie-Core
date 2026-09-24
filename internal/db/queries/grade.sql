@@ -106,6 +106,17 @@ WHERE component_id = $1 AND student_member_id = $2 AND origin = 'computed'
 
 -- Serialising what races -------------------------------------------------------
 
+-- name: ShareAssignmentForGrading :one
+-- The assignment a submission's grade is out of, read again and held still
+-- until the grade is in. FOR SHARE waits for an assignment.update under way,
+-- and holds the next one off until the grade is there for its check to find.
+-- Graders of the same assignment do not wait for one another.
+SELECT id, course_id, component_id, title, instructions_document_id, rubric_document_id,
+       points_possible, due_at, published_at
+FROM assignment
+WHERE id = $1 AND course_id = $2
+FOR SHARE;
+
 -- name: LockSubmissionForGrading :one
 -- A row lock, not an UPDATE: the freeze trigger does not fire. Two drafts for
 -- one submission entered at once would otherwise both be live, and late work
