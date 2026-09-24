@@ -64,7 +64,11 @@ type Store interface {
 	// listing without being one. It is how uploads that nothing came to
 	// point at are found and removed. The bucket or directory may hold other
 	// things besides this server's files, and the prefix keeps them out of it.
-	List(ctx context.Context, prefix string, fn func(key string, modified time.Time) error) error
+	//
+	// Objects come in an order of the store's own, the same on every call.
+	// Given a key it listed as after, List starts past it, so that a listing
+	// stopped part way can be taken up again where it stopped.
+	List(ctx context.Context, prefix, after string, fn func(key string, modified time.Time) error) error
 }
 
 // ErrStopList, returned from a List callback, ends the listing early.

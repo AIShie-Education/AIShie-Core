@@ -65,15 +65,23 @@ func TestS3Store(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = s.Delete(ctx, other) }()
-	var listed []string
-	if err := s.List(ctx, "courses/test/", func(k string, _ time.Time) error {
-		listed = append(listed, k)
-		return nil
-	}); err != nil {
-		t.Fatal(err)
+	list := func(after string) []string {
+		t.Helper()
+		var listed []string
+		if err := s.List(ctx, "courses/test/", after, func(k string, _ time.Time) error {
+			listed = append(listed, k)
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return listed
 	}
-	if !slices.Contains(listed, key) || slices.ContainsFunc(listed, func(k string) bool { return !strings.HasPrefix(k, "courses/test/") }) {
+	if listed := list(""); !slices.Contains(listed, key) || slices.ContainsFunc(listed, func(k string) bool { return !strings.HasPrefix(k, "courses/test/") }) {
 		t.Fatalf("listed under courses/test/: %q", listed)
+	}
+	// And one taken up again after a key goes on past it.
+	if listed := list(key); slices.ContainsFunc(listed, func(k string) bool { return k <= key }) {
+		t.Fatalf("listed after %s: %q", key, listed)
 	}
 	// Attaching moves the object somewhere the upload URL cannot reach. The
 	// URL is still valid, and whoever holds it PUTs again — and changes

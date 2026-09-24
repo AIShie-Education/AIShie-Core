@@ -73,6 +73,9 @@ type Runner struct {
 	log    *slog.Logger
 	// blobsSwept is when this instance last went through the file store.
 	blobsSwept time.Time
+	// blobsAt is how far it has got through the store since: the last key
+	// it took on, or empty when the next pass starts from the beginning.
+	blobsAt string
 }
 
 // New returns a runner that acts as the given system actor.
@@ -239,9 +242,25 @@ func (r *Runner) sweepBlobs(ctx context.Context, now time.Time) (int, error) {
 		return 0, nil
 	}
 	cutoff := now.Add(-ttl - OrphanGrace)
+	// A pass through the store takes a batch of old files a tick, and each
+	// tick goes on from where the last one stopped. Most old files are
+	// attached, and kept; a pass that started over every tick would take on
+	// the same attached files each time and never reach what lies behind
+	// them. The prefixes before the one it stopped in are done with.
+	prefixes := r.blobPrefixes()
+	from := 0
+	for i, prefix := range prefixes {
+		if strings.HasPrefix(r.blobsAt, prefix) {
+			from = i
+		}
+	}
 	var old []string
-	for _, prefix := range r.blobPrefixes() {
-		err := r.cfg.Blob.List(ctx, prefix, func(key string, modified time.Time) error {
+	for i, prefix := range prefixes[from:] {
+		after := ""
+		if i == 0 {
+			after = r.blobsAt
+		}
+		err := r.cfg.Blob.List(ctx, prefix, after, func(key string, modified time.Time) error {
 			if !ownKey(strings.TrimPrefix(key, prefix)) || !modified.Before(cutoff) {
 				return nil
 			}
@@ -268,9 +287,12 @@ func (r *Runner) sweepBlobs(ctx context.Context, now time.Time) (int, error) {
 			removed++
 		}
 	}
-	// A full batch means there may be more; come back on the next tick.
+	// A full batch means there may be more; the next tick goes on after the
+	// last key taken. Anything short of one is the end of the store.
 	if len(old) < int(r.cfg.Batch) {
-		r.blobsSwept = now
+		r.blobsSwept, r.blobsAt = now, ""
+	} else {
+		r.blobsAt = old[len(old)-1]
 	}
 	return removed, nil
 }

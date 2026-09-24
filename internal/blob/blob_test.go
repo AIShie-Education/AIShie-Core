@@ -124,7 +124,7 @@ func TestFSStoreListsUnderAPrefix(t *testing.T) {
 	list := func(prefix string) []string {
 		t.Helper()
 		var keys []string
-		if err := s.List(ctx, prefix, func(key string, _ time.Time) error {
+		if err := s.List(ctx, prefix, "", func(key string, _ time.Time) error {
 			keys = append(keys, key)
 			return nil
 		}); err != nil {
@@ -143,6 +143,49 @@ func TestFSStoreListsUnderAPrefix(t *testing.T) {
 		slices.Sort(got)
 		if got := strings.Join(got, " "); got != want {
 			t.Errorf("under %q: %q, want %q", prefix, got, want)
+		}
+	}
+}
+
+// A listing stopped part way is taken up again after the last key it gave,
+// and goes on with exactly what it had not given yet — also where the walk's
+// order is not the order of the keys as strings.
+func TestFSStoreListingIsTakenUpWhereItStopped(t *testing.T) {
+	s, _ := newFS(t)
+	ctx := context.Background()
+	for _, key := range []string{"courses/b/w", "courses/a-b/y", "courses/a/z", "courses/a/sub/q", "courses/a/x", "courses/b/w2", "other/v"} {
+		if _, err := s.Put(ctx, key, "text/plain", strings.NewReader("x"), 100); err != nil {
+			t.Fatal(err)
+		}
+	}
+	list := func(after string, stopAt int) []string {
+		t.Helper()
+		var keys []string
+		if err := s.List(ctx, "courses/", after, func(key string, _ time.Time) error {
+			if keys = append(keys, key); len(keys) == stopAt {
+				return ErrStopList
+			}
+			return nil
+		}); err != nil {
+			t.Fatalf("list after %q: %v", after, err)
+		}
+		return keys
+	}
+	all := list("", 0)
+	if len(all) != 6 {
+		t.Fatalf("listed %q", all)
+	}
+	for n := 1; n <= len(all); n++ {
+		var got []string
+		for after := ""; ; {
+			batch := list(after, n)
+			if got = append(got, batch...); len(batch) < n {
+				break
+			}
+			after = batch[len(batch)-1]
+		}
+		if !slices.Equal(got, all) {
+			t.Errorf("in batches of %d: %q, want %q", n, got, all)
 		}
 	}
 }

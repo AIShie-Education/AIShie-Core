@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 )
@@ -147,7 +148,9 @@ func (s *FSStore) Finalize(ctx context.Context, stagingKey string) (Info, error)
 	return s.Stat(ctx, stagingKey)
 }
 
-func (s *FSStore) List(ctx context.Context, prefix string, fn func(key string, modified time.Time) error) error {
+// List goes in the order the directory tree is walked in, name by name at
+// each level (see walkOrder), and skips whatever comes before after.
+func (s *FSStore) List(ctx context.Context, prefix, after string, fn func(key string, modified time.Time) error) error {
 	// Only the directory the prefix names is walked, not the whole root:
 	// whatever else is kept there is not ours to go through.
 	start := s.root
@@ -161,7 +164,7 @@ func (s *FSStore) List(ctx context.Context, prefix string, fn func(key string, m
 		if p == start && errors.Is(err, fs.ErrNotExist) {
 			return nil // nothing has been written under the prefix yet
 		}
-		if err != nil || d.IsDir() || strings.HasSuffix(p, ".meta") {
+		if err != nil {
 			return err
 		}
 		if err := ctx.Err(); err != nil {
@@ -172,8 +175,20 @@ func (s *FSStore) List(ctx context.Context, prefix string, fn func(key string, m
 			return err
 		}
 		key := filepath.ToSlash(rel)
-		if !strings.HasPrefix(key, prefix) {
+		if d.IsDir() {
+			// A directory whose every key comes before after is not gone
+			// into, so that taking a listing up again does not walk again
+			// through all it has passed.
+			if after != "" && p != s.root && walkOrder(key, after) < 0 && !strings.HasPrefix(after, key+"/") {
+				return filepath.SkipDir
+			}
 			return nil
+		}
+		if strings.HasSuffix(key, ".meta") || !strings.HasPrefix(key, prefix) {
+			return nil
+		}
+		if after != "" && walkOrder(key, after) <= 0 {
+			return nil // listed already
 		}
 		info, err := d.Info()
 		if errors.Is(err, fs.ErrNotExist) {
@@ -188,6 +203,14 @@ func (s *FSStore) List(ctx context.Context, prefix string, fn func(key string, m
 		return nil
 	}
 	return err
+}
+
+// walkOrder compares keys in the order filepath.WalkDir comes to them: path
+// element by path element, each by name, a directory before what is in it.
+// It is not the order of the keys as strings: courses-old/x comes after
+// courses/y here, because courses comes before courses-old.
+func walkOrder(a, b string) int {
+	return slices.Compare(strings.Split(a, "/"), strings.Split(b, "/"))
 }
 
 func (s *FSStore) Delete(_ context.Context, key string) error {

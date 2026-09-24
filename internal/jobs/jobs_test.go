@@ -3,6 +3,7 @@ package jobs_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -33,12 +34,27 @@ type fixture struct {
 
 func setup(t *testing.T, students int) *fixture {
 	t.Helper()
-	c := testkit.NewCS101(t, students)
+	return setupWith(t, students, onDisk)
+}
+
+// setupWith is setup with the tools keeping files in whatever store wrap
+// makes of the filesystem store.
+func setupWith(t *testing.T, students int, wrap func(*blob.FSStore) blob.Store) *fixture {
+	t.Helper()
+	c := testkit.NewCS101WithStore(t, students, wrap)
 	f := &fixture{CS101: c, system: c.Actor("system", "system"), now: time.Now()}
 	f.runner = jobs.New(c.Pool, c.P, f.system, jobs.Config{}, nil)
 	c.P.SetClock(func() time.Time { return f.now })
 	return f
 }
+
+// The two ways a store keeps an upload once it is attached: where it was
+// uploaded, or, like S3, moved to a final key.
+var (
+	onDisk        = func(fs *blob.FSStore) blob.Store { return fs }
+	inObjectStore = func(fs *blob.FSStore) blob.Store { return testkit.ObjectStore{FSStore: fs} }
+	stores        = map[string]func(*blob.FSStore) blob.Store{"on disk": onDisk, "in an object store": inObjectStore}
+)
 
 func (f *fixture) sweep(t *testing.T) jobs.Report {
 	t.Helper()
@@ -50,6 +66,21 @@ func (f *fixture) sweep(t *testing.T) jobs.Report {
 		t.Fatal("the sweep stood by, with nobody else sweeping")
 	}
 	return rep
+}
+
+// upload gets an upload URL from Sato and PUTs a file to it.
+func (f *fixture) upload(t *testing.T) (token, key string) {
+	t.Helper()
+	out := f.MustCall(f.Sato, "document.upload_url", m{"course_id": f.Course, "kind": "material", "content_type": "text/plain"}, "")
+	u := testkit.Result[tools.UploadURLOut](t, out)
+	key, ct, err := f.Blob.Redeem(strings.TrimPrefix(u.UploadURL, "http://lms.test"+blob.BlobPath), "PUT")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Blob.Put(context.Background(), key, ct, strings.NewReader("slides"), 1<<20); err != nil {
+		t.Fatal(err)
+	}
+	return u.UploadToken, key
 }
 
 func (f *fixture) propose(t *testing.T, s testkit.Student, key string) uuid.UUID {
@@ -432,31 +463,16 @@ func TestOrphanFilesAreRemoved(t *testing.T) {
 // the server did not write, however old — whether the store keeps a file
 // where it was uploaded or, like S3, moves it on attaching.
 func TestTheSweepRemovesOnlyTheServersOwnFiles(t *testing.T) {
-	for name, wrap := range map[string]func(*blob.FSStore) blob.Store{
-		"on disk":            func(fs *blob.FSStore) blob.Store { return fs },
-		"in an object store": func(fs *blob.FSStore) blob.Store { return testkit.ObjectStore{FSStore: fs} },
-	} {
+	for name, wrap := range stores {
 		t.Run(name, func(t *testing.T) {
 			f := setup(t, 1)
 			store := wrap(f.Blob)
 			f.runner = jobs.New(f.Pool, f.P, f.system, jobs.Config{Blob: store}, nil)
 			ctx := context.Background()
-			upload := func() string {
-				t.Helper()
-				out := f.MustCall(f.Sato, "document.upload_url", m{"course_id": f.Course, "kind": "material", "content_type": "text/plain"}, "")
-				u := testkit.Result[tools.UploadURLOut](t, out)
-				key, ct, err := f.Blob.Redeem(strings.TrimPrefix(u.UploadURL, "http://lms.test"+blob.BlobPath), "PUT")
-				if err != nil {
-					t.Fatal(err)
-				}
-				if _, err := f.Blob.Put(ctx, key, ct, strings.NewReader("never attached"), 1<<20); err != nil {
-					t.Fatal(err)
-				}
-				return key
-			}
 			// Ours: an upload never attached, and one moved to its final
 			// key by an attach that then did not commit.
-			staged, moved := upload(), upload()
+			_, staged := f.upload(t)
+			_, moved := f.upload(t)
 			if _, err := store.Finalize(ctx, moved); err != nil {
 				t.Fatal(err)
 			}
@@ -488,6 +504,66 @@ func TestTheSweepRemovesOnlyTheServersOwnFiles(t *testing.T) {
 				if _, err := os.Stat(filepath.Join(f.Blob.Root(), filepath.FromSlash(key))); err != nil {
 					t.Errorf("%s, which the server never wrote, was removed: %v", key, err)
 				}
+			}
+		})
+	}
+}
+
+// A sweep takes on a batch of old files at a time, and most old files are
+// attached: they stay, and that batch has removed nothing. The next sweep
+// must go on from there. Were it to start again from the beginning, it would
+// find the same attached files, and once there were a batch of them ahead of
+// an orphan, that orphan would never be removed.
+func TestTheSweepGetsPastAttachedFiles(t *testing.T) {
+	for name, wrap := range stores {
+		t.Run(name, func(t *testing.T) {
+			f := setupWith(t, 1, wrap)
+			store := wrap(f.Blob)
+			f.runner = jobs.New(f.Pool, f.P, f.system, jobs.Config{Blob: store, Batch: 2}, nil)
+			ctx := context.Background()
+			// A batch of attached files, uploaded first, so they come first.
+			var attached []string
+			for i := range 2 {
+				token, key := f.upload(t)
+				if out := f.MustCall(f.Sato, "document.create", m{"course_id": f.Course, "kind": "material",
+					"title": fmt.Sprintf("week %d", i+1), "upload_token": token}, fmt.Sprint("attach", i)); out.Status != domain.StatusExecuted {
+					t.Fatalf("%+v", out)
+				}
+				attached = append(attached, store.FinalKey(key))
+			}
+			// Behind them, an upload nobody attached, and one moved to its
+			// final key by an attach that then did not commit.
+			_, staged := f.upload(t)
+			_, moved := f.upload(t)
+			if _, err := store.Finalize(ctx, moved); err != nil {
+				t.Fatal(err)
+			}
+			orphans := []string{staged, store.FinalKey(moved)}
+
+			f.now = f.now.Add(pipeline.DefaultProposalTTL + jobs.OrphanGrace + time.Hour)
+			gone := func(key string) bool {
+				_, err := f.Blob.Stat(ctx, key)
+				return errors.Is(err, blob.ErrNotFound)
+			}
+			// Four files in batches of two: three sweeps at most, the last
+			// finding nothing more. A sweep that starts over each time
+			// never gets there.
+			removed := 0
+			for range 3 {
+				removed += f.sweep(t).OrphanFilesRemoved
+			}
+			if removed != 2 || !gone(orphans[0]) || !gone(orphans[1]) {
+				t.Fatalf("%d removed, want both orphans behind the attached files", removed)
+			}
+			for _, key := range attached {
+				if gone(key) {
+					t.Fatalf("%s, which a version points at, was removed", key)
+				}
+			}
+			// The store has been gone through; the next pass waits its hour.
+			_, another := f.upload(t)
+			if rep := f.sweep(t); rep.OrphanFilesRemoved != 0 || gone(another) {
+				t.Fatalf("the store was gone through again at once: %+v", rep)
 			}
 		})
 	}

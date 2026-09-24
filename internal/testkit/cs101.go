@@ -96,7 +96,14 @@ type CS101 struct {
 
 func NewCS101(t testing.TB, students int) *CS101 {
 	t.Helper()
-	p := NewPlatform(t)
+	return NewCS101WithStore(t, students, func(fs *blob.FSStore) blob.Store { return fs })
+}
+
+// NewCS101WithStore is NewCS101 with the tools talking to whatever wrap makes
+// of the filesystem store; see NewPlatformWithStore.
+func NewCS101WithStore(t testing.TB, students int, wrap func(*blob.FSStore) blob.Store) *CS101 {
+	t.Helper()
+	p := NewPlatformWithStore(t, wrap)
 	w := p.World
 	c := &CS101{Platform: p}
 

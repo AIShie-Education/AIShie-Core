@@ -110,11 +110,13 @@ func (s *S3Store) Finalize(ctx context.Context, stagingKey string) (Info, error)
 	return s.Stat(ctx, final)
 }
 
-func (s *S3Store) List(ctx context.Context, prefix string, fn func(key string, modified time.Time) error) error {
+// List goes in key order, byte by byte, which is how S3 lists and what its
+// StartAfter means.
+func (s *S3Store) List(ctx context.Context, prefix, after string, fn func(key string, modified time.Time) error) error {
 	// Cancelling is how the client is told to stop paging.
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	for obj := range s.client.ListObjects(ctx, s.bucket, minio.ListObjectsOptions{Prefix: prefix, Recursive: true}) {
+	for obj := range s.client.ListObjects(ctx, s.bucket, minio.ListObjectsOptions{Prefix: prefix, StartAfter: after, Recursive: true}) {
 		if obj.Err != nil {
 			return obj.Err
 		}
