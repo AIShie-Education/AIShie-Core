@@ -15,7 +15,8 @@ name: Deploy
 #
 #   1. `aishiterud migrate up` with the new image and the environment's
 #      DATABASE_URL. A schema a newer release already migrated is left alone,
-#      so this is safe on a rollback too.
+#      so this does not stop a rollback to the release before, which a
+#      migration keeps working (CONTRIBUTING.md, Migrations).
 #   2. Move the servers over to the new image.
 #   3. Wait until GET /healthz answers status "ok" with the new version and
 #      commit.

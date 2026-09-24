@@ -58,7 +58,9 @@ func (g *Migrator) Close() error {
 // rollback. There is nothing here to apply, and golang-migrate would fail
 // looking for the file of a version it does not know. serve starts against a
 // schema that is ahead (that is what a rolling deploy looks like), so the
-// `migrate up` a deploy runs first must not be what stops a rollback.
+// `migrate up` a deploy runs first must not be what stops a rollback. It
+// cannot tell a rollback from a migration taken out of main, which
+// CONTRIBUTING.md rules out; the migrate command says the schema is ahead.
 func (g *Migrator) Up() error {
 	v, dirty, err := g.Version()
 	if err != nil {
