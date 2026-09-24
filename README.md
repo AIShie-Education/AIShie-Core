@@ -152,7 +152,8 @@ registry's with the dot turned to an underscore (`grade_submit`). Every tool
 that changes something takes an `idempotency_key` argument. A result whose
 status is `proposed` is not an error: the action waits for a person, and the
 agent learns the decision by polling `event_list`. The server's MCP
-instructions tell a connecting model all of this.
+instructions tell a connecting model all of this. One HTTP request carries
+one call: JSON-RPC batches are refused, since the rate limit counts requests.
 
 To look around by hand: `npx @modelcontextprotocol/inspector`, transport
 "Streamable HTTP", URL `http://localhost:8080/mcp`, and the bearer token.

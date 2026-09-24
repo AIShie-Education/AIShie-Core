@@ -103,6 +103,47 @@ func TestARunawayCallerIsStopped(t *testing.T) {
 	}
 }
 
+// The limit charges a request, so a request is one call. A JSON-RPC batch
+// would put a body's worth of tool calls, each attempted and recorded, behind
+// the one call it was charged for; it is refused before any is attempted.
+func TestABatchIsNotManyCallsForThePriceOfOne(t *testing.T) {
+	now := time.Now()
+	calls := ratelimit.New(60, 3)
+	calls.SetClock(func() time.Time { return now })
+	a := hardened(t, calls, nil, nil)
+	c, yuki := a.c, a.c.Students[0]
+	student := a.tokenFor(yuki.Actor)
+	grade := func(id int) string {
+		return fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":"tools/call","params":{"name":"grade_submit","arguments":`+
+			`{"course_id":%q,"submission_id":%q,"score":100,"idempotency_key":"batch-%d"}}}`, id, c.Course, yuki.HW3, id)
+	}
+	// No Mcp-Protocol-Version header: from a client that names no version,
+	// the SDK itself would take a batch.
+	post := func(body string) (rawResponse, []byte) {
+		return a.raw("POST", a.srv.URL+httpapi.MCPPath, "application/json", []byte(body),
+			"Authorization", "Bearer "+student, "Accept", "application/json, text/event-stream")
+	}
+	var batch []string
+	for i := range 20 {
+		batch = append(batch, grade(i))
+	}
+	for _, body := range []string{"[" + strings.Join(batch, ",") + "]", " \r\n\t[" + grade(20) + "]"} {
+		if res, got := post(body); res.StatusCode != http.StatusBadRequest || !strings.Contains(string(got), "a batch is not taken") {
+			t.Fatalf("a batch: %d %.300s", res.StatusCode, got)
+		}
+	}
+	if n := c.Count(`SELECT count(*) FROM action`); n != 0 {
+		t.Fatalf("%d actions recorded from batches, want none", n)
+	}
+	// One call to a request is attempted, recorded, and charged as one.
+	if res, got := post(" \n" + grade(21)); res.StatusCode != 200 || !strings.Contains(string(got), `"status":"denied"`) {
+		t.Fatalf("a single call: %d %s", res.StatusCode, got)
+	}
+	if n := c.Count(`SELECT count(*) FROM action`); n != 1 {
+		t.Fatalf("%d actions recorded, want the one call", n)
+	}
+}
+
 func TestSignInAttemptsAreLimited(t *testing.T) {
 	// One a minute, so that nothing refills while the test runs: each guess
 	// costs an argon2 hash, which under the race detector is most of a second.
