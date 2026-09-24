@@ -375,7 +375,11 @@ func (h *heldResponse) Write(b []byte) (int, error) {
 func refuse(w http.ResponseWriter, status int, id jsonrpc.ID, code int64, message string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": id.Raw(), "error": map[string]any{"code": code, "message": message}})
+	// The id goes back as it came, as the SDK sends it: escaped for HTML,
+	// each '<' in it would be six bytes.
+	enc := json.NewEncoder(w)
+	enc.SetEscapeHTML(false)
+	_ = enc.Encode(map[string]any{"jsonrpc": "2.0", "id": id.Raw(), "error": map[string]any{"code": code, "message": message}})
 }
 
 // limited refuses an actor that is calling too fast, before anything is

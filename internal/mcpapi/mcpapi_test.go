@@ -277,6 +277,13 @@ func TestNothingIsOfferedThatIsNotPushed(t *testing.T) {
 	if err := json.Unmarshal(out, &answer); err != nil || status != http.StatusNotFound || string(answer.ID) != "7" || answer.Error.Code != -32601 {
 		t.Errorf("a listen: %d %s", status, out)
 	}
+	// The id goes back as it came, not escaped for HTML.
+	id := `"` + strings.Repeat("<", 200) + `"`
+	status, out = post(t, f, token, `{"jsonrpc": "2.0", "id": `+id+`, "method": "subscriptions/listen", "params": {"notifications": {"toolsListChanged": true}, `+
+		`"_meta": {"io.modelcontextprotocol/protocolVersion": "2026-07-28"}}}`, "Mcp-Protocol-Version", "2026-07-28")
+	if err := json.Unmarshal(out, &answer); err != nil || status != http.StatusNotFound || string(answer.ID) != id {
+		t.Errorf("a listen with an id of 200 '<': %d %.300s", status, out)
+	}
 }
 
 // Over MCP a refusal of ours is written twice, as text and as structured
