@@ -665,13 +665,21 @@ func TestAnArchivedDocumentIsWithdrawn(t *testing.T) {
 // Feedback on a posted grade is a release, and archiving it is how the release
 // is taken back. Yuki and her tutor, who were handed the file's id with the
 // grade, must not go on reading it, or fetching fresh download URLs for it.
+// The tutor is given the right to read drafts, which lists versions, but it
+// does not grade: feedback that is not released is not there for it by that
+// road either, before the grade is posted or after the file is archived.
 func TestWithdrawnFeedbackIsWithdrawn(t *testing.T) {
 	b := build(t)
+	b.do(t, b.sato, "member.update_perms", m{"course_id": b.course, "member_id": b.tutorM, "perms": m{"document_read_draft": "autonomous"}})
 	work := b.submit(t, b.yuki, "essay")
 	gradeID := testkit.Result[tools.GradeSubmitOut](t, b.do(t, b.sato, "grade.submit", m{"course_id": b.course, "submission_id": work, "score": 90})).GradeID
 	token := b.upload(t, b.sato, "feedback", "application/pdf", []byte("%PDF Ken's marked-up essay"))
 	wrong := testkit.Result[tools.DocumentCreateOut](t, b.do(t, b.sato, "document.create", m{"course_id": b.course, "kind": "feedback",
 		"title": "essay-marked.pdf", "grade_id": gradeID, "body_md": "notes for Ken", "upload_token": token}))
+	versions := m{"course_id": b.course, "document_id": wrong.DocumentID}
+	if _, err := b.Call(b.tutor, "document.versions", versions, ""); !apperr.Is(err, apperr.NotFound) {
+		t.Fatalf("the tutor listing the versions of feedback on a draft grade: %v", err)
+	}
 	b.do(t, b.sato, "grade.post", m{"course_id": b.course, "grade_ids": []uuid.UUID{gradeID}})
 	for _, reader := range []uuid.UUID{b.yuki, b.tutor} {
 		if got := b.get(t, reader, m{"document_id": wrong.DocumentID}); got.Version == nil || got.Version.DownloadURL == nil {
@@ -693,9 +701,15 @@ func TestWithdrawnFeedbackIsWithdrawn(t *testing.T) {
 			}
 		}
 	}
+	if _, err := b.Call(b.tutor, "document.versions", versions, ""); !apperr.Is(err, apperr.NotFound) {
+		t.Fatalf("the tutor listing the versions of withdrawn feedback: %v", err)
+	}
 	// Whoever grades still can: it is archived, not destroyed.
 	if got := b.get(t, b.sato, m{"document_id": wrong.DocumentID}); got.Version == nil || *got.Version.BodyMD != "notes for Ken" {
 		t.Fatalf("Sato reading the withdrawn feedback: %+v", got)
+	}
+	if got := testkit.Result[tools.DocumentVersionsOut](t, b.do(t, b.sato, "document.versions", versions)); len(got.Versions) != 1 {
+		t.Fatalf("Sato listing the withdrawn feedback's versions: %+v", got)
 	}
 }
 

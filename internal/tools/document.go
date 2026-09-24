@@ -834,12 +834,7 @@ func documentGet(d Deps) tool.Tool {
 			if err != nil {
 				return DocumentGetOut{}, err
 			}
-			// Feedback on a grade the student cannot see yet is not theirs to
-			// read either. Nor is feedback archived from a posted grade:
-			// archiving it takes back a release (feedbackWritePerms), so like
-			// withdrawn material below it is withdrawn from anyone who kept
-			// the id. Those who grade still read it.
-			if doc.Kind == kindFeedback && (doc.GradePostedAt == nil || doc.GradeSupersededBy != nil || doc.Status == "archived") && !seesDrafts(rc.Member) {
+			if feedbackWithheld(doc, rc.Member) {
 				return DocumentGetOut{}, apperr.Missing("no such document in this course")
 			}
 			drafts := rc.Member.Perm(domain.PermDocumentReadDraft).Allowed()
@@ -933,6 +928,15 @@ type DocumentVersionsOut struct {
 	Versions []VersionSummary `json:"versions"`
 }
 
+// feedbackWithheld: feedback on a grade the student cannot see yet is not
+// theirs to read either. Nor is feedback archived from a posted grade:
+// archiving it takes back a release (feedbackWritePerms), so like withdrawn
+// material it is withdrawn from anyone who kept the id. Those who grade still
+// read it. It holds for the version list as for the document.
+func feedbackWithheld(doc dbq.GetDocumentWithOwnerRow, m *domain.Member) bool {
+	return doc.Kind == kindFeedback && (doc.GradePostedAt == nil || doc.GradeSupersededBy != nil || doc.Status == "archived") && !seesDrafts(m)
+}
+
 // assignmentWithheld: an instructions or rubric document is withheld from a
 // member who does not write assignments unless a published assignment in
 // their scope refers to it — the document is visible exactly when the
@@ -962,6 +966,9 @@ func documentVersions() tool.Tool {
 			doc, err := loadDocument(ctx, rc.Q, in.CourseID, in.DocumentID)
 			if err != nil {
 				return DocumentVersionsOut{}, err
+			}
+			if feedbackWithheld(doc, rc.Member) {
+				return DocumentVersionsOut{}, apperr.Missing("no such document in this course")
 			}
 			if courseLevel(doc.Kind) && doc.Kind != kindMaterial {
 				if withheld, err := assignmentWithheld(ctx, rc, doc.ID); err != nil {
