@@ -22,12 +22,10 @@ WHERE m.id = $1 AND m.course_id = $2
 FOR UPDATE OF m;
 
 -- name: GetLiveMembership :one
--- Locked, as every removal locks the seat it removes: a seat past its expiry
--- is removed on the spot, and that waits for its member's calls in flight
--- and cancels what they proposed. If the sweep removes it first, the row no
--- longer matches once the lock is had, and there is nothing in the way.
-SELECT id, status, expires_at FROM course_member WHERE course_id = $1 AND actor_id = $2 AND status <> 'removed'
-FOR UPDATE;
+-- Not locked: a live seat found here is only refused, and locking it would
+-- wait for its member's calls in flight, and could deadlock with them, to say
+-- no. A seat past its expiry is locked by id before it is removed.
+SELECT id, status, expires_at FROM course_member WHERE course_id = $1 AND actor_id = $2 AND status <> 'removed';
 
 -- name: ListMembers :many
 SELECT m.*, a.display_name, a.kind AS actor_kind

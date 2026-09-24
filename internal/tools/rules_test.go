@@ -1147,7 +1147,8 @@ func TestAnEventNamingAStudentTakesTheSeatFirst(t *testing.T) {
 
 // Seating an actor over their expired seat removes that seat as any removal
 // does: after the member's calls in flight, cancelling what they proposed. A
-// seat the sweep removes meanwhile is simply out of the way.
+// seat the sweep removes meanwhile is simply out of the way; one whose expiry
+// is moved meanwhile is still in it.
 func TestReseatingOverAnExpiredSeatWaitsForItsCalls(t *testing.T) {
 	b := build(t)
 	work := b.submit(t, b.yuki, "essay")
@@ -1177,5 +1178,57 @@ func TestReseatingOverAnExpiredSeatWaitsForItsCalls(t *testing.T) {
 	release()
 	if out := settled(t, again); out.Status != domain.StatusExecuted {
 		t.Fatalf("seating Ken again as the sweep removed his seat: %+v", out)
+	}
+
+	// The tutor's expired seat is given longer while the tutor is being
+	// seated again.
+	b.P.SetClock(time.Now)
+	b.do(t, b.sato, "member.rescope", m{"course_id": b.course, "member_id": b.tutorM, "expires_at": time.Now().Add(time.Hour)})
+	b.P.SetClock(func() time.Time { return time.Now().Add(2 * time.Hour) })
+	release = heldBy(t, b, `UPDATE course_member SET expires_at = now() + interval '3 hours' WHERE id = $1`, b.tutorM)
+	extended := b.inFlight(b.sato, "member.add", m{"course_id": b.course, "actor_id": b.tutor, "preset": "tutor"}, "tutor-again")
+	b.waitingFor(t, 1, extended)
+	release()
+	if out := settled(t, extended); out.Error == nil || !strings.Contains(out.Error.Message, "already has a seat") {
+		t.Fatalf("seating the tutor again as their seat was given longer: %+v", out)
+	}
+}
+
+// Seating an actor who has a live seat is refused without locking that seat.
+// The lock would wait for its member's calls in flight, and deadlock with one
+// that is changing the caller's own seat, only to say no. Here Sato seats
+// Boss again, by mistake, while Boss pauses Sato.
+func TestSeatingSomeoneAlreadySeatedLeavesTheirSeatAlone(t *testing.T) {
+	b := build(t)
+	boss := testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", m{"kind": "human", "display_name": "Boss"})).ActorID
+	b.do(t, b.sato, "member.add", m{"course_id": b.course, "actor_id": boss, "preset": "instructor"})
+	// Both calls hold their callers' seats and are about to record themselves.
+	release := heldBy(t, b, `SELECT 1 FROM course WHERE id = $1 FOR UPDATE`, b.course)
+	add := b.inFlight(b.sato, "member.add", m{"course_id": b.course, "actor_id": boss, "preset": "ta"}, "add")
+	pause := b.inFlight(boss, "member.pause", m{"course_id": b.course, "member_id": b.satoM}, "pause")
+	b.waitingFor(t, 2, add, pause)
+	release()
+	if out := settled(t, add); out.Error == nil || !strings.Contains(out.Error.Message, "already has a seat") {
+		t.Fatalf("seating Boss again: %+v", out)
+	}
+	if out := settled(t, pause); out.Status != domain.StatusExecuted {
+		t.Fatalf("Boss pausing Sato: %+v", out)
+	}
+}
+
+// The same for the caller's own seat: two calls seating themselves at once,
+// by mistake, each hold that seat shared, and would deadlock upgrading it.
+func TestSeatingYourselfTwiceAtOnceIsRefusedTwice(t *testing.T) {
+	b := build(t)
+	release := heldBy(t, b, `SELECT 1 FROM course WHERE id = $1 FOR UPDATE`, b.course)
+	again := m{"course_id": b.course, "actor_id": b.sato, "preset": "ta"}
+	one := b.inFlight(b.sato, "member.add", again, "one")
+	two := b.inFlight(b.sato, "member.add", again, "two")
+	b.waitingFor(t, 2, one, two)
+	release()
+	for _, c := range []<-chan callResult{one, two} {
+		if out := settled(t, c); out.Error == nil || !strings.Contains(out.Error.Message, "already has a seat") {
+			t.Fatalf("Sato seating himself: %+v", out)
+		}
 	}
 }

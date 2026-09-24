@@ -299,6 +299,8 @@ func (s seating) listsItself() bool {
 	return s.role == "student" && s.studentScope == domain.ScopeListed && len(s.listedStudents) == 0
 }
 
+var errSeated = apperr.Conflicts("the actor already has a seat in this course; change it, or remove it and add again for a fresh start")
+
 // seat adds a member: a new course_member row with the preset copied onto it.
 // preset_id is kept as provenance only — nothing reads it afterwards, so
 // editing the preset later changes nobody already seated.
@@ -323,11 +325,26 @@ func seat(ctx context.Context, ec *tool.ExecCtx, s seating) (uuid.UUID, error) {
 	case err != nil:
 		return uuid.Nil, err
 	case live.ExpiresAt != nil && !live.ExpiresAt.After(ec.Now):
-		if _, err := members.Remove(ctx, ec.Q, ec.Emit, s.courseID, live.ID, members.ReasonExpired); err != nil {
+		// Only now is the seat locked, as every removal locks the seat it
+		// removes: the removal then waits for its member's calls in flight,
+		// and cancels what they proposed. Then it is looked at again: the
+		// sweep may have removed it meanwhile, and nothing is in the way, or
+		// it may have been given longer, and it is as live as any other.
+		locked, err := ec.Q.GetMemberForSweep(ctx, live.ID)
+		if err != nil {
 			return uuid.Nil, err
 		}
+		switch {
+		case locked.Status == domain.MemberRemoved:
+		case locked.ExpiresAt == nil || locked.ExpiresAt.After(ec.Now):
+			return uuid.Nil, errSeated
+		default:
+			if _, err := members.Remove(ctx, ec.Q, ec.Emit, s.courseID, live.ID, members.ReasonExpired); err != nil {
+				return uuid.Nil, err
+			}
+		}
 	default:
-		return uuid.Nil, apperr.Conflicts("the actor already has a seat in this course; change it, or remove it and add again for a fresh start")
+		return uuid.Nil, errSeated
 	}
 	if s.expiresAt != nil && !s.expiresAt.After(ec.Now) {
 		return uuid.Nil, apperr.Invalid("expires_at is in the past")

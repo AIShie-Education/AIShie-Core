@@ -111,7 +111,6 @@ func (q *Queries) CountStudentsOfCourse(ctx context.Context, arg CountStudentsOf
 
 const getLiveMembership = `-- name: GetLiveMembership :one
 SELECT id, status, expires_at FROM course_member WHERE course_id = $1 AND actor_id = $2 AND status <> 'removed'
-FOR UPDATE
 `
 
 type GetLiveMembershipParams struct {
@@ -125,10 +124,9 @@ type GetLiveMembershipRow struct {
 	ExpiresAt *time.Time
 }
 
-// Locked, as every removal locks the seat it removes: a seat past its expiry
-// is removed on the spot, and that waits for its member's calls in flight
-// and cancels what they proposed. If the sweep removes it first, the row no
-// longer matches once the lock is had, and there is nothing in the way.
+// Not locked: a live seat found here is only refused, and locking it would
+// wait for its member's calls in flight, and could deadlock with them, to say
+// no. A seat past its expiry is locked by id before it is removed.
 func (q *Queries) GetLiveMembership(ctx context.Context, arg GetLiveMembershipParams) (GetLiveMembershipRow, error) {
 	row := q.db.QueryRow(ctx, getLiveMembership, arg.CourseID, arg.ActorID)
 	var i GetLiveMembershipRow

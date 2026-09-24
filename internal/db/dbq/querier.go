@@ -90,10 +90,9 @@ type Querier interface {
 	// The partial unique index allows at most one row per (course, actor) that is
 	// not removed. A paused row is returned so the caller can say why it denied.
 	GetLiveMemberForAuthz(ctx context.Context, arg GetLiveMemberForAuthzParams) (GetLiveMemberForAuthzRow, error)
-	// Locked, as every removal locks the seat it removes: a seat past its expiry
-	// is removed on the spot, and that waits for its member's calls in flight
-	// and cancels what they proposed. If the sweep removes it first, the row no
-	// longer matches once the lock is had, and there is nothing in the way.
+	// Not locked: a live seat found here is only refused, and locking it would
+	// wait for its member's calls in flight, and could deadlock with them, to say
+	// no. A seat past its expiry is locked by id before it is removed.
 	GetLiveMembership(ctx context.Context, arg GetLiveMembershipParams) (GetLiveMembershipRow, error)
 	// By id, removed rows included: re-authorizing a proposal checks the very
 	// membership it was made under, not whatever row the actor holds today.
