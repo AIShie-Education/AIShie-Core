@@ -41,7 +41,9 @@ next, drop it in the one after.
 
 ## Releasing
 
-Nothing is deployed automatically. A release is made by a tag, from `main`:
+A push to `main` goes out by itself once CI passes: its image is pushed to
+GHCR as `:sha-<commit>` and `:edge`, and deployed to `staging`. A release is
+made by a tag, from `main`:
 
 ```
 git switch main && git pull
@@ -50,14 +52,43 @@ git push origin v0.1.0
 ```
 
 `release.yml` re-runs the whole of CI on the tagged commit, then publishes
-binaries (Linux and macOS, amd64 and arm64) with checksums and build
-provenance to the release page, and a multi-architecture image to
-`ghcr.io/aishiteru-lms/aishiteru-core`. The release notes list any migrations
-new in the release. A tag with a hyphen (`v0.1.0-rc.1`) is a pre-release and
-leaves `:latest` alone.
+binaries (Linux and macOS, amd64 and arm64) with checksums to the release
+page, and a multi-architecture image to `ghcr.io/aishiteru-lms/aishiteru-core`.
+The release notes list the migrations new in the release; for a stable
+release, new since the last stable one, pre-releases included. A tag with a
+hyphen (`v0.1.0-rc.1`) is a pre-release: it leaves `:latest` alone and is
+deployed to staging.
+
+A stable release goes to production when somebody runs **Deploy** for it:
+Actions → Deploy → Run workflow, use the workflow from the release's tag, and
+give the environment `production` and the image the release run's summary
+names. That run is the decision to deploy and to migrate. To roll back, run
+Deploy with the older release's image: `migrate up` leaves a schema a newer
+release migrated as it is.
 
 To try the build without publishing anything:
 
 ```
 goreleaser release --snapshot --clean
 ```
+
+### One-time settings
+
+In the repository's settings on GitHub:
+
+- **Environments**: `staging` and `production`. Let `staging` take `main` and
+  tags `v*`, and `production` tags `v*` only. On a private repository,
+  environments need a paid plan (Pro, Team or Enterprise), and required
+  reviewers need GitHub Enterprise; where they are available, add them to
+  `production` for a second look before a deploy runs.
+- **Packages**: the image's package must let this repository's Actions write
+  to it (package settings, Manage Actions access). A package the workflow
+  creates starts that way.
+- **Variables**, when they apply: `ATTESTATIONS` = `true` where artifact
+  attestations are available (a public repository, or GitHub Enterprise
+  Cloud); `DEPLOY_TARGET`, once deploy.yml has a deploy step for it.
+- **Storage**: every green push to `main` leaves a `:sha-*` image, with its
+  SBOM and provenance, which counts against a private repository's package
+  storage. Nothing deletes them automatically, since deleting untagged
+  versions can break a multi-architecture image; prune old ones from the
+  package page when needed.

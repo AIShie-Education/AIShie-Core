@@ -1,10 +1,11 @@
 name: CI
 
-# Runs on every pull request and on main. It only checks; nothing is built for
-# release or deployed from here. Release artifacts come from release.yml, on
-# version tags only.
+# Runs on every pull request and on main. On a pull request it only checks. A
+# push to main whose checks all pass is handed to publish.yml, which pushes its
+# image and deploys it to staging; releases come from release.yml, on version
+# tags.
 #
-# Every job calls a Makefile target, so `make ci` locally is the same thing.
+# Every check calls a Makefile target, so `make ci` locally is the same thing.
 
 on:
   pull_request:
@@ -13,9 +14,12 @@ on:
   schedule:
     - cron: "17 3 * * 1" # weekly, so new advisories surface without a push
 
+# A newer push to a pull request makes the older run moot. A run on main is
+# never cut off: it may be publishing, and the weekly run must not cancel a
+# push's either.
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -187,3 +191,14 @@ jobs:
         with:
           go-version-file: go.mod
       - run: make vuln
+
+  # A green push to main: its image, deployed to staging. Pull requests and
+  # the weekly run publish nothing. vuln does not hold it back; a new advisory
+  # is for a person to weigh, and it still shows red here.
+  publish:
+    needs: [lint, generate, sql, test, test-s3, e2e, build]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/publish.yml

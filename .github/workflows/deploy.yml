@@ -1,0 +1,125 @@
+name: Deploy
+
+# The one place a build reaches an environment. publish.yml calls it for
+# staging on every green push to main, and release.yml for staging on a
+# pre-release tag. Production is deployed by running it by hand, from the
+# release's tag: that run is the decision to deploy, and the migration that
+# comes with it, which README says is somebody's to make.
+#
+# No host is deployed to yet. Until a deploy target is configured (the
+# variable DEPLOY_TARGET, on the repository or the environment), a run records
+# the deployment in the environment and says which image is ready. A target,
+# once there is one, does this, in this order:
+#
+#   1. `aishiterud migrate up` with the new image and the environment's
+#      DATABASE_URL. A schema a newer release already migrated is left alone,
+#      so this is safe on a rollback too.
+#   2. Move the servers over to the new image.
+#   3. Wait until GET /healthz answers status "ok" with the new version and
+#      commit.
+#
+# Its credentials go in the environment's secrets.
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        type: string
+        required: true
+      image:
+        description: The image, by digest
+        type: string
+        required: true
+      migrations:
+        description: The migrations new since the release the image is compared with (scripts/release-notes.sh)
+        type: string
+        default: ""
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Where to deploy
+        type: environment
+        required: true
+      image:
+        description: "ghcr.io/aishiteru-lms/aishiteru-core:TAG (e.g. :1.2.3 or :sha-abc1234) or @sha256:DIGEST"
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  IMAGE: ghcr.io/aishiteru-lms/aishiteru-core
+
+jobs:
+  # What is about to be deployed, said before any approval the environment
+  # asks for, so that whoever approves can see it.
+  plan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: read
+    outputs:
+      image: ${{ steps.resolve.outputs.image }}
+    steps:
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: resolve
+        name: Resolve the image to its digest
+        env:
+          WANT: ${{ inputs.image }}
+          ENVIRONMENT: ${{ inputs.environment }}
+          MIGRATIONS: ${{ inputs.migrations }}
+        run: |
+          case "$WANT" in
+            "$IMAGE:"* | "$IMAGE@"*) ;;
+            *) echo "::error::$WANT is not an image of $IMAGE"; exit 1 ;;
+          esac
+          digest=$(docker buildx imagetools inspect "$WANT" --format '{{json .Manifest}}' | jq -r .digest)
+          image="$IMAGE@$digest"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          version=$(docker run --rm "$image" version)
+          {
+            echo "## Deploying to $ENVIRONMENT"
+            echo
+            echo "- image: \`$image\`"
+            echo "- asked for: \`$WANT\`"
+            echo "- version: \`$version\`"
+            if [ -n "$MIGRATIONS" ]; then
+              echo "- migrations new since the last release: \`${MIGRATIONS// /\`, \`}\`"
+            else
+              echo "- migrations: none new since the last release, or see the release notes"
+            fi
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+  deploy:
+    needs: plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    # GitHub records the deployment here, and any protection the environment
+    # has (required reviewers, allowed branches and tags) applies here.
+    environment: ${{ inputs.environment }}
+    # One deploy to an environment at a time, and never cancelled half way:
+    # a migration stopped in the middle leaves the schema dirty.
+    concurrency:
+      group: deploy-${{ inputs.environment }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Deploy
+        env:
+          IMAGE_REF: ${{ needs.plan.outputs.image }}
+          TARGET: ${{ vars.DEPLOY_TARGET }}
+        run: |
+          if [ -z "$TARGET" ]; then
+            echo "No deploy target is configured (DEPLOY_TARGET); $IMAGE_REF is ready." | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          echo "::error::DEPLOY_TARGET is $TARGET, but there is no deploy step for it yet: see the contract at the top of deploy.yml"
+          exit 1

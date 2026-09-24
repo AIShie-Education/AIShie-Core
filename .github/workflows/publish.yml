@@ -1,0 +1,96 @@
+name: Publish
+
+# A green push to main, published for staging. ci.yml calls this once every
+# check on the commit has passed, and nothing else does.
+#
+# It builds the image of the commit CI checked and pushes it as :sha-<commit>.
+# If that commit is still main's tip, it moves :edge to it and deploys it to
+# the staging environment through deploy.yml; a run that main has moved past
+# publishes its image and stops there, so staging never goes backwards.
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+env:
+  IMAGE: ghcr.io/aishiteru-lms/aishiteru-core
+
+jobs:
+  image:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    # One at a time. A newer commit waits for the one being published rather
+    # than cutting it off half way through moving :edge.
+    concurrency:
+      group: publish-main
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      packages: write # push to GHCR
+    outputs:
+      image: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
+      tip: ${{ steps.edge.outputs.tip }}
+      migrations: ${{ steps.meta.outputs.migrations }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # git describe and the migration list need the tags
+      - id: meta
+        name: Version, commit and migrations
+        run: |
+          {
+            echo "version=$(git describe --tags --always)"
+            echo "commit=$(git rev-parse --short HEAD)"
+            echo "date=$(TZ=UTC git show -s --format=%cd --date=format-local:%Y-%m-%dT%H:%M:%SZ HEAD)"
+            scripts/release-notes.sh "$GITHUB_SHA" | grep '^migrations='
+          } | tee -a "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ env.IMAGE }}:sha-${{ steps.meta.outputs.commit }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ steps.meta.outputs.version }}
+          build-args: |
+            VERSION=${{ steps.meta.outputs.version }}
+            COMMIT=${{ steps.meta.outputs.commit }}
+            DATE=${{ steps.meta.outputs.date }}
+          provenance: mode=max
+          sbom: true
+      - id: edge
+        name: Move :edge, if this is still main's tip
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          tip=$(git ls-remote origin refs/heads/main | cut -f1)
+          if [ "$tip" = "$GITHUB_SHA" ]; then
+            docker buildx imagetools create --tag "$IMAGE:edge" "$IMAGE@$DIGEST"
+            echo "tip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "main has moved on to $tip; its own run moves :edge and deploys it"
+            echo "tip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  staging:
+    needs: image
+    if: needs.image.outputs.tip == 'true'
+    permissions:
+      contents: read
+      packages: read
+    uses: ./.github/workflows/deploy.yml
+    with:
+      environment: staging
+      image: ${{ needs.image.outputs.image }}
+      migrations: ${{ needs.image.outputs.migrations }}

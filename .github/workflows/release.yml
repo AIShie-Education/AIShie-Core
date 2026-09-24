@@ -1,14 +1,16 @@
 name: Release
 
 # The only place anything is built for release, and it runs on version tags
-# only. Nothing is deployed from here or from anywhere else: a release is
-# binaries on the release page and an image in GHCR, and what runs where is
-# somebody's decision, made elsewhere.
+# only:
 #
 #   git tag -s v0.1.0 -m "v0.1.0" && git push origin v0.1.0
 #
-# A tag with a hyphen (v0.1.0-rc.1) is a pre-release: it gets its own version
-# tags on the image and leaves :latest alone.
+# It checks the tagged commit again, then publishes binaries on the release
+# page and a multi-architecture image in GHCR. A tag with a hyphen
+# (v0.1.0-rc.1) is a pre-release: it gets its own version tags on the image,
+# leaves :latest alone, and is deployed to staging through deploy.yml. A
+# stable release is not deployed by itself: production is deployed by running
+# the Deploy workflow by hand, from the tag, and the run's summary says how.
 
 on:
   push:
@@ -126,7 +128,11 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SHORT_COMMIT: ${{ needs.verify.outputs.commit }}
           COMMIT_DATE: ${{ needs.verify.outputs.date }}
+      # Artifact attestations need GitHub Enterprise Cloud on a private
+      # repository, and would fail the run after the release is published. Set
+      # the variable ATTESTATIONS to "true" where they are available.
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        if: ${{ !github.event.repository.private || vars.ATTESTATIONS == 'true' }}
         with:
           subject-checksums: dist/checksums.txt
 
@@ -138,6 +144,8 @@ jobs:
       packages: write      # push to GHCR
       id-token: write
       attestations: write
+    outputs:
+      image: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
@@ -172,7 +180,41 @@ jobs:
           provenance: mode=max
           sbom: true
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        if: ${{ !github.event.repository.private || vars.ATTESTATIONS == 'true' }}
         with:
           subject-name: ${{ env.IMAGE }}
           subject-digest: ${{ steps.build.outputs.digest }}
           push-to-registry: true
+
+  # A pre-release goes to staging by itself.
+  staging:
+    needs: [verify, binaries, image]
+    if: contains(github.ref_name, '-')
+    permissions:
+      contents: read
+      packages: read
+    uses: ./.github/workflows/deploy.yml
+    with:
+      environment: staging
+      image: ${{ needs.image.outputs.image }}
+      migrations: ${{ needs.verify.outputs.migrations }}
+
+  # A stable release goes to production only when somebody runs Deploy for it.
+  production:
+    needs: [binaries, image]
+    if: ${{ !contains(github.ref_name, '-') }}
+    runs-on: ubuntu-24.04
+    steps:
+      - name: How to deploy it
+        env:
+          IMAGE_REF: ${{ needs.image.outputs.image }}
+        run: |
+          {
+            echo "## $GITHUB_REF_NAME is released"
+            echo
+            echo "To deploy it to production: Actions → Deploy → Run workflow, with"
+            echo
+            echo "- Use workflow from: tag \`$GITHUB_REF_NAME\`"
+            echo "- environment: \`production\`"
+            echo "- image: \`$IMAGE_REF\`"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
