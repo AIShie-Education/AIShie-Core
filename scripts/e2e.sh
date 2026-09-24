@@ -61,10 +61,14 @@ export BLOB_FS_ROOT="$WORK/blobs" PUBLIC_URL="$BASE"
 "$BIN" seed
 
 step "bootstrap: the one actor created by nobody"
+# An empty password is refused before anything is made: the bootstrap
+# after it is still the first.
+printf '\n' | "$BIN" bootstrap --name Root --email root@example.edu --password-stdin >/dev/null 2>&1 &&
+  fail "bootstrap took an empty password"
 ROOT=$("$BIN" bootstrap --name Root 2>/dev/null)
 [[ $ROOT == ais_* ]] || fail "bootstrap printed no token"
 "$BIN" bootstrap --name Usurper >/dev/null 2>&1 && fail "bootstrap ran twice"
-echo "  root token ${ROOT:0:16}…; a second bootstrap is refused"
+echo "  root token ${ROOT:0:16}…; an empty password and a second bootstrap are refused"
 
 "$BIN" serve 2>"$WORK/server.log" &
 SERVER_PID=$!

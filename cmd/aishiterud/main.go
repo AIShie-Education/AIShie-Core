@@ -362,6 +362,12 @@ func bootstrap(cfg config.Config, args []string) error {
 			return fmt.Errorf("bootstrap: read password: %w", err)
 		}
 		in.Password = strings.TrimRight(line, "\r\n")
+		// An empty line is not taken as no password: root would be left
+		// without the one it was asked to have, and bootstrap does not run a
+		// second time to put that right.
+		if in.Password == "" {
+			return errors.New("bootstrap: --password-stdin read an empty password; nothing was created")
+		}
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
