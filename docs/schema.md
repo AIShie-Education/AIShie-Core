@@ -589,7 +589,8 @@ check `actor.platform_role` instead. That is the only place it is read.
 - A call that loses a deadlock — two managers changing each other's seats at once — is made
   again, once, in a fresh transaction, and is recorded as failed ("try again") only if it loses
   again. A sweep's call that loses twice is not recorded at all: its key names what it sweeps,
-  and a failure stored under it would be replayed on every sweep after.
+  and a failure stored under it would stand for the sweep: every sweep after would replay that
+  failure or pass the thing over, and never sweep it.
 - `actor.kind` and `course_member.role` are never read by authorization.
 
 ## 5. Worked example: an agent grades an essay

@@ -394,8 +394,8 @@ func TestASweepLosesRacesQuietly(t *testing.T) {
 
 // A sweep step that loses a deadlock is made again, and one that loses
 // twice is not recorded at all: its key names the thing swept, so a failure
-// stored under it would be replayed on every tick after, and the thing never
-// swept. The next tick sweeps it.
+// stored under it would stand for the sweep: every tick after would replay it
+// or pass the thing over, and never sweep it. The next tick sweeps it.
 func TestASweepStepThatLosesADeadlockIsSweptNextTick(t *testing.T) {
 	f := setup(t, 0)
 	f.Exec(`UPDATE course_member SET expires_at = $2 WHERE id = $1`, f.GraderM, f.now.Add(-time.Hour))

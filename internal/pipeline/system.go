@@ -33,7 +33,8 @@ import (
 // The idempotency key is chosen by the sweep and is deterministic — it names
 // the thing swept — so that two instances sweeping at once, or one sweep run
 // twice, act once. So a lost deadlock is never recorded: stored under that
-// key as failed, it would be replayed for ever, and the thing never swept.
+// key as failed, it would stand for the sweep: every sweep after would replay
+// it or pass the thing over, and never sweep it.
 // The call is made again, as any write is, and if it loses again the error
 // is returned with nothing recorded, for the next sweep to try.
 func (p *Pipeline) InvokeSystem(ctx context.Context, systemActor uuid.UUID, name string, args any, key string) (Outcome, error) {
