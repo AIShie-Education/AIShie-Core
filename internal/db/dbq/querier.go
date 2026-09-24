@@ -36,7 +36,6 @@ type Querier interface {
 	CountStudentsInScope(ctx context.Context, arg CountStudentsInScopeParams) (int64, error)
 	// How many of the given member ids are current students of this course.
 	CountStudentsOfCourse(ctx context.Context, arg CountStudentsOfCourseParams) (int64, error)
-	CountSubmissionDocuments(ctx context.Context, submissionID *uuid.UUID) (int64, error)
 	CourseCodeTaken(ctx context.Context, arg CourseCodeTakenParams) (bool, error)
 	// A session is a credential with a short life. Long after it has expired it
 	// says nothing the action log does not, so it is the one kind of row that is
@@ -116,6 +115,10 @@ type Querier interface {
 	// The account an identity provider's subject is linked to, if any.
 	GetSSOCredential(ctx context.Context, arg GetSSOCredentialParams) (GetSSOCredentialRow, error)
 	GetSubmissionFull(ctx context.Context, arg GetSubmissionFullParams) (Submission, error)
+	// GetSubmissionFull, locked until the hand-in is written, so that what
+	// submission.submit checks is what it hands in: an edit to the draft
+	// meanwhile waits, and then finds it handed in.
+	GetSubmissionFullForUpdate(ctx context.Context, arg GetSubmissionFullForUpdateParams) (Submission, error)
 	// Lookups are always "in this course": an id from another course is not found.
 	GetSubmissionInCourse(ctx context.Context, arg GetSubmissionInCourseParams) (GetSubmissionInCourseRow, error)
 	GetSystemActor(ctx context.Context) (uuid.UUID, error)

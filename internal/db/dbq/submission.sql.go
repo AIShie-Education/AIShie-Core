@@ -12,17 +12,6 @@ import (
 	"github.com/google/uuid"
 )
 
-const countSubmissionDocuments = `-- name: CountSubmissionDocuments :one
-SELECT count(*) FROM document WHERE submission_id = $1 AND status = 'active'
-`
-
-func (q *Queries) CountSubmissionDocuments(ctx context.Context, submissionID *uuid.UUID) (int64, error) {
-	row := q.db.QueryRow(ctx, countSubmissionDocuments, submissionID)
-	var count int64
-	err := row.Scan(&count)
-	return count, err
-}
-
 const getSubmissionFull = `-- name: GetSubmissionFull :one
 SELECT id, assignment_id, course_id, student_member_id, attempt, body, instructions_version_id,
        state, submitted_at, created_at
@@ -36,6 +25,39 @@ type GetSubmissionFullParams struct {
 
 func (q *Queries) GetSubmissionFull(ctx context.Context, arg GetSubmissionFullParams) (Submission, error) {
 	row := q.db.QueryRow(ctx, getSubmissionFull, arg.ID, arg.CourseID)
+	var i Submission
+	err := row.Scan(
+		&i.ID,
+		&i.AssignmentID,
+		&i.CourseID,
+		&i.StudentMemberID,
+		&i.Attempt,
+		&i.Body,
+		&i.InstructionsVersionID,
+		&i.State,
+		&i.SubmittedAt,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
+const getSubmissionFullForUpdate = `-- name: GetSubmissionFullForUpdate :one
+SELECT id, assignment_id, course_id, student_member_id, attempt, body, instructions_version_id,
+       state, submitted_at, created_at
+FROM submission WHERE id = $1 AND course_id = $2
+FOR UPDATE
+`
+
+type GetSubmissionFullForUpdateParams struct {
+	ID       uuid.UUID
+	CourseID uuid.UUID
+}
+
+// GetSubmissionFull, locked until the hand-in is written, so that what
+// submission.submit checks is what it hands in: an edit to the draft
+// meanwhile waits, and then finds it handed in.
+func (q *Queries) GetSubmissionFullForUpdate(ctx context.Context, arg GetSubmissionFullForUpdateParams) (Submission, error) {
+	row := q.db.QueryRow(ctx, getSubmissionFullForUpdate, arg.ID, arg.CourseID)
 	var i Submission
 	err := row.Scan(
 		&i.ID,

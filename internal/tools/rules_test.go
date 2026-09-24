@@ -757,6 +757,68 @@ func TestSubmissionLifecycle(t *testing.T) {
 	}
 }
 
+// A hand-in that waits for approval counts from when it was asked for. Yuki
+// asked before the due date, under the instructions then published; the
+// approver's delay does not make her late, nor pin instructions published
+// afterwards. And what is handed in is what was asked for: Ken, who also
+// asked in time, cannot go on rewriting his draft after the due date and
+// have that handed in as of before it.
+func TestAProposedHandInCountsFromWhenItWasAsked(t *testing.T) {
+	b := build(t)
+	base := time.Now()
+	later := func(d time.Duration) { b.P.SetClock(func() time.Time { return base.Add(d) }) }
+	brief := testkit.Result[tools.DocumentCreateOut](t, b.do(t, b.sato, "document.create",
+		m{"course_id": b.course, "kind": "instructions", "title": "HW3", "body_md": "v1: 1000 words"}))
+	b.do(t, b.sato, "document.publish", m{"course_id": b.course, "document_id": brief.DocumentID})
+	b.do(t, b.sato, "assignment.update", m{"course_id": b.course, "assignment_id": b.hw3,
+		"instructions_document_id": brief.DocumentID, "due_at": base.Add(time.Hour)})
+	// Each writes a draft, and then may only ask for it to be handed in.
+	handIn := func(student, member uuid.UUID) (uuid.UUID, *uuid.UUID) {
+		t.Helper()
+		work := testkit.Result[tools.SubmissionCreateOut](t, b.do(t, student, "submission.create",
+			m{"course_id": b.course, "assignment_id": b.hw3, "body": "my essay"})).SubmissionID
+		b.do(t, b.sato, "member.update_perms", m{"course_id": b.course, "member_id": member, "perms": m{"submission_write": "confirm_required"}})
+		out := b.MustCall(student, "submission.submit", m{"course_id": b.course, "submission_id": work}, "hand-in-"+work.String())
+		if out.Status != domain.StatusProposed {
+			t.Fatalf("%+v", out)
+		}
+		return work, out.ActionID
+	}
+	approve := func(action *uuid.UUID) pipeline.DecideOut {
+		t.Helper()
+		return testkit.Result[pipeline.DecideOut](t, b.do(t, b.sato, "action.decide", m{"course_id": b.course, "action_id": action, "decision": "approve"}))
+	}
+	yukis, yukisAsk := handIn(b.yuki, b.yukiM)
+	kens, kensAsk := handIn(b.ken, b.kenM)
+
+	later(2 * time.Hour)
+	b.do(t, b.sato, "document.add_version", m{"course_id": b.course, "document_id": brief.DocumentID, "body_md": "v2: 3000 words", "publish": true})
+	later(3 * time.Hour)
+	if v := approve(yukisAsk); v.Outcome != domain.StatusExecuted {
+		t.Fatalf("%+v", v)
+	}
+	if n := b.Count(`SELECT count(*) FROM submission s JOIN action a ON a.id = $2
+		WHERE s.id = $1 AND s.state = 'submitted' AND s.submitted_at = a.created_at AND s.instructions_version_id = $3`,
+		yukis, *yukisAsk, *brief.VersionID); n != 1 {
+		t.Fatal("the hand-in was judged, dated or pinned as of its approval, not as of when it was asked for")
+	}
+
+	b.do(t, b.sato, "submission.update_draft", m{"course_id": b.course, "submission_id": kens, "body": "rewritten after the due date"})
+	if v := approve(kensAsk); v.Outcome != domain.StatusFailed || v.Error == nil || v.Error.Code != apperr.FailedPrecondition {
+		t.Fatalf("approving a hand-in of a draft that has changed since: %+v", v)
+	}
+	if n := b.Count(`SELECT count(*) FROM submission WHERE id = $1 AND state = 'draft'`, kens); n != 1 {
+		t.Fatal("a draft changed after it was asked to be handed in was handed in")
+	}
+	// A direct call may say what it hands in, and is held to it.
+	b.try(t, b.sato, "submission.submit", m{"course_id": b.course, "submission_id": kens, "body": "my essay"}, apperr.FailedPrecondition)
+	b.try(t, b.sato, "submission.submit", m{"course_id": b.course, "submission_id": kens, "instructions_version_id": brief.VersionID}, apperr.FailedPrecondition)
+	if got := testkit.Result[tools.SubmissionSubmitOut](t, b.do(t, b.sato, "submission.submit",
+		m{"course_id": b.course, "submission_id": kens, "body": "rewritten after the due date", "files": []uuid.UUID{}})); got.State != "late" {
+		t.Fatalf("handed in now, after the due date: %+v", got)
+	}
+}
+
 func TestAStudentWithAnEmptiedScopeReachesNobody(t *testing.T) {
 	b := build(t)
 	b.Exec(`DELETE FROM member_student_scope WHERE member_id = $1`, b.yukiM)

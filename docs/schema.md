@@ -324,7 +324,9 @@ the submitting member belong to the same course" a database fact. That the membe
 
 **Submissions freeze on submit.** Once `submitted` or `late`, a trigger rejects deletion and
 every change except correcting lateness. Resubmitting is a new `attempt`. The work a grade was
-given for never changes underneath it.
+given for never changes underneath it. A hand-in that waits for approval counts from when it
+was asked for: `submitted_at`, lateness and the pinned instructions are as of then, and it is
+refused on approval if the draft has changed in the meantime.
 
 ### 2.6 Activity
 
@@ -366,10 +368,11 @@ any secret fields removed; a secret (a password) still counts in the hash, throu
 digest under `SIGNING_KEY`, so that a key reused with a different secret is caught too while
 the hash gives nothing away to whoever reads the table. For a proposal, `payload` also carries
 the defaults that had to be fixed when it was made rather than when it is approved — the rubric
-version a grade is against, the points possible its score is out of, the version that "publish
-the latest" means, the drafts that "post this assignment" means — while the hash stays that of
-the call as the caller made it. A version or a draft that arrives while a proposal waits has
-been in front of nobody who asked for it, and approving the proposal does not release it.
+version a grade is against, the points possible its score is out of, the draft a hand-in is of
+and the instructions it is handed in under, the version that "publish the latest" means, the
+drafts that "post this assignment" means — while the hash stays that of the call as the caller
+made it. A version or a draft that arrives while a proposal waits has been in front of nobody
+who asked for it, and approving the proposal does not release it.
 `result` holds what the call returned (secrets removed likewise), or `{"error": …}` for a
 failed, denied or cancelled action and `{"decision": …}` for a rejected one; which of those it
 is follows from `status`, never from the shape of `result`.
@@ -547,6 +550,8 @@ check `actor.platform_role` instead. That is the only place it is read.
   carried out only against the points possible it was proposed out of.
 - A draft is as old as the call that made it (§2.3), a draft written by an approved proposal
   included: an approval replaces only what came before the proposal.
+- A hand-in approved later counts from when it was asked for, and only if the draft still
+  holds what was asked to be handed in (§2.5).
 - The component tree is acyclic beyond the self-loop the CHECK blocks.
 - Cancelling pending proposals when a member is removed or expires.
 - Nobody hands out more than they hold (§2.2): any change that widens a seat is measured as
