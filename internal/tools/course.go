@@ -299,6 +299,8 @@ func (s seating) listsItself() bool {
 	return s.role == "student" && s.studentScope == domain.ScopeListed && len(s.listedStudents) == 0
 }
 
+// errSeated refuses a second live seat, whether the first was live all along
+// or was given longer while seat() looked at it.
 var errSeated = apperr.Conflicts("the actor already has a seat in this course; change it, or remove it and add again for a fresh start")
 
 // seat adds a member: a new course_member row with the preset copied onto it.
