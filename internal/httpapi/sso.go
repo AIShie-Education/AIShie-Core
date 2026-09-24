@@ -3,6 +3,7 @@ package httpapi
 import (
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
 	"net/http"
 	"net/url"
 	"strings"
@@ -99,11 +100,12 @@ func (s *server) ssoCallback(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, st.ReturnTo, http.StatusFound)
 }
 
-// maxReturn bounds return_to. It travels in the state cookie, escaped for
-// JSON and then in base64, and a browser keeps a cookie of about four
-// kilobytes at most: a longer one would never come back to finish the
-// sign-in, and would only have made the answer to anyone who asks, before
-// they are signed in, several times the size of the question.
+// maxReturn bounds return_to as it is written into the state cookie, escaped
+// for JSON, where each '<', '>' or '&' takes six bytes; the cookie then goes
+// out in base64. A browser keeps a cookie of about four kilobytes at most: a
+// longer one would never come back to finish the sign-in, and would only
+// have made the answer to anyone who asks, before they are signed in,
+// several times the size of the question.
 const maxReturn = 2 << 10
 
 // safeReturn decides where the browser goes after signing in. Only two kinds
@@ -117,6 +119,9 @@ func (s *server) safeReturn(want string) string {
 		def = s.TrustedOrigins[0] + "/"
 	}
 	if want == "" || len(want) > maxReturn {
+		return def
+	}
+	if escaped, _ := json.Marshal(want); len(escaped)-len(`""`) > maxReturn {
 		return def
 	}
 	u, err := url.Parse(want)

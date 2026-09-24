@@ -371,7 +371,9 @@ func TestSingleSignOnDoesNotRedirectElsewhere(t *testing.T) {
 	for want, tries := range map[string][]string{
 		frontEnd + "/": {"", "https://evil.example/", "//evil.example/x", `/\evil.example`, `\\evil.example`, "https://lms.example.edu.evil.example/",
 			"https://lms.example.edu@evil.example/", "http://lms.example.edu/", "javascript:alert(1)", "evil.example", "/\t/evil.example", "https:evil.example",
-			long + "a"},
+			long + "a",
+			// Short, but six times as long escaped in the cookie.
+			"/courses/1?q=" + strings.Repeat("<", 400)},
 		"/courses/1?tab=grades":            {"/courses/1?tab=grades"},
 		frontEnd + "/courses/1#submission": {frontEnd + "/courses/1#submission"},
 		long:                               {long},
