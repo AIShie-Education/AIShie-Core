@@ -324,7 +324,8 @@ func (p *Pipeline) Review(ctx context.Context, ec *tool.ExecCtx, in ReviewIn) (R
 	if err != nil {
 		return ReviewOut{}, err
 	}
-	if from := domain.ReviewState(row.ReviewState); !canReview(from, domain.ReviewState(in.Outcome)) {
+	from := domain.ReviewState(row.ReviewState)
+	if !canReview(from, domain.ReviewState(in.Outcome)) {
 		if from == domain.ReviewEscalated {
 			return ReviewOut{}, apperr.Conflicts("the action is already escalated")
 		}
@@ -342,6 +343,18 @@ func (p *Pipeline) Review(ctx context.Context, ec *tool.ExecCtx, in ReviewIn) (R
 		return ReviewOut{}, err
 	} else if own {
 		return ReviewOut{}, apperr.Forbid("nobody reviews their own action, even at one remove: this one decides or reviews an action of yours")
+	}
+	if from == domain.ReviewEscalated && row.ReviewedByMemberID != nil {
+		// An escalation asks for a second reviewer, so whoever raised it does
+		// not close it: not from the seat they raised it from, nor from one
+		// they have taken since.
+		by, err := ec.Q.GetMemberInCourse(ctx, dbq.GetMemberInCourseParams{ID: *row.ReviewedByMemberID, CourseID: in.CourseID})
+		if err != nil {
+			return ReviewOut{}, err
+		}
+		if by.ActorID == ec.Actor.ID {
+			return ReviewOut{}, apperr.Forbid("an escalation is for someone else to look at")
+		}
 	}
 	n, err := ec.Q.SetActionReview(ctx, dbq.SetActionReviewParams{
 		ID: row.ID, ReviewState: in.Outcome, ReviewedByMemberID: &ec.Member.ID, ReviewedAt: &ec.Now,

@@ -447,14 +447,26 @@ func TestPendingReview(t *testing.T) {
 	if twice := review(c.Sato, "escalated", "esc2"); twice.Status != domain.StatusFailed {
 		t.Fatalf("escalating twice: %+v", twice)
 	}
-	if done := review(c.Sato, "reviewed", "done"); done.Status != domain.StatusExecuted {
+	// An escalation is for someone else to look at: Sato does not close his
+	// own, from his seat or from one he has taken since.
+	if own := review(c.Sato, "reviewed", "own"); own.Status != domain.StatusFailed || own.Error.Code != apperr.Forbidden {
+		t.Fatalf("closing his own escalation: %+v", own)
+	}
+	c.Exec(`UPDATE course_member SET status = 'removed' WHERE id = $1`, c.SatoM)
+	c.Member(c.Course, c.Sato, "instructor")
+	if own := review(c.Sato, "reviewed", "own-again"); own.Status != domain.StatusFailed || own.Error.Code != apperr.Forbidden {
+		t.Fatalf("closing his own escalation from a new seat: %+v", own)
+	}
+	second := c.Actor("human", "Second reviewer")
+	secondM := c.Member(c.Course, second, "instructor")
+	if done := review(second, "reviewed", "done"); done.Status != domain.StatusExecuted {
 		t.Fatalf("review after escalation: %+v", done)
 	}
-	if again := review(c.Sato, "reviewed", "again"); again.Status != domain.StatusFailed {
+	if again := review(second, "reviewed", "again"); again.Status != domain.StatusFailed {
 		t.Fatalf("reviewing twice: %+v", again)
 	}
-	if n := c.Count(`SELECT count(*) FROM action WHERE id = $1 AND review_state = 'reviewed' AND reviewed_by_member_id = $2`, *out.ActionID, c.SatoM); n != 1 {
-		t.Fatal("the review is not recorded against Sato")
+	if n := c.Count(`SELECT count(*) FROM action WHERE id = $1 AND review_state = 'reviewed' AND reviewed_by_member_id = $2`, *out.ActionID, secondM); n != 1 {
+		t.Fatal("the review is not recorded against the second reviewer")
 	}
 	// Reviewing undoes nothing.
 	if n := c.Count(`SELECT count(*) FROM grade WHERE grader_member_id = $1 AND superseded_by IS NULL`, taM); n != 1 {
