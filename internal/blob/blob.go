@@ -51,18 +51,20 @@ type Store interface {
 	//
 	// FinalKey is where the object uploaded under stagingKey will live. It is
 	// a pure function of the staging key, so that "already attached" can be
-	// checked before anything is copied.
+	// checked before anything is copied, and it maps a prefix to a prefix:
+	// whatever is staged under p is attached under FinalKey(p).
 	FinalKey(stagingKey string) string
 	// Finalize moves the object to its final key and describes what is now
 	// there. The description is of the final object, read after the move: it
 	// is what was attached, whatever is PUT to the staging key afterwards.
 	Finalize(ctx context.Context, stagingKey string) (Info, error)
 
-	// List calls fn for every object in the store, with when it was last
-	// written, until fn returns an error; ErrStopList ends the listing
-	// without being one. It is how uploads that nothing came to point at are
-	// found and removed.
-	List(ctx context.Context, fn func(key string, modified time.Time) error) error
+	// List calls fn for every object whose key begins with prefix, with when
+	// it was last written, until fn returns an error; ErrStopList ends the
+	// listing without being one. It is how uploads that nothing came to
+	// point at are found and removed. The bucket or directory may hold other
+	// things besides this server's files, and the prefix keeps them out of it.
+	List(ctx context.Context, prefix string, fn func(key string, modified time.Time) error) error
 }
 
 // ErrStopList, returned from a List callback, ends the listing early.

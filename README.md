@@ -121,7 +121,9 @@ Configuration is environment variables only; `bin/aishiterud help` lists them.
 Files are kept under `var/blobs` by default (`BLOB_STORE=fs`). For more than
 one instance, or for production, use `BLOB_STORE=s3` with the `S3_*` settings
 and a `SIGNING_KEY` shared by every instance. An upload that is not attached
-to a document within `PROPOSAL_TTL` plus two days is removed.
+to a document within `PROPOSAL_TTL` plus two days is removed. The server keeps
+its files under `courses/` (with S3, `attached/courses/` as well) and leaves
+anything else in the directory or bucket alone.
 `serve` never migrates on its own. It refuses to start against a schema older
 than the binary (run `aishiterud migrate up` first), and `/healthz` reports
 503 if the schema falls behind or a migration is left half-done.

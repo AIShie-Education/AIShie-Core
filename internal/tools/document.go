@@ -152,6 +152,12 @@ type UploadURLOut struct {
 	MaxBytes    int64             `json:"max_bytes"`
 }
 
+// UploadPrefix begins the key of every upload: courses/<course>/<upload>.
+// These keys, and the final keys that attaching moves them to, are all the
+// server ever writes to the store. The orphan sweep looks at nothing else, so
+// a bucket or directory that holds other things as well loses none of them.
+const UploadPrefix = "courses/"
+
 func documentUploadURL(d Deps) tool.Tool {
 	return tool.Define(tool.Spec[UploadURLIn, UploadURLOut]{
 		Name: "document.upload_url",
@@ -183,8 +189,9 @@ func documentUploadURL(d Deps) tool.Tool {
 				return UploadURLOut{}, apperr.Forbid("the course is archived and takes no new files").With("reason", "course_archived")
 			}
 			// The key is ours and unguessable; nothing the uploader says goes
-			// into it.
-			key := "courses/" + in.CourseID.String() + "/" + ids.New().String()
+			// into it. The orphan sweep knows the server's own keys by this
+			// shape.
+			key := UploadPrefix + in.CourseID.String() + "/" + ids.New().String()
 			url, headers, err := d.Blob.PresignPut(ctx, key, in.ContentType, uploadWindow)
 			if err != nil {
 				return UploadURLOut{}, err

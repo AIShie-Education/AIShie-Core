@@ -147,13 +147,33 @@ func (s *FSStore) Finalize(ctx context.Context, stagingKey string) (Info, error)
 	return s.Stat(ctx, stagingKey)
 }
 
-func (s *FSStore) List(ctx context.Context, fn func(key string, modified time.Time) error) error {
-	err := filepath.WalkDir(s.root, func(p string, d fs.DirEntry, err error) error {
+func (s *FSStore) List(ctx context.Context, prefix string, fn func(key string, modified time.Time) error) error {
+	// Only the directory the prefix names is walked, not the whole root:
+	// whatever else is kept there is not ours to go through.
+	start := s.root
+	if dir := prefix[:strings.LastIndex(prefix, "/")+1]; dir != "" {
+		var err error
+		if start, err = s.path(dir); err != nil {
+			return err
+		}
+	}
+	err := filepath.WalkDir(start, func(p string, d fs.DirEntry, err error) error {
+		if p == start && errors.Is(err, fs.ErrNotExist) {
+			return nil // nothing has been written under the prefix yet
+		}
 		if err != nil || d.IsDir() || strings.HasSuffix(p, ".meta") {
 			return err
 		}
 		if err := ctx.Err(); err != nil {
 			return err
+		}
+		rel, err := filepath.Rel(s.root, p)
+		if err != nil {
+			return err
+		}
+		key := filepath.ToSlash(rel)
+		if !strings.HasPrefix(key, prefix) {
+			return nil
 		}
 		info, err := d.Info()
 		if errors.Is(err, fs.ErrNotExist) {
@@ -162,11 +182,7 @@ func (s *FSStore) List(ctx context.Context, fn func(key string, modified time.Ti
 		if err != nil {
 			return err
 		}
-		rel, err := filepath.Rel(s.root, p)
-		if err != nil {
-			return err
-		}
-		return fn(filepath.ToSlash(rel), info.ModTime())
+		return fn(key, info.ModTime())
 	})
 	if errors.Is(err, ErrStopList) {
 		return nil

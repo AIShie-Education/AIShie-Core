@@ -7,10 +7,13 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/minio/minio-go/v7"
 )
 
 // TestS3Store runs against a real S3-compatible store, which CI provides as a
@@ -54,6 +57,23 @@ func TestS3Store(t *testing.T) {
 	info, err := s.Stat(ctx, key)
 	if err != nil || info.Size != int64(len(body)) || info.ContentType != "application/pdf" || info.Checksum == "" {
 		t.Fatalf("stat: %+v %v", info, err)
+	}
+	// Listing under a prefix finds what is there and nothing else the bucket
+	// holds.
+	other := "backups/" + uuid.NewString()
+	if _, err := s.client.PutObject(ctx, s.bucket, other, bytes.NewReader(body), int64(len(body)), minio.PutObjectOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s.Delete(ctx, other) }()
+	var listed []string
+	if err := s.List(ctx, "courses/test/", func(k string, _ time.Time) error {
+		listed = append(listed, k)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(listed, key) || slices.ContainsFunc(listed, func(k string) bool { return !strings.HasPrefix(k, "courses/test/") }) {
+		t.Fatalf("listed under courses/test/: %q", listed)
 	}
 	// Attaching moves the object somewhere the upload URL cannot reach. The
 	// URL is still valid, and whoever holds it PUTs again — and changes

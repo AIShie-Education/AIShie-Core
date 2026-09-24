@@ -27,6 +27,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -49,8 +50,8 @@ const (
 	// OrphanGrace is how long past the proposal TTL an unattached upload is
 	// kept. See sweepBlobs.
 	OrphanGrace = 48 * time.Hour
-	// blobSweepEvery: listing a whole store is not something to do every
-	// minute.
+	// blobSweepEvery: listing every file the server keeps is not something to
+	// do every minute.
 	blobSweepEvery = time.Hour
 )
 
@@ -228,6 +229,10 @@ func (r *Runner) Sweep(ctx context.Context) (Report, error) {
 // An upload token does not expire for attaching (see blob.UploadClaim), so
 // this is also what bounds it: a file not attached within TTL + OrphanGrace
 // is gone, and attaching it then fails as though it had never been uploaded.
+//
+// Only the server's own files are looked at. The bucket or directory may be
+// shared with other things — a backup, another program's objects — and their
+// age says nothing about whether anyone still wants them.
 func (r *Runner) sweepBlobs(ctx context.Context, now time.Time) (int, error) {
 	ttl := r.pl.Config().ProposalTTL
 	if r.cfg.Blob == nil || ttl <= 0 || now.Sub(r.blobsSwept) < blobSweepEvery {
@@ -235,16 +240,22 @@ func (r *Runner) sweepBlobs(ctx context.Context, now time.Time) (int, error) {
 	}
 	cutoff := now.Add(-ttl - OrphanGrace)
 	var old []string
-	err := r.cfg.Blob.List(ctx, func(key string, modified time.Time) error {
-		if modified.Before(cutoff) {
+	for _, prefix := range r.blobPrefixes() {
+		err := r.cfg.Blob.List(ctx, prefix, func(key string, modified time.Time) error {
+			if !ownKey(strings.TrimPrefix(key, prefix)) || !modified.Before(cutoff) {
+				return nil
+			}
 			if old = append(old, key); len(old) >= int(r.cfg.Batch) {
 				return blob.ErrStopList
 			}
+			return nil
+		})
+		if err != nil {
+			return 0, err
 		}
-		return nil
-	})
-	if err != nil {
-		return 0, err
+		if len(old) >= int(r.cfg.Batch) {
+			break
+		}
 	}
 	removed := 0
 	for _, key := range old {
@@ -262,6 +273,31 @@ func (r *Runner) sweepBlobs(ctx context.Context, now time.Time) (int, error) {
 		r.blobsSwept = now
 	}
 	return removed, nil
+}
+
+// blobPrefixes are where the server's files are kept: uploads, and where
+// attaching moves them, which for a store that moves nothing is the same
+// place.
+func (r *Runner) blobPrefixes() []string {
+	prefixes := []string{tools.UploadPrefix}
+	if final := r.cfg.Blob.FinalKey(tools.UploadPrefix); final != tools.UploadPrefix {
+		prefixes = append(prefixes, final)
+	}
+	return prefixes
+}
+
+// ownKey reports whether name, what follows the prefix a key was listed
+// under, is what document.upload_url puts there: <course>/<upload>, two UUIDs
+// spelt as the server spells them. Anything else under the prefix was put
+// there by someone else, and is left alone.
+func ownKey(name string) bool {
+	course, upload, ok := strings.Cut(name, "/")
+	return ok && canonicalUUID(course) && canonicalUUID(upload)
+}
+
+func canonicalUUID(s string) bool {
+	u, err := uuid.Parse(s)
+	return err == nil && u.String() == s
 }
 
 // removeIfOrphan deletes one object unless a version points at it. It holds

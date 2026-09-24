@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -107,6 +108,42 @@ func TestFSStoreLimitsAndPaths(t *testing.T) {
 	entries, _ := os.ReadDir(filepath.Dir(s.root))
 	if len(entries) != 1 {
 		t.Fatalf("something was written outside the root: %v", entries)
+	}
+}
+
+// Listing under a prefix goes through what is under it and nothing else: the
+// root may hold things that are not the server's.
+func TestFSStoreListsUnderAPrefix(t *testing.T) {
+	s, _ := newFS(t)
+	ctx := context.Background()
+	for _, key := range []string{"courses/c1/a", "courses/c2/b", "courses-old/c", "backups/nightly.sql.gz", "README"} {
+		if _, err := s.Put(ctx, key, "text/plain", strings.NewReader("x"), 100); err != nil {
+			t.Fatal(err)
+		}
+	}
+	list := func(prefix string) []string {
+		t.Helper()
+		var keys []string
+		if err := s.List(ctx, prefix, func(key string, _ time.Time) error {
+			keys = append(keys, key)
+			return nil
+		}); err != nil {
+			t.Fatalf("list %q: %v", prefix, err)
+		}
+		return keys
+	}
+	for prefix, want := range map[string]string{
+		"courses/":          "courses/c1/a courses/c2/b",
+		"courses/c2/":       "courses/c2/b",
+		"courses":           "courses-old/c courses/c1/a courses/c2/b",
+		"attached/courses/": "",
+		"":                  "README backups/nightly.sql.gz courses-old/c courses/c1/a courses/c2/b",
+	} {
+		got := list(prefix)
+		slices.Sort(got)
+		if got := strings.Join(got, " "); got != want {
+			t.Errorf("under %q: %q, want %q", prefix, got, want)
+		}
 	}
 }
 

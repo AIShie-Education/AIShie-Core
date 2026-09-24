@@ -2,6 +2,9 @@ package jobs_test
 
 import (
 	"context"
+	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -420,6 +423,73 @@ func TestOrphanFilesAreRemoved(t *testing.T) {
 	rep, err := jobs.New(f.Pool, patient, f.system, jobs.Config{Blob: f.Blob}, nil).Sweep(ctx)
 	if err != nil || rep.OrphanFilesRemoved != 0 || !exists(kept) {
 		t.Fatalf("with no proposal TTL: %+v, %v", rep, err)
+	}
+}
+
+// The bucket or directory the files are kept in may hold other things: a
+// backup, another program's objects, a file somebody dropped among ours. The
+// sweep removes the server's own files that nothing points at, and nothing
+// the server did not write, however old — whether the store keeps a file
+// where it was uploaded or, like S3, moves it on attaching.
+func TestTheSweepRemovesOnlyTheServersOwnFiles(t *testing.T) {
+	for name, wrap := range map[string]func(*blob.FSStore) blob.Store{
+		"on disk":            func(fs *blob.FSStore) blob.Store { return fs },
+		"in an object store": func(fs *blob.FSStore) blob.Store { return testkit.ObjectStore{FSStore: fs} },
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := setup(t, 1)
+			store := wrap(f.Blob)
+			f.runner = jobs.New(f.Pool, f.P, f.system, jobs.Config{Blob: store}, nil)
+			ctx := context.Background()
+			upload := func() string {
+				t.Helper()
+				out := f.MustCall(f.Sato, "document.upload_url", m{"course_id": f.Course, "kind": "material", "content_type": "text/plain"}, "")
+				u := testkit.Result[tools.UploadURLOut](t, out)
+				key, ct, err := f.Blob.Redeem(strings.TrimPrefix(u.UploadURL, "http://lms.test"+blob.BlobPath), "PUT")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := f.Blob.Put(ctx, key, ct, strings.NewReader("never attached"), 1<<20); err != nil {
+					t.Fatal(err)
+				}
+				return key
+			}
+			// Ours: an upload never attached, and one moved to its final
+			// key by an attach that then did not commit.
+			staged, moved := upload(), upload()
+			if _, err := store.Finalize(ctx, moved); err != nil {
+				t.Fatal(err)
+			}
+			moved = store.FinalKey(moved)
+			// Not ours, beside our files and among them.
+			course := f.Course.String()
+			foreign := []string{"backups/nightly.sql.gz", "README", "courses/syllabus.pdf", "courses/" + course + "/cover.png",
+				"courses/" + course + "/" + strings.ToUpper(uuid.NewString()), "attached/courses/" + course + "/cover.png"}
+			for _, key := range foreign {
+				p := filepath.Join(f.Blob.Root(), filepath.FromSlash(key))
+				if err := os.MkdirAll(filepath.Dir(p), 0o750); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(p, []byte("not the server's"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			f.now = f.now.Add(pipeline.DefaultProposalTTL + jobs.OrphanGrace + time.Hour)
+			if rep := f.sweep(t); rep.OrphanFilesRemoved != 2 {
+				t.Fatalf("%+v, want the two old files of ours removed", rep)
+			}
+			for _, key := range []string{staged, moved} {
+				if _, err := f.Blob.Stat(ctx, key); !errors.Is(err, blob.ErrNotFound) {
+					t.Errorf("%s is still there: %v", key, err)
+				}
+			}
+			for _, key := range foreign {
+				if _, err := os.Stat(filepath.Join(f.Blob.Root(), filepath.FromSlash(key))); err != nil {
+					t.Errorf("%s, which the server never wrote, was removed: %v", key, err)
+				}
+			}
+		})
 	}
 }
 
