@@ -3,6 +3,7 @@ package httpapi
 import (
 	"errors"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"strconv"
@@ -54,7 +55,10 @@ func (s *server) blobPut(local blob.Local) http.HandlerFunc {
 			// logged, as a warning: a run of timeouts may be the disk's.
 			// Nothing of the file is kept, and the same URL takes it again.
 			s.Log.Warn("an upload did not arrive in full", "err", readFault(body.err))
-			s.writeError(w, r, apperr.Invalid("the file did not arrive in full within %s; upload it again", s.TransferTimeout))
+			// The answer claims no cause: a body can be broken off by more
+			// than the clock.
+			s.writeError(w, r, apperr.Invalid("the file did not arrive in full; upload it again (a file has %d minutes to arrive)",
+				int(math.Ceil(s.TransferTimeout.Minutes()))))
 		case err != nil:
 			// Ours: a full disk, a permission, a path. Logged in full, and
 			// the holder of an upload URL is told nothing of it.

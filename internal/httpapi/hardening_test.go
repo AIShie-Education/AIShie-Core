@@ -588,7 +588,7 @@ func TestAnUploadThatDoesNotArriveCanBeSentAgain(t *testing.T) {
 	}
 	putURL := a.here(ask.str("result", "upload_url"))
 	for _, hangUp := range []bool{true, false} {
-		if status, body := a.putHalf(putURL, hangUp); status != 400 || !strings.Contains(body, "did not arrive in full within 300ms") {
+		if status, body := a.putHalf(putURL, hangUp); status != 400 || !strings.Contains(body, "did not arrive in full; upload it again") {
 			t.Fatalf("ten bytes of a hundred, hanging up %v: %d %s", hangUp, status, body)
 		}
 	}
@@ -600,6 +600,35 @@ func TestAnUploadThatDoesNotArriveCanBeSentAgain(t *testing.T) {
 	}
 	if res, body := a.raw("PUT", putURL, "text/plain", []byte("the whole file")); res.StatusCode != 200 || !strings.Contains(string(body), `"byte_size":14`) {
 		t.Fatalf("the whole file, to the same URL: %d %s", res.StatusCode, body)
+	}
+}
+
+// A body can be broken off by more than the clock: here by chunking that
+// makes no sense, sent all at once. The uploader is told the file did not
+// arrive in full and how long a file has, not that it ran out of time.
+func TestAnUploadBrokenOffIsNotBlamedOnTheClock(t *testing.T) {
+	a := hardened(t, nil, nil, nil)
+	ask := a.do(nil, "GET", "/v1/courses/"+a.c.Course.String()+"/upload-url?kind=material&content_type=text/plain", a.tokenFor(a.c.Sato), nil)
+	if ask.Status != 200 {
+		t.Fatalf("upload-url: %d %s", ask.Status, ask.Raw)
+	}
+	conn, err := net.Dial("tcp", strings.TrimPrefix(a.srv.URL, "http://"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	_, _ = fmt.Fprintf(conn, "PUT %s HTTP/1.1\r\nHost: lms.test\r\nContent-Type: text/plain\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\nzz\r\n",
+		strings.TrimPrefix(a.here(ask.str("result", "upload_url")), a.srv.URL))
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	res, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	body, _ := io.ReadAll(res.Body)
+	const want = "the file did not arrive in full; upload it again (a file has 10 minutes to arrive)"
+	if res.StatusCode != 400 || !strings.Contains(string(body), `"message":"`+want+`"`) {
+		t.Fatalf("a chunked body that makes no sense: %d %s", res.StatusCode, body)
 	}
 }
 
