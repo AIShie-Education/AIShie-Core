@@ -73,8 +73,13 @@ DATABASE_URL=postgres:///aishiteru bin/aishiterud seed
 
 `aishiterud` records the applied version in a `schema_migrations` table; psql
 does not. A database first built with `psql -f` must be adopted once before
-the binary will manage it: `aishiterud migrate force 1` (the number of the
-last migration applied by hand). Pick one way per database and stay with it.
+the binary will manage it: `aishiterud migrate force N`, N being the number of
+the last migration applied by hand (after the loop above, the highest). Pick
+one way per database and stay with it.
+
+A migration that fails under `aishiterud` has applied nothing, but leaves its
+version recorded as dirty. Fix the cause, then `aishiterud migrate force N`,
+N being the last migration fully applied (0 if none), and `migrate up` again.
 
 File names follow `NNNN_name.up.sql` / `NNNN_name.down.sql`. Every migration
 needs both directions; a test enforces it.

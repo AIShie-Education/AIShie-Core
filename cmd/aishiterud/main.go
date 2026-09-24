@@ -43,7 +43,7 @@ Usage:
   aishiterud migrate down --all --yes
                                      revert every migration (DESTROYS ALL DATA)
   aishiterud migrate version         print the applied and the embedded version
-  aishiterud migrate force N         record version N without running anything
+  aishiterud migrate force N         record version N (0 for none) without running anything
   aishiterud seed                    insert the built-in permission presets
   aishiterud bootstrap --name N [--email E] [--password-stdin]
                                      create the root actor, once; prints its API token
@@ -142,7 +142,7 @@ func serve(cfg config.Config) error {
 	case err != nil:
 		return fmt.Errorf("read schema version: %w", err)
 	case dirty:
-		return fmt.Errorf("the schema is dirty at version %d: a migration failed half-way; fix it by hand, then `aishiterud migrate force N`", have)
+		return fmt.Errorf("the schema is dirty at version %d: a migration failed half-way; fix it by hand, then `aishiterud migrate force N`, N being the last migration fully applied (0 if none)", have)
 	case have < latest:
 		return fmt.Errorf("the schema is at version %d and this binary needs %d; run `aishiterud migrate up` first", have, latest)
 	case have > latest:
@@ -319,7 +319,7 @@ func migrate(cfg config.Config, args []string) error {
 	}
 	fmt.Printf("schema version %d (embedded latest %d)", v, latest)
 	if dirty {
-		fmt.Print(" DIRTY — fix the database by hand, then `migrate force N`")
+		fmt.Print(" DIRTY — fix the database by hand, then `migrate force N`, N being the last migration fully applied (0 if none)")
 	}
 	fmt.Println()
 	return nil
