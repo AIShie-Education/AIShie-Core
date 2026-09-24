@@ -242,11 +242,24 @@ func TestAGradeForNothingDoesNotLandOnLateWork(t *testing.T) {
 	if out := waitWhile("zero-while-reopened", `UPDATE submission SET state = 'draft', body = 'draft' WHERE id = $1`, ken); out.Status == domain.StatusExecuted {
 		t.Fatalf("a zero for nothing was entered on a reopened draft: %+v", out)
 	}
-	// A caller may say what its grade is for, and is held to it; it means
-	// nothing for a component, and is refused there.
+	// A caller may say what its grade is for, and is held to it, and told
+	// which way the work is not that; it means nothing for a component, and
+	// is refused there.
 	_, noorM := enrol("Noor")
-	b.try(t, b.sato, "grade.submit", m{"course_id": b.course, "submission_id": late.SubmissionID, "score": 0, "for_missing": true}, apperr.FailedPrecondition)
-	b.try(t, b.sato, "grade.submit", m{"course_id": b.course, "submission_id": missing(noorM), "score": 50, "for_missing": false}, apperr.FailedPrecondition)
+	for _, held := range []struct {
+		work       uuid.UUID
+		score      int
+		forMissing bool
+		says       string
+	}{
+		{late.SubmissionID, 0, true, "given for nothing handed in, and there is work here now"},
+		{missing(noorM), 50, false, "given for work handed in, and nothing was"},
+	} {
+		out, err := b.Call(b.sato, "grade.submit", m{"course_id": b.course, "submission_id": held.work, "score": held.score, "for_missing": held.forMissing}, "held-"+uuid.NewString())
+		if err != nil || out.Error == nil || out.Error.Code != apperr.FailedPrecondition || !strings.Contains(out.Error.Message, held.says) {
+			t.Fatalf("for_missing %v: %+v %v, want %s saying %q", held.forMissing, out.Error, err, apperr.FailedPrecondition, held.says)
+		}
+	}
 	b.try(t, b.sato, "grade.submit", m{"course_id": b.course, "component_id": b.midterm, "student_member_id": b.kenM, "score": 50, "for_missing": false}, apperr.InvalidArgument)
 
 	_, leoM := enrol("Leo")
