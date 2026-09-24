@@ -691,6 +691,29 @@ func TestAnApprovedDraftIsAsOldAsItsProposal(t *testing.T) {
 	}
 }
 
+// The same, when the instances of a server do not share a clock. The agent
+// proposes on one whose clock runs ahead, Sato enters a draft there after
+// it, and the proposal is approved on one whose clock is behind both. It is
+// still an approval, and still must not replace the draft entered after it.
+func TestAnApprovalOnASlowerClockReplacesOnlyWhatCameBefore(t *testing.T) {
+	c := testkit.NewCS101(t, 1)
+	yuki := c.Students[0]
+	base := time.Now()
+	clock := func(d time.Duration) { c.P.SetClock(func() time.Time { return base.Add(d) }) }
+	clock(3 * time.Minute)
+	proposed := c.MustCall(c.Grader, "grade.submit", submitArgs(c, yuki, 85), "p")
+	clock(4 * time.Minute)
+	satos := testkit.Result[tools.GradeSubmitOut](t, c.MustCall(c.Sato, "grade.submit", submitArgs(c, yuki, 60), "sato")).GradeID
+	clock(time.Minute)
+	v := testkit.Result[pipeline.DecideOut](t, c.MustCall(c.Sato, "action.decide", m{"course_id": c.Course, "action_id": proposed.ActionID, "decision": "approve"}, "d"))
+	if v.Outcome != domain.StatusFailed || v.Error == nil || !strings.Contains(v.Error.Message, "newer draft") {
+		t.Fatalf("approving over a newer draft on a clock behind the proposer's: %+v", v)
+	}
+	if n := c.Count(`SELECT count(*) FROM grade WHERE id = $1 AND superseded_by IS NULL`, satos); n != 1 {
+		t.Fatal("the newer draft was replaced by an older judgement")
+	}
+}
+
 func TestProposalsExpire(t *testing.T) {
 	c := testkit.NewCS101(t, 1)
 	proposed := c.MustCall(c.Grader, "grade.submit", submitArgs(c, c.Students[0], 85), "p")

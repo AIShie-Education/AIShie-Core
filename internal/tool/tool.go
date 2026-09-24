@@ -109,10 +109,15 @@ type ExecCtx struct {
 	// Now is when this is being executed. ActionCreatedAt is when the call
 	// was made: the same moment for a direct call, and the moment of the
 	// proposal for an approval, which may be days later. A tool that must
-	// not overwrite what was done in between compares against it, and can
-	// tell an approval from a direct call by its being earlier than Now.
+	// not overwrite what was done in between compares against it.
 	Now             time.Time
 	ActionCreatedAt time.Time
+	// Approved says the call is carrying out a proposal that has just been
+	// approved, rather than being made directly. A tool tells the two apart
+	// by this, never by ActionCreatedAt being earlier than Now: the proposal
+	// was dated by whichever instance stored it, and that instance's clock
+	// may run ahead of this one's.
+	Approved bool
 	// Emit queues an event. It is written, with ActionID filled in, only if
 	// the action executes.
 	Emit func(events.Event)

@@ -819,6 +819,42 @@ func TestAProposedHandInCountsFromWhenItWasAsked(t *testing.T) {
 	}
 }
 
+// The instances of a server do not share a clock. Yuki asks to hand in on
+// one whose clock runs a few minutes ahead, and Sato approves on one whose
+// clock is behind, so that by the approver's clock she has not asked yet.
+// It is still an approval, not a direct call: it is dated when she asked and
+// handed in under the instructions she was reading, not held to those Sato
+// published in between.
+func TestAHandInApprovedOnASlowerClockIsStillAnApproval(t *testing.T) {
+	b := build(t)
+	base := time.Now()
+	clock := func(d time.Duration) { b.P.SetClock(func() time.Time { return base.Add(d) }) }
+	brief := testkit.Result[tools.DocumentCreateOut](t, b.do(t, b.sato, "document.create",
+		m{"course_id": b.course, "kind": "instructions", "title": "HW3", "body_md": "v1: 1000 words"}))
+	b.do(t, b.sato, "document.publish", m{"course_id": b.course, "document_id": brief.DocumentID})
+	b.do(t, b.sato, "assignment.update", m{"course_id": b.course, "assignment_id": b.hw3, "instructions_document_id": brief.DocumentID})
+	work := testkit.Result[tools.SubmissionCreateOut](t, b.do(t, b.yuki, "submission.create",
+		m{"course_id": b.course, "assignment_id": b.hw3, "body": "my essay"})).SubmissionID
+	b.do(t, b.sato, "member.update_perms", m{"course_id": b.course, "member_id": b.yukiM, "perms": m{"submission_write": "confirm_required"}})
+
+	clock(3 * time.Minute)
+	asked := b.MustCall(b.yuki, "submission.submit", m{"course_id": b.course, "submission_id": work}, "hand-in")
+	if asked.Status != domain.StatusProposed {
+		t.Fatalf("%+v", asked)
+	}
+	clock(time.Minute)
+	b.do(t, b.sato, "document.add_version", m{"course_id": b.course, "document_id": brief.DocumentID, "body_md": "v2: 3000 words", "publish": true})
+	v := testkit.Result[pipeline.DecideOut](t, b.do(t, b.sato, "action.decide", m{"course_id": b.course, "action_id": asked.ActionID, "decision": "approve"}))
+	if v.Outcome != domain.StatusExecuted {
+		t.Fatalf("approving on a clock behind the proposer's: %+v", v)
+	}
+	if n := b.Count(`SELECT count(*) FROM submission s JOIN action a ON a.id = $2
+		WHERE s.id = $1 AND s.submitted_at = a.created_at AND s.instructions_version_id = $3`,
+		work, *asked.ActionID, *brief.VersionID); n != 1 {
+		t.Fatal("the hand-in was carried out as a direct call at the approval, not as of when it was asked for")
+	}
+}
+
 func TestAStudentWithAnEmptiedScopeReachesNobody(t *testing.T) {
 	b := build(t)
 	b.Exec(`DELETE FROM member_student_scope WHERE member_id = $1`, b.yukiM)

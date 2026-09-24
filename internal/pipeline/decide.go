@@ -179,7 +179,7 @@ func (p *Pipeline) Decide(ctx context.Context, ec *tool.ExecCtx, in DecideIn) (D
 	res, err := savepoint(ctx, ec.Tx, func(sp pgx.Tx) (any, error) {
 		return t.Execute(ctx, &tool.ExecCtx{
 			Tx: sp, Q: dbq.New(sp), Actor: proposer, Member: a.decision.Member,
-			ActionID: prop.ID, Now: ec.Now, ActionCreatedAt: prop.CreatedAt, Emit: stamp(child, prop.ID),
+			ActionID: prop.ID, Now: ec.Now, ActionCreatedAt: prop.CreatedAt, Approved: true, Emit: stamp(child, prop.ID),
 		}, args)
 	})
 	if err != nil {

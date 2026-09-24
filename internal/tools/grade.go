@@ -471,9 +471,9 @@ func lockGradeTarget(ctx context.Context, q dbq.Querier, courseID uuid.UUID, s *
 
 // noNewerDraft refuses to replace a draft entered after this call was made.
 // A direct call is as new as anything: it applies to a proposal being
-// carried out later than it was made.
+// carried out on its approval.
 func noNewerDraft(ctx context.Context, ec *tool.ExecCtx, s gradeSubject) error {
-	if !ec.ActionCreatedAt.Before(ec.Now) {
+	if !ec.Approved {
 		return nil
 	}
 	var newest time.Time

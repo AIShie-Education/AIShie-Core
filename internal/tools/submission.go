@@ -429,7 +429,7 @@ func submissionSubmit() tool.Tool {
 			}
 			at := ec.Now
 			switch {
-			case !ec.ActionCreatedAt.Before(ec.Now):
+			case !ec.Approved:
 				if err := in.sameInstructions(pinned); err != nil {
 					return SubmissionSubmitOut{}, err
 				}
