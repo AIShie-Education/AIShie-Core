@@ -407,10 +407,14 @@ func gradeSubmit(d Deps) tool.Tool {
 			if err != nil {
 				return GradeSubmitOut{}, err
 			}
+			// Dated when the call was made, not when it was approved: the
+			// next proposal measures itself against this draft as this one
+			// was measured, and one made after this was proposed replaces it
+			// even if it is approved after this was.
 			row := dbq.InsertGradeParams{
 				ID: id, StudentMemberID: s.student, Origin: "entered", Score: in.Score,
 				Feedback: in.Feedback, Breakdown: breakdown, RubricVersionID: rubric,
-				GraderMemberID: ec.Member.ID, CreatedByActionID: ec.ActionID, CreatedAt: ec.Now,
+				GraderMemberID: ec.Member.ID, CreatedByActionID: ec.ActionID, CreatedAt: ec.ActionCreatedAt,
 			}
 			ev := events.Event{
 				Type: events.GradeCreated, CourseID: &in.CourseID,

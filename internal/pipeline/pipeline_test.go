@@ -663,6 +663,34 @@ func TestAnApprovedProposalReplacesOnlyWhatCameBefore(t *testing.T) {
 	}
 }
 
+// The draft an approved proposal writes is as old as the proposal, not the
+// approval. Two proposals for the same work, approved in the order the queue
+// lists them, oldest first, leave the later one standing: it was made after
+// the first, so it replaces it, and which of them survives does not depend
+// on the order the approver happens to work in.
+func TestAnApprovedDraftIsAsOldAsItsProposal(t *testing.T) {
+	c := testkit.NewCS101(t, 1)
+	yuki := c.Students[0]
+	first := c.MustCall(c.Grader, "grade.submit", submitArgs(c, yuki, 70), "p1")
+	c.P.SetClock(func() time.Time { return time.Now().Add(time.Minute) })
+	second := c.MustCall(c.Grader, "grade.submit", submitArgs(c, yuki, 85), "p2")
+	for i, key := range []string{"d1", "d2"} {
+		c.P.SetClock(func() time.Time { return time.Now().Add(time.Duration(i+1) * time.Hour) })
+		proposal := []pipeline.Outcome{first, second}[i]
+		v := testkit.Result[pipeline.DecideOut](t, c.MustCall(c.Sato, "action.decide", m{"course_id": c.Course, "action_id": proposal.ActionID, "decision": "approve"}, key))
+		if v.Outcome != domain.StatusExecuted {
+			t.Fatalf("approving the proposals oldest first, number %d: %+v", i+1, v)
+		}
+	}
+	if n := c.Count(`SELECT count(*) FROM grade WHERE submission_id = $1 AND score = 85 AND posted_at IS NULL AND superseded_by IS NULL`, yuki.HW3); n != 1 {
+		t.Fatal("the later proposal's draft is not the live one")
+	}
+	if n := c.Count(`SELECT count(*) FROM grade g JOIN action a ON a.id = g.created_by_action_id
+		WHERE g.submission_id = $1 AND g.created_at <> a.created_at`, yuki.HW3); n != 0 {
+		t.Fatal("a draft is dated when it was approved, not when the call that made it was made")
+	}
+}
+
 func TestProposalsExpire(t *testing.T) {
 	c := testkit.NewCS101(t, 1)
 	proposed := c.MustCall(c.Grader, "grade.submit", submitArgs(c, c.Students[0], 85), "p")

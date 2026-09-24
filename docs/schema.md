@@ -545,6 +545,8 @@ check `actor.platform_role` instead. That is the only place it is read.
   much as a posted one, its `points_possible` and its place in the tree stay as they are
   (§2.3), even when the grade and the change come at the same moment; a proposed grade is
   carried out only against the points possible it was proposed out of.
+- A draft is as old as the call that made it (§2.3), a draft written by an approved proposal
+  included: an approval replaces only what came before the proposal.
 - The component tree is acyclic beyond the self-loop the CHECK blocks.
 - Cancelling pending proposals when a member is removed or expires.
 - Nobody hands out more than they hold (§2.2): any change that widens a seat is measured as
