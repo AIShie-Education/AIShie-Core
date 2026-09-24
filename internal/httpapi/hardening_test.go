@@ -322,8 +322,8 @@ func TestARefusalRepeatsLittleOfWhatItRefuses(t *testing.T) {
 	const most = 4 << 10
 	small := func(what string, res rawResponse, out []byte, status int, says string) {
 		t.Helper()
-		if res.StatusCode != status || len(out) > most || !strings.Contains(string(out), says) {
-			t.Errorf("%s: %d, %d bytes: %.300s", what, res.StatusCode, len(out), out)
+		if n := len(out) + headerBytes(res.Header); res.StatusCode != status || n > most || !strings.Contains(string(out), says) {
+			t.Errorf("%s: %d, %d bytes: %.300s", what, res.StatusCode, n, out)
 		}
 	}
 	for i, tc := range []struct{ what, path, body, says string }{
@@ -341,7 +341,10 @@ func TestARefusalRepeatsLittleOfWhatItRefuses(t *testing.T) {
 	small("a method the route does not take", res, out, http.StatusMethodNotAllowed, "method_not_allowed")
 
 	// A path the router would tidy, in raw bytes, which its redirect would
-	// escape to three each, twice over. The second tidies to a route.
+	// escape to three each, twice over. The second tidies to a route. Then
+	// a short one with a long query, which the redirect would repeat as it
+	// was sent in Location and escaped in the page; the last has no path at
+	// all, which tidies to /.
 	get := func(target string) (rawResponse, []byte) {
 		t.Helper()
 		conn, err := net.Dial("tcp", a.srv.Listener.Addr().String())
@@ -358,12 +361,12 @@ func TestARefusalRepeatsLittleOfWhatItRefuses(t *testing.T) {
 		out, _ := io.ReadAll(res.Body)
 		return rawResponse{StatusCode: res.StatusCode, Header: res.Header}, out
 	}
-	junk := strings.Repeat("\x80", 1<<18)
-	for _, target := range []string{"/v1//" + junk, "/v1//courses/" + junk + "/grades"} {
+	junk, query := strings.Repeat("\x80", 1<<18), strings.Repeat("&", 1<<18)
+	for _, target := range []string{"/v1//" + junk, "/v1//courses/" + junk + "/grades", "/v1//tools?" + query, "http://lms.test?" + query} {
 		res, out := get(target)
 		small("a path the router would tidy", res, out, http.StatusNotFound, "no such route")
 	}
-	if res, _ := get("/v1//tools"); res.StatusCode != http.StatusTemporaryRedirect || res.Header.Get("Location") != "/v1/tools" {
+	if res, _ := get("/v1//tools?tab=mine"); res.StatusCode != http.StatusTemporaryRedirect || res.Header.Get("Location") != "/v1/tools?tab=mine" {
 		t.Errorf("a short path is no longer tidied: %d %q", res.StatusCode, res.Header.Get("Location"))
 	}
 
@@ -395,6 +398,18 @@ func TestARefusalRepeatsLittleOfWhatItRefuses(t *testing.T) {
 	if r.Status != http.StatusUnauthorized || len(r.Raw) > most {
 		t.Errorf("the identity provider's refusal: %d, %d bytes: %.300s", r.Status, len(r.Raw), r.Raw)
 	}
+}
+
+// headerBytes is about what a response's headers take on the wire. They
+// are part of what a refusal says as much as its body is.
+func headerBytes(h http.Header) int {
+	n := 0
+	for k, vs := range h {
+		for _, v := range vs {
+			n += len(k) + len(v) + len(": \r\n")
+		}
+	}
+	return n
 }
 
 // What no credential or account could be is answered as not one, at every

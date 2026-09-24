@@ -164,8 +164,9 @@ const (
 	DefaultTransferTimeout = 10 * time.Minute
 )
 
-// maxTidied is the longest path the mux is left to tidy. The paths of our
-// routes are shorter, but for a blob URL's, which is never untidy.
+// maxTidied is the longest path, query included, the mux is left to tidy.
+// The paths of our routes are shorter, but for a blob URL's, which is never
+// untidy.
 const maxTidied = 256
 
 // routed answers for the routes the mux does not have. The mux's own 404 and
@@ -173,12 +174,14 @@ const maxTidied = 256
 // client should not need a second parser for a mistyped path.
 //
 // The mux tidies a path by redirecting to the tidy one, which it repeats
-// twice, escaped, in Location and in the page: a byte sent could come back
-// as six, before anyone is authenticated. So a long path it would tidy is
-// answered as no route, whether or not the tidy one would match one.
+// twice, escaped, in Location and in the page, and the query with it as it
+// was sent: a byte sent could come back as six, before anyone is
+// authenticated. So a long path it would tidy, or a short one with a long
+// query, is answered as no route, whether or not the tidy one would match
+// one.
 func (s *server) routed(mux *http.ServeMux) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if p := r.URL.EscapedPath(); len(p) > maxTidied && path.Clean(p) != strings.TrimSuffix(p, "/") {
+		if p := r.URL.EscapedPath(); len(p)+len(r.URL.RawQuery) > maxTidied && path.Clean(p) != strings.TrimSuffix(p, "/") {
 			s.writeError(w, r, apperr.Missing("no such route; GET /v1/tools lists what there is"))
 			return
 		}
