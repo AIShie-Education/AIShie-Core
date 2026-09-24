@@ -371,7 +371,7 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 	// it was aimed at nor leaves a bucket behind for ten minutes.
 	var keys []string
 	if addr, known := s.clientAddr(r); known {
-		keys = append(keys, "addr:"+addr)
+		keys = append(keys, addrKey(addr))
 	}
 	keys = append(keys, emailKey(in.Email))
 	for _, key := range keys {
@@ -387,6 +387,21 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 	}
 	http.SetCookie(w, s.sessionCookie(sess.Token, sess.ExpiresAt))
 	writeJSON(w, http.StatusOK, loginOut{ActorID: sess.ActorID.String(), ExpiresAt: sess.ExpiresAt})
+}
+
+// addrKey is the sign-in limit's key for an address. An IPv6 address is
+// keyed by its /64, the least one network is given: every address in it is
+// its holder's to send from, and keyed alone, each would be a fresh bucket.
+// An IPv4 address written as IPv6 (::ffff:203.0.113.7) is that IPv4 address.
+func addrKey(addr string) string {
+	ip := net.ParseIP(addr)
+	switch {
+	case ip == nil:
+		return "addr:" + addr
+	case ip.To4() != nil:
+		return "addr:" + ip.String()
+	}
+	return "addr:" + ip.Mask(net.CIDRMask(64, 128)).String() + "/64"
 }
 
 // emailKey is the sign-in limit's key for an email: one key for an account

@@ -371,6 +371,41 @@ func TestSignInLimitSeesThroughATrustedProxy(t *testing.T) {
 	}
 }
 
+// An IPv6 client has a /64 to itself, and any address in it to send from.
+// The sign-in limit holds a /64 to the guesses of one address; the /64 next
+// to it is somebody else's. An IPv4 address is one address, however written.
+func TestAnIPv6NetworkIsOneAddressToTheSignInLimit(t *testing.T) {
+	a := hardenedWith(t, nil, ratelimit.New(1, 3), nil, func(d *httpapi.Deps) { d.TrustedProxies = []string{"127.0.0.0/8", "::1/128"} })
+	guesses := 0
+	login := func(from string) int {
+		guesses++
+		return a.do(nil, "POST", "/v1/auth/login", "", m{"email": fmt.Sprintf("nobody%d@example.edu", guesses), "password": "guess"},
+			"X-Forwarded-For", from).Status
+	}
+	for i := range 3 {
+		if got := login(fmt.Sprintf("2001:db8:1:2::%x", i+1)); got != 401 {
+			t.Fatalf("guess %d from one /64: %d", i+1, got)
+		}
+	}
+	if got := login("2001:db8:1:2:ffff:ffff:ffff:ffff"); got != http.StatusTooManyRequests {
+		t.Fatalf("a fourth guess from another address in the same /64: %d, want 429", got)
+	}
+	if got := login("2001:db8:1:3::1"); got != 401 {
+		t.Fatalf("a guess from the next /64: %d, want 401", got)
+	}
+	for i := range 3 {
+		if got := login("203.0.113.7"); got != 401 {
+			t.Fatalf("guess %d from one IPv4 address: %d", i+1, got)
+		}
+	}
+	if got := login("::ffff:203.0.113.7"); got != http.StatusTooManyRequests {
+		t.Fatalf("a fourth guess from the same IPv4 address written as IPv6: %d, want 429", got)
+	}
+	if got := login("203.0.113.8"); got != 401 {
+		t.Fatalf("a guess from the next IPv4 address: %d, want 401", got)
+	}
+}
+
 // A null body is not an object, and says so — rather than taking the handler
 // down with it and the connection too.
 func TestANullBodyIsRefused(t *testing.T) {
