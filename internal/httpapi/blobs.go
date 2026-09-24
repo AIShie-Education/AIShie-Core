@@ -3,6 +3,7 @@ package httpapi
 import (
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"strconv"
 	"time"
@@ -47,9 +48,12 @@ func (s *server) blobPut(local blob.Local) http.HandlerFunc {
 		case errors.Is(err, blob.ErrExists):
 			s.writeError(w, r, apperr.Conflicts("this URL has been uploaded to already; a file is written once"))
 		case body.err != nil:
-			// Theirs: the uploader hung up, or had not finished when the
-			// transfer timeout ran out. Nothing of the file is kept, and the
-			// same URL takes it again.
+			// Theirs, as a rule: the uploader hung up, or had not finished
+			// when the transfer timeout ran out. A disk that stalls until it
+			// has run out looks the same from here, so what went wrong is
+			// logged, as a warning: a run of timeouts may be the disk's.
+			// Nothing of the file is kept, and the same URL takes it again.
+			s.Log.Warn("an upload did not arrive in full", "err", readFault(body.err))
 			s.writeError(w, r, apperr.Invalid("the file did not arrive in full within %s; upload it again", s.TransferTimeout))
 		case err != nil:
 			// Ours: a full disk, a permission, a path. Logged in full, and
@@ -75,6 +79,16 @@ func (b *uploadBody) Read(p []byte) (int, error) {
 		b.err = err
 	}
 	return n, err
+}
+
+// readFault is what went wrong reading a body, without the addresses a
+// network error names: the log has no business knowing who was uploading.
+func readFault(err error) error {
+	var op *net.OpError
+	if errors.As(err, &op) {
+		return op.Err
+	}
+	return err
 }
 
 func (s *server) blobGet(local blob.Local) http.HandlerFunc {

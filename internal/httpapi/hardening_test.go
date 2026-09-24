@@ -576,8 +576,9 @@ func TestASlowUploadIsAnswered(t *testing.T) {
 
 // A file that does not arrive in full is the uploader's to send again, not a
 // fault of ours: whether they hung up half way or had not finished when the
-// transfer timeout ran out, they are told so, nothing is logged as an error,
-// and nothing of it is kept, so that the same URL takes the whole file after.
+// transfer timeout ran out, they are told so, and nothing of it is kept, so
+// that the same URL takes the whole file after. It is logged as a warning,
+// not an error, saying what went wrong but not whose connection it was.
 func TestAnUploadThatDoesNotArriveCanBeSentAgain(t *testing.T) {
 	var buf bytes.Buffer
 	a := hardenedWith(t, nil, nil, slog.New(slog.NewJSONHandler(&buf, nil)), func(d *httpapi.Deps) { d.TransferTimeout = 300 * time.Millisecond })
@@ -591,7 +592,9 @@ func TestAnUploadThatDoesNotArriveCanBeSentAgain(t *testing.T) {
 			t.Fatalf("ten bytes of a hundred, hanging up %v: %d %s", hangUp, status, body)
 		}
 	}
-	if log := buf.String(); strings.Contains(log, `"level":"ERROR"`) ||
+	if log := buf.String(); strings.Contains(log, `"level":"ERROR"`) || strings.Contains(log, "127.0.0.1") ||
+		!strings.Contains(log, `"level":"WARN","msg":"an upload did not arrive in full","err":"unexpected EOF"`) ||
+		!strings.Contains(log, `"level":"WARN","msg":"an upload did not arrive in full","err":"i/o timeout"`) ||
 		!strings.Contains(log, `"level":"INFO","msg":"request","method":"PUT","path":"/v1/blobs/…","status":400`) {
 		t.Fatalf("an upload that did not arrive, in the log:\n%s", log)
 	}
