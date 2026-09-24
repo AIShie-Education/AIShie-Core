@@ -501,6 +501,31 @@ func TestAnUploadOutlastsTheProposalThatNamesIt(t *testing.T) {
 	}
 }
 
+// A store that moves a file on attaching may be left with it at its final
+// key, unattached, by an attach that moved it and then did not commit; the
+// sweep then judges the moved copy by when it was moved. A proposal made
+// later with the same token is held to that copy's age as to any upload's,
+// and refused once it is more than OrphanGrace old: queued, it could lose
+// the copy to the sweep while it waited.
+func TestAProposalIsNotMadeAboutAMovedUploadItMayOutlive(t *testing.T) {
+	f := setupWith(t, 1, inObjectStore)
+	store := inObjectStore(f.Blob)
+	token, key := f.uploadAs(t, f.Grader, "feedback")
+	if _, err := store.Finalize(context.Background(), key); err != nil {
+		t.Fatal(err)
+	}
+
+	f.now = f.now.Add(tools.OrphanGrace + time.Hour)
+	out := f.MustCall(f.Grader, "grade.submit", m{"course_id": f.Course, "submission_id": f.Students[0].HW3, "score": 70,
+		"feedback_files": []m{{"title": "notes.txt", "upload_token": token}}}, "propose")
+	if out.Status != domain.StatusFailed || out.Error.Code != apperr.FailedPrecondition || !strings.Contains(out.Error.Message, "upload the file again") {
+		t.Fatalf("a proposal naming an upload moved more than %v ago: %+v", tools.OrphanGrace, out)
+	}
+	if n := f.Count(`SELECT count(*) FROM action WHERE action_type = 'grade.submit' AND status = 'proposed'`); n != 0 {
+		t.Fatal("the proposal was queued")
+	}
+}
+
 // The bucket or directory the files are kept in may hold other things: a
 // backup, another program's objects, a file somebody dropped among ours,
 // another deployment's uploads, spelt like ours but under a course this
