@@ -158,9 +158,10 @@ var unreleased = map[string]string{
 // so is news of them: the event is filed under each published assignment that
 // refers to the document, so that the feed's assignment scope applies to it,
 // and while none does it goes out under its unreleased name, which only those
-// who see unpublished work are shown. Otherwise a student would learn from the
-// feed that next week's exam exists, and when it was finished. Every other
-// event goes out as it is.
+// who see unpublished work, and would be shown the event by its own name, are
+// shown (seesType). Otherwise a student would learn from the feed that next
+// week's exam exists, and when it was finished. Every other event goes out as
+// it is.
 func emitDocumentEvent(ctx context.Context, ec *tool.ExecCtx, kind string, ev events.Event) error {
 	if kind != kindInstructions && kind != kindRubric {
 		ec.Emit(ev)

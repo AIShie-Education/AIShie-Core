@@ -860,6 +860,48 @@ func TestInstructionsAppearWithTheirAssignment(t *testing.T) {
 	}
 }
 
+// Early news of an exam is still news of a draft, or of a rubric. A seat that
+// writes assignments but may read neither is told only what it may read — that
+// the brief was published — and not that a draft or a rubric exists, which
+// document.get would not show it.
+func TestEarlyNewsOfAnExamGoesOnlyWhereItMayBeRead(t *testing.T) {
+	b := build(t)
+	setter := testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", m{"kind": "human", "display_name": "Setter"})).ActorID
+	seat := testkit.Result[tools.MemberIDOut](t, b.do(t, b.sato, "member.add", m{"course_id": b.course, "actor_id": setter, "preset": "ta"})).MemberID
+	b.do(t, b.sato, "member.update_perms", m{"course_id": b.course, "member_id": seat,
+		"perms": m{"assignment_write": "autonomous", "document_read_draft": "denied", "rubric_read": "denied"}})
+	create := func(kind, title, body string) uuid.UUID {
+		t.Helper()
+		doc := testkit.Result[tools.DocumentCreateOut](t, b.do(t, b.sato, "document.create",
+			m{"course_id": b.course, "kind": kind, "title": title, "body_md": body})).DocumentID
+		b.do(t, b.sato, "document.publish", m{"course_id": b.course, "document_id": doc})
+		return doc
+	}
+	brief := create("instructions", "Take-home exam", "Question 1: ...")
+	rubric := create("rubric", "Exam marking scheme", "10 marks a question")
+	b.do(t, b.sato, "assignment.create",
+		m{"course_id": b.course, "title": "Take-home exam", "points_possible": 100, "instructions_document_id": brief, "rubric_document_id": rubric})
+	b.do(t, b.sato, "document.add_version", m{"course_id": b.course, "document_id": brief, "body_md": "Question 1, draft: ..."})
+
+	told := map[uuid.UUID][]string{brief: {}, rubric: {}}
+	for _, e := range feed(t, b, setter) {
+		if e.SubjectID != nil {
+			if _, ok := told[*e.SubjectID]; ok {
+				told[*e.SubjectID] = append(told[*e.SubjectID], e.Type)
+			}
+		}
+	}
+	if got := told[brief]; !slices.Equal(got, []string{"document.published_unreleased"}) {
+		t.Errorf("the feed tells the seat, of the brief: %v, want only that it was published", got)
+	}
+	if got := told[rubric]; len(got) != 0 {
+		t.Errorf("the feed tells a seat that may not read rubrics of the rubric: %v", got)
+	}
+	if got := b.get(t, setter, m{"document_id": brief}); got.Version == nil || *got.Version.BodyMD != "Question 1: ..." {
+		t.Fatalf("the seat reading the published brief: %+v", got.Version)
+	}
+}
+
 // With an object store, attaching moves the object before the transaction
 // commits, and the move is not undone if the transaction then is. A retry
 // with the same token — which is what a caller is told to do after a fault

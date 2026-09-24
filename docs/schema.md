@@ -442,9 +442,10 @@ about one (`document.created`, `document.version_added`, `document.published`,
 `document.rubric_published`, `document.archived`) is written once for each published
 assignment that refers to the document, with that `assignment_id`, so that assignment scope
 applies to it. While no published assignment does, it is written once under the same name
-with `_unreleased` appended (`document.published_unreleased`), which only
-`perm_assignment_write` sees, as only it sees unpublished work. Material's events belong to
-no assignment and are for the whole course.
+with `_unreleased` appended (`document.published_unreleased`), which is shown to those who
+would be shown the event by its own name and who also hold `perm_assignment_write`, as only
+it sees unpublished work. Material's events belong to no assignment and are for the whole
+course.
 
 Nobody approves or reviews their own action. The CHECKs compare seats; the application compares
 actors as well, so the rule holds across every seat one actor has held: someone removed and
