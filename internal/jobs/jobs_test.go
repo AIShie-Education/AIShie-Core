@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/apperr"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/blob"
@@ -671,6 +672,79 @@ func TestTheSweepGetsPastFilesItCannotRemove(t *testing.T) {
 	}
 	if _, err := f.Blob.Stat(context.Background(), orphans[2]); !errors.Is(err, blob.ErrNotFound) {
 		t.Fatalf("%s is still there: %v", orphans[2], err)
+	}
+}
+
+// The sweep asks the database which of a page of old files are orphans, and
+// then removes them one by one, so an attach may commit in between. Before
+// removing a file it asks again, holding the lock that attaching takes on
+// the same key: an attach in flight is waited for, and once it has
+// committed its file is kept.
+func TestAFileAttachedWhileTheSweepWaitsForItIsKept(t *testing.T) {
+	f := setup(t, 1)
+	f.runner = jobs.New(f.Pool, f.P, f.system, jobs.Config{Blob: f.Blob}, nil)
+	ctx := context.Background()
+	_, key := f.upload(t)
+	doc := testkit.Result[tools.DocumentCreateOut](t, f.MustCall(f.Sato, "document.create",
+		m{"course_id": f.Course, "kind": "material", "title": "Week 1", "body_md": "slides to follow"}, "doc")).DocumentID
+
+	// An attach part way through, on a connection of its own: the key locked
+	// as attaching locks it, and a version pointing at the file written but
+	// not committed.
+	conn, err := pgx.Connect(ctx, f.Pool.Config().ConnString())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(ctx)
+	tx, err := conn.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	attach := dbq.New(tx)
+	if err := attach.LockStorageKey(ctx, key); err != nil {
+		t.Fatal(err)
+	}
+	contentType, size, checksum := "text/plain", int64(6), "sha256:x"
+	if err := attach.InsertDocumentVersion(ctx, dbq.InsertDocumentVersionParams{ID: uuid.Must(uuid.NewV7()), DocumentID: doc, Seq: 2,
+		StorageKey: &key, ContentType: &contentType, ByteSize: &size, Checksum: &checksum, AuthorMemberID: f.SatoM, CreatedAt: f.now}); err != nil {
+		t.Fatal(err)
+	}
+
+	// The sweep finds the file an orphan, since the version is not there
+	// for it yet, and comes to wait for the key.
+	f.now = f.now.Add(pipeline.DefaultProposalTTL + tools.OrphanGrace + time.Hour)
+	done := make(chan jobs.Report, 1)
+	go func() {
+		rep, err := f.runner.Sweep(ctx)
+		if err != nil {
+			t.Error(err)
+		}
+		done <- rep
+	}()
+	waiting := func() bool {
+		return f.Count(`SELECT count(*) FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid
+			WHERE a.datname = current_database() AND l.locktype = 'advisory' AND NOT l.granted`) > 0
+	}
+	for deadline := time.Now().Add(10 * time.Second); !waiting(); time.Sleep(10 * time.Millisecond) {
+		select {
+		case rep := <-done:
+			t.Fatalf("the sweep did not wait for the attach in flight: %+v", rep)
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the sweep never came to wait for the attach in flight")
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if rep := <-done; rep.OrphanFilesRemoved != 0 {
+		t.Fatalf("%+v, and the file was attached while the sweep waited", rep)
+	}
+	if _, err := f.Blob.Stat(ctx, key); err != nil {
+		t.Fatalf("a file attached while the sweep waited to remove it was removed: %v", err)
 	}
 }
 
