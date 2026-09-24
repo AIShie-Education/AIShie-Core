@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -133,5 +134,76 @@ func TestS3Store(t *testing.T) {
 	}
 	if _, err := s.Stat(ctx, key); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("stat after delete: %v", err)
+	}
+}
+
+// A listing stopped part way, by the caller or by an error, leaves nothing
+// running behind it. The sweep stops one every time it has found a batch of
+// orphans, and whatever went on paging for a listing nobody reads any more
+// would hold the page it had in hand for as long as the process lived.
+func TestS3StoreListingStoppedPartWayLeavesNothingRunning(t *testing.T) {
+	endpoint := os.Getenv("S3_TEST_ENDPOINT")
+	if endpoint == "" {
+		t.Skip("S3_TEST_ENDPOINT is not set")
+	}
+	ctx := context.Background()
+	s, err := NewS3Store(S3Config{Endpoint: endpoint, Bucket: "aishiteru-test", Region: "us-east-1",
+		AccessKey: os.Getenv("S3_TEST_ACCESS_KEY"), SecretKey: os.Getenv("S3_TEST_SECRET_KEY")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.EnsureBucket(ctx); err != nil {
+		t.Fatal(err)
+	}
+	prefix := "courses/" + uuid.NewString() + "/"
+	for range 5 {
+		key := prefix + uuid.NewString()
+		if _, err := s.client.PutObject(ctx, s.bucket, key, bytes.NewReader([]byte("x")), 1, minio.PutObjectOptions{}); err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = s.Delete(ctx, key) }()
+	}
+
+	before := runtime.NumGoroutine()
+	gaveUp := errors.New("the caller gave up")
+	const listings = 40
+	for i := range listings {
+		stop, want := ErrStopList, error(nil)
+		if i%2 == 1 {
+			stop, want = gaveUp, gaveUp
+		}
+		n := 0
+		if err := s.List(ctx, prefix, "", func(string, time.Time) error {
+			if n++; n == 2 {
+				return stop
+			}
+			return nil
+		}); !errors.Is(err, want) || (want == nil && err != nil) {
+			t.Fatalf("a listing stopped with %v: %v", stop, err)
+		}
+	}
+	for deadline := time.Now().Add(5 * time.Second); runtime.NumGoroutine() > before; time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("%d goroutines are running after %d listings were stopped part way, and %d were before", runtime.NumGoroutine(), listings, before)
+		}
+	}
+}
+
+// Nor does a listing whose context is cancelled seem to have come to the end
+// of what is there: the sweep would take that for a pass through the store.
+func TestS3StoreListingCancelledSaysSo(t *testing.T) {
+	endpoint := os.Getenv("S3_TEST_ENDPOINT")
+	if endpoint == "" {
+		t.Skip("S3_TEST_ENDPOINT is not set")
+	}
+	s, err := NewS3Store(S3Config{Endpoint: endpoint, Bucket: "aishiteru-test", Region: "us-east-1",
+		AccessKey: os.Getenv("S3_TEST_ACCESS_KEY"), SecretKey: os.Getenv("S3_TEST_SECRET_KEY")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := s.List(ctx, "courses/", "", func(string, time.Time) error { return nil }); !errors.Is(err, context.Canceled) {
+		t.Fatalf("a listing with its context cancelled: %v", err)
 	}
 }

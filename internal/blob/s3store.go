@@ -113,10 +113,10 @@ func (s *S3Store) Finalize(ctx context.Context, stagingKey string) (Info, error)
 // List goes in key order, byte by byte, which is how S3 lists and what its
 // StartAfter means.
 func (s *S3Store) List(ctx context.Context, prefix, after string, fn func(key string, modified time.Time) error) error {
-	// Cancelling is how the client is told to stop paging.
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	for obj := range s.client.ListObjects(ctx, s.bucket, minio.ListObjectsOptions{Prefix: prefix, StartAfter: after, Recursive: true}) {
+	// The iterator pages as it is ranged over, and leaving the loop stops
+	// it. ListObjects would page in a goroutine of its own, which stays
+	// blocked, holding its page, unless whoever stops reading drains it.
+	for obj := range s.client.ListObjectsIter(ctx, s.bucket, minio.ListObjectsOptions{Prefix: prefix, StartAfter: after, Recursive: true}) {
 		if obj.Err != nil {
 			return obj.Err
 		}
@@ -126,7 +126,9 @@ func (s *S3Store) List(ctx context.Context, prefix, after string, fn func(key st
 			return err
 		}
 	}
-	return nil
+	// A cancelled context ends the iterator between pages without a word,
+	// which is not the end of the listing.
+	return ctx.Err()
 }
 
 func (s *S3Store) Delete(ctx context.Context, key string) error {
