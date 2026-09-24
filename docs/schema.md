@@ -376,9 +376,10 @@ version a grade is against, the points possible its score is out of, the draft a
 and the instructions it is handed in under, the version that "publish the latest" means, the
 drafts that "post this assignment" means — while the hash stays that of the call as the caller
 made it. A version or a draft that arrives while a proposal waits has been in front of nobody
-who asked for it, and approving the proposal does not release it. A draft it names that is
-posted by hand meanwhile is out already, as proposed, and the approval posts the rest; one
-replaced meanwhile fails the approval.
+who asked for it, and approving the proposal does not release it. A draft that a proposal to
+post grades names, by id or as one that was waiting for the assignment, and that is posted by
+hand meanwhile is out already, as proposed, and the approval posts the rest, failing if there
+are none; one replaced meanwhile fails the approval.
 `result` holds what the call returned (secrets removed likewise), or `{"error": …}` for a
 failed, denied or cancelled action and `{"decision": …}` for a rejected one; which of those it
 is follows from `status`, never from the shape of `result`.

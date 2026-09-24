@@ -513,7 +513,7 @@ func noNewerDraft(ctx context.Context, ec *tool.ExecCtx, s gradeSubject) error {
 
 type GradePostIn struct {
 	tool.InCourse
-	GradeIDs            []uuid.UUID `json:"grade_ids,omitempty" jsonschema:"the draft grades to post; or give assignment_id"`
+	GradeIDs            []uuid.UUID `json:"grade_ids,omitempty" jsonschema:"the draft grades to post; or give assignment_id. Approving a proposal to post them posts those still waiting, passes over any posted since, and fails if one has been replaced"`
 	AssignmentID        *uuid.UUID  `json:"assignment_id,omitempty" jsonschema:"post every draft grade waiting for this assignment. A proposal records the drafts that were waiting when it was made, as grade_ids beside this: approving it posts those of them still waiting, passes over any posted since, and fails if one has been replaced"`
 	TreatUngradedAsZero bool        `json:"treat_ungraded_as_zero,omitempty" jsonschema:"for final grades: count ungraded work as zero in the totals. Once a student's totals have been written this way they stay final: later posts and regrades keep counting ungraded work as zero. It decides the course total, so it needs an assignment scope of the whole course"`
 }
@@ -566,8 +566,8 @@ func gradesToPost(ctx context.Context, q dbq.Querier, in GradePostIn) ([]dbq.Get
 	return rows, nil
 }
 
-// stillWaiting is what approving a pinned proposal posts: the drafts it
-// names, less any posted by hand while it waited. Those are out already, as
+// stillWaiting is what approving a proposal posts: the drafts it names,
+// less any posted by hand while it waited. Those are out already, as
 // what was proposed, and the rest were in front of whoever proposed
 // releasing them as they are now. A draft replaced meanwhile fails the
 // approval instead. Its replacement has been in front of nobody who asked
@@ -624,12 +624,15 @@ func gradePost() tool.Tool {
 			if err != nil {
 				return err
 			}
-			// What a pinned proposal may post is worked out in Execute, the
-			// one place that can tell its approval, which passes over a
-			// draft posted meanwhile, from a call giving both, which is
-			// refused. Approving it runs Execute straight after this, and
-			// fails there as it would have here.
-			if in.pinned() {
+			// Drafts named by id, alone or beside the assignment as Pin
+			// records them, are checked in Execute: it is the one place
+			// that can tell an approval, which passes over one posted
+			// meanwhile, from a call, which is told that it is posted or
+			// refused for giving both. Pin checks them for a proposal as it
+			// is made. Execute runs straight after this, for a call and an
+			// approval alike, and refuses there what would have been
+			// refused here.
+			if len(in.GradeIDs) > 0 {
 				return nil
 			}
 			if len(rows) == 0 {
@@ -644,7 +647,15 @@ func gradePost() tool.Tool {
 		// approving it posts of them.
 		Pin: func(ctx context.Context, q dbq.Querier, _ time.Time, in GradePostIn) (GradePostIn, error) {
 			if in.AssignmentID == nil {
-				return in, nil
+				// Validate left the drafts named to Execute. A proposal
+				// being made is not an approval, and is held to them as a
+				// call is: nobody is asked to approve posting what could
+				// not be posted.
+				rows, err := gradesToPost(ctx, q, in)
+				if err != nil {
+					return in, err
+				}
+				return in, checkPostable(ctx, q, rows)
 			}
 			if len(in.GradeIDs) > 0 {
 				return in, apperr.Invalid("give exactly one of grade_ids and assignment_id")
@@ -666,19 +677,19 @@ func gradePost() tool.Tool {
 			return in, nil
 		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in GradePostIn) (GradePostOut, error) {
-			// Grade ids beside the assignment are what Pin stores, and only
-			// approving that passes over a draft posted meanwhile. A call
-			// giving both is refused, and one naming a grade that is already
-			// posted is told so by checkPostable.
-			pinned := in.pinned()
-			if pinned && !ec.Approved {
+			// Grade ids beside the assignment are what Pin stores, and a
+			// call giving both is refused. Approving a proposal, whether it
+			// named its drafts or had them pinned, passes over one posted
+			// meanwhile; a call naming a grade that is already posted is
+			// told so by checkPostable.
+			if in.pinned() && !ec.Approved {
 				return GradePostOut{}, apperr.Invalid("give exactly one of grade_ids and assignment_id")
 			}
 			rows, err := gradesToPost(ctx, ec.Q, in)
 			if err != nil {
 				return GradePostOut{}, err
 			}
-			if pinned {
+			if ec.Approved {
 				if rows, err = stillWaiting(rows); err != nil {
 					return GradePostOut{}, err
 				}
@@ -697,7 +708,7 @@ func gradePost() tool.Tool {
 			if rows, err = ec.Q.GetGradesInCourse(ctx, dbq.GetGradesInCourseParams{Ids: gradeIDs, CourseID: in.CourseID}); err != nil {
 				return GradePostOut{}, err
 			}
-			if pinned {
+			if ec.Approved {
 				if rows, err = stillWaiting(rows); err != nil {
 					return GradePostOut{}, err
 				}

@@ -799,6 +799,72 @@ func TestAnApprovedPostPassesOverDraftsPostedMeanwhile(t *testing.T) {
 	}
 }
 
+// A proposal that names its drafts by id is approved as one that has them
+// pinned for an assignment: a draft posted by hand while it waits is out
+// already, as proposed, and the approval posts the rest; one replaced
+// meanwhile fails it, without sending the approver to regrade. A call naming
+// a posted grade is still told it is posted, and a proposal naming one is
+// refused as it is made.
+func TestAnApprovedPostOfNamedDraftsPassesOverOnesPostedMeanwhile(t *testing.T) {
+	b := build(t)
+	bot := testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", m{"kind": "agent", "display_name": "release-bot"})).ActorID
+	b.do(t, b.sato, "member.add", m{"course_id": b.course, "actor_id": bot, "preset": "ta", "perms": m{"grade_post": "confirm_required"}})
+	draft := func(work uuid.UUID, score int) uuid.UUID {
+		t.Helper()
+		return testkit.Result[tools.GradeSubmitOut](t, b.do(t, b.sato, "grade.submit", m{"course_id": b.course, "submission_id": work, "score": score})).GradeID
+	}
+	propose := func(key string, grades ...uuid.UUID) *uuid.UUID {
+		t.Helper()
+		out := b.MustCall(bot, "grade.post", m{"course_id": b.course, "grade_ids": grades}, key)
+		if out.Status != domain.StatusProposed {
+			t.Fatalf("the bot's proposal: %+v", out)
+		}
+		return out.ActionID
+	}
+	approve := func(action *uuid.UUID) pipeline.DecideOut {
+		t.Helper()
+		return testkit.Result[pipeline.DecideOut](t, b.do(t, b.sato, "action.decide", m{"course_id": b.course, "action_id": action, "decision": "approve"}))
+	}
+	posted := func(grade uuid.UUID) bool {
+		return b.Count(`SELECT count(*) FROM grade WHERE id = $1 AND posted_at IS NOT NULL`, grade) == 1
+	}
+
+	yukis, kens := draft(b.submit(t, b.yuki, "essay"), 80), draft(b.submit(t, b.ken, "essay"), 70)
+	proposal := propose("post", yukis, kens)
+	b.do(t, b.sato, "grade.post", m{"course_id": b.course, "grade_ids": []uuid.UUID{yukis}})
+	v := approve(proposal)
+	if v.Outcome != domain.StatusExecuted {
+		t.Fatalf("approving after Yuki's draft was posted by hand: %+v", v.Error)
+	}
+	if got := testkit.Result[tools.GradePostOut](t, pipeline.Outcome{Result: v.Result}).Posted; len(got) != 1 || got[0] != kens || !posted(kens) {
+		t.Fatalf("the approval posted %v, want Ken's %s alone", got, kens)
+	}
+	if n := b.Count(`SELECT count(*) FROM grade WHERE id = $1 AND posted_by_member_id = $2`, yukis, b.satoM); n != 1 {
+		t.Fatal("Yuki's grade is no longer the one Sato posted")
+	}
+
+	if out := b.MustCall(b.sato, "grade.post", m{"course_id": b.course, "grade_ids": []uuid.UUID{yukis}}, "again"); out.Status != domain.StatusFailed ||
+		!strings.Contains(out.Error.Message, "already posted; use grade.regrade") {
+		t.Fatalf("a call posting Yuki's posted grade: %+v", out)
+	}
+	if out := b.MustCall(bot, "grade.post", m{"course_id": b.course, "grade_ids": []uuid.UUID{yukis}}, "propose-posted"); out.Status != domain.StatusFailed ||
+		!strings.Contains(out.Error.Message, "already posted; use grade.regrade") {
+		t.Fatalf("a proposal to post Yuki's posted grade: %+v", out)
+	}
+
+	// Second attempts, and Ken's draft is replaced while the proposal waits.
+	kensWork := b.submit(t, b.ken, "revised")
+	yukis, kens = draft(b.submit(t, b.yuki, "revised"), 85), draft(kensWork, 75)
+	proposal = propose("post-again", yukis, kens)
+	replacement := draft(kensWork, 78)
+	if v := approve(proposal); v.Outcome != domain.StatusFailed || !strings.Contains(v.Error.Message, "replaced") || strings.Contains(v.Error.Message, "regrade") {
+		t.Fatalf("approving after Ken's draft was replaced: %+v", v.Error)
+	}
+	if posted(yukis) || posted(kens) || posted(replacement) {
+		t.Fatal("a draft was posted by an approval that failed")
+	}
+}
+
 // Validate and Pin each look for the drafts waiting, and a post by hand can
 // come in between. A proposal made then would name no draft, and nobody
 // could ever approve it, so Pin refuses it as Validate would have. The race
