@@ -389,7 +389,8 @@ Nobody is authorized because nobody is calling. None of it is what makes the sys
 proposal's age itself — it makes those facts visible, and keeps the queues free of entries
 nobody could approve. When a due date passes, every current student with no submission row
 gets one in state `missing`, so that the gap is something a grader can see and grade; late
-work takes that row over.
+work takes that row over, unless a grade has been entered or proposed for it: a zero for
+handing in nothing is a grade of that nothing, and the late work is then a new attempt.
 
 **`event` is something that happened, written after it did**, in the same transaction as the
 state change. Not every event has an action behind it (a due date passing); one action may
@@ -528,6 +529,8 @@ check `actor.platform_role` instead. That is the only place it is read.
 - Cancelling pending proposals when a member is removed or expires.
 - Nobody hands out more than they hold (§2.2): any change that widens a seat is measured as
   the whole of what it will then hold, a student's seat reaching the student included.
+- A grade lands on the work it was given for: the submission's state is read under its lock,
+  and late work takes a `missing` row over only while no grade is entered or proposed for it.
 - `actor.kind` and `course_member.role` are never read by authorization.
 
 ## 5. Worked example: an agent grades an essay

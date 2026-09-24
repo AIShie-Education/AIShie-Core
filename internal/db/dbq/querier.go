@@ -218,8 +218,10 @@ type Querier interface {
 	LockStudentTotals(ctx context.Context, arg LockStudentTotalsParams) error
 	// Serialising what races -------------------------------------------------------
 	// A row lock, not an UPDATE: the freeze trigger does not fire. Two drafts for
-	// one submission entered at once would otherwise both be live.
-	LockSubmissionForGrading(ctx context.Context, id uuid.UUID) error
+	// one submission entered at once would otherwise both be live, and late work
+	// taking a 'missing' placeholder over takes the same lock. The state is read
+	// under it, so it is the state the grade is written against.
+	LockSubmissionForGrading(ctx context.Context, id uuid.UUID) (string, error)
 	// All of one student's attempts at one assignment, locked, newest first.
 	LockSubmissionsOf(ctx context.Context, arg LockSubmissionsOfParams) ([]LockSubmissionsOfRow, error)
 	MarkActionExecuted(ctx context.Context, arg MarkActionExecutedParams) error
@@ -251,6 +253,8 @@ type Querier interface {
 	SetPublishedVersion(ctx context.Context, arg SetPublishedVersionParams) error
 	SetSubmissionLateness(ctx context.Context, arg SetSubmissionLatenessParams) (int64, error)
 	StorageKeyInUse(ctx context.Context, storageKey *string) (bool, error)
+	// A grade entered, or proposed and not yet decided: either way, one is on its
+	// way for exactly this work.
 	SubmissionHasGrades(ctx context.Context, submissionID *uuid.UUID) (bool, error)
 	SubmitSubmission(ctx context.Context, arg SubmitSubmissionParams) (int64, error)
 	SupersedeComponentDrafts(ctx context.Context, arg SupersedeComponentDraftsParams) error

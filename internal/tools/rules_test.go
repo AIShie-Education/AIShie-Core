@@ -146,9 +146,10 @@ func TestADecimalStringIsBounded(t *testing.T) {
 }
 
 // A zero for handing in nothing is a grade of that nothing. Late work takes a
-// 'missing' placeholder over, keeping its id, until the placeholder has a
-// grade; a grade proposed before that, or waiting on the lock while it
-// happens, does not land on the late work instead.
+// 'missing' placeholder over, keeping its id, only while no grade is entered
+// or proposed for it; a grade proposed before that stays on the placeholder,
+// and one waiting on the lock while it happens is refused. Nothing in it
+// depends on a clock.
 func TestAGradeForNothingDoesNotLandOnLateWork(t *testing.T) {
 	b := build(t)
 	missing := func(student uuid.UUID) uuid.UUID {
@@ -168,14 +169,18 @@ func TestAGradeForNothingDoesNotLandOnLateWork(t *testing.T) {
 		t.Fatalf("proposal: %+v", prop)
 	}
 	late := testkit.Result[tools.SubmissionCreateOut](t, b.do(t, b.yuki, "submission.create",
-		m{"course_id": b.course, "assignment_id": b.hw3, "body": "my late essay"})).SubmissionID
-	if late != yuki {
-		t.Fatal("the late work did not take the placeholder over; the test no longer tests anything")
+		m{"course_id": b.course, "assignment_id": b.hw3, "body": "my late essay"}))
+	if late.SubmissionID == yuki || late.Attempt != 2 {
+		t.Fatalf("the late work took over a placeholder with a grade proposed for it: %+v", late)
 	}
-	b.do(t, b.yuki, "submission.submit", m{"course_id": b.course, "submission_id": late})
+	b.do(t, b.yuki, "submission.submit", m{"course_id": b.course, "submission_id": late.SubmissionID})
 	b.do(t, b.sato, "action.decide", m{"course_id": b.course, "action_id": prop.ActionID, "decision": "approve"})
-	if n := b.Count(`SELECT count(*) FROM action WHERE id = $1 AND status = 'failed'`, prop.ActionID); n != 1 {
-		t.Fatal("the zero proposed for nothing was carried out on the late work")
+	if n := b.Count(`SELECT count(*) FROM grade g JOIN submission s ON s.id = g.submission_id
+		WHERE g.created_by_action_id = $1 AND s.id = $2 AND s.state = 'missing'`, prop.ActionID, yuki); n != 1 {
+		t.Fatal("the zero proposed for nothing is not on the nothing")
+	}
+	if n := b.Count(`SELECT count(*) FROM grade WHERE submission_id = $1`, late.SubmissionID); n != 0 {
+		t.Fatal("the zero proposed for nothing landed on the late work")
 	}
 
 	// A direct call that waits on the placeholder's lock while
@@ -212,6 +217,12 @@ func TestAGradeForNothingDoesNotLandOnLateWork(t *testing.T) {
 	if n := b.Count(`SELECT count(*) FROM grade WHERE submission_id = $1`, ken); n != 0 {
 		t.Fatalf("%d grades on the reopened draft", n)
 	}
+	// Work handed in on an instance whose clock runs ahead is graded like any
+	// other: nothing is ordered by comparing two instances' clocks.
+	b.P.SetClock(func() time.Time { return time.Now().Add(time.Minute) })
+	b.do(t, b.ken, "submission.submit", m{"course_id": b.course, "submission_id": ken})
+	b.P.SetClock(time.Now)
+	b.do(t, b.sato, "grade.submit", m{"course_id": b.course, "submission_id": ken, "score": 90})
 }
 
 // ---------------------------------------------------------------------------

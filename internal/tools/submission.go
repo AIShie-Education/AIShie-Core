@@ -219,11 +219,14 @@ func submissionCreate() tool.Tool {
 					return SubmissionCreateOut{}, apperr.Conflicts("there is already an open draft; edit or submit that one").With("submission_id", latest.ID)
 				case stateMissing:
 					// Late work takes the placeholder over — unless someone has
-					// graded the placeholder. A zero "for handing in nothing"
+					// graded the placeholder, or proposed a grade for it that
+					// nobody has decided yet. A zero "for handing in nothing"
 					// is a grade of that nothing; the work a grade was given
 					// for never changes underneath it. Then the placeholder
 					// stays as it is, as history, and the late work is a new
-					// attempt with a grade of its own to come.
+					// attempt with a grade of its own to come. grade.submit
+					// holds the placeholder's lock while it makes a proposal,
+					// so one being made now is seen here.
 					graded, err := ec.Q.SubmissionHasGrades(ctx, &latest.ID)
 					if err != nil {
 						return SubmissionCreateOut{}, err
