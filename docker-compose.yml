@@ -3,7 +3,8 @@
 #   export DATABASE_URL=postgres://postgres:postgres@localhost:5432/aishiteru?sslmode=disable
 #   export TEST_DATABASE_URL=postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable
 #
-# MinIO stands in for S3 once document storage lands.
+# MinIO stands in for S3 (see `make test-s3`). Docker Hub no longer has
+# minio/minio; quay.io keeps the last community release, the one CI uses.
 services:
   postgres:
     image: postgres:18
@@ -18,7 +19,7 @@ services:
       retries: 30
 
   minio:
-    image: minio/minio
+    image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
     command: server /data --console-address :9001
     environment:
       MINIO_ROOT_USER: minioadmin
