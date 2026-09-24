@@ -1,6 +1,7 @@
 package mcpapi_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -8,7 +9,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"regexp"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -210,6 +213,71 @@ func TestARequestIsRefusedAsTheSDKWouldRefuseIt(t *testing.T) {
 	}
 }
 
+// recorder is bearer, noting the method of each message the client posts.
+type recorder struct {
+	bearer
+	mu   sync.Mutex
+	sent []string
+}
+
+func (r *recorder) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.Body != nil {
+		body, _ := io.ReadAll(req.Body)
+		req.Body = io.NopCloser(bytes.NewReader(body))
+		var msg struct {
+			Method string `json:"method"`
+		}
+		_ = json.Unmarshal(body, &msg)
+		r.mu.Lock()
+		r.sent = append(r.sent, msg.Method)
+		r.mu.Unlock()
+	}
+	return r.bearer.RoundTrip(req)
+}
+
+// Nothing is pushed from here, and nothing says otherwise. The tool list is
+// not said to change, so a client that would listen for that does not ask;
+// and a listen asked for all the same is answered as SEP-2575 answers a
+// method a server does not have: not found, to the id that asked.
+func TestNothingIsOfferedThatIsNotPushed(t *testing.T) {
+	f := serve(t, 1)
+	token := f.token(t, f.c.Sato)
+	rec := &recorder{bearer: bearer{token}}
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-agent", Version: "0"},
+		&mcp.ClientOptions{ToolListChangedHandler: func(context.Context, *mcp.ToolListChangedRequest) {}})
+	session, err := client.Connect(context.Background(), &mcp.StreamableClientTransport{
+		Endpoint: f.srv.URL + httpapi.MCPPath, HTTPClient: &http.Client{Transport: rec},
+		DisableStandaloneSSE: true, MaxRetries: -1,
+	}, nil)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer session.Close()
+	if tools := session.InitializeResult().Capabilities.Tools; tools == nil || tools.ListChanged {
+		t.Errorf("tools: %+v", tools)
+	}
+	if _, err := session.ListTools(context.Background(), nil); err != nil {
+		t.Fatal(err)
+	}
+	rec.mu.Lock()
+	if slices.Contains(rec.sent, "subscriptions/listen") {
+		t.Errorf("the client listened: %v", rec.sent)
+	}
+	rec.mu.Unlock()
+
+	status, out := post(t, f, token, `{"jsonrpc": "2.0", "id": 7, "method": "subscriptions/listen", "params": {"notifications": {"toolsListChanged": true}, `+
+		`"_meta": {"io.modelcontextprotocol/protocolVersion": "2026-07-28"}}}`, "Mcp-Protocol-Version", "2026-07-28")
+	var answer struct {
+		ID    json.RawMessage `json:"id"`
+		Error struct {
+			Code int `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(out, &answer); err != nil || status != http.StatusNotFound || string(answer.ID) != "7" || answer.Error.Code != -32601 {
+		t.Errorf("a listen: %d %s", status, out)
+	}
+}
+
 // Over MCP a refusal of ours is written twice, as text and as structured
 // content, and the text is escaped once more on the way: a megabyte of input
 // would come back as thirteen. The SDK words some refusals itself — a tool
@@ -243,7 +311,7 @@ func TestARefusalOverMCPRepeatsLittleOfWhatItRefuses(t *testing.T) {
 		{"an id", `{"jsonrpc": "2.0", "id": "` + del + `", "method": "tools/list"}`,
 			"", http.StatusBadRequest, "the id is longer than"},
 		{"a listen", `{"jsonrpc": "2.0", "id": 1, "method": "subscriptions/listen", "params": {"notifications": 5, "x": "` + del + `"}}`,
-			"", http.StatusBadRequest, "poll event_list"},
+			"", http.StatusNotFound, "poll event_list"},
 	} {
 		var headers []string
 		if tc.version != "" {

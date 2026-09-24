@@ -131,7 +131,9 @@ const maxID = 256
 // Nor anything whose answer bounded could not keep short: an id longer than
 // maxID, or subscriptions/listen, whose answer is a stream that stays open.
 // Nothing is pushed from here, so a listen would carry only its own
-// acknowledgement, or a refusal the SDK words for it.
+// acknowledgement, or a refusal the SDK words for it; it is answered as
+// SEP-2575 answers a method a server does not have, and newServer offers
+// nothing a client would listen for.
 func screened(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// The SDK's own test of the Content-Type: what fails it is refused
@@ -150,22 +152,28 @@ func screened(next http.Handler) http.Handler {
 		}
 		b := bytes.TrimLeft(body, " \t\r\n")
 		if len(b) > 0 && b[0] == '[' {
-			refuse(w, jsonrpc.CodeInvalidRequest, "one message per request; a batch is not taken")
+			refuse(w, http.StatusBadRequest, jsonrpc.ID{}, jsonrpc.CodeInvalidRequest, "one message per request; a batch is not taken")
 			return
 		}
 		var m sighting
 		if err := sight(body, &m); err != nil && len(b) > 0 && b[0] == '{' {
 			// An object this cannot read, which the SDK's own decoder
 			// might, and act on unscreened.
-			refuse(w, jsonrpc.CodeParseError, "the request is not JSON")
+			refuse(w, http.StatusBadRequest, jsonrpc.ID{}, jsonrpc.CodeParseError, "the request is not JSON")
 			return
 		}
 		switch {
 		case m.ID.long:
-			refuse(w, jsonrpc.CodeInvalidRequest, fmt.Sprintf("the id is longer than %d bytes", maxID))
+			refuse(w, http.StatusBadRequest, jsonrpc.ID{}, jsonrpc.CodeInvalidRequest, fmt.Sprintf("the id is longer than %d bytes", maxID))
 			return
 		case m.Method.listen:
-			refuse(w, jsonrpc.CodeMethodNotFound, "nothing is pushed from here; poll event_list with the next_seq it last returned")
+			var id jsonrpc.ID // the id the SDK would have answered
+			if msg, err := jsonrpc.DecodeMessage(body); err == nil {
+				if req, ok := msg.(*jsonrpc.Request); ok {
+					id = req.ID
+				}
+			}
+			refuse(w, http.StatusNotFound, id, jsonrpc.CodeMethodNotFound, "nothing is pushed from here; poll event_list with the next_seq it last returned")
 			return
 		}
 		r.Body = io.NopCloser(bytes.NewReader(body))
@@ -354,12 +362,12 @@ func (h *heldResponse) Write(b []byte) (int, error) {
 	return h.body.Write(b)
 }
 
-// refuse answers, as JSON-RPC, a request the SDK is not given. The id is
-// null, as it is for a request whose id cannot be told.
-func refuse(w http.ResponseWriter, code int64, message string) {
+// refuse answers, as JSON-RPC, a request the SDK is not given. The zero id
+// is written as null, as it is for a request whose id cannot be told.
+func refuse(w http.ResponseWriter, status int, id jsonrpc.ID, code int64, message string) {
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusBadRequest)
-	_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": nil, "error": map[string]any{"code": code, "message": message}})
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": id.Raw(), "error": map[string]any{"code": code, "message": message}})
 }
 
 // limited refuses an actor that is calling too fast, before anything is
@@ -384,7 +392,15 @@ func limited(d Deps, next http.Handler) http.Handler {
 
 func newServer(d Deps) *mcp.Server {
 	server := mcp.NewServer(&mcp.Implementation{Name: "aishiteru-core", Title: "AIshiteru Core", Version: version.Version},
-		&mcp.ServerOptions{Instructions: instructions})
+		&mcp.ServerOptions{Instructions: instructions, Capabilities: &mcp.ServerCapabilities{
+			// What the SDK offers when not told otherwise, but for the tool
+			// list's changing: the list does not change while the server
+			// runs, and nothing is pushed from here to say so if it did.
+			// Offered, it would have a client open a listen, which
+			// screened refuses.
+			Logging: &mcp.LoggingCapabilities{},
+			Tools:   &mcp.ToolCapabilities{},
+		}})
 	seen := map[string]string{}
 	for _, t := range d.Pipeline.Registry().Exposed() {
 		name := ToolName(t.Name)
