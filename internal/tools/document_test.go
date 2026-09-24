@@ -514,6 +514,43 @@ func TestAnArchivedDocumentIsWithdrawn(t *testing.T) {
 	}
 }
 
+// Feedback on a posted grade is a release, and archiving it is how the release
+// is taken back. Yuki and her tutor, who were handed the file's id with the
+// grade, must not go on reading it, or fetching fresh download URLs for it.
+func TestWithdrawnFeedbackIsWithdrawn(t *testing.T) {
+	b := build(t)
+	work := b.submit(t, b.yuki, "essay")
+	gradeID := testkit.Result[tools.GradeSubmitOut](t, b.do(t, b.sato, "grade.submit", m{"course_id": b.course, "submission_id": work, "score": 90})).GradeID
+	token := b.upload(t, b.sato, "feedback", "application/pdf", []byte("%PDF Ken's marked-up essay"))
+	wrong := testkit.Result[tools.DocumentCreateOut](t, b.do(t, b.sato, "document.create", m{"course_id": b.course, "kind": "feedback",
+		"title": "essay-marked.pdf", "grade_id": gradeID, "body_md": "notes for Ken", "upload_token": token}))
+	b.do(t, b.sato, "grade.post", m{"course_id": b.course, "grade_ids": []uuid.UUID{gradeID}})
+	for _, reader := range []uuid.UUID{b.yuki, b.tutor} {
+		if got := b.get(t, reader, m{"document_id": wrong.DocumentID}); got.Version == nil || got.Version.DownloadURL == nil {
+			t.Fatalf("posted feedback: %+v", got)
+		}
+	}
+
+	b.do(t, b.sato, "document.archive", m{"course_id": b.course, "document_id": wrong.DocumentID})
+	if g := testkit.Result[tools.GradeView](t, b.do(t, b.yuki, "grade.get", m{"course_id": b.course, "grade_id": gradeID})); len(g.FeedbackFiles) != 0 {
+		t.Fatalf("grade.get lists %d feedback files after the withdrawal", len(g.FeedbackFiles))
+	}
+	for _, reader := range []uuid.UUID{b.yuki, b.tutor} {
+		for _, args := range []m{
+			{"course_id": b.course, "document_id": wrong.DocumentID},
+			{"course_id": b.course, "document_id": wrong.DocumentID, "version_id": wrong.VersionID},
+		} {
+			if _, err := b.Call(reader, "document.get", args, ""); !apperr.Is(err, apperr.NotFound) {
+				t.Fatalf("reading withdrawn feedback (%v): %v", args, err)
+			}
+		}
+	}
+	// Whoever grades still can: it is archived, not destroyed.
+	if got := b.get(t, b.sato, m{"document_id": wrong.DocumentID}); got.Version == nil || *got.Version.BodyMD != "notes for Ken" {
+		t.Fatalf("Sato reading the withdrawn feedback: %+v", got)
+	}
+}
+
 // Instructions are the assignment's. Publishing them is a step on the way to
 // publishing the assignment — assignment.publish insists on it — and must not
 // itself put next week's exam in front of the class.

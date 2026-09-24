@@ -278,7 +278,8 @@ instructors read the latest. A half-edited lecture is invisible until the pointe
 `perm_document_read` / `perm_document_write`; a rubric is read with `perm_rubric_read`; a
 submitted file follows its submission (`perm_submission_read` / `_write`, scoped to its student
 and assignment); a feedback file follows its grade (`perm_grade_read`, scoped, and invisible
-to non-graders until the grade is posted; written with `perm_grade_submit`). Unpublished
+to non-graders until the grade is posted and again once the file is archived, which is how
+posted feedback is withdrawn; written with `perm_grade_submit`). Unpublished
 versions and the version list need `perm_document_read_draft`. One exception, for the reason
 versions are pinned at all: a member may always read the exact version that a submission
 within their scope was handed in under, even after the instructions have moved on.

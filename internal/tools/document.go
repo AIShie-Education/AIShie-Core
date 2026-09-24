@@ -720,8 +720,11 @@ func documentGet(d Deps) tool.Tool {
 				return DocumentGetOut{}, err
 			}
 			// Feedback on a grade the student cannot see yet is not theirs to
-			// read either.
-			if doc.Kind == kindFeedback && (doc.GradePostedAt == nil || doc.GradeSupersededBy != nil) && !seesDrafts(rc.Member) {
+			// read either. Nor is feedback archived from a posted grade:
+			// archiving it takes back a release (feedbackWritePerms), so like
+			// withdrawn material below it is withdrawn from anyone who kept
+			// the id. Those who grade still read it.
+			if doc.Kind == kindFeedback && (doc.GradePostedAt == nil || doc.GradeSupersededBy != nil || doc.Status == "archived") && !seesDrafts(rc.Member) {
 				return DocumentGetOut{}, apperr.Missing("no such document in this course")
 			}
 			drafts := rc.Member.Perm(domain.PermDocumentReadDraft).Allowed()
