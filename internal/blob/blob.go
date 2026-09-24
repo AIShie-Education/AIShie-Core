@@ -28,7 +28,8 @@ type Info struct {
 	Checksum string
 	// Modified is when the object was last written, by the store's clock:
 	// the time List reports, and the orphan sweep judges an upload's age by.
-	// It is not recorded.
+	// S3 answers Stat with it only to the second, so there it may be up to a
+	// second earlier than List's. It is not recorded.
 	Modified time.Time `json:"-"`
 }
 
