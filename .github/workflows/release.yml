@@ -23,6 +23,12 @@ concurrency:
 permissions:
   contents: read
 
+# Each run block is bash with -o pipefail: a pipeline fails when any command
+# in it does, not only when its last one does.
+defaults:
+  run:
+    shell: bash
+
 env:
   IMAGE: ghcr.io/aishiteru-lms/aishiteru-core
   GOLANGCI_LINT_VERSION: v2.13.2

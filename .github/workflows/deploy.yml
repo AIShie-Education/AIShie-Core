@@ -48,6 +48,12 @@ on:
 permissions:
   contents: read
 
+# Each run block is bash with -o pipefail: a pipeline fails when any command
+# in it does, not only when its last one does.
+defaults:
+  run:
+    shell: bash
+
 env:
   IMAGE: ghcr.io/aishiteru-lms/aishiteru-core
 
@@ -80,6 +86,7 @@ jobs:
             *) echo "::error::$WANT is not an image of $IMAGE"; exit 1 ;;
           esac
           digest=$(docker buildx imagetools inspect "$WANT" --format '{{json .Manifest}}' | jq -r .digest)
+          [[ $digest == sha256:* ]] || { echo "::error::$WANT did not resolve to a digest"; exit 1; }
           image="$IMAGE@$digest"
           echo "image=$image" >> "$GITHUB_OUTPUT"
           version=$(docker run --rm "$image" version)
