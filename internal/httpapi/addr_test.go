@@ -52,6 +52,27 @@ func TestClientAddr(t *testing.T) {
 	}
 }
 
+// The sign-in limit keys an IPv6 address by its /64, whatever zone it came
+// with, and an IPv4 address as itself, however it reached us: written as
+// IPv6, or through NAT64.
+func TestAnAddressIsKeyedAsTheNetworkItComesFrom(t *testing.T) {
+	for addr, want := range map[string]string{
+		"203.0.113.7":                      "addr:203.0.113.7",
+		"::ffff:203.0.113.7":               "addr:203.0.113.7",
+		"64:ff9b::cb00:7107":               "addr:203.0.113.7",
+		"64:ff9b::c633:6401":               "addr:198.51.100.1",
+		"2001:db8:1:2::1":                  "addr:2001:db8:1:2::/64",
+		"2001:db8:1:2:ffff:ffff:ffff:ffff": "addr:2001:db8:1:2::/64",
+		"fe80::1%eth0":                     "addr:fe80::/64",
+		"fe80::2%eth0":                     "addr:fe80::/64",
+		"not an address":                   "addr:not an address",
+	} {
+		if got := addrKey(addr); got != want {
+			t.Errorf("%s: %s, want %s", addr, got, want)
+		}
+	}
+}
+
 // The sign-in limit keys an email by what it names, in a few dozen bytes
 // however long it came.
 func TestEmailKey(t *testing.T) {

@@ -17,6 +17,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"path"
 	"strings"
 	"time"
@@ -405,18 +406,31 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 // keyed by its /64, the least one network is given: whoever holds it may
 // send from any address in it, and keyed alone, each would be a fresh
 // bucket. A /64 may as well be a LAN of many people, as an IPv4 address
-// behind a NAT may be; they share only their guesses (see login). An IPv4
-// address written as IPv6 (::ffff:203.0.113.7) is that IPv4 address.
+// behind a NAT may be; they share only their guesses (see login). The zone
+// a link-local peer comes with names our interface, not the peer, and is
+// no part of the key. An IPv4 address written as IPv6 (::ffff:203.0.113.7),
+// or shown to an IPv6-only server through NAT64 (64:ff9b::203.0.113.7), is
+// that IPv4 address.
 func addrKey(addr string) string {
-	ip := net.ParseIP(addr)
-	switch {
-	case ip == nil:
+	ip, err := netip.ParseAddr(addr)
+	if err != nil {
 		return "addr:" + addr
-	case ip.To4() != nil:
+	}
+	ip = ip.WithZone("").Unmap()
+	if nat64.Contains(ip) {
+		a := ip.As16()
+		ip = netip.AddrFrom4([4]byte(a[12:]))
+	}
+	if ip.Is4() {
 		return "addr:" + ip.String()
 	}
-	return "addr:" + ip.Mask(net.CIDRMask(64, 128)).String() + "/64"
+	return "addr:" + netip.PrefixFrom(ip, 64).Masked().String()
 }
+
+// nat64 is the well-known prefix (RFC 6052) under which NAT64 and SIIT show
+// an IPv4 client to an IPv6-only server, with its address in the last 32
+// bits. Keyed by its /64, every IPv4 client would share one bucket.
+var nat64 = netip.MustParsePrefix("64:ff9b::/96")
 
 // emailKey is the sign-in limit's key for an email: one key for an account
 // however its email is typed, and a small one however long the body made it.
