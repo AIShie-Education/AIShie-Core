@@ -865,6 +865,48 @@ func TestAnApprovedPostOfNamedDraftsPassesOverOnesPostedMeanwhile(t *testing.T) 
 	}
 }
 
+// A draft posted by hand can land after an approval has first looked at the
+// drafts and before it has them locked. The approval looks again under the
+// lock and passes over it there too, whether the proposal named its drafts or
+// had them pinned for an assignment, and posts the rest. The hand post is
+// held open here until the approval is waiting on Yuki's row.
+func TestADraftPostedJustBeforeAnApprovalsLockIsPassedOver(t *testing.T) {
+	b := build(t)
+	bot := testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", m{"kind": "agent", "display_name": "release-bot"})).ActorID
+	b.do(t, b.sato, "member.add", m{"course_id": b.course, "actor_id": bot, "preset": "ta", "perms": m{"grade_post": "confirm_required"}})
+	draft := func(student uuid.UUID, score int) uuid.UUID {
+		t.Helper()
+		return testkit.Result[tools.GradeSubmitOut](t, b.do(t, b.sato, "grade.submit",
+			m{"course_id": b.course, "submission_id": b.submit(t, student, "essay"), "score": score})).GradeID
+	}
+
+	for _, proposal := range []struct {
+		what string
+		args func(yukis, kens uuid.UUID) m
+	}{
+		{"naming its drafts", func(yukis, kens uuid.UUID) m { return m{"course_id": b.course, "grade_ids": []uuid.UUID{yukis, kens}} }},
+		{"for an assignment", func(_, _ uuid.UUID) m { return m{"course_id": b.course, "assignment_id": b.hw3} }},
+	} {
+		yukis, kens := draft(b.yuki, 80), draft(b.ken, 70)
+		proposed := b.MustCall(bot, "grade.post", proposal.args(yukis, kens), proposal.what)
+		if proposed.Status != domain.StatusProposed {
+			t.Fatalf("the bot's proposal %s: %+v", proposal.what, proposed)
+		}
+		release := b.hold(t, `UPDATE grade SET posted_at = now(), posted_by_member_id = $2 WHERE id = $1`, yukis, b.satoM)
+		done := make(chan pipeline.Outcome, 1)
+		b.start(t, done, b.sato, "action.decide", m{"course_id": b.course, "action_id": proposed.ActionID, "decision": "approve"})
+		b.blocked(t, 1, done)
+		release()
+		v := testkit.Result[pipeline.DecideOut](t, <-done)
+		if v.Outcome != domain.StatusExecuted {
+			t.Fatalf("approving the proposal %s, Yuki's draft posted by hand just before its lock: %+v", proposal.what, v.Error)
+		}
+		if got := testkit.Result[tools.GradePostOut](t, pipeline.Outcome{Result: v.Result}).Posted; len(got) != 1 || got[0] != kens {
+			t.Fatalf("the approval of the proposal %s posted %v, want Ken's %s alone", proposal.what, got, kens)
+		}
+	}
+}
+
 // The instances of a server do not share a clock. The release bot proposes
 // posting HW3 on one whose clock runs a few minutes ahead, Sato posts Yuki's
 // draft by hand, and then approves on one whose clock is behind, so that by
