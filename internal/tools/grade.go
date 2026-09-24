@@ -466,7 +466,7 @@ type GradePostIn struct {
 	tool.InCourse
 	GradeIDs            []uuid.UUID `json:"grade_ids,omitempty" jsonschema:"the draft grades to post; or give assignment_id"`
 	AssignmentID        *uuid.UUID  `json:"assignment_id,omitempty" jsonschema:"post every draft grade waiting for this assignment"`
-	TreatUngradedAsZero bool        `json:"treat_ungraded_as_zero,omitempty" jsonschema:"for final grades: count ungraded work as zero in the totals. Once a student's totals have been written this way they stay final: later posts and regrades keep counting ungraded work as zero"`
+	TreatUngradedAsZero bool        `json:"treat_ungraded_as_zero,omitempty" jsonschema:"for final grades: count ungraded work as zero in the totals. Once a student's totals have been written this way they stay final: later posts and regrades keep counting ungraded work as zero. It decides the course total, so it needs an assignment scope of the whole course"`
 }
 
 type GradePostOut struct {
@@ -520,7 +520,7 @@ func gradePost() tool.Tool {
 			if err != nil {
 				return tool.Target{}, err
 			}
-			t := tool.Target{CourseID: in.CourseID, Type: "grade", Scope: postScope(rows)}
+			t := tool.Target{CourseID: in.CourseID, Type: "grade", Scope: postScope(rows, in.TreatUngradedAsZero)}
 			switch {
 			case in.AssignmentID != nil:
 				// The assignment is the target whether or not anything is
@@ -570,7 +570,7 @@ func gradePost() tool.Tool {
 			// may be more than what authorize() scope-checked: a draft entered
 			// in between, for a student the caller does not reach. Checked
 			// again against the rows that are actually about to be posted.
-			if reason, err := authz.CheckScope(ctx, ec.Q, ec.Member, postScope(rows)); err != nil {
+			if reason, err := authz.CheckScope(ctx, ec.Q, ec.Member, postScope(rows, in.TreatUngradedAsZero)); err != nil {
 				return GradePostOut{}, err
 			} else if reason != authz.ReasonNone {
 				return GradePostOut{}, apperr.Forbid("a draft entered since this call was authorized is outside your scope; call again").With("reason", string(reason))
@@ -605,8 +605,11 @@ func gradePost() tool.Tool {
 }
 
 // postScope is steps 4 and 5 for a batch: every student and assignment in it.
-func postScope(rows []dbq.GetGradesInCourseRow) authz.Target {
-	var t authz.Target
+// Posting as final is a decision about the course total as well — every other
+// assignment's ungraded work becomes a zero, for good — so it spans
+// assignments whatever is in the batch.
+func postScope(rows []dbq.GetGradesInCourseRow, final bool) authz.Target {
+	t := authz.Target{SpansAssignments: final}
 	for _, g := range rows {
 		t.StudentMemberIDs = append(t.StudentMemberIDs, g.StudentMemberID)
 		if g.AssignmentID != nil {
@@ -722,6 +725,11 @@ func gradeRegrade(d Deps) tool.Tool {
 			}
 			t := s.target(in.CourseID)
 			t.Type, t.ID = "grade", &g.ID
+			// Regrading as final decides the course total, as posting as
+			// final does (postScope).
+			if in.TreatUngradedAsZero {
+				t.Scope.SpansAssignments = true
+			}
 			return t, nil
 		},
 		Validate: func(ctx context.Context, q dbq.Querier, m *domain.Member, in GradeRegradeIn) error {

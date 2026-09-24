@@ -473,7 +473,9 @@ authorize(actor, course, action_type, target) → autonomy_level
 Step 5 has one more case. A target that belongs to a student but to no single assignment — a
 grade on a component, a course total, a whole gradebook — is within scope only for
 `assignment_scope = 'all'`. Otherwise "names no assignment" would mean "skips the check", and
-a grader listed for HW3 alone could read the class's midterm.
+a grader listed for HW3 alone could read the class's midterm. Posting or regrading with
+`treat_ungraded_as_zero` is such a target too, whatever the grades in it: it decides how every
+other assignment counts in the course total, for good.
 
 Steps 1–3 run before the target is looked up, and the lookup happens only for a caller who
 passed them. A non-member probing ids gets the same recorded denial whether or not the id

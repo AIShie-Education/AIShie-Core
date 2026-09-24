@@ -562,6 +562,39 @@ func TestFinalTotalsStayFinal(t *testing.T) {
 	}
 }
 
+// treat_ungraded_as_zero is a decision about the course total: every other
+// assignment's ungraded work becomes a zero, and stays one. A course total is
+// within scope only for assignment_scope = 'all', so a grader listed for HW3
+// may post and regrade HW3, but not make Yuki's totals final by doing so.
+func TestFinalisingTotalsTakesTheWholeCourse(t *testing.T) {
+	b := build(t)
+	b.do(t, b.sato, "member.update_perms", m{"course_id": b.course, "member_id": b.graderM, "perms": m{"grade_submit": "autonomous", "grade_post": "autonomous"}})
+	work := b.submit(t, b.yuki, "essay")
+	hw := testkit.Result[tools.GradeSubmitOut](t, b.do(t, b.grader, "grade.submit", m{"course_id": b.course, "submission_id": work, "score": 80})).GradeID
+	denied := func(what string, out pipeline.Outcome) {
+		t.Helper()
+		if out.Status != domain.StatusDenied || out.Error.Details["reason"] != "assignment_out_of_scope" {
+			t.Fatalf("%s: %+v", what, out)
+		}
+	}
+	final := func() int {
+		return b.Count(`SELECT count(*) FROM grade WHERE student_member_id = $1 AND origin = 'computed' AND breakdown::text LIKE '%ungraded_as_zero%'`, b.yukiM)
+	}
+
+	denied("posting HW3 as final", b.MustCall(b.grader, "grade.post", m{"course_id": b.course, "grade_ids": []uuid.UUID{hw}, "treat_ungraded_as_zero": true}, "final"))
+	denied("posting HW3 as final by assignment", b.MustCall(b.grader, "grade.post", m{"course_id": b.course, "assignment_id": b.hw3, "treat_ungraded_as_zero": true}, "final-hw3"))
+	if out := b.MustCall(b.grader, "grade.post", m{"course_id": b.course, "grade_ids": []uuid.UUID{hw}}, "post"); out.Status != domain.StatusExecuted {
+		t.Fatalf("posting HW3: %+v", out)
+	}
+	denied("regrading HW3 as final", b.MustCall(b.grader, "grade.regrade", m{"course_id": b.course, "grade_id": hw, "score": 90, "treat_ungraded_as_zero": true}, "regrade-final"))
+	if out := b.MustCall(b.grader, "grade.regrade", m{"course_id": b.course, "grade_id": hw, "score": 90}, "regrade"); out.Status != domain.StatusExecuted {
+		t.Fatalf("regrading HW3: %+v", out)
+	}
+	if final() != 0 {
+		t.Fatal("a grader listed for HW3 made Yuki's totals final")
+	}
+}
+
 // The rubric version a grade is against is the one the grader was shown. For
 // a proposal that is the rubric as published when the proposal was made, not
 // when it was approved: it is pinned into the proposal.
