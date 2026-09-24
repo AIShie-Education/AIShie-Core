@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -387,5 +388,33 @@ func TestWhatTheDatabaseCannotHoldIsNoCredential(t *testing.T) {
 	}
 	if strings.Contains(log.String(), `"level":"ERROR"`) {
 		t.Errorf("logged as a fault of ours: %s", log.String())
+	}
+}
+
+// A call carries one idempotency key. Given two, whichever a retry carried
+// would decide whether it was the same call, so neither is taken, and
+// nothing is attempted.
+func TestACallCarriesOneIdempotencyKey(t *testing.T) {
+	a := newAPI(t, 1)
+	req, err := http.NewRequest("POST", a.srv.URL+"/v1/courses/"+a.c.Course.String()+"/grades",
+		strings.NewReader(`{"submission_id": "`+a.c.Students[0].HW3.String()+`", "score": 1}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+a.tokenFor(a.c.Sato))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Add(httpapi.HeaderIdempotencyKey, "first")
+	req.Header.Add(httpapi.HeaderIdempotencyKey, "second")
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(res.Body)
+	_ = res.Body.Close()
+	if res.StatusCode != http.StatusBadRequest || !strings.Contains(string(body), "invalid_argument") {
+		t.Fatalf("two keys: %d %s", res.StatusCode, body)
+	}
+	if n := a.c.Count(`SELECT count(*) FROM action`); n != 0 {
+		t.Fatalf("%d actions recorded", n)
 	}
 }

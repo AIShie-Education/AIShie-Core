@@ -224,6 +224,13 @@ type callerKey struct{}
 
 func (s *server) callTool(t tool.Tool) func(http.ResponseWriter, *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// One key. Given twice, which of the two a retry carries would decide
+		// whether it is the same call, so neither is taken, as a key named
+		// twice in a body is not.
+		if len(r.Header.Values(HeaderIdempotencyKey)) > 1 {
+			s.writeError(w, r, apperr.Invalid("%s is given more than once", HeaderIdempotencyKey))
+			return
+		}
 		args, err := buildArgs(t, r)
 		if err != nil {
 			s.writeError(w, r, err)
