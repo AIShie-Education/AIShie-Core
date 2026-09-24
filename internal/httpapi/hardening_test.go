@@ -359,3 +359,33 @@ func TestARefusalRepeatsLittleOfWhatItRefuses(t *testing.T) {
 		t.Errorf("the identity provider's refusal: %d, %d bytes: %.300s", r.Status, len(r.Raw), r.Raw)
 	}
 }
+
+// What no credential or account could be is answered as not one, at every
+// door, and not as a fault of ours to retry: a token whose prefix is not in
+// the alphabet prefixes are made in (Go's server passes a header's bytes
+// that are not UTF-8, and the database refuses them), and an email holding
+// U+0000. A sign-in with such an email is counted like any other guess.
+func TestWhatTheDatabaseCannotHoldIsNoCredential(t *testing.T) {
+	var log bytes.Buffer
+	a := hardened(t, nil, ratelimit.New(1, 3), slog.New(slog.NewJSONHandler(&log, nil)))
+	token := "ais_\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff_" + strings.Repeat("A", 43)
+	if r := a.do(nil, "GET", "/v1/me", token, nil); r.Status != http.StatusUnauthorized {
+		t.Errorf("REST: %d %s", r.Status, r.Raw)
+	}
+	res, body := a.raw("POST", a.srv.URL+httpapi.MCPPath, "application/json", []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`),
+		"Authorization", "Bearer "+token, "Accept", "application/json, text/event-stream")
+	if res.StatusCode != http.StatusUnauthorized {
+		t.Errorf("MCP: %d %s", res.StatusCode, body)
+	}
+	for i := range 3 {
+		if r := a.do(nil, "POST", "/v1/auth/login", "", m{"email": "sato\x00@example.edu", "password": "not the password!"}); r.Status != http.StatusUnauthorized {
+			t.Fatalf("sign-in %d: %d %s", i+1, r.Status, r.Raw)
+		}
+	}
+	if r := a.do(nil, "POST", "/v1/auth/login", "", m{"email": "sato\x00@example.edu", "password": "not the password!"}); r.Status != http.StatusTooManyRequests {
+		t.Fatalf("a fourth sign-in: %d, want 429", r.Status)
+	}
+	if strings.Contains(log.String(), `"level":"ERROR"`) {
+		t.Errorf("logged as a fault of ours: %s", log.String())
+	}
+}
