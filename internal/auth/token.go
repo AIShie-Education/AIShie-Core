@@ -70,8 +70,18 @@ func parsePrefix(full string) (string, bool) {
 	if len(parts) != 3 || parts[0] != tokenScheme || len(parts[1]) != prefixLen || len(parts[2]) < 40 {
 		return "", false
 	}
+	// The prefix is looked up, so it is held first to the alphabet it is
+	// made in. Nothing outside it could find a row, and some of what a
+	// header may carry, bytes that are not UTF-8, the database would refuse
+	// as a fault of ours: a 500 to retry, before any limit on calls.
+	if strings.Trim(parts[1], prefixAlphabet) != "" {
+		return "", false
+	}
 	return parts[1], true
 }
+
+// prefixAlphabet is what a prefix is written in: base32, lower-cased.
+const prefixAlphabet = "abcdefghijklmnopqrstuvwxyz234567"
 
 // tokenMatches compares in constant time.
 func tokenMatches(full, storedHash string) bool {

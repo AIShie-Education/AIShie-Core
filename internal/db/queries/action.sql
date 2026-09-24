@@ -1,6 +1,14 @@
 -- name: GetActionByKey :one
 SELECT * FROM action WHERE actor_id = $1 AND idempotency_key = $2;
 
+-- name: LockIdempotencyKey :exec
+-- Calls with one key take turns from the start, before anything else is
+-- locked. A retry of a call still in flight waits here holding nothing, and
+-- then finds the first call's row; without this it would wait for that row
+-- at InsertAction, holding its caller's seat, which the first call may yet
+-- need to lock FOR UPDATE.
+SELECT pg_advisory_xact_lock(hashtextextended('action-key:' || sqlc.arg(actor_id)::uuid::text || ':' || sqlc.arg(idempotency_key)::text, 0));
+
 -- name: InsertAction :execrows
 -- Zero rows means another call with the same key got there first; the caller
 -- then reads that row and replays it. ON CONFLICT waits for an in-flight

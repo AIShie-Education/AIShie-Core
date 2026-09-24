@@ -632,17 +632,19 @@ func (q *Queries) LockStudentTotals(ctx context.Context, arg LockStudentTotalsPa
 	return err
 }
 
-const lockSubmissionForGrading = `-- name: LockSubmissionForGrading :exec
-
-SELECT 1 FROM submission WHERE id = $1 FOR UPDATE
+const lockSubmissionForGrading = `-- name: LockSubmissionForGrading :one
+SELECT state FROM submission WHERE id = $1 FOR UPDATE
 `
 
-// Serialising what races -------------------------------------------------------
 // A row lock, not an UPDATE: the freeze trigger does not fire. Two drafts for
-// one submission entered at once would otherwise both be live.
-func (q *Queries) LockSubmissionForGrading(ctx context.Context, id uuid.UUID) error {
-	_, err := q.db.Exec(ctx, lockSubmissionForGrading, id)
-	return err
+// one submission entered at once would otherwise both be live, and late work
+// taking a 'missing' placeholder over takes the same lock. The state is read
+// under it, so it is the state the grade is written against.
+func (q *Queries) LockSubmissionForGrading(ctx context.Context, id uuid.UUID) (string, error) {
+	row := q.db.QueryRow(ctx, lockSubmissionForGrading, id)
+	var state string
+	err := row.Scan(&state)
+	return state, err
 }
 
 const newestComponentDraftAt = `-- name: NewestComponentDraftAt :one
@@ -695,10 +697,66 @@ func (q *Queries) PostGrade(ctx context.Context, arg PostGradeParams) (int64, er
 	return result.RowsAffected(), nil
 }
 
-const submissionHasGrades = `-- name: SubmissionHasGrades :one
-SELECT EXISTS (SELECT 1 FROM grade WHERE submission_id = $1)
+const shareAssignmentForGrading = `-- name: ShareAssignmentForGrading :one
+
+SELECT id, course_id, component_id, title, instructions_document_id, rubric_document_id,
+       points_possible, due_at, published_at
+FROM assignment
+WHERE id = $1 AND course_id = $2
+FOR SHARE
 `
 
+type ShareAssignmentForGradingParams struct {
+	ID       uuid.UUID
+	CourseID uuid.UUID
+}
+
+type ShareAssignmentForGradingRow struct {
+	ID                     uuid.UUID
+	CourseID               uuid.UUID
+	ComponentID            *uuid.UUID
+	Title                  string
+	InstructionsDocumentID *uuid.UUID
+	RubricDocumentID       *uuid.UUID
+	PointsPossible         decimal.Decimal
+	DueAt                  *time.Time
+	PublishedAt            *time.Time
+}
+
+// Serialising what races -------------------------------------------------------
+// The assignment a submission's grade is out of, read again and held still
+// until the grade is in. FOR SHARE waits for an assignment.update under way,
+// and holds the next one off until the grade is there for its check to find.
+// Graders of the same assignment do not wait for one another.
+func (q *Queries) ShareAssignmentForGrading(ctx context.Context, arg ShareAssignmentForGradingParams) (ShareAssignmentForGradingRow, error) {
+	row := q.db.QueryRow(ctx, shareAssignmentForGrading, arg.ID, arg.CourseID)
+	var i ShareAssignmentForGradingRow
+	err := row.Scan(
+		&i.ID,
+		&i.CourseID,
+		&i.ComponentID,
+		&i.Title,
+		&i.InstructionsDocumentID,
+		&i.RubricDocumentID,
+		&i.PointsPossible,
+		&i.DueAt,
+		&i.PublishedAt,
+	)
+	return i, err
+}
+
+const submissionHasGrades = `-- name: SubmissionHasGrades :one
+SELECT EXISTS (
+    SELECT 1 FROM grade WHERE submission_id = $1
+    UNION ALL
+    SELECT 1 FROM action
+    WHERE target_type = 'submission' AND target_id = $1
+      AND action_type = 'grade.submit' AND status = 'proposed'
+)
+`
+
+// A grade entered, or proposed and not yet decided: either way, one is on its
+// way for exactly this work.
 func (q *Queries) SubmissionHasGrades(ctx context.Context, submissionID *uuid.UUID) (bool, error) {
 	row := q.db.QueryRow(ctx, submissionHasGrades, submissionID)
 	var exists bool

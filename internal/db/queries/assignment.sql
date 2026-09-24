@@ -3,6 +3,22 @@ INSERT INTO assignment (id, course_id, component_id, title, instructions_documen
                         points_possible, due_at, created_at)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9);
 
+-- name: GetAssignmentInCourseForUpdate :one
+-- GetAssignmentInCourse, locked for the rest of the transaction:
+-- assignment.update and assignment.publish read the row, check it and write
+-- it back, and two of them at once must take turns. NO KEY UPDATE is the lock
+-- the UPDATE takes anyway, taken before the read instead of after it; it does
+-- not hold up a submission being created for the assignment. It is taken
+-- first: assignment.update holds it and then waits for the component-tree
+-- lock, and nothing takes those two the other way round. Graders of the
+-- assignment lock the row FOR SHARE (ShareAssignmentForGrading), so they queue
+-- behind an update, including while the update waits for the tree lock.
+SELECT id, course_id, component_id, title, instructions_document_id, rubric_document_id,
+       points_possible, due_at, published_at
+FROM assignment
+WHERE id = $1 AND course_id = $2
+FOR NO KEY UPDATE;
+
 -- name: UpdateAssignment :exec
 UPDATE assignment
 SET component_id = $2, title = $3, instructions_document_id = $4, rubric_document_id = $5,

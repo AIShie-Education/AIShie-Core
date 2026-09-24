@@ -1,12 +1,16 @@
 package tools_test
 
 import (
+	"context"
+	"hash/fnv"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/shopspring/decimal"
 
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/apperr"
@@ -30,6 +34,51 @@ func (b *built) try(t *testing.T, actor uuid.UUID, name string, args m, want app
 		t.Fatalf("%s went through (%s), want %s", name, out.Status, want)
 	case out.Error == nil || out.Error.Code != want:
 		t.Fatalf("%s: %+v, want %s", name, out.Error, want)
+	}
+}
+
+// start makes a call in the background; its outcome arrives on done.
+func (b *built) start(t *testing.T, done chan<- pipeline.Outcome, actor uuid.UUID, name string, args m) {
+	go func() {
+		out, err := b.Call(actor, name, args, "bg-"+uuid.NewString())
+		if err != nil {
+			t.Errorf("%s: %v", name, err)
+		}
+		done <- out
+	}()
+}
+
+// hold locks rows the way a change already under way would, until release
+// is called; calls made meanwhile queue behind it.
+func (b *built) hold(t *testing.T, sql string, args ...any) (release func()) {
+	t.Helper()
+	ctx := context.Background()
+	tx, err := b.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = tx.Rollback(ctx) })
+	if _, err := tx.Exec(ctx, sql, args...); err != nil {
+		t.Fatal(err)
+	}
+	return func() {
+		if err := tx.Commit(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// blocked waits until n calls are waiting for a lock in this test's
+// database. It stops early once done holds an outcome: a call that should
+// have waited finished instead, and what came of it is for the test to say.
+func (b *built) blocked(t *testing.T, n int, done chan pipeline.Outcome) {
+	t.Helper()
+	for deadline := time.Now().Add(10 * time.Second); len(done) == 0 && b.Count(`SELECT count(*) FROM pg_locks l
+		JOIN pg_stat_activity a ON a.pid = l.pid WHERE NOT l.granted AND a.datname = current_database()`) < n; {
+		if time.Now().After(deadline) {
+			t.Fatalf("%d calls never came to wait for a lock", n)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
@@ -85,6 +134,308 @@ func TestMemberManagementCannotEscalate(t *testing.T) {
 	// Typos are refused, not ignored.
 	b.try(t, b.sato, "member.update_perms", m{"course_id": b.course, "member_id": seated, "perms": m{"grade_sumbit": "denied"}}, apperr.InvalidArgument)
 	b.try(t, b.sato, "member.update_perms", m{"course_id": b.course, "member_id": seated, "perms": m{"grade_submit": "sometimes"}}, apperr.InvalidArgument)
+}
+
+// A student's seat reaches that student, so a level on it is a level over
+// that student's work: raising one, resuming the seat or seating a new
+// student is held to the granter's own list like any other grant. Otherwise
+// a manager listed for Yuki could give Ken grade_post over Ken, and Ken
+// would post his own grade.
+func TestAStudentsSeatReachesTheStudent(t *testing.T) {
+	b := build(t)
+	register := func(name string) uuid.UUID {
+		return testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", m{"kind": "human", "display_name": name})).ActorID
+	}
+	helper := register("Helper")
+	b.do(t, b.sato, "member.add", m{"course_id": b.course, "actor_id": helper, "preset": "ta",
+		"perms":         m{"member_manage": "autonomous", "grade_post": "autonomous", "submission_write": "autonomous"},
+		"student_scope": "listed", "listed_students": []uuid.UUID{b.yukiM}})
+
+	// Ken is not on the helper's list: nothing that widens his seat.
+	b.try(t, helper, "member.update_perms", m{"course_id": b.course, "member_id": b.kenM,
+		"perms": m{"grade_submit": "autonomous", "grade_post": "autonomous"}}, apperr.Forbidden)
+	b.do(t, b.sato, "member.pause", m{"course_id": b.course, "member_id": b.kenM})
+	b.try(t, helper, "member.resume", m{"course_id": b.course, "member_id": b.kenM}, apperr.Forbidden)
+	b.do(t, b.sato, "member.resume", m{"course_id": b.course, "member_id": b.kenM})
+	// Nor a new student, whom no list can have named yet.
+	b.try(t, helper, "member.add", m{"course_id": b.course, "actor_id": register("Newbie"), "preset": "student"}, apperr.Forbidden)
+
+	// Narrowing Ken is allowed, as always; taking it back is a grant again.
+	b.do(t, helper, "member.update_perms", m{"course_id": b.course, "member_id": b.kenM, "perms": m{"grade_read": "denied"}})
+	b.try(t, helper, "member.update_perms", m{"course_id": b.course, "member_id": b.kenM, "perms": m{"grade_read": "autonomous"}}, apperr.Forbidden)
+	// Nor in three steps: take Ken off his own list, which reaches nobody, raise
+	// grade_post while it does, and put him back on it.
+	b.do(t, helper, "member.rescope", m{"course_id": b.course, "member_id": b.kenM, "listed_students": []uuid.UUID{}})
+	b.do(t, helper, "member.update_perms", m{"course_id": b.course, "member_id": b.kenM, "perms": m{"grade_post": "autonomous"}})
+	b.try(t, helper, "member.rescope", m{"course_id": b.course, "member_id": b.kenM, "listed_students": []uuid.UUID{b.kenM}}, apperr.Forbidden)
+	b.do(t, b.sato, "member.update_perms", m{"course_id": b.course, "member_id": b.kenM, "perms": m{"grade_post": "denied"}})
+	b.do(t, b.sato, "member.rescope", m{"course_id": b.course, "member_id": b.kenM, "listed_students": []uuid.UUID{b.kenM}})
+	// Only a student's seat lists itself; any other would reach nobody.
+	b.try(t, b.sato, "member.rescope", m{"course_id": b.course, "member_id": b.graderM, "student_scope": "listed",
+		"listed_students": []uuid.UUID{b.graderM}}, apperr.FailedPrecondition)
+	// Yuki is on the list, and her seat may be raised within the helper's own.
+	b.do(t, helper, "member.update_perms", m{"course_id": b.course, "member_id": b.yukiM, "perms": m{"rubric_read": "autonomous"}})
+}
+
+// A decimal given as a string is bounded like a number, and more tightly: as
+// a string "1e2000000000" is twelve bytes that the first comparison made with
+// it would expand into two billion digits, on the lowest level that can grade
+// at all.
+func TestADecimalStringIsBounded(t *testing.T) {
+	b := build(t)
+	work := uuid.New() // refused before anything is looked up
+	for _, args := range []m{
+		{"score": "1e2000000000"},
+		{"score": "1", "breakdown": []m{{"criterion": "Thesis", "points": "1e-2000000000", "max": "10"}}},
+	} {
+		args["course_id"], args["submission_id"] = b.course, work
+		b.try(t, b.grader, "grade.submit", args, apperr.InvalidArgument)
+	}
+	b.try(t, b.sato, "component.create", m{"course_id": b.course, "parent_id": b.total, "name": "Quiz", "weight": "9e999999"}, apperr.InvalidArgument)
+}
+
+// A zero for handing in nothing is a grade of that nothing. Late work takes a
+// 'missing' placeholder over, keeping its id, only while no grade is entered
+// or proposed for it; a grade proposed before that stays on the placeholder,
+// and one waiting on the lock while it happens is refused. Nothing in it
+// depends on a clock.
+func TestAGradeForNothingDoesNotLandOnLateWork(t *testing.T) {
+	b := build(t)
+	missing := func(student uuid.UUID) uuid.UUID {
+		id := uuid.New()
+		b.Exec(`INSERT INTO submission (id, assignment_id, course_id, student_member_id, state) VALUES ($1, $2, $3, $4, 'missing')`,
+			id, b.hw3, b.course, student)
+		return id
+	}
+	nothing := func(work uuid.UUID) m {
+		return m{"course_id": b.course, "submission_id": work, "score": 0, "feedback": "Nothing handed in."}
+	}
+
+	// Proposed for the placeholder; the late work comes in before approval.
+	yuki := missing(b.yukiM)
+	prop := b.MustCall(b.grader, "grade.submit", nothing(yuki), "zero-for-nothing")
+	if prop.Status != domain.StatusProposed {
+		t.Fatalf("proposal: %+v", prop)
+	}
+	late := testkit.Result[tools.SubmissionCreateOut](t, b.do(t, b.yuki, "submission.create",
+		m{"course_id": b.course, "assignment_id": b.hw3, "body": "my late essay"}))
+	if late.SubmissionID == yuki || late.Attempt != 2 {
+		t.Fatalf("the late work took over a placeholder with a grade proposed for it: %+v", late)
+	}
+	b.do(t, b.yuki, "submission.submit", m{"course_id": b.course, "submission_id": late.SubmissionID})
+	b.do(t, b.sato, "action.decide", m{"course_id": b.course, "action_id": prop.ActionID, "decision": "approve"})
+	if n := b.Count(`SELECT count(*) FROM grade g JOIN submission s ON s.id = g.submission_id
+		WHERE g.created_by_action_id = $1 AND s.id = $2 AND s.state = 'missing'`, prop.ActionID, yuki); n != 1 {
+		t.Fatal("the zero proposed for nothing is not on the nothing")
+	}
+	if n := b.Count(`SELECT count(*) FROM grade WHERE submission_id = $1`, late.SubmissionID); n != 0 {
+		t.Fatal("the zero proposed for nothing landed on the late work")
+	}
+
+	// The proposal says what it was given for, so a placeholder taken over
+	// all the same — by an instance still on code that did not look for
+	// proposals — is refused at approval rather than graded.
+	enrol := func(name string) (actor, member uuid.UUID) {
+		actor = testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", m{"kind": "human", "display_name": name})).ActorID
+		member = testkit.Result[tools.MemberIDOut](t, b.do(t, b.sato, "member.add", m{"course_id": b.course, "actor_id": actor, "preset": "student"})).MemberID
+		return actor, member
+	}
+	mia, miaM := enrol("Mia")
+	old := missing(miaM)
+	prop = b.MustCall(b.grader, "grade.submit", nothing(old), "zero-then-old-takeover")
+	if n := b.Count(`SELECT count(*) FROM action WHERE id = $1 AND payload->>'for_missing' = 'true'`, prop.ActionID); n != 1 {
+		t.Fatal("the proposal does not say it was given for nothing")
+	}
+	b.Exec(`UPDATE submission SET state = 'draft', body = 'my late essay' WHERE id = $1 AND state = 'missing'`, old)
+	b.do(t, mia, "submission.submit", m{"course_id": b.course, "submission_id": old})
+	b.do(t, b.sato, "action.decide", m{"course_id": b.course, "action_id": prop.ActionID, "decision": "approve"})
+	if n := b.Count(`SELECT count(*) FROM grade WHERE submission_id = $1`, old); n != 0 {
+		t.Fatal("the zero proposed for nothing landed on late work that took the placeholder over")
+	}
+
+	// A direct call that waits on the placeholder's lock while it is taken
+	// over — reopened for late work, or reopened and handed in already.
+	ctx := t.Context()
+	waitWhile := func(name, change string, work uuid.UUID) pipeline.Outcome {
+		t.Helper()
+		tx, err := b.Pool.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer tx.Rollback(ctx)
+		if _, err := tx.Exec(ctx, change, work); err != nil {
+			t.Fatal(err)
+		}
+		done := make(chan pipeline.Outcome, 1)
+		go func() {
+			out, _ := b.Call(b.sato, "grade.submit", nothing(work), name)
+			done <- out
+		}()
+		// Until grade.submit has read the placeholder and waits for its lock.
+		for deadline := time.Now().Add(10 * time.Second); b.Count(`SELECT count(*) FROM pg_locks l
+			JOIN pg_stat_activity a ON a.pid = l.pid WHERE NOT l.granted AND a.datname = current_database()`) == 0; {
+			if len(done) > 0 || time.Now().After(deadline) {
+				t.Fatal("grade.submit never waited for the placeholder's lock")
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			t.Fatal(err)
+		}
+		return <-done
+	}
+	ken := missing(b.kenM)
+	if out := waitWhile("zero-while-reopened", `UPDATE submission SET state = 'draft', body = 'draft' WHERE id = $1`, ken); out.Status == domain.StatusExecuted {
+		t.Fatalf("a zero for nothing was entered on a reopened draft: %+v", out)
+	}
+	// A caller may say what its grade is for, and is held to it, and told
+	// which way the work is not that; it means nothing for a component, and
+	// is refused there.
+	_, noorM := enrol("Noor")
+	for _, held := range []struct {
+		work       uuid.UUID
+		score      int
+		forMissing bool
+		says       string
+	}{
+		{late.SubmissionID, 0, true, "given for nothing handed in, and there is work here now"},
+		{missing(noorM), 50, false, "given for work handed in, and nothing was"},
+	} {
+		out, err := b.Call(b.sato, "grade.submit", m{"course_id": b.course, "submission_id": held.work, "score": held.score, "for_missing": held.forMissing}, "held-"+uuid.NewString())
+		if err != nil || out.Error == nil || out.Error.Code != apperr.FailedPrecondition || !strings.Contains(out.Error.Message, held.says) {
+			t.Fatalf("for_missing %v: %+v %v, want %s saying %q", held.forMissing, out.Error, err, apperr.FailedPrecondition, held.says)
+		}
+	}
+	b.try(t, b.sato, "grade.submit", m{"course_id": b.course, "component_id": b.midterm, "student_member_id": b.kenM, "score": 50, "for_missing": false}, apperr.InvalidArgument)
+
+	_, leoM := enrol("Leo")
+	leo := missing(leoM)
+	if out := waitWhile("zero-while-handed-in", `UPDATE submission SET state = 'submitted', body = 'handed in', submitted_at = now() WHERE id = $1`, leo); out.Status == domain.StatusExecuted {
+		t.Fatalf("a zero for nothing was entered on work handed in while it waited: %+v", out)
+	}
+	if n := b.Count(`SELECT count(*) FROM grade WHERE submission_id = ANY($1)`, []uuid.UUID{ken, leo}); n != 0 {
+		t.Fatalf("%d grades on work that was not there when they were given", n)
+	}
+	// Work handed in on an instance whose clock runs ahead is graded like any
+	// other: nothing is ordered by comparing two instances' clocks.
+	b.P.SetClock(func() time.Time { return time.Now().Add(time.Minute) })
+	b.do(t, b.ken, "submission.submit", m{"course_id": b.course, "submission_id": ken})
+	b.P.SetClock(time.Now)
+	b.do(t, b.sato, "grade.submit", m{"course_id": b.course, "submission_id": ken, "score": 90})
+}
+
+// A write takes its caller's seat before anything else it locks, so locking a
+// piece of work in Validate cannot close a cycle with a removal (the seat,
+// then the proposals it cancels) and an approval (a proposal, then the work).
+// The grader's grade.submit is held after Validate by a stand-in for any
+// delay there: an uncommitted row with its idempotency key.
+func TestAWriteTakesItsSeatFirst(t *testing.T) {
+	b := build(t)
+	ctx := t.Context()
+	work := b.submit(t, b.yuki, "essay")
+	lateness := b.MustCall(b.grader, "submission.set_lateness", m{"course_id": b.course, "submission_id": work, "state": "late"}, "p-late")
+	if lateness.Status != domain.StatusProposed {
+		t.Fatalf("lateness proposal: %+v", lateness)
+	}
+	conn, err := pgx.Connect(ctx, b.Pool.Config().ConnConfig.ConnString())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(ctx)
+	gate, err := conn.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer gate.Rollback(ctx)
+	if _, err := gate.Exec(ctx, `INSERT INTO action (actor_id, action_type, target_type, payload_hash, idempotency_key, authz_result, status)
+		VALUES ($1, 'gate', 'gate', repeat('0', 64), 'p-grade', 'denied', 'denied')`, b.grader); err != nil {
+		t.Fatal(err)
+	}
+	waiting := func(n int) {
+		t.Helper()
+		for deadline := time.Now().Add(10 * time.Second); b.Count(`SELECT count(*) FROM pg_locks l
+			JOIN pg_stat_activity a ON a.pid = l.pid WHERE NOT l.granted AND a.datname = current_database()`) < n; {
+			if time.Now().After(deadline) {
+				t.Fatalf("fewer than %d calls ever waited", n)
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	type result struct {
+		out pipeline.Outcome
+		err error
+	}
+	done := make(chan result, 3)
+	call := func(actor uuid.UUID, name string, args m, key string) {
+		go func() {
+			out, err := b.Call(actor, name, args, key)
+			done <- result{out, err}
+		}()
+	}
+	call(b.grader, "grade.submit", m{"course_id": b.course, "submission_id": work, "score": 80}, "p-grade")
+	waiting(1)
+	call(b.sato, "action.decide", m{"course_id": b.course, "action_id": lateness.ActionID, "decision": "approve"}, "d-late")
+	waiting(2)
+	call(b.sato, "member.remove", m{"course_id": b.course, "member_id": b.graderM}, "rm-grader")
+	waiting(3)
+	if err := gate.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for range 3 {
+		select {
+		case r := <-done:
+			if r.err != nil || strings.Contains(string(r.out.Result), "collided") {
+				t.Fatalf("a call lost a deadlock: %v %s", r.err, r.out.Result)
+			}
+		case <-time.After(30 * time.Second):
+			t.Fatal("the calls never finished")
+		}
+	}
+	if n := b.Count(`SELECT count(*) FROM action WHERE id = $1 AND status = 'executed'`, lateness.ActionID); n != 1 {
+		t.Fatal("the approved lateness correction was not carried out")
+	}
+}
+
+// A call made while its caller's seat is being removed waits for the removal
+// and is then refused, rather than leaving behind a proposal that the
+// removal, which could not see it yet, never cancelled.
+func TestACallDuringItsCallersRemovalWaitsForIt(t *testing.T) {
+	b := build(t)
+	ctx := t.Context()
+	work := b.submit(t, b.yuki, "essay")
+	removal, err := b.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer removal.Rollback(ctx)
+	// What member.remove does to the seat, up to its commit.
+	if _, err := removal.Exec(ctx, `SELECT 1 FROM course_member WHERE id = $1 FOR UPDATE`, b.graderM); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := removal.Exec(ctx, `UPDATE course_member SET status = 'removed' WHERE id = $1`, b.graderM); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan pipeline.Outcome, 1)
+	go func() {
+		out, _ := b.Call(b.grader, "grade.submit", m{"course_id": b.course, "submission_id": work, "score": 70}, "during-removal")
+		done <- out
+	}()
+	for deadline := time.Now().Add(10 * time.Second); b.Count(`SELECT count(*) FROM pg_locks l
+		JOIN pg_stat_activity a ON a.pid = l.pid WHERE NOT l.granted AND a.datname = current_database()`) == 0; {
+		if len(done) > 0 || time.Now().After(deadline) {
+			t.Fatal("the call never waited for its caller's seat")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if err := removal.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if out := <-done; out.Status != domain.StatusDenied {
+		t.Fatalf("a call made during its caller's removal: %+v", out)
+	}
+	if n := b.Count(`SELECT count(*) FROM action WHERE member_id = $1 AND status = 'proposed'`, b.graderM); n != 0 {
+		t.Fatalf("%d proposals outlived the seat they were made from", n)
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -406,6 +757,157 @@ func TestSubmissionLifecycle(t *testing.T) {
 	}
 }
 
+// A hand-in that waits for approval counts from when it was asked for. Yuki
+// asked before the due date, under the instructions then published; the
+// approver's delay does not make her late, nor pin instructions published
+// afterwards. And what is handed in is what was asked for: Ken, who also
+// asked in time, cannot go on rewriting his draft after the due date and
+// have that handed in as of before it.
+func TestAProposedHandInCountsFromWhenItWasAsked(t *testing.T) {
+	b := build(t)
+	base := time.Now()
+	later := func(d time.Duration) { b.P.SetClock(func() time.Time { return base.Add(d) }) }
+	brief := testkit.Result[tools.DocumentCreateOut](t, b.do(t, b.sato, "document.create",
+		m{"course_id": b.course, "kind": "instructions", "title": "HW3", "body_md": "v1: 1000 words"}))
+	b.do(t, b.sato, "document.publish", m{"course_id": b.course, "document_id": brief.DocumentID})
+	b.do(t, b.sato, "assignment.update", m{"course_id": b.course, "assignment_id": b.hw3,
+		"instructions_document_id": brief.DocumentID, "due_at": base.Add(time.Hour)})
+	// Each writes a draft, and then may only ask for it to be handed in.
+	handIn := func(student, member uuid.UUID) (uuid.UUID, *uuid.UUID) {
+		t.Helper()
+		work := testkit.Result[tools.SubmissionCreateOut](t, b.do(t, student, "submission.create",
+			m{"course_id": b.course, "assignment_id": b.hw3, "body": "my essay"})).SubmissionID
+		b.do(t, b.sato, "member.update_perms", m{"course_id": b.course, "member_id": member, "perms": m{"submission_write": "confirm_required"}})
+		out := b.MustCall(student, "submission.submit", m{"course_id": b.course, "submission_id": work}, "hand-in-"+work.String())
+		if out.Status != domain.StatusProposed {
+			t.Fatalf("%+v", out)
+		}
+		return work, out.ActionID
+	}
+	approve := func(action *uuid.UUID) pipeline.DecideOut {
+		t.Helper()
+		return testkit.Result[pipeline.DecideOut](t, b.do(t, b.sato, "action.decide", m{"course_id": b.course, "action_id": action, "decision": "approve"}))
+	}
+	yukis, yukisAsk := handIn(b.yuki, b.yukiM)
+	kens, kensAsk := handIn(b.ken, b.kenM)
+
+	later(2 * time.Hour)
+	b.do(t, b.sato, "document.add_version", m{"course_id": b.course, "document_id": brief.DocumentID, "body_md": "v2: 3000 words", "publish": true})
+	later(3 * time.Hour)
+	if v := approve(yukisAsk); v.Outcome != domain.StatusExecuted {
+		t.Fatalf("%+v", v)
+	}
+	if n := b.Count(`SELECT count(*) FROM submission s JOIN action a ON a.id = $2
+		WHERE s.id = $1 AND s.state = 'submitted' AND s.submitted_at = a.created_at AND s.instructions_version_id = $3`,
+		yukis, *yukisAsk, *brief.VersionID); n != 1 {
+		t.Fatal("the hand-in was judged, dated or pinned as of its approval, not as of when it was asked for")
+	}
+
+	b.do(t, b.sato, "submission.update_draft", m{"course_id": b.course, "submission_id": kens, "body": "rewritten after the due date"})
+	if v := approve(kensAsk); v.Outcome != domain.StatusFailed || v.Error == nil || v.Error.Code != apperr.FailedPrecondition {
+		t.Fatalf("approving a hand-in of a draft that has changed since: %+v", v)
+	}
+	if n := b.Count(`SELECT count(*) FROM submission WHERE id = $1 AND state = 'draft'`, kens); n != 1 {
+		t.Fatal("a draft changed after it was asked to be handed in was handed in")
+	}
+	// A direct call may say what it hands in, and is held to it.
+	b.try(t, b.sato, "submission.submit", m{"course_id": b.course, "submission_id": kens, "body": "my essay"}, apperr.FailedPrecondition)
+	b.try(t, b.sato, "submission.submit", m{"course_id": b.course, "submission_id": kens, "instructions_version_id": brief.VersionID}, apperr.FailedPrecondition)
+	if got := testkit.Result[tools.SubmissionSubmitOut](t, b.do(t, b.sato, "submission.submit",
+		m{"course_id": b.course, "submission_id": kens, "body": "rewritten after the due date", "files": []uuid.UUID{}})); got.State != "late" {
+		t.Fatalf("handed in now, after the due date: %+v", got)
+	}
+}
+
+// The instances of a server do not share a clock. Yuki asks to hand in on
+// one whose clock runs a few minutes ahead, and Sato approves on one whose
+// clock is behind, so that by the approver's clock she has not asked yet.
+// It is still an approval, not a direct call: it is dated when she asked and
+// handed in under the instructions she was reading, not held to those Sato
+// published in between.
+func TestAHandInApprovedOnASlowerClockIsStillAnApproval(t *testing.T) {
+	b := build(t)
+	base := time.Now()
+	clock := func(d time.Duration) { b.P.SetClock(func() time.Time { return base.Add(d) }) }
+	brief := testkit.Result[tools.DocumentCreateOut](t, b.do(t, b.sato, "document.create",
+		m{"course_id": b.course, "kind": "instructions", "title": "HW3", "body_md": "v1: 1000 words"}))
+	b.do(t, b.sato, "document.publish", m{"course_id": b.course, "document_id": brief.DocumentID})
+	b.do(t, b.sato, "assignment.update", m{"course_id": b.course, "assignment_id": b.hw3, "instructions_document_id": brief.DocumentID})
+	work := testkit.Result[tools.SubmissionCreateOut](t, b.do(t, b.yuki, "submission.create",
+		m{"course_id": b.course, "assignment_id": b.hw3, "body": "my essay"})).SubmissionID
+	b.do(t, b.sato, "member.update_perms", m{"course_id": b.course, "member_id": b.yukiM, "perms": m{"submission_write": "confirm_required"}})
+
+	clock(3 * time.Minute)
+	asked := b.MustCall(b.yuki, "submission.submit", m{"course_id": b.course, "submission_id": work}, "hand-in")
+	if asked.Status != domain.StatusProposed {
+		t.Fatalf("%+v", asked)
+	}
+	clock(time.Minute)
+	b.do(t, b.sato, "document.add_version", m{"course_id": b.course, "document_id": brief.DocumentID, "body_md": "v2: 3000 words", "publish": true})
+	v := testkit.Result[pipeline.DecideOut](t, b.do(t, b.sato, "action.decide", m{"course_id": b.course, "action_id": asked.ActionID, "decision": "approve"}))
+	if v.Outcome != domain.StatusExecuted {
+		t.Fatalf("approving on a clock behind the proposer's: %+v", v)
+	}
+	if n := b.Count(`SELECT count(*) FROM submission s JOIN action a ON a.id = $2
+		WHERE s.id = $1 AND s.submitted_at = a.created_at AND s.instructions_version_id = $3`,
+		work, *asked.ActionID, *brief.VersionID); n != 1 {
+		t.Fatal("the hand-in was carried out as a direct call at the approval, not as of when it was asked for")
+	}
+}
+
+// A hand-in that waits for approval is of the draft as it was when asked
+// for. Yuki, who may only propose, asks for an edit to her draft and then for
+// it to be handed in, and Sato approves them in the order they came. The edit
+// goes through; the hand-in is then refused, plainly, since the draft is no
+// longer what was asked to be handed in, and nothing is handed in. Asked for
+// again once the edit has been decided, it hands in the edited draft.
+func TestAHandInQueuedBehindAnEditIsOfTheDraftBeforeIt(t *testing.T) {
+	b := build(t)
+	work := testkit.Result[tools.SubmissionCreateOut](t, b.do(t, b.yuki, "submission.create",
+		m{"course_id": b.course, "assignment_id": b.hw3, "body": "draft v1"})).SubmissionID
+	b.do(t, b.sato, "member.update_perms", m{"course_id": b.course, "member_id": b.yukiM, "perms": m{"submission_write": "confirm_required"}})
+	ask := func(name string, args m, key string) *uuid.UUID {
+		t.Helper()
+		out := b.MustCall(b.yuki, name, args, key)
+		if out.Status != domain.StatusProposed {
+			t.Fatalf("%s: %+v", name, out)
+		}
+		return out.ActionID
+	}
+	approve := func(action *uuid.UUID) pipeline.DecideOut {
+		t.Helper()
+		return testkit.Result[pipeline.DecideOut](t, b.do(t, b.sato, "action.decide", m{"course_id": b.course, "action_id": action, "decision": "approve"}))
+	}
+	stored := func() (state, body string) {
+		t.Helper()
+		if err := b.Pool.QueryRow(t.Context(), `SELECT state, coalesce(body, '') FROM submission WHERE id = $1`, work).Scan(&state, &body); err != nil {
+			t.Fatal(err)
+		}
+		return state, body
+	}
+	handIn := m{"course_id": b.course, "submission_id": work}
+
+	edit := ask("submission.update_draft", m{"course_id": b.course, "submission_id": work, "body": "final"}, "edit")
+	asked := ask("submission.submit", handIn, "hand-in")
+	if v := approve(edit); v.Outcome != domain.StatusExecuted {
+		t.Fatalf("approving the edit: %+v", v)
+	}
+	if v := approve(asked); v.Outcome != domain.StatusFailed || v.Error == nil || v.Error.Code != apperr.FailedPrecondition ||
+		!strings.Contains(v.Error.Message, "the draft does not hold what this call says it hands in") {
+		t.Fatalf("approving the hand-in asked for before the edit: %+v", v)
+	}
+	if state, body := stored(); state != "draft" || body != "final" {
+		t.Fatalf("after the refused hand-in the submission is %s with %q, want the edited draft", state, body)
+	}
+
+	if v := approve(ask("submission.submit", handIn, "hand-in-again")); v.Outcome != domain.StatusExecuted {
+		t.Fatalf("approving the hand-in asked for after the edit: %+v", v)
+	}
+	if state, body := stored(); state != "submitted" || body != "final" {
+		t.Fatalf("the submission is %s with %q, want the edited draft handed in", state, body)
+	}
+}
+
 func TestAStudentWithAnEmptiedScopeReachesNobody(t *testing.T) {
 	b := build(t)
 	b.Exec(`DELETE FROM member_student_scope WHERE member_id = $1`, b.yukiM)
@@ -507,6 +1009,64 @@ func TestAPublishedAssignmentKeepsReadableInstructions(t *testing.T) {
 		m{"course_id": b.course, "kind": "instructions", "title": "HW4", "body_md": "tbd"})).DocumentID
 	hw4 := testkit.Result[tools.IDOut](t, b.do(t, b.sato, "assignment.create", m{"course_id": b.course, "title": "HW4", "points_possible": 10})).ID
 	b.do(t, b.sato, "assignment.update", m{"course_id": b.course, "assignment_id": hw4, "instructions_document_id": draftBrief})
+}
+
+// Changing an assignment reads it, checks it and writes all of it back. Two
+// changes at once take turns on its row, or the second would write back the
+// copy it read before the first committed: a rename and a new due date made
+// together would leave one of them undone, both reported done. Publishing
+// takes the same turn, so that it and a change of instructions cannot each
+// pass on what the other has not done yet.
+func TestChangesToAnAssignmentTakeTurns(t *testing.T) {
+	b := build(t)
+	const lockRow = `SELECT 1 FROM assignment WHERE id = $1 FOR UPDATE`
+	done := make(chan pipeline.Outcome, 2)
+
+	due := time.Now().Add(72 * time.Hour).Truncate(time.Second)
+	release := b.hold(t, lockRow, b.hw3)
+	for i, change := range []m{{"title": "HW3 (revised)"}, {"due_at": due}} {
+		change["course_id"], change["assignment_id"] = b.course, b.hw3
+		b.start(t, done, b.sato, "assignment.update", change)
+		b.blocked(t, i+1, done)
+	}
+	release()
+	for range 2 {
+		if out := <-done; out.Status != domain.StatusExecuted {
+			t.Fatalf("assignment.update: %+v", out)
+		}
+	}
+	if n := b.Count(`SELECT count(*) FROM assignment WHERE id = $1 AND title = 'HW3 (revised)' AND due_at = $2`, b.hw3, due); n != 1 {
+		t.Fatal("of two changes made at once, one was undone by the other")
+	}
+
+	// HW4 is published while its instructions are pointed at a brief
+	// nobody can read yet.
+	brief := testkit.Result[tools.DocumentCreateOut](t, b.do(t, b.sato, "document.create",
+		m{"course_id": b.course, "kind": "instructions", "title": "HW4", "body_md": "Write 1000 words."})).DocumentID
+	b.do(t, b.sato, "document.publish", m{"course_id": b.course, "document_id": brief})
+	rewrite := testkit.Result[tools.DocumentCreateOut](t, b.do(t, b.sato, "document.create",
+		m{"course_id": b.course, "kind": "instructions", "title": "HW4, rewritten", "body_md": "tbd"})).DocumentID
+	hw4 := testkit.Result[tools.IDOut](t, b.do(t, b.sato, "assignment.create",
+		m{"course_id": b.course, "title": "HW4", "points_possible": 10, "instructions_document_id": brief})).ID
+	release = b.hold(t, lockRow, hw4)
+	b.start(t, done, b.sato, "assignment.update", m{"course_id": b.course, "assignment_id": hw4, "instructions_document_id": rewrite})
+	b.blocked(t, 1, done)
+	b.start(t, done, b.sato, "assignment.publish", m{"course_id": b.course, "assignment_id": hw4})
+	b.blocked(t, 2, done)
+	release()
+	executed := 0
+	for range 2 {
+		if out := <-done; out.Status == domain.StatusExecuted {
+			executed++
+		}
+	}
+	if n := b.Count(`SELECT count(*) FROM assignment a JOIN document d ON d.id = a.instructions_document_id
+		WHERE a.id = $1 AND a.published_at IS NOT NULL AND d.published_version_id IS NULL`, hw4); n != 0 {
+		t.Fatal("the assignment was published with instructions students cannot read")
+	}
+	if executed != 1 {
+		t.Fatalf("%d of the two went through; whichever came second should have been refused", executed)
+	}
 }
 
 // "An archived course refuses every write" includes the writes that touch no
@@ -700,4 +1260,344 @@ func TestAKeptListIsNotReValidated(t *testing.T) {
 	b.do(t, b.sato, "member.rescope", m{"course_id": b.course, "member_id": b.tutorM, "assignment_scope": "listed", "listed_assignments": []uuid.UUID{b.hw3}})
 	// Sending the list does check it.
 	b.try(t, b.sato, "member.rescope", m{"course_id": b.course, "member_id": b.tutorM, "listed_students": []uuid.UUID{b.yukiM}}, apperr.FailedPrecondition)
+}
+
+// ---------------------------------------------------------------------------
+// Lock order: calls held at a chosen point, and what may happen meanwhile
+// ---------------------------------------------------------------------------
+
+type callResult struct {
+	out pipeline.Outcome
+	err error
+}
+
+// inFlight starts a call and returns where its result will arrive.
+func (b *built) inFlight(actor uuid.UUID, name string, args m, key string) <-chan callResult {
+	done := make(chan callResult, 1)
+	go func() {
+		out, err := b.Call(actor, name, args, key)
+		done <- callResult{out, err}
+	}()
+	return done
+}
+
+// heldBy runs sql in a transaction on a connection of its own, which keeps
+// its locks until release is called.
+func heldBy(t *testing.T, b *built, sql string, args ...any) (release func()) {
+	t.Helper()
+	ctx := t.Context()
+	conn, err := pgx.Connect(ctx, b.Pool.Config().ConnConfig.ConnString())
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx, err := conn.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(ctx, sql, args...); err != nil {
+		t.Fatal(err)
+	}
+	var once sync.Once
+	release = func() { once.Do(func() { _ = tx.Commit(ctx); _ = conn.Close(ctx) }) }
+	t.Cleanup(release)
+	return release
+}
+
+// waitingFor waits until n lock waits are held up in the test's database; a
+// call in back that has already returned means it did not wait.
+func (b *built) waitingFor(t *testing.T, n int, back ...<-chan callResult) {
+	t.Helper()
+	for deadline := time.Now().Add(10 * time.Second); b.Count(`SELECT count(*) FROM pg_locks l
+		JOIN pg_stat_activity a ON a.pid = l.pid WHERE NOT l.granted AND a.datname = current_database()`) < n; {
+		for _, c := range back {
+			if len(c) > 0 {
+				r := <-c
+				t.Fatalf("a call came back instead of waiting: %v %+v", r.err, r.out)
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("fewer than %d calls ever waited", n)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// settled fails if the call lost a deadlock, and returns what it came back with.
+func settled(t *testing.T, c <-chan callResult) pipeline.Outcome {
+	t.Helper()
+	select {
+	case r := <-c:
+		if r.err != nil || strings.Contains(string(r.out.Result), "collided") || (r.out.Error != nil && strings.Contains(r.out.Error.Message, "collided")) {
+			t.Fatalf("a call lost a deadlock: %v %+v", r.err, r.out)
+		}
+		return r.out
+	case <-time.After(30 * time.Second):
+		t.Fatal("a call never came back")
+	}
+	return pipeline.Outcome{}
+}
+
+// A retry of a call still in flight waits for it holding nothing, then
+// replays it. Here the call is an approval of a change to the approver's own
+// seat, which locks that seat FOR UPDATE; a retry holding the seat shared
+// while it waited for the first call's key would deadlock with it.
+func TestARetryWaitsForItsCallHoldingNothing(t *testing.T) {
+	b := build(t)
+	helper := testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", m{"kind": "agent", "display_name": "Helper"})).ActorID
+	b.do(t, b.sato, "member.add", m{"course_id": b.course, "actor_id": helper, "preset": "ta", "perms": m{"member_manage": "confirm_required"}})
+	prop := b.MustCall(helper, "member.update_perms", m{"course_id": b.course, "member_id": b.satoM, "perms": m{"grade_post": "confirm_required"}}, "narrow-sato")
+	if prop.Status != domain.StatusProposed {
+		t.Fatalf("proposal: %+v", prop)
+	}
+	release := heldBy(t, b, `SELECT 1 FROM action WHERE id = $1 FOR UPDATE`, prop.ActionID)
+	approve := m{"course_id": b.course, "action_id": prop.ActionID, "decision": "approve"}
+	first := b.inFlight(b.sato, "action.decide", approve, "approve")
+	b.waitingFor(t, 1, first)
+	retry := b.inFlight(b.sato, "action.decide", approve, "approve")
+	b.waitingFor(t, 2, first, retry)
+	release()
+	if out := settled(t, first); out.Status != domain.StatusExecuted || out.Replayed {
+		t.Fatalf("the approval: %+v", out)
+	}
+	if out := settled(t, retry); !out.Replayed {
+		t.Fatalf("the retry was not a replay: %+v", out)
+	}
+}
+
+// Pausing a member waits for an approval of their proposal that is under way,
+// and an approval waits for a pause under way and sees it: the proposer's
+// seat is taken before the proposal, the order a change to the seat takes.
+func TestAnApprovalHoldsTheProposersSeat(t *testing.T) {
+	b := build(t)
+	work := b.submit(t, b.yuki, "essay")
+	prop := b.MustCall(b.grader, "grade.submit", m{"course_id": b.course, "submission_id": work, "score": 70}, "p")
+	if prop.Status != domain.StatusProposed {
+		t.Fatalf("proposal: %+v", prop)
+	}
+	// The approval is under way, re-checking the proposal, when the pause
+	// comes: it has read the proposer's seat and is waiting for the work.
+	release := heldBy(t, b, `SELECT 1 FROM submission WHERE id = $1 FOR UPDATE`, work)
+	approval := b.inFlight(b.sato, "action.decide", m{"course_id": b.course, "action_id": prop.ActionID, "decision": "approve"}, "approve")
+	b.waitingFor(t, 1, approval)
+	pause := b.inFlight(b.sato, "member.pause", m{"course_id": b.course, "member_id": b.graderM}, "pause")
+	b.waitingFor(t, 2, approval, pause)
+	release()
+	if out := settled(t, approval); !strings.Contains(string(out.Result), `"outcome":"executed"`) {
+		t.Fatalf("the approval: %+v", out)
+	}
+	if out := settled(t, pause); out.Status != domain.StatusExecuted {
+		t.Fatalf("the pause: %+v", out)
+	}
+}
+
+// Changing a student's seat and writing an event that names the student do
+// not deadlock: the event's writer takes the seat before the course's event
+// stream, so it never holds the stream while it waits for the seat.
+func TestAnEventNamingAStudentTakesTheSeatFirst(t *testing.T) {
+	b := build(t)
+	work := b.submit(t, b.yuki, "essay")
+	// The course's event stream is busy (see events.Flush for its key).
+	h := fnv.New32a()
+	_, _ = h.Write(b.course[:])
+	release := heldBy(t, b, `SELECT pg_advisory_xact_lock($1::int4, $2::int4)`, int32(0x41495345), int32(h.Sum32()))
+	lateness := b.inFlight(b.sato, "submission.set_lateness", m{"course_id": b.course, "submission_id": work, "state": "late"}, "late")
+	b.waitingFor(t, 1, lateness)
+	pause := b.inFlight(b.sato, "member.pause", m{"course_id": b.course, "member_id": b.yukiM}, "pause")
+	b.waitingFor(t, 2, lateness, pause)
+	release()
+	if out := settled(t, lateness); out.Status != domain.StatusExecuted {
+		t.Fatalf("the lateness correction: %+v", out)
+	}
+	if out := settled(t, pause); out.Status != domain.StatusExecuted {
+		t.Fatalf("the pause: %+v", out)
+	}
+}
+
+// Seating an actor over their expired seat removes that seat as any removal
+// does: after the member's calls in flight, cancelling what they proposed. A
+// seat the sweep removes meanwhile is simply out of the way; one whose expiry
+// is moved meanwhile is still in it.
+func TestReseatingOverAnExpiredSeatWaitsForItsCalls(t *testing.T) {
+	b := build(t)
+	work := b.submit(t, b.yuki, "essay")
+	b.do(t, b.sato, "member.rescope", m{"course_id": b.course, "member_id": b.graderM, "expires_at": time.Now().Add(time.Hour)})
+	release := heldBy(t, b, `SELECT 1 FROM submission WHERE id = $1 FOR UPDATE`, work)
+	proposing := b.inFlight(b.grader, "grade.submit", m{"course_id": b.course, "submission_id": work, "score": 70}, "p")
+	b.waitingFor(t, 1, proposing)
+	b.P.SetClock(func() time.Time { return time.Now().Add(2 * time.Hour) })
+	reseat := b.inFlight(b.sato, "member.add", m{"course_id": b.course, "actor_id": b.grader, "preset": "grader"}, "reseat")
+	b.waitingFor(t, 2, proposing, reseat)
+	release()
+	settled(t, proposing)
+	if out := settled(t, reseat); out.Status != domain.StatusExecuted {
+		t.Fatalf("re-seating: %+v", out)
+	}
+	if n := b.Count(`SELECT count(*) FROM action WHERE member_id = $1 AND status = 'proposed'`, b.graderM); n != 0 {
+		t.Fatalf("%d proposals outlived the expired seat they were made from", n)
+	}
+
+	// The sweep removes Ken's expired seat while he is being seated again.
+	b.P.SetClock(time.Now)
+	b.do(t, b.sato, "member.rescope", m{"course_id": b.course, "member_id": b.kenM, "expires_at": time.Now().Add(time.Hour)})
+	b.P.SetClock(func() time.Time { return time.Now().Add(2 * time.Hour) })
+	release = heldBy(t, b, `UPDATE course_member SET status = 'removed' WHERE id = $1`, b.kenM)
+	again := b.inFlight(b.sato, "member.add", m{"course_id": b.course, "actor_id": b.ken, "preset": "student"}, "ken-again")
+	b.waitingFor(t, 1, again)
+	release()
+	if out := settled(t, again); out.Status != domain.StatusExecuted {
+		t.Fatalf("seating Ken again as the sweep removed his seat: %+v", out)
+	}
+
+	// The tutor's expired seat is given longer while the tutor is being
+	// seated again.
+	b.P.SetClock(time.Now)
+	b.do(t, b.sato, "member.rescope", m{"course_id": b.course, "member_id": b.tutorM, "expires_at": time.Now().Add(time.Hour)})
+	b.P.SetClock(func() time.Time { return time.Now().Add(2 * time.Hour) })
+	release = heldBy(t, b, `UPDATE course_member SET expires_at = now() + interval '3 hours' WHERE id = $1`, b.tutorM)
+	extended := b.inFlight(b.sato, "member.add", m{"course_id": b.course, "actor_id": b.tutor, "preset": "tutor"}, "tutor-again")
+	b.waitingFor(t, 1, extended)
+	release()
+	if out := settled(t, extended); out.Error == nil || !strings.Contains(out.Error.Message, "already has a seat") {
+		t.Fatalf("seating the tutor again as their seat was given longer: %+v", out)
+	}
+}
+
+// Seating an actor who has a live seat is refused without locking that seat.
+// The lock would wait for its member's calls in flight, and deadlock with one
+// that is changing the caller's own seat, only to say no. Here Sato seats
+// Boss again, by mistake, while Boss pauses Sato.
+func TestSeatingSomeoneAlreadySeatedLeavesTheirSeatAlone(t *testing.T) {
+	b := build(t)
+	boss := testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", m{"kind": "human", "display_name": "Boss"})).ActorID
+	b.do(t, b.sato, "member.add", m{"course_id": b.course, "actor_id": boss, "preset": "instructor"})
+	// Both calls hold their callers' seats and are about to record themselves.
+	release := heldBy(t, b, `SELECT 1 FROM course WHERE id = $1 FOR UPDATE`, b.course)
+	add := b.inFlight(b.sato, "member.add", m{"course_id": b.course, "actor_id": boss, "preset": "ta"}, "add")
+	pause := b.inFlight(boss, "member.pause", m{"course_id": b.course, "member_id": b.satoM}, "pause")
+	b.waitingFor(t, 2, add, pause)
+	release()
+	if out := settled(t, add); out.Error == nil || !strings.Contains(out.Error.Message, "already has a seat") {
+		t.Fatalf("seating Boss again: %+v", out)
+	}
+	if out := settled(t, pause); out.Status != domain.StatusExecuted {
+		t.Fatalf("Boss pausing Sato: %+v", out)
+	}
+}
+
+// The same for the caller's own seat: two calls seating themselves at once,
+// by mistake, each hold that seat shared, and would deadlock upgrading it.
+func TestSeatingYourselfTwiceAtOnceIsRefusedTwice(t *testing.T) {
+	b := build(t)
+	release := heldBy(t, b, `SELECT 1 FROM course WHERE id = $1 FOR UPDATE`, b.course)
+	again := m{"course_id": b.course, "actor_id": b.sato, "preset": "ta"}
+	one := b.inFlight(b.sato, "member.add", again, "one")
+	two := b.inFlight(b.sato, "member.add", again, "two")
+	b.waitingFor(t, 2, one, two)
+	release()
+	for _, c := range []<-chan callResult{one, two} {
+		if out := settled(t, c); out.Error == nil || !strings.Contains(out.Error.Message, "already has a seat") {
+			t.Fatalf("Sato seating himself: %+v", out)
+		}
+	}
+}
+
+// An approval that loses a real deadlock while it carries its proposal out
+// leaves the proposal waiting, as one that loses it re-checking does: the
+// decision is recorded as failed, "try again", and deciding again works.
+// Here two helpers each propose pausing the other, and both proposals are
+// approved at once: each approval holds its proposer's seat and wants the
+// other's. Which one PostgreSQL stops is its choice; it stops one.
+func TestAnApprovalThatLosesADeadlockCarryingItOutLeavesTheProposalWaiting(t *testing.T) {
+	b := build(t)
+	register := func(name string) uuid.UUID {
+		return testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", m{"kind": "human", "display_name": name})).ActorID
+	}
+	boss, helperA, helperB := register("Boss"), register("HelperA"), register("HelperB")
+	b.do(t, b.sato, "member.add", m{"course_id": b.course, "actor_id": boss, "preset": "instructor"})
+	helper := func(actor uuid.UUID) uuid.UUID {
+		return testkit.Result[tools.MemberIDOut](t, b.do(t, b.sato, "member.add", m{"course_id": b.course, "actor_id": actor,
+			"preset": "ta", "perms": m{"member_manage": "confirm_required"}})).MemberID
+	}
+	helperAM, helperBM := helper(helperA), helper(helperB)
+
+	type approval struct {
+		by, proposerM uuid.UUID
+		prop          *uuid.UUID
+		back          <-chan callResult
+		out           pipeline.Outcome
+	}
+	propose := func(by, proposer, proposerM, target uuid.UUID, key string) *approval {
+		out := b.MustCall(proposer, "member.pause", m{"course_id": b.course, "member_id": target}, key)
+		if out.Status != domain.StatusProposed {
+			t.Fatalf("proposal: %+v", out)
+		}
+		return &approval{by: by, proposerM: proposerM, prop: out.ActionID}
+	}
+	approvals := []*approval{
+		propose(b.sato, helperA, helperAM, helperBM, "a-pauses-b"),
+		propose(boss, helperB, helperBM, helperAM, "b-pauses-a"),
+	}
+	decide := func(a *approval) m {
+		return m{"course_id": b.course, "action_id": a.prop, "decision": "approve"}
+	}
+	// Both approvals hold their proposers' seats and wait for their proposals.
+	release := heldBy(t, b, `SELECT 1 FROM action WHERE id = ANY($1) FOR UPDATE`, []uuid.UUID{*approvals[0].prop, *approvals[1].prop})
+	for i, a := range approvals {
+		a.back = b.inFlight(a.by, "action.decide", decide(a), "approve-"+strconv.Itoa(i))
+	}
+	b.waitingFor(t, 2, approvals[0].back, approvals[1].back)
+	release()
+
+	var lost *approval
+	for _, a := range approvals {
+		select {
+		case r := <-a.back:
+			if r.err != nil {
+				t.Fatalf("an approval: %v", r.err)
+			}
+			a.out = r.out
+		case <-time.After(30 * time.Second):
+			t.Fatal("an approval never came back")
+		}
+		if strings.Contains(string(a.out.Result), `"outcome":"executed"`) {
+			continue
+		}
+		if lost != nil {
+			t.Fatalf("neither approval went through: %+v, %+v", lost.out, a.out)
+		}
+		lost = a
+	}
+	if lost == nil {
+		t.Fatal("both approvals went through")
+	}
+	if lost.out.Status != domain.StatusFailed || lost.out.Error == nil || lost.out.Error.Code != apperr.Conflict {
+		t.Fatalf("the approval that lost: %+v", lost.out)
+	}
+	if n := b.Count(`SELECT count(*) FROM action WHERE id = $1 AND status = 'proposed'`, lost.prop); n != 1 {
+		t.Fatal("the proposal whose approval lost no longer waits")
+	}
+
+	// The other approval paused this proposer; resumed, their proposal can
+	// be approved again, and is carried out.
+	b.do(t, b.sato, "member.resume", m{"course_id": b.course, "member_id": lost.proposerM})
+	if out := b.MustCall(lost.by, "action.decide", decide(lost), "again"); !strings.Contains(string(out.Result), `"outcome":"executed"`) {
+		t.Fatalf("deciding again: %+v", out)
+	}
+}
+
+// A manager naming their own seat is refused before that seat is locked.
+// Two such calls at once each hold the seat shared, as every call holds its
+// caller's, and would deadlock upgrading it.
+func TestEditingYourOwnSeatTwiceAtOnceIsRefusedTwice(t *testing.T) {
+	b := build(t)
+	release := heldBy(t, b, `SELECT 1 FROM course WHERE id = $1 FOR UPDATE`, b.course)
+	pause := b.inFlight(b.sato, "member.pause", m{"course_id": b.course, "member_id": b.satoM}, "pause")
+	perms := b.inFlight(b.sato, "member.update_perms", m{"course_id": b.course, "member_id": b.satoM, "perms": m{"grade_post": "confirm_required"}}, "perms")
+	b.waitingFor(t, 2, pause, perms)
+	release()
+	for _, c := range []<-chan callResult{pause, perms} {
+		if out := settled(t, c); out.Error == nil || out.Error.Message != "not on your own membership" {
+			t.Fatalf("Sato changing his own seat: %+v", out)
+		}
+	}
 }

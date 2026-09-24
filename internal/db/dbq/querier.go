@@ -36,7 +36,6 @@ type Querier interface {
 	CountStudentsInScope(ctx context.Context, arg CountStudentsInScopeParams) (int64, error)
 	// How many of the given member ids are current students of this course.
 	CountStudentsOfCourse(ctx context.Context, arg CountStudentsOfCourseParams) (int64, error)
-	CountSubmissionDocuments(ctx context.Context, submissionID *uuid.UUID) (int64, error)
 	CourseCodeTaken(ctx context.Context, arg CourseCodeTakenParams) (bool, error)
 	// A session is a credential with a short life. Long after it has expired it
 	// says nothing the action log does not, so it is the one kind of row that is
@@ -64,6 +63,16 @@ type Querier interface {
 	// branch on either, and a test fails if this file ever names them.
 	GetActorForAuthz(ctx context.Context, id uuid.UUID) (GetActorForAuthzRow, error)
 	GetAssignmentInCourse(ctx context.Context, arg GetAssignmentInCourseParams) (GetAssignmentInCourseRow, error)
+	// GetAssignmentInCourse, locked for the rest of the transaction:
+	// assignment.update and assignment.publish read the row, check it and write
+	// it back, and two of them at once must take turns. NO KEY UPDATE is the lock
+	// the UPDATE takes anyway, taken before the read instead of after it; it does
+	// not hold up a submission being created for the assignment. It is taken
+	// first: assignment.update holds it and then waits for the component-tree
+	// lock, and nothing takes those two the other way round. Graders of the
+	// assignment lock the row FOR SHARE (ShareAssignmentForGrading), so they queue
+	// behind an update, including while the update waits for the tree lock.
+	GetAssignmentInCourseForUpdate(ctx context.Context, arg GetAssignmentInCourseForUpdateParams) (GetAssignmentInCourseForUpdateRow, error)
 	GetBuiltinPresetByName(ctx context.Context, name string) (PermissionPreset, error)
 	GetComponentInCourse(ctx context.Context, arg GetComponentInCourseParams) (GetComponentInCourseRow, error)
 	GetComponentParent(ctx context.Context, id uuid.UUID) (*uuid.UUID, error)
@@ -90,6 +99,9 @@ type Querier interface {
 	// The partial unique index allows at most one row per (course, actor) that is
 	// not removed. A paused row is returned so the caller can say why it denied.
 	GetLiveMemberForAuthz(ctx context.Context, arg GetLiveMemberForAuthzParams) (GetLiveMemberForAuthzRow, error)
+	// Not locked: a live seat found here is only refused, and locking it would
+	// wait for its member's calls in flight, and could deadlock with them, to say
+	// no. A seat past its expiry is locked by id before it is removed.
 	GetLiveMembership(ctx context.Context, arg GetLiveMembershipParams) (GetLiveMembershipRow, error)
 	// By id, removed rows included: re-authorizing a proposal checks the very
 	// membership it was made under, not whatever row the actor holds today.
@@ -107,6 +119,10 @@ type Querier interface {
 	// The account an identity provider's subject is linked to, if any.
 	GetSSOCredential(ctx context.Context, arg GetSSOCredentialParams) (GetSSOCredentialRow, error)
 	GetSubmissionFull(ctx context.Context, arg GetSubmissionFullParams) (Submission, error)
+	// GetSubmissionFull, locked until the hand-in is written, so that what
+	// submission.submit checks is what it hands in: an edit to the draft
+	// meanwhile waits, and then finds it handed in.
+	GetSubmissionFullForUpdate(ctx context.Context, arg GetSubmissionFullForUpdateParams) (Submission, error)
 	// Lookups are always "in this course": an id from another course is not found.
 	GetSubmissionInCourse(ctx context.Context, arg GetSubmissionInCourseParams) (GetSubmissionInCourseRow, error)
 	GetSystemActor(ctx context.Context) (uuid.UUID, error)
@@ -182,6 +198,16 @@ type Querier interface {
 	ListLiveComponentScores(ctx context.Context, studentMemberID uuid.UUID) ([]ListLiveComponentScoresRow, error)
 	ListMembers(ctx context.Context, arg ListMembersParams) ([]ListMembersRow, error)
 	ListMembershipsForActor(ctx context.Context, actorID uuid.UUID) ([]ListMembershipsForActorRow, error)
+	// Which of these uploads, each given with the course its key names, are
+	// this deployment's and attached to nothing? The course must be one this
+	// database has. document.upload_url issues keys only under courses that
+	// exist, and a course is never deleted, so a key under any other course was
+	// written by another deployment keeping its files in the same place: it is
+	// not ours to remove, however old it is and whatever points at it there.
+	// What is left comes back in the order it was given. The orphan sweep puts
+	// a page of listed files at a time to it, and asks again about each one it
+	// removes, under the lock attaching takes.
+	ListOrphanUploads(ctx context.Context, arg ListOrphanUploadsParams) ([]ListOrphanUploadsRow, error)
 	ListPendingReviewActions(ctx context.Context, arg ListPendingReviewActionsParams) ([]Action, error)
 	// Built-ins, plus one department's own when a department is named.
 	ListPresets(ctx context.Context, deptID *uuid.UUID) ([]PermissionPreset, error)
@@ -212,14 +238,28 @@ type Querier interface {
 	// Held until the transaction ends. See events.Flush for why.
 	LockEventStream(ctx context.Context, arg LockEventStreamParams) error
 	LockGradesInCourse(ctx context.Context, arg LockGradesInCourseParams) ([]uuid.UUID, error)
+	// Calls with one key take turns from the start, before anything else is
+	// locked. A retry of a call still in flight waits here holding nothing, and
+	// then finds the first call's row; without this it would wait for that row
+	// at InsertAction, holding its caller's seat, which the first call may yet
+	// need to lock FOR UPDATE.
+	LockIdempotencyKey(ctx context.Context, arg LockIdempotencyKeyParams) error
+	// The same, for a call that writes, and the first row that call locks: the
+	// caller's own seat, KEY SHARE, to the end of the call. It blocks only what
+	// locks the seat FOR UPDATE — a change to it, its removal, the expiry sweep —
+	// which then waits for the call, or the call waits for it and sees what it
+	// did. Taking the seat before anything else keeps one order for every write,
+	// the seat first: the order the action row's foreign key to it always had.
+	LockLiveMemberForAuthz(ctx context.Context, arg LockLiveMemberForAuthzParams) (LockLiveMemberForAuthzRow, error)
 	// Serialises attaching one upload. Held until the transaction ends.
 	LockStorageKey(ctx context.Context, storageKey string) error
 	// One writer of a student's rolled-up totals at a time.
 	LockStudentTotals(ctx context.Context, arg LockStudentTotalsParams) error
-	// Serialising what races -------------------------------------------------------
 	// A row lock, not an UPDATE: the freeze trigger does not fire. Two drafts for
-	// one submission entered at once would otherwise both be live.
-	LockSubmissionForGrading(ctx context.Context, id uuid.UUID) error
+	// one submission entered at once would otherwise both be live, and late work
+	// taking a 'missing' placeholder over takes the same lock. The state is read
+	// under it, so it is the state the grade is written against.
+	LockSubmissionForGrading(ctx context.Context, id uuid.UUID) (string, error)
 	// All of one student's attempts at one assignment, locked, newest first.
 	LockSubmissionsOf(ctx context.Context, arg LockSubmissionsOfParams) ([]LockSubmissionsOfRow, error)
 	MarkActionExecuted(ctx context.Context, arg MarkActionExecutedParams) error
@@ -250,7 +290,19 @@ type Querier interface {
 	SetMemberStatus(ctx context.Context, arg SetMemberStatusParams) (int64, error)
 	SetPublishedVersion(ctx context.Context, arg SetPublishedVersionParams) error
 	SetSubmissionLateness(ctx context.Context, arg SetSubmissionLatenessParams) (int64, error)
+	// Serialising what races -------------------------------------------------------
+	// The assignment a submission's grade is out of, read again and held still
+	// until the grade is in. FOR SHARE waits for an assignment.update under way,
+	// and holds the next one off until the grade is there for its check to find.
+	// Graders of the same assignment do not wait for one another.
+	ShareAssignmentForGrading(ctx context.Context, arg ShareAssignmentForGradingParams) (ShareAssignmentForGradingRow, error)
+	// KEY SHARE on the given seats, in id order: what taking them before some
+	// other lock looks like, where that lock would otherwise be held while one of
+	// them is waited for.
+	ShareSeats(ctx context.Context, ids []uuid.UUID) error
 	StorageKeyInUse(ctx context.Context, storageKey *string) (bool, error)
+	// A grade entered, or proposed and not yet decided: either way, one is on its
+	// way for exactly this work.
 	SubmissionHasGrades(ctx context.Context, submissionID *uuid.UUID) (bool, error)
 	SubmitSubmission(ctx context.Context, arg SubmitSubmissionParams) (int64, error)
 	SupersedeComponentDrafts(ctx context.Context, arg SupersedeComponentDraftsParams) error

@@ -22,6 +22,21 @@ SELECT id, course_id, actor_id, status, expires_at, student_scope, assignment_sc
 FROM course_member
 WHERE course_id = $1 AND actor_id = $2 AND status <> 'removed';
 
+-- name: LockLiveMemberForAuthz :one
+-- The same, for a call that writes, and the first row that call locks: the
+-- caller's own seat, KEY SHARE, to the end of the call. It blocks only what
+-- locks the seat FOR UPDATE — a change to it, its removal, the expiry sweep —
+-- which then waits for the call, or the call waits for it and sees what it
+-- did. Taking the seat before anything else keeps one order for every write,
+-- the seat first: the order the action row's foreign key to it always had.
+SELECT id, course_id, actor_id, status, expires_at, student_scope, assignment_scope,
+       perm_document_read, perm_document_read_draft, perm_document_write, perm_rubric_read,
+       perm_assignment_write, perm_submission_read, perm_submission_write, perm_grade_read,
+       perm_grade_submit, perm_grade_post, perm_member_read, perm_member_manage, perm_action_decide
+FROM course_member
+WHERE course_id = $1 AND actor_id = $2 AND status <> 'removed'
+FOR KEY SHARE;
+
 -- name: GetMemberForAuthz :one
 -- By id, removed rows included: re-authorizing a proposal checks the very
 -- membership it was made under, not whatever row the actor holds today.

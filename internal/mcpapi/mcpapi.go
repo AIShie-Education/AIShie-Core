@@ -16,17 +16,21 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
+	"mime"
 	"net/http"
 	"strconv"
 	"strings"
 
 	"github.com/google/uuid"
 	sdkauth "github.com/modelcontextprotocol/go-sdk/auth"
+	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/apperr"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/auth"
+	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/canon"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/domain"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/pipeline"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/ratelimit"
@@ -71,6 +75,14 @@ type Deps struct {
 var errCredentialCheck = errors.New("the credential could not be checked just now; retry")
 
 // NewHandler returns the handler to mount at /mcp.
+//
+// It makes no check against DNS rebinding of its own: the SDK's is switched
+// off (DisableLocalhostProtection, below), because it cannot tell a rebound
+// page from a reverse proxy on the same machine. It must be mounted through
+// httpapi.NewHandler, as httpapi.Deps.MCP, which makes that check knowing
+// which proxies are trusted, and makes it before the token is looked at.
+// Served any other way, it is open to a page in a browser on the server's
+// machine that reaches it by DNS rebinding.
 func NewHandler(d Deps) http.Handler {
 	if d.Log == nil {
 		d.Log = slog.New(slog.DiscardHandler)
@@ -80,8 +92,15 @@ func NewHandler(d Deps) http.Handler {
 		// No session survives a request, so any instance can serve any call
 		// and nothing needs to be sticky. Nothing is lost by it: this server
 		// never initiates anything towards a client.
-		Stateless:    true,
-		JSONResponse: true,
+		Stateless:           true,
+		JSONResponse:        true,
+		MaxRequestBodyBytes: maxBody,
+		// The SDK refuses a request that came in over loopback naming a
+		// host that is not loopback, against DNS rebinding. A reverse proxy
+		// on the same machine sends exactly that, for every agent. httpapi,
+		// which must mount this handler, makes the check knowing which
+		// proxies are trusted.
+		DisableLocalhostProtection: true,
 	})
 	// The same verification path as REST. It runs on every request, so a
 	// revoked token stops working on the agent's very next call.
@@ -105,7 +124,276 @@ func NewHandler(d Deps) http.Handler {
 		return info, nil
 	}
 	// An API token need not expire; it is revoked instead.
-	return sdkauth.RequireBearerToken(verify, &sdkauth.RequireBearerTokenOptions{AllowMissingExpiration: true})(limited(d, handler))
+	return sdkauth.RequireBearerToken(verify, &sdkauth.RequireBearerTokenOptions{AllowMissingExpiration: true})(limited(d, screened(bounded(handler))))
+}
+
+// maxBody is the most one request may carry. It is the SDK's own default,
+// named here because screened reads the body before the SDK does.
+const maxBody = mcp.DefaultMaxRequestBodyBytes
+
+// maxID bounds a request's id, as written. Every answer repeats the id, and
+// an answer cannot be cut short of it; ids are numbers or short strings.
+const maxID = 256
+
+// screened looks at what a request carries before the SDK is given it.
+//
+// One message per request. JSON-RPC allows a batch, and protocol versions
+// before 2025-06-18 let a client send one, but the per-actor limit counts
+// requests: a batch would be as many calls as it held for the price of one,
+// and as many answers to one request, each tools/list the whole catalogue.
+//
+// Nor anything whose answer bounded could not keep short: an id longer than
+// maxID, or subscriptions/listen, whose answer is a stream that stays open.
+// Nothing is pushed from here, so a listen would carry only its own
+// acknowledgement, or a refusal the SDK words for it; it is answered as
+// SEP-2575 answers a method a server does not have, and newServer offers
+// nothing a client would listen for.
+func screened(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The SDK's own test of the Content-Type: what fails it is refused
+		// in a few words, and never read.
+		if mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type")); r.Method != http.MethodPost || err != nil || mediaType != "application/json" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		body, err := readBody(w, r)
+		if err != nil {
+			// The SDK refuses it, after its own look at the headers, as it
+			// would have: its read of the body fails as this one did.
+			r.Body = io.NopCloser(failedReader{err})
+			next.ServeHTTP(w, r)
+			return
+		}
+		b := bytes.TrimLeft(body, " \t\r\n")
+		if len(b) > 0 && b[0] == '[' {
+			refuse(w, http.StatusBadRequest, jsonrpc.ID{}, jsonrpc.CodeInvalidRequest, "one message per request; a batch is not taken")
+			return
+		}
+		var m sighting
+		if err := sight(body, &m); err != nil && len(b) > 0 && b[0] == '{' {
+			// An object this cannot read, which the SDK's own decoder
+			// might, and act on unscreened.
+			refuse(w, http.StatusBadRequest, jsonrpc.ID{}, jsonrpc.CodeParseError, "the request is not JSON")
+			return
+		}
+		switch {
+		case m.ID.long:
+			refuse(w, http.StatusBadRequest, jsonrpc.ID{}, jsonrpc.CodeInvalidRequest, fmt.Sprintf("the id is longer than %d bytes", maxID))
+			return
+		case m.Method.listen:
+			var id jsonrpc.ID // the id the SDK would have answered
+			if msg, err := jsonrpc.DecodeMessage(body); err == nil {
+				if req, ok := msg.(*jsonrpc.Request); ok {
+					id = req.ID
+				}
+			}
+			refuse(w, http.StatusNotFound, id, jsonrpc.CodeMethodNotFound, "nothing is pushed from here; poll event_list with the next_seq it last returned")
+			return
+		}
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		next.ServeHTTP(w, r)
+	})
+}
+
+// readBody reads a request's body, no more than maxBody of it, into a buffer
+// the size the client said it would be, up to firstRead, and grown from
+// there by what comes. The size a client says is only its word: taken whole,
+// a request that says four megabytes, sends a byte and waits would hold four
+// megabytes until it timed out, as many times over as it was sent.
+func readBody(w http.ResponseWriter, r *http.Request) ([]byte, error) {
+	size := int64(bytes.MinRead)
+	if n := r.ContentLength; n > 0 {
+		size += min(n, firstRead)
+	}
+	buf := bytes.NewBuffer(make([]byte, 0, size))
+	_, err := buf.ReadFrom(http.MaxBytesReader(w, r.Body, maxBody))
+	return buf.Bytes(), err
+}
+
+// firstRead is as much of a body as is set aside before any of it has come.
+// Past it the buffer doubles as the body arrives: six times at most, for a
+// body of maxBody.
+const firstRead = 64 << 10
+
+// failedReader fails as a read of the body did.
+type failedReader struct{ err error }
+
+func (f failedReader) Read([]byte) (int, error) { return 0, f.err }
+
+// sighting is what screened needs of a message. It is decoded where it lies,
+// so that params of megabytes are passed over, not copied. encoding/json
+// gives a field every key that matches it, not only the last, and matches
+// in any case, where the SDK keeps the last key that matches exactly: so
+// whichever id and method the SDK takes from a message, they are among
+// those seen here.
+type sighting struct {
+	ID     idSighting     `json:"id"`
+	Method methodSighting `json:"method"`
+}
+
+type idSighting struct{ long bool }
+
+func (s *idSighting) UnmarshalJSON(b []byte) error {
+	s.long = s.long || len(b) > maxID
+	return nil
+}
+
+type methodSighting struct{ listen bool }
+
+func (s *methodSighting) UnmarshalJSON(b []byte) error {
+	var method string
+	s.listen = s.listen || len(b) <= maxID && json.Unmarshal(b, &method) == nil && method == "subscriptions/listen"
+	return nil
+}
+
+// sight decodes into v the first JSON value in body, which is all the SDK
+// reads of it. Only a body with something after that value, which no client
+// sends, is read the slow way, through a Decoder that copies it.
+func sight(body []byte, v any) error {
+	err := json.Unmarshal(body, v)
+	var syntax *json.SyntaxError
+	if errors.As(err, &syntax) {
+		err = json.NewDecoder(bytes.NewReader(body)).Decode(v)
+	}
+	return err
+}
+
+// bounded holds what the SDK says in refusal to what a message of ours may
+// be. The SDK words some refusals itself, instead of calling a tool — a tool
+// or a method it does not know, params that do not decode, a header that
+// does not match the body — and many quote what they refuse whole, with %q,
+// before JSON escapes that again: a megabyte sent would be five back. So an
+// answer is held until it is complete, unless it opens as a result, which is
+// passed on as it is written. The message of a JSON-RPC error is cut as
+// apperr.Clip cuts one of ours, and its data left out if Clip would cut that
+// too, since JSON cannot be cut; a refusal in plain text is cut the same
+// way. Any other answer is passed on as it is.
+func bounded(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		held := &heldResponse{w: w}
+		next.ServeHTTP(held, r)
+		if held.passed {
+			return
+		}
+		if held.status == 0 {
+			held.status = http.StatusOK
+		}
+		body := held.body.Bytes()
+		var cut bool
+		if isJSON(w.Header()) {
+			body, cut = clippedError(body)
+		} else if held.status >= 400 {
+			text := strings.TrimSuffix(string(body), "\n")
+			if short := apperr.Clip(text); short != text {
+				body, cut = []byte(short+"\n"), true
+			}
+		}
+		if cut {
+			w.Header().Del("Content-Length")
+		}
+		w.WriteHeader(held.status)
+		_, _ = w.Write(body)
+	})
+}
+
+func isJSON(h http.Header) bool { return strings.HasPrefix(h.Get("Content-Type"), "application/json") }
+
+// isResult reports whether b opens a JSON-RPC answer that is a result. The
+// SDK writes jsonrpc and id before result or error, and screened holds the
+// id short, so the key that tells the two apart comes within a few hundred
+// bytes; what follows it is not read.
+func isResult(b []byte) bool {
+	dec := json.NewDecoder(bytes.NewReader(b))
+	if t, err := dec.Token(); err != nil || t != json.Delim('{') {
+		return false
+	}
+	for range 3 {
+		key, err := dec.Token()
+		if err != nil || key == "error" {
+			return false
+		}
+		if key == "result" {
+			return true
+		}
+		var skip json.RawMessage
+		if dec.Decode(&skip) != nil {
+			return false
+		}
+	}
+	return false
+}
+
+// clippedError is body with its error's message cut, if it is a JSON-RPC
+// error and that needs cutting. Any other answer is passed on as written.
+func clippedError(body []byte) ([]byte, bool) {
+	var m struct {
+		JSONRPC json.RawMessage `json:"jsonrpc"`
+		ID      json.RawMessage `json:"id"`
+		Error   *struct {
+			Code    json.RawMessage `json:"code"`
+			Message string          `json:"message"`
+			Data    json.RawMessage `json:"data,omitempty"`
+		} `json:"error"`
+	}
+	if json.Unmarshal(body, &m) != nil || m.Error == nil {
+		return body, false
+	}
+	message := apperr.Clip(m.Error.Message)
+	longData := apperr.Clip(string(m.Error.Data)) != string(m.Error.Data)
+	if message == m.Error.Message && !longData {
+		return body, false
+	}
+	m.Error.Message = message
+	if longData {
+		m.Error.Data = nil
+	}
+	out, err := json.Marshal(m)
+	if err != nil {
+		return body, false
+	}
+	return out, true
+}
+
+// heldResponse keeps a response until bounded has looked at it, or passes
+// it on once it is seen to be a result.
+type heldResponse struct {
+	w      http.ResponseWriter
+	status int
+	body   bytes.Buffer
+	passed bool
+}
+
+func (h *heldResponse) Header() http.Header { return h.w.Header() }
+func (h *heldResponse) WriteHeader(code int) {
+	if h.status == 0 {
+		h.status = code
+	}
+}
+
+func (h *heldResponse) Write(b []byte) (int, error) {
+	if h.status == 0 {
+		h.status = http.StatusOK
+	}
+	if !h.passed && h.body.Len() == 0 && h.status < 400 && isJSON(h.w.Header()) && isResult(b) {
+		h.passed = true
+		h.w.WriteHeader(h.status)
+	}
+	if h.passed {
+		return h.w.Write(b)
+	}
+	return h.body.Write(b)
+}
+
+// refuse answers, as JSON-RPC, a request the SDK is not given. The zero id
+// is written as null, as it is for a request whose id cannot be told.
+func refuse(w http.ResponseWriter, status int, id jsonrpc.ID, code int64, message string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	// The id goes back as it came, as the SDK sends it: escaped for HTML,
+	// each '<' in it would be six bytes.
+	enc := json.NewEncoder(w)
+	enc.SetEscapeHTML(false)
+	_ = enc.Encode(map[string]any{"jsonrpc": "2.0", "id": id.Raw(), "error": map[string]any{"code": code, "message": message}})
 }
 
 // limited refuses an actor that is calling too fast, before anything is
@@ -130,7 +418,15 @@ func limited(d Deps, next http.Handler) http.Handler {
 
 func newServer(d Deps) *mcp.Server {
 	server := mcp.NewServer(&mcp.Implementation{Name: "aishiteru-core", Title: "AIshiteru Core", Version: version.Version},
-		&mcp.ServerOptions{Instructions: instructions})
+		&mcp.ServerOptions{Instructions: instructions, Capabilities: &mcp.ServerCapabilities{
+			// Tools, and no more. Their list does not change while the
+			// server runs, and nothing is pushed from here to say so if it
+			// did: offered, a change would have a client open a listen,
+			// which screened refuses. Nor is logging, the SDK's other
+			// default, offered: nothing is logged to a client either, and
+			// the protocol has deprecated it.
+			Tools: &mcp.ToolCapabilities{},
+		}})
 	seen := map[string]string{}
 	for _, t := range d.Pipeline.Registry().Exposed() {
 		name := ToolName(t.Name)
@@ -271,6 +567,11 @@ func splitKey(raw json.RawMessage, write bool) ([]byte, string, error) {
 	}
 	if !write {
 		return raw, "", nil
+	}
+	// Before the arguments become a map, which would keep a repeated key's
+	// last value without a word: refused here as it is further in.
+	if err := canon.Check(raw); err != nil {
+		return nil, "", err
 	}
 	var args map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &args); err != nil {

@@ -2,12 +2,18 @@ package jobs_test
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/apperr"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/blob"
@@ -30,12 +36,27 @@ type fixture struct {
 
 func setup(t *testing.T, students int) *fixture {
 	t.Helper()
-	c := testkit.NewCS101(t, students)
+	return setupWith(t, students, onDisk)
+}
+
+// setupWith is setup with the tools keeping files in whatever store wrap
+// makes of the filesystem store.
+func setupWith(t *testing.T, students int, wrap func(*blob.FSStore) blob.Store) *fixture {
+	t.Helper()
+	c := testkit.NewCS101WithStore(t, students, wrap)
 	f := &fixture{CS101: c, system: c.Actor("system", "system"), now: time.Now()}
 	f.runner = jobs.New(c.Pool, c.P, f.system, jobs.Config{}, nil)
 	c.P.SetClock(func() time.Time { return f.now })
 	return f
 }
+
+// The two ways a store keeps an upload once it is attached: where it was
+// uploaded, or, like S3, moved to a final key.
+var (
+	onDisk        = func(fs *blob.FSStore) blob.Store { return fs }
+	inObjectStore = func(fs *blob.FSStore) blob.Store { return testkit.ObjectStore{FSStore: fs} }
+	stores        = map[string]func(*blob.FSStore) blob.Store{"on disk": onDisk, "in an object store": inObjectStore}
+)
 
 func (f *fixture) sweep(t *testing.T) jobs.Report {
 	t.Helper()
@@ -47,6 +68,27 @@ func (f *fixture) sweep(t *testing.T) jobs.Report {
 		t.Fatal("the sweep stood by, with nobody else sweeping")
 	}
 	return rep
+}
+
+// upload gets an upload URL from Sato and PUTs a file to it.
+func (f *fixture) upload(t *testing.T) (token, key string) {
+	t.Helper()
+	return f.uploadAs(t, f.Sato, "material")
+}
+
+// uploadAs is upload by someone else, or for something else.
+func (f *fixture) uploadAs(t *testing.T, actor uuid.UUID, kind string) (token, key string) {
+	t.Helper()
+	out := f.MustCall(actor, "document.upload_url", m{"course_id": f.Course, "kind": kind, "content_type": "text/plain"}, "")
+	u := testkit.Result[tools.UploadURLOut](t, out)
+	key, ct, err := f.Blob.Redeem(strings.TrimPrefix(u.UploadURL, "http://lms.test"+blob.BlobPath), "PUT")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Blob.Put(context.Background(), key, ct, strings.NewReader("slides"), 1<<20); err != nil {
+		t.Fatal(err)
+	}
+	return u.UploadToken, key
 }
 
 func (f *fixture) propose(t *testing.T, s testkit.Student, key string) uuid.UUID {
@@ -388,7 +430,7 @@ func TestOrphanFilesAreRemoved(t *testing.T) {
 	}
 	decide(toApprove, "approve")
 
-	f.now = f.now.Add(jobs.OrphanGrace + 2*time.Hour)
+	f.now = f.now.Add(tools.OrphanGrace + 2*time.Hour)
 	if rep := f.sweep(t); rep.OrphanFilesRemoved != 2 {
 		t.Fatalf("%+v, want the abandoned upload and the rejected proposal's file removed", rep)
 	}
@@ -420,6 +462,314 @@ func TestOrphanFilesAreRemoved(t *testing.T) {
 	rep, err := jobs.New(f.Pool, patient, f.system, jobs.Config{Blob: f.Blob}, nil).Sweep(ctx)
 	if err != nil || rep.OrphanFilesRemoved != 0 || !exists(kept) {
 		t.Fatalf("with no proposal TTL: %+v, %v", rep, err)
+	}
+}
+
+// A proposal is decided within the TTL of being made, and cannot be made
+// naming an upload more than OrphanGrace old; an upload that nothing has
+// attached is kept until it is TTL + OrphanGrace old. So the file named by a
+// proposal made just short of OrphanGrace after the upload is still there
+// on the proposal's last day, however the store keeps it, and approving the
+// proposal then attaches it.
+func TestAnUploadOutlastsTheProposalThatNamesIt(t *testing.T) {
+	for name, wrap := range stores {
+		t.Run(name, func(t *testing.T) {
+			f := setupWith(t, 1, wrap)
+			store := wrap(f.Blob)
+			f.runner = jobs.New(f.Pool, f.P, f.system, jobs.Config{Blob: store}, nil)
+			token, key := f.uploadAs(t, f.Grader, "feedback")
+
+			f.now = f.now.Add(tools.OrphanGrace - time.Minute)
+			out := f.MustCall(f.Grader, "grade.submit", m{"course_id": f.Course, "submission_id": f.Students[0].HW3, "score": 70,
+				"feedback_files": []m{{"title": "notes.txt", "upload_token": token}}}, "propose")
+			if out.Status != domain.StatusProposed {
+				t.Fatalf("a proposal naming an upload just short of %v old: %+v", tools.OrphanGrace, out)
+			}
+			f.now = f.now.Add(pipeline.DefaultProposalTTL - time.Hour)
+			if rep := f.sweep(t); rep.OrphanFilesRemoved != 0 {
+				t.Fatalf("%+v, with a proposal still waiting on the file", rep)
+			}
+			decided := testkit.Result[pipeline.DecideOut](t, f.MustCall(f.Sato, "action.decide",
+				m{"course_id": f.Course, "action_id": *out.ActionID, "decision": "approve"}, "approve"))
+			if decided.Outcome != domain.StatusExecuted {
+				t.Fatalf("approving on the proposal's last day: %+v", decided)
+			}
+			if n := f.Count(`SELECT count(*) FROM document_version WHERE storage_key = $1`, store.FinalKey(key)); n != 1 {
+				t.Fatal("the file was not attached")
+			}
+		})
+	}
+}
+
+// A store that moves a file on attaching may be left with it at its final
+// key, unattached, by an attach that moved it and then did not commit; the
+// sweep then judges the moved copy by when it was moved. A proposal made
+// later with the same token is held to that copy's age as to any upload's,
+// and refused once it is more than OrphanGrace old: queued, it could lose
+// the copy to the sweep while it waited.
+func TestAProposalIsNotMadeAboutAMovedUploadItMayOutlive(t *testing.T) {
+	f := setupWith(t, 1, inObjectStore)
+	store := inObjectStore(f.Blob)
+	token, key := f.uploadAs(t, f.Grader, "feedback")
+	if _, err := store.Finalize(context.Background(), key); err != nil {
+		t.Fatal(err)
+	}
+
+	f.now = f.now.Add(tools.OrphanGrace + time.Hour)
+	out := f.MustCall(f.Grader, "grade.submit", m{"course_id": f.Course, "submission_id": f.Students[0].HW3, "score": 70,
+		"feedback_files": []m{{"title": "notes.txt", "upload_token": token}}}, "propose")
+	if out.Status != domain.StatusFailed || out.Error.Code != apperr.FailedPrecondition || !strings.Contains(out.Error.Message, "upload the file again") {
+		t.Fatalf("a proposal naming an upload moved more than %v ago: %+v", tools.OrphanGrace, out)
+	}
+	if n := f.Count(`SELECT count(*) FROM action WHERE action_type = 'grade.submit' AND status = 'proposed'`); n != 0 {
+		t.Fatal("the proposal was queued")
+	}
+}
+
+// The bucket or directory the files are kept in may hold other things: a
+// backup, another program's objects, a file somebody dropped among ours,
+// another deployment's uploads, spelt like ours but under a course this
+// database never had. The sweep removes the server's own files that nothing
+// points at, and nothing the server did not write, however old — whether the
+// store keeps a file where it was uploaded or, like S3, moves it on attaching.
+func TestTheSweepRemovesOnlyTheServersOwnFiles(t *testing.T) {
+	for name, wrap := range stores {
+		t.Run(name, func(t *testing.T) {
+			f := setup(t, 1)
+			store := wrap(f.Blob)
+			f.runner = jobs.New(f.Pool, f.P, f.system, jobs.Config{Blob: store}, nil)
+			ctx := context.Background()
+			// Ours: an upload never attached, and one moved to its final
+			// key by an attach that then did not commit.
+			_, staged := f.upload(t)
+			_, moved := f.upload(t)
+			if _, err := store.Finalize(ctx, moved); err != nil {
+				t.Fatal(err)
+			}
+			moved = store.FinalKey(moved)
+			// Not ours, beside our files and among them.
+			course := f.Course.String()
+			foreign := []string{"backups/nightly.sql.gz", "README", "courses/syllabus.pdf", "courses/" + course + "/cover.png",
+				"courses/" + course + "/" + strings.ToUpper(uuid.NewString()), "attached/courses/" + course + "/cover.png"}
+			// Another deployment's: one it has not attached, and one it
+			// has. Nothing here says which is which.
+			elsewhere := "courses/" + uuid.Must(uuid.NewV7()).String() + "/"
+			foreign = append(foreign, elsewhere+uuid.Must(uuid.NewV7()).String(), store.FinalKey(elsewhere+uuid.Must(uuid.NewV7()).String()))
+			for _, key := range foreign {
+				p := filepath.Join(f.Blob.Root(), filepath.FromSlash(key))
+				if err := os.MkdirAll(filepath.Dir(p), 0o750); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(p, []byte("not the server's"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			f.now = f.now.Add(pipeline.DefaultProposalTTL + tools.OrphanGrace + time.Hour)
+			if rep := f.sweep(t); rep.OrphanFilesRemoved != 2 {
+				t.Fatalf("%+v, want the two old files of ours removed", rep)
+			}
+			for _, key := range []string{staged, moved} {
+				if _, err := f.Blob.Stat(ctx, key); !errors.Is(err, blob.ErrNotFound) {
+					t.Errorf("%s is still there: %v", key, err)
+				}
+			}
+			for _, key := range foreign {
+				if _, err := os.Stat(filepath.Join(f.Blob.Root(), filepath.FromSlash(key))); err != nil {
+					t.Errorf("%s, which the server never wrote, was removed: %v", key, err)
+				}
+			}
+		})
+	}
+}
+
+// A sweep takes on a batch of orphans at a time. Most old files are not
+// orphans — they are attached, or another deployment's — and they must not
+// use up the batch: were they to, a pass through a store of many of them
+// would take a tick for every batch, and an orphan behind them would outlive
+// TTL + OrphanGrace by as long, its upload token good for attaching all the
+// while. However many files the sweep keeps, it finds the orphans behind them
+// at once.
+func TestTheSweepGetsPastAttachedFiles(t *testing.T) {
+	for name, wrap := range stores {
+		t.Run(name, func(t *testing.T) {
+			f := setupWith(t, 1, wrap)
+			store := wrap(f.Blob)
+			f.runner = jobs.New(f.Pool, f.P, f.system, jobs.Config{Blob: store, Batch: 2}, nil)
+			ctx := context.Background()
+			// Another deployment's files, under a course it made long ago
+			// and so listed before ours.
+			var kept []string
+			elsewhere := "courses/00000000-0000-7000-8000-000000000000/"
+			for range 3 {
+				key := store.FinalKey(elsewhere + uuid.Must(uuid.NewV7()).String())
+				p := filepath.Join(f.Blob.Root(), filepath.FromSlash(key))
+				if err := os.MkdirAll(filepath.Dir(p), 0o750); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(p, []byte("attached over there"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				kept = append(kept, key)
+			}
+			// Attached files, uploaded first, so they come first.
+			for i := range 5 {
+				token, key := f.upload(t)
+				if out := f.MustCall(f.Sato, "document.create", m{"course_id": f.Course, "kind": "material",
+					"title": fmt.Sprintf("week %d", i+1), "upload_token": token}, fmt.Sprint("attach", i)); out.Status != domain.StatusExecuted {
+					t.Fatalf("%+v", out)
+				}
+				kept = append(kept, store.FinalKey(key))
+			}
+			// Behind them, three orphans: uploads moved to their final keys
+			// by attaches that then did not commit.
+			var orphans []string
+			for range 3 {
+				_, key := f.upload(t)
+				if _, err := store.Finalize(ctx, key); err != nil {
+					t.Fatal(err)
+				}
+				orphans = append(orphans, store.FinalKey(key))
+			}
+
+			f.now = f.now.Add(pipeline.DefaultProposalTTL + tools.OrphanGrace + time.Hour)
+			gone := func(key string) bool {
+				_, err := os.Stat(filepath.Join(f.Blob.Root(), filepath.FromSlash(key)))
+				return errors.Is(err, fs.ErrNotExist)
+			}
+			// A batch of orphans in the first sweep, the one left in the
+			// second, which reaches the end of the store.
+			if rep := f.sweep(t); rep.OrphanFilesRemoved != 2 || !gone(orphans[0]) || !gone(orphans[1]) {
+				t.Fatalf("%+v, want the first two orphans, behind eight files that are kept, removed at once", rep)
+			}
+			if rep := f.sweep(t); rep.OrphanFilesRemoved != 1 || !gone(orphans[2]) {
+				t.Fatalf("%+v, want the third orphan removed next", rep)
+			}
+			for _, key := range kept {
+				if gone(key) {
+					t.Fatalf("%s, which is not an orphan, was removed", key)
+				}
+			}
+			// The store has been gone through; the next pass waits its hour.
+			_, another := f.upload(t)
+			if rep := f.sweep(t); rep.OrphanFilesRemoved != 0 || gone(another) {
+				t.Fatalf("the store was gone through again at once: %+v", rep)
+			}
+		})
+	}
+}
+
+// stubborn is a store that will not delete some of its files: a permission
+// set wrong, an object under a legal hold.
+type stubborn struct {
+	blob.Store
+	keep map[string]bool
+}
+
+func (s stubborn) Delete(ctx context.Context, key string) error {
+	if s.keep[key] {
+		return errors.New("access denied")
+	}
+	return s.Store.Delete(ctx, key)
+}
+
+// An orphan the store will not delete is logged and passed over, and the next
+// sweep goes on after it. Were it to start from the beginning again, it would
+// take on the same orphans each time, and once there were a batch of them,
+// nothing behind them would ever be removed.
+func TestTheSweepGetsPastFilesItCannotRemove(t *testing.T) {
+	f := setup(t, 1)
+	store := stubborn{Store: f.Blob, keep: map[string]bool{}}
+	f.runner = jobs.New(f.Pool, f.P, f.system, jobs.Config{Blob: store, Batch: 2}, nil)
+	var orphans []string
+	for range 3 {
+		_, key := f.upload(t)
+		orphans = append(orphans, key)
+	}
+	store.keep[orphans[0]], store.keep[orphans[1]] = true, true
+
+	f.now = f.now.Add(pipeline.DefaultProposalTTL + tools.OrphanGrace + time.Hour)
+	if rep := f.sweep(t); rep.OrphanFilesRemoved != 0 {
+		t.Fatalf("%+v, and the store deletes neither of the first two", rep)
+	}
+	if rep := f.sweep(t); rep.OrphanFilesRemoved != 1 {
+		t.Fatalf("%+v, want the orphan behind the two that would not go removed", rep)
+	}
+	if _, err := f.Blob.Stat(context.Background(), orphans[2]); !errors.Is(err, blob.ErrNotFound) {
+		t.Fatalf("%s is still there: %v", orphans[2], err)
+	}
+}
+
+// The sweep asks the database which of a page of old files are orphans, and
+// then removes them one by one, so an attach may commit in between. Before
+// removing a file it asks again, holding the lock that attaching takes on
+// the same key: an attach in flight is waited for, and once it has
+// committed its file is kept.
+func TestAFileAttachedWhileTheSweepWaitsForItIsKept(t *testing.T) {
+	f := setup(t, 1)
+	f.runner = jobs.New(f.Pool, f.P, f.system, jobs.Config{Blob: f.Blob}, nil)
+	ctx := context.Background()
+	_, key := f.upload(t)
+	doc := testkit.Result[tools.DocumentCreateOut](t, f.MustCall(f.Sato, "document.create",
+		m{"course_id": f.Course, "kind": "material", "title": "Week 1", "body_md": "slides to follow"}, "doc")).DocumentID
+
+	// An attach part way through, on a connection of its own: the key locked
+	// as attaching locks it, and a version pointing at the file written but
+	// not committed.
+	conn, err := pgx.Connect(ctx, f.Pool.Config().ConnString())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(ctx)
+	tx, err := conn.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	attach := dbq.New(tx)
+	if err := attach.LockStorageKey(ctx, key); err != nil {
+		t.Fatal(err)
+	}
+	contentType, size, checksum := "text/plain", int64(6), "sha256:x"
+	if err := attach.InsertDocumentVersion(ctx, dbq.InsertDocumentVersionParams{ID: uuid.Must(uuid.NewV7()), DocumentID: doc, Seq: 2,
+		StorageKey: &key, ContentType: &contentType, ByteSize: &size, Checksum: &checksum, AuthorMemberID: f.SatoM, CreatedAt: f.now}); err != nil {
+		t.Fatal(err)
+	}
+
+	// The sweep finds the file an orphan, since the version is not there
+	// for it yet, and comes to wait for the key.
+	f.now = f.now.Add(pipeline.DefaultProposalTTL + tools.OrphanGrace + time.Hour)
+	done := make(chan jobs.Report, 1)
+	go func() {
+		rep, err := f.runner.Sweep(ctx)
+		if err != nil {
+			t.Error(err)
+		}
+		done <- rep
+	}()
+	waiting := func() bool {
+		return f.Count(`SELECT count(*) FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid
+			WHERE a.datname = current_database() AND l.locktype = 'advisory' AND NOT l.granted`) > 0
+	}
+	for deadline := time.Now().Add(10 * time.Second); !waiting(); time.Sleep(10 * time.Millisecond) {
+		select {
+		case rep := <-done:
+			t.Fatalf("the sweep did not wait for the attach in flight: %+v", rep)
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the sweep never came to wait for the attach in flight")
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if rep := <-done; rep.OrphanFilesRemoved != 0 {
+		t.Fatalf("%+v, and the file was attached while the sweep waited", rep)
+	}
+	if _, err := f.Blob.Stat(ctx, key); err != nil {
+		t.Fatalf("a file attached while the sweep waited to remove it was removed: %v", err)
 	}
 }
 

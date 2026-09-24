@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -101,7 +103,14 @@ func (a *Authenticator) Login(ctx context.Context, email, password string) (Sess
 	q := dbq.New(a.pool)
 
 	var stored string
-	actor, err := q.GetActorByEmail(ctx, email)
+	// An email the database cannot hold is one no account has. The database
+	// is not asked, since it would answer with a fault of ours, and the
+	// guess is answered, and costs the hash, like any other wrong one.
+	var actor dbq.GetActorByEmailRow
+	err := pgx.ErrNoRows
+	if utf8.ValidString(email) && !strings.ContainsRune(email, 0) {
+		actor, err = q.GetActorByEmail(ctx, email)
+	}
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
 	case err != nil:

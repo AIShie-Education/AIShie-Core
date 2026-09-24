@@ -13,6 +13,7 @@ import (
 
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/apperr"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/auth"
+	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/canon"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/tool"
 )
 
@@ -44,6 +45,12 @@ func buildArgs(t tool.Tool, r *http.Request) ([]byte, error) {
 			return nil, err
 		}
 		if len(body) > 0 {
+			// Before the body becomes a map, which would keep a repeated
+			// key's last value without a word: refused here as it is from
+			// an MCP client.
+			if err := canon.Check(body); err != nil {
+				return nil, apperr.Invalid("the body: %v", err)
+			}
 			dec := json.NewDecoder(bytes.NewReader(body))
 			dec.UseNumber()
 			if err := dec.Decode(&args); err != nil {
@@ -52,13 +59,16 @@ func buildArgs(t tool.Tool, r *http.Request) ([]byte, error) {
 			if args == nil { // the literal null decodes into a map as nil
 				return nil, apperr.Invalid("the body must be a JSON object, not null")
 			}
+			if _, err := dec.Token(); err != io.EOF {
+				return nil, apperr.Invalid("the body must be one JSON object, with nothing after it")
+			}
 		}
 	}
 
 	for _, m := range pathParam.FindAllStringSubmatch(t.HTTP.Pattern, -1) {
 		name, value := m[1], r.PathValue(m[1])
 		if prior, ok := args[name]; ok && prior != value {
-			return nil, apperr.Invalid("%s is %q in the path and %v in the request; they must agree", name, value, prior)
+			return nil, apperr.Invalid("%s in the request is not the one in the path; they must agree", name)
 		}
 		args[name] = value
 	}

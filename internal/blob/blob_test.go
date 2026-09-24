@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -55,7 +56,8 @@ func TestFSStoreRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	// echo -n '%PDF-1.7 the essay' | shasum -a 256
-	if info.Size != int64(len(body)) || info.ContentType != "application/pdf" || !strings.HasPrefix(info.Checksum, "sha256:") || len(info.Checksum) != 71 {
+	if info.Size != int64(len(body)) || info.ContentType != "application/pdf" || !strings.HasPrefix(info.Checksum, "sha256:") || len(info.Checksum) != 71 ||
+		time.Since(info.Modified).Abs() > time.Minute {
 		t.Fatalf("info: %+v", info)
 	}
 	if stat, err := s.Stat(ctx, key); err != nil || stat != info {
@@ -83,6 +85,45 @@ func TestFSStoreRoundTrip(t *testing.T) {
 	}
 }
 
+// A file's .meta is written after its bytes and removed before them, so it
+// says the file is whole. Bytes lost from under one are a fault, not a file
+// that is not there; and a delete stopped half way has taken the .meta
+// already, leaving bytes that a listing still finds.
+func TestFSStoreTellsLostBytesFromNone(t *testing.T) {
+	s, _ := newFS(t)
+	ctx := context.Background()
+	for _, key := range []string{"lost", "stuck"} {
+		if _, err := s.Put(ctx, key, "text/plain", strings.NewReader("hello"), 5); err != nil {
+			t.Fatal(err)
+		}
+	}
+	p, _ := s.path("lost")
+	if err := os.Remove(p); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Stat(ctx, "lost"); err == nil || errors.Is(err, ErrNotFound) {
+		t.Fatalf("stat of a file whose bytes were lost: %v", err)
+	}
+	if _, _, err := s.Open(ctx, "lost"); err == nil || errors.Is(err, ErrNotFound) {
+		t.Fatalf("open of a file whose bytes were lost: %v", err)
+	}
+
+	// Bytes that cannot be removed, standing in for a delete cut short.
+	p, _ = s.path("stuck")
+	if err := os.Remove(p); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(p, "in-the-way"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Delete(ctx, "stuck"); err == nil {
+		t.Fatal("a delete that could not remove the bytes said nothing")
+	}
+	if _, err := os.Stat(p + ".meta"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a delete cut short left the .meta: %v", err)
+	}
+}
+
 func TestFSStoreLimitsAndPaths(t *testing.T) {
 	s, _ := newFS(t)
 	ctx := context.Background()
@@ -107,6 +148,112 @@ func TestFSStoreLimitsAndPaths(t *testing.T) {
 	entries, _ := os.ReadDir(filepath.Dir(s.root))
 	if len(entries) != 1 {
 		t.Fatalf("something was written outside the root: %v", entries)
+	}
+}
+
+// Listing under a prefix goes through what is under it and nothing else: the
+// root may hold things that are not the server's.
+func TestFSStoreListsUnderAPrefix(t *testing.T) {
+	s, _ := newFS(t)
+	ctx := context.Background()
+	for _, key := range []string{"courses/c1/a", "courses/c2/b", "courses-old/c", "backups/nightly.sql.gz", "README"} {
+		if _, err := s.Put(ctx, key, "text/plain", strings.NewReader("x"), 100); err != nil {
+			t.Fatal(err)
+		}
+	}
+	list := func(prefix string) []string {
+		t.Helper()
+		var keys []string
+		if err := s.List(ctx, prefix, "", func(key string, _ time.Time) error {
+			keys = append(keys, key)
+			return nil
+		}); err != nil {
+			t.Fatalf("list %q: %v", prefix, err)
+		}
+		return keys
+	}
+	for prefix, want := range map[string]string{
+		"courses/":          "courses/c1/a courses/c2/b",
+		"courses/c2/":       "courses/c2/b",
+		"courses":           "courses-old/c courses/c1/a courses/c2/b",
+		"attached/courses/": "",
+		"":                  "README backups/nightly.sql.gz courses-old/c courses/c1/a courses/c2/b",
+	} {
+		got := list(prefix)
+		slices.Sort(got)
+		if got := strings.Join(got, " "); got != want {
+			t.Errorf("under %q: %q, want %q", prefix, got, want)
+		}
+	}
+}
+
+// The root may hold a directory the server cannot read: lost+found, at the
+// top of a volume mounted for the files. Listing the server's own prefix
+// walks only the prefix's directory and never comes to it. A walk of the
+// whole root would, and would fail there, on every sweep.
+func TestFSStoreListsPastADirectoryItCannotRead(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads a directory whatever its mode")
+	}
+	s, _ := newFS(t)
+	ctx := context.Background()
+	if _, err := s.Put(ctx, "courses/c1/a", "text/plain", strings.NewReader("x"), 100); err != nil {
+		t.Fatal(err)
+	}
+	lost := filepath.Join(s.Root(), "lost+found")
+	if err := os.Mkdir(lost, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(lost, 0o700) })
+	var keys []string
+	if err := s.List(ctx, "courses/", "", func(key string, _ time.Time) error {
+		keys = append(keys, key)
+		return nil
+	}); err != nil || !slices.Equal(keys, []string{"courses/c1/a"}) {
+		t.Fatalf("listed %q: %v", keys, err)
+	}
+}
+
+// A listing stopped part way is taken up again after the last key it gave,
+// and goes on with exactly what it had not given yet — also where the walk's
+// order is not the order of the keys as strings.
+func TestFSStoreListingIsTakenUpWhereItStopped(t *testing.T) {
+	s, _ := newFS(t)
+	ctx := context.Background()
+	for _, key := range []string{"courses/b/w", "courses/a-b/y", "courses/a/z", "courses/a/sub/q", "courses/a/x", "courses/b/w2", "other/v"} {
+		if _, err := s.Put(ctx, key, "text/plain", strings.NewReader("x"), 100); err != nil {
+			t.Fatal(err)
+		}
+	}
+	list := func(after string, stopAt int) []string {
+		t.Helper()
+		var keys []string
+		if err := s.List(ctx, "courses/", after, func(key string, _ time.Time) error {
+			if keys = append(keys, key); len(keys) == stopAt {
+				return ErrStopList
+			}
+			return nil
+		}); err != nil {
+			t.Fatalf("list after %q: %v", after, err)
+		}
+		return keys
+	}
+	all := list("", 0)
+	if len(all) != 6 {
+		t.Fatalf("listed %q", all)
+	}
+	for n := 1; n <= len(all); n++ {
+		var got []string
+		for after := ""; ; {
+			batch := list(after, n)
+			if got = append(got, batch...); len(batch) < n {
+				break
+			}
+			after = batch[len(batch)-1]
+		}
+		if !slices.Equal(got, all) {
+			t.Errorf("in batches of %d: %q, want %q", n, got, all)
+		}
 	}
 }
 

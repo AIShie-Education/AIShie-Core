@@ -15,7 +15,8 @@ import (
 
 // Deps is what tools need beyond their execution context.
 type Deps struct {
-	// Pipeline runs a proposal on behalf of action.decide.
+	// Pipeline runs a proposal on behalf of action.decide, and says how long
+	// a proposal may wait for it.
 	Pipeline *pipeline.Pipeline
 	// Blob is where files live. Nil means the installation has no file
 	// storage: documents can still hold text, and uploads are refused.

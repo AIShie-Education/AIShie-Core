@@ -10,11 +10,15 @@
 package httpapi
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
+	"path"
 	"strings"
 	"time"
 
@@ -73,13 +77,14 @@ type Deps struct {
 	Signer *signing.Signer
 
 	// Calls bounds how fast one actor may call; SignIns bounds sign-in
-	// attempts per address and per email. Nil means no limit.
+	// attempts per email, and per address those that fail. Nil means no
+	// limit.
 	Calls   *ratelimit.Limiter
 	SignIns *ratelimit.Limiter
 
 	// MCP is the agents' door, mounted at /mcp beside the REST routes and
-	// behind the same cross-origin guard. It does its own authentication,
-	// with the same authenticator.
+	// behind the same cross-origin guard, and behind notRebound. It does its
+	// own authentication, with the same authenticator.
 	MCP http.Handler
 }
 
@@ -130,7 +135,7 @@ func NewHandler(d Deps) http.Handler {
 		}
 	}
 	if d.MCP != nil {
-		mux.Handle(MCPPath, d.MCP)
+		mux.Handle(MCPPath, s.notRebound(d.MCP))
 	}
 	if local, ok := d.Blob.(blob.Local); ok {
 		mux.HandleFunc("PUT "+blob.BlobPath+"{token}", s.blobPut(local))
@@ -163,11 +168,27 @@ const (
 	DefaultTransferTimeout = 10 * time.Minute
 )
 
+// maxTidied is the longest path, query included, the mux is left to tidy.
+// The paths of our routes are shorter, but for a blob URL's, which is never
+// untidy.
+const maxTidied = 256
+
 // routed answers for the routes the mux does not have. The mux's own 404 and
 // 405 are plain text; everything else this API says, it says in JSON, and a
 // client should not need a second parser for a mistyped path.
+//
+// The mux tidies a path by redirecting to the tidy one, which it repeats
+// twice, escaped, in Location and in the page, and the query with it as it
+// was sent: a byte sent could come back as six, before anyone is
+// authenticated. So a long path it would tidy, or a short one with a long
+// query, is answered as no route, whether or not the tidy one would match
+// one.
 func (s *server) routed(mux *http.ServeMux) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if p := r.URL.EscapedPath(); len(p)+len(r.URL.RawQuery) > maxTidied && path.Clean(p) != strings.TrimSuffix(p, "/") {
+			s.writeError(w, r, apperr.Missing("no such route; GET /v1/tools lists what there is"))
+			return
+		}
 		h, pattern := mux.Handler(r)
 		if pattern != "" {
 			mux.ServeHTTP(w, r)
@@ -180,8 +201,8 @@ func (s *server) routed(mux *http.ServeMux) http.Handler {
 		switch {
 		case probe.status == http.StatusMethodNotAllowed:
 			w.Header().Set("Allow", probe.header.Get("Allow"))
-			writeJSON(w, http.StatusMethodNotAllowed, errorBody{Error: &apperr.Error{Code: "method_not_allowed",
-				Message: r.Method + " is not something " + r.URL.Path + " takes; it takes " + probe.header.Get("Allow")}})
+			writeJSON(w, http.StatusMethodNotAllowed, errorBody{Error: apperr.New("method_not_allowed",
+				"%s is not something %s takes; it takes %s", r.Method, r.URL.Path, probe.header.Get("Allow"))})
 		case probe.status >= 300 && probe.status < 400:
 			// The mux tidying a path: /v1//tools → /v1/tools.
 			h.ServeHTTP(w, r)
@@ -224,6 +245,13 @@ type callerKey struct{}
 
 func (s *server) callTool(t tool.Tool) func(http.ResponseWriter, *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// One key. Given twice, which of the two a retry carries would decide
+		// whether it is the same call, so neither is taken, as a key named
+		// twice in a body is not.
+		if len(r.Header.Values(HeaderIdempotencyKey)) > 1 {
+			s.writeError(w, r, apperr.Invalid("%s is given more than once", HeaderIdempotencyKey))
+			return
+		}
 		args, err := buildArgs(t, r)
 		if err != nil {
 			s.writeError(w, r, err)
@@ -339,10 +367,16 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 	// Guessing is limited twice over: by where it comes from, and by whose
 	// account it is aimed at. Each attempt costs a 64 MiB argon2 hash, so
 	// this protects the server as much as the password.
-	keys := []string{"email:" + strings.ToLower(strings.TrimSpace(in.Email))}
-	if addr, known := s.clientAddr(r); known {
-		keys = append(keys, "addr:"+addr)
+	//
+	// The address is asked first, so that an attempt it refuses touches
+	// nothing under the email: it neither spends the allowance of the account
+	// it was aimed at nor leaves a bucket behind for ten minutes.
+	var keys []string
+	addr, known := s.clientAddr(r)
+	if known {
+		keys = append(keys, addrKey(addr))
 	}
+	keys = append(keys, emailKey(in.Email))
 	for _, key := range keys {
 		if ok, wait := s.SignIns.Allow(key); !ok {
 			s.tooMany(w, r, wait)
@@ -354,8 +388,55 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, err)
 		return
 	}
+	// A sign-in that succeeds was no guess, and its address has it back. One
+	// address may be a whole lecture hall (an IPv4 address behind a NAT, or
+	// a campus LAN's /64), and the students in it signing in must not use up
+	// what it is allowed and lock out the next one with the right password.
+	// It is taken first all the same, so that no more attempts from one
+	// address are hashed at once than it is allowed. The account keeps it
+	// spent: nobody signs in to one account that often.
+	if known {
+		s.SignIns.Refund(addrKey(addr))
+	}
 	http.SetCookie(w, s.sessionCookie(sess.Token, sess.ExpiresAt))
 	writeJSON(w, http.StatusOK, loginOut{ActorID: sess.ActorID.String(), ExpiresAt: sess.ExpiresAt})
+}
+
+// addrKey is the sign-in limit's key for an address. An IPv6 address is
+// keyed by its /64, the least one network is given: whoever holds it may
+// send from any address in it, and keyed alone, each would be a fresh
+// bucket. A /64 may as well be a LAN of many people, as an IPv4 address
+// behind a NAT may be; they share only their guesses (see login). The zone
+// a link-local peer comes with names our interface, not the peer, and is
+// no part of the key. An IPv4 address written as IPv6 (::ffff:203.0.113.7),
+// or shown to an IPv6-only server through NAT64 (64:ff9b::203.0.113.7), is
+// that IPv4 address.
+func addrKey(addr string) string {
+	ip, err := netip.ParseAddr(addr)
+	if err != nil {
+		return "addr:" + addr
+	}
+	ip = ip.WithZone("").Unmap()
+	if nat64.Contains(ip) {
+		a := ip.As16()
+		ip = netip.AddrFrom4([4]byte(a[12:]))
+	}
+	if ip.Is4() {
+		return "addr:" + ip.String()
+	}
+	return "addr:" + netip.PrefixFrom(ip, 64).Masked().String()
+}
+
+// nat64 is the well-known prefix (RFC 6052) under which NAT64 and SIIT show
+// an IPv4 client to an IPv6-only server, with its address in the last 32
+// bits. Keyed by its /64, every IPv4 client would share one bucket.
+var nat64 = netip.MustParsePrefix("64:ff9b::/96")
+
+// emailKey is the sign-in limit's key for an email: one key for an account
+// however its email is typed, and a small one however long the body made it.
+func emailKey(email string) string {
+	sum := sha256.Sum256([]byte(strings.ToLower(strings.TrimSpace(email))))
+	return "email:" + hex.EncodeToString(sum[:])
 }
 
 func (s *server) logout(w http.ResponseWriter, r *http.Request) {
@@ -482,7 +563,7 @@ func (s *server) writeError(w http.ResponseWriter, r *http.Request, err error) {
 	}
 	e, ok := apperr.As(err)
 	if !ok {
-		s.Log.Error("internal error", "method", r.Method, "path", r.URL.Path, "err", err)
+		s.Log.Error("internal error", "method", r.Method, "path", safePath(r.URL.Path), "err", err)
 		e = &apperr.Error{Code: "internal", Message: "something went wrong on our side; the call can be retried with the same idempotency key"}
 	}
 	if e.Code == apperr.Unauthenticated {

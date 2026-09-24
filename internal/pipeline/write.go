@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -24,7 +26,10 @@ func (p *Pipeline) invokeWrite(ctx context.Context, caller Caller, t tool.Tool, 
 	switch {
 	case key == "":
 		return Outcome{}, apperr.Invalid("%s changes state, so it needs an idempotency key", t.Name)
-	case len(key) > MaxIdempotencyKeyLen:
+	case !utf8.ValidString(key) || strings.ContainsRune(key, 0):
+		// The database cannot hold it, and would say so as a fault of ours.
+		return Outcome{}, apperr.Invalid("the idempotency key must be UTF-8 text without U+0000")
+	case utf8.RuneCountInString(key) > MaxIdempotencyKeyLen:
 		return Outcome{}, apperr.Invalid("the idempotency key is longer than %d characters", MaxIdempotencyKeyLen)
 	}
 	canonical, hash, err := p.payload(t, rawArgs)
@@ -51,8 +56,11 @@ func (p *Pipeline) write(ctx context.Context, tx pgx.Tx, caller Caller, t tool.T
 	q := dbq.New(tx)
 	now := p.now()
 
-	// Seen before? This is only the fast path; the insert below is what
-	// actually settles a race.
+	if err := q.LockIdempotencyKey(ctx, dbq.LockIdempotencyKeyParams{ActorID: caller.ActorID, IdempotencyKey: key}); err != nil {
+		return Outcome{}, fmt.Errorf("idempotency key lock: %w", err)
+	}
+	// Seen before? A call with this key that is still in flight has been
+	// waited for just above; the insert below still settles any other race.
 	existing, err := q.GetActionByKey(ctx, dbq.GetActionByKeyParams{ActorID: caller.ActorID, IdempotencyKey: key})
 	if err == nil {
 		return replay(existing, hash)
@@ -82,7 +90,7 @@ func (p *Pipeline) write(ctx context.Context, tx pgx.Tx, caller Caller, t tool.T
 	case !level.Allowed():
 		failure = denial(a.decision.Reason)
 	case t.Validate != nil:
-		if err := t.Validate(ctx, q, a.decision.Member, in); err != nil {
+		if err := validate(ctx, tx, t, a.decision.Member, in); err != nil {
 			e, ok := isCallerFault(err)
 			if !ok {
 				return Outcome{}, err
@@ -98,7 +106,7 @@ func (p *Pipeline) write(ctx context.Context, tx pgx.Tx, caller Caller, t tool.T
 	// the stored payload; the hash stays that of the call as it was made,
 	// which is what a retry of it presents.
 	if status == domain.StatusProposed && t.Pin != nil {
-		pinned, err := t.Pin(ctx, q, in)
+		pinned, err := t.Pin(ctx, q, now, in)
 		if err != nil {
 			e, ok := isCallerFault(err)
 			if !ok {

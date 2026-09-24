@@ -33,16 +33,57 @@ func TestClientAddr(t *testing.T) {
 		{"10.0.0.9:80", "", "", false},
 		{"10.0.0.9:80", "not-an-address", "", false},
 		{"[::1]:80", "2001:db8::7", "2001:db8::7", true},
+		// A proxy that appends a line of its own after the client's, as
+		// HAProxy does: the header is every line, and its hop is the last.
+		{"10.0.0.9:80", "6.6.6.6\n198.51.100.7", "198.51.100.7", true},
+		{"10.0.0.9:80", "6.6.6.6, 1.2.3.4\n198.51.100.7, 10.0.0.2", "198.51.100.7", true},
 	} {
 		r := httptest.NewRequest(http.MethodGet, "/", nil)
 		r.RemoteAddr = tc.remote
 		if tc.forwarded != "" {
-			r.Header.Set("X-Forwarded-For", tc.forwarded)
+			for _, line := range strings.Split(tc.forwarded, "\n") {
+				r.Header.Add("X-Forwarded-For", line)
+			}
 		}
 		got, known := s.clientAddr(r)
 		if got != tc.want || known != tc.known {
 			t.Errorf("from %s via %q: %q, %v; want %q, %v", tc.remote, tc.forwarded, got, known, tc.want, tc.known)
 		}
+	}
+}
+
+// The sign-in limit keys an IPv6 address by its /64, whatever zone it came
+// with, and an IPv4 address as itself, however it reached us: written as
+// IPv6, or through NAT64.
+func TestAnAddressIsKeyedAsTheNetworkItComesFrom(t *testing.T) {
+	for addr, want := range map[string]string{
+		"203.0.113.7":                      "addr:203.0.113.7",
+		"::ffff:203.0.113.7":               "addr:203.0.113.7",
+		"64:ff9b::cb00:7107":               "addr:203.0.113.7",
+		"64:ff9b::c633:6401":               "addr:198.51.100.1",
+		"2001:db8:1:2::1":                  "addr:2001:db8:1:2::/64",
+		"2001:db8:1:2:ffff:ffff:ffff:ffff": "addr:2001:db8:1:2::/64",
+		"fe80::1%eth0":                     "addr:fe80::/64",
+		"fe80::2%eth0":                     "addr:fe80::/64",
+		"not an address":                   "addr:not an address",
+	} {
+		if got := addrKey(addr); got != want {
+			t.Errorf("%s: %s, want %s", addr, got, want)
+		}
+	}
+}
+
+// The sign-in limit keys an email by what it names, in a few dozen bytes
+// however long it came.
+func TestEmailKey(t *testing.T) {
+	if emailKey(" Sato@Example.EDU ") != emailKey("sato@example.edu") {
+		t.Error("one account, typed two ways, has two keys")
+	}
+	if emailKey("sato@example.edu") == emailKey("yuki@example.edu") {
+		t.Error("two accounts share a key")
+	}
+	if k := emailKey(strings.Repeat("a", 1<<20) + "@example.edu"); len(k) > 80 {
+		t.Errorf("a megabyte of email is a %d-byte key", len(k))
 	}
 }
 

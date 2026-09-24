@@ -121,7 +121,19 @@ Configuration is environment variables only; `bin/aishiterud help` lists them.
 Files are kept under `var/blobs` by default (`BLOB_STORE=fs`). For more than
 one instance, or for production, use `BLOB_STORE=s3` with the `S3_*` settings
 and a `SIGNING_KEY` shared by every instance. An upload that is not attached
-to a document within `PROPOSAL_TTL` plus two days is removed.
+to a document within `PROPOSAL_TTL` plus two days is removed about an hour
+after that, and can no longer be attached: the sweep goes through the store
+once an hour and removes up to 200 such uploads every `JOBS_INTERVAL`, however
+many attached files it passes on the way. So that no proposal outlives its
+files, a call that would attach an upload by way of a proposal is refused
+once the upload is two days old. With `PROPOSAL_TTL=0` proposals wait for
+ever, and uploads are neither removed nor refused for their age. The server
+keeps its files under `courses/` (with S3, `attached/courses/` as well) and
+leaves anything else in the directory or bucket alone, uploads under a course
+its database does not have included. Still, two deployments must not share a
+directory or bucket: a staging copy whose database was cloned from production
+has production's courses, and each would take the files the other has attached
+since the copy for orphans, and remove them.
 `serve` never migrates on its own. It refuses to start against a schema older
 than the binary (run `aishiterud migrate up` first), and `/healthz` reports
 503 if the schema falls behind or a migration is left half-done.
@@ -152,7 +164,8 @@ registry's with the dot turned to an underscore (`grade_submit`). Every tool
 that changes something takes an `idempotency_key` argument. A result whose
 status is `proposed` is not an error: the action waits for a person, and the
 agent learns the decision by polling `event_list`. The server's MCP
-instructions tell a connecting model all of this.
+instructions tell a connecting model all of this. One HTTP request carries
+one call: JSON-RPC batches are refused, since the rate limit counts requests.
 
 To look around by hand: `npx @modelcontextprotocol/inspector`, transport
 "Streamable HTTP", URL `http://localhost:8080/mcp`, and the bearer token.
@@ -180,7 +193,10 @@ Name the proxy's address range in `TRUSTED_PROXIES` (CIDRs), or every
 request looks like it comes from the proxy and the per-address limit on
 sign-in attempts becomes one bucket for the whole installation; with the
 proxy named, the client is the one it forwards in `X-Forwarded-For`, and that
-header is ignored from anywhere else.
+header is ignored from anywhere else. A proxy on the same machine is
+`127.0.0.1/32` (or `::1/128`). Until it is named, `/mcp` refuses what it
+forwards: a request over loopback for a public host name is also what a page
+reaching the server by DNS rebinding sends.
 
 ## CI and releases
 

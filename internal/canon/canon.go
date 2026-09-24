@@ -36,11 +36,78 @@ import (
 const Rule = "ais-canon-1"
 
 // Numbers beyond these bounds are refused rather than expanded: 1e999999999
-// is a short string and a very long decimal.
+// is a short string and a very long decimal. The digits are counted as
+// written and again as expanded, so that what is accepted once is accepted
+// again: a proposal's payload is canonicalized a second time when defaults
+// are pinned into it.
 const (
 	maxExponent = 400
 	maxDigits   = 400
 )
+
+// Check runs over raw, as written, before anything parses it into Go values:
+// every number literal is held to the bounds on numbers, and no object may
+// name a key twice. Parsing a literal into a decimal is quadratic in its
+// digits, and a 1 MiB literal would otherwise cost seconds of CPU before the
+// bound was looked at. A repeated key is refused because the parses that
+// follow disagree about it: decoding into a map keeps only the last value,
+// which is all the schema and this check would see, while decoding into a
+// struct parses every one of them. Check reads token by token, so it is
+// linear in the size of raw and sees every value, repeated or not. Malformed
+// JSON is left for the parse that follows to report.
+func Check(raw []byte) error {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	// One entry per open object or array: the keys an object has named so
+	// far (nil for an array), and whether the next token is a key.
+	type open struct {
+		keys    map[string]bool
+		wantKey bool
+	}
+	var stack []*open
+	valueDone := func() {
+		if n := len(stack); n > 0 && stack[n-1].keys != nil {
+			stack[n-1].wantKey = true
+		}
+	}
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			return nil // the end, or malformed: either way, not ours to report
+		}
+		if n := len(stack); n > 0 && stack[n-1].wantKey {
+			if tok == json.Delim('}') {
+				stack = stack[:n-1]
+				valueDone()
+				continue
+			}
+			key, _ := tok.(string)
+			if stack[n-1].keys[key] {
+				return fmt.Errorf("%q is given twice in one object", clip(key))
+			}
+			stack[n-1].keys[key], stack[n-1].wantKey = true, false
+			continue
+		}
+		switch x := tok.(type) {
+		case json.Delim:
+			switch x {
+			case '{':
+				stack = append(stack, &open{keys: map[string]bool{}, wantKey: true})
+			case '[':
+				stack = append(stack, &open{})
+			case ']':
+				stack = stack[:len(stack)-1]
+				valueDone()
+			}
+			continue
+		case json.Number:
+			if _, err := normalizeNumber(string(x)); err != nil {
+				return err
+			}
+		}
+		valueDone()
+	}
+}
 
 // Canonicalize returns the canonical form of raw with the named top-level
 // fields removed.
@@ -180,14 +247,14 @@ func normalizeNumber(lit string) (string, error) {
 	if i := strings.IndexAny(s, "eE"); i >= 0 {
 		e, err := strconv.Atoi(s[i+1:])
 		if err != nil || e > maxExponent || e < -maxExponent {
-			return "", fmt.Errorf("number %q is out of range", lit)
+			return "", fmt.Errorf("number %q is out of range", clip(lit))
 		}
 		exp, s = e, s[:i]
 	}
 	intPart, fracPart, _ := strings.Cut(s, ".")
 	digits := intPart + fracPart
 	if len(digits) > maxDigits {
-		return "", fmt.Errorf("number %q has too many digits", lit)
+		return "", fmt.Errorf("number %q has too many digits", clip(lit))
 	}
 	// value = digits × 10^-scale
 	scale := len(fracPart) - exp
@@ -210,8 +277,21 @@ func normalizeNumber(lit string) (string, error) {
 	default:
 		out = digits[:len(digits)-scale] + "." + digits[len(digits)-scale:]
 	}
+	if written := len(out) - strings.Count(out, "."); written > maxDigits {
+		return "", fmt.Errorf("number %q has too many digits written out", clip(lit))
+	}
 	if neg {
 		out = "-" + out
 	}
 	return out, nil
+}
+
+// clip shortens what an error repeats back of the caller's input: a refusal
+// should not be a way to have the server send a megabyte, or several.
+func clip(s string) string {
+	const keep = 40
+	if len(s) <= keep {
+		return s
+	}
+	return fmt.Sprintf("%s… (%d bytes)", s[:keep], len(s))
 }

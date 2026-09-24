@@ -106,10 +106,23 @@ WHERE component_id = $1 AND student_member_id = $2 AND origin = 'computed'
 
 -- Serialising what races -------------------------------------------------------
 
--- name: LockSubmissionForGrading :exec
+-- name: ShareAssignmentForGrading :one
+-- The assignment a submission's grade is out of, read again and held still
+-- until the grade is in. FOR SHARE waits for an assignment.update under way,
+-- and holds the next one off until the grade is there for its check to find.
+-- Graders of the same assignment do not wait for one another.
+SELECT id, course_id, component_id, title, instructions_document_id, rubric_document_id,
+       points_possible, due_at, published_at
+FROM assignment
+WHERE id = $1 AND course_id = $2
+FOR SHARE;
+
+-- name: LockSubmissionForGrading :one
 -- A row lock, not an UPDATE: the freeze trigger does not fire. Two drafts for
--- one submission entered at once would otherwise both be live.
-SELECT 1 FROM submission WHERE id = $1 FOR UPDATE;
+-- one submission entered at once would otherwise both be live, and late work
+-- taking a 'missing' placeholder over takes the same lock. The state is read
+-- under it, so it is the state the grade is written against.
+SELECT state FROM submission WHERE id = $1 FOR UPDATE;
 
 -- name: LockComponentGradeTarget :exec
 SELECT pg_advisory_xact_lock(hashtextextended(
@@ -164,7 +177,15 @@ WHERE student_member_id = $1 AND component_id IS NOT NULL
   AND origin = 'entered' AND posted_at IS NOT NULL AND superseded_by IS NULL;
 
 -- name: SubmissionHasGrades :one
-SELECT EXISTS (SELECT 1 FROM grade WHERE submission_id = $1);
+-- A grade entered, or proposed and not yet decided: either way, one is on its
+-- way for exactly this work.
+SELECT EXISTS (
+    SELECT 1 FROM grade WHERE submission_id = $1
+    UNION ALL
+    SELECT 1 FROM action
+    WHERE target_type = 'submission' AND target_id = $1
+      AND action_type = 'grade.submit' AND status = 'proposed'
+);
 
 -- name: ComponentHasLivePostedGrades :one
 -- Any origin: an entered grade, or a total written down when it was a parent.

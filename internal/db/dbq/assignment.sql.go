@@ -29,6 +29,57 @@ func (q *Queries) AssignmentHasLiveGrades(ctx context.Context, assignmentID uuid
 	return exists, err
 }
 
+const getAssignmentInCourseForUpdate = `-- name: GetAssignmentInCourseForUpdate :one
+SELECT id, course_id, component_id, title, instructions_document_id, rubric_document_id,
+       points_possible, due_at, published_at
+FROM assignment
+WHERE id = $1 AND course_id = $2
+FOR NO KEY UPDATE
+`
+
+type GetAssignmentInCourseForUpdateParams struct {
+	ID       uuid.UUID
+	CourseID uuid.UUID
+}
+
+type GetAssignmentInCourseForUpdateRow struct {
+	ID                     uuid.UUID
+	CourseID               uuid.UUID
+	ComponentID            *uuid.UUID
+	Title                  string
+	InstructionsDocumentID *uuid.UUID
+	RubricDocumentID       *uuid.UUID
+	PointsPossible         decimal.Decimal
+	DueAt                  *time.Time
+	PublishedAt            *time.Time
+}
+
+// GetAssignmentInCourse, locked for the rest of the transaction:
+// assignment.update and assignment.publish read the row, check it and write
+// it back, and two of them at once must take turns. NO KEY UPDATE is the lock
+// the UPDATE takes anyway, taken before the read instead of after it; it does
+// not hold up a submission being created for the assignment. It is taken
+// first: assignment.update holds it and then waits for the component-tree
+// lock, and nothing takes those two the other way round. Graders of the
+// assignment lock the row FOR SHARE (ShareAssignmentForGrading), so they queue
+// behind an update, including while the update waits for the tree lock.
+func (q *Queries) GetAssignmentInCourseForUpdate(ctx context.Context, arg GetAssignmentInCourseForUpdateParams) (GetAssignmentInCourseForUpdateRow, error) {
+	row := q.db.QueryRow(ctx, getAssignmentInCourseForUpdate, arg.ID, arg.CourseID)
+	var i GetAssignmentInCourseForUpdateRow
+	err := row.Scan(
+		&i.ID,
+		&i.CourseID,
+		&i.ComponentID,
+		&i.Title,
+		&i.InstructionsDocumentID,
+		&i.RubricDocumentID,
+		&i.PointsPossible,
+		&i.DueAt,
+		&i.PublishedAt,
+	)
+	return i, err
+}
+
 const getDocumentInCourse = `-- name: GetDocumentInCourse :one
 SELECT id, course_id, kind, title, status, published_version_id
 FROM document WHERE id = $1 AND course_id = $2

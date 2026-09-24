@@ -66,17 +66,46 @@ func TestNumbers(t *testing.T) {
 		"1": "1", "1.0": "1", "1e0": "1", "10e-1": "1", "0.10": "0.1", "1E2": "100",
 		"1.5e1": "15", "1.5e-1": "0.15", "-7": "-7", "-0.50": "-0.5", "100": "100",
 		"0.001": "0.001", "1e-3": "0.001", "123.456e2": "12345.6", "120e-1": "12",
-		"1e400": "1" + strings.Repeat("0", 400),
+		"1e399": "1" + strings.Repeat("0", 399), "-1e-399": "-0." + strings.Repeat("0", 398) + "1",
 	}
 	for in, want := range cases {
 		got, err := normalizeNumber(in)
 		if err != nil || got != want {
 			t.Errorf("normalizeNumber(%q) = %q, %v; want %q", in, got, err, want)
 		}
+		// What is accepted once is accepted again, unchanged.
+		if again, err := normalizeNumber(got); err != nil || again != got {
+			t.Errorf("normalizeNumber(%q) = %q, %v; want it unchanged", got, again, err)
+		}
 	}
-	for _, in := range []string{"1e401", "1e-401", "1e999999999", strings.Repeat("9", 401)} {
+	// 1e400 and 1e-400 are within the bounds as written, but not written out.
+	for _, in := range []string{"1e400", "1e-400", "1e401", "1e-401", "1e999999999", strings.Repeat("9", 401)} {
 		if got, err := normalizeNumber(in); err == nil {
 			t.Errorf("normalizeNumber(%q) = %q; want an error", in, got)
+		}
+	}
+}
+
+// Check finds a number wherever it is, and refuses a long one without parsing
+// it into anything. A repeated key is refused, wherever it is and whatever
+// follows it: the last value is all a map keeps, and a struct parses them all.
+func TestCheck(t *testing.T) {
+	long := "0." + strings.Repeat("7", 1<<20)
+	for raw, ok := range map[string]bool{
+		`{"a": [1, {"b": 2.5}], "c": "1e999999999", "d": {}, "e": [], "f": [{}, []]}`:              true, // a string is not a number
+		`{"a": [1, {"b": 1e999999999}]}`:                                                           false,
+		`{"score": ` + long + `}`:                                                                  false,
+		`{"score": ` + long + `, "score": 1}`:                                                      false,
+		`{"score": "` + long + `", "score": 1}`:                                                    false,
+		`{"b": [{"points": 1, "points": 2}]}`:                                                      false,
+		`{"` + strings.Repeat("\x7f", 1<<16) + `": 1, "` + strings.Repeat("\x7f", 1<<16) + `": 2}`: false,
+		`{"a": {"x": 1}, "b": {"x": 1}, "x": [{"x": 1}, {"x": 2}]}`:                                true, // the same key in different objects
+		`{`: true, // left for the parse that follows
+	} {
+		if err := Check([]byte(raw)); (err == nil) != ok {
+			t.Errorf("Check(%.60s…) = %.80v, want ok=%v", raw, err, ok)
+		} else if err != nil && len(err.Error()) > 500 {
+			t.Errorf("Check(%.60s…) repeats %d bytes of the input back", raw, len(err.Error()))
 		}
 	}
 }

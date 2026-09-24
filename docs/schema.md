@@ -191,8 +191,11 @@ a time, so the three are measured together: any change that widens a seat — a 
 scope opened or a list added to, an expiry extended or cleared, a paused seat resumed — is a
 grant of the whole of what the seat will then hold, and the whole of it must be within the
 granter's own: no level above the granter's on any column, no reach beyond a list-scoped
-granter's own list, no life past the granter's own `expires_at`. Narrowing is always allowed,
-whatever the granter holds. Nobody manages their own seat, and a seat whose `expires_at` has
+granter's own list, no life past the granter's own `expires_at`. A student's seat reaches that
+student, as any seat reaches whoever is on its list, so a list-scoped granter raises nothing on
+a seat that reaches a student outside the list, and seats no new student whose list is
+themselves: nobody can have listed them yet. Narrowing is always allowed, whatever the granter
+holds. Nobody manages their own seat, and a seat whose `expires_at` has
 passed is as good as removed whether or not the sweep has got to it: it is not revived, and
 seating the actor again is a fresh row.
 
@@ -231,7 +234,9 @@ posted grades):
   incomplete. `treat_ungraded_as_zero` counts it as zero instead, for final grades.
 - A score is a score out of the points possible when it was given: once any grade has been
   entered for an assignment or a directly graded component — a draft as much as a posted one —
-  its `points_possible` and its place in the tree no longer change.
+  its `points_possible` and its place in the tree no longer change. A proposed grade carries
+  the points possible it was proposed out of, and is refused on approval if the work has been
+  rescaled while it waited.
 - Final is final. The policy a snapshot was worked out under travels with it (`breakdown`
   carries `ungraded_as_zero`), and once a student's totals have been written with ungraded
   work counted as zero, every later post or regrade beneath them keeps counting it so.
@@ -275,7 +280,8 @@ instructors read the latest. A half-edited lecture is invisible until the pointe
 `perm_document_read` / `perm_document_write`; a rubric is read with `perm_rubric_read`; a
 submitted file follows its submission (`perm_submission_read` / `_write`, scoped to its student
 and assignment); a feedback file follows its grade (`perm_grade_read`, scoped, and invisible
-to non-graders until the grade is posted; written with `perm_grade_submit`). Unpublished
+to non-graders until the grade is posted and again once the file is archived, which is how
+posted feedback is withdrawn; written with `perm_grade_submit`). Unpublished
 versions and the version list need `perm_document_read_draft`. One exception, for the reason
 versions are pinned at all: a member may always read the exact version that a submission
 within their scope was handed in under, even after the instructions have moved on.
@@ -288,7 +294,11 @@ its own disk — and hands the token to the tool that attaches the file (`docume
 that this member of this course was given this storage key for this purpose; there is no
 table of pending uploads. Its expiry limits the upload, not the attaching: a proposal carrying
 a feedback file may be approved days later, and `unique(storage_key)` is what stops a file
-being attached twice. Reading returns a short-lived download URL the same way. The storage
+being attached twice. What limits the attaching is the sweep, which removes an upload that
+nothing has attached once it is `PROPOSAL_TTL` plus two days old; and a call that would attach
+one by way of a proposal is refused once the upload is two days old, so that the proposal is
+decided while its files are there. With `PROPOSAL_TTL=0` proposals wait for ever, and neither
+is done. Reading returns a short-lived download URL the same way. The storage
 key is made by the server and is unguessable; nothing the uploader says goes into it.
 
 Once a submission is handed in, its files are frozen with it. The trigger guards the
@@ -318,7 +328,11 @@ the submitting member belong to the same course" a database fact. That the membe
 
 **Submissions freeze on submit.** Once `submitted` or `late`, a trigger rejects deletion and
 every change except correcting lateness. Resubmitting is a new `attempt`. The work a grade was
-given for never changes underneath it.
+given for never changes underneath it. A hand-in that waits for approval counts from when it
+was asked for: `submitted_at`, lateness and the pinned instructions are as of then. It hands in
+the draft as it was then, and is refused on approval if the draft has changed in the meantime,
+even by an edit that was waiting for approval ahead of it: a hand-in is to be proposed once any
+change to its draft that waits for approval has been decided.
 
 ### 2.6 Activity
 
@@ -360,7 +374,14 @@ any secret fields removed; a secret (a password) still counts in the hash, throu
 digest under `SIGNING_KEY`, so that a key reused with a different secret is caught too while
 the hash gives nothing away to whoever reads the table. For a proposal, `payload` also carries
 the defaults that had to be fixed when it was made rather than when it is approved — the rubric
-version a grade is against — while the hash stays that of the call as the caller made it.
+version a grade is against, the points possible its score is out of, the draft a hand-in is of
+and the instructions it is handed in under, the version that "publish the latest" means, the
+drafts that "post this assignment" means — while the hash stays that of the call as the caller
+made it. A version or a draft that arrives while a proposal waits has been in front of nobody
+who asked for it, and approving the proposal does not release it. A draft that a proposal to
+post grades names, by id or as one that was waiting for the assignment, and that is posted by
+hand meanwhile is out already, as proposed, and the approval posts the rest, failing if there
+are none; one replaced meanwhile fails the approval.
 `result` holds what the call returned (secrets removed likewise), or `{"error": …}` for a
 failed, denied or cancelled action and `{"decision": …}` for a rejected one; which of those it
 is follows from `status`, never from the shape of `result`.
@@ -386,7 +407,8 @@ Nobody is authorized because nobody is calling. None of it is what makes the sys
 proposal's age itself — it makes those facts visible, and keeps the queues free of entries
 nobody could approve. When a due date passes, every current student with no submission row
 gets one in state `missing`, so that the gap is something a grader can see and grade; late
-work takes that row over.
+work takes that row over, unless a grade has been entered or proposed for it: a zero for
+handing in nothing is a grade of that nothing, and the late work is then a new attempt.
 
 **`event` is something that happened, written after it did**, in the same transaction as the
 state change. Not every event has an action behind it (a due date passing); one action may
@@ -411,7 +433,10 @@ event is written and never change. Payloads carry ids and small facts only — n
 feedback text; a reader fetches content through the read tools, which authorize it.
 
 Nobody approves or reviews their own action. The database cannot go further and require the
-decider to be human, because nothing reads `actor.kind`.
+decider to be human, because nothing reads `actor.kind`. Nor can it see past one row: a decision
+is an action like any other, so it may itself wait for a decision or be under review — a triage
+agent whose approvals a human confirms. Confirming it carries out what it decided, so nobody
+confirms or reviews a decision about their own action either, at any remove.
 
 ### 2.7 Grades
 
@@ -466,7 +491,9 @@ authorize(actor, course, action_type, target) → autonomy_level
 Step 5 has one more case. A target that belongs to a student but to no single assignment — a
 grade on a component, a course total, a whole gradebook — is within scope only for
 `assignment_scope = 'all'`. Otherwise "names no assignment" would mean "skips the check", and
-a grader listed for HW3 alone could read the class's midterm.
+a grader listed for HW3 alone could read the class's midterm. Posting or regrading with
+`treat_ungraded_as_zero` is such a target too, whatever the grades in it: it decides how every
+other assignment counts in the course total, for good.
 
 Steps 1–3 run before the target is looked up, and the lookup happens only for a caller who
 passed them. A non-member probing ids gets the same recorded denial whether or not the id
@@ -513,6 +540,9 @@ check `actor.platform_role` instead. That is the only place it is read.
   a different hash is refused.
 - Re-authorizing the proposer when a proposal is approved, and cancelling proposals past
   their TTL.
+- Nobody decides or reviews their own action at one remove (§2.6): a decision or review that is
+  itself proposed or under review is not confirmed or reviewed by whoever's action it is about.
+  The CHECKs compare a row with its own decider only.
 - Filling `event.student_member_id` and `event.assignment_id` correctly, and filtering the
   feed by them.
 - The submitting member has `role = 'student'`; `member_*_scope` rows name members and
@@ -520,9 +550,27 @@ check `actor.platform_role` instead. That is the only place it is read.
   are documents of the same course with the right `kind`; `document_version.author_member_id`
   is a member of the document's course (it is always the calling member, and the call was
   authorized in that course).
+- A published assignment's instructions have a published version, for students to read and for
+  each submission to pin (§2.4), however publishing and a change of instructions interleave.
 - Grade computation, and writing a `computed` snapshot only on post.
+- Once a grade has been entered for an assignment or a directly graded component, a draft as
+  much as a posted one, its `points_possible` and its place in the tree stay as they are
+  (§2.3), even when the grade and the change come at the same moment; a proposed grade is
+  carried out only against the points possible it was proposed out of.
+- A draft is as old as the call that made it (§2.3), a draft written by an approved proposal
+  included: an approval replaces only what came before the proposal.
+- A hand-in approved later counts from when it was asked for, and only if the draft still
+  holds what was asked to be handed in (§2.5).
 - The component tree is acyclic beyond the self-loop the CHECK blocks.
 - Cancelling pending proposals when a member is removed or expires.
+- Nobody hands out more than they hold (§2.2): any change that widens a seat is measured as
+  the whole of what it will then hold, a student's seat reaching the student included.
+- A grade lands on the work it was given for: the submission's state is read under its lock, a
+  proposal records whether it was given for a `missing` row, and late work takes a `missing`
+  row over only while no grade is entered or proposed for it.
+- A write takes its caller's seat before anything else and holds it to the end: removing or
+  changing a seat waits for the member's calls in flight, or they wait for it and are refused,
+  so nothing is proposed from a seat that is being removed.
 - `actor.kind` and `course_member.role` are never read by authorization.
 
 ## 5. Worked example: an agent grades an essay

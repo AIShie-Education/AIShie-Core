@@ -373,6 +373,25 @@ func (q *Queries) ListProposedActions(ctx context.Context, arg ListProposedActio
 	return items, nil
 }
 
+const lockIdempotencyKey = `-- name: LockIdempotencyKey :exec
+SELECT pg_advisory_xact_lock(hashtextextended('action-key:' || $1::uuid::text || ':' || $2::text, 0))
+`
+
+type LockIdempotencyKeyParams struct {
+	ActorID        uuid.UUID
+	IdempotencyKey string
+}
+
+// Calls with one key take turns from the start, before anything else is
+// locked. A retry of a call still in flight waits here holding nothing, and
+// then finds the first call's row; without this it would wait for that row
+// at InsertAction, holding its caller's seat, which the first call may yet
+// need to lock FOR UPDATE.
+func (q *Queries) LockIdempotencyKey(ctx context.Context, arg LockIdempotencyKeyParams) error {
+	_, err := q.db.Exec(ctx, lockIdempotencyKey, arg.ActorID, arg.IdempotencyKey)
+	return err
+}
+
 const markActionExecuted = `-- name: MarkActionExecuted :exec
 UPDATE action
 SET status = 'executed', executed_at = $2, review_state = $3, result = $4

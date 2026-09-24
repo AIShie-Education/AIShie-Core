@@ -58,7 +58,8 @@ Environment:
   PROPOSAL_TTL      default 336h (14 days); 0 disables expiry
   RATE_LIMIT_PER_MINUTE        default 600 calls per actor per instance; 0 for no limit
   RATE_LIMIT_BURST             default 100
-  SIGN_IN_ATTEMPTS_PER_MINUTE  default 10, per address and per email
+  SIGN_IN_ATTEMPTS_PER_MINUTE  default 10, per address (an IPv6 /64 counts as one) and per email;
+                               a sign-in that succeeds is not counted against its address
   JOBS              default true; background sweeps (only one instance sweeps at a time)
   JOBS_INTERVAL     default 1m
   SESSION_TTL       default 12h

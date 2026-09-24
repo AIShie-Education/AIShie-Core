@@ -24,6 +24,7 @@ import (
 
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/apperr"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/authz"
+	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/canon"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/db/dbq"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/domain"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/events"
@@ -108,10 +109,15 @@ type ExecCtx struct {
 	// Now is when this is being executed. ActionCreatedAt is when the call
 	// was made: the same moment for a direct call, and the moment of the
 	// proposal for an approval, which may be days later. A tool that must
-	// not overwrite what was done in between compares against it, and can
-	// tell an approval from a direct call by its being earlier than Now.
+	// not overwrite what was done in between compares against it.
 	Now             time.Time
 	ActionCreatedAt time.Time
+	// Approved says the call is carrying out a proposal that has just been
+	// approved, rather than being made directly. A tool tells the two apart
+	// by this, never by ActionCreatedAt being earlier than Now: the proposal
+	// was dated by whichever instance stored it, and that instance's clock
+	// may run ahead of this one's.
+	Approved bool
 	// Emit queues an event. It is written, with ActionID filled in, only if
 	// the action executes.
 	Emit func(events.Event)
@@ -158,8 +164,10 @@ type Spec[In, Out any] struct {
 	// Pin fills in defaults that must be fixed when a proposal is made rather
 	// than when it is approved — the rubric version a grade is against, say,
 	// which may have moved on by then. It runs only for a call that is being
-	// queued as a proposal; what it returns is the payload stored with it.
-	Pin func(ctx context.Context, q dbq.Querier, in In) (In, error)
+	// queued as a proposal, and now is when that is; what it returns is the
+	// payload stored with it. It may refuse the call instead, for what could
+	// not wait as long as a proposal may: an upload too old to outlast it.
+	Pin func(ctx context.Context, q dbq.Querier, now time.Time, in In) (In, error)
 	// Execute is set for a Write, Query for a Read.
 	Execute func(ctx context.Context, ec *ExecCtx, in In) (Out, error)
 	Query   func(ctx context.Context, rc *ReadCtx, in In) (Out, error)
@@ -186,7 +194,7 @@ type Tool struct {
 	CourseID func(in any) uuid.UUID
 	Resolve  func(ctx context.Context, q dbq.Querier, in any) (Target, error)
 	Validate func(ctx context.Context, q dbq.Querier, m *domain.Member, in any) error
-	Pin      func(ctx context.Context, q dbq.Querier, in any) (any, error)
+	Pin      func(ctx context.Context, q dbq.Querier, now time.Time, in any) (any, error)
 	Execute  func(ctx context.Context, ec *ExecCtx, in any) (any, error)
 	Query    func(ctx context.Context, rc *ReadCtx, in any) (any, error)
 }
@@ -293,6 +301,12 @@ func Define[In, Out any](s Spec[In, Out]) Tool {
 		if len(raw) == 0 {
 			raw = []byte("{}")
 		}
+		// Before anything below parses a number into a decimal, which is
+		// quadratic in its digits, or sees a repeated key differently from
+		// the parse after it.
+		if err := canon.Check(raw); err != nil {
+			return nil, apperr.Invalid("arguments: %v", err)
+		}
 		var instance any
 		if err := json.Unmarshal(raw, &instance); err != nil {
 			return nil, apperr.Invalid("arguments are not valid JSON: %v", err)
@@ -326,8 +340,8 @@ func Define[In, Out any](s Spec[In, Out]) Tool {
 		}
 	}
 	if s.Pin != nil {
-		t.Pin = func(ctx context.Context, q dbq.Querier, in any) (any, error) {
-			return s.Pin(ctx, q, in.(In))
+		t.Pin = func(ctx context.Context, q dbq.Querier, now time.Time, in any) (any, error) {
+			return s.Pin(ctx, q, now, in.(In))
 		}
 	}
 	if s.Execute != nil {
@@ -343,14 +357,25 @@ func Define[In, Out any](s Spec[In, Out]) Tool {
 	return t
 }
 
+// decimalString is what a decimal given as a string may look like. canon
+// bounds number literals and never looks inside strings, and "1e2000000000"
+// is twelve bytes that the first comparison would expand into two billion
+// digits. A score, a weight or a number of points needs nothing like canon's
+// generous bounds, and a string held well within them stays within them
+// wherever it goes next: pinned into a proposal as a number, canonicalized
+// again, decoded again on approval.
+const decimalString = `^[-+]?([0-9]{1,40}(\.[0-9]{0,40})?|\.[0-9]{1,40})([eE][-+]?[0-9]{1,2})?$`
+
 // schemaOptions teaches schema inference the types that do not look like
 // what they are: a UUID is a [16]byte and a Decimal is a struct.
 var schemaOptions = &jsonschema.ForOptions{
 	TypeSchemas: map[reflect.Type]*jsonschema.Schema{
 		reflect.TypeFor[uuid.UUID](): {Type: "string", Format: "uuid"},
 		reflect.TypeFor[decimal.Decimal](): {
-			Types:       []string{"number", "string"},
-			Description: "a decimal number; a string is accepted where exactness matters",
+			Types:   []string{"number", "string"},
+			Pattern: decimalString, // applies to the string form only
+			Description: "a decimal number; a string is accepted where exactness matters, " +
+				"with at most 40 digits either side of the point and an exponent of at most two digits",
 		},
 		reflect.TypeFor[json.RawMessage](): {},
 	},

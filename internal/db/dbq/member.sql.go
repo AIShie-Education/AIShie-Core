@@ -124,6 +124,9 @@ type GetLiveMembershipRow struct {
 	ExpiresAt *time.Time
 }
 
+// Not locked: a live seat found here is only refused, and locking it would
+// wait for its member's calls in flight, and could deadlock with them, to say
+// no. A seat past its expiry is locked by id before it is removed.
 func (q *Queries) GetLiveMembership(ctx context.Context, arg GetLiveMembershipParams) (GetLiveMembershipRow, error) {
 	row := q.db.QueryRow(ctx, getLiveMembership, arg.CourseID, arg.ActorID)
 	var i GetLiveMembershipRow
@@ -612,4 +615,16 @@ func (q *Queries) SetMemberStatus(ctx context.Context, arg SetMemberStatusParams
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+const shareSeats = `-- name: ShareSeats :exec
+SELECT 1 FROM course_member WHERE id = ANY($1::uuid[]) ORDER BY id FOR KEY SHARE
+`
+
+// KEY SHARE on the given seats, in id order: what taking them before some
+// other lock looks like, where that lock would otherwise be held while one of
+// them is waited for.
+func (q *Queries) ShareSeats(ctx context.Context, ids []uuid.UUID) error {
+	_, err := q.db.Exec(ctx, shareSeats, ids)
+	return err
 }
