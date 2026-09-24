@@ -144,8 +144,8 @@ func TestArgumentsNameEachKeyOnce(t *testing.T) {
 }
 
 // post sends body to the MCP endpoint as it is, header pairs after it, as
-// a client that is not the SDK's might.
-func post(t *testing.T, f *fixture, token, body string, headers ...string) (*http.Response, []byte) {
+// a client that is not the SDK's might, and returns the status and body.
+func post(t *testing.T, f *fixture, token, body string, headers ...string) (int, []byte) {
 	t.Helper()
 	req, _ := http.NewRequest(http.MethodPost, f.srv.URL+httpapi.MCPPath, strings.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+token)
@@ -160,7 +160,7 @@ func post(t *testing.T, f *fixture, token, body string, headers ...string) (*htt
 	}
 	defer res.Body.Close()
 	out, _ := io.ReadAll(res.Body)
-	return res, out
+	return res.StatusCode, out
 }
 
 // One request, one message. The per-actor limit counts requests, so a batch
@@ -173,15 +173,15 @@ func TestARequestCarriesOneMessage(t *testing.T) {
 		return `{"jsonrpc": "2.0", "id": ` + id + `, "method": "tools/call", "params": {"name": "grade_submit", "arguments": {"course_id": "` +
 			c.Course.String() + `", "submission_id": "` + yuki.HW3.String() + `", "score": 90, "idempotency_key": "` + key + `"}}}`
 	}
-	res, out := post(t, f, f.token(t, c.Sato), " ["+grade("1", "one")+", "+grade("2", "two")+"]")
-	if res.StatusCode != http.StatusBadRequest || !strings.Contains(string(out), "a batch is not taken") {
-		t.Fatalf("a batch: %d %s", res.StatusCode, out)
+	status, out := post(t, f, f.token(t, c.Sato), " ["+grade("1", "one")+", "+grade("2", "two")+"]")
+	if status != http.StatusBadRequest || !strings.Contains(string(out), "a batch is not taken") {
+		t.Fatalf("a batch: %d %s", status, out)
 	}
 	if n := c.Count(`SELECT count(*) FROM action`); n != 0 {
 		t.Fatalf("%d actions recorded", n)
 	}
-	if res, out := post(t, f, f.token(t, c.Sato), grade("1", "one")); res.StatusCode != http.StatusOK || !strings.Contains(string(out), `\"status\":\"executed\"`) {
-		t.Fatalf("the same call alone: %d %s", res.StatusCode, out)
+	if status, out := post(t, f, f.token(t, c.Sato), grade("1", "one")); status != http.StatusOK || !strings.Contains(string(out), `\"status\":\"executed\"`) {
+		t.Fatalf("the same call alone: %d %s", status, out)
 	}
 }
 
@@ -224,9 +224,9 @@ func TestARefusalOverMCPRepeatsLittleOfWhatItRefuses(t *testing.T) {
 		if tc.version != "" {
 			headers = []string{"Mcp-Protocol-Version", tc.version}
 		}
-		res, out := post(t, f, token, tc.body, headers...)
-		if res.StatusCode != tc.status || len(out) > 8<<10 || !strings.Contains(string(out), tc.says) {
-			t.Errorf("%s: %d, %d bytes: %.300q", tc.what, res.StatusCode, len(out), out)
+		status, out := post(t, f, token, tc.body, headers...)
+		if status != tc.status || len(out) > 8<<10 || !strings.Contains(string(out), tc.says) {
+			t.Errorf("%s: %d, %d bytes: %.300q", tc.what, status, len(out), out)
 		}
 	}
 }

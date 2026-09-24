@@ -354,6 +354,7 @@ func TestARefusalRepeatsLittleOfWhatItRefuses(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		defer res.Body.Close()
 		out, _ := io.ReadAll(res.Body)
 		return rawResponse{StatusCode: res.StatusCode, Header: res.Header}, out
 	}
