@@ -33,11 +33,17 @@ func TestClientAddr(t *testing.T) {
 		{"10.0.0.9:80", "", "", false},
 		{"10.0.0.9:80", "not-an-address", "", false},
 		{"[::1]:80", "2001:db8::7", "2001:db8::7", true},
+		// A proxy that appends a line of its own after the client's, as
+		// HAProxy does: the header is every line, and its hop is the last.
+		{"10.0.0.9:80", "6.6.6.6\n198.51.100.7", "198.51.100.7", true},
+		{"10.0.0.9:80", "6.6.6.6, 1.2.3.4\n198.51.100.7, 10.0.0.2", "198.51.100.7", true},
 	} {
 		r := httptest.NewRequest(http.MethodGet, "/", nil)
 		r.RemoteAddr = tc.remote
 		if tc.forwarded != "" {
-			r.Header.Set("X-Forwarded-For", tc.forwarded)
+			for _, line := range strings.Split(tc.forwarded, "\n") {
+				r.Header.Add("X-Forwarded-For", line)
+			}
 		}
 		got, known := s.clientAddr(r)
 		if got != tc.want || known != tc.known {

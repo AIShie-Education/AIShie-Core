@@ -32,10 +32,13 @@ func (s *server) tooMany(w http.ResponseWriter, r *http.Request, wait time.Durat
 // Reached directly, that is the peer. Reached through a proxy the operator
 // has named in TrustedProxies, it is the last hop of X-Forwarded-For that is
 // not itself a trusted proxy — the one the proxy appended, which the client
-// could not forge. From anywhere else X-Forwarded-For is ignored, since
-// anyone can send it. When a trusted proxy names no client, the address is
-// unknown, and the caller must not key a limit on it: behind a proxy that
-// would be one bucket for the whole installation.
+// could not forge. The header is read whole, every line of it in order: a
+// proxy may append its hop as a line of its own after the client's, as
+// HAProxy does, and the first line is then the client's to write. From
+// anywhere else X-Forwarded-For is ignored, since anyone can send it. When a
+// trusted proxy names no client, the address is unknown, and the caller must
+// not key a limit on it: behind a proxy that would be one bucket for the
+// whole installation.
 func (s *server) clientAddr(r *http.Request) (addr string, known bool) {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
@@ -44,7 +47,7 @@ func (s *server) clientAddr(r *http.Request) (addr string, known bool) {
 	if !s.trustedProxy(host) {
 		return host, host != ""
 	}
-	hops := strings.Split(r.Header.Get("X-Forwarded-For"), ",")
+	hops := strings.Split(strings.Join(r.Header.Values("X-Forwarded-For"), ","), ",")
 	for i := len(hops) - 1; i >= 0; i-- {
 		hop := strings.TrimSpace(hops[i])
 		if hop == "" || s.trustedProxy(hop) {
