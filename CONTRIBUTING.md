@@ -88,22 +88,42 @@ goreleaser release --snapshot --clean
 
 ### One-time settings
 
-In the repository's settings on GitHub:
+Before the first push to `main` after the CD workflows land, in GitHub:
 
-- **Environments**: `staging` and `production`. Let `staging` take `main` and
-  tags `v*`, and `production` tags `v*` only. On a private repository,
-  environments need a paid plan (Pro, Team or Enterprise), and required
-  reviewers need GitHub Enterprise; where they are available, add them to
-  `production` for a second look before a deploy runs. Deploy keeps
-  production to stable releases by itself, on any plan.
-- **Packages**: the image's package must let this repository's Actions write
-  to it (package settings, Manage Actions access). A package the workflow
-  creates starts that way.
-- **Variables**, when they apply: `ATTESTATIONS` = `true` where artifact
-  attestations are available (a public repository, or GitHub Enterprise
-  Cloud); `DEPLOY_TARGET`, once deploy.yml has a deploy step for it.
-- **Storage**: every green push to `main` leaves a `:sha-*` image, with its
-  SBOM and provenance, which counts against a private repository's package
-  storage. Nothing deletes them automatically, since deleting untagged
-  versions can break a multi-architecture image; prune old ones from the
-  package page when needed.
+- **Environments** (repository Settings → Environments): `staging` and
+  `production`. Let `staging` take branch `main` and tags `v*`, and
+  `production` tags `v*` only (Deployment branches and tags → Selected
+  branches and tags). Create them first: a run that names an environment
+  that does not exist creates it, with no rules. Required reviewers on a
+  private repository need GitHub Enterprise; where they are there, add them
+  to `production`. On GitHub Free, GitHub's docs say a private repository
+  cannot configure environments: the workflows still run, the environments
+  carry no rules, and only Deploy's own check keeps production to stable
+  releases.
+- **Packages** (organization Settings → Packages): Package Creation must allow
+  Private, and Default Package Settings should keep "Inherit access from
+  source repository". The first publish then creates the package private,
+  linked to this repository, which its workflows can write to. Do not push
+  the image by hand before that: a package pushed from outside a workflow
+  is not linked, and the workflow cannot push to it until it is given access
+  (package settings, Manage Actions access).
+- **Allowed actions** (organization Settings → Actions → General →
+  Policies): if the organization allows only selected actions, allow
+  `docker/*` and `goreleaser/*` with the rest. Pull requests' CI uses only
+  `actions/*` and `sqlc-dev/*`, so a policy that leaves the others out
+  first shows at the first publish or release.
+- **Variables and secrets**, when they apply: `ATTESTATIONS` = `true` where
+  artifact attestations are available (a public repository, or GitHub
+  Enterprise Cloud); `DEPLOY_TARGET` and the target's credentials once
+  deploy.yml has a deploy step. Put those on the environment where the plan
+  allows environment secrets and variables, else on the repository: a
+  private repository on GitHub Free sees neither the environment's nor the
+  organization's.
+- **Minutes and storage**: on GitHub Free a private repository has 2,000
+  Actions minutes a month, and runs stop when they are used up unless there
+  is a payment method. Every push to `main` runs the whole of CI and a
+  two-architecture image build. Every green push also leaves a `:sha-*`
+  image, with its SBOM and provenance; GitHub says container storage is
+  free for now. Nothing deletes old images automatically, since deleting
+  untagged versions can break a multi-architecture image; prune them from
+  the package page when needed.

@@ -210,3 +210,6 @@ jobs:
       contents: read
       packages: write
     uses: ./.github/workflows/publish.yml
+    # A called workflow sees no secret its caller does not pass, and deploy.yml
+    # is two calls down: see its header.
+    secrets: inherit

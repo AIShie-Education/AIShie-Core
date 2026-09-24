@@ -105,3 +105,4 @@ jobs:
       image: ${{ needs.image.outputs.image }}
       migrations: ${{ needs.image.outputs.migrations }}
       since: ${{ needs.image.outputs.since }}
+    secrets: inherit # the deploy target's credentials: see deploy.yml

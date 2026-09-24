@@ -214,6 +214,7 @@ jobs:
       image: ${{ needs.image.outputs.image }}
       migrations: ${{ needs.verify.outputs.migrations }}
       since: ${{ needs.verify.outputs.prev }}
+    secrets: inherit # the deploy target's credentials: see deploy.yml
 
   # A stable release goes to production only when somebody runs Deploy for it.
   production:

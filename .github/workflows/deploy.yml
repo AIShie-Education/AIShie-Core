@@ -9,9 +9,9 @@ name: Deploy
 # and nothing else, whatever the plan lets the environment enforce.
 #
 # No host is deployed to yet. Until a deploy target is configured (the
-# variable DEPLOY_TARGET, on the repository or the environment), a run records
-# the deployment in the environment and says which image is ready. A target,
-# once there is one, does this, in this order:
+# variable DEPLOY_TARGET), a run records the deployment in the environment and
+# says which image is ready. A target, once there is one, does this, in this
+# order:
 #
 #   1. `aishiterud migrate up` with the new image and the environment's
 #      DATABASE_URL. A schema a newer release already migrated is left alone,
@@ -21,7 +21,12 @@ name: Deploy
 #   3. Wait until GET /healthz answers status "ok" with the new version and
 #      commit.
 #
-# Its credentials go in the environment's secrets.
+# Its credentials go in the environment's secrets, and DEPLOY_TARGET in its
+# variables. A private repository on GitHub Free has neither, and does not
+# see the organization's: there they go in the repository's. Every workflow
+# that calls this one passes `secrets: inherit`. A called workflow sees no
+# secret its caller does not pass, and an environment's secrets have been
+# reported to come through empty without it (actions/runner#4453).
 
 on:
   workflow_call:
