@@ -855,6 +855,59 @@ func TestAHandInApprovedOnASlowerClockIsStillAnApproval(t *testing.T) {
 	}
 }
 
+// A hand-in that waits for approval is of the draft as it was when asked
+// for. Yuki, who may only propose, asks for an edit to her draft and then for
+// it to be handed in, and Sato approves them in the order they came. The edit
+// goes through; the hand-in is then refused, plainly, since the draft is no
+// longer what was asked to be handed in, and nothing is handed in. Asked for
+// again once the edit has been decided, it hands in the edited draft.
+func TestAHandInQueuedBehindAnEditIsOfTheDraftBeforeIt(t *testing.T) {
+	b := build(t)
+	work := testkit.Result[tools.SubmissionCreateOut](t, b.do(t, b.yuki, "submission.create",
+		m{"course_id": b.course, "assignment_id": b.hw3, "body": "draft v1"})).SubmissionID
+	b.do(t, b.sato, "member.update_perms", m{"course_id": b.course, "member_id": b.yukiM, "perms": m{"submission_write": "confirm_required"}})
+	ask := func(name string, args m, key string) *uuid.UUID {
+		t.Helper()
+		out := b.MustCall(b.yuki, name, args, key)
+		if out.Status != domain.StatusProposed {
+			t.Fatalf("%s: %+v", name, out)
+		}
+		return out.ActionID
+	}
+	approve := func(action *uuid.UUID) pipeline.DecideOut {
+		t.Helper()
+		return testkit.Result[pipeline.DecideOut](t, b.do(t, b.sato, "action.decide", m{"course_id": b.course, "action_id": action, "decision": "approve"}))
+	}
+	stored := func() (state, body string) {
+		t.Helper()
+		if err := b.Pool.QueryRow(t.Context(), `SELECT state, coalesce(body, '') FROM submission WHERE id = $1`, work).Scan(&state, &body); err != nil {
+			t.Fatal(err)
+		}
+		return state, body
+	}
+	handIn := m{"course_id": b.course, "submission_id": work}
+
+	edit := ask("submission.update_draft", m{"course_id": b.course, "submission_id": work, "body": "final"}, "edit")
+	asked := ask("submission.submit", handIn, "hand-in")
+	if v := approve(edit); v.Outcome != domain.StatusExecuted {
+		t.Fatalf("approving the edit: %+v", v)
+	}
+	if v := approve(asked); v.Outcome != domain.StatusFailed || v.Error == nil || v.Error.Code != apperr.FailedPrecondition ||
+		!strings.Contains(v.Error.Message, "the draft does not hold what this call says it hands in") {
+		t.Fatalf("approving the hand-in asked for before the edit: %+v", v)
+	}
+	if state, body := stored(); state != "draft" || body != "final" {
+		t.Fatalf("after the refused hand-in the submission is %s with %q, want the edited draft", state, body)
+	}
+
+	if v := approve(ask("submission.submit", handIn, "hand-in-again")); v.Outcome != domain.StatusExecuted {
+		t.Fatalf("approving the hand-in asked for after the edit: %+v", v)
+	}
+	if state, body := stored(); state != "submitted" || body != "final" {
+		t.Fatalf("the submission is %s with %q, want the edited draft handed in", state, body)
+	}
+}
+
 func TestAStudentWithAnEmptiedScopeReachesNobody(t *testing.T) {
 	b := build(t)
 	b.Exec(`DELETE FROM member_student_scope WHERE member_id = $1`, b.yukiM)

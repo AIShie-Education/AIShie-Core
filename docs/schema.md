@@ -329,8 +329,10 @@ the submitting member belong to the same course" a database fact. That the membe
 **Submissions freeze on submit.** Once `submitted` or `late`, a trigger rejects deletion and
 every change except correcting lateness. Resubmitting is a new `attempt`. The work a grade was
 given for never changes underneath it. A hand-in that waits for approval counts from when it
-was asked for: `submitted_at`, lateness and the pinned instructions are as of then, and it is
-refused on approval if the draft has changed in the meantime.
+was asked for: `submitted_at`, lateness and the pinned instructions are as of then. It hands in
+the draft as it was then, and is refused on approval if the draft has changed in the meantime,
+even by an edit that was waiting for approval ahead of it: a hand-in is to be proposed once any
+change to its draft that waits for approval has been decided.
 
 ### 2.6 Activity
 

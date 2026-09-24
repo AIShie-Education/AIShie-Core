@@ -367,7 +367,9 @@ func submissionSubmit() tool.Tool {
 		Description: "Hand a draft in. It is marked late if the due date has passed, the version of the instructions in " +
 			"force right now is recorded with it, and from this moment it never changes. A hand-in that waits for " +
 			"approval counts from when it was asked for: it is judged late or not, and recorded under the instructions " +
-			"then in force, as of that moment, and it is refused on approval if the draft has changed meanwhile.",
+			"then in force, as of that moment. It hands in the draft as it was then, and is refused on approval if the " +
+			"draft has changed meanwhile, so propose it only after any change to the draft that is waiting for approval " +
+			"has been decided.",
 		Kind: tool.Write, Gate: writeSubmissions,
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/submissions/{submission_id}/submit"},
 		Resolve: func(ctx context.Context, q dbq.Querier, in SubmissionSubmitIn) (tool.Target, error) {
