@@ -147,6 +147,33 @@ func TestFSStoreListsUnderAPrefix(t *testing.T) {
 	}
 }
 
+// The root may hold a directory the server cannot read: lost+found, at the
+// top of a volume mounted for the files. Listing the server's own prefix
+// walks only the prefix's directory and never comes to it. A walk of the
+// whole root would, and would fail there, on every sweep.
+func TestFSStoreListsPastADirectoryItCannotRead(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads a directory whatever its mode")
+	}
+	s, _ := newFS(t)
+	ctx := context.Background()
+	if _, err := s.Put(ctx, "courses/c1/a", "text/plain", strings.NewReader("x"), 100); err != nil {
+		t.Fatal(err)
+	}
+	lost := filepath.Join(s.Root(), "lost+found")
+	if err := os.Mkdir(lost, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(lost, 0o700) })
+	var keys []string
+	if err := s.List(ctx, "courses/", "", func(key string, _ time.Time) error {
+		keys = append(keys, key)
+		return nil
+	}); err != nil || !slices.Equal(keys, []string{"courses/c1/a"}) {
+		t.Fatalf("listed %q: %v", keys, err)
+	}
+}
+
 // A listing stopped part way is taken up again after the last key it gave,
 // and goes on with exactly what it had not given yet — also where the walk's
 // order is not the order of the keys as strings.
