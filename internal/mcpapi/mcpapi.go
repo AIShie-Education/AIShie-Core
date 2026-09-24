@@ -393,13 +393,13 @@ func limited(d Deps, next http.Handler) http.Handler {
 func newServer(d Deps) *mcp.Server {
 	server := mcp.NewServer(&mcp.Implementation{Name: "aishiteru-core", Title: "AIshiteru Core", Version: version.Version},
 		&mcp.ServerOptions{Instructions: instructions, Capabilities: &mcp.ServerCapabilities{
-			// What the SDK offers when not told otherwise, but for the tool
-			// list's changing: the list does not change while the server
-			// runs, and nothing is pushed from here to say so if it did.
-			// Offered, it would have a client open a listen, which
-			// screened refuses.
-			Logging: &mcp.LoggingCapabilities{},
-			Tools:   &mcp.ToolCapabilities{},
+			// Tools, and no more. Their list does not change while the
+			// server runs, and nothing is pushed from here to say so if it
+			// did: offered, a change would have a client open a listen,
+			// which screened refuses. Nor is logging, the SDK's other
+			// default, offered: nothing is logged to a client either, and
+			// the protocol has deprecated it.
+			Tools: &mcp.ToolCapabilities{},
 		}})
 	seen := map[string]string{}
 	for _, t := range d.Pipeline.Registry().Exposed() {

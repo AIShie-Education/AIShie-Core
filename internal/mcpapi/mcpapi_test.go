@@ -235,10 +235,11 @@ func (r *recorder) RoundTrip(req *http.Request) (*http.Response, error) {
 	return r.bearer.RoundTrip(req)
 }
 
-// Nothing is pushed from here, and nothing says otherwise. The tool list is
-// not said to change, so a client that would listen for that does not ask;
-// and a listen asked for all the same is answered as SEP-2575 answers a
-// method a server does not have: not found, to the id that asked.
+// Nothing is pushed from here, and nothing says otherwise. Tools are all
+// that is offered, and their list is not said to change, so a client that
+// would listen for that does not ask; a listen asked for all the same is
+// answered as SEP-2575 answers a method a server does not have: not found,
+// to the id that asked.
 func TestNothingIsOfferedThatIsNotPushed(t *testing.T) {
 	f := serve(t, 1)
 	token := f.token(t, f.c.Sato)
@@ -253,8 +254,8 @@ func TestNothingIsOfferedThatIsNotPushed(t *testing.T) {
 		t.Fatalf("connect: %v", err)
 	}
 	defer session.Close()
-	if tools := session.InitializeResult().Capabilities.Tools; tools == nil || tools.ListChanged {
-		t.Errorf("tools: %+v", tools)
+	if caps, _ := json.Marshal(session.InitializeResult().Capabilities); string(caps) != `{"tools":{}}` {
+		t.Errorf("offered: %s", caps)
 	}
 	if _, err := session.ListTools(context.Background(), nil); err != nil {
 		t.Fatal(err)
