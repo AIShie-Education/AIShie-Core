@@ -213,6 +213,7 @@ jobs:
       environment: staging
       image: ${{ needs.image.outputs.image }}
       migrations: ${{ needs.verify.outputs.migrations }}
+      since: ${{ needs.verify.outputs.prev }}
 
   # A stable release goes to production only when somebody runs Deploy for it.
   production:
@@ -231,5 +232,7 @@ jobs:
             echo
             echo "- Use workflow from: tag \`$GITHUB_REF_NAME\`"
             echo "- environment: \`production\`"
-            echo "- image: \`$IMAGE_REF\`"
+            echo "- image: \`$IMAGE:${GITHUB_REF_NAME#v}\`"
+            echo
+            echo "This run built it as \`$IMAGE_REF\`; Deploy shows the digest it resolves to before it goes on."
           } | tee -a "$GITHUB_STEP_SUMMARY"

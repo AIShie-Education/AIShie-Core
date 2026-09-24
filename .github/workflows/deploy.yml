@@ -4,7 +4,9 @@ name: Deploy
 # staging on every green push to main, and release.yml for staging on a
 # pre-release tag. Production is deployed by running it by hand, from the
 # release's tag: that run is the decision to deploy, and the migration that
-# comes with it, which README says is somebody's to make.
+# comes with it, which README says is somebody's to make. For production it
+# takes a stable release's tag (v1.2.3) and a stable release's image (:1.2.3)
+# and nothing else, whatever the plan lets the environment enforce.
 #
 # No host is deployed to yet. Until a deploy target is configured (the
 # variable DEPLOY_TARGET, on the repository or the environment), a run records
@@ -34,14 +36,21 @@ on:
         description: The migrations new since the release the image is compared with (scripts/release-notes.sh)
         type: string
         default: ""
+      since:
+        description: The tag of that release; empty when there is none
+        type: string
+        default: ""
   workflow_dispatch:
     inputs:
+      # A list of its own: the form offers only environments that exist, and
+      # a private repository on GitHub Free may have none.
       environment:
         description: Where to deploy
-        type: environment
+        type: choice
+        options: [staging, production]
         required: true
       image:
-        description: "ghcr.io/aishiteru-lms/aishiteru-core:TAG (e.g. :1.2.3 or :sha-abc1234) or @sha256:DIGEST"
+        description: "ghcr.io/aishiteru-lms/aishiteru-core:TAG or @sha256:DIGEST; production takes a release's tag, e.g. :1.2.3"
         type: string
         required: true
 
@@ -80,11 +89,21 @@ jobs:
           WANT: ${{ inputs.image }}
           ENVIRONMENT: ${{ inputs.environment }}
           MIGRATIONS: ${{ inputs.migrations }}
+          SINCE: ${{ inputs.since }}
         run: |
           case "$WANT" in
             "$IMAGE:"* | "$IMAGE@"*) ;;
             *) echo "::error::$WANT is not an image of $IMAGE"; exit 1 ;;
           esac
+          # Not a build of main, nor a pre-release, nor a deploy procedure
+          # from a branch: a rollback too is a release's image, run from a
+          # release's tag.
+          if [ "$ENVIRONMENT" = production ]; then
+            [[ $GITHUB_REF_TYPE == tag && $GITHUB_REF_NAME =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+              || { echo "::error::production is deployed from a release's tag, like v1.2.3, not from $GITHUB_REF_NAME"; exit 1; }
+            [[ ${WANT#"$IMAGE:"} =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+              || { echo "::error::production takes a release's image, like $IMAGE:1.2.3, not $WANT"; exit 1; }
+          fi
           digest=$(docker buildx imagetools inspect "$WANT" --format '{{json .Manifest}}' | jq -r .digest)
           [[ $digest == sha256:* ]] || { echo "::error::$WANT did not resolve to a digest"; exit 1; }
           image="$IMAGE@$digest"
@@ -97,15 +116,19 @@ jobs:
             echo "- asked for: \`$WANT\`"
             echo "- version: \`$version\`"
             if [ -n "$MIGRATIONS" ]; then
-              echo "- migrations new since the last release: \`${MIGRATIONS// /\`, \`}\`"
+              echo "- migrations${SINCE:+ new since $SINCE}: \`${MIGRATIONS// /\`, \`}\`"
+            elif [ -n "$SINCE" ]; then
+              echo "- migrations: none new since $SINCE"
             else
-              echo "- migrations: none new since the last release, or see the release notes"
+              echo "- migrations: see the release notes"
             fi
           } | tee -a "$GITHUB_STEP_SUMMARY"
 
   deploy:
     needs: plan
     runs-on: ubuntu-24.04
+    # A timeout stops a migration half way, as a cancellation would: once
+    # there is a deploy target, keep this above the longest migration.
     timeout-minutes: 30
     # GitHub records the deployment here, and any protection the environment
     # has (required reviewers, allowed branches and tags) applies here.

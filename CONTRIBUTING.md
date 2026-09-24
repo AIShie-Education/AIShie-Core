@@ -62,9 +62,13 @@ deployed to staging.
 A stable release goes to production when somebody runs **Deploy** for it:
 Actions → Deploy → Run workflow, use the workflow from the release's tag, and
 give the environment `production` and the image the release run's summary
-names. That run is the decision to deploy and to migrate. To roll back, run
-Deploy with the older release's image: `migrate up` leaves a schema a newer
-release migrated as it is.
+names (`ghcr.io/aishiteru-lms/aishiteru-core:1.2.3`). That run is the decision
+to deploy and to migrate. For production, Deploy takes nothing else: run from
+a branch or a pre-release's tag, or given an image that is not a stable
+release's, it stops before it deploys. To roll back, run Deploy from the
+newest release's tag, which carries the current deploy procedure, with the
+older release's image: `migrate up` leaves a schema a newer release migrated
+as it is.
 
 To try the build without publishing anything:
 
@@ -80,7 +84,8 @@ In the repository's settings on GitHub:
   tags `v*`, and `production` tags `v*` only. On a private repository,
   environments need a paid plan (Pro, Team or Enterprise), and required
   reviewers need GitHub Enterprise; where they are available, add them to
-  `production` for a second look before a deploy runs.
+  `production` for a second look before a deploy runs. Deploy keeps
+  production to stable releases by itself, on any plan.
 - **Packages**: the image's package must let this repository's Actions write
   to it (package settings, Manage Actions access). A package the workflow
   creates starts that way.
