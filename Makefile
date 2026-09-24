@@ -94,6 +94,10 @@ lint: fmt-check tidy-check ## gofmt, go mod tidy, go vet, golangci-lint
 	go vet ./...
 	golangci-lint run
 
+.PHONY: script-test
+script-test: ## the tests of scripts/
+	scripts/release-notes_test.sh
+
 .PHONY: sqlc
 sqlc: ## regenerate internal/db/dbq from the SQL
 	sqlc generate
@@ -111,7 +115,7 @@ docker: ## build the image locally; never pushes
 	docker build --build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) --build-arg DATE=$(DATE) -t aishiteru-core:dev .
 
 .PHONY: ci
-ci: lint sqlc-check db-test-sql test e2e ## everything CI runs, except docker and vuln
+ci: lint script-test sqlc-check db-test-sql test e2e ## everything CI runs, except docker, test-s3 and vuln
 
 .PHONY: dev-db
 dev-db: ## Postgres in Docker, for machines without a local server
