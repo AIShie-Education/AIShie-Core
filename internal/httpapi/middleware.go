@@ -78,6 +78,47 @@ func (s *server) trustedProxy(host string) bool {
 	return false
 }
 
+// notRebound keeps a page in a browser on this machine from reaching the
+// agents' door by DNS rebinding: a name the page's author controls, made to
+// resolve to 127.0.0.1. Such a request comes in over loopback naming that
+// name in Host. So does one from a reverse proxy on the same machine, which
+// connects over loopback and forwards the public name, and the MCP SDK's own
+// check, which cannot tell the two apart, refused every agent behind such a
+// proxy. Here a request from a trusted proxy is let through; anything else
+// that comes in over loopback must name loopback.
+//
+// A server that names loopback in TrustedProxies has said that what comes
+// over loopback is its proxy, and a rebound page gets through with it. That
+// costs little on this door: /mcp takes a bearer token and never a cookie,
+// so a rebound page has no credential to bring.
+func (s *server) notRebound(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		local, _ := r.Context().Value(http.LocalAddrContextKey).(net.Addr)
+		if local != nil && loopback(local.String()) && !loopback(r.Host) {
+			if peer, _, err := net.SplitHostPort(r.RemoteAddr); err != nil || !s.trustedProxy(peer) {
+				s.writeError(w, r, apperr.Forbid("a request for %q came in over loopback from no trusted proxy; "+
+					"a proxy on this machine must be named in TRUSTED_PROXIES", r.Host))
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// loopback reports whether a host, with or without a port, names this
+// machine's loopback interface.
+func loopback(hostport string) bool {
+	host, _, err := net.SplitHostPort(hostport)
+	if err != nil {
+		host = strings.Trim(hostport, "[]")
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
 // recovered turns a panic in a handler into a logged 500 with a JSON body,
 // rather than a dropped connection with nothing in our log. The server's own
 // recovery would log it, but the client would get no answer at all.

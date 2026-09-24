@@ -144,6 +144,42 @@ func TestABatchIsNotManyCallsForThePriceOfOne(t *testing.T) {
 	}
 }
 
+// A reverse proxy on the same machine connects over loopback and forwards the
+// public name in Host; so does a page that reaches the server by DNS
+// rebinding. Named in TRUSTED_PROXIES, the proxy gets its agents through to
+// /mcp. Nothing else that comes over loopback may name a host that is not.
+func TestMCPWorksBehindAProxyOnTheSameMachine(t *testing.T) {
+	list := func(a *api, host string) (int, string) {
+		t.Helper()
+		req, err := http.NewRequest("POST", a.srv.URL+httpapi.MCPPath, strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Host = host // the test server listens on 127.0.0.1
+		req.Header.Set("Authorization", "Bearer "+a.tokenFor(a.c.Sato))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json, text/event-stream")
+		res, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer res.Body.Close()
+		body, _ := io.ReadAll(res.Body)
+		return res.StatusCode, string(body)
+	}
+	proxied := hardenedWith(t, nil, nil, nil, func(d *httpapi.Deps) { d.TrustedProxies = []string{"127.0.0.0/8", "::1/128"} })
+	if status, body := list(proxied, "lms.example.edu"); status != 200 || !strings.Contains(body, `"tools"`) {
+		t.Fatalf("through a proxy on the same machine: %d %.300s", status, body)
+	}
+	direct := hardened(t, nil, nil, nil)
+	if status, body := list(direct, "rebound.example"); status != http.StatusForbidden || !strings.Contains(body, "TRUSTED_PROXIES") {
+		t.Fatalf("a public name over loopback, with no proxy named: %d %.300s", status, body)
+	}
+	if status, body := list(direct, "localhost:8080"); status != 200 || !strings.Contains(body, `"tools"`) {
+		t.Fatalf("localhost over loopback: %d %.300s", status, body)
+	}
+}
+
 func TestSignInAttemptsAreLimited(t *testing.T) {
 	// One a minute, so that nothing refills while the test runs: each guess
 	// costs an argon2 hash, which under the race detector is most of a second.

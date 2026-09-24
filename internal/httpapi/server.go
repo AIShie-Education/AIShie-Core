@@ -81,8 +81,8 @@ type Deps struct {
 	SignIns *ratelimit.Limiter
 
 	// MCP is the agents' door, mounted at /mcp beside the REST routes and
-	// behind the same cross-origin guard. It does its own authentication,
-	// with the same authenticator.
+	// behind the same cross-origin guard, and behind notRebound. It does its
+	// own authentication, with the same authenticator.
 	MCP http.Handler
 }
 
@@ -133,7 +133,7 @@ func NewHandler(d Deps) http.Handler {
 		}
 	}
 	if d.MCP != nil {
-		mux.Handle(MCPPath, d.MCP)
+		mux.Handle(MCPPath, s.notRebound(d.MCP))
 	}
 	if local, ok := d.Blob.(blob.Local); ok {
 		mux.HandleFunc("PUT "+blob.BlobPath+"{token}", s.blobPut(local))

@@ -181,7 +181,10 @@ Name the proxy's address range in `TRUSTED_PROXIES` (CIDRs), or every
 request looks like it comes from the proxy and the per-address limit on
 sign-in attempts becomes one bucket for the whole installation; with the
 proxy named, the client is the one it forwards in `X-Forwarded-For`, and that
-header is ignored from anywhere else.
+header is ignored from anywhere else. A proxy on the same machine is
+`127.0.0.1/32` (or `::1/128`). Until it is named, `/mcp` refuses what it
+forwards: a request over loopback for a public host name is also what a page
+reaching the server by DNS rebinding sends.
 
 ## CI and releases
 
