@@ -4,11 +4,14 @@
 
 ```
 make ci     # what CI runs: lint, generated-code drift, the psql suite, Go tests, the curl end-to-end
+make minio  # builds MinIO from source into bin/minio, for the S3 tests
+make test-s3
 ```
 
 Work on a branch and open a pull request against `main`. `main` is protected:
-it takes changes by pull request only, with `lint`, `generate`, `sql`, `test`,
-`e2e` and `build` green on both PostgreSQL 13 and 18.
+it takes changes by pull request only, with `lint`, `generated code is
+current`, `sql` and `test` (each on PostgreSQL 13 and 18), `end to end (curl)`
+and `build` green. CI also runs `test (s3 against minio)` and `vuln`.
 
 ## Where things go
 

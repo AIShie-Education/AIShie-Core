@@ -47,10 +47,6 @@ sees the grade.
   credentials in it, and a refusal to start against a schema older than the
   binary.
 
-Not yet exercised anywhere but a developer's machine: the GitHub Actions
-workflows, PostgreSQL 13, the S3 store against a real object store, and the
-Docker image. The first pull request is what runs them.
-
 ## Layout
 
 ```
@@ -186,8 +182,9 @@ header is ignored from anywhere else.
 
 Every pull request and every push to `main` runs [ci.yml](.github/workflows/ci.yml):
 lint, generated-code drift, the SQL suite and the Go tests on PostgreSQL 13 and
-18, a build (including the Docker image, never pushed) and `govulncheck`.
-Each job is a `make` target, so a green `make ci` locally means the same thing.
+18, the S3 store against MinIO, the curl end-to-end, a build (including the
+Docker image, never pushed) and `govulncheck`. Each job is a `make` target, so
+a green `make ci` locally means the same thing.
 
 Nothing is deployed automatically. Release artifacts are built only from
 version tags (`v*.*.*`): [release.yml](.github/workflows/release.yml) checks

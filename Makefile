@@ -53,9 +53,28 @@ db-test-sql: ## psql suite: migrations up, seed, constraint tests, down, up agai
 	for f in $$ups; do echo "up    $$f"; $(PSQL) -d $(SQLTEST_DB) -f $$f; done
 
 .PHONY: test-s3
-test-s3: ## the S3 store against a real S3-compatible server; needs S3_TEST_ENDPOINT and keys (see docker-compose.yml)
-	@[ -n "$$S3_TEST_ENDPOINT" ] || { echo "S3_TEST_ENDPOINT is not set; try: make dev-db && S3_TEST_ENDPOINT=localhost:9000 S3_TEST_ACCESS_KEY=minioadmin S3_TEST_SECRET_KEY=minioadmin make test-s3"; exit 1; }
+test-s3: ## the S3 store against a real S3-compatible server; needs S3_TEST_ENDPOINT and keys (make minio builds one)
+	@[ -n "$$S3_TEST_ENDPOINT" ] || { echo "S3_TEST_ENDPOINT is not set; try: make minio && (bin/minio server var/minio &) && S3_TEST_ENDPOINT=localhost:9000 S3_TEST_ACCESS_KEY=minioadmin S3_TEST_SECRET_KEY=minioadmin make test-s3"; exit 1; }
 	go test -count=1 -run TestS3Store -v ./internal/blob/
+
+# MinIO stands in for S3 in `make test-s3`. It no longer publishes an image
+# anyone can pull (Docker Hub dropped minio/minio; quay.io wants a login) or
+# binaries (dl.min.io answers 410 Gone), so it is built from source, at the
+# commit pinned here, through the Go module proxy. That takes a few minutes,
+# once; CI caches the binary.
+MINIO_VERSION ?= v0.0.0-20260212201848-7aac2a2c5b7c
+
+.PHONY: minio
+minio: ## build MinIO into bin/minio, for make test-s3 (once per MINIO_VERSION)
+	@if [ "$$(go version -m bin/minio 2>/dev/null | awk '$$1 == "mod" { print $$3 }')" = "$(MINIO_VERSION)" ]; then \
+		echo "bin/minio is $(MINIO_VERSION)"; \
+	else \
+		GOTOOLCHAIN=local CGO_ENABLED=0 GOBIN=$(CURDIR)/bin go install github.com/minio/minio@$(MINIO_VERSION); \
+	fi
+
+.PHONY: minio-version
+minio-version: ## the MinIO commit make minio builds
+	@echo $(MINIO_VERSION)
 
 .PHONY: e2e
 e2e: build ## the real binary and curl: bootstrap, then docs/schema.md §5 over the REST API
@@ -95,7 +114,7 @@ docker: ## build the image locally; never pushes
 ci: lint sqlc-check db-test-sql test e2e ## everything CI runs, except docker and vuln
 
 .PHONY: dev-db
-dev-db: ## Postgres and MinIO in Docker, for machines without a local server
+dev-db: ## Postgres in Docker, for machines without a local server
 	docker compose up -d
 
 .PHONY: clean
