@@ -77,9 +77,11 @@ the binary will manage it: `aishiterud migrate force N`, N being the number of
 the last migration applied by hand (after the loop above, the highest). Pick
 one way per database and stay with it.
 
-A migration that fails under `aishiterud` has applied nothing, but leaves its
-version recorded as dirty. Fix the cause, then `aishiterud migrate force N`,
-N being the last migration fully applied (0 if none), and `migrate up` again.
+A migration that fails under `aishiterud` leaves its version recorded as
+dirty. Each file applies whole or not at all, but the flag is also left when
+a file committed and its version was never recorded, so look at the database
+to see which. Fix the cause, then `aishiterud migrate force N`, N being the
+last migration fully applied (0 if none), and `migrate up` again.
 
 File names follow `NNNN_name.up.sql` / `NNNN_name.down.sql`. Every migration
 needs both directions; a test enforces it.
