@@ -865,6 +865,41 @@ func TestAnApprovedPostOfNamedDraftsPassesOverOnesPostedMeanwhile(t *testing.T) 
 	}
 }
 
+// The instances of a server do not share a clock. The release bot proposes
+// posting HW3 on one whose clock runs a few minutes ahead, Sato posts Yuki's
+// draft by hand, and then approves on one whose clock is behind, so that by
+// his clock the proposal has not been made yet. It is still an approval, not
+// a call giving drafts beside the assignment: it passes over Yuki's grade
+// and posts Ken's.
+func TestAPostApprovedOnASlowerClockIsStillAnApproval(t *testing.T) {
+	b := build(t)
+	base := time.Now()
+	clock := func(d time.Duration) { b.P.SetClock(func() time.Time { return base.Add(d) }) }
+	bot := testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", m{"kind": "agent", "display_name": "release-bot"})).ActorID
+	b.do(t, b.sato, "member.add", m{"course_id": b.course, "actor_id": bot, "preset": "ta", "perms": m{"grade_post": "confirm_required"}})
+	draft := func(student uuid.UUID, score int) uuid.UUID {
+		t.Helper()
+		return testkit.Result[tools.GradeSubmitOut](t, b.do(t, b.sato, "grade.submit",
+			m{"course_id": b.course, "submission_id": b.submit(t, student, "essay"), "score": score})).GradeID
+	}
+	yukis, kens := draft(b.yuki, 80), draft(b.ken, 70)
+
+	clock(3 * time.Minute)
+	proposed := b.MustCall(bot, "grade.post", m{"course_id": b.course, "assignment_id": b.hw3}, "post")
+	if proposed.Status != domain.StatusProposed {
+		t.Fatalf("the bot's proposal: %+v", proposed)
+	}
+	clock(time.Minute)
+	b.do(t, b.sato, "grade.post", m{"course_id": b.course, "grade_ids": []uuid.UUID{yukis}})
+	v := testkit.Result[pipeline.DecideOut](t, b.do(t, b.sato, "action.decide", m{"course_id": b.course, "action_id": proposed.ActionID, "decision": "approve"}))
+	if v.Outcome != domain.StatusExecuted {
+		t.Fatalf("approving on a clock behind the proposer's: %+v", v.Error)
+	}
+	if got := testkit.Result[tools.GradePostOut](t, pipeline.Outcome{Result: v.Result}).Posted; len(got) != 1 || got[0] != kens {
+		t.Fatalf("the approval posted %v, want Ken's %s alone", got, kens)
+	}
+}
+
 // Validate and Pin each look for the drafts waiting, and a post by hand can
 // come in between. A proposal made then would name no draft, and nobody
 // could ever approve it, so Pin refuses it as Validate would have. The race
