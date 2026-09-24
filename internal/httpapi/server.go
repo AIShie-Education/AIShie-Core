@@ -15,6 +15,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"path"
 	"strings"
 	"time"
 
@@ -163,11 +164,24 @@ const (
 	DefaultTransferTimeout = 10 * time.Minute
 )
 
+// maxTidied is the longest path the mux is left to tidy. No route of ours
+// is near it.
+const maxTidied = 256
+
 // routed answers for the routes the mux does not have. The mux's own 404 and
 // 405 are plain text; everything else this API says, it says in JSON, and a
 // client should not need a second parser for a mistyped path.
+//
+// The mux tidies a path by redirecting to the tidy one, which it repeats
+// twice, escaped, in Location and in the page: a byte sent could come back
+// as six, before anyone is authenticated. So a long path it would tidy is
+// answered as no route, whether or not the tidy one would match one.
 func (s *server) routed(mux *http.ServeMux) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if p := r.URL.EscapedPath(); len(p) > maxTidied && path.Clean(p) != strings.TrimSuffix(p, "/") {
+			s.writeError(w, r, apperr.Missing("no such route; GET /v1/tools lists what there is"))
+			return
+		}
 		h, pattern := mux.Handler(r)
 		if pattern != "" {
 			mux.ServeHTTP(w, r)

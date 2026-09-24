@@ -1,6 +1,7 @@
 package httpapi_test
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"fmt"
@@ -308,9 +309,9 @@ func TestCookiesForACrossSiteFrontEnd(t *testing.T) {
 
 // A refusal says what was wrong, not all of what was sent. A megabyte of
 // input is answered in a few kilobytes whichever check refuses it — the
-// schema, the decoding after it, the path, the router, a header, the
-// identity provider's answer — however early, and so to any caller at all;
-// and a failure is recorded no longer than it is told.
+// schema, the decoding after it, the path, the router or its tidying of a
+// path, a header, the identity provider's answer — however early, and so to
+// any caller at all; and a failure is recorded no longer than it is told.
 func TestARefusalRepeatsLittleOfWhatItRefuses(t *testing.T) {
 	a := newAPI(t, 1)
 	c := a.c
@@ -338,6 +339,32 @@ func TestARefusalRepeatsLittleOfWhatItRefuses(t *testing.T) {
 
 	res, out := a.raw("PATCH", a.srv.URL+"/v1/courses/"+url.PathEscape(big[:1<<18])+"/grades", "", nil)
 	small("a method the route does not take", res, out, http.StatusMethodNotAllowed, "method_not_allowed")
+
+	// A path the router would tidy, in raw bytes, which its redirect would
+	// escape to three each, twice over. The second tidies to a route.
+	get := func(target string) (rawResponse, []byte) {
+		t.Helper()
+		conn, err := net.Dial("tcp", a.srv.Listener.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer conn.Close()
+		_, _ = fmt.Fprintf(conn, "GET %s HTTP/1.1\r\nHost: lms.test\r\nConnection: close\r\n\r\n", target)
+		res, err := http.ReadResponse(bufio.NewReader(conn), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out, _ := io.ReadAll(res.Body)
+		return rawResponse{StatusCode: res.StatusCode, Header: res.Header}, out
+	}
+	junk := strings.Repeat("\x80", 1<<18)
+	for _, target := range []string{"/v1//" + junk, "/v1//courses/" + junk + "/grades"} {
+		res, out := get(target)
+		small("a path the router would tidy", res, out, http.StatusNotFound, "no such route")
+	}
+	if res, _ := get("/v1//tools"); res.StatusCode != http.StatusTemporaryRedirect || res.Header.Get("Location") != "/v1/tools" {
+		t.Errorf("a short path is no longer tidied: %d %q", res.StatusCode, res.Header.Get("Location"))
+	}
 
 	ask := a.do(nil, "GET", "/v1/courses/"+c.Course.String()+"/upload-url?kind=material&content_type=text/plain", sato, nil)
 	res, out = a.raw("PUT", a.here(ask.str("result", "upload_url")), big[:1<<19], []byte("hello"))
