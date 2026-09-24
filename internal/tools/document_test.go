@@ -447,6 +447,31 @@ func TestAProposalIsNotMadeAboutAnUploadItMayOutlive(t *testing.T) {
 	}
 }
 
+// Where proposals do not expire (PROPOSAL_TTL=0) the sweep removes no upload
+// for its age, so no proposal can outlive the file it names. A proposal
+// naming an upload of any age is queued, and approving it attaches the file;
+// nor does document.upload_url speak of a refusal that will not come.
+func TestWhereProposalsDoNotExpireAnUploadOfAnyAgeMayBeProposed(t *testing.T) {
+	b := buildOn(t, testkit.NewPlatformWithConfig(t, pipeline.Config{}))
+	editor := testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", m{"kind": "agent", "display_name": "editor"})).ActorID
+	b.do(t, b.sato, "member.add", m{"course_id": b.course, "actor_id": editor, "preset": "ta", "perms": m{"document_write": "confirm_required"}})
+	token := b.upload(t, editor, "material", "text/plain", []byte("notes"))
+	b.P.SetClock(func() time.Time { return time.Now().Add(tools.OrphanGrace + time.Hour) })
+	defer b.P.SetClock(time.Now)
+
+	out := b.MustCall(editor, "document.create", m{"course_id": b.course, "kind": "material", "title": "Lecture 2", "upload_token": token}, "propose")
+	if out.Status != domain.StatusProposed {
+		t.Fatalf("with no proposal TTL, a proposal naming an upload more than %v old: %+v", tools.OrphanGrace, out)
+	}
+	decided := testkit.Result[pipeline.DecideOut](t, b.do(t, b.sato, "action.decide", m{"course_id": b.course, "action_id": out.ActionID, "decision": "approve"}))
+	if decided.Outcome != domain.StatusExecuted {
+		t.Fatalf("approving it: %+v", decided)
+	}
+	if uploadURL, _ := b.P.Registry().Get("document.upload_url"); strings.Contains(uploadURL.Description, "refused") {
+		t.Fatalf("document.upload_url says an old upload is refused: %q", uploadURL.Description)
+	}
+}
+
 // "submission pins instructions_version_id ... so a dispute can show exactly
 // what the student was told."
 func TestPinnedVersionsStayReadable(t *testing.T) {

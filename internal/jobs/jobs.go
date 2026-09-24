@@ -226,7 +226,7 @@ func (r *Runner) Sweep(ctx context.Context) (Report, error) {
 // says it was written, as the sweep does (see checkUploadAge in package
 // tools); so past TTL + OrphanGrace nothing can still be waiting on the file.
 // Without a TTL a proposal may wait for ever, and then nothing is removed at
-// all.
+// all, nor is any upload too old to be proposed.
 //
 // An upload token does not expire for attaching (see blob.UploadClaim), so
 // this is also what bounds it: a file not attached within TTL + OrphanGrace

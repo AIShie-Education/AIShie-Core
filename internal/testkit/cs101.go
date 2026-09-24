@@ -158,6 +158,17 @@ func NewPlatform(t testing.TB) *Platform {
 // underneath, so a test can PUT and read bytes the way a client would.
 func NewPlatformWithStore(t testing.TB, wrap func(*blob.FSStore) blob.Store) *Platform {
 	t.Helper()
+	return newPlatform(t, wrap, pipeline.Config{ProposalTTL: pipeline.DefaultProposalTTL})
+}
+
+// NewPlatformWithConfig is NewPlatform with the pipeline set up as cfg says.
+func NewPlatformWithConfig(t testing.TB, cfg pipeline.Config) *Platform {
+	t.Helper()
+	return newPlatform(t, func(fs *blob.FSStore) blob.Store { return fs }, cfg)
+}
+
+func newPlatform(t testing.TB, wrap func(*blob.FSStore) blob.Store, cfg pipeline.Config) *Platform {
+	t.Helper()
 	w := NewWorld(t)
 	signer, err := blob.NewSigner("")
 	if err != nil {
@@ -168,8 +179,7 @@ func NewPlatformWithStore(t testing.TB, wrap func(*blob.FSStore) blob.Store) *Pl
 		t.Fatal(err)
 	}
 	reg := tool.NewRegistry()
-	p := &Platform{World: w, Blob: store, Uploads: signer,
-		P: pipeline.New(w.Pool, reg, pipeline.Config{ProposalTTL: pipeline.DefaultProposalTTL})}
+	p := &Platform{World: w, Blob: store, Uploads: signer, P: pipeline.New(w.Pool, reg, cfg)}
 	tools.RegisterAll(reg, tools.Deps{Pipeline: p.P, Blob: wrap(store), Uploads: signer, MaxUploadBytes: MaxUploadBytes})
 	return p
 }

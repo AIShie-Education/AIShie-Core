@@ -165,14 +165,25 @@ const UploadPrefix = "courses/"
 // decided within the TTL, and the file it names is there all that time.
 const OrphanGrace = 48 * time.Hour
 
+// proposalsExpire says whether a proposal is cancelled once it has waited the
+// TTL. Only then does the orphan sweep remove uploads, and only then can a
+// proposal outlive the file it names.
+func proposalsExpire(d Deps) bool {
+	return d.Pipeline.Config().ProposalTTL > 0
+}
+
 func documentUploadURL(d Deps) tool.Tool {
+	description := "Get somewhere to upload a file. Files do not travel through tool calls: PUT the bytes to the URL this " +
+		"returns, then pass the upload_token to the tool that attaches it. Nothing is recorded until then, and an upload " +
+		"that is never attached is eventually discarded."
+	if proposalsExpire(d) {
+		description += " A call that would attach it by way of a proposal is refused once the upload is more than " +
+			strconv.Itoa(int(OrphanGrace.Hours())) + " hours old."
+	}
 	return tool.Define(tool.Spec[UploadURLIn, UploadURLOut]{
-		Name: "document.upload_url",
-		Description: "Get somewhere to upload a file. Files do not travel through tool calls: PUT the bytes to the URL this " +
-			"returns, then pass the upload_token to the tool that attaches it. Nothing is recorded until then, and an upload " +
-			"that is never attached is eventually discarded. A call that would attach it by way of a proposal is refused once " +
-			"the upload is more than " + strconv.Itoa(int(OrphanGrace.Hours())) + " hours old.",
-		Kind: tool.Read, Gate: anyDocumentWrite,
+		Name:        "document.upload_url",
+		Description: description,
+		Kind:        tool.Read, Gate: anyDocumentWrite,
 		HTTP: tool.Route{Method: "GET", Pattern: "/v1/courses/{course_id}/upload-url"},
 		Resolve: func(_ context.Context, _ dbq.Querier, in UploadURLIn) (tool.Target, error) {
 			if !courseLevel(in.Kind) && in.Kind != kindSubmission && in.Kind != kindFeedback {
@@ -306,9 +317,10 @@ func claimUpload(ctx context.Context, d Deps, q dbq.Querier, m *domain.Member, c
 // however old the file is by the time it is approved. A token that is not
 // good, or names nothing uploaded yet, is let by: the call that attaches it
 // says what is wrong, and an upload still to come is younger than the
-// proposal.
+// proposal. Where proposals do not expire nothing is swept, and any upload
+// may be proposed.
 func checkUploadAge(ctx context.Context, d Deps, now time.Time, tokens ...string) error {
-	if d.Blob == nil {
+	if d.Blob == nil || !proposalsExpire(d) {
 		return nil
 	}
 	for _, token := range tokens {
