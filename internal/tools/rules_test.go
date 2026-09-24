@@ -1,6 +1,7 @@
 package tools_test
 
 import (
+	"context"
 	"hash/fnv"
 	"strconv"
 	"strings"
@@ -33,6 +34,51 @@ func (b *built) try(t *testing.T, actor uuid.UUID, name string, args m, want app
 		t.Fatalf("%s went through (%s), want %s", name, out.Status, want)
 	case out.Error == nil || out.Error.Code != want:
 		t.Fatalf("%s: %+v, want %s", name, out.Error, want)
+	}
+}
+
+// start makes a call in the background; its outcome arrives on done.
+func (b *built) start(t *testing.T, done chan<- pipeline.Outcome, actor uuid.UUID, name string, args m) {
+	go func() {
+		out, err := b.Call(actor, name, args, "bg-"+uuid.NewString())
+		if err != nil {
+			t.Errorf("%s: %v", name, err)
+		}
+		done <- out
+	}()
+}
+
+// hold locks rows the way a change already under way would, until release
+// is called; calls made meanwhile queue behind it.
+func (b *built) hold(t *testing.T, sql string, args ...any) (release func()) {
+	t.Helper()
+	ctx := context.Background()
+	tx, err := b.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = tx.Rollback(ctx) })
+	if _, err := tx.Exec(ctx, sql, args...); err != nil {
+		t.Fatal(err)
+	}
+	return func() {
+		if err := tx.Commit(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// blocked waits until n calls are waiting for a lock in this test's
+// database. It stops early once done holds an outcome: a call that should
+// have waited finished instead, and what came of it is for the test to say.
+func (b *built) blocked(t *testing.T, n int, done chan pipeline.Outcome) {
+	t.Helper()
+	for deadline := time.Now().Add(10 * time.Second); len(done) == 0 && b.Count(`SELECT count(*) FROM pg_locks l
+		JOIN pg_stat_activity a ON a.pid = l.pid WHERE NOT l.granted AND a.datname = current_database()`) < n; {
+		if time.Now().After(deadline) {
+			t.Fatalf("%d calls never came to wait for a lock", n)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
@@ -812,6 +858,64 @@ func TestAPublishedAssignmentKeepsReadableInstructions(t *testing.T) {
 		m{"course_id": b.course, "kind": "instructions", "title": "HW4", "body_md": "tbd"})).DocumentID
 	hw4 := testkit.Result[tools.IDOut](t, b.do(t, b.sato, "assignment.create", m{"course_id": b.course, "title": "HW4", "points_possible": 10})).ID
 	b.do(t, b.sato, "assignment.update", m{"course_id": b.course, "assignment_id": hw4, "instructions_document_id": draftBrief})
+}
+
+// Changing an assignment reads it, checks it and writes all of it back. Two
+// changes at once take turns on its row, or the second would write back the
+// copy it read before the first committed: a rename and a new due date made
+// together would leave one of them undone, both reported done. Publishing
+// takes the same turn, so that it and a change of instructions cannot each
+// pass on what the other has not done yet.
+func TestChangesToAnAssignmentTakeTurns(t *testing.T) {
+	b := build(t)
+	const lockRow = `SELECT 1 FROM assignment WHERE id = $1 FOR UPDATE`
+	done := make(chan pipeline.Outcome, 2)
+
+	due := time.Now().Add(72 * time.Hour).Truncate(time.Second)
+	release := b.hold(t, lockRow, b.hw3)
+	for i, change := range []m{{"title": "HW3 (revised)"}, {"due_at": due}} {
+		change["course_id"], change["assignment_id"] = b.course, b.hw3
+		b.start(t, done, b.sato, "assignment.update", change)
+		b.blocked(t, i+1, done)
+	}
+	release()
+	for range 2 {
+		if out := <-done; out.Status != domain.StatusExecuted {
+			t.Fatalf("assignment.update: %+v", out)
+		}
+	}
+	if n := b.Count(`SELECT count(*) FROM assignment WHERE id = $1 AND title = 'HW3 (revised)' AND due_at = $2`, b.hw3, due); n != 1 {
+		t.Fatal("of two changes made at once, one was undone by the other")
+	}
+
+	// HW4 is published while its instructions are pointed at a brief
+	// nobody can read yet.
+	brief := testkit.Result[tools.DocumentCreateOut](t, b.do(t, b.sato, "document.create",
+		m{"course_id": b.course, "kind": "instructions", "title": "HW4", "body_md": "Write 1000 words."})).DocumentID
+	b.do(t, b.sato, "document.publish", m{"course_id": b.course, "document_id": brief})
+	rewrite := testkit.Result[tools.DocumentCreateOut](t, b.do(t, b.sato, "document.create",
+		m{"course_id": b.course, "kind": "instructions", "title": "HW4, rewritten", "body_md": "tbd"})).DocumentID
+	hw4 := testkit.Result[tools.IDOut](t, b.do(t, b.sato, "assignment.create",
+		m{"course_id": b.course, "title": "HW4", "points_possible": 10, "instructions_document_id": brief})).ID
+	release = b.hold(t, lockRow, hw4)
+	b.start(t, done, b.sato, "assignment.update", m{"course_id": b.course, "assignment_id": hw4, "instructions_document_id": rewrite})
+	b.blocked(t, 1, done)
+	b.start(t, done, b.sato, "assignment.publish", m{"course_id": b.course, "assignment_id": hw4})
+	b.blocked(t, 2, done)
+	release()
+	executed := 0
+	for range 2 {
+		if out := <-done; out.Status == domain.StatusExecuted {
+			executed++
+		}
+	}
+	if n := b.Count(`SELECT count(*) FROM assignment a JOIN document d ON d.id = a.instructions_document_id
+		WHERE a.id = $1 AND a.published_at IS NOT NULL AND d.published_version_id IS NULL`, hw4); n != 0 {
+		t.Fatal("the assignment was published with instructions students cannot read")
+	}
+	if executed != 1 {
+		t.Fatalf("%d of the two went through; whichever came second should have been refused", executed)
+	}
 }
 
 // "An archived course refuses every write" includes the writes that touch no

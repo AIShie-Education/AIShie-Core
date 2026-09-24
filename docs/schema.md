@@ -536,6 +536,8 @@ check `actor.platform_role` instead. That is the only place it is read.
   are documents of the same course with the right `kind`; `document_version.author_member_id`
   is a member of the document's course (it is always the calling member, and the call was
   authorized in that course).
+- A published assignment's instructions have a published version, for students to read and for
+  each submission to pin (§2.4), however publishing and a change of instructions interleave.
 - Grade computation, and writing a `computed` snapshot only on post.
 - The component tree is acyclic beyond the self-loop the CHECK blocks.
 - Cancelling pending proposals when a member is removed or expires.

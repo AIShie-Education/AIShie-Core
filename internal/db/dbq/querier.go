@@ -64,6 +64,12 @@ type Querier interface {
 	// branch on either, and a test fails if this file ever names them.
 	GetActorForAuthz(ctx context.Context, id uuid.UUID) (GetActorForAuthzRow, error)
 	GetAssignmentInCourse(ctx context.Context, arg GetAssignmentInCourseParams) (GetAssignmentInCourseRow, error)
+	// GetAssignmentInCourse, locked for the rest of the transaction:
+	// assignment.update and assignment.publish read the row, check it and write
+	// it back, and two of them at once must take turns. NO KEY UPDATE is the lock
+	// the UPDATE takes anyway, taken before the read instead of after it; it does
+	// not hold up a submission being created for the assignment.
+	GetAssignmentInCourseForUpdate(ctx context.Context, arg GetAssignmentInCourseForUpdateParams) (GetAssignmentInCourseForUpdateRow, error)
 	GetBuiltinPresetByName(ctx context.Context, name string) (PermissionPreset, error)
 	GetComponentInCourse(ctx context.Context, arg GetComponentInCourseParams) (GetComponentInCourseRow, error)
 	GetComponentParent(ctx context.Context, id uuid.UUID) (*uuid.UUID, error)
