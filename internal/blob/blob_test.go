@@ -85,6 +85,45 @@ func TestFSStoreRoundTrip(t *testing.T) {
 	}
 }
 
+// A file's .meta is written after its bytes and removed before them, so it
+// says the file is whole. Bytes lost from under one are a fault, not a file
+// that is not there; and a delete stopped half way has taken the .meta
+// already, leaving bytes that a listing still finds.
+func TestFSStoreTellsLostBytesFromNone(t *testing.T) {
+	s, _ := newFS(t)
+	ctx := context.Background()
+	for _, key := range []string{"lost", "stuck"} {
+		if _, err := s.Put(ctx, key, "text/plain", strings.NewReader("hello"), 5); err != nil {
+			t.Fatal(err)
+		}
+	}
+	p, _ := s.path("lost")
+	if err := os.Remove(p); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Stat(ctx, "lost"); err == nil || errors.Is(err, ErrNotFound) {
+		t.Fatalf("stat of a file whose bytes were lost: %v", err)
+	}
+	if _, _, err := s.Open(ctx, "lost"); err == nil || errors.Is(err, ErrNotFound) {
+		t.Fatalf("open of a file whose bytes were lost: %v", err)
+	}
+
+	// Bytes that cannot be removed, standing in for a delete cut short.
+	p, _ = s.path("stuck")
+	if err := os.Remove(p); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(p, "in-the-way"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Delete(ctx, "stuck"); err == nil {
+		t.Fatal("a delete that could not remove the bytes said nothing")
+	}
+	if _, err := os.Stat(p + ".meta"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a delete cut short left the .meta: %v", err)
+	}
+}
+
 func TestFSStoreLimitsAndPaths(t *testing.T) {
 	s, _ := newFS(t)
 	ctx := context.Background()

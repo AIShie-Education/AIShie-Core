@@ -135,11 +135,11 @@ func (s *FSStore) Stat(_ context.Context, key string) (Info, error) {
 	if err := json.Unmarshal(meta, &info); err != nil {
 		return Info{}, err
 	}
-	// When it was written is the file's own, as List reports it.
+	// When it was written is the file's own, as List reports it. The .meta
+	// is written after the bytes and removed before them (Delete), so bytes
+	// missing under a .meta were lost, not half written or half deleted:
+	// that is a fault, and is not reported as nothing there.
 	written, err := os.Stat(p)
-	if errors.Is(err, fs.ErrNotExist) {
-		return Info{}, ErrNotFound
-	}
 	if err != nil {
 		return Info{}, err
 	}
@@ -235,7 +235,10 @@ func (s *FSStore) Delete(_ context.Context, key string) error {
 	if err != nil {
 		return err
 	}
-	for _, f := range []string{p, p + ".meta"} {
+	// The .meta goes first, as it is written last: it is what says the file
+	// is whole. Stopped half way, a delete leaves bytes without one, which
+	// List still finds and a sweep deletes again.
+	for _, f := range []string{p + ".meta", p} {
 		if err := os.Remove(f); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return err
 		}
