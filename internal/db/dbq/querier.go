@@ -67,7 +67,11 @@ type Querier interface {
 	// assignment.update and assignment.publish read the row, check it and write
 	// it back, and two of them at once must take turns. NO KEY UPDATE is the lock
 	// the UPDATE takes anyway, taken before the read instead of after it; it does
-	// not hold up a submission being created for the assignment.
+	// not hold up a submission being created for the assignment. It is taken
+	// first: assignment.update holds it and then waits for the component-tree
+	// lock, and nothing takes those two the other way round. Graders of the
+	// assignment lock the row FOR SHARE (ShareAssignmentForGrading), so they queue
+	// behind an update, including while the update waits for the tree lock.
 	GetAssignmentInCourseForUpdate(ctx context.Context, arg GetAssignmentInCourseForUpdateParams) (GetAssignmentInCourseForUpdateRow, error)
 	GetBuiltinPresetByName(ctx context.Context, name string) (PermissionPreset, error)
 	GetComponentInCourse(ctx context.Context, arg GetComponentInCourseParams) (GetComponentInCourseRow, error)

@@ -295,7 +295,9 @@ func assignmentUpdate() tool.Tool {
 			// Read under the row's lock. Every column is written back, and a
 			// copy read before another change committed would quietly undo
 			// it: a rename made alongside a new due date would put the old
-			// due date back, with both calls reporting success.
+			// due date back, with both calls reporting success. The row is
+			// locked before checkAssignment takes the component-tree lock,
+			// and lockAssignment says why that order is safe.
 			a, err := lockAssignment(ctx, ec.Q, in.CourseID, in.AssignmentID)
 			if err != nil {
 				return OK{}, err
@@ -381,6 +383,18 @@ func assignmentPublish() tool.Tool {
 
 // lockAssignment reads an assignment and holds it until the transaction
 // ends, for a tool that reads it, checks it and writes it back.
+//
+// The row lock (FOR NO KEY UPDATE) is the first lock the tool takes. For
+// assignment.update the order is therefore the assignment row and then the
+// course's component-tree lock, which checkAssignment takes when the
+// assignment counts toward a component. Nothing takes the two the other way
+// round: what holds the tree lock — component.create, update and move,
+// assignment.create, and grade.submit for a component — takes no lock on an
+// existing assignment row that this one holds off, so the two cannot
+// deadlock. It does mean that while an update holds the row and waits for
+// the tree, whoever grades that assignment's submissions waits behind it:
+// grade.submit's checkSubject takes the row FOR SHARE
+// (ShareAssignmentForGrading), which this lock holds off.
 func lockAssignment(ctx context.Context, q *dbq.Queries, courseID, id uuid.UUID) (dbq.GetAssignmentInCourseRow, error) {
 	a, err := q.GetAssignmentInCourseForUpdate(ctx, dbq.GetAssignmentInCourseForUpdateParams{ID: id, CourseID: courseID})
 	return dbq.GetAssignmentInCourseRow(a), err
