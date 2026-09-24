@@ -565,6 +565,52 @@ func TestTotalsAreWrittenByOneAtATime(t *testing.T) {
 	}
 }
 
+// A post writes its students' totals one at a time, and computes each with
+// the scheme as it is when it gets to them. Here it waits on the first while
+// the midterm is reweighted to 70 and the second student's midterm regraded,
+// which writes their total under the new weights; reaching them, the post
+// must not write it over under the old ones.
+func TestAPostWritesEachTotalUnderTheSchemeAsItIsThen(t *testing.T) {
+	b := build(t)
+	midterms := map[uuid.UUID]uuid.UUID{}
+	for _, s := range []struct{ actor, member uuid.UUID }{{b.yuki, b.yukiM}, {b.ken, b.kenM}} {
+		work := b.submit(t, s.actor, "essay")
+		b.do(t, b.sato, "grade.submit", m{"course_id": b.course, "submission_id": work, "score": 100})
+		midterms[s.member] = testkit.Result[tools.GradeSubmitOut](t, b.do(t, b.sato, "grade.submit",
+			m{"course_id": b.course, "component_id": b.midterm, "student_member_id": s.member, "score": 50})).GradeID
+		b.do(t, b.sato, "grade.post", m{"course_id": b.course, "grade_ids": []uuid.UUID{midterms[s.member]}})
+	}
+	// A post takes its students in the order of their ids (see snapshot),
+	// each under the lock on their totals (LockStudentTotals).
+	first, second := b.yukiM, b.kenM
+	if second.String() < first.String() {
+		first, second = second, first
+	}
+	release := heldBy(t, b, `SELECT pg_advisory_xact_lock(hashtextextended('totals:' || $1::uuid::text || ':' || $2::uuid::text, 0))`, b.course, first)
+	posting := b.inFlight(b.sato, "grade.post", m{"course_id": b.course, "assignment_id": b.hw3}, "post")
+	b.waitingFor(t, 1, posting)
+	b.do(t, b.sato, "component.update", m{"course_id": b.course, "component_id": b.midterm, "weight": 70})
+	b.do(t, b.sato, "grade.regrade", m{"course_id": b.course, "grade_id": midterms[second], "score": 60})
+	release()
+	if out := settled(t, posting); out.Status != domain.StatusExecuted {
+		t.Fatalf("the post: %+v", out)
+	}
+
+	// (40 × 1.00 + 70 × 0.60) / 110, not (40 × 1.00 + 30 × 0.60) / 70.
+	book := testkit.Result[tools.GradebookGetOut](t, b.do(t, b.sato, "gradebook.get", m{"course_id": b.course, "student_member_id": second}))
+	for _, l := range book.Components {
+		if l.ComponentID == b.total {
+			wantScore(t, "the gradebook's total", *l.Percent, "74.55")
+		}
+	}
+	var live decimal.Decimal
+	if err := b.Pool.QueryRow(t.Context(), `SELECT score FROM grade WHERE student_member_id = $1 AND component_id = $2
+		AND origin = 'computed' AND superseded_by IS NULL`, second, b.total).Scan(&live); err != nil {
+		t.Fatal(err)
+	}
+	wantScore(t, "the live total", live, "74.55")
+}
+
 // Final is final. Once a student's totals have been written with ungraded
 // work counted as zero, a later post or regrade beneath them — made without
 // saying so — keeps counting it as zero, rather than quietly turning the

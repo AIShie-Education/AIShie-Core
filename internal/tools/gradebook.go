@@ -89,10 +89,6 @@ func loadScores(ctx context.Context, q dbq.Querier, courseID, student uuid.UUID)
 // assignments and components whose grades moved; only their ancestors are
 // looked at.
 func snapshot(ctx context.Context, ec *tool.ExecCtx, courseID uuid.UUID, changed map[uuid.UUID][]uuid.UUID, policy gradecalc.Policy) (int, error) {
-	root, _, err := loadTree(ctx, ec.Q, courseID)
-	if err != nil {
-		return 0, err
-	}
 	// In a fixed order, so that the events come out the same way every time.
 	students := make([]uuid.UUID, 0, len(changed))
 	for s := range changed {
@@ -107,6 +103,17 @@ func snapshot(ctx context.Context, ec *tool.ExecCtx, courseID uuid.UUID, changed
 		// same student would otherwise each read the other's not-yet-written
 		// snapshot as absent and collide on the one live total.
 		if err := ec.Q.LockStudentTotals(ctx, dbq.LockStudentTotalsParams{CourseID: courseID, StudentMemberID: student}); err != nil {
+			return 0, err
+		}
+		// The scheme is read here, under the lock, as the scores are. A post
+		// works through its students one at a time: by the time it reaches
+		// this one, a weight may have changed and a regrade have written
+		// their totals under it, and a scheme read before the lock would
+		// write them over under the old one. The tree lock is not taken:
+		// grade.submit on a component holds it while it waits for drafts a
+		// post has locked by now.
+		root, _, err := loadTree(ctx, ec.Q, courseID)
+		if err != nil {
 			return 0, err
 		}
 		scores, err := loadScores(ctx, ec.Q, courseID, student)
