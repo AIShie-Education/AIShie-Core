@@ -311,8 +311,8 @@ func asStored(t *time.Time) *time.Time {
 // ran.
 func loadOther(ctx context.Context, ec *tool.ExecCtx, courseID, memberID uuid.UUID) (dbq.GetMemberInCourseRow, error) {
 	// Refused before the seat is locked: the caller's own seat is already
-	// held, shared, by this call, and upgrading that could deadlock with a
-	// retry of the same call waiting to share it.
+	// held, shared, by this call, and upgrading that would deadlock with
+	// another call of theirs that holds it too.
 	if memberID == ec.Member.ID {
 		return dbq.GetMemberInCourseRow{}, apperr.Forbid("not on your own membership")
 	}

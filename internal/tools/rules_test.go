@@ -1232,3 +1232,104 @@ func TestSeatingYourselfTwiceAtOnceIsRefusedTwice(t *testing.T) {
 		}
 	}
 }
+
+// An approval that loses a real deadlock while it carries its proposal out
+// leaves the proposal waiting, as one that loses it re-checking does: the
+// decision is recorded as failed, "try again", and deciding again works.
+// Here two helpers each propose pausing the other, and both proposals are
+// approved at once: each approval holds its proposer's seat and wants the
+// other's. Which one PostgreSQL stops is its choice; it stops one.
+func TestAnApprovalThatLosesADeadlockCarryingItOutLeavesTheProposalWaiting(t *testing.T) {
+	b := build(t)
+	register := func(name string) uuid.UUID {
+		return testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", m{"kind": "human", "display_name": name})).ActorID
+	}
+	boss, helperA, helperB := register("Boss"), register("HelperA"), register("HelperB")
+	b.do(t, b.sato, "member.add", m{"course_id": b.course, "actor_id": boss, "preset": "instructor"})
+	helper := func(actor uuid.UUID) uuid.UUID {
+		return testkit.Result[tools.MemberIDOut](t, b.do(t, b.sato, "member.add", m{"course_id": b.course, "actor_id": actor,
+			"preset": "ta", "perms": m{"member_manage": "confirm_required"}})).MemberID
+	}
+	helperAM, helperBM := helper(helperA), helper(helperB)
+
+	type approval struct {
+		by, proposerM uuid.UUID
+		prop          *uuid.UUID
+		back          <-chan callResult
+		out           pipeline.Outcome
+	}
+	propose := func(by, proposer, proposerM, target uuid.UUID, key string) *approval {
+		out := b.MustCall(proposer, "member.pause", m{"course_id": b.course, "member_id": target}, key)
+		if out.Status != domain.StatusProposed {
+			t.Fatalf("proposal: %+v", out)
+		}
+		return &approval{by: by, proposerM: proposerM, prop: out.ActionID}
+	}
+	approvals := []*approval{
+		propose(b.sato, helperA, helperAM, helperBM, "a-pauses-b"),
+		propose(boss, helperB, helperBM, helperAM, "b-pauses-a"),
+	}
+	decide := func(a *approval) m {
+		return m{"course_id": b.course, "action_id": a.prop, "decision": "approve"}
+	}
+	// Both approvals hold their proposers' seats and wait for their proposals.
+	release := heldBy(t, b, `SELECT 1 FROM action WHERE id = ANY($1) FOR UPDATE`, []uuid.UUID{*approvals[0].prop, *approvals[1].prop})
+	for i, a := range approvals {
+		a.back = b.inFlight(a.by, "action.decide", decide(a), "approve-"+strconv.Itoa(i))
+	}
+	b.waitingFor(t, 2, approvals[0].back, approvals[1].back)
+	release()
+
+	var lost *approval
+	for _, a := range approvals {
+		select {
+		case r := <-a.back:
+			if r.err != nil {
+				t.Fatalf("an approval: %v", r.err)
+			}
+			a.out = r.out
+		case <-time.After(30 * time.Second):
+			t.Fatal("an approval never came back")
+		}
+		if strings.Contains(string(a.out.Result), `"outcome":"executed"`) {
+			continue
+		}
+		if lost != nil {
+			t.Fatalf("neither approval went through: %+v, %+v", lost.out, a.out)
+		}
+		lost = a
+	}
+	if lost == nil {
+		t.Fatal("both approvals went through")
+	}
+	if lost.out.Status != domain.StatusFailed || lost.out.Error == nil || lost.out.Error.Code != apperr.Conflict {
+		t.Fatalf("the approval that lost: %+v", lost.out)
+	}
+	if n := b.Count(`SELECT count(*) FROM action WHERE id = $1 AND status = 'proposed'`, lost.prop); n != 1 {
+		t.Fatal("the proposal whose approval lost no longer waits")
+	}
+
+	// The other approval paused this proposer; resumed, their proposal can
+	// be approved again, and is carried out.
+	b.do(t, b.sato, "member.resume", m{"course_id": b.course, "member_id": lost.proposerM})
+	if out := b.MustCall(lost.by, "action.decide", decide(lost), "again"); !strings.Contains(string(out.Result), `"outcome":"executed"`) {
+		t.Fatalf("deciding again: %+v", out)
+	}
+}
+
+// A manager naming their own seat is refused before that seat is locked.
+// Two such calls at once each hold the seat shared, as every call holds its
+// caller's, and would deadlock upgrading it.
+func TestEditingYourOwnSeatTwiceAtOnceIsRefusedTwice(t *testing.T) {
+	b := build(t)
+	release := heldBy(t, b, `SELECT 1 FROM course WHERE id = $1 FOR UPDATE`, b.course)
+	pause := b.inFlight(b.sato, "member.pause", m{"course_id": b.course, "member_id": b.satoM}, "pause")
+	perms := b.inFlight(b.sato, "member.update_perms", m{"course_id": b.course, "member_id": b.satoM, "perms": m{"grade_post": "confirm_required"}}, "perms")
+	b.waitingFor(t, 2, pause, perms)
+	release()
+	for _, c := range []<-chan callResult{pause, perms} {
+		if out := settled(t, c); out.Error == nil || out.Error.Message != "not on your own membership" {
+			t.Fatalf("Sato changing his own seat: %+v", out)
+		}
+	}
+}
