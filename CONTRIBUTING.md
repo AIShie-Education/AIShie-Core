@@ -42,8 +42,9 @@ next, drop it in the one after.
 ## Releasing
 
 A push to `main` goes out by itself once CI passes: its image is pushed to
-GHCR as `:sha-<commit>` and `:edge`, and deployed to `staging`. A release is
-made by a tag, from `main`:
+GHCR as `:sha-<commit>` and `:edge`, and deployed to `staging`. When pushes
+come faster than they are published, one that a newer push overtakes while
+it waits is not published. A release is made by a tag, from `main`:
 
 ```
 git switch main && git pull

@@ -134,7 +134,9 @@ jobs:
     # has (required reviewers, allowed branches and tags) applies here.
     environment: ${{ inputs.environment }}
     # One deploy to an environment at a time, and never cancelled half way:
-    # a migration stopped in the middle leaves the schema dirty.
+    # a migration stopped in the middle leaves the schema dirty. A deploy
+    # still waiting is cancelled when a newer one for the environment comes,
+    # and the run that asked for it ends as cancelled.
     concurrency:
       group: deploy-${{ inputs.environment }}
       cancel-in-progress: false

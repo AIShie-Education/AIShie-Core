@@ -14,11 +14,13 @@ on:
   schedule:
     - cron: "17 3 * * 1" # weekly, so new advisories surface without a push
 
-# A newer push to a pull request makes the older run moot. A run on main is
-# never cut off: it may be publishing, and the weekly run must not cancel a
-# push's either.
+# A newer push to a pull request makes the older run moot. Every push to main
+# is checked in a run of its own, which nothing waits for or cancels: waiting
+# would hold the next commit's checks back until this one is deployed, and a
+# waiting run is cancelled when another joins the group. publish.yml puts the
+# publishing in order.
 concurrency:
-  group: ci-${{ github.event_name }}-${{ github.ref }}
+  group: ci-${{ github.event_name }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:

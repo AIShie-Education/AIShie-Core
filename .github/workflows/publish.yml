@@ -28,7 +28,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     # One at a time. A newer commit waits for the one being published rather
-    # than cutting it off half way through moving :edge.
+    # than cutting it off half way through moving :edge. Of the commits
+    # waiting, GitHub keeps the newest and cancels the others, which are then
+    # not published: main's tip has what they had.
     concurrency:
       group: publish-main
       cancel-in-progress: false
