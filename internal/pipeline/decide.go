@@ -61,6 +61,17 @@ func (p *Pipeline) Decide(ctx context.Context, ec *tool.ExecCtx, in DecideIn) (D
 	if in.Decision != DecisionApprove && in.Decision != DecisionReject {
 		return DecideOut{}, apperr.Invalid("decision must be %q or %q", DecisionApprove, DecisionReject)
 	}
+	// The proposer's seat first, then the proposal: the order a removal of
+	// that seat takes them in (the seat, then its proposals) and the order
+	// every write takes its caller's seat in. A pause, narrowing or removal
+	// of the proposer then waits for the decision, or the decision waits
+	// for it and sees what it did. Whose proposal it is never changes, so
+	// it is read before anything is locked.
+	if ahead, err := ec.Q.GetActionInCourse(ctx, dbq.GetActionInCourseParams{ID: in.ActionID, CourseID: &in.CourseID}); err == nil && ahead.MemberID != nil {
+		if err := ec.Q.ShareSeats(ctx, []uuid.UUID{*ahead.MemberID}); err != nil {
+			return DecideOut{}, err
+		}
+	}
 	prop, err := ec.Q.GetActionInCourseForUpdate(ctx, dbq.GetActionInCourseForUpdateParams{ID: in.ActionID, CourseID: &in.CourseID})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return DecideOut{}, apperr.Missing("no such action in this course")
@@ -134,7 +145,13 @@ func (p *Pipeline) Decide(ctx context.Context, ec *tool.ExecCtx, in DecideIn) (D
 		return out, nil
 	}
 	if t.Validate != nil {
-		if err := t.Validate(ctx, ec.Q, a.decision.Member, args); err != nil {
+		if err := validate(ctx, ec.Tx, t, a.decision.Member, args); err != nil {
+			if transient(err) {
+				// Lost a deadlock: nothing is wrong with the proposal. The
+				// decision is undone, the proposal still waits, and deciding
+				// again can work.
+				return DecideOut{}, err
+			}
 			e, ok := isCallerFault(err)
 			if !ok {
 				return DecideOut{}, err
@@ -154,6 +171,9 @@ func (p *Pipeline) Decide(ctx context.Context, ec *tool.ExecCtx, in DecideIn) (D
 		}, args)
 	})
 	if err != nil {
+		if transient(err) {
+			return DecideOut{}, fmt.Errorf("%s: %w", t.Name, err)
+		}
 		e, ok := isCallerFault(err)
 		if !ok {
 			return DecideOut{}, fmt.Errorf("%s: %w", t.Name, err)

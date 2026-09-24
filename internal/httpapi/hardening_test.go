@@ -1,13 +1,16 @@
 package httpapi_test
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -222,6 +225,25 @@ func TestANullBodyIsRefused(t *testing.T) {
 	}
 }
 
+// A body is one JSON object, each key given once: what a repeated key or a
+// second value means is anybody's guess, and an MCP client is told the same.
+func TestABodyIsOneObjectWithEachKeyOnce(t *testing.T) {
+	a := newAPI(t, 1)
+	tok := a.tokenFor(a.c.Sato)
+	work := a.c.Students[0].HW3.String()
+	for i, body := range []string{
+		`{"submission_id": "` + work + `", "score": 1, "score": 2}`,
+		`{"submission_id": "` + work + `", "score": 1, "breakdown": [{"criterion": "a", "points": 1, "points": 2, "max": 2}]}`,
+		`{"submission_id": "` + work + `", "score": 1} {"score": 2}`,
+	} {
+		res, out := a.raw("POST", a.srv.URL+"/v1/courses/"+a.c.Course.String()+"/grades", "application/json", []byte(body),
+			"Authorization", "Bearer "+tok, "Idempotency-Key", "twice-"+strconv.Itoa(i))
+		if res.StatusCode != 400 {
+			t.Fatalf("%s: %d %s", body, res.StatusCode, out)
+		}
+	}
+}
+
 // A store that cannot take the file is our fault: logged in full, and the
 // holder of an upload URL — who is nobody we know — is told nothing of it,
 // least of all where on the disk we tried.
@@ -282,5 +304,175 @@ func TestCookiesForACrossSiteFrontEnd(t *testing.T) {
 	cookie := login.Header.Get("Set-Cookie")
 	if login.Status != 200 || !strings.Contains(cookie, "SameSite=None") || !strings.Contains(cookie, "Secure") {
 		t.Fatalf("session cookie for a cross-site front end: %d %q", login.Status, cookie)
+	}
+}
+
+// A refusal says what was wrong, not all of what was sent. A megabyte of
+// input is answered in a few kilobytes whichever check refuses it — the
+// schema, the decoding after it, the path, the router or its tidying of a
+// path, a header, the identity provider's answer — however early, and so to
+// any caller at all; and a failure is recorded no longer than it is told.
+func TestARefusalRepeatsLittleOfWhatItRefuses(t *testing.T) {
+	a := newAPI(t, 1)
+	c := a.c
+	student, sato := a.tokenFor(c.Students[0].Actor), a.tokenFor(c.Sato)
+	course := a.srv.URL + "/v1/courses/" + c.Course.String()
+	work := c.Students[0].HW3.String()
+	big := strings.Repeat("<", 1<<20-200) // six bytes each, once JSON has escaped them
+	const most = 4 << 10
+	small := func(what string, res rawResponse, out []byte, status int, says string) {
+		t.Helper()
+		if n := len(out) + headerBytes(res.Header); res.StatusCode != status || n > most || !strings.Contains(string(out), says) {
+			t.Errorf("%s: %d, %d bytes: %.300s", what, res.StatusCode, n, out)
+		}
+	}
+	for i, tc := range []struct{ what, path, body, says string }{
+		{"a score that is no number", "/grades", `{"submission_id": "` + work + `", "score": "` + big + `"}`, "/properties/score"},
+		{"a key the schema does not have", "/grades", `{"submission_id": "` + work + `", "score": 1, "` + big + `": 1}`, "unexpected additional properties"},
+		{"a course_id that is not the path's", "/grades", `{"submission_id": "` + work + `", "score": 1, "course_id": "` + big + `"}`, "course_id in the request is not the one in the path"},
+		{"a date that does not parse", "/assignments", `{"title": "HW5", "due_at": "` + big + `"}`, "parsing time"},
+	} {
+		res, out := a.raw("POST", course+tc.path, "application/json", []byte(tc.body),
+			"Authorization", "Bearer "+student, "Idempotency-Key", "big-"+strconv.Itoa(i))
+		small(tc.what, res, out, http.StatusBadRequest, tc.says)
+	}
+
+	res, out := a.raw("PATCH", a.srv.URL+"/v1/courses/"+url.PathEscape(big[:1<<18])+"/grades", "", nil)
+	small("a method the route does not take", res, out, http.StatusMethodNotAllowed, "method_not_allowed")
+
+	// A path the router would tidy, in raw bytes, which its redirect would
+	// escape to three each, twice over. The second tidies to a route. Then
+	// a short one with a long query, which the redirect would repeat as it
+	// was sent in Location and escaped in the page; the last has no path at
+	// all, which tidies to /.
+	get := func(target string) (rawResponse, []byte) {
+		t.Helper()
+		conn, err := net.Dial("tcp", a.srv.Listener.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer conn.Close()
+		_, _ = fmt.Fprintf(conn, "GET %s HTTP/1.1\r\nHost: lms.test\r\nConnection: close\r\n\r\n", target)
+		res, err := http.ReadResponse(bufio.NewReader(conn), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer res.Body.Close()
+		out, _ := io.ReadAll(res.Body)
+		return rawResponse{StatusCode: res.StatusCode, Header: res.Header}, out
+	}
+	junk, query := strings.Repeat("\x80", 1<<18), strings.Repeat("&", 1<<18)
+	for _, target := range []string{"/v1//" + junk, "/v1//courses/" + junk + "/grades", "/v1//tools?" + query, "http://lms.test?" + query} {
+		res, out := get(target)
+		small("a path the router would tidy", res, out, http.StatusNotFound, "no such route")
+	}
+	if res, _ := get("/v1//tools?tab=mine"); res.StatusCode != http.StatusTemporaryRedirect || res.Header.Get("Location") != "/v1/tools?tab=mine" {
+		t.Errorf("a short path is no longer tidied: %d %q", res.StatusCode, res.Header.Get("Location"))
+	}
+
+	ask := a.do(nil, "GET", "/v1/courses/"+c.Course.String()+"/upload-url?kind=material&content_type=text/plain", sato, nil)
+	res, out = a.raw("PUT", a.here(ask.str("result", "upload_url")), big[:1<<19], []byte("hello"))
+	small("an upload of another type", res, out, http.StatusBadRequest, "Content-Type")
+
+	// A long path that is tidy is routed as ever: a blob URL's token, which
+	// carries the content type, runs past what the router tidies.
+	docx := "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+	ask = a.do(nil, "GET", "/v1/courses/"+c.Course.String()+"/upload-url?kind=material&content_type="+url.QueryEscape(docx), sato, nil)
+	if res, out := a.raw("PUT", a.here(ask.str("result", "upload_url")), docx, []byte("hello")); res.StatusCode != http.StatusOK {
+		t.Errorf("a long blob URL: %d %s", res.StatusCode, out)
+	}
+
+	// A name stored whole, repeated in a failure that is recorded.
+	c.Exec(`UPDATE grade_component SET name = $1 WHERE id = $2`, big, c.Midterm)
+	res, out = a.raw("POST", course+"/components", "application/json", []byte(`{"parent_id": "`+c.Midterm.String()+`", "name": "Part A"}`),
+		"Authorization", "Bearer "+sato, "Idempotency-Key", "under-the-midterm")
+	small("a failure that names the component", res, out, http.StatusUnprocessableEntity, "failed_precondition")
+	if n := c.Count(`SELECT count(*) FROM action WHERE status = 'failed' AND length(result::text) < 1024`); n != 1 {
+		t.Errorf("%d failures recorded in under a kilobyte, want 1", n)
+	}
+
+	s := newSSO(t)
+	b := browser()
+	q := s.start(b, "")
+	r := s.do(b, "GET", httpapi.SSOCallbackPath+"?error="+url.QueryEscape(big[:1<<18])+"&state="+q.Get("state"), "", nil)
+	if r.Status != http.StatusUnauthorized || len(r.Raw) > most {
+		t.Errorf("the identity provider's refusal: %d, %d bytes: %.300s", r.Status, len(r.Raw), r.Raw)
+	}
+	// Not a refusal, but as early and as open: where to go after signing
+	// in, which the start carries in a cookie, escaped for JSON and then in
+	// base64.
+	r = s.do(browser(), "GET", "/v1/auth/sso/start?return_to=/"+url.QueryEscape(big[:1<<18]), "", nil)
+	if n := len(r.Raw) + headerBytes(r.Header); r.Status != http.StatusFound || n > most {
+		t.Errorf("the start of a sign-in: %d, %d bytes", r.Status, n)
+	}
+}
+
+// headerBytes is about what a response's headers take on the wire. They
+// are part of what a refusal says as much as its body is.
+func headerBytes(h http.Header) int {
+	n := 0
+	for k, vs := range h {
+		for _, v := range vs {
+			n += len(k) + len(v) + len(": \r\n")
+		}
+	}
+	return n
+}
+
+// What no credential or account could be is answered as not one, at every
+// door, and not as a fault of ours to retry: a token whose prefix is not in
+// the alphabet prefixes are made in (Go's server passes a header's bytes
+// that are not UTF-8, and the database refuses them), and an email holding
+// U+0000. A sign-in with such an email is counted like any other guess.
+func TestWhatTheDatabaseCannotHoldIsNoCredential(t *testing.T) {
+	var log bytes.Buffer
+	a := hardened(t, nil, ratelimit.New(1, 3), slog.New(slog.NewJSONHandler(&log, nil)))
+	token := "ais_\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff_" + strings.Repeat("A", 43)
+	if r := a.do(nil, "GET", "/v1/me", token, nil); r.Status != http.StatusUnauthorized {
+		t.Errorf("REST: %d %s", r.Status, r.Raw)
+	}
+	res, body := a.raw("POST", a.srv.URL+httpapi.MCPPath, "application/json", []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`),
+		"Authorization", "Bearer "+token, "Accept", "application/json, text/event-stream")
+	if res.StatusCode != http.StatusUnauthorized {
+		t.Errorf("MCP: %d %s", res.StatusCode, body)
+	}
+	for i := range 3 {
+		if r := a.do(nil, "POST", "/v1/auth/login", "", m{"email": "sato\x00@example.edu", "password": "not the password!"}); r.Status != http.StatusUnauthorized {
+			t.Fatalf("sign-in %d: %d %s", i+1, r.Status, r.Raw)
+		}
+	}
+	if r := a.do(nil, "POST", "/v1/auth/login", "", m{"email": "sato\x00@example.edu", "password": "not the password!"}); r.Status != http.StatusTooManyRequests {
+		t.Fatalf("a fourth sign-in: %d, want 429", r.Status)
+	}
+	if strings.Contains(log.String(), `"level":"ERROR"`) {
+		t.Errorf("logged as a fault of ours: %s", log.String())
+	}
+}
+
+// A call carries one idempotency key. Given two, whichever a retry carried
+// would decide whether it was the same call, so neither is taken, and
+// nothing is attempted.
+func TestACallCarriesOneIdempotencyKey(t *testing.T) {
+	a := newAPI(t, 1)
+	req, err := http.NewRequest("POST", a.srv.URL+"/v1/courses/"+a.c.Course.String()+"/grades",
+		strings.NewReader(`{"submission_id": "`+a.c.Students[0].HW3.String()+`", "score": 1}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+a.tokenFor(a.c.Sato))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Add(httpapi.HeaderIdempotencyKey, "first")
+	req.Header.Add(httpapi.HeaderIdempotencyKey, "second")
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(res.Body)
+	_ = res.Body.Close()
+	if res.StatusCode != http.StatusBadRequest || !strings.Contains(string(body), "invalid_argument") {
+		t.Fatalf("two keys: %d %s", res.StatusCode, body)
+	}
+	if n := a.c.Count(`SELECT count(*) FROM action`); n != 0 {
+		t.Fatalf("%d actions recorded", n)
 	}
 }

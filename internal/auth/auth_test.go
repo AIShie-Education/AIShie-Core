@@ -112,6 +112,7 @@ func TestBootstrapAndAuthenticate(t *testing.T) {
 	for name, presented := range map[string]string{
 		"nothing": "", "not ours": "ghp_abcdefghijklmnop", "right prefix, wrong secret": tampered,
 		"unknown prefix": "ais_aaaaaaaaaaaa_" + strings.Repeat("A", 43), "the hash itself": stored,
+		"a prefix that is not UTF-8": "ais_\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff_" + strings.Repeat("A", 43),
 	} {
 		if _, err := a.Authenticate(ctx, presented); !apperr.Is(err, apperr.Unauthenticated) {
 			t.Errorf("%s: err = %v, want unauthenticated", name, err)
@@ -198,6 +199,12 @@ func TestLogin(t *testing.T) {
 	_, noSuch := a.Login(ctx, "nobody@example.edu", "a long enough password")
 	if !apperr.Is(wrongPw, apperr.Unauthenticated) || !apperr.Is(noSuch, apperr.Unauthenticated) || wrongPw.Error() != noSuch.Error() {
 		t.Fatalf("wrong password: %v; unknown email: %v", wrongPw, noSuch)
+	}
+	// So does an email the database could not hold.
+	for _, email := range []string{"root@example.edu\xff", "root@example.edu\x00"} {
+		if _, err := a.Login(ctx, email, "a long enough password"); err == nil || err.Error() != noSuch.Error() {
+			t.Errorf("%q: %v", email, err)
+		}
 	}
 	// A suspended actor cannot start a session.
 	if _, err := pool.Exec(ctx, `UPDATE actor SET status = 'suspended' WHERE id = $1`, res.RootID); err != nil {

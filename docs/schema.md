@@ -191,8 +191,11 @@ a time, so the three are measured together: any change that widens a seat — a 
 scope opened or a list added to, an expiry extended or cleared, a paused seat resumed — is a
 grant of the whole of what the seat will then hold, and the whole of it must be within the
 granter's own: no level above the granter's on any column, no reach beyond a list-scoped
-granter's own list, no life past the granter's own `expires_at`. Narrowing is always allowed,
-whatever the granter holds. Nobody manages their own seat, and a seat whose `expires_at` has
+granter's own list, no life past the granter's own `expires_at`. A student's seat reaches that
+student, as any seat reaches whoever is on its list, so a list-scoped granter raises nothing on
+a seat that reaches a student outside the list, and seats no new student whose list is
+themselves: nobody can have listed them yet. Narrowing is always allowed, whatever the granter
+holds. Nobody manages their own seat, and a seat whose `expires_at` has
 passed is as good as removed whether or not the sweep has got to it: it is not revived, and
 seating the actor again is a fresh row.
 
@@ -386,7 +389,8 @@ Nobody is authorized because nobody is calling. None of it is what makes the sys
 proposal's age itself — it makes those facts visible, and keeps the queues free of entries
 nobody could approve. When a due date passes, every current student with no submission row
 gets one in state `missing`, so that the gap is something a grader can see and grade; late
-work takes that row over.
+work takes that row over, unless a grade has been entered or proposed for it: a zero for
+handing in nothing is a grade of that nothing, and the late work is then a new attempt.
 
 **`event` is something that happened, written after it did**, in the same transaction as the
 state change. Not every event has an action behind it (a due date passing); one action may
@@ -523,6 +527,14 @@ check `actor.platform_role` instead. That is the only place it is read.
 - Grade computation, and writing a `computed` snapshot only on post.
 - The component tree is acyclic beyond the self-loop the CHECK blocks.
 - Cancelling pending proposals when a member is removed or expires.
+- Nobody hands out more than they hold (§2.2): any change that widens a seat is measured as
+  the whole of what it will then hold, a student's seat reaching the student included.
+- A grade lands on the work it was given for: the submission's state is read under its lock, a
+  proposal records whether it was given for a `missing` row, and late work takes a `missing`
+  row over only while no grade is entered or proposed for it.
+- A write takes its caller's seat before anything else and holds it to the end: removing or
+  changing a seat waits for the member's calls in flight, or they wait for it and are refused,
+  so nothing is proposed from a seat that is being removed.
 - `actor.kind` and `course_member.role` are never read by authorization.
 
 ## 5. Worked example: an agent grades an essay

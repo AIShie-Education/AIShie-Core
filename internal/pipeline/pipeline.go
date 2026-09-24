@@ -25,6 +25,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -34,6 +35,7 @@ import (
 
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/apperr"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/canon"
+	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/db/dbq"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/domain"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/signing"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/tool"
@@ -56,7 +58,9 @@ type Config struct {
 // enough that an approval still means what the proposer meant.
 const DefaultProposalTTL = 14 * 24 * time.Hour
 
-// MaxIdempotencyKeyLen bounds the key; it is indexed.
+// MaxIdempotencyKeyLen bounds the key, in characters, as the schema MCP
+// clients are given counts them. The column has no length of its own; 200
+// characters are at most 800 bytes, well within what its index can hold.
 const MaxIdempotencyKeyLen = 200
 
 type Pipeline struct {
@@ -191,6 +195,32 @@ func savepoint(ctx context.Context, tx pgx.Tx, fn func(sp pgx.Tx) (any, error)) 
 		return nil, err
 	}
 	return out, nil
+}
+
+// validate runs a tool's Validate inside a savepoint. Validate may take locks
+// — a grade's takes the work's — and so may lose a deadlock; the savepoint
+// keeps that from aborting the transaction its failure is then recorded in.
+// What it locked it keeps when it succeeds, for Execute after it.
+func validate(ctx context.Context, tx pgx.Tx, t tool.Tool, m *domain.Member, in any) error {
+	sp, err := tx.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	if err := t.Validate(ctx, dbq.New(sp), m, in); err != nil {
+		if rbErr := sp.Rollback(ctx); rbErr != nil {
+			return errors.Join(err, rbErr)
+		}
+		return err
+	}
+	return sp.Commit(ctx)
+}
+
+// transient reports whether err is a conflict between transactions that the
+// database resolved by stopping this one (serialization failure, deadlock):
+// nothing about the call itself was wrong, and making it again can work.
+func transient(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && strings.HasPrefix(pgErr.Code, "40")
 }
 
 func errorResult(e *apperr.Error) []byte {

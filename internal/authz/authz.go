@@ -121,7 +121,15 @@ func ForActor(ctx context.Context, q dbq.Querier, actorID, courseID uuid.UUID, p
 		return Decision{}, fmt.Errorf("load course: %w", err)
 	}
 	var member *domain.Member
-	row, err := q.GetLiveMemberForAuthz(ctx, dbq.GetLiveMemberForAuthzParams{CourseID: courseID, ActorID: actorID})
+	var row dbq.GetLiveMemberForAuthzRow
+	if write {
+		// A write holds its caller's seat to the end, and takes it first.
+		var locked dbq.LockLiveMemberForAuthzRow
+		locked, err = q.LockLiveMemberForAuthz(ctx, dbq.LockLiveMemberForAuthzParams{CourseID: courseID, ActorID: actorID})
+		row = dbq.GetLiveMemberForAuthzRow(locked)
+	} else {
+		row, err = q.GetLiveMemberForAuthz(ctx, dbq.GetLiveMemberForAuthzParams{CourseID: courseID, ActorID: actorID})
+	}
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
 	case err != nil:

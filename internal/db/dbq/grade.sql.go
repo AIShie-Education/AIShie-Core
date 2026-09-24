@@ -632,17 +632,21 @@ func (q *Queries) LockStudentTotals(ctx context.Context, arg LockStudentTotalsPa
 	return err
 }
 
-const lockSubmissionForGrading = `-- name: LockSubmissionForGrading :exec
+const lockSubmissionForGrading = `-- name: LockSubmissionForGrading :one
 
-SELECT 1 FROM submission WHERE id = $1 FOR UPDATE
+SELECT state FROM submission WHERE id = $1 FOR UPDATE
 `
 
 // Serialising what races -------------------------------------------------------
 // A row lock, not an UPDATE: the freeze trigger does not fire. Two drafts for
-// one submission entered at once would otherwise both be live.
-func (q *Queries) LockSubmissionForGrading(ctx context.Context, id uuid.UUID) error {
-	_, err := q.db.Exec(ctx, lockSubmissionForGrading, id)
-	return err
+// one submission entered at once would otherwise both be live, and late work
+// taking a 'missing' placeholder over takes the same lock. The state is read
+// under it, so it is the state the grade is written against.
+func (q *Queries) LockSubmissionForGrading(ctx context.Context, id uuid.UUID) (string, error) {
+	row := q.db.QueryRow(ctx, lockSubmissionForGrading, id)
+	var state string
+	err := row.Scan(&state)
+	return state, err
 }
 
 const newestComponentDraftAt = `-- name: NewestComponentDraftAt :one
@@ -696,9 +700,17 @@ func (q *Queries) PostGrade(ctx context.Context, arg PostGradeParams) (int64, er
 }
 
 const submissionHasGrades = `-- name: SubmissionHasGrades :one
-SELECT EXISTS (SELECT 1 FROM grade WHERE submission_id = $1)
+SELECT EXISTS (
+    SELECT 1 FROM grade WHERE submission_id = $1
+    UNION ALL
+    SELECT 1 FROM action
+    WHERE target_type = 'submission' AND target_id = $1
+      AND action_type = 'grade.submit' AND status = 'proposed'
+)
 `
 
+// A grade entered, or proposed and not yet decided: either way, one is on its
+// way for exactly this work.
 func (q *Queries) SubmissionHasGrades(ctx context.Context, submissionID *uuid.UUID) (bool, error) {
 	row := q.db.QueryRow(ctx, submissionHasGrades, submissionID)
 	var exists bool

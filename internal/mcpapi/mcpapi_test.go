@@ -1,6 +1,7 @@
 package mcpapi_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -8,7 +9,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"regexp"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -121,6 +124,212 @@ func call(t *testing.T, s *mcp.ClientSession, name string, args m) (envelope, *m
 		t.Fatalf("%s: structured content %s disagrees with text %s", name, structured, text)
 	}
 	return env, res
+}
+
+// Arguments name each key once, at the top level too, where an MCP write's
+// idempotency key is taken out of them.
+func TestArgumentsNameEachKeyOnce(t *testing.T) {
+	f := serve(t, 1)
+	c, yuki := f.c, f.c.Students[0]
+	sato := f.connect(t, f.token(t, c.Sato))
+	raw := json.RawMessage(`{"course_id": "` + c.Course.String() + `", "submission_id": "` + yuki.HW3.String() +
+		`", "score": 90, "score": 10, "idempotency_key": "twice"}`)
+	res, err := sato.CallTool(context.Background(), &mcp.CallToolParams{Name: "grade_submit", Arguments: raw})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if text := res.Content[0].(*mcp.TextContent).Text; !res.IsError || !strings.Contains(text, "invalid_argument") {
+		t.Fatalf("a repeated key: %s", text)
+	}
+	if n := c.Count(`SELECT count(*) FROM action`); n != 0 {
+		t.Fatal("something was recorded")
+	}
+}
+
+// post sends body to the MCP endpoint as it is, header pairs after it, as
+// a client that is not the SDK's might, and returns the status and body.
+func post(t *testing.T, f *fixture, token, body string, headers ...string) (int, []byte) {
+	t.Helper()
+	req, _ := http.NewRequest(http.MethodPost, f.srv.URL+httpapi.MCPPath, strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	for i := 0; i+1 < len(headers); i += 2 {
+		req.Header.Set(headers[i], headers[i+1])
+	}
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	out, _ := io.ReadAll(res.Body)
+	return res.StatusCode, out
+}
+
+// One request, one message. The per-actor limit counts requests, so a batch
+// would be as many calls as it held for the price of one: it is refused
+// whole, and nothing in it is attempted.
+func TestARequestCarriesOneMessage(t *testing.T) {
+	f := serve(t, 1)
+	c, yuki := f.c, f.c.Students[0]
+	grade := func(id, key string) string {
+		return `{"jsonrpc": "2.0", "id": ` + id + `, "method": "tools/call", "params": {"name": "grade_submit", "arguments": {"course_id": "` +
+			c.Course.String() + `", "submission_id": "` + yuki.HW3.String() + `", "score": 90, "idempotency_key": "` + key + `"}}}`
+	}
+	status, out := post(t, f, f.token(t, c.Sato), " ["+grade("1", "one")+", "+grade("2", "two")+"]")
+	if status != http.StatusBadRequest || !strings.Contains(string(out), "a batch is not taken") {
+		t.Fatalf("a batch: %d %s", status, out)
+	}
+	if n := c.Count(`SELECT count(*) FROM action`); n != 0 {
+		t.Fatalf("%d actions recorded", n)
+	}
+	if status, out := post(t, f, f.token(t, c.Sato), grade("1", "one")); status != http.StatusOK || !strings.Contains(string(out), `\"status\":\"executed\"`) {
+		t.Fatalf("the same call alone: %d %s", status, out)
+	}
+}
+
+// A request the SDK would refuse for its headers is refused for them, as
+// the SDK words it, however large it is; one that is only too large is
+// refused in the SDK's words too. That the body is read before the SDK
+// sees it changes neither.
+func TestARequestIsRefusedAsTheSDKWouldRefuseIt(t *testing.T) {
+	f := serve(t, 1)
+	token := f.token(t, f.c.Sato)
+	big := `{"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {"x": "` + strings.Repeat("a", 5<<20) + `"}}`
+	for _, tc := range []struct {
+		what    string
+		headers []string
+		status  int
+		says    string
+	}{
+		{"not JSON", []string{"Content-Type", "text/plain"}, http.StatusUnsupportedMediaType, "Content-Type must be"},
+		{"no stream accepted", []string{"Accept", "application/json"}, http.StatusBadRequest, "Accept must contain"},
+		{"a version there is not", []string{"Mcp-Protocol-Version", "2000-01-01"}, http.StatusBadRequest, "Unsupported protocol version"},
+		{"too large", nil, http.StatusRequestEntityTooLarge, "request body exceeds"},
+	} {
+		if status, out := post(t, f, token, big, tc.headers...); status != tc.status || !strings.Contains(string(out), tc.says) {
+			t.Errorf("%s: %d %.300s", tc.what, status, out)
+		}
+	}
+}
+
+// recorder is bearer, noting the method of each message the client posts.
+type recorder struct {
+	bearer
+	mu   sync.Mutex
+	sent []string
+}
+
+func (r *recorder) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.Body != nil {
+		body, _ := io.ReadAll(req.Body)
+		req.Body = io.NopCloser(bytes.NewReader(body))
+		var msg struct {
+			Method string `json:"method"`
+		}
+		_ = json.Unmarshal(body, &msg)
+		r.mu.Lock()
+		r.sent = append(r.sent, msg.Method)
+		r.mu.Unlock()
+	}
+	return r.bearer.RoundTrip(req)
+}
+
+// Nothing is pushed from here, and nothing says otherwise. Tools are all
+// that is offered, and their list is not said to change, so a client that
+// would listen for that does not ask; a listen asked for all the same is
+// answered as SEP-2575 answers a method a server does not have: not found,
+// to the id that asked.
+func TestNothingIsOfferedThatIsNotPushed(t *testing.T) {
+	f := serve(t, 1)
+	token := f.token(t, f.c.Sato)
+	rec := &recorder{bearer: bearer{token}}
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-agent", Version: "0"},
+		&mcp.ClientOptions{ToolListChangedHandler: func(context.Context, *mcp.ToolListChangedRequest) {}})
+	session, err := client.Connect(context.Background(), &mcp.StreamableClientTransport{
+		Endpoint: f.srv.URL + httpapi.MCPPath, HTTPClient: &http.Client{Transport: rec},
+		DisableStandaloneSSE: true, MaxRetries: -1,
+	}, nil)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer session.Close()
+	if caps, _ := json.Marshal(session.InitializeResult().Capabilities); string(caps) != `{"tools":{}}` {
+		t.Errorf("offered: %s", caps)
+	}
+	if _, err := session.ListTools(context.Background(), nil); err != nil {
+		t.Fatal(err)
+	}
+	rec.mu.Lock()
+	if slices.Contains(rec.sent, "subscriptions/listen") {
+		t.Errorf("the client listened: %v", rec.sent)
+	}
+	rec.mu.Unlock()
+
+	status, out := post(t, f, token, `{"jsonrpc": "2.0", "id": 7, "method": "subscriptions/listen", "params": {"notifications": {"toolsListChanged": true}, `+
+		`"_meta": {"io.modelcontextprotocol/protocolVersion": "2026-07-28"}}}`, "Mcp-Protocol-Version", "2026-07-28")
+	var answer struct {
+		ID    json.RawMessage `json:"id"`
+		Error struct {
+			Code int `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(out, &answer); err != nil || status != http.StatusNotFound || string(answer.ID) != "7" || answer.Error.Code != -32601 {
+		t.Errorf("a listen: %d %s", status, out)
+	}
+	// The id goes back as it came, not escaped for HTML.
+	id := `"` + strings.Repeat("<", 200) + `"`
+	status, out = post(t, f, token, `{"jsonrpc": "2.0", "id": `+id+`, "method": "subscriptions/listen", "params": {"notifications": {"toolsListChanged": true}, `+
+		`"_meta": {"io.modelcontextprotocol/protocolVersion": "2026-07-28"}}}`, "Mcp-Protocol-Version", "2026-07-28")
+	if err := json.Unmarshal(out, &answer); err != nil || status != http.StatusNotFound || string(answer.ID) != id {
+		t.Errorf("a listen with an id of 200 '<': %d %.300s", status, out)
+	}
+}
+
+// Over MCP a refusal of ours is written twice, as text and as structured
+// content, and the text is escaped once more on the way: a megabyte of input
+// would come back as thirteen. The SDK words some refusals itself — a tool
+// or a method it does not know, params that do not decode, a protocol
+// version the header does not match — quoting what it refuses with %q, which
+// makes each DEL four bytes before JSON escapes the backslash. Every one is
+// held to a few kilobytes all the same and still says what was wrong; what
+// could not be cut short — an id, which every answer repeats, or a listen,
+// whose answer is a stream — is not taken.
+func TestARefusalOverMCPRepeatsLittleOfWhatItRefuses(t *testing.T) {
+	f := serve(t, 1)
+	c, yuki := f.c, f.c.Students[0]
+	token := f.token(t, yuki.Actor)
+	del := strings.Repeat("\x7f", 1<<20)
+	for _, tc := range []struct {
+		what, body, version string
+		status              int
+		says                string
+	}{
+		{"a score that is no number", `{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "grade_submit", "arguments": {"course_id": "` +
+			c.Course.String() + `", "submission_id": "` + yuki.HW3.String() + `", "score": "` + strings.Repeat("<", 1<<20) + `", "idempotency_key": "big"}}}`,
+			"", http.StatusOK, "/properties/score"},
+		{"a tool there is not", `{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "` + del + `", "arguments": {}}}`,
+			"", http.StatusOK, "unknown tool"},
+		{"a method there is not", `{"jsonrpc": "2.0", "id": 1, "method": "` + del + `", "params": {}}`,
+			"", http.StatusBadRequest, "JSON RPC not handled"},
+		{"params that do not decode", `{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": 5, "arguments": {"x": "` + del + `"}}}`,
+			"", http.StatusOK, "unmarshaling"},
+		{"a version the header does not match", `{"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {"_meta": {"io.modelcontextprotocol/protocolVersion": "` + del + `"}}}`,
+			"2025-06-18", http.StatusBadRequest, "does not match"},
+		{"an id", `{"jsonrpc": "2.0", "id": "` + del + `", "method": "tools/list"}`,
+			"", http.StatusBadRequest, "the id is longer than"},
+		{"a listen", `{"jsonrpc": "2.0", "id": 1, "method": "subscriptions/listen", "params": {"notifications": 5, "x": "` + del + `"}}`,
+			"", http.StatusNotFound, "poll event_list"},
+	} {
+		var headers []string
+		if tc.version != "" {
+			headers = []string{"Mcp-Protocol-Version", tc.version}
+		}
+		status, out := post(t, f, token, tc.body, headers...)
+		if status != tc.status || len(out) > 8<<10 || !strings.Contains(string(out), tc.says) {
+			t.Errorf("%s: %d, %d bytes: %.300q", tc.what, status, len(out), out)
+		}
+	}
 }
 
 // docs/schema.md §5 once more, this time as the agent actually lives it: an

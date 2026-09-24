@@ -293,6 +293,16 @@ type seating struct {
 	expiresAt                     *time.Time
 }
 
+// listsItself reports whether the seat's student list will be the seat
+// itself, as a student's is unless someone else is named.
+func (s seating) listsItself() bool {
+	return s.role == "student" && s.studentScope == domain.ScopeListed && len(s.listedStudents) == 0
+}
+
+// errSeated refuses a second live seat, whether the first was live all along
+// or was given longer while seat() looked at it.
+var errSeated = apperr.Conflicts("the actor already has a seat in this course; change it, or remove it and add again for a fresh start")
+
 // seat adds a member: a new course_member row with the preset copied onto it.
 // preset_id is kept as provenance only — nothing reads it afterwards, so
 // editing the preset later changes nobody already seated.
@@ -317,11 +327,26 @@ func seat(ctx context.Context, ec *tool.ExecCtx, s seating) (uuid.UUID, error) {
 	case err != nil:
 		return uuid.Nil, err
 	case live.ExpiresAt != nil && !live.ExpiresAt.After(ec.Now):
-		if _, err := members.Remove(ctx, ec.Q, ec.Emit, s.courseID, live.ID, members.ReasonExpired); err != nil {
+		// Only now is the seat locked, as every removal locks the seat it
+		// removes: the removal then waits for its member's calls in flight,
+		// and cancels what they proposed. Then it is looked at again: the
+		// sweep may have removed it meanwhile, and nothing is in the way, or
+		// it may have been given longer, and it is as live as any other.
+		locked, err := ec.Q.GetMemberForSweep(ctx, live.ID)
+		if err != nil {
 			return uuid.Nil, err
 		}
+		switch {
+		case locked.Status == domain.MemberRemoved:
+		case locked.ExpiresAt == nil || locked.ExpiresAt.After(ec.Now):
+			return uuid.Nil, errSeated
+		default:
+			if _, err := members.Remove(ctx, ec.Q, ec.Emit, s.courseID, live.ID, members.ReasonExpired); err != nil {
+				return uuid.Nil, err
+			}
+		}
 	default:
-		return uuid.Nil, apperr.Conflicts("the actor already has a seat in this course; change it, or remove it and add again for a fresh start")
+		return uuid.Nil, errSeated
 	}
 	if s.expiresAt != nil && !s.expiresAt.After(ec.Now) {
 		return uuid.Nil, apperr.Invalid("expires_at is in the past")
@@ -350,7 +375,7 @@ func seat(ctx context.Context, ec *tool.ExecCtx, s seating) (uuid.UUID, error) {
 	// self-access special case anywhere: a student sees their own work for
 	// the same reason a tutor listed for them does.
 	students := s.listedStudents
-	if s.role == "student" && s.studentScope == domain.ScopeListed && len(students) == 0 {
+	if s.listsItself() {
 		students = []uuid.UUID{id}
 	}
 	if err := writeScope(ctx, ec.Q, s.courseID, id, s.studentScope, students, s.assignmentScope, s.listedAssignments); err != nil {
@@ -379,19 +404,15 @@ func writeStudentScope(ctx context.Context, q *dbq.Queries, courseID, memberID u
 		return apperr.Invalid("listed_students only makes sense with student_scope = listed")
 	}
 	if len(students) > 0 {
-		// The member itself may be in its own list before its row is visible
-		// to the count, so it is set aside and checked by identity.
-		others := make([]uuid.UUID, 0, len(students))
-		for _, s := range students {
-			if s != memberID {
-				others = append(others, s)
-			}
-		}
-		n, err := q.CountStudentsOfCourse(ctx, dbq.CountStudentsOfCourseParams{CourseID: courseID, MemberIds: others})
+		// The member's own id is counted like any other: a new seat's row is
+		// already visible in this transaction, so a student may list itself,
+		// and a seat that is not a student's cannot — it would reach nothing,
+		// yet be measured as reaching someone when it is next granted to.
+		n, err := q.CountStudentsOfCourse(ctx, dbq.CountStudentsOfCourseParams{CourseID: courseID, MemberIds: students})
 		if err != nil {
 			return err
 		}
-		if int(n) != len(others) {
+		if int(n) != len(students) {
 			return apperr.Precondition("listed_students must all be current students of this course")
 		}
 	}

@@ -102,6 +102,10 @@ type GradeSubmitIn struct {
 	SubmissionID    *uuid.UUID `json:"submission_id,omitempty" jsonschema:"grade this submission; or give component_id and student_member_id"`
 	ComponentID     *uuid.UUID `json:"component_id,omitempty" jsonschema:"grade a directly graded component, such as an exam"`
 	StudentMemberID *uuid.UUID `json:"student_member_id,omitempty" jsonschema:"required with component_id"`
+	// ForMissing is pinned when a grade is proposed for a submission, and a
+	// direct call may give it too: the grade is refused if the work is no
+	// longer what it was.
+	ForMissing *bool `json:"for_missing,omitempty" jsonschema:"whether the grade is for a 'missing' placeholder, nothing handed in; filled in when the grade is proposed, and the grade is refused if late work has since taken the placeholder's place"`
 	GradeContent
 }
 
@@ -189,11 +193,29 @@ func loadSubject(ctx context.Context, q dbq.Querier, courseID uuid.UUID, submiss
 	return s, nil
 }
 
-// checkSubject holds the rules about what may be graded at all.
-func checkSubject(ctx context.Context, q dbq.Querier, courseID uuid.UUID, s gradeSubject) error {
+// checkSubject holds the rules about what may be graded at all. forMissing is
+// what the grade was given for, when that was pinned.
+func checkSubject(ctx context.Context, q dbq.Querier, courseID uuid.UUID, s gradeSubject, forMissing *bool) error {
 	if s.submission != nil {
-		if s.submission.State == "draft" {
+		// Read under the submission's lock, which is held to the end of the
+		// call. Late work taking a 'missing' placeholder over takes the same
+		// lock, so the state read here is the state the grade is written
+		// against, and a proposal made for the placeholder is on record
+		// before any takeover can look for it (SubmissionHasGrades). The work
+		// must still be what the grade was given for: nothing, if it was a
+		// placeholder when first read here or when the grade was proposed.
+		state, err := q.LockSubmissionForGrading(ctx, s.submission.ID)
+		if err != nil {
+			return err
+		}
+		missing := state == stateMissing
+		switch {
+		case state == stateDraft:
 			return apperr.Precondition("the submission has not been submitted yet")
+		case missing != (s.submission.State == stateMissing), forMissing != nil && *forMissing && !missing:
+			return apperr.Precondition("this grade was given for nothing handed in, and there is work here now; look at it, and grade it again")
+		case forMissing != nil && !*forMissing && missing:
+			return apperr.Precondition("this grade was given for work handed in, and nothing was; look at it, and grade it again")
 		}
 		return nil
 	}
@@ -310,22 +332,32 @@ func gradeSubmit(d Deps) tool.Tool {
 			return s.target(in.CourseID), nil
 		},
 		Validate: func(ctx context.Context, q dbq.Querier, m *domain.Member, in GradeSubmitIn) error {
+			if in.ForMissing != nil && in.SubmissionID == nil {
+				return apperr.Invalid("for_missing is for a grade on a submission")
+			}
 			s, err := load(ctx, q, in)
 			if err != nil {
 				return err
 			}
-			if err := checkSubject(ctx, q, in.CourseID, s); err != nil {
+			// The uploads first: grade.regrade takes their locks before the
+			// grade's work, and both take them in that order.
+			if err := checkFeedbackFiles(ctx, d, q, m, in.CourseID, in.FeedbackFiles); err != nil {
 				return err
 			}
-			if _, err = checkContent(ctx, q, s, in.GradeContent); err != nil {
+			if err := checkSubject(ctx, q, in.CourseID, s, in.ForMissing); err != nil {
 				return err
 			}
-			return checkFeedbackFiles(ctx, d, q, m, in.CourseID, in.FeedbackFiles)
+			_, err = checkContent(ctx, q, s, in.GradeContent)
+			return err
 		},
 		Pin: func(ctx context.Context, q dbq.Querier, in GradeSubmitIn) (GradeSubmitIn, error) {
 			s, err := load(ctx, q, in)
 			if err != nil {
 				return in, err
+			}
+			if s.submission != nil {
+				forMissing := s.submission.State == stateMissing
+				in.ForMissing = &forMissing
 			}
 			return in, pinRubric(ctx, q, s, &in.GradeContent)
 		},
@@ -394,7 +426,8 @@ func gradeSubmit(d Deps) tool.Tool {
 // lockGradeTarget serialises the writers of one piece of work's grades.
 func lockGradeTarget(ctx context.Context, q *dbq.Queries, s gradeSubject) error {
 	if s.submission != nil {
-		return q.LockSubmissionForGrading(ctx, s.submission.ID)
+		_, err := q.LockSubmissionForGrading(ctx, s.submission.ID)
+		return err
 	}
 	return q.LockComponentGradeTarget(ctx, dbq.LockComponentGradeTargetParams{ComponentID: s.component.ID, StudentMemberID: s.student})
 }

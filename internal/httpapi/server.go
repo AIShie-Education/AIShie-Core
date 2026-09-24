@@ -15,6 +15,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"path"
 	"strings"
 	"time"
 
@@ -163,11 +164,27 @@ const (
 	DefaultTransferTimeout = 10 * time.Minute
 )
 
+// maxTidied is the longest path, query included, the mux is left to tidy.
+// The paths of our routes are shorter, but for a blob URL's, which is never
+// untidy.
+const maxTidied = 256
+
 // routed answers for the routes the mux does not have. The mux's own 404 and
 // 405 are plain text; everything else this API says, it says in JSON, and a
 // client should not need a second parser for a mistyped path.
+//
+// The mux tidies a path by redirecting to the tidy one, which it repeats
+// twice, escaped, in Location and in the page, and the query with it as it
+// was sent: a byte sent could come back as six, before anyone is
+// authenticated. So a long path it would tidy, or a short one with a long
+// query, is answered as no route, whether or not the tidy one would match
+// one.
 func (s *server) routed(mux *http.ServeMux) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if p := r.URL.EscapedPath(); len(p)+len(r.URL.RawQuery) > maxTidied && path.Clean(p) != strings.TrimSuffix(p, "/") {
+			s.writeError(w, r, apperr.Missing("no such route; GET /v1/tools lists what there is"))
+			return
+		}
 		h, pattern := mux.Handler(r)
 		if pattern != "" {
 			mux.ServeHTTP(w, r)
@@ -180,8 +197,8 @@ func (s *server) routed(mux *http.ServeMux) http.Handler {
 		switch {
 		case probe.status == http.StatusMethodNotAllowed:
 			w.Header().Set("Allow", probe.header.Get("Allow"))
-			writeJSON(w, http.StatusMethodNotAllowed, errorBody{Error: &apperr.Error{Code: "method_not_allowed",
-				Message: r.Method + " is not something " + r.URL.Path + " takes; it takes " + probe.header.Get("Allow")}})
+			writeJSON(w, http.StatusMethodNotAllowed, errorBody{Error: apperr.New("method_not_allowed",
+				"%s is not something %s takes; it takes %s", r.Method, r.URL.Path, probe.header.Get("Allow"))})
 		case probe.status >= 300 && probe.status < 400:
 			// The mux tidying a path: /v1//tools → /v1/tools.
 			h.ServeHTTP(w, r)
@@ -224,6 +241,13 @@ type callerKey struct{}
 
 func (s *server) callTool(t tool.Tool) func(http.ResponseWriter, *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// One key. Given twice, which of the two a retry carries would decide
+		// whether it is the same call, so neither is taken, as a key named
+		// twice in a body is not.
+		if len(r.Header.Values(HeaderIdempotencyKey)) > 1 {
+			s.writeError(w, r, apperr.Invalid("%s is given more than once", HeaderIdempotencyKey))
+			return
+		}
 		args, err := buildArgs(t, r)
 		if err != nil {
 			s.writeError(w, r, err)

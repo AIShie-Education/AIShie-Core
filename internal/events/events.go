@@ -98,6 +98,16 @@ func Flush(ctx context.Context, q *dbq.Queries, b *Buffer) error {
 	if len(b.events) == 0 {
 		return nil
 	}
+	// An event that names a student takes KEY SHARE on the student's seat
+	// through its foreign key. Taken there, under the stream lock, it would
+	// wait for anyone changing that seat — who, holding the seat FOR UPDATE,
+	// then waits for the stream lock to write its own events. So the seats
+	// come first, and the stream lock is never held while one is waited for.
+	if seats := studentSeats(b.events); len(seats) > 0 {
+		if err := q.ShareSeats(ctx, seats); err != nil {
+			return fmt.Errorf("event seats: %w", err)
+		}
+	}
 	for _, key := range lockKeys(b.events) {
 		if err := q.LockEventStream(ctx, dbq.LockEventStreamParams{Namespace: lockNamespace, Stream: key}); err != nil {
 			return fmt.Errorf("event stream lock: %w", err)
@@ -126,6 +136,19 @@ func Flush(ctx context.Context, q *dbq.Queries, b *Buffer) error {
 	}
 	b.events = nil
 	return nil
+}
+
+// studentSeats returns the distinct students the events name.
+func studentSeats(evs []Event) []uuid.UUID {
+	seen := map[uuid.UUID]bool{}
+	var ids []uuid.UUID
+	for _, e := range evs {
+		if e.StudentMemberID != nil && !seen[*e.StudentMemberID] {
+			seen[*e.StudentMemberID] = true
+			ids = append(ids, *e.StudentMemberID)
+		}
+	}
+	return ids
 }
 
 // lockKeys returns one key per distinct course among the events, sorted.
