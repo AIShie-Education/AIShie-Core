@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -301,5 +302,60 @@ func TestCookiesForACrossSiteFrontEnd(t *testing.T) {
 	cookie := login.Header.Get("Set-Cookie")
 	if login.Status != 200 || !strings.Contains(cookie, "SameSite=None") || !strings.Contains(cookie, "Secure") {
 		t.Fatalf("session cookie for a cross-site front end: %d %q", login.Status, cookie)
+	}
+}
+
+// A refusal says what was wrong, not all of what was sent. A megabyte of
+// input is answered in a few kilobytes whichever check refuses it — the
+// schema, the decoding after it, the path, the router, a header, the
+// identity provider's answer — however early, and so to any caller at all;
+// and a failure is recorded no longer than it is told.
+func TestARefusalRepeatsLittleOfWhatItRefuses(t *testing.T) {
+	a := newAPI(t, 1)
+	c := a.c
+	student, sato := a.tokenFor(c.Students[0].Actor), a.tokenFor(c.Sato)
+	course := a.srv.URL + "/v1/courses/" + c.Course.String()
+	work := c.Students[0].HW3.String()
+	big := strings.Repeat("<", 1<<20-200) // six bytes each, once JSON has escaped them
+	const most = 4 << 10
+	small := func(what string, res rawResponse, out []byte, status int, says string) {
+		t.Helper()
+		if res.StatusCode != status || len(out) > most || !strings.Contains(string(out), says) {
+			t.Errorf("%s: %d, %d bytes: %.300s", what, res.StatusCode, len(out), out)
+		}
+	}
+	for i, tc := range []struct{ what, path, body, says string }{
+		{"a score that is no number", "/grades", `{"submission_id": "` + work + `", "score": "` + big + `"}`, "/properties/score"},
+		{"a key the schema does not have", "/grades", `{"submission_id": "` + work + `", "score": 1, "` + big + `": 1}`, "unexpected additional properties"},
+		{"a course_id that is not the path's", "/grades", `{"submission_id": "` + work + `", "score": 1, "course_id": "` + big + `"}`, "course_id in the request is not the one in the path"},
+		{"a date that does not parse", "/assignments", `{"title": "HW5", "due_at": "` + big + `"}`, "parsing time"},
+	} {
+		res, out := a.raw("POST", course+tc.path, "application/json", []byte(tc.body),
+			"Authorization", "Bearer "+student, "Idempotency-Key", "big-"+strconv.Itoa(i))
+		small(tc.what, res, out, http.StatusBadRequest, tc.says)
+	}
+
+	res, out := a.raw("PATCH", a.srv.URL+"/v1/courses/"+url.PathEscape(big[:1<<18])+"/grades", "", nil)
+	small("a method the route does not take", res, out, http.StatusMethodNotAllowed, "method_not_allowed")
+
+	ask := a.do(nil, "GET", "/v1/courses/"+c.Course.String()+"/upload-url?kind=material&content_type=text/plain", sato, nil)
+	res, out = a.raw("PUT", a.here(ask.str("result", "upload_url")), big[:1<<19], []byte("hello"))
+	small("an upload of another type", res, out, http.StatusBadRequest, "Content-Type")
+
+	// A name stored whole, repeated in a failure that is recorded.
+	c.Exec(`UPDATE grade_component SET name = $1 WHERE id = $2`, big, c.Midterm)
+	res, out = a.raw("POST", course+"/components", "application/json", []byte(`{"parent_id": "`+c.Midterm.String()+`", "name": "Part A"}`),
+		"Authorization", "Bearer "+sato, "Idempotency-Key", "under-the-midterm")
+	small("a failure that names the component", res, out, http.StatusUnprocessableEntity, "failed_precondition")
+	if n := c.Count(`SELECT count(*) FROM action WHERE status = 'failed' AND length(result::text) < 1024`); n != 1 {
+		t.Errorf("%d failures recorded in under a kilobyte, want 1", n)
+	}
+
+	s := newSSO(t)
+	b := browser()
+	q := s.start(b, "")
+	r := s.do(b, "GET", httpapi.SSOCallbackPath+"?error="+url.QueryEscape(big[:1<<18])+"&state="+q.Get("state"), "", nil)
+	if r.Status != http.StatusUnauthorized || len(r.Raw) > most {
+		t.Errorf("the identity provider's refusal: %d, %d bytes: %.300s", r.Status, len(r.Raw), r.Raw)
 	}
 }

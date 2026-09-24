@@ -8,6 +8,7 @@ package apperr
 import (
 	"errors"
 	"fmt"
+	"unicode/utf8"
 )
 
 type Code string
@@ -42,8 +43,27 @@ func (e *Error) With(key string, value any) *Error {
 	return &c
 }
 
+// New makes an Error, its message held to maxMessage.
 func New(code Code, format string, args ...any) *Error {
-	return &Error{Code: code, Message: fmt.Sprintf(format, args...)}
+	return &Error{Code: code, Message: clip(fmt.Sprintf(format, args...))}
+}
+
+// maxMessage bounds a message, in bytes. Many repeat something of what they
+// refuse — a value the schema did not match, a date that did not parse, a
+// name — and a refusal must not be a way to have the server send back a
+// megabyte, or several once it is escaped for JSON. The server's own words
+// are well under it; a value repeated in full is cut off, its start kept.
+const maxMessage = 400
+
+func clip(s string) string {
+	if len(s) <= maxMessage {
+		return s
+	}
+	cut := maxMessage
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return fmt.Sprintf("%s… (%d bytes)", s[:cut], len(s))
 }
 
 func Invalid(format string, args ...any) *Error      { return New(InvalidArgument, format, args...) }

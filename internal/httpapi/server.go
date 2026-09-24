@@ -180,8 +180,8 @@ func (s *server) routed(mux *http.ServeMux) http.Handler {
 		switch {
 		case probe.status == http.StatusMethodNotAllowed:
 			w.Header().Set("Allow", probe.header.Get("Allow"))
-			writeJSON(w, http.StatusMethodNotAllowed, errorBody{Error: &apperr.Error{Code: "method_not_allowed",
-				Message: r.Method + " is not something " + r.URL.Path + " takes; it takes " + probe.header.Get("Allow")}})
+			writeJSON(w, http.StatusMethodNotAllowed, errorBody{Error: apperr.New("method_not_allowed",
+				"%s is not something %s takes; it takes %s", r.Method, r.URL.Path, probe.header.Get("Allow"))})
 		case probe.status >= 300 && probe.status < 400:
 			// The mux tidying a path: /v1//tools → /v1/tools.
 			h.ServeHTTP(w, r)

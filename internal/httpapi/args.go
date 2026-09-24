@@ -68,7 +68,7 @@ func buildArgs(t tool.Tool, r *http.Request) ([]byte, error) {
 	for _, m := range pathParam.FindAllStringSubmatch(t.HTTP.Pattern, -1) {
 		name, value := m[1], r.PathValue(m[1])
 		if prior, ok := args[name]; ok && prior != value {
-			return nil, apperr.Invalid("%s is %q in the path and %v in the request; they must agree", name, value, prior)
+			return nil, apperr.Invalid("%s in the request is not the one in the path; they must agree", name)
 		}
 		args[name] = value
 	}

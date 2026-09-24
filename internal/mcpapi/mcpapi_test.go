@@ -143,6 +143,31 @@ func TestArgumentsNameEachKeyOnce(t *testing.T) {
 	}
 }
 
+// Over MCP a refusal is written twice, as text and as structured content,
+// and the text is escaped once more on the way: a megabyte of input would
+// come back as thirteen. It is held to a few kilobytes all the same, and
+// still says where the schema was not met.
+func TestARefusalOverMCPRepeatsLittleOfWhatItRefuses(t *testing.T) {
+	f := serve(t, 1)
+	c, yuki := f.c, f.c.Students[0]
+	body := `{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "grade_submit", "arguments": {"course_id": "` +
+		c.Course.String() + `", "submission_id": "` + yuki.HW3.String() + `", "score": "` + strings.Repeat("<", 1<<20) +
+		`", "idempotency_key": "big"}}}`
+	req, _ := http.NewRequest(http.MethodPost, f.srv.URL+httpapi.MCPPath, strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+f.token(t, yuki.Actor))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	out, _ := io.ReadAll(res.Body)
+	if res.StatusCode != http.StatusOK || len(out) > 8<<10 || !strings.Contains(string(out), "invalid_argument") || !strings.Contains(string(out), "/properties/score") {
+		t.Fatalf("%d, %d bytes: %.300s", res.StatusCode, len(out), out)
+	}
+}
+
 // docs/schema.md §5 once more, this time as the agent actually lives it: an
 // MCP session, a bearer token, and tool calls.
 func TestAnAgentGradesAnEssayOverMCP(t *testing.T) {
