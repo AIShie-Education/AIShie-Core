@@ -371,6 +371,14 @@ func TestARefusalRepeatsLittleOfWhatItRefuses(t *testing.T) {
 	res, out = a.raw("PUT", a.here(ask.str("result", "upload_url")), big[:1<<19], []byte("hello"))
 	small("an upload of another type", res, out, http.StatusBadRequest, "Content-Type")
 
+	// A long path that is tidy is routed as ever: a blob URL's token, which
+	// carries the content type, runs past what the router tidies.
+	docx := "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+	ask = a.do(nil, "GET", "/v1/courses/"+c.Course.String()+"/upload-url?kind=material&content_type="+url.QueryEscape(docx), sato, nil)
+	if res, out := a.raw("PUT", a.here(ask.str("result", "upload_url")), docx, []byte("hello")); res.StatusCode != http.StatusOK {
+		t.Errorf("a long blob URL: %d %s", res.StatusCode, out)
+	}
+
 	// A name stored whole, repeated in a failure that is recorded.
 	c.Exec(`UPDATE grade_component SET name = $1 WHERE id = $2`, big, c.Midterm)
 	res, out = a.raw("POST", course+"/components", "application/json", []byte(`{"parent_id": "`+c.Midterm.String()+`", "name": "Part A"}`),

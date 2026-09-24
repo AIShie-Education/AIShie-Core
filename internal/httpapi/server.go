@@ -164,8 +164,8 @@ const (
 	DefaultTransferTimeout = 10 * time.Minute
 )
 
-// maxTidied is the longest path the mux is left to tidy. No route of ours
-// is near it.
+// maxTidied is the longest path the mux is left to tidy. The paths of our
+// routes are shorter, but for a blob URL's, which is never untidy.
 const maxTidied = 256
 
 // routed answers for the routes the mux does not have. The mux's own 404 and
