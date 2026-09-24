@@ -50,6 +50,8 @@ jobs:
     outputs:
       prev: ${{ steps.release.outputs.prev }}
       migrations: ${{ steps.release.outputs.migrations }}
+      commit: ${{ steps.release.outputs.commit }}
+      date: ${{ steps.release.outputs.date }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -71,12 +73,17 @@ jobs:
             | sh -s -- -b "$(go env GOPATH)/bin" "${GOLANGCI_LINT_VERSION}"
       - run: make ci
       - run: make vuln
-      # The tag compared with, and the migrations new since: for a stable
-      # tag, since the last stable one.
+      # The tag compared with and the migrations new since (for a stable
+      # tag, since the last stable one), and one commit and date for the
+      # binaries and the image both.
       - id: release
         name: What this release is
         run: |
-          scripts/release-notes.sh "$GITHUB_REF_NAME" "$GITHUB_SHA" | tee -a "$GITHUB_OUTPUT"
+          {
+            scripts/release-notes.sh "$GITHUB_REF_NAME" "$GITHUB_SHA"
+            echo "commit=$(git rev-parse --short HEAD)"
+            echo "date=$(TZ=UTC git show -s --format=%cd --date=format-local:%Y-%m-%dT%H:%M:%SZ HEAD)"
+          } | tee -a "$GITHUB_OUTPUT"
 
   binaries:
     needs: verify
@@ -117,6 +124,8 @@ jobs:
           args: release --clean --release-footer ${{ runner.temp }}/footer.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SHORT_COMMIT: ${{ needs.verify.outputs.commit }}
+          COMMIT_DATE: ${{ needs.verify.outputs.date }}
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-checksums: dist/checksums.txt
@@ -158,8 +167,8 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             VERSION=${{ github.ref_name }}
-            COMMIT=${{ github.sha }}
-            DATE=${{ github.event.head_commit.timestamp }}
+            COMMIT=${{ needs.verify.outputs.commit }}
+            DATE=${{ needs.verify.outputs.date }}
           provenance: mode=max
           sbom: true
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
