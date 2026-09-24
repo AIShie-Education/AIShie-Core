@@ -343,6 +343,13 @@ func Define[In, Out any](s Spec[In, Out]) Tool {
 	return t
 }
 
+// decimalString is what a decimal given as a string may look like: a JSON
+// number, held to the bounds canon puts on a number literal — an exponent of
+// at most 400, and no more than 400 digits either side of the point. canon
+// never looks inside strings, and "1e2000000000" is ten bytes that the first
+// comparison would expand into two billion digits.
+const decimalString = `^-?[0-9]{1,400}(\.[0-9]{1,400})?([eE][-+]?(400|[0-3]?[0-9]{1,2}))?$`
+
 // schemaOptions teaches schema inference the types that do not look like
 // what they are: a UUID is a [16]byte and a Decimal is a struct.
 var schemaOptions = &jsonschema.ForOptions{
@@ -350,6 +357,7 @@ var schemaOptions = &jsonschema.ForOptions{
 		reflect.TypeFor[uuid.UUID](): {Type: "string", Format: "uuid"},
 		reflect.TypeFor[decimal.Decimal](): {
 			Types:       []string{"number", "string"},
+			Pattern:     decimalString, // applies to the string form only
 			Description: "a decimal number; a string is accepted where exactness matters",
 		},
 		reflect.TypeFor[json.RawMessage](): {},

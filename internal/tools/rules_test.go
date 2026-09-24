@@ -118,6 +118,22 @@ func TestAStudentsSeatReachesTheStudent(t *testing.T) {
 	b.do(t, helper, "member.update_perms", m{"course_id": b.course, "member_id": b.yukiM, "perms": m{"rubric_read": "autonomous"}})
 }
 
+// A decimal given as a string is held to the bounds a number is. As a string
+// "1e2000000000" is ten bytes; the first comparison made with it would expand
+// it into two billion digits, on the lowest level that can grade at all.
+func TestADecimalStringIsBoundedLikeANumber(t *testing.T) {
+	b := build(t)
+	work := uuid.New() // refused before anything is looked up
+	for _, args := range []m{
+		{"score": "1e2000000000"},
+		{"score": "1", "breakdown": []m{{"criterion": "Thesis", "points": "1e-2000000000", "max": "10"}}},
+	} {
+		args["course_id"], args["submission_id"] = b.course, work
+		b.try(t, b.grader, "grade.submit", args, apperr.InvalidArgument)
+	}
+	b.try(t, b.sato, "component.create", m{"course_id": b.course, "parent_id": b.total, "name": "Quiz", "weight": "9e999999"}, apperr.InvalidArgument)
+}
+
 // ---------------------------------------------------------------------------
 // docs/schema.md §4, "enforced by the application", one by one
 // ---------------------------------------------------------------------------

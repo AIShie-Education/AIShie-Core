@@ -84,9 +84,19 @@ func TestDecode(t *testing.T) {
 		"bad uuid":         `{"course_id": "nope", "score": 1}`,
 		"not json":         `{`,
 		"not an object":    `[1]`,
+		// A decimal as a string is held to the bounds canon puts on a number.
+		"decimal string, huge exponent":   `{"course_id": "` + course.String() + `", "score": "1e2000000000"}`,
+		"decimal string, tiny exponent":   `{"course_id": "` + course.String() + `", "score": "1e-401"}`,
+		"decimal string, too many digits": `{"course_id": "` + course.String() + `", "score": "` + strings.Repeat("9", 401) + `"}`,
+		"decimal string, not a number":    `{"course_id": "` + course.String() + `", "score": "lots"}`,
 	} {
 		if _, err := tl.Decode([]byte(raw)); !apperr.Is(err, apperr.InvalidArgument) {
 			t.Errorf("%s: err = %v, want invalid_argument", name, err)
+		}
+	}
+	for _, s := range []string{"-0.5", "1e400", "12E-3", "007", strings.Repeat("9", 400) + "." + strings.Repeat("9", 400)} {
+		if _, err := tl.Decode([]byte(`{"course_id": "` + course.String() + `", "score": "` + s + `"}`)); err != nil {
+			t.Errorf("score %.20q: %v", s, err)
 		}
 	}
 }
