@@ -373,7 +373,9 @@ func TestSingleSignOnDoesNotRedirectElsewhere(t *testing.T) {
 			"https://lms.example.edu@evil.example/", "http://lms.example.edu/", "javascript:alert(1)", "evil.example", "/\t/evil.example", "https:evil.example",
 			long + "a",
 			// Short, but six times as long escaped in the cookie.
-			"/courses/1?q=" + strings.Repeat("<", 400)},
+			"/courses/1?q=" + strings.Repeat("<", 400),
+			// Paths that http.Redirect cleans into /\evil.example.
+			`/./\evil.example`, `/x/../\evil.example`, `/x#/../\evil.example`},
 		"/courses/1?tab=grades":            {"/courses/1?tab=grades"},
 		frontEnd + "/courses/1#submission": {frontEnd + "/courses/1#submission"},
 		long:                               {long},
