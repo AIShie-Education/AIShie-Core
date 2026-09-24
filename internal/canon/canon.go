@@ -45,40 +45,68 @@ const (
 	maxDigits   = 400
 )
 
-// CheckNumbers applies the bounds on numbers to every number literal in raw,
-// and nothing else. It is linear in the size of raw, and runs before anything
-// parses a literal into a decimal: that parse is quadratic in the digits, and
-// a 1 MiB literal would cost seconds of CPU before the bound was ever looked
-// at. Malformed JSON is left for the parse that follows to report.
-func CheckNumbers(raw []byte) error {
+// Check runs over raw, as written, before anything parses it into Go values:
+// every number literal is held to the bounds on numbers, and no object may
+// name a key twice. Parsing a literal into a decimal is quadratic in its
+// digits, and a 1 MiB literal would otherwise cost seconds of CPU before the
+// bound was looked at. A repeated key is refused because the parses that
+// follow disagree about it: decoding into a map keeps only the last value,
+// which is all the schema and this check would see, while decoding into a
+// struct parses every one of them. Check reads token by token, so it is
+// linear in the size of raw and sees every value, repeated or not. Malformed
+// JSON is left for the parse that follows to report.
+func Check(raw []byte) error {
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.UseNumber()
-	var v any
-	if dec.Decode(&v) != nil {
-		return nil
+	// One entry per open object or array: the keys an object has named so
+	// far (nil for an array), and whether the next token is a key.
+	type open struct {
+		keys    map[string]bool
+		wantKey bool
 	}
-	return checkNumbers(v)
-}
-
-func checkNumbers(v any) error {
-	switch x := v.(type) {
-	case json.Number:
-		_, err := normalizeNumber(string(x))
-		return err
-	case []any:
-		for _, e := range x {
-			if err := checkNumbers(e); err != nil {
+	var stack []*open
+	valueDone := func() {
+		if n := len(stack); n > 0 && stack[n-1].keys != nil {
+			stack[n-1].wantKey = true
+		}
+	}
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			return nil // the end, or malformed: either way, not ours to report
+		}
+		if n := len(stack); n > 0 && stack[n-1].wantKey {
+			if tok == json.Delim('}') {
+				stack = stack[:n-1]
+				valueDone()
+				continue
+			}
+			key, _ := tok.(string)
+			if stack[n-1].keys[key] {
+				return fmt.Errorf("%q is given twice in one object", key)
+			}
+			stack[n-1].keys[key], stack[n-1].wantKey = true, false
+			continue
+		}
+		switch x := tok.(type) {
+		case json.Delim:
+			switch x {
+			case '{':
+				stack = append(stack, &open{keys: map[string]bool{}, wantKey: true})
+			case '[':
+				stack = append(stack, &open{})
+			case ']':
+				stack = stack[:len(stack)-1]
+				valueDone()
+			}
+			continue
+		case json.Number:
+			if _, err := normalizeNumber(string(x)); err != nil {
 				return err
 			}
 		}
-	case map[string]any:
-		for _, e := range x {
-			if err := checkNumbers(e); err != nil {
-				return err
-			}
-		}
+		valueDone()
 	}
-	return nil
 }
 
 // Canonicalize returns the canonical form of raw with the named top-level

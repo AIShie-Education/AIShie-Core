@@ -85,12 +85,13 @@ func TestDecode(t *testing.T) {
 		"not json":         `{`,
 		"not an object":    `[1]`,
 		// A decimal is bounded before anything expands it or parses it.
-		"decimal string, huge exponent":    `{"course_id": "` + course.String() + `", "score": "1e2000000000"}`,
-		"decimal string, 3-digit exponent": `{"course_id": "` + course.String() + `", "score": "1e-100"}`,
-		"decimal string, too many digits":  `{"course_id": "` + course.String() + `", "score": "` + strings.Repeat("9", 41) + `"}`,
-		"decimal string, not a number":     `{"course_id": "` + course.String() + `", "score": "lots"}`,
-		"number, huge exponent":            `{"course_id": "` + course.String() + `", "score": 1e999999999}`,
-		"number, a megabyte of digits":     `{"course_id": "` + course.String() + `", "score": 0.` + strings.Repeat("7", 1<<20) + `}`,
+		"decimal string, huge exponent":     `{"course_id": "` + course.String() + `", "score": "1e2000000000"}`,
+		"decimal string, 3-digit exponent":  `{"course_id": "` + course.String() + `", "score": "1e-100"}`,
+		"decimal string, too many digits":   `{"course_id": "` + course.String() + `", "score": "` + strings.Repeat("9", 41) + `"}`,
+		"decimal string, not a number":      `{"course_id": "` + course.String() + `", "score": "lots"}`,
+		"number, huge exponent":             `{"course_id": "` + course.String() + `", "score": 1e999999999}`,
+		"number, a megabyte of digits":      `{"course_id": "` + course.String() + `", "score": 0.` + strings.Repeat("7", 1<<20) + `}`,
+		"a repeated key, hiding a megabyte": `{"course_id": "` + course.String() + `", "score": "` + strings.Repeat("7", 1<<20) + `", "score": 1}`,
 	} {
 		if _, err := tl.Decode([]byte(raw)); !apperr.Is(err, apperr.InvalidArgument) {
 			t.Errorf("%.30s: err = %.80v, want invalid_argument", name, err)

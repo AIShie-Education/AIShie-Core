@@ -295,8 +295,9 @@ func Define[In, Out any](s Spec[In, Out]) Tool {
 			raw = []byte("{}")
 		}
 		// Before anything below parses a number into a decimal, which is
-		// quadratic in its digits.
-		if err := canon.CheckNumbers(raw); err != nil {
+		// quadratic in its digits, or sees a repeated key differently from
+		// the parse after it.
+		if err := canon.Check(raw); err != nil {
 			return nil, apperr.Invalid("arguments: %v", err)
 		}
 		var instance any

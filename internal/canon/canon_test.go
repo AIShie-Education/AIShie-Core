@@ -86,18 +86,23 @@ func TestNumbers(t *testing.T) {
 	}
 }
 
-// CheckNumbers finds a number wherever it is, and refuses a long one without
-// parsing it into anything.
-func TestCheckNumbers(t *testing.T) {
+// Check finds a number wherever it is, and refuses a long one without parsing
+// it into anything. A repeated key is refused, wherever it is and whatever
+// follows it: the last value is all a map keeps, and a struct parses them all.
+func TestCheck(t *testing.T) {
 	long := "0." + strings.Repeat("7", 1<<20)
 	for raw, ok := range map[string]bool{
-		`{"a": [1, {"b": 2.5}], "c": "1e999999999"}`: true, // a string is not a number
-		`{"a": [1, {"b": 1e999999999}]}`:             false,
-		`{"score": ` + long + `}`:                    false,
-		`{`:                                          true, // left for the parse that follows
+		`{"a": [1, {"b": 2.5}], "c": "1e999999999", "d": {}, "e": [], "f": [{}, []]}`: true, // a string is not a number
+		`{"a": [1, {"b": 1e999999999}]}`:                                              false,
+		`{"score": ` + long + `}`:                                                     false,
+		`{"score": ` + long + `, "score": 1}`:                                         false,
+		`{"score": "` + long + `", "score": 1}`:                                       false,
+		`{"b": [{"points": 1, "points": 2}]}`:                                         false,
+		`{"a": {"x": 1}, "b": {"x": 1}, "x": [{"x": 1}, {"x": 2}]}`:                   true, // the same key in different objects
+		`{`: true, // left for the parse that follows
 	} {
-		if err := CheckNumbers([]byte(raw)); (err == nil) != ok {
-			t.Errorf("CheckNumbers(%.40s…) = %v, want ok=%v", raw, err, ok)
+		if err := Check([]byte(raw)); (err == nil) != ok {
+			t.Errorf("Check(%.60s…) = %.80v, want ok=%v", raw, err, ok)
 		}
 	}
 }
