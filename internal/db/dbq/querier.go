@@ -180,6 +180,7 @@ type Querier interface {
 	//     assignments and is for members whose assignment scope is the whole course.
 	ListEvents(ctx context.Context, arg ListEventsParams) ([]ListEventsRow, error)
 	ListEventsForAction(ctx context.Context, actionID *uuid.UUID) ([]ListEventsForActionRow, error)
+	// Not only open courses: a draft course takes writes, and its seats expire.
 	ListExpiredMembers(ctx context.Context, arg ListExpiredMembersParams) ([]ListExpiredMembersRow, error)
 	ListGradeDocuments(ctx context.Context, gradeID *uuid.UUID) ([]ListGradeDocumentsRow, error)
 	// Assignments that count toward the grade. An unpublished one cannot have a
@@ -218,6 +219,11 @@ type Querier interface {
 	// correct — authorize() ignores an expired member on every call and approval
 	// re-checks a proposal's age inline — they make the state visible and keep
 	// the queues clean.
+	//
+	// An archived course refuses every write, the sweeps' included, so none of
+	// its proposals, seats or assignments is listed; what expired or fell due in
+	// it meanwhile is swept once it is opened again.
+	// NOT EXISTS rather than a join: an action need not be in a course.
 	ListStaleProposals(ctx context.Context, arg ListStaleProposalsParams) ([]ListStaleProposalsRow, error)
 	ListStudentScope(ctx context.Context, memberID uuid.UUID) ([]uuid.UUID, error)
 	// Current students of the course with no submission row at all for the

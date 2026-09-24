@@ -408,7 +408,9 @@ proposal's age itself — it makes those facts visible, and keeps the queues fre
 nobody could approve. When a due date passes, every current student with no submission row
 gets one in state `missing`, so that the gap is something a grader can see and grade; late
 work takes that row over, unless a grade has been entered or proposed for it: a zero for
-handing in nothing is a grade of that nothing, and the late work is then a new attempt.
+handing in nothing is a grade of that nothing, and the late work is then a new attempt. An
+archived course is left as archived, by the sweeps as by everyone: its expired seats, stale
+proposals and past due dates are swept once it is activated again.
 
 **`event` is something that happened, written after it did**, in the same transaction as the
 state change. Not every event has an action behind it (a due date passing); one action may

@@ -244,6 +244,39 @@ func TestPastDueAssignments(t *testing.T) {
 	}
 }
 
+// An archived course refuses every write, the sweeps' as much as anyone's: a
+// seat that expires and a proposal that goes stale in one are left as they
+// are, and swept once the course is opened again.
+func TestTheSweepsLeaveAnArchivedCourseAlone(t *testing.T) {
+	f := setup(t, 1)
+	proposal := f.propose(t, f.Students[0], "p")
+	f.Exec(`UPDATE course_member SET expires_at = $2 WHERE id = $1`, f.GraderM, f.now.Add(time.Hour))
+	f.Exec(`UPDATE course SET status = 'archived' WHERE id = $1`, f.Course)
+	events := f.Count(`SELECT count(*) FROM event`)
+	f.now = f.now.Add(pipeline.DefaultProposalTTL + time.Hour)
+
+	if rep := f.sweep(t); rep.ProposalsExpired != 0 || rep.MembersExpired != 0 {
+		t.Fatalf("an archived course was swept: %+v", rep)
+	}
+	if n := f.Count(`SELECT count(*) FROM course_member WHERE id = $1 AND status = 'active'`, f.GraderM); n != 1 {
+		t.Fatal("a seat in an archived course was removed")
+	}
+	if n := f.Count(`SELECT count(*) FROM action WHERE id = $1 AND status = 'proposed'`, proposal); n != 1 {
+		t.Fatal("a proposal in an archived course was cancelled")
+	}
+	if n := f.Count(`SELECT count(*) FROM event`); n != events {
+		t.Fatalf("%d events written into an archived course", n-events)
+	}
+	if n := f.Count(`SELECT count(*) FROM action WHERE actor_id = $1`, f.system); n != 0 {
+		t.Fatalf("%d sweep actions in an archived course", n)
+	}
+
+	f.Exec(`UPDATE course SET status = 'active' WHERE id = $1`, f.Course)
+	if rep := f.sweep(t); rep.ProposalsExpired != 1 || rep.MembersExpired != 1 {
+		t.Fatalf("%+v, want the proposal and the seat swept once the course is open", rep)
+	}
+}
+
 // Every instance may run the sweeps; only one does at a time, and even if two
 // did, each thing is swept once.
 func TestOnlyOneInstanceSweeps(t *testing.T) {
