@@ -185,6 +185,31 @@ func TestARequestCarriesOneMessage(t *testing.T) {
 	}
 }
 
+// A request the SDK would refuse for its headers is refused for them, as
+// the SDK words it, however large it is; one that is only too large is
+// refused in the SDK's words too. That the body is read before the SDK
+// sees it changes neither.
+func TestARequestIsRefusedAsTheSDKWouldRefuseIt(t *testing.T) {
+	f := serve(t, 1)
+	token := f.token(t, f.c.Sato)
+	big := `{"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {"x": "` + strings.Repeat("a", 5<<20) + `"}}`
+	for _, tc := range []struct {
+		what    string
+		headers []string
+		status  int
+		says    string
+	}{
+		{"not JSON", []string{"Content-Type", "text/plain"}, http.StatusUnsupportedMediaType, "Content-Type must be"},
+		{"no stream accepted", []string{"Accept", "application/json"}, http.StatusBadRequest, "Accept must contain"},
+		{"a version there is not", []string{"Mcp-Protocol-Version", "2000-01-01"}, http.StatusBadRequest, "Unsupported protocol version"},
+		{"too large", nil, http.StatusRequestEntityTooLarge, "request body exceeds"},
+	} {
+		if status, out := post(t, f, token, big, tc.headers...); status != tc.status || !strings.Contains(string(out), tc.says) {
+			t.Errorf("%s: %d %.300s", tc.what, status, out)
+		}
+	}
+}
+
 // Over MCP a refusal of ours is written twice, as text and as structured
 // content, and the text is escaped once more on the way: a megabyte of input
 // would come back as thirteen. The SDK words some refusals itself — a tool

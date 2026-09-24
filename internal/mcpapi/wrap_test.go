@@ -2,6 +2,7 @@ package mcpapi
 
 import (
 	"bytes"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"runtime"
@@ -11,10 +12,18 @@ import (
 
 // Every call pays for what screened and bounded do, so neither may cost
 // much more than the request and its answer already do. A request is read
-// once, into a buffer of its size, and looked at where it lies; a result is
+// once, into a buffer of its size, and looked at where it lies, and one the
+// SDK refuses unread for its Content-Type is not read at all; a result is
 // passed on as the SDK writes it, not held and read again. Only what may be
 // a refusal is held.
 func TestTheScreensCostLittleMoreThanWhatTheyScreen(t *testing.T) {
+	form := httptest.NewRequest(http.MethodPost, "/mcp", readerFunc(func([]byte) (int, error) {
+		t.Error("a form was read")
+		return 0, io.EOF
+	}))
+	form.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	screened(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})).ServeHTTP(httptest.NewRecorder(), form)
+
 	body := []byte(`{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "submission_create", "arguments": {"body": "` +
 		strings.Repeat("a", maxBody-200) + `"}}}`)
 	h := screened(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
@@ -57,3 +66,7 @@ func TestTheScreensCostLittleMoreThanWhatTheyScreen(t *testing.T) {
 		}
 	}
 }
+
+type readerFunc func([]byte) (int, error)
+
+func (f readerFunc) Read(p []byte) (int, error) { return f(p) }

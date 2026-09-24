@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"mime"
 	"net/http"
 	"strconv"
 	"strings"
@@ -133,18 +134,18 @@ const maxID = 256
 // acknowledgement, or a refusal the SDK words for it.
 func screened(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			next.ServeHTTP(w, r) // the SDK refuses it, in a few words
+		// The SDK's own test of the Content-Type: what fails it is refused
+		// in a few words, and never read.
+		if mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type")); r.Method != http.MethodPost || err != nil || mediaType != "application/json" {
+			next.ServeHTTP(w, r)
 			return
 		}
 		body, err := readBody(w, r)
 		if err != nil {
-			var tooLarge *http.MaxBytesError
-			if errors.As(err, &tooLarge) {
-				http.Error(w, fmt.Sprintf("the request body is larger than %d bytes", maxBody), http.StatusRequestEntityTooLarge)
-				return
-			}
-			http.Error(w, "the request body could not be read", http.StatusBadRequest)
+			// The SDK refuses it, after its own look at the headers, as it
+			// would have: its read of the body fails as this one did.
+			r.Body = io.NopCloser(failedReader{err})
+			next.ServeHTTP(w, r)
 			return
 		}
 		b := bytes.TrimLeft(body, " \t\r\n")
@@ -183,6 +184,11 @@ func readBody(w http.ResponseWriter, r *http.Request) ([]byte, error) {
 	_, err := buf.ReadFrom(http.MaxBytesReader(w, r.Body, maxBody))
 	return buf.Bytes(), err
 }
+
+// failedReader fails as a read of the body did.
+type failedReader struct{ err error }
+
+func (f failedReader) Read([]byte) (int, error) { return 0, f.err }
 
 // sighting is what screened needs of a message. It is decoded where it lies,
 // so that params of megabytes are passed over, not copied. encoding/json
