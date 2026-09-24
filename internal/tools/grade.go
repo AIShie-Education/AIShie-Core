@@ -85,12 +85,13 @@ type BreakdownItem struct {
 // Exported because it is embedded in tool inputs: schema inference and
 // encoding/json both need to see through it.
 type GradeContent struct {
-	Score           decimal.Decimal `json:"score"`
-	Feedback        *string         `json:"feedback,omitempty"`
-	Breakdown       []BreakdownItem `json:"breakdown,omitempty"`
-	RubricVersionID *uuid.UUID      `json:"rubric_version_id,omitempty" jsonschema:"the rubric version the grader was shown; defaults to the published one"`
-	AllowExtra      bool            `json:"allow_extra,omitempty" jsonschema:"permit a score above the points possible"`
-	FeedbackFiles   []FeedbackFile  `json:"feedback_files,omitempty" jsonschema:"files to return with the grade, uploaded beforehand"`
+	Score           decimal.Decimal  `json:"score"`
+	Feedback        *string          `json:"feedback,omitempty"`
+	Breakdown       []BreakdownItem  `json:"breakdown,omitempty"`
+	RubricVersionID *uuid.UUID       `json:"rubric_version_id,omitempty" jsonschema:"the rubric version the grader was shown; defaults to the published one"`
+	OutOf           *decimal.Decimal `json:"out_of,omitempty" jsonschema:"the points possible the score is out of; defaults to what the work is worth now. A proposal records it, and is refused on approval if the work has been rescaled since"`
+	AllowExtra      bool             `json:"allow_extra,omitempty" jsonschema:"permit a score above the points possible"`
+	FeedbackFiles   []FeedbackFile   `json:"feedback_files,omitempty" jsonschema:"files to return with the grade, uploaded beforehand"`
 }
 
 // ---------------------------------------------------------------------------
@@ -253,11 +254,17 @@ func checkSubject(ctx context.Context, q dbq.Querier, courseID uuid.UUID, s *gra
 	return nil
 }
 
-// pinRubric fills in the rubric version a grade is against when the caller
-// left it to default: the rubric's published version as it stands now. It is
-// a Pin, run when a proposal is made, so that a proposal approved after the
-// rubric has moved on still records the version the grader was shown.
-func pinRubric(ctx context.Context, q dbq.Querier, s gradeSubject, c *GradeContent) error {
+// pinContent fills in what a grade is against when the caller left it to
+// default: the points possible the score is out of, and the rubric's
+// published version, as they stand now. It is a Pin, run when a proposal is
+// made. A proposal approved after the rubric has moved on still records the
+// version the grader was shown; one approved after the work was rescaled is
+// refused, rather than its 95 out of 100 being carried out as 95 out of 200.
+func pinContent(ctx context.Context, q dbq.Querier, s gradeSubject, c *GradeContent) error {
+	if c.OutOf == nil {
+		max := s.pointsPossible()
+		c.OutOf = &max
+	}
 	if c.RubricVersionID != nil || s.assignment == nil || s.assignment.RubricDocumentID == nil {
 		return nil
 	}
@@ -275,7 +282,11 @@ func checkContent(ctx context.Context, q dbq.Querier, s gradeSubject, c GradeCon
 	if c.Score.IsNegative() {
 		return nil, apperr.Invalid("score cannot be negative")
 	}
-	if max := s.pointsPossible(); c.Score.GreaterThan(max) && !c.AllowExtra {
+	max := s.pointsPossible()
+	if c.OutOf != nil && !c.OutOf.Equal(max) {
+		return nil, apperr.Precondition("the score was given out of %s, and the work is worth %s now; grade it again out of what it is worth", *c.OutOf, max)
+	}
+	if c.Score.GreaterThan(max) && !c.AllowExtra {
 		return nil, apperr.Precondition("score %s is above the %s points possible; set allow_extra to permit it", c.Score, max)
 	}
 	for _, b := range c.Breakdown {
@@ -357,7 +368,7 @@ func gradeSubmit(d Deps) tool.Tool {
 				forMissing := s.submission.State == stateMissing
 				in.ForMissing = &forMissing
 			}
-			return in, pinRubric(ctx, q, s, &in.GradeContent)
+			return in, pinContent(ctx, q, s, &in.GradeContent)
 		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in GradeSubmitIn) (GradeSubmitOut, error) {
 			s, err := load(ctx, ec.Q, in)
@@ -792,7 +803,7 @@ func gradeRegrade(d Deps) tool.Tool {
 			if err != nil {
 				return in, err
 			}
-			return in, pinRubric(ctx, q, s, &in.GradeContent)
+			return in, pinContent(ctx, q, s, &in.GradeContent)
 		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in GradeRegradeIn) (GradeRegradeOut, error) {
 			if _, err := ec.Q.LockGradesInCourse(ctx, dbq.LockGradesInCourseParams{Ids: []uuid.UUID{in.GradeID}, CourseID: in.CourseID}); err != nil {

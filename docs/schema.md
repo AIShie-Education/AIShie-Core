@@ -234,7 +234,9 @@ posted grades):
   incomplete. `treat_ungraded_as_zero` counts it as zero instead, for final grades.
 - A score is a score out of the points possible when it was given: once any grade has been
   entered for an assignment or a directly graded component — a draft as much as a posted one —
-  its `points_possible` and its place in the tree no longer change.
+  its `points_possible` and its place in the tree no longer change. A proposed grade carries
+  the points possible it was proposed out of, and is refused on approval if the work has been
+  rescaled while it waited.
 - Final is final. The policy a snapshot was worked out under travels with it (`breakdown`
   carries `ungraded_as_zero`), and once a student's totals have been written with ungraded
   work counted as zero, every later post or regrade beneath them keeps counting it so.
@@ -364,10 +366,10 @@ any secret fields removed; a secret (a password) still counts in the hash, throu
 digest under `SIGNING_KEY`, so that a key reused with a different secret is caught too while
 the hash gives nothing away to whoever reads the table. For a proposal, `payload` also carries
 the defaults that had to be fixed when it was made rather than when it is approved — the rubric
-version a grade is against, the version that "publish the latest" means, the drafts that "post
-this assignment" means — while the hash stays that of the call as the caller made it. A version
-or a draft that arrives while a proposal waits has been in front of nobody who asked for it,
-and approving the proposal does not release it.
+version a grade is against, the points possible its score is out of, the version that "publish
+the latest" means, the drafts that "post this assignment" means — while the hash stays that of
+the call as the caller made it. A version or a draft that arrives while a proposal waits has
+been in front of nobody who asked for it, and approving the proposal does not release it.
 `result` holds what the call returned (secrets removed likewise), or `{"error": …}` for a
 failed, denied or cancelled action and `{"decision": …}` for a rejected one; which of those it
 is follows from `status`, never from the shape of `result`.
@@ -541,7 +543,8 @@ check `actor.platform_role` instead. That is the only place it is read.
 - Grade computation, and writing a `computed` snapshot only on post.
 - Once a grade has been entered for an assignment or a directly graded component, a draft as
   much as a posted one, its `points_possible` and its place in the tree stay as they are
-  (§2.3), even when the grade and the change come at the same moment.
+  (§2.3), even when the grade and the change come at the same moment; a proposed grade is
+  carried out only against the points possible it was proposed out of.
 - The component tree is acyclic beyond the self-loop the CHECK blocks.
 - Cancelling pending proposals when a member is removed or expires.
 - Nobody hands out more than they hold (§2.2): any change that widens a seat is measured as

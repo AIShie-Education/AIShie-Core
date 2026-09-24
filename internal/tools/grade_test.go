@@ -764,3 +764,53 @@ func TestPostingByAssignmentIsScopedToTheAssignment(t *testing.T) {
 		}
 	}
 }
+
+// A score is a score out of the points possible when it was given, and for a
+// proposal that is when it was made. While it waits there is no grade row,
+// so nothing stops the work being rescaled; a 95 proposed out of 100 must not
+// then be carried out as 95 out of 200, with nobody having said so.
+func TestAProposalPinsThePointsItWasGivenOutOf(t *testing.T) {
+	b := build(t)
+	approve := func(action *uuid.UUID) pipeline.DecideOut {
+		t.Helper()
+		return testkit.Result[pipeline.DecideOut](t, b.do(t, b.sato, "action.decide", m{"course_id": b.course, "action_id": action, "decision": "approve"}))
+	}
+	propose := func(args m, key string) *uuid.UUID {
+		t.Helper()
+		args["course_id"] = b.course
+		out := b.MustCall(b.grader, "grade.submit", args, key)
+		if out.Status != domain.StatusProposed {
+			t.Fatalf("%+v", out)
+		}
+		return out.ActionID
+	}
+	work := b.submit(t, b.yuki, "essay")
+
+	proposed := propose(m{"submission_id": work, "score": 95}, "p")
+	if n := b.Count(`SELECT count(*) FROM action WHERE id = $1 AND (payload->>'out_of')::numeric = 100`, *proposed); n != 1 {
+		t.Fatal("the proposal does not carry the points possible its score is out of")
+	}
+	b.do(t, b.sato, "assignment.update", m{"course_id": b.course, "assignment_id": b.hw3, "points_possible": 200})
+	if v := approve(proposed); v.Outcome != domain.StatusFailed || v.Error == nil || v.Error.Code != apperr.FailedPrecondition {
+		t.Fatalf("approving 95 out of 100 on work now worth 200: %+v", v)
+	}
+	if n := b.Count(`SELECT count(*) FROM grade WHERE submission_id = $1`, work); n != 0 {
+		t.Fatal("the score was carried out against points it was not given out of")
+	}
+	// Proposed again, out of what the work is worth now, it goes through.
+	if v := approve(propose(m{"submission_id": work, "score": 190}, "p2")); v.Outcome != domain.StatusExecuted {
+		t.Fatalf("%+v", v)
+	}
+
+	// A directly graded component is held to the same.
+	b.do(t, b.sato, "member.rescope", m{"course_id": b.course, "member_id": b.graderM, "assignment_scope": "all"})
+	proposed = propose(m{"component_id": b.midterm, "student_member_id": b.kenM, "score": 80}, "p3")
+	b.do(t, b.sato, "component.update", m{"course_id": b.course, "component_id": b.midterm, "points_possible": 120})
+	if v := approve(proposed); v.Outcome != domain.StatusFailed {
+		t.Fatalf("approving 80 out of 100 on an exam now worth 120: %+v", v)
+	}
+	// And a direct call that says what its score is out of is held to it.
+	kens := b.submit(t, b.ken, "essay")
+	b.try(t, b.sato, "grade.submit", m{"course_id": b.course, "submission_id": kens, "score": 90, "out_of": 100}, apperr.FailedPrecondition)
+	b.do(t, b.sato, "grade.submit", m{"course_id": b.course, "submission_id": kens, "score": 180, "out_of": 200})
+}
