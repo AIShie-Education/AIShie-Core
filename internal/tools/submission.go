@@ -295,10 +295,14 @@ type SubmissionSubmitOut struct {
 }
 
 // sameDraft refuses to hand in anything but what the call says it is
-// handing in. What it does not say is not checked.
+// handing in. What it does not say is not checked. The refusal is worded
+// for both ways of coming to it: a direct call that names other text or
+// other files than the draft's, and an approval of a hand-in whose draft
+// has changed since it was asked for.
 func (in SubmissionSubmitIn) sameDraft(body *string, files []uuid.UUID) error {
 	if in.Body != nil && *in.Body != textOf(body) || in.Files != nil && !sameFiles(in.Files, files) {
-		return apperr.Precondition("the draft is not what was asked to be handed in: it has changed since. Look at it, and hand it in again")
+		return apperr.Precondition("the draft does not hold what this call says it hands in; if the hand-in waited for approval, " +
+			"the draft has changed since it was asked for. Look at it, and hand it in again")
 	}
 	return nil
 }
