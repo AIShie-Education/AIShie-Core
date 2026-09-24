@@ -82,7 +82,7 @@ func (p *Pipeline) write(ctx context.Context, tx pgx.Tx, caller Caller, t tool.T
 	case !level.Allowed():
 		failure = denial(a.decision.Reason)
 	case t.Validate != nil:
-		if err := t.Validate(ctx, q, a.decision.Member, in); err != nil {
+		if err := validate(ctx, tx, t, a.decision.Member, in); err != nil {
 			e, ok := isCallerFault(err)
 			if !ok {
 				return Outcome{}, err

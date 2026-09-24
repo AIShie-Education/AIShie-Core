@@ -34,6 +34,7 @@ import (
 
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/apperr"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/canon"
+	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/db/dbq"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/domain"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/signing"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/tool"
@@ -191,6 +192,17 @@ func savepoint(ctx context.Context, tx pgx.Tx, fn func(sp pgx.Tx) (any, error)) 
 		return nil, err
 	}
 	return out, nil
+}
+
+// validate runs a tool's Validate inside a savepoint. Validate may take locks
+// — a grade's takes the work's — and so may lose a deadlock; the savepoint
+// keeps that from aborting the transaction its failure is then recorded in.
+// What it locked it keeps when it succeeds, for Execute after it.
+func validate(ctx context.Context, tx pgx.Tx, t tool.Tool, m *domain.Member, in any) error {
+	_, err := savepoint(ctx, tx, func(sp pgx.Tx) (any, error) {
+		return nil, t.Validate(ctx, dbq.New(sp), m, in)
+	})
+	return err
 }
 
 func errorResult(e *apperr.Error) []byte {

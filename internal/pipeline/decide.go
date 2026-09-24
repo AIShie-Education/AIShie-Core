@@ -134,7 +134,7 @@ func (p *Pipeline) Decide(ctx context.Context, ec *tool.ExecCtx, in DecideIn) (D
 		return out, nil
 	}
 	if t.Validate != nil {
-		if err := t.Validate(ctx, ec.Q, a.decision.Member, args); err != nil {
+		if err := validate(ctx, ec.Tx, t, a.decision.Member, args); err != nil {
 			e, ok := isCallerFault(err)
 			if !ok {
 				return DecideOut{}, err

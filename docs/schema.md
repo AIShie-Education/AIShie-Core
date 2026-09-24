@@ -529,8 +529,12 @@ check `actor.platform_role` instead. That is the only place it is read.
 - Cancelling pending proposals when a member is removed or expires.
 - Nobody hands out more than they hold (§2.2): any change that widens a seat is measured as
   the whole of what it will then hold, a student's seat reaching the student included.
-- A grade lands on the work it was given for: the submission's state is read under its lock,
-  and late work takes a `missing` row over only while no grade is entered or proposed for it.
+- A grade lands on the work it was given for: the submission's state is read under its lock, a
+  proposal records whether it was given for a `missing` row, and late work takes a `missing`
+  row over only while no grade is entered or proposed for it.
+- A write takes its caller's seat before anything else and holds it to the end: removing or
+  changing a seat waits for the member's calls in flight, or they wait for it and are refused,
+  so nothing is proposed from a seat that is being removed.
 - `actor.kind` and `course_member.role` are never read by authorization.
 
 ## 5. Worked example: an agent grades an essay

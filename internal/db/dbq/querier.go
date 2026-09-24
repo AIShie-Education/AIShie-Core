@@ -212,6 +212,13 @@ type Querier interface {
 	// Held until the transaction ends. See events.Flush for why.
 	LockEventStream(ctx context.Context, arg LockEventStreamParams) error
 	LockGradesInCourse(ctx context.Context, arg LockGradesInCourseParams) ([]uuid.UUID, error)
+	// The same, for a call that writes, and the first row that call locks: the
+	// caller's own seat, KEY SHARE, to the end of the call. It blocks only what
+	// locks the seat FOR UPDATE — a change to it, its removal, the expiry sweep —
+	// which then waits for the call, or the call waits for it and sees what it
+	// did. Taking the seat before anything else keeps one order for every write,
+	// the seat first: the order the action row's foreign key to it always had.
+	LockLiveMemberForAuthz(ctx context.Context, arg LockLiveMemberForAuthzParams) (LockLiveMemberForAuthzRow, error)
 	// Serialises attaching one upload. Held until the transaction ends.
 	LockStorageKey(ctx context.Context, storageKey string) error
 	// One writer of a student's rolled-up totals at a time.

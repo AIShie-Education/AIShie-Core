@@ -223,3 +223,75 @@ func (q *Queries) GetMemberForAuthz(ctx context.Context, id uuid.UUID) (GetMembe
 	)
 	return i, err
 }
+
+const lockLiveMemberForAuthz = `-- name: LockLiveMemberForAuthz :one
+SELECT id, course_id, actor_id, status, expires_at, student_scope, assignment_scope,
+       perm_document_read, perm_document_read_draft, perm_document_write, perm_rubric_read,
+       perm_assignment_write, perm_submission_read, perm_submission_write, perm_grade_read,
+       perm_grade_submit, perm_grade_post, perm_member_read, perm_member_manage, perm_action_decide
+FROM course_member
+WHERE course_id = $1 AND actor_id = $2 AND status <> 'removed'
+FOR KEY SHARE
+`
+
+type LockLiveMemberForAuthzParams struct {
+	CourseID uuid.UUID
+	ActorID  uuid.UUID
+}
+
+type LockLiveMemberForAuthzRow struct {
+	ID                    uuid.UUID
+	CourseID              uuid.UUID
+	ActorID               uuid.UUID
+	Status                string
+	ExpiresAt             *time.Time
+	StudentScope          string
+	AssignmentScope       string
+	PermDocumentRead      AutonomyLevel
+	PermDocumentReadDraft AutonomyLevel
+	PermDocumentWrite     AutonomyLevel
+	PermRubricRead        AutonomyLevel
+	PermAssignmentWrite   AutonomyLevel
+	PermSubmissionRead    AutonomyLevel
+	PermSubmissionWrite   AutonomyLevel
+	PermGradeRead         AutonomyLevel
+	PermGradeSubmit       AutonomyLevel
+	PermGradePost         AutonomyLevel
+	PermMemberRead        AutonomyLevel
+	PermMemberManage      AutonomyLevel
+	PermActionDecide      AutonomyLevel
+}
+
+// The same, for a call that writes, and the first row that call locks: the
+// caller's own seat, KEY SHARE, to the end of the call. It blocks only what
+// locks the seat FOR UPDATE — a change to it, its removal, the expiry sweep —
+// which then waits for the call, or the call waits for it and sees what it
+// did. Taking the seat before anything else keeps one order for every write,
+// the seat first: the order the action row's foreign key to it always had.
+func (q *Queries) LockLiveMemberForAuthz(ctx context.Context, arg LockLiveMemberForAuthzParams) (LockLiveMemberForAuthzRow, error) {
+	row := q.db.QueryRow(ctx, lockLiveMemberForAuthz, arg.CourseID, arg.ActorID)
+	var i LockLiveMemberForAuthzRow
+	err := row.Scan(
+		&i.ID,
+		&i.CourseID,
+		&i.ActorID,
+		&i.Status,
+		&i.ExpiresAt,
+		&i.StudentScope,
+		&i.AssignmentScope,
+		&i.PermDocumentRead,
+		&i.PermDocumentReadDraft,
+		&i.PermDocumentWrite,
+		&i.PermRubricRead,
+		&i.PermAssignmentWrite,
+		&i.PermSubmissionRead,
+		&i.PermSubmissionWrite,
+		&i.PermGradeRead,
+		&i.PermGradeSubmit,
+		&i.PermGradePost,
+		&i.PermMemberRead,
+		&i.PermMemberManage,
+		&i.PermActionDecide,
+	)
+	return i, err
+}

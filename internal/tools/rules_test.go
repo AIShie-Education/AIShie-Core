@@ -2,11 +2,13 @@ package tools_test
 
 import (
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/shopspring/decimal"
 
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/apperr"
@@ -183,39 +185,69 @@ func TestAGradeForNothingDoesNotLandOnLateWork(t *testing.T) {
 		t.Fatal("the zero proposed for nothing landed on the late work")
 	}
 
-	// A direct call that waits on the placeholder's lock while
-	// submission.create reopens it for late work.
-	ken := missing(b.kenM)
+	// The proposal says what it was given for, so a placeholder taken over
+	// all the same — by an instance still on code that did not look for
+	// proposals — is refused at approval rather than graded.
+	enrol := func(name string) (actor, member uuid.UUID) {
+		actor = testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", m{"kind": "human", "display_name": name})).ActorID
+		member = testkit.Result[tools.MemberIDOut](t, b.do(t, b.sato, "member.add", m{"course_id": b.course, "actor_id": actor, "preset": "student"})).MemberID
+		return actor, member
+	}
+	mia, miaM := enrol("Mia")
+	old := missing(miaM)
+	prop = b.MustCall(b.grader, "grade.submit", nothing(old), "zero-then-old-takeover")
+	if n := b.Count(`SELECT count(*) FROM action WHERE id = $1 AND payload->>'for_missing' = 'true'`, prop.ActionID); n != 1 {
+		t.Fatal("the proposal does not say it was given for nothing")
+	}
+	b.Exec(`UPDATE submission SET state = 'draft', body = 'my late essay' WHERE id = $1 AND state = 'missing'`, old)
+	b.do(t, mia, "submission.submit", m{"course_id": b.course, "submission_id": old})
+	b.do(t, b.sato, "action.decide", m{"course_id": b.course, "action_id": prop.ActionID, "decision": "approve"})
+	if n := b.Count(`SELECT count(*) FROM grade WHERE submission_id = $1`, old); n != 0 {
+		t.Fatal("the zero proposed for nothing landed on late work that took the placeholder over")
+	}
+
+	// A direct call that waits on the placeholder's lock while it is taken
+	// over — reopened for late work, or reopened and handed in already.
 	ctx := t.Context()
-	tx, err := b.Pool.Begin(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer tx.Rollback(ctx)
-	if _, err := tx.Exec(ctx, `UPDATE submission SET state = 'draft', body = 'draft' WHERE id = $1 AND state = 'missing'`, ken); err != nil {
-		t.Fatal(err)
-	}
-	done := make(chan pipeline.Outcome, 1)
-	go func() {
-		out, _ := b.Call(b.sato, "grade.submit", nothing(ken), "zero-while-reopened")
-		done <- out
-	}()
-	// Until grade.submit has read the placeholder and is waiting for its lock.
-	for deadline := time.Now().Add(10 * time.Second); b.Count(`SELECT count(*) FROM pg_locks l
-		JOIN pg_stat_activity a ON a.pid = l.pid WHERE NOT l.granted AND a.datname = current_database()`) == 0; {
-		if len(done) > 0 || time.Now().After(deadline) {
-			t.Fatal("grade.submit never waited for the placeholder's lock")
+	waitWhile := func(name, change string, work uuid.UUID) pipeline.Outcome {
+		t.Helper()
+		tx, err := b.Pool.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
 		}
-		time.Sleep(10 * time.Millisecond)
+		defer tx.Rollback(ctx)
+		if _, err := tx.Exec(ctx, change, work); err != nil {
+			t.Fatal(err)
+		}
+		done := make(chan pipeline.Outcome, 1)
+		go func() {
+			out, _ := b.Call(b.sato, "grade.submit", nothing(work), name)
+			done <- out
+		}()
+		// Until grade.submit has read the placeholder and waits for its lock.
+		for deadline := time.Now().Add(10 * time.Second); b.Count(`SELECT count(*) FROM pg_locks l
+			JOIN pg_stat_activity a ON a.pid = l.pid WHERE NOT l.granted AND a.datname = current_database()`) == 0; {
+			if len(done) > 0 || time.Now().After(deadline) {
+				t.Fatal("grade.submit never waited for the placeholder's lock")
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			t.Fatal(err)
+		}
+		return <-done
 	}
-	if err := tx.Commit(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if out := <-done; out.Status == domain.StatusExecuted {
+	ken := missing(b.kenM)
+	if out := waitWhile("zero-while-reopened", `UPDATE submission SET state = 'draft', body = 'draft' WHERE id = $1`, ken); out.Status == domain.StatusExecuted {
 		t.Fatalf("a zero for nothing was entered on a reopened draft: %+v", out)
 	}
-	if n := b.Count(`SELECT count(*) FROM grade WHERE submission_id = $1`, ken); n != 0 {
-		t.Fatalf("%d grades on the reopened draft", n)
+	_, leoM := enrol("Leo")
+	leo := missing(leoM)
+	if out := waitWhile("zero-while-handed-in", `UPDATE submission SET state = 'submitted', body = 'handed in', submitted_at = now() WHERE id = $1`, leo); out.Status == domain.StatusExecuted {
+		t.Fatalf("a zero for nothing was entered on work handed in while it waited: %+v", out)
+	}
+	if n := b.Count(`SELECT count(*) FROM grade WHERE submission_id = ANY($1)`, []uuid.UUID{ken, leo}); n != 0 {
+		t.Fatalf("%d grades on work that was not there when they were given", n)
 	}
 	// Work handed in on an instance whose clock runs ahead is graded like any
 	// other: nothing is ordered by comparing two instances' clocks.
@@ -223,6 +255,120 @@ func TestAGradeForNothingDoesNotLandOnLateWork(t *testing.T) {
 	b.do(t, b.ken, "submission.submit", m{"course_id": b.course, "submission_id": ken})
 	b.P.SetClock(time.Now)
 	b.do(t, b.sato, "grade.submit", m{"course_id": b.course, "submission_id": ken, "score": 90})
+}
+
+// A write takes its caller's seat before anything else it locks, so locking a
+// piece of work in Validate cannot close a cycle with a removal (the seat,
+// then the proposals it cancels) and an approval (a proposal, then the work).
+// The grader's grade.submit is held after Validate by a stand-in for any
+// delay there: an uncommitted row with its idempotency key.
+func TestAWriteTakesItsSeatFirst(t *testing.T) {
+	b := build(t)
+	ctx := t.Context()
+	work := b.submit(t, b.yuki, "essay")
+	lateness := b.MustCall(b.grader, "submission.set_lateness", m{"course_id": b.course, "submission_id": work, "state": "late"}, "p-late")
+	if lateness.Status != domain.StatusProposed {
+		t.Fatalf("lateness proposal: %+v", lateness)
+	}
+	conn, err := pgx.Connect(ctx, b.Pool.Config().ConnConfig.ConnString())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(ctx)
+	gate, err := conn.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer gate.Rollback(ctx)
+	if _, err := gate.Exec(ctx, `INSERT INTO action (actor_id, action_type, target_type, payload_hash, idempotency_key, authz_result, status)
+		VALUES ($1, 'gate', 'gate', repeat('0', 64), 'p-grade', 'denied', 'denied')`, b.grader); err != nil {
+		t.Fatal(err)
+	}
+	waiting := func(n int) {
+		t.Helper()
+		for deadline := time.Now().Add(10 * time.Second); b.Count(`SELECT count(*) FROM pg_locks l
+			JOIN pg_stat_activity a ON a.pid = l.pid WHERE NOT l.granted AND a.datname = current_database()`) < n; {
+			if time.Now().After(deadline) {
+				t.Fatalf("fewer than %d calls ever waited", n)
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	type result struct {
+		out pipeline.Outcome
+		err error
+	}
+	done := make(chan result, 3)
+	call := func(actor uuid.UUID, name string, args m, key string) {
+		go func() {
+			out, err := b.Call(actor, name, args, key)
+			done <- result{out, err}
+		}()
+	}
+	call(b.grader, "grade.submit", m{"course_id": b.course, "submission_id": work, "score": 80}, "p-grade")
+	waiting(1)
+	call(b.sato, "action.decide", m{"course_id": b.course, "action_id": lateness.ActionID, "decision": "approve"}, "d-late")
+	waiting(2)
+	call(b.sato, "member.remove", m{"course_id": b.course, "member_id": b.graderM}, "rm-grader")
+	waiting(3)
+	if err := gate.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for range 3 {
+		select {
+		case r := <-done:
+			if r.err != nil || strings.Contains(string(r.out.Result), "collided") {
+				t.Fatalf("a call lost a deadlock: %v %s", r.err, r.out.Result)
+			}
+		case <-time.After(30 * time.Second):
+			t.Fatal("the calls never finished")
+		}
+	}
+	if n := b.Count(`SELECT count(*) FROM action WHERE id = $1 AND status = 'executed'`, lateness.ActionID); n != 1 {
+		t.Fatal("the approved lateness correction was not carried out")
+	}
+}
+
+// A call made while its caller's seat is being removed waits for the removal
+// and is then refused, rather than leaving behind a proposal that the
+// removal, which could not see it yet, never cancelled.
+func TestACallDuringItsCallersRemovalWaitsForIt(t *testing.T) {
+	b := build(t)
+	ctx := t.Context()
+	work := b.submit(t, b.yuki, "essay")
+	removal, err := b.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer removal.Rollback(ctx)
+	// What member.remove does to the seat, up to its commit.
+	if _, err := removal.Exec(ctx, `SELECT 1 FROM course_member WHERE id = $1 FOR UPDATE`, b.graderM); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := removal.Exec(ctx, `UPDATE course_member SET status = 'removed' WHERE id = $1`, b.graderM); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan pipeline.Outcome, 1)
+	go func() {
+		out, _ := b.Call(b.grader, "grade.submit", m{"course_id": b.course, "submission_id": work, "score": 70}, "during-removal")
+		done <- out
+	}()
+	for deadline := time.Now().Add(10 * time.Second); b.Count(`SELECT count(*) FROM pg_locks l
+		JOIN pg_stat_activity a ON a.pid = l.pid WHERE NOT l.granted AND a.datname = current_database()`) == 0; {
+		if len(done) > 0 || time.Now().After(deadline) {
+			t.Fatal("the call never waited for its caller's seat")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if err := removal.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if out := <-done; out.Status != domain.StatusDenied {
+		t.Fatalf("a call made during its caller's removal: %+v", out)
+	}
+	if n := b.Count(`SELECT count(*) FROM action WHERE member_id = $1 AND status = 'proposed'`, b.graderM); n != 0 {
+		t.Fatalf("%d proposals outlived the seat they were made from", n)
+	}
 }
 
 // ---------------------------------------------------------------------------
