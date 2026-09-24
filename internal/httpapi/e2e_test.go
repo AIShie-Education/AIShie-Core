@@ -18,6 +18,7 @@ import (
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/auth"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/db"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/db/dbq"
+	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/domain"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/httpapi"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/testkit"
 )
@@ -185,12 +186,33 @@ func TestEndToEndOverHTTP(t *testing.T) {
 	}
 }
 
+// What a status says of whether anything was recorded: a call that was
+// attempted answers with the action on record as its top-level action_id,
+// and a failure there with its error's own status, 400 and 404 included. A
+// call that never was, and a key used for another call, name no action of
+// their own.
 func TestStatusCodes(t *testing.T) {
 	a := newAPI(t, 1)
 	c, yuki := a.c, a.c.Students[0]
-	sato := a.tokenFor(c.Sato)
+	sato, grader, student := a.tokenFor(c.Sato), a.tokenFor(c.Grader), a.tokenFor(yuki.Actor)
 	course := "/v1/courses/" + c.Course.String()
 	key := func(k string) []string { return []string{"Idempotency-Key", k} }
+
+	// A TA whose grades wait for someone else's approval, and who approves
+	// others'; one of the agent's proposals rejected, and one cancelled when
+	// its seat is taken away; and HW4 not published after all.
+	ta := c.Actor("human", "TA")
+	c.Member(c.Course, ta, "ta",
+		testkit.WithPerm(domain.PermGradeSubmit, domain.ConfirmRequired),
+		testkit.WithPerm(domain.PermActionDecide, domain.Autonomous))
+	own := c.MustCall(ta, "grade.submit", m{"course_id": c.Course, "submission_id": yuki.HW3, "score": 50}, "own")
+	toReject := m{"submission_id": yuki.HW3, "score": 60}
+	rejected := c.MustCall(c.Grader, "grade.submit", m{"course_id": c.Course, "submission_id": yuki.HW3, "score": 60}, "to-reject")
+	c.MustCall(c.Sato, "action.decide", m{"course_id": c.Course, "action_id": rejected.ActionID, "decision": "reject"}, "reject")
+	toCancel := m{"submission_id": yuki.HW3, "score": 70}
+	c.MustCall(c.Grader, "grade.submit", m{"course_id": c.Course, "submission_id": yuki.HW3, "score": 70}, "to-cancel")
+	c.MustCall(c.Sato, "member.remove", m{"course_id": c.Course, "member_id": c.GraderM}, "rm-grader")
+	c.Exec(`UPDATE assignment SET published_at = NULL WHERE id = $1`, c.HW4)
 
 	cases := []struct {
 		name         string
@@ -200,23 +222,32 @@ func TestStatusCodes(t *testing.T) {
 		headers      []string
 		status       int
 		code         string
+		recorded     bool
 	}{
-		{"no credential", "GET", "/v1/me", "", nil, nil, 401, "unauthenticated"},
-		{"bad credential", "GET", "/v1/me", "ais_aaaaaaaaaaaa_" + strings.Repeat("A", 43), nil, nil, 401, "unauthenticated"},
-		{"write without a key", "POST", course + "/grades", sato, m{"submission_id": yuki.HW3, "score": 1}, nil, 400, "invalid_argument"},
-		{"schema violation", "POST", course + "/grades", sato, m{"submission_id": yuki.HW3}, key("a"), 400, "invalid_argument"},
-		{"unknown field", "POST", course + "/grades", sato, m{"submission_id": yuki.HW3, "score": 1, "x": 1}, key("b"), 400, "invalid_argument"},
-		{"body is not JSON", "POST", course + "/grades", sato, "not-an-object", key("c"), 400, "invalid_argument"},
-		{"path and body disagree", "POST", course + "/grades", sato, m{"course_id": uuid.New(), "submission_id": yuki.HW3, "score": 1}, key("d"), 400, "invalid_argument"},
-		{"unknown course", "POST", "/v1/courses/" + uuid.NewString() + "/grades", sato, m{"submission_id": yuki.HW3, "score": 1}, key("e"), 404, "not_found"},
-		{"unknown submission", "POST", course + "/grades", sato, m{"submission_id": uuid.New(), "score": 1}, key("f"), 404, "not_found"},
-		{"a rule of the domain", "POST", course + "/grades", sato, m{"submission_id": yuki.HW3, "score": 1000}, key("g"), 422, "failed_precondition"},
-		{"unknown tool by name", "POST", "/v1/tools/grade.obliterate", sato, m{}, key("h"), 404, "not_found"},
-		{"bad query parameter", "GET", course + "/actions/proposed?limit=lots", sato, nil, nil, 400, "invalid_argument"},
-		{"unknown query parameter", "GET", course + "/actions/proposed?sudo=1", sato, nil, nil, 400, "invalid_argument"},
+		{"no credential", "GET", "/v1/me", "", nil, nil, 401, "unauthenticated", false},
+		{"bad credential", "GET", "/v1/me", "ais_aaaaaaaaaaaa_" + strings.Repeat("A", 43), nil, nil, 401, "unauthenticated", false},
+		{"write without a key", "POST", course + "/grades", sato, m{"submission_id": yuki.HW3, "score": 1}, nil, 400, "invalid_argument", false},
+		{"schema violation", "POST", course + "/grades", sato, m{"submission_id": yuki.HW3}, key("a"), 400, "invalid_argument", false},
+		{"unknown field", "POST", course + "/grades", sato, m{"submission_id": yuki.HW3, "score": 1, "x": 1}, key("b"), 400, "invalid_argument", false},
+		{"body is not JSON", "POST", course + "/grades", sato, "not-an-object", key("c"), 400, "invalid_argument", false},
+		{"path and body disagree", "POST", course + "/grades", sato, m{"course_id": uuid.New(), "submission_id": yuki.HW3, "score": 1}, key("d"), 400, "invalid_argument", false},
+		{"unknown course", "POST", "/v1/courses/" + uuid.NewString() + "/grades", sato, m{"submission_id": yuki.HW3, "score": 1}, key("e"), 404, "not_found", false},
+		{"unknown submission", "POST", course + "/grades", sato, m{"submission_id": uuid.New(), "score": 1}, key("f"), 404, "not_found", false},
+		{"a rule of the domain", "POST", course + "/grades", sato, m{"submission_id": yuki.HW3, "score": 1000}, key("g"), 422, "failed_precondition", true},
+		{"unknown tool by name", "POST", "/v1/tools/grade.obliterate", sato, m{}, key("h"), 404, "not_found", false},
+		{"bad query parameter", "GET", course + "/actions/proposed?limit=lots", sato, nil, nil, 400, "invalid_argument", false},
+		{"unknown query parameter", "GET", course + "/actions/proposed?sudo=1", sato, nil, nil, 400, "invalid_argument", false},
+		{"denied", "POST", course + "/grades", student, m{"submission_id": yuki.HW3, "score": 100}, key("i"), 403, "forbidden", true},
+		{"an argument the tool refuses", "POST", course + "/grades", sato, m{"submission_id": yuki.HW3, "score": -1}, key("j"), 400, "invalid_argument", true},
+		{"a key used for another call", "POST", course + "/grades", sato, m{"submission_id": yuki.HW3, "score": 1}, key("j"), 409, "idempotency_conflict", false},
+		{"something the tool does not find", "POST", course + "/submissions", student, m{"assignment_id": c.HW4}, key("k"), 404, "not_found", true},
+		{"something the tool forbids", "POST", course + "/actions/" + own.ActionID.String() + "/decide", a.tokenFor(ta), m{"decision": "approve"}, key("l"), 403, "forbidden", true},
+		{"a rejected proposal, replayed", "POST", course + "/grades", grader, toReject, key("to-reject"), 409, "", true},
+		{"a cancelled proposal, replayed", "POST", course + "/grades", grader, toCancel, key("to-cancel"), 422, "failed_precondition", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			before := c.Count(`SELECT count(*) FROM action`)
 			r := a.do(nil, tc.method, tc.path, tc.token, tc.body, tc.headers...)
 			code := r.str("error", "code")
 			if r.Status != tc.status || code != tc.code {
@@ -224,6 +255,20 @@ func TestStatusCodes(t *testing.T) {
 			}
 			if tc.status == 401 && r.Header.Get("WWW-Authenticate") == "" {
 				t.Fatal("401 without WWW-Authenticate")
+			}
+			// The top-level action_id is what says the call is on record.
+			id := r.str("action_id")
+			switch {
+			case tc.recorded && (id == "" || c.Count(`SELECT count(*) FROM action WHERE id = $1`, id) != 1):
+				t.Fatalf("recorded, and the answer names no action on record\n%s", r.Raw)
+			case !tc.recorded && id != "":
+				t.Fatalf("not recorded, and the answer names action %s\n%s", id, r.Raw)
+			case !tc.recorded && c.Count(`SELECT count(*) FROM action`) != before:
+				t.Fatalf("not recorded, and something was\n%s", r.Raw)
+			}
+			// A key used for another call names that call's action instead.
+			if code == "idempotency_conflict" && r.str("error", "details", "action_id") == "" {
+				t.Fatalf("the conflict does not name the earlier action\n%s", r.Raw)
 			}
 		})
 	}
