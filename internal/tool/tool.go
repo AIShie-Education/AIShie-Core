@@ -150,9 +150,11 @@ type Spec[In, Out any] struct {
 	// what changes whether it is archived.
 	OnArchived bool
 	// SecretIn and SecretOut name top-level fields that must never be
-	// stored: they are removed from the recorded payload (and so from the
-	// payload hash) and from the recorded result. A replay returns that
-	// result, so the output schema does not require a SecretOut field.
+	// stored: they are removed from the recorded payload and from the
+	// recorded result. A SecretIn field still counts in the payload hash, as
+	// a keyed digest, so that a key reused with another secret is caught. A
+	// replay returns the recorded result, so the output schema does not
+	// require a SecretOut field.
 	SecretIn  []string
 	SecretOut []string
 
