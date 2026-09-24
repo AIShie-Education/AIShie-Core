@@ -361,7 +361,8 @@ event(seq, type, course_id null→course, action_id null→action,
 denied. `confirm_required` needs no approval table — the queue is `WHERE status = 'proposed'`,
 and the proposal itself lives in `payload`; nothing else is written until a human approves.
 `pending_review` needs no review table — the queue is `WHERE review_state IN ('pending', 'escalated')`,
-an escalated action still waiting for its second reviewer: someone other than whoever escalated it.
+an escalated action still waiting for its second reviewer: someone other than whoever escalated it
+or approved its escalation.
 
 `unique(actor_id, idempotency_key)` is not optional. A tool call retried after a timeout would
 otherwise post a second grade silently at 3am.
@@ -552,7 +553,10 @@ check `actor.platform_role` instead. That is the only place it is read.
 - Nobody decides or reviews their own action at one remove (§2.6): a decision or review that is
   itself proposed or under review is not confirmed or reviewed by whoever's action it is about,
   in any seat. The CHECKs compare a row with its own decider only.
-- An escalated action is closed by someone other than whoever escalated it, in any seat (§2.6).
+- An escalated action is closed by someone other than whoever escalated it (§2.6), in any seat
+  and at any remove: nobody who made the review that escalated it, approved that review or
+  confirmed that approval marks it reviewed, nor approves someone else's review that would.
+  Saying no to such a review closes nothing, and is still theirs to say.
 - Filling `event.student_member_id` and `event.assignment_id` correctly, and filtering the
   feed by them.
 - The submitting member has `role = 'student'`; `member_*_scope` rows name members and

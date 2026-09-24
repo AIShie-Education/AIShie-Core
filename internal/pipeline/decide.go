@@ -103,6 +103,13 @@ func (p *Pipeline) Decide(ctx context.Context, ec *tool.ExecCtx, in DecideIn) (D
 	} else if own {
 		return DecideOut{}, apperr.Forbid("nobody decides their own proposal, even at one remove: this one decides or reviews an action of yours")
 	}
+	if in.Decision == DecisionApprove {
+		if own, err := closesOwnEscalation(ctx, ec.Q, prop, ec.Actor.ID); err != nil {
+			return DecideOut{}, err
+		} else if own {
+			return DecideOut{}, apperr.Forbid("an escalation is for someone else to look at")
+		}
+	}
 	out := DecideOut{ActionID: prop.ID}
 
 	if p.cfg.ProposalTTL > 0 && prop.CreatedAt.Add(p.cfg.ProposalTTL).Before(ec.Now) {
@@ -235,6 +242,34 @@ func judgesOwn(ctx context.Context, q *dbq.Queries, a dbq.Action, member, actor 
 	return false, nil
 }
 
+// closesOwnEscalation reports whether carrying out a would close an
+// escalation that actor had a hand in: a is a review of an action actor
+// escalated, or the approval of one, at any remove. Once escalated, the
+// action can only be marked reviewed, so carrying such a review out closes
+// the escalation or fails. The review is carried out as its proposer, and
+// Review checks only them; whoever approves it is checked here. Saying no
+// closes nothing, so a rejection anywhere on the way down is not this.
+func closesOwnEscalation(ctx context.Context, q *dbq.Queries, a dbq.Action, actor uuid.UUID) (bool, error) {
+	for a.ActionType == ToolActionDecide && a.TargetID != nil {
+		var d DecideIn
+		if json.Unmarshal(a.Payload, &d) != nil || d.Decision != DecisionApprove {
+			return false, nil
+		}
+		about, err := q.GetActionInCourse(ctx, dbq.GetActionInCourseParams{ID: *a.TargetID, CourseID: a.CourseID})
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		a = about
+	}
+	if a.ActionType != ToolActionReview || a.TargetID == nil {
+		return false, nil
+	}
+	return q.EscalatedBy(ctx, dbq.EscalatedByParams{ActionID: *a.TargetID, ActorID: actor})
+}
+
 // cancel ends a proposal without executing it and without blaming anyone: it
 // was fine when it was made and is not any more.
 func (p *Pipeline) cancel(ctx context.Context, ec *tool.ExecCtx, prop dbq.Action, code string, details map[string]any) (DecideOut, error) {
@@ -346,15 +381,17 @@ func (p *Pipeline) Review(ctx context.Context, ec *tool.ExecCtx, in ReviewIn) (R
 	} else if own {
 		return ReviewOut{}, apperr.Forbid("nobody reviews their own action, even at one remove: this one decides or reviews an action of yours")
 	}
-	if from == domain.ReviewEscalated && row.ReviewedByMemberID != nil {
+	if from == domain.ReviewEscalated {
 		// An escalation asks for a second reviewer, so whoever raised it does
 		// not close it: not from the seat they raised it from, nor from one
-		// they have taken since.
-		by, err := ec.Q.GetMemberInCourse(ctx, dbq.GetMemberInCourseParams{ID: *row.ReviewedByMemberID, CourseID: in.CourseID})
+		// they have taken since. Approving someone else's escalation is
+		// raising it too. Approving someone else's review that closes it is
+		// refused in Decide (closesOwnEscalation).
+		mine, err := ec.Q.EscalatedBy(ctx, dbq.EscalatedByParams{ActionID: row.ID, ActorID: ec.Actor.ID})
 		if err != nil {
 			return ReviewOut{}, err
 		}
-		if by.ActorID == ec.Actor.ID {
+		if mine {
 			return ReviewOut{}, apperr.Forbid("an escalation is for someone else to look at")
 		}
 	}

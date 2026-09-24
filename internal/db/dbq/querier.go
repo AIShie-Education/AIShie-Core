@@ -46,6 +46,13 @@ type Querier interface {
 	// document as its instructions or rubric.
 	DocumentInUseByPublishedAssignment(ctx context.Context, arg DocumentInUseByPublishedAssignmentParams) (bool, error)
 	EmailTaken(ctx context.Context, lower string) (bool, error)
+	// Whether the actor had a hand in escalating the action, from any seat: made
+	// the review that escalated it, or approved that review, or confirmed that
+	// approval, and so on up. An approved review is carried out as its proposer,
+	// so the seat the escalation is recorded against is only the first of these;
+	// each approval is an executed action.decide about the one before, made from
+	// the seat that approved it.
+	EscalatedBy(ctx context.Context, arg EscalatedByParams) (bool, error)
 	// Moves a proposal to its end state. The status guard makes a lost race
 	// between two deciders, or a decider and the expiry sweep, a no-op.
 	FinishProposal(ctx context.Context, arg FinishProposalParams) (int64, error)

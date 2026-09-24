@@ -584,6 +584,105 @@ func TestNobodyDecidesTheirOwnActionAtOneRemove(t *testing.T) {
 	}
 }
 
+// An escalation is for someone else to look at, and approving a review is
+// carrying it out. So whoever escalated an action does not close it by
+// approving someone else's review of it, at any remove; and whoever approved
+// the review that escalated it, or confirmed that approval, escalated it too.
+// Saying no to a review that would close it closes nothing, and is theirs to
+// say.
+func TestNobodyClosesTheirOwnEscalationAtOneRemove(t *testing.T) {
+	c := testkit.NewCS101(t, 3)
+	ta := c.Actor("human", "TA")
+	c.Member(c.Course, ta, "ta", testkit.WithPerm(domain.PermGradeSubmit, domain.PendingReview))
+	triage := c.Actor("agent", "triage")
+	c.Member(c.Course, triage, "ta", testkit.WithPerm(domain.PermActionDecide, domain.ConfirmRequired))
+	second := c.Actor("agent", "second opinion")
+	c.Member(c.Course, second, "ta", testkit.WithPerm(domain.PermActionDecide, domain.ConfirmRequired))
+	other := c.Actor("human", "Other reviewer")
+	c.Member(c.Course, other, "instructor")
+
+	review := func(actor uuid.UUID, action *uuid.UUID, outcome, key string) pipeline.Outcome {
+		t.Helper()
+		return c.MustCall(actor, "action.review", m{"course_id": c.Course, "action_id": action, "outcome": outcome}, key)
+	}
+	decide := func(actor uuid.UUID, action *uuid.UUID, decision, key string) pipeline.Outcome {
+		t.Helper()
+		return c.MustCall(actor, "action.decide", m{"course_id": c.Course, "action_id": action, "decision": decision}, key)
+	}
+	status := func(what string, out pipeline.Outcome, want domain.ActionStatus) {
+		t.Helper()
+		if out.Status != want {
+			t.Fatalf("%s: %+v", what, out)
+		}
+	}
+	refused := func(what string, out pipeline.Outcome) {
+		t.Helper()
+		if out.Status != domain.StatusFailed || out.Error == nil || out.Error.Code != apperr.Forbidden {
+			t.Fatalf("%s: %+v", what, out)
+		}
+	}
+	state := func(what string, action *uuid.UUID, want domain.ReviewState) {
+		t.Helper()
+		if n := c.Count(`SELECT count(*) FROM action WHERE id = $1 AND review_state = $2`, *action, string(want)); n != 1 {
+			t.Fatalf("%s: the TA's grade is not %s", what, want)
+		}
+	}
+
+	// Sato escalates the TA's grade, and the agent proposes marking it
+	// reviewed. Sato does not approve that, nor an approval of it.
+	graded := c.MustCall(ta, "grade.submit", submitArgs(c, c.Students[0], 77), "g1")
+	status("Sato escalating", review(c.Sato, graded.ActionID, "escalated", "esc1"), domain.StatusExecuted)
+	closing := review(triage, graded.ActionID, "reviewed", "close1")
+	status("the agent's review", closing, domain.StatusProposed)
+	refused("Sato approving the agent's review of his escalation", decide(c.Sato, closing.ActionID, "approve", "sato1"))
+	deeper := decide(second, closing.ActionID, "approve", "second1")
+	status("the second agent's approval", deeper, domain.StatusProposed)
+	refused("Sato confirming an approval of that review", decide(c.Sato, deeper.ActionID, "approve", "sato1-deeper"))
+	state("after Sato's approvals", graded.ActionID, domain.ReviewEscalated)
+	if no := decide(c.Sato, deeper.ActionID, "reject", "sato1-no"); no.Status != domain.StatusExecuted || testkit.Result[pipeline.DecideOut](t, no).Outcome != domain.StatusRejected {
+		t.Fatalf("Sato turning down the approval: %+v", no)
+	}
+	if v := testkit.Result[pipeline.DecideOut](t, decide(other, closing.ActionID, "approve", "other1")); v.Outcome != domain.StatusExecuted {
+		t.Fatalf("someone else approving the agent's review: %+v", v)
+	}
+	state("after someone else's approval", graded.ActionID, domain.ReviewReviewed)
+
+	// The agent proposes escalating, and Sato approves it: the escalation is
+	// his as much as the agent's, and he does not close it.
+	graded2 := c.MustCall(ta, "grade.submit", submitArgs(c, c.Students[1], 70), "g2")
+	raised := review(triage, graded2.ActionID, "escalated", "esc2")
+	status("the agent's escalation", raised, domain.StatusProposed)
+	if v := testkit.Result[pipeline.DecideOut](t, decide(c.Sato, raised.ActionID, "approve", "sato2")); v.Outcome != domain.StatusExecuted {
+		t.Fatalf("Sato approving the escalation: %+v", v)
+	}
+	refused("Sato closing an escalation he approved", review(c.Sato, graded2.ActionID, "reviewed", "sato2-close"))
+	// Approving someone else's no to a review that would close it is saying
+	// no too.
+	closing2 := review(triage, graded2.ActionID, "reviewed", "close2")
+	status("the agent's review", closing2, domain.StatusProposed)
+	no := decide(second, closing2.ActionID, "reject", "second2-no")
+	status("the second agent's rejection", no, domain.StatusProposed)
+	if yes := decide(c.Sato, no.ActionID, "approve", "sato2-no"); yes.Status != domain.StatusExecuted || testkit.Result[pipeline.DecideOut](t, yes).Outcome != domain.StatusExecuted {
+		t.Fatalf("Sato approving the rejection: %+v", yes)
+	}
+	state("after the rejection", graded2.ActionID, domain.ReviewEscalated)
+	status("someone else closing it", review(other, graded2.ActionID, "reviewed", "other2"), domain.StatusExecuted)
+
+	// One agent proposes escalating, another approves, and Sato confirms
+	// that approval: two removes are one remove twice.
+	graded3 := c.MustCall(ta, "grade.submit", submitArgs(c, c.Students[2], 64), "g3")
+	raised3 := review(second, graded3.ActionID, "escalated", "esc3")
+	status("the second agent's escalation", raised3, domain.StatusProposed)
+	approval := decide(triage, raised3.ActionID, "approve", "triage3")
+	status("the agent's approval of it", approval, domain.StatusProposed)
+	if v := testkit.Result[pipeline.DecideOut](t, decide(c.Sato, approval.ActionID, "approve", "sato3")); v.Outcome != domain.StatusExecuted {
+		t.Fatalf("Sato confirming the approval: %+v", v)
+	}
+	state("after Sato's confirmation", graded3.ActionID, domain.ReviewEscalated)
+	refused("Sato closing an escalation he confirmed", review(c.Sato, graded3.ActionID, "reviewed", "sato3-close"))
+	status("someone else closing it", review(other, graded3.ActionID, "reviewed", "other3"), domain.StatusExecuted)
+}
+
 // ---------------------------------------------------------------------------
 // Proposals: re-authorization and expiry
 // ---------------------------------------------------------------------------
