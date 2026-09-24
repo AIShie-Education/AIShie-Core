@@ -12,10 +12,10 @@ import (
 
 // Every call pays for what screened and bounded do, so neither may cost
 // much more than the request and its answer already do. A request is read
-// once, into a buffer of its size, and looked at where it lies, and one the
-// SDK refuses unread for its Content-Type is not read at all; a result is
-// passed on as the SDK writes it, not held and read again. Only what may be
-// a refusal is held.
+// once, into a buffer that grows as it comes, and looked at where it lies,
+// and one the SDK refuses unread for its Content-Type is not read at all; a
+// result is passed on as the SDK writes it, not held and read again. Only
+// what may be a refusal is held.
 func TestTheScreensCostLittleMoreThanWhatTheyScreen(t *testing.T) {
 	form := httptest.NewRequest(http.MethodPost, "/mcp", readerFunc(func([]byte) (int, error) {
 		t.Error("a form was read")
@@ -64,6 +64,18 @@ func TestTheScreensCostLittleMoreThanWhatTheyScreen(t *testing.T) {
 		if got := rec.Body.Bytes(); rec.Code != http.StatusOK || !tc.held && !bytes.Equal(got, tc.answer) || tc.held && len(got) > 1<<10 {
 			t.Errorf("%s: %d, %d bytes: %.100s", tc.what, rec.Code, len(got), got)
 		}
+	}
+}
+
+// A request says how long it is before any of it has come, and may say four
+// megabytes, send a byte and wait. What is set aside for it grows with what
+// arrives, not with what it says.
+func TestABodyIsReadAsItComesNotAsItIsDeclared(t *testing.T) {
+	r := httptest.NewRequest(http.MethodPost, "/mcp", io.MultiReader(strings.NewReader("{"),
+		readerFunc(func([]byte) (int, error) { return 0, io.ErrUnexpectedEOF })))
+	r.ContentLength = maxBody
+	if b, _ := readBody(httptest.NewRecorder(), r); cap(b) > 2*firstRead {
+		t.Errorf("%d bytes set aside for a body of which %d came", cap(b), len(b))
 	}
 }
 

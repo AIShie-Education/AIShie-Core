@@ -182,16 +182,24 @@ func screened(next http.Handler) http.Handler {
 }
 
 // readBody reads a request's body, no more than maxBody of it, into a buffer
-// the size the client said it would be, not one grown by copies.
+// the size the client said it would be, up to firstRead, and grown from
+// there by what comes. The size a client says is only its word: taken whole,
+// a request that says four megabytes, sends a byte and waits would hold four
+// megabytes until it timed out, as many times over as it was sent.
 func readBody(w http.ResponseWriter, r *http.Request) ([]byte, error) {
 	size := int64(bytes.MinRead)
-	if n := r.ContentLength; n > 0 && n <= maxBody {
-		size += n
+	if n := r.ContentLength; n > 0 {
+		size += min(n, firstRead)
 	}
 	buf := bytes.NewBuffer(make([]byte, 0, size))
 	_, err := buf.ReadFrom(http.MaxBytesReader(w, r.Body, maxBody))
 	return buf.Bytes(), err
 }
+
+// firstRead is as much of a body as is set aside before any of it has come.
+// Past it the buffer doubles as the body arrives: six times at most, for a
+// body of maxBody.
+const firstRead = 64 << 10
 
 // failedReader fails as a read of the body did.
 type failedReader struct{ err error }
