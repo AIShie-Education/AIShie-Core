@@ -149,14 +149,14 @@ func TestABatchIsNotManyCallsForThePriceOfOne(t *testing.T) {
 // rebinding. Named in TRUSTED_PROXIES, the proxy gets its agents through to
 // /mcp. Nothing else that comes over loopback may name a host that is not.
 func TestMCPWorksBehindAProxyOnTheSameMachine(t *testing.T) {
-	list := func(a *api, host string) (int, string) {
+	list := func(a *api, host, token string) (int, string) {
 		t.Helper()
 		req, err := http.NewRequest("POST", a.srv.URL+httpapi.MCPPath, strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))
 		if err != nil {
 			t.Fatal(err)
 		}
 		req.Host = host // the test server listens on 127.0.0.1
-		req.Header.Set("Authorization", "Bearer "+a.tokenFor(a.c.Sato))
+		req.Header.Set("Authorization", "Bearer "+token)
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Accept", "application/json, text/event-stream")
 		res, err := http.DefaultClient.Do(req)
@@ -168,15 +168,32 @@ func TestMCPWorksBehindAProxyOnTheSameMachine(t *testing.T) {
 		return res.StatusCode, string(body)
 	}
 	proxied := hardenedWith(t, nil, nil, nil, func(d *httpapi.Deps) { d.TrustedProxies = []string{"127.0.0.0/8", "::1/128"} })
-	if status, body := list(proxied, "lms.example.edu"); status != 200 || !strings.Contains(body, `"tools"`) {
+	if status, body := list(proxied, "lms.example.edu", proxied.tokenFor(proxied.c.Sato)); status != 200 || !strings.Contains(body, `"tools"`) {
 		t.Fatalf("through a proxy on the same machine: %d %.300s", status, body)
 	}
 	direct := hardened(t, nil, nil, nil)
-	if status, body := list(direct, "rebound.example"); status != http.StatusForbidden || !strings.Contains(body, "TRUSTED_PROXIES") {
+	sato := direct.tokenFor(direct.c.Sato)
+	if status, body := list(direct, "rebound.example", sato); status != http.StatusForbidden || !strings.Contains(body, "TRUSTED_PROXIES") {
 		t.Fatalf("a public name over loopback, with no proxy named: %d %.300s", status, body)
 	}
-	if status, body := list(direct, "localhost:8080"); status != 200 || !strings.Contains(body, `"tools"`) {
+	if status, body := list(direct, "localhost:8080", sato); status != 200 || !strings.Contains(body, `"tools"`) {
 		t.Fatalf("localhost over loopback: %d %.300s", status, body)
+	}
+	// The check comes before the token is looked at. A rebound page has no
+	// token, and its guesses are refused for where they came from without
+	// ever reaching the credential store; the same guess from localhost is
+	// refused as a guess.
+	if status, body := list(direct, "rebound.example", "not-a-token"); status != http.StatusForbidden || !strings.Contains(body, "TRUSTED_PROXIES") {
+		t.Fatalf("a guessed token over a rebound name: %d %.300s", status, body)
+	}
+	if status, body := list(direct, "localhost:8080", "not-a-token"); status != http.StatusUnauthorized {
+		t.Fatalf("a guessed token from localhost: %d %.300s", status, body)
+	}
+	// A proxy named elsewhere says nothing about loopback: what comes in
+	// over loopback naming a public host is refused as though none were.
+	elsewhere := hardenedWith(t, nil, nil, nil, func(d *httpapi.Deps) { d.TrustedProxies = []string{"10.0.0.0/8"} })
+	if status, body := list(elsewhere, "lms.example.edu", elsewhere.tokenFor(elsewhere.c.Sato)); status != http.StatusForbidden || !strings.Contains(body, "TRUSTED_PROXIES") {
+		t.Fatalf("a public name over loopback, with only a proxy elsewhere named: %d %.300s", status, body)
 	}
 }
 
