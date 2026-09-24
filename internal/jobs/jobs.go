@@ -235,7 +235,11 @@ func (r *Runner) Sweep(ctx context.Context) (Report, error) {
 //
 // Only the server's own files are looked at. The bucket or directory may be
 // shared with other things — a backup, another program's objects — and their
-// age says nothing about whether anyone still wants them.
+// age says nothing about whether anyone still wants them. Nor are uploads
+// under a course this database does not have: they are another deployment's,
+// kept in the same place, and only its database knows which it has attached.
+// A deployment whose database was copied from this one has the same courses,
+// and its files cannot be told from ours; the README says not to share.
 func (r *Runner) sweepBlobs(ctx context.Context, now time.Time) (int, error) {
 	ttl := r.pl.Config().ProposalTTL
 	if r.cfg.Blob == nil || ttl <= 0 || now.Sub(r.blobsSwept) < blobSweepEvery {
@@ -254,17 +258,18 @@ func (r *Runner) sweepBlobs(ctx context.Context, now time.Time) (int, error) {
 			from = i
 		}
 	}
-	var old []string
+	var old []upload
 	for i, prefix := range prefixes[from:] {
 		after := ""
 		if i == 0 {
 			after = r.blobsAt
 		}
 		err := r.cfg.Blob.List(ctx, prefix, after, func(key string, modified time.Time) error {
-			if !ownKey(strings.TrimPrefix(key, prefix)) || !modified.Before(cutoff) {
+			course, ok := ownKey(strings.TrimPrefix(key, prefix))
+			if !ok || !modified.Before(cutoff) {
 				return nil
 			}
-			if old = append(old, key); len(old) >= int(r.cfg.Batch) {
+			if old = append(old, upload{key, course}); len(old) >= int(r.cfg.Batch) {
 				return blob.ErrStopList
 			}
 			return nil
@@ -277,10 +282,10 @@ func (r *Runner) sweepBlobs(ctx context.Context, now time.Time) (int, error) {
 		}
 	}
 	removed := 0
-	for _, key := range old {
-		gone, err := r.removeIfOrphan(ctx, key)
+	for _, u := range old {
+		gone, err := r.removeIfOrphan(ctx, u)
 		if err != nil {
-			r.log.Error("sweep step failed", "step", "orphan file", "key", key, "err", err)
+			r.log.Error("sweep step failed", "step", "orphan file", "key", u.key, "err", err)
 			continue
 		}
 		if gone {
@@ -292,7 +297,7 @@ func (r *Runner) sweepBlobs(ctx context.Context, now time.Time) (int, error) {
 	if len(old) < int(r.cfg.Batch) {
 		r.blobsSwept, r.blobsAt = now, ""
 	} else {
-		r.blobsAt = old[len(old)-1]
+		r.blobsAt = old[len(old)-1].key
 	}
 	return removed, nil
 }
@@ -308,38 +313,48 @@ func (r *Runner) blobPrefixes() []string {
 	return prefixes
 }
 
+// upload is an old file the sweep has found under one of its prefixes, and
+// the course its key names.
+type upload struct {
+	key    string
+	course uuid.UUID
+}
+
 // ownKey reports whether name, what follows the prefix a key was listed
 // under, is what document.upload_url puts there: <course>/<upload>, two UUIDs
-// spelt as the server spells them. Anything else under the prefix was put
-// there by someone else, and is left alone.
-func ownKey(name string) bool {
-	course, upload, ok := strings.Cut(name, "/")
-	return ok && canonicalUUID(course) && canonicalUUID(upload)
+// spelt as the server spells them, and if so which course it names. Anything
+// else under the prefix was put there by someone else, and is left alone.
+func ownKey(name string) (uuid.UUID, bool) {
+	course, upload, _ := strings.Cut(name, "/")
+	id, isCourse := canonicalUUID(course)
+	_, isUpload := canonicalUUID(upload)
+	return id, isCourse && isUpload
 }
 
-func canonicalUUID(s string) bool {
+func canonicalUUID(s string) (uuid.UUID, bool) {
 	u, err := uuid.Parse(s)
-	return err == nil && u.String() == s
+	return u, err == nil && u.String() == s
 }
 
-// removeIfOrphan deletes one object unless a version points at it. It holds
-// the lock that attaching takes on the same key, so that "is it attached?"
-// and the deletion are one step: an attach in flight either commits first,
-// and the file is kept, or comes after, and finds nothing uploaded.
-func (r *Runner) removeIfOrphan(ctx context.Context, key string) (bool, error) {
+// removeIfOrphan deletes one object unless a version points at it, or it is
+// another deployment's (see UploadIsOrphan). It holds the lock that attaching
+// takes on the same key, so that "is it attached?" and the deletion are one
+// step: an attach in flight either commits first, and the file is kept, or
+// comes after, and finds nothing uploaded.
+func (r *Runner) removeIfOrphan(ctx context.Context, u upload) (bool, error) {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return false, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	q := dbq.New(tx)
-	if err := q.LockStorageKey(ctx, key); err != nil {
+	if err := q.LockStorageKey(ctx, u.key); err != nil {
 		return false, err
 	}
-	if used, err := q.StorageKeyInUse(ctx, &key); err != nil || used {
+	if orphan, err := q.UploadIsOrphan(ctx, dbq.UploadIsOrphanParams{CourseID: u.course, StorageKey: u.key}); err != nil || !orphan {
 		return false, err
 	}
-	if err := r.cfg.Blob.Delete(ctx, key); err != nil {
+	if err := r.cfg.Blob.Delete(ctx, u.key); err != nil {
 		return false, err
 	}
 	return true, tx.Commit(ctx)

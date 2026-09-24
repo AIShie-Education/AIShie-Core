@@ -312,6 +312,13 @@ type Querier interface {
 	// department's own presets are edited here.
 	UpdatePreset(ctx context.Context, arg UpdatePresetParams) (int64, error)
 	UpdateSubmissionDraft(ctx context.Context, arg UpdateSubmissionDraftParams) (int64, error)
+	// Is the file under this key one of this deployment's uploads that no
+	// version points at? The course its key names must be one this database
+	// has. document.upload_url issues keys only under courses that exist, and a
+	// course is never deleted, so a key under any other course was written by
+	// another deployment keeping its files in the same place: it is not ours to
+	// remove, however old it is and whatever points at it there.
+	UploadIsOrphan(ctx context.Context, arg UploadIsOrphanParams) (bool, error)
 	// Is this version the one some submission within the member's scope was
 	// submitted under? Then that member may read it even after the instructions
 	// have moved on: it is what they, or their student, were told.

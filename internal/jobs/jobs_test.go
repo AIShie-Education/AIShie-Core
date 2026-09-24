@@ -458,10 +458,11 @@ func TestOrphanFilesAreRemoved(t *testing.T) {
 }
 
 // The bucket or directory the files are kept in may hold other things: a
-// backup, another program's objects, a file somebody dropped among ours. The
-// sweep removes the server's own files that nothing points at, and nothing
-// the server did not write, however old — whether the store keeps a file
-// where it was uploaded or, like S3, moves it on attaching.
+// backup, another program's objects, a file somebody dropped among ours,
+// another deployment's uploads, spelt like ours but under a course this
+// database never had. The sweep removes the server's own files that nothing
+// points at, and nothing the server did not write, however old — whether the
+// store keeps a file where it was uploaded or, like S3, moves it on attaching.
 func TestTheSweepRemovesOnlyTheServersOwnFiles(t *testing.T) {
 	for name, wrap := range stores {
 		t.Run(name, func(t *testing.T) {
@@ -481,6 +482,10 @@ func TestTheSweepRemovesOnlyTheServersOwnFiles(t *testing.T) {
 			course := f.Course.String()
 			foreign := []string{"backups/nightly.sql.gz", "README", "courses/syllabus.pdf", "courses/" + course + "/cover.png",
 				"courses/" + course + "/" + strings.ToUpper(uuid.NewString()), "attached/courses/" + course + "/cover.png"}
+			// Another deployment's: one it has not attached, and one it
+			// has. Nothing here says which is which.
+			elsewhere := "courses/" + uuid.Must(uuid.NewV7()).String() + "/"
+			foreign = append(foreign, elsewhere+uuid.Must(uuid.NewV7()).String(), store.FinalKey(elsewhere+uuid.Must(uuid.NewV7()).String()))
 			for _, key := range foreign {
 				p := filepath.Join(f.Blob.Root(), filepath.FromSlash(key))
 				if err := os.MkdirAll(filepath.Dir(p), 0o750); err != nil {
