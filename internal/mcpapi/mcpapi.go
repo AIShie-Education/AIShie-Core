@@ -27,6 +27,7 @@ import (
 
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/apperr"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/auth"
+	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/canon"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/domain"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/pipeline"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/ratelimit"
@@ -271,6 +272,11 @@ func splitKey(raw json.RawMessage, write bool) ([]byte, string, error) {
 	}
 	if !write {
 		return raw, "", nil
+	}
+	// Before the arguments become a map, which would keep a repeated key's
+	// last value without a word: refused here as it is further in.
+	if err := canon.Check(raw); err != nil {
+		return nil, "", err
 	}
 	var args map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &args); err != nil {

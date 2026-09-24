@@ -123,6 +123,26 @@ func call(t *testing.T, s *mcp.ClientSession, name string, args m) (envelope, *m
 	return env, res
 }
 
+// Arguments name each key once, at the top level too, where an MCP write's
+// idempotency key is taken out of them.
+func TestArgumentsNameEachKeyOnce(t *testing.T) {
+	f := serve(t, 1)
+	c, yuki := f.c, f.c.Students[0]
+	sato := f.connect(t, f.token(t, c.Sato))
+	raw := json.RawMessage(`{"course_id": "` + c.Course.String() + `", "submission_id": "` + yuki.HW3.String() +
+		`", "score": 90, "score": 10, "idempotency_key": "twice"}`)
+	res, err := sato.CallTool(context.Background(), &mcp.CallToolParams{Name: "grade_submit", Arguments: raw})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if text := res.Content[0].(*mcp.TextContent).Text; !res.IsError || !strings.Contains(text, "invalid_argument") {
+		t.Fatalf("a repeated key: %s", text)
+	}
+	if n := c.Count(`SELECT count(*) FROM action`); n != 0 {
+		t.Fatal("something was recorded")
+	}
+}
+
 // docs/schema.md §5 once more, this time as the agent actually lives it: an
 // MCP session, a bearer token, and tool calls.
 func TestAnAgentGradesAnEssayOverMCP(t *testing.T) {

@@ -222,6 +222,25 @@ func TestANullBodyIsRefused(t *testing.T) {
 	}
 }
 
+// A body is one JSON object, each key given once: what a repeated key or a
+// second value means is anybody's guess, and an MCP client is told the same.
+func TestABodyIsOneObjectWithEachKeyOnce(t *testing.T) {
+	a := newAPI(t, 1)
+	tok := a.tokenFor(a.c.Sato)
+	work := a.c.Students[0].HW3.String()
+	for i, body := range []string{
+		`{"submission_id": "` + work + `", "score": 1, "score": 2}`,
+		`{"submission_id": "` + work + `", "score": 1, "breakdown": [{"criterion": "a", "points": 1, "points": 2, "max": 2}]}`,
+		`{"submission_id": "` + work + `", "score": 1} {"score": 2}`,
+	} {
+		res, out := a.raw("POST", a.srv.URL+"/v1/courses/"+a.c.Course.String()+"/grades", "application/json", []byte(body),
+			"Authorization", "Bearer "+tok, "Idempotency-Key", "twice-"+strconv.Itoa(i))
+		if res.StatusCode != 400 {
+			t.Fatalf("%s: %d %s", body, res.StatusCode, out)
+		}
+	}
+}
+
 // A store that cannot take the file is our fault: logged in full, and the
 // holder of an upload URL — who is nobody we know — is told nothing of it,
 // least of all where on the disk we tried.

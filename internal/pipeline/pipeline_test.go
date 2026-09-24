@@ -759,3 +759,17 @@ func TestANulCharacterIsRefusedAsInput(t *testing.T) {
 		t.Fatal("something was recorded")
 	}
 }
+
+// An idempotency key the database cannot hold is the caller's to fix, said
+// before anything is attempted, not a fault of ours to retry for ever.
+func TestAnUnstorableKeyIsRefusedAsInput(t *testing.T) {
+	c := testkit.NewCS101(t, 1)
+	for _, key := range []string{"a\x00b", "a\xffb"} {
+		if _, err := c.Call(c.Sato, "grade.submit", submitArgs(c, c.Students[0], 85), key); !apperr.Is(err, apperr.InvalidArgument) {
+			t.Fatalf("key %q: %v", key, err)
+		}
+	}
+	if n := c.Count(`SELECT count(*) FROM action`); n != 0 {
+		t.Fatal("something was recorded")
+	}
+}

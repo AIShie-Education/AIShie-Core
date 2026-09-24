@@ -92,17 +92,20 @@ func TestNumbers(t *testing.T) {
 func TestCheck(t *testing.T) {
 	long := "0." + strings.Repeat("7", 1<<20)
 	for raw, ok := range map[string]bool{
-		`{"a": [1, {"b": 2.5}], "c": "1e999999999", "d": {}, "e": [], "f": [{}, []]}`: true, // a string is not a number
-		`{"a": [1, {"b": 1e999999999}]}`:                                              false,
-		`{"score": ` + long + `}`:                                                     false,
-		`{"score": ` + long + `, "score": 1}`:                                         false,
-		`{"score": "` + long + `", "score": 1}`:                                       false,
-		`{"b": [{"points": 1, "points": 2}]}`:                                         false,
-		`{"a": {"x": 1}, "b": {"x": 1}, "x": [{"x": 1}, {"x": 2}]}`:                   true, // the same key in different objects
+		`{"a": [1, {"b": 2.5}], "c": "1e999999999", "d": {}, "e": [], "f": [{}, []]}`:              true, // a string is not a number
+		`{"a": [1, {"b": 1e999999999}]}`:                                                           false,
+		`{"score": ` + long + `}`:                                                                  false,
+		`{"score": ` + long + `, "score": 1}`:                                                      false,
+		`{"score": "` + long + `", "score": 1}`:                                                    false,
+		`{"b": [{"points": 1, "points": 2}]}`:                                                      false,
+		`{"` + strings.Repeat("\x7f", 1<<16) + `": 1, "` + strings.Repeat("\x7f", 1<<16) + `": 2}`: false,
+		`{"a": {"x": 1}, "b": {"x": 1}, "x": [{"x": 1}, {"x": 2}]}`:                                true, // the same key in different objects
 		`{`: true, // left for the parse that follows
 	} {
 		if err := Check([]byte(raw)); (err == nil) != ok {
 			t.Errorf("Check(%.60s…) = %.80v, want ok=%v", raw, err, ok)
+		} else if err != nil && len(err.Error()) > 500 {
+			t.Errorf("Check(%.60s…) repeats %d bytes of the input back", raw, len(err.Error()))
 		}
 	}
 }

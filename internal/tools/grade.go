@@ -212,8 +212,10 @@ func checkSubject(ctx context.Context, q dbq.Querier, courseID uuid.UUID, s grad
 		switch {
 		case state == stateDraft:
 			return apperr.Precondition("the submission has not been submitted yet")
-		case missing != (s.submission.State == stateMissing), forMissing != nil && *forMissing != missing:
-			return apperr.Precondition("the work is not what this grade was given for: late work has taken the place of nothing handed in; look at it, and grade it again")
+		case missing != (s.submission.State == stateMissing), forMissing != nil && *forMissing && !missing:
+			return apperr.Precondition("this grade was given for nothing handed in, and there is work here now; look at it, and grade it again")
+		case forMissing != nil && !*forMissing && missing:
+			return apperr.Precondition("this grade was given for work handed in, and nothing was; look at it, and grade it again")
 		}
 		return nil
 	}
@@ -330,6 +332,9 @@ func gradeSubmit(d Deps) tool.Tool {
 			return s.target(in.CourseID), nil
 		},
 		Validate: func(ctx context.Context, q dbq.Querier, m *domain.Member, in GradeSubmitIn) error {
+			if in.ForMissing != nil && in.SubmissionID == nil {
+				return apperr.Invalid("for_missing is for a grade on a submission")
+			}
 			s, err := load(ctx, q, in)
 			if err != nil {
 				return err

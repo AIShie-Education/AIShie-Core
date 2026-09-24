@@ -241,6 +241,13 @@ func TestAGradeForNothingDoesNotLandOnLateWork(t *testing.T) {
 	if out := waitWhile("zero-while-reopened", `UPDATE submission SET state = 'draft', body = 'draft' WHERE id = $1`, ken); out.Status == domain.StatusExecuted {
 		t.Fatalf("a zero for nothing was entered on a reopened draft: %+v", out)
 	}
+	// A caller may say what its grade is for, and is held to it; it means
+	// nothing for a component, and is refused there.
+	_, noorM := enrol("Noor")
+	b.try(t, b.sato, "grade.submit", m{"course_id": b.course, "submission_id": late.SubmissionID, "score": 0, "for_missing": true}, apperr.FailedPrecondition)
+	b.try(t, b.sato, "grade.submit", m{"course_id": b.course, "submission_id": missing(noorM), "score": 50, "for_missing": false}, apperr.FailedPrecondition)
+	b.try(t, b.sato, "grade.submit", m{"course_id": b.course, "component_id": b.midterm, "student_member_id": b.kenM, "score": 50, "for_missing": false}, apperr.InvalidArgument)
+
 	_, leoM := enrol("Leo")
 	leo := missing(leoM)
 	if out := waitWhile("zero-while-handed-in", `UPDATE submission SET state = 'submitted', body = 'handed in', submitted_at = now() WHERE id = $1`, leo); out.Status == domain.StatusExecuted {

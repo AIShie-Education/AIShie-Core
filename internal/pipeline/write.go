@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -26,6 +28,9 @@ func (p *Pipeline) invokeWrite(ctx context.Context, caller Caller, t tool.Tool, 
 		return Outcome{}, apperr.Invalid("%s changes state, so it needs an idempotency key", t.Name)
 	case len(key) > MaxIdempotencyKeyLen:
 		return Outcome{}, apperr.Invalid("the idempotency key is longer than %d characters", MaxIdempotencyKeyLen)
+	case !utf8.ValidString(key) || strings.ContainsRune(key, 0):
+		// The database cannot hold it, and would say so as a fault of ours.
+		return Outcome{}, apperr.Invalid("the idempotency key must be UTF-8 text without U+0000")
 	}
 	canonical, hash, err := p.payload(t, rawArgs)
 	if err != nil {

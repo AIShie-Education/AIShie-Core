@@ -83,7 +83,7 @@ func Check(raw []byte) error {
 			}
 			key, _ := tok.(string)
 			if stack[n-1].keys[key] {
-				return fmt.Errorf("%q is given twice in one object", key)
+				return fmt.Errorf("%q is given twice in one object", clip(key))
 			}
 			stack[n-1].keys[key], stack[n-1].wantKey = true, false
 			continue
@@ -247,14 +247,14 @@ func normalizeNumber(lit string) (string, error) {
 	if i := strings.IndexAny(s, "eE"); i >= 0 {
 		e, err := strconv.Atoi(s[i+1:])
 		if err != nil || e > maxExponent || e < -maxExponent {
-			return "", fmt.Errorf("number %q is out of range", lit)
+			return "", fmt.Errorf("number %q is out of range", clip(lit))
 		}
 		exp, s = e, s[:i]
 	}
 	intPart, fracPart, _ := strings.Cut(s, ".")
 	digits := intPart + fracPart
 	if len(digits) > maxDigits {
-		return "", fmt.Errorf("number %q has too many digits", lit)
+		return "", fmt.Errorf("number %q has too many digits", clip(lit))
 	}
 	// value = digits × 10^-scale
 	scale := len(fracPart) - exp
@@ -278,10 +278,20 @@ func normalizeNumber(lit string) (string, error) {
 		out = digits[:len(digits)-scale] + "." + digits[len(digits)-scale:]
 	}
 	if written := len(out) - strings.Count(out, "."); written > maxDigits {
-		return "", fmt.Errorf("number %q has too many digits written out", lit)
+		return "", fmt.Errorf("number %q has too many digits written out", clip(lit))
 	}
 	if neg {
 		out = "-" + out
 	}
 	return out, nil
+}
+
+// clip shortens what an error repeats back of the caller's input: a refusal
+// should not be a way to have the server send a megabyte, or several.
+func clip(s string) string {
+	const keep = 40
+	if len(s) <= keep {
+		return s
+	}
+	return fmt.Sprintf("%s… (%d bytes)", s[:keep], len(s))
 }
