@@ -173,6 +173,33 @@ func TestRegradeKeepsHistory(t *testing.T) {
 	}
 }
 
+// A snapshot shows its working and whether it is complete, not only its
+// number. Yuki's HW4 posted at 80 beside her 80 on HW3 leaves the Assignments
+// bucket at 80, but complete now: that is written down, and said. The total,
+// still waiting on the midterm, shows what it showed before and is left alone.
+func TestATotalThatFillsAGapIsWrittenDownAgain(t *testing.T) {
+	c := testkit.NewCS101(t, 1)
+	yuki := c.Students[0]
+	post(t, c, "p3", grade(t, c, m{"course_id": c.Course, "submission_id": yuki.HW3, "score": 80}, "hw3"))
+	updated := func() int {
+		return c.Count(`SELECT count(*) FROM event WHERE type = 'grade.total_updated' AND payload->>'component_id' = $1`, c.Assignments.String())
+	}
+	before := updated()
+
+	hw4 := c.Submission(c.Course, c.HW4, yuki.Member)
+	if got := post(t, c, "p4", grade(t, c, m{"course_id": c.Course, "submission_id": hw4, "score": 80}, "hw4")); got.Snapshots != 1 {
+		t.Fatalf("snapshots = %d, want 1: the bucket, now complete", got.Snapshots)
+	}
+	wantScore(t, "bucket", liveSnapshot(t, c, c.Assignments, yuki.Member), "80")
+	if n := c.Count(`SELECT count(*) FROM grade WHERE origin = 'computed' AND component_id = $1 AND student_member_id = $2
+		AND superseded_by IS NULL AND breakdown->>'complete' = 'true'`, c.Assignments, yuki.Member); n != 1 {
+		t.Fatal("the bucket's snapshot still says HW4 is ungraded")
+	}
+	if n := updated(); n != before+1 {
+		t.Fatalf("%d grade.total_updated events for the bucket, want %d", n, before+1)
+	}
+}
+
 // Regrade takes both permissions and runs at the lower of their levels.
 func TestRegradeRunsAtTheLowerLevel(t *testing.T) {
 	c := testkit.NewCS101(t, 1)

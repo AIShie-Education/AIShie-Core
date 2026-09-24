@@ -166,6 +166,18 @@ func storedPolicy(breakdown []byte) gradecalc.Policy {
 	return gradecalc.Policy{UngradedAsZero: w.UngradedAsZero}
 }
 
+// sameWorking reports whether a stored snapshot's working is what r, worked
+// out under policy, would store. A snapshot shows its working and whether it
+// is complete, not only its number: a post that fills a gap without moving
+// the number, or comes after a weight has changed, still writes a new one.
+func sameWorking(breakdown []byte, r gradecalc.Result, policy gradecalc.Policy) bool {
+	var stored snapshotWorking
+	if err := json.Unmarshal(breakdown, &stored); err != nil {
+		return false
+	}
+	return gradecalc.Policy{UngradedAsZero: stored.UngradedAsZero} == policy && stored.Same(r)
+}
+
 func writeSnapshot(ctx context.Context, ec *tool.ExecCtx, courseID, student, componentID uuid.UUID, r gradecalc.Result, policy gradecalc.Policy) (bool, error) {
 	score := gradecalc.Percent(*r.Fraction)
 	newID := ids.New()
@@ -175,7 +187,7 @@ func writeSnapshot(ctx context.Context, ec *tool.ExecCtx, courseID, student, com
 	case errors.Is(err, pgx.ErrNoRows):
 	case err != nil:
 		return false, err
-	case live.Score.Equal(score) && storedPolicy(live.Breakdown) == policy:
+	case live.Score.Equal(score) && sameWorking(live.Breakdown, r, policy):
 		return false, nil
 	default:
 		// Old row first, then the new one: the other order would briefly be

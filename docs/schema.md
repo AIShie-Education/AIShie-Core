@@ -483,7 +483,10 @@ serves HW3, the midterm, the assignments bucket and the course total.
   row as posted. The partial indexes guarantee one live grade per target.
 - **Rolled-up components and the course total are computed on read** and stored only when
   posted, as an `origin = 'computed'` snapshot. The number a student was shown must not drift
-  when a lower grade changes later; updating it is a regrade, with history.
+  when a lower grade changes later; updating it is a regrade, with history. A post or regrade
+  beneath a snapshot writes a new one when anything it shows has changed — the number, whether
+  it is complete, or any line of its working, a weight changed since included — and nothing
+  when nothing has.
 - **`breakdown`** holds per-criterion detail for submission grades:
   `[{criterion, points, max, comment}]`. The rubric is prose the model reads; the breakdown is
   its output. Structured criteria tables were dropped as a second copy of the rubric.
