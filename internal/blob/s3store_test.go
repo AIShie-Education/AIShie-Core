@@ -79,8 +79,14 @@ func TestS3Store(t *testing.T) {
 	if listed := list(""); !slices.Contains(listed, key) || slices.ContainsFunc(listed, func(k string) bool { return !strings.HasPrefix(k, "courses/test/") }) {
 		t.Fatalf("listed under courses/test/: %q", listed)
 	}
-	// And one taken up again after a key goes on past it.
-	if listed := list(key); slices.ContainsFunc(listed, func(k string) bool { return k <= key }) {
+	// And one taken up again after a key goes on past it, to what comes
+	// after it.
+	later := key + "-later"
+	if _, err := s.client.PutObject(ctx, s.bucket, later, bytes.NewReader(body), int64(len(body)), minio.PutObjectOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s.Delete(ctx, later) }()
+	if listed := list(key); !slices.Contains(listed, later) || slices.ContainsFunc(listed, func(k string) bool { return k <= key }) {
 		t.Fatalf("listed after %s: %q", key, listed)
 	}
 	// Attaching moves the object somewhere the upload URL cannot reach. The
