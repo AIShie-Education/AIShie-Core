@@ -631,6 +631,26 @@ func TestATemporaryManagerHandsOutNothingPermanent(t *testing.T) {
 	}
 }
 
+// An expiry is measured as the database will keep it: to the microsecond. A
+// seat given until the very moment its granter's ends does not outlast it by
+// the nanoseconds a finer clock sent and the database dropped, and giving the
+// same moment again is no extension.
+func TestAnExpiryIsMeasuredAsTheDatabaseKeepsIt(t *testing.T) {
+	b := build(t)
+	// A moment the database cannot hold exactly, whatever this machine's clock.
+	friday := time.Now().Add(72 * time.Hour).Truncate(time.Microsecond).Add(789 * time.Nanosecond)
+	temp := testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", m{"kind": "human", "display_name": "Temp"})).ActorID
+	b.do(t, b.sato, "member.add", m{"course_id": b.course, "actor_id": temp, "preset": "ta",
+		"perms": m{"member_manage": "autonomous"}, "expires_at": friday})
+	puppet := testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", m{"kind": "agent", "display_name": "Puppet"})).ActorID
+
+	puppetM := testkit.Result[tools.MemberIDOut](t, b.do(t, temp, "member.add", m{"course_id": b.course, "actor_id": puppet, "preset": "ta",
+		"perms": m{"member_manage": "autonomous"}, "expires_at": friday})).MemberID
+	b.do(t, temp, "member.rescope", m{"course_id": b.course, "member_id": puppetM, "expires_at": friday})
+	// A microsecond more is longer than the granter's own.
+	b.try(t, temp, "member.rescope", m{"course_id": b.course, "member_id": puppetM, "expires_at": friday.Add(time.Microsecond)}, apperr.Forbidden)
+}
+
 // Two managers editing the same seat at once take turns, so that a
 // revocation that reports executed is not undone by a change that never
 // meant to touch it.

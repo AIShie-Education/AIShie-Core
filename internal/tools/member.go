@@ -163,7 +163,7 @@ func memberAdd() tool.Tool {
 			}
 			s := seating{courseID: in.CourseID, actorID: in.ActorID, preset: &preset, perms: presetPerms(preset),
 				role: preset.Role, studentScope: preset.StudentScope, assignmentScope: preset.AssignmentScope,
-				listedStudents: in.ListedStudents, listedAssignments: in.ListedAssignments, expiresAt: in.ExpiresAt}
+				listedStudents: in.ListedStudents, listedAssignments: in.ListedAssignments, expiresAt: asStored(in.ExpiresAt)}
 			if in.Role != nil {
 				s.role = *in.Role
 			}
@@ -275,6 +275,19 @@ func outlastsGranter(ec *tool.ExecCtx, expiresAt *time.Time) error {
 		return apperr.Forbid("your own membership ends at %s; you cannot give one that lasts longer", g.UTC().Format(time.RFC3339))
 	}
 	return nil
+}
+
+// asStored drops what a timestamptz cannot hold. An expiry the caller gives
+// is measured against expiries read back from the database — the granter's
+// own, the one it replaces — which keep microseconds; kept to the nanosecond,
+// the caller's would outlast the very same moment by what the database was
+// about to drop.
+func asStored(t *time.Time) *time.Time {
+	if t == nil {
+		return nil
+	}
+	s := t.Truncate(time.Microsecond)
+	return &s
 }
 
 // ---------------------------------------------------------------------------
@@ -492,7 +505,7 @@ func memberRescope() tool.Tool {
 			case in.ClearExpiry:
 				after.expiresAt = nil
 			case in.ExpiresAt != nil:
-				after.expiresAt = in.ExpiresAt
+				after.expiresAt = asStored(in.ExpiresAt)
 			}
 			if err := grant(ctx, ec, before, after); err != nil {
 				return OK{}, err
