@@ -594,6 +594,12 @@ func gradePost() tool.Tool {
 			if err != nil {
 				return in, err
 			}
+			// Validate found some, but they may have been posted since. A
+			// proposal about none would name nothing, and could never be
+			// carried out.
+			if len(rows) == 0 {
+				return in, apperr.Precondition("there are no draft grades to post")
+			}
 			in.GradeIDs, in.AssignmentID = make([]uuid.UUID, len(rows)), nil
 			for i, g := range rows {
 				in.GradeIDs[i] = g.ID

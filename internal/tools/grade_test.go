@@ -15,6 +15,7 @@ import (
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/domain"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/pipeline"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/testkit"
+	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/tool"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/tools"
 )
 
@@ -706,6 +707,23 @@ func TestAPostProposalPostsWhatWasWaiting(t *testing.T) {
 	}
 	if posted(later) || posted(replaced) {
 		t.Fatal("a draft nobody proposed to post was posted")
+	}
+}
+
+// Validate and Pin each look for the drafts waiting, and a post by hand can
+// come in between. A proposal made then would name no draft, and nobody
+// could ever approve it, so Pin refuses it as Validate would have. The race
+// is played here by calling Pin once the only draft has been posted.
+func TestAPostProposalAboutNothingIsRefused(t *testing.T) {
+	b := build(t)
+	yukis := b.submit(t, b.yuki, "essay")
+	draft := testkit.Result[tools.GradeSubmitOut](t, b.do(t, b.sato, "grade.submit", m{"course_id": b.course, "submission_id": yukis, "score": 80})).GradeID
+	b.do(t, b.sato, "grade.post", m{"course_id": b.course, "grade_ids": []uuid.UUID{draft}})
+
+	post, _ := b.P.Registry().Get("grade.post")
+	pinned, err := post.Pin(context.Background(), b.Q, tools.GradePostIn{InCourse: tool.InCourse{CourseID: b.course}, AssignmentID: &b.hw3})
+	if !apperr.Is(err, apperr.FailedPrecondition) {
+		t.Fatalf("pinning a proposal to post HW3 with nothing waiting: %+v, %v", pinned, err)
 	}
 }
 
