@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/google/uuid"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -539,6 +540,56 @@ func TestToolsListIsTheRegistry(t *testing.T) {
 		if tl.OutputSchema == nil {
 			t.Errorf("%s: no output schema", tl.Name)
 		}
+	}
+}
+
+// A replay of a call that returned a secret comes back without it, and the
+// schema the tool is listed with allows that: a client that checks every
+// result against it, as the TypeScript and Python SDKs do, takes the replay
+// as it took the first answer. The Go SDK's client does not check, so the
+// test does.
+func TestAReplayWithoutItsSecretMatchesTheListedSchema(t *testing.T) {
+	f := serve(t, 0)
+	s := f.connect(t, f.token(t, f.c.Sato))
+	var listed *mcp.Tool
+	for tl, err := range s.Tools(context.Background(), nil) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		if tl.Name == "credential_issue_token" {
+			listed = tl
+		}
+	}
+	if listed == nil {
+		t.Fatal("credential_issue_token is not listed")
+	}
+	raw, err := json.Marshal(listed.OutputSchema)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var schema jsonschema.Schema
+	if err := json.Unmarshal(raw, &schema); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := schema.Resolve(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	args := m{"label": "ci", "idempotency_key": "once"}
+	first, res := call(t, s, "credential_issue_token", args)
+	if first.Status != "executed" || !strings.Contains(string(first.Result), `"token":"ais_`) {
+		t.Fatalf("first call: %+v", first)
+	}
+	if err := resolved.Validate(res.StructuredContent); err != nil {
+		t.Fatalf("the first answer does not match the listed schema: %v", err)
+	}
+	again, res := call(t, s, "credential_issue_token", args)
+	if again.Status != "executed" || !again.Replayed || strings.Contains(string(again.Result), `"token":`) {
+		t.Fatalf("replay: %+v", again)
+	}
+	if err := resolved.Validate(res.StructuredContent); err != nil {
+		t.Fatalf("the replay does not match the listed schema: %v", err)
 	}
 }
 
