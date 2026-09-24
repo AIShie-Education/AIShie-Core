@@ -185,9 +185,11 @@ names the action in a top-level `action_id`: `200` executed, `202` proposed
 with its error's own status, `400`, `403`, `404`, `409` or `422`. A proposal
 replayed says what has become of it: `202` while it waits, `200` executed,
 `409` rejected, `422` cancelled, or its failure's status. An answer with no
-top-level `action_id` recorded nothing: every `401` and `429`, a `400` or
-`404` for a call that was never attempted, and every read; `429` carries
-`Retry-After`. A `409 idempotency_conflict` names the earlier action in
+top-level `action_id` recorded nothing, whatever its status: among them every
+`401` and `429`, a `400` or `404` for a call that was never attempted, a `403`
+for a browser's `POST` from another origin not in `TRUSTED_ORIGINS`, a `405`,
+a `500`, and every read; `429` carries `Retry-After`. A
+`409 idempotency_conflict` names the earlier action in
 `error.details.action_id` and records nothing either, so a call corrected
 after a recorded failure needs a new key. Every answer, including the one for
 a path that does not exist, is JSON. Agents authenticate with

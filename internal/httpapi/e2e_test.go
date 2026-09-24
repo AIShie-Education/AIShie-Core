@@ -239,6 +239,8 @@ func TestStatusCodes(t *testing.T) {
 		{"unknown tool by name", "POST", "/v1/tools/grade.obliterate", sato, m{}, key("h"), 404, "not_found", false},
 		{"bad query parameter", "GET", course + "/actions/proposed?limit=lots", sato, nil, nil, 400, "invalid_argument", false},
 		{"unknown query parameter", "GET", course + "/actions/proposed?sudo=1", sato, nil, nil, 400, "invalid_argument", false},
+		{"a page on another site", "POST", course + "/grades", sato, m{"submission_id": yuki.HW3, "score": 1}, append(key("m"), "Origin", "https://evil.example", "Sec-Fetch-Site", "cross-site"), 403, "forbidden", false},
+		{"a method the route does not take", "DELETE", course + "/grades", sato, nil, nil, 405, "method_not_allowed", false},
 		{"denied", "POST", course + "/grades", student, m{"submission_id": yuki.HW3, "score": 100}, key("i"), 403, "forbidden", true},
 		{"an argument the tool refuses", "POST", course + "/grades", sato, m{"submission_id": yuki.HW3, "score": -1}, key("j"), 400, "invalid_argument", true},
 		{"a key used for another call", "POST", course + "/grades", sato, m{"submission_id": yuki.HW3, "score": 1}, key("refused"), 409, "idempotency_conflict", false},

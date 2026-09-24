@@ -12,10 +12,11 @@
 //	replayed → as the action stands now, with Idempotency-Replayed: true;
 //	           a proposal since rejected is 409, one cancelled 422
 //
-// A call that is never attempted — every 401 and 429, and a 400 or 404 from
-// before the tool runs — records nothing and names no action; nor does a
-// read. A key used for another call is a 409 idempotency_conflict naming the
-// earlier action in error.details.action_id, and records nothing either.
+// An answer with no top-level action_id records nothing, whatever its
+// status: among them every 401 and 429, a 400 or 404 from before the tool
+// runs, a 403 from the cross-origin guard, a 405, a 500, and every read. A
+// key used for another call is a 409 idempotency_conflict naming the earlier
+// action in error.details.action_id, and records nothing either.
 package httpapi
 
 import (
