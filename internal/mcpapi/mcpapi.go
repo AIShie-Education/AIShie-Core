@@ -130,16 +130,14 @@ const maxID = 256
 // Nor anything whose answer bounded could not keep short: an id longer than
 // maxID, or subscriptions/listen, whose answer is a stream that stays open.
 // Nothing is pushed from here, so a listen would carry only its own
-// acknowledgement, or a refusal the SDK words for it. Every "id" and
-// "method" in the message is looked at, so that a key given twice is caught
-// whichever of the two the SDK keeps.
+// acknowledgement, or a refusal the SDK words for it.
 func screened(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			next.ServeHTTP(w, r) // the SDK refuses it, in a few words
 			return
 		}
-		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBody))
+		body, err := readBody(w, r)
 		if err != nil {
 			var tooLarge *http.MaxBytesError
 			if errors.As(err, &tooLarge) {
@@ -149,33 +147,79 @@ func screened(next http.Handler) http.Handler {
 			http.Error(w, "the request body could not be read", http.StatusBadRequest)
 			return
 		}
-		if b := bytes.TrimLeft(body, " \t\r\n"); len(b) > 0 && b[0] == '[' {
+		b := bytes.TrimLeft(body, " \t\r\n")
+		if len(b) > 0 && b[0] == '[' {
 			refuse(w, jsonrpc.CodeInvalidRequest, "one message per request; a batch is not taken")
 			return
 		}
-		dec := json.NewDecoder(bytes.NewReader(body))
-		if t, err := dec.Token(); err == nil && t == json.Delim('{') {
-			for dec.More() {
-				key, err := dec.Token()
-				var value json.RawMessage
-				if err != nil || dec.Decode(&value) != nil {
-					refuse(w, jsonrpc.CodeParseError, "the request is not JSON")
-					return
-				}
-				var method string
-				switch {
-				case key == "id" && len(value) > maxID:
-					refuse(w, jsonrpc.CodeInvalidRequest, fmt.Sprintf("the id is longer than %d bytes", maxID))
-					return
-				case key == "method" && json.Unmarshal(value, &method) == nil && method == "subscriptions/listen":
-					refuse(w, jsonrpc.CodeMethodNotFound, "nothing is pushed from here; poll event_list with the next_seq it last returned")
-					return
-				}
-			}
+		var m sighting
+		if err := sight(body, &m); err != nil && len(b) > 0 && b[0] == '{' {
+			// An object this cannot read, which the SDK's own decoder
+			// might, and act on unscreened.
+			refuse(w, jsonrpc.CodeParseError, "the request is not JSON")
+			return
+		}
+		switch {
+		case m.ID.long:
+			refuse(w, jsonrpc.CodeInvalidRequest, fmt.Sprintf("the id is longer than %d bytes", maxID))
+			return
+		case m.Method.listen:
+			refuse(w, jsonrpc.CodeMethodNotFound, "nothing is pushed from here; poll event_list with the next_seq it last returned")
+			return
 		}
 		r.Body = io.NopCloser(bytes.NewReader(body))
 		next.ServeHTTP(w, r)
 	})
+}
+
+// readBody reads a request's body, no more than maxBody of it, into a buffer
+// the size the client said it would be, not one grown by copies.
+func readBody(w http.ResponseWriter, r *http.Request) ([]byte, error) {
+	size := int64(bytes.MinRead)
+	if n := r.ContentLength; n > 0 && n <= maxBody {
+		size += n
+	}
+	buf := bytes.NewBuffer(make([]byte, 0, size))
+	_, err := buf.ReadFrom(http.MaxBytesReader(w, r.Body, maxBody))
+	return buf.Bytes(), err
+}
+
+// sighting is what screened needs of a message. It is decoded where it lies,
+// so that params of megabytes are passed over, not copied. encoding/json
+// gives a field every key that matches it, not only the last, and matches
+// in any case, where the SDK keeps the last key that matches exactly: so
+// whichever id and method the SDK takes from a message, they are among
+// those seen here.
+type sighting struct {
+	ID     idSighting     `json:"id"`
+	Method methodSighting `json:"method"`
+}
+
+type idSighting struct{ long bool }
+
+func (s *idSighting) UnmarshalJSON(b []byte) error {
+	s.long = s.long || len(b) > maxID
+	return nil
+}
+
+type methodSighting struct{ listen bool }
+
+func (s *methodSighting) UnmarshalJSON(b []byte) error {
+	var method string
+	s.listen = s.listen || len(b) <= maxID && json.Unmarshal(b, &method) == nil && method == "subscriptions/listen"
+	return nil
+}
+
+// sight decodes into v the first JSON value in body, which is all the SDK
+// reads of it. Only a body with something after that value, which no client
+// sends, is read the slow way, through a Decoder that copies it.
+func sight(body []byte, v any) error {
+	err := json.Unmarshal(body, v)
+	var syntax *json.SyntaxError
+	if errors.As(err, &syntax) {
+		err = json.NewDecoder(bytes.NewReader(body)).Decode(v)
+	}
+	return err
 }
 
 // bounded holds what the SDK says in refusal to what a message of ours may
@@ -183,20 +227,24 @@ func screened(next http.Handler) http.Handler {
 // or a method it does not know, params that do not decode, a header that
 // does not match the body — and many quote what they refuse whole, with %q,
 // before JSON escapes that again: a megabyte sent would be five back. So an
-// answer is held until it is complete. The message of a JSON-RPC error is
-// cut as apperr.Clip cuts one of ours, and its data left out if Clip would
-// cut that too, since JSON cannot be cut; a refusal in plain text is cut the
-// same way. Any other answer is passed on as it is.
+// answer is held until it is complete, unless it opens as a result, which is
+// passed on as it is written. The message of a JSON-RPC error is cut as
+// apperr.Clip cuts one of ours, and its data left out if Clip would cut that
+// too, since JSON cannot be cut; a refusal in plain text is cut the same
+// way. Any other answer is passed on as it is.
 func bounded(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		held := &heldResponse{header: w.Header()}
+		held := &heldResponse{w: w}
 		next.ServeHTTP(held, r)
+		if held.passed {
+			return
+		}
 		if held.status == 0 {
 			held.status = http.StatusOK
 		}
 		body := held.body.Bytes()
 		var cut bool
-		if strings.HasPrefix(held.header.Get("Content-Type"), "application/json") {
+		if isJSON(w.Header()) {
 			body, cut = clippedError(body)
 		} else if held.status >= 400 {
 			text := strings.TrimSuffix(string(body), "\n")
@@ -210,6 +258,33 @@ func bounded(next http.Handler) http.Handler {
 		w.WriteHeader(held.status)
 		_, _ = w.Write(body)
 	})
+}
+
+func isJSON(h http.Header) bool { return strings.HasPrefix(h.Get("Content-Type"), "application/json") }
+
+// isResult reports whether b opens a JSON-RPC answer that is a result. The
+// SDK writes jsonrpc and id before result or error, and screened holds the
+// id short, so the key that tells the two apart comes within a few hundred
+// bytes; what follows it is not read.
+func isResult(b []byte) bool {
+	dec := json.NewDecoder(bytes.NewReader(b))
+	if t, err := dec.Token(); err != nil || t != json.Delim('{') {
+		return false
+	}
+	for range 3 {
+		key, err := dec.Token()
+		if err != nil || key == "error" {
+			return false
+		}
+		if key == "result" {
+			return true
+		}
+		var skip json.RawMessage
+		if dec.Decode(&skip) != nil {
+			return false
+		}
+	}
+	return false
 }
 
 // clippedError is body with its error's message cut, if it is a JSON-RPC
@@ -243,14 +318,16 @@ func clippedError(body []byte) ([]byte, bool) {
 	return out, true
 }
 
-// heldResponse keeps a response until bounded has looked at it.
+// heldResponse keeps a response until bounded has looked at it, or passes
+// it on once it is seen to be a result.
 type heldResponse struct {
-	header http.Header
+	w      http.ResponseWriter
 	status int
 	body   bytes.Buffer
+	passed bool
 }
 
-func (h *heldResponse) Header() http.Header { return h.header }
+func (h *heldResponse) Header() http.Header { return h.w.Header() }
 func (h *heldResponse) WriteHeader(code int) {
 	if h.status == 0 {
 		h.status = code
@@ -260,6 +337,13 @@ func (h *heldResponse) WriteHeader(code int) {
 func (h *heldResponse) Write(b []byte) (int, error) {
 	if h.status == 0 {
 		h.status = http.StatusOK
+	}
+	if !h.passed && h.body.Len() == 0 && h.status < 400 && isJSON(h.w.Header()) && isResult(b) {
+		h.passed = true
+		h.w.WriteHeader(h.status)
+	}
+	if h.passed {
+		return h.w.Write(b)
 	}
 	return h.body.Write(b)
 }
