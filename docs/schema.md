@@ -192,9 +192,10 @@ scope opened or a list added to, an expiry extended or cleared, a paused seat re
 grant of the whole of what the seat will then hold, and the whole of it must be within the
 granter's own: no level above the granter's on any column, no reach beyond a list-scoped
 granter's own list, no life past the granter's own `expires_at`. A student's seat reaches that
-student, so a list-scoped granter raises nothing on the seat of a student outside the list, and
-seats no new student at all: nobody can have listed them yet. Narrowing is always allowed,
-whatever the granter holds. Nobody manages their own seat, and a seat whose `expires_at` has
+student, as any seat reaches whoever is on its list, so a list-scoped granter raises nothing on
+a seat that reaches a student outside the list, and seats no new student whose list is
+themselves: nobody can have listed them yet. Narrowing is always allowed, whatever the granter
+holds. Nobody manages their own seat, and a seat whose `expires_at` has
 passed is as good as removed whether or not the sweep has got to it: it is not revived, and
 seating the actor again is a fresh row.
 

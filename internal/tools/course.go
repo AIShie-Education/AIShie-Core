@@ -385,19 +385,15 @@ func writeStudentScope(ctx context.Context, q *dbq.Queries, courseID, memberID u
 		return apperr.Invalid("listed_students only makes sense with student_scope = listed")
 	}
 	if len(students) > 0 {
-		// The member itself may be in its own list before its row is visible
-		// to the count, so it is set aside and checked by identity.
-		others := make([]uuid.UUID, 0, len(students))
-		for _, s := range students {
-			if s != memberID {
-				others = append(others, s)
-			}
-		}
-		n, err := q.CountStudentsOfCourse(ctx, dbq.CountStudentsOfCourseParams{CourseID: courseID, MemberIds: others})
+		// The member's own id is counted like any other: a new seat's row is
+		// already visible in this transaction, so a student may list itself,
+		// and a seat that is not a student's cannot — it would reach nothing,
+		// yet be measured as reaching someone when it is next granted to.
+		n, err := q.CountStudentsOfCourse(ctx, dbq.CountStudentsOfCourseParams{CourseID: courseID, MemberIds: students})
 		if err != nil {
 			return err
 		}
-		if int(n) != len(others) {
+		if int(n) != len(students) {
 			return apperr.Precondition("listed_students must all be current students of this course")
 		}
 	}

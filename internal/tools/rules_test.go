@@ -114,6 +114,16 @@ func TestAStudentsSeatReachesTheStudent(t *testing.T) {
 	// Narrowing Ken is allowed, as always; taking it back is a grant again.
 	b.do(t, helper, "member.update_perms", m{"course_id": b.course, "member_id": b.kenM, "perms": m{"grade_read": "denied"}})
 	b.try(t, helper, "member.update_perms", m{"course_id": b.course, "member_id": b.kenM, "perms": m{"grade_read": "autonomous"}}, apperr.Forbidden)
+	// Nor in three steps: take Ken off his own list, which reaches nobody, raise
+	// grade_post while it does, and put him back on it.
+	b.do(t, helper, "member.rescope", m{"course_id": b.course, "member_id": b.kenM, "listed_students": []uuid.UUID{}})
+	b.do(t, helper, "member.update_perms", m{"course_id": b.course, "member_id": b.kenM, "perms": m{"grade_post": "autonomous"}})
+	b.try(t, helper, "member.rescope", m{"course_id": b.course, "member_id": b.kenM, "listed_students": []uuid.UUID{b.kenM}}, apperr.Forbidden)
+	b.do(t, b.sato, "member.update_perms", m{"course_id": b.course, "member_id": b.kenM, "perms": m{"grade_post": "denied"}})
+	b.do(t, b.sato, "member.rescope", m{"course_id": b.course, "member_id": b.kenM, "listed_students": []uuid.UUID{b.kenM}})
+	// Only a student's seat lists itself; any other would reach nobody.
+	b.try(t, b.sato, "member.rescope", m{"course_id": b.course, "member_id": b.graderM, "student_scope": "listed",
+		"listed_students": []uuid.UUID{b.graderM}}, apperr.FailedPrecondition)
 	// Yuki is on the list, and her seat may be raised within the helper's own.
 	b.do(t, helper, "member.update_perms", m{"course_id": b.course, "member_id": b.yukiM, "perms": m{"rubric_read": "autonomous"}})
 }
