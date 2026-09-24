@@ -415,7 +415,10 @@ event is written and never change. Payloads carry ids and small facts only — n
 feedback text; a reader fetches content through the read tools, which authorize it.
 
 Nobody approves or reviews their own action. The database cannot go further and require the
-decider to be human, because nothing reads `actor.kind`.
+decider to be human, because nothing reads `actor.kind`. Nor can it see past one row: a decision
+is an action like any other, so it may itself wait for a decision or be under review — a triage
+agent whose approvals a human confirms. Confirming it carries out what it decided, so nobody
+confirms or reviews a decision about their own action either, at any remove.
 
 ### 2.7 Grades
 
@@ -517,6 +520,9 @@ check `actor.platform_role` instead. That is the only place it is read.
   a different hash is refused.
 - Re-authorizing the proposer when a proposal is approved, and cancelling proposals past
   their TTL.
+- Nobody decides or reviews their own action at one remove (§2.6): a decision or review that is
+  itself proposed or under review is not confirmed or reviewed by whoever's action it is about.
+  The CHECKs compare a row with its own decider only.
 - Filling `event.student_member_id` and `event.assignment_id` correctly, and filtering the
   feed by them.
 - The submitting member has `role = 'student'`; `member_*_scope` rows name members and
