@@ -511,7 +511,7 @@ func publish(ctx context.Context, ec *tool.ExecCtx, courseID uuid.UUID, doc dbq.
 type DocumentPublishIn struct {
 	tool.InCourse
 	DocumentID uuid.UUID  `json:"document_id"`
-	VersionID  *uuid.UUID `json:"version_id,omitempty" jsonschema:"which version to publish; the latest if omitted"`
+	VersionID  *uuid.UUID `json:"version_id,omitempty" jsonschema:"which version to publish; if omitted, the latest when the call was made (for a proposal, when it was proposed)"`
 }
 
 func documentPublish() tool.Tool {
@@ -523,6 +523,24 @@ func documentPublish() tool.Tool {
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/documents/{document_id}/publish"},
 		Resolve: func(ctx context.Context, q dbq.Querier, in DocumentPublishIn) (tool.Target, error) {
 			return documentTarget(ctx, q, in.CourseID, in.DocumentID, writePerm)
+		},
+		// "The latest" is the latest the proposer read. A version added while
+		// the proposal waits has been read by nobody who asked for it to be
+		// published, and approving must not put it in front of the class, so
+		// the proposal names the version it was made about.
+		Pin: func(ctx context.Context, q dbq.Querier, in DocumentPublishIn) (DocumentPublishIn, error) {
+			if in.VersionID != nil {
+				return in, nil
+			}
+			v, err := q.GetLatestVersion(ctx, in.DocumentID)
+			if errors.Is(err, pgx.ErrNoRows) {
+				return in, apperr.Precondition("there is no such version of this document to publish")
+			}
+			if err != nil {
+				return in, err
+			}
+			in.VersionID = &v.ID
+			return in, nil
 		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in DocumentPublishIn) (DocumentVersionOut, error) {
 			doc, err := loadDocument(ctx, ec.Q, in.CourseID, in.DocumentID)

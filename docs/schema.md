@@ -364,7 +364,10 @@ any secret fields removed; a secret (a password) still counts in the hash, throu
 digest under `SIGNING_KEY`, so that a key reused with a different secret is caught too while
 the hash gives nothing away to whoever reads the table. For a proposal, `payload` also carries
 the defaults that had to be fixed when it was made rather than when it is approved — the rubric
-version a grade is against — while the hash stays that of the call as the caller made it.
+version a grade is against, the version that "publish the latest" means, the drafts that "post
+this assignment" means — while the hash stays that of the call as the caller made it. A version
+or a draft that arrives while a proposal waits has been in front of nobody who asked for it,
+and approving the proposal does not release it.
 `result` holds what the call returned (secrets removed likewise), or `{"error": …}` for a
 failed, denied or cancelled action and `{"decision": …}` for a rejected one; which of those it
 is follows from `status`, never from the shape of `result`.

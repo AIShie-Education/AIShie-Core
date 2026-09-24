@@ -631,6 +631,52 @@ func TestAProposalPinsTheRubricItWasMadeAgainst(t *testing.T) {
 	}
 }
 
+// A proposal to post an assignment's drafts is about the drafts that were
+// waiting when it was made. One a TA enters while it waits — the TA grades
+// but does not post — has been in front of nobody who could release it, and
+// an old approval must not release it with the rest.
+func TestAPostProposalPostsWhatWasWaiting(t *testing.T) {
+	b := build(t)
+	register := func(kind, name string) uuid.UUID {
+		return testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", m{"kind": kind, "display_name": name})).ActorID
+	}
+	bot, ta := register("agent", "release-bot"), register("human", "TA")
+	b.do(t, b.sato, "member.add", m{"course_id": b.course, "actor_id": bot, "preset": "ta", "perms": m{"grade_post": "confirm_required"}})
+	b.do(t, b.sato, "member.add", m{"course_id": b.course, "actor_id": ta, "preset": "ta"})
+	yukis, kens := b.submit(t, b.yuki, "essay"), b.submit(t, b.ken, "essay")
+	reviewed := testkit.Result[tools.GradeSubmitOut](t, b.do(t, b.sato, "grade.submit", m{"course_id": b.course, "submission_id": yukis, "score": 80})).GradeID
+	approve := func(action *uuid.UUID) pipeline.DecideOut {
+		t.Helper()
+		return testkit.Result[pipeline.DecideOut](t, b.do(t, b.sato, "action.decide", m{"course_id": b.course, "action_id": action, "decision": "approve"}))
+	}
+	posted := func(grade uuid.UUID) bool {
+		return b.Count(`SELECT count(*) FROM grade WHERE id = $1 AND posted_at IS NOT NULL`, grade) == 1
+	}
+
+	proposed := b.MustCall(bot, "grade.post", m{"course_id": b.course, "assignment_id": b.hw3}, "post")
+	if proposed.Status != domain.StatusProposed {
+		t.Fatalf("the bot's proposal: %+v", proposed)
+	}
+	later := testkit.Result[tools.GradeSubmitOut](t, b.do(t, ta, "grade.submit", m{"course_id": b.course, "submission_id": kens, "score": 3})).GradeID
+	if v := approve(proposed.ActionID); v.Outcome != domain.StatusExecuted {
+		t.Fatalf("approval: %+v", v)
+	}
+	if !posted(reviewed) || posted(later) {
+		t.Fatalf("posted: Yuki's %v (want true), Ken's, entered after the proposal, %v (want false)", posted(reviewed), posted(later))
+	}
+
+	// A draft replaced while the proposal waits is not what was proposed
+	// either, and neither is its replacement: the approval fails plainly.
+	proposed = b.MustCall(bot, "grade.post", m{"course_id": b.course, "assignment_id": b.hw3}, "post-again")
+	replaced := testkit.Result[tools.GradeSubmitOut](t, b.do(t, ta, "grade.submit", m{"course_id": b.course, "submission_id": kens, "score": 5})).GradeID
+	if v := approve(proposed.ActionID); v.Outcome != domain.StatusFailed {
+		t.Fatalf("approving over a replaced draft: %+v", v)
+	}
+	if posted(later) || posted(replaced) {
+		t.Fatal("a draft nobody proposed to post was posted")
+	}
+}
+
 // Posting by assignment is about the assignment: one outside the caller's
 // scope is out of scope whether or not anything is waiting on it, so the
 // refusal tells them nothing about what is. And the batch is checked again

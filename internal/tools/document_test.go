@@ -126,6 +126,45 @@ func TestMaterialIsInvisibleUntilPublished(t *testing.T) {
 	}
 }
 
+// A proposal to publish "the latest" means the latest its proposer read. A
+// version added while it waits has been read by nobody who asked for it to be
+// published, and approving the proposal must not put that half-edited draft
+// in front of the class.
+func TestAPublishProposalPublishesWhatWasProposed(t *testing.T) {
+	b := build(t)
+	editor := testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", m{"kind": "agent", "display_name": "editor"})).ActorID
+	b.do(t, b.sato, "member.add", m{"course_id": b.course, "actor_id": editor, "preset": "ta", "perms": m{"document_write": "confirm_required"}})
+	made := testkit.Result[tools.DocumentCreateOut](t, b.do(t, b.sato, "document.create",
+		m{"course_id": b.course, "kind": "material", "title": "Lecture 1", "body_md": "v1: reviewed"}))
+
+	proposed := b.MustCall(editor, "document.publish", m{"course_id": b.course, "document_id": made.DocumentID}, "publish")
+	if proposed.Status != domain.StatusProposed {
+		t.Fatalf("the editor's proposal: %+v", proposed)
+	}
+	b.do(t, b.sato, "document.add_version", m{"course_id": b.course, "document_id": made.DocumentID, "body_md": "v2: HALF-EDITED, answers inline"})
+	v := testkit.Result[pipeline.DecideOut](t, b.do(t, b.sato, "action.decide", m{"course_id": b.course, "action_id": proposed.ActionID, "decision": "approve"}))
+	if v.Outcome != domain.StatusExecuted {
+		t.Fatalf("approval: %+v", v)
+	}
+	if got := b.get(t, b.yuki, m{"document_id": made.DocumentID}).Version; got == nil || got.BodyMD == nil {
+		t.Fatalf("students read nothing: %+v", got)
+	} else if *got.BodyMD != "v1: reviewed" {
+		t.Fatalf("students read %q, want the version that was proposed", *got.BodyMD)
+	}
+	// The approver was shown which version it was.
+	if n := b.Count(`SELECT count(*) FROM action WHERE id = $1 AND payload->>'version_id' = $2`, *proposed.ActionID, made.VersionID.String()); n != 1 {
+		t.Fatal("the proposal does not name the version it was made about")
+	}
+
+	// A proposal to publish a document with nothing in it is refused at
+	// once: there is nothing it could be about.
+	empty := testkit.Result[tools.DocumentCreateOut](t, b.do(t, b.sato, "document.create",
+		m{"course_id": b.course, "kind": "material", "title": "Lecture 2"}))
+	if out := b.MustCall(editor, "document.publish", m{"course_id": b.course, "document_id": empty.DocumentID}, "publish-empty"); out.Status != domain.StatusFailed || out.Error.Code != apperr.FailedPrecondition {
+		t.Fatalf("proposing to publish an empty document: %+v", out)
+	}
+}
+
 // Which permission governs depends on what kind of document it is.
 func TestDocumentPermissionFollowsKind(t *testing.T) {
 	b := build(t)

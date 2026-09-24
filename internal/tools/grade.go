@@ -465,7 +465,7 @@ func noNewerDraft(ctx context.Context, ec *tool.ExecCtx, s gradeSubject) error {
 type GradePostIn struct {
 	tool.InCourse
 	GradeIDs            []uuid.UUID `json:"grade_ids,omitempty" jsonschema:"the draft grades to post; or give assignment_id"`
-	AssignmentID        *uuid.UUID  `json:"assignment_id,omitempty" jsonschema:"post every draft grade waiting for this assignment"`
+	AssignmentID        *uuid.UUID  `json:"assignment_id,omitempty" jsonschema:"post every draft grade waiting for this assignment; a proposal posts those that were waiting when it was made"`
 	TreatUngradedAsZero bool        `json:"treat_ungraded_as_zero,omitempty" jsonschema:"for final grades: count ungraded work as zero in the totals. Once a student's totals have been written this way they stay final: later posts and regrades keep counting ungraded work as zero. It decides the course total, so it needs an assignment scope of the whole course"`
 }
 
@@ -544,6 +544,25 @@ func gradePost() tool.Tool {
 			}
 			return checkPostable(ctx, q, rows)
 		},
+		// A proposal to post an assignment is about the drafts waiting when
+		// it was made. One entered while it waits has been in front of
+		// nobody who could release it, so the proposal names the drafts it
+		// was made about; one of them replaced since fails the approval, as
+		// any named grade that is no longer a draft does.
+		Pin: func(ctx context.Context, q dbq.Querier, in GradePostIn) (GradePostIn, error) {
+			if in.AssignmentID == nil {
+				return in, nil
+			}
+			rows, err := gradesToPost(ctx, q, in)
+			if err != nil {
+				return in, err
+			}
+			in.GradeIDs, in.AssignmentID = make([]uuid.UUID, len(rows)), nil
+			for i, g := range rows {
+				in.GradeIDs[i] = g.ID
+			}
+			return in, nil
+		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in GradePostIn) (GradePostOut, error) {
 			rows, err := gradesToPost(ctx, ec.Q, in)
 			if err != nil {
@@ -566,9 +585,10 @@ func gradePost() tool.Tool {
 			if err := checkPostable(ctx, ec.Q, rows); err != nil {
 				return GradePostOut{}, err
 			}
-			// With assignment_id the batch is whatever is a draft now, which
-			// may be more than what authorize() scope-checked: a draft entered
-			// in between, for a student the caller does not reach. Checked
+			// With assignment_id — a direct call; a proposal names its
+			// drafts — the batch is whatever is a draft now, which may be
+			// more than what authorize() scope-checked: a draft entered in
+			// between, for a student the caller does not reach. Checked
 			// again against the rows that are actually about to be posted.
 			if reason, err := authz.CheckScope(ctx, ec.Q, ec.Member, postScope(rows, in.TreatUngradedAsZero)); err != nil {
 				return GradePostOut{}, err
