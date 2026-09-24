@@ -76,7 +76,8 @@ type Deps struct {
 	Signer *signing.Signer
 
 	// Calls bounds how fast one actor may call; SignIns bounds sign-in
-	// attempts per address and per email. Nil means no limit.
+	// attempts per email, and per address those that fail. Nil means no
+	// limit.
 	Calls   *ratelimit.Limiter
 	SignIns *ratelimit.Limiter
 
@@ -370,7 +371,8 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 	// nothing under the email: it neither spends the allowance of the account
 	// it was aimed at nor leaves a bucket behind for ten minutes.
 	var keys []string
-	if addr, known := s.clientAddr(r); known {
+	addr, known := s.clientAddr(r)
+	if known {
 		keys = append(keys, addrKey(addr))
 	}
 	keys = append(keys, emailKey(in.Email))
@@ -385,14 +387,26 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, err)
 		return
 	}
+	// A sign-in that succeeds was no guess, and its address has it back. One
+	// address may be a whole lecture hall (an IPv4 address behind a NAT, or
+	// a campus LAN's /64), and the students in it signing in must not use up
+	// what it is allowed and lock out the next one with the right password.
+	// It is taken first all the same, so that no more attempts from one
+	// address are hashed at once than it is allowed. The account keeps it
+	// spent: nobody signs in to one account that often.
+	if known {
+		s.SignIns.Refund(addrKey(addr))
+	}
 	http.SetCookie(w, s.sessionCookie(sess.Token, sess.ExpiresAt))
 	writeJSON(w, http.StatusOK, loginOut{ActorID: sess.ActorID.String(), ExpiresAt: sess.ExpiresAt})
 }
 
 // addrKey is the sign-in limit's key for an address. An IPv6 address is
-// keyed by its /64, the least one network is given: every address in it is
-// its holder's to send from, and keyed alone, each would be a fresh bucket.
-// An IPv4 address written as IPv6 (::ffff:203.0.113.7) is that IPv4 address.
+// keyed by its /64, the least one network is given: whoever holds it may
+// send from any address in it, and keyed alone, each would be a fresh
+// bucket. A /64 may as well be a LAN of many people, as an IPv4 address
+// behind a NAT may be; they share only their guesses (see login). An IPv4
+// address written as IPv6 (::ffff:203.0.113.7) is that IPv4 address.
 func addrKey(addr string) string {
 	ip := net.ParseIP(addr)
 	switch {

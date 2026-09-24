@@ -374,9 +374,9 @@ func TestSignInLimitSeesThroughATrustedProxy(t *testing.T) {
 	}
 }
 
-// An IPv6 client has a /64 to itself, and any address in it to send from.
-// The sign-in limit holds a /64 to the guesses of one address; the /64 next
-// to it is somebody else's. An IPv4 address is one address, however written.
+// Whoever holds an IPv6 /64 may send from any address in it. The sign-in
+// limit holds a /64 to the guesses of one address; the /64 next to it is
+// another network. An IPv4 address is one address, however written.
 func TestAnIPv6NetworkIsOneAddressToTheSignInLimit(t *testing.T) {
 	a := hardenedWith(t, nil, ratelimit.New(1, 3), nil, func(d *httpapi.Deps) { d.TrustedProxies = []string{"127.0.0.0/8", "::1/128"} })
 	guesses := 0
@@ -406,6 +406,48 @@ func TestAnIPv6NetworkIsOneAddressToTheSignInLimit(t *testing.T) {
 	}
 	if got := login("203.0.113.8"); got != 401 {
 		t.Fatalf("a guess from the next IPv4 address: %d, want 401", got)
+	}
+}
+
+// One address may be a whole lecture hall: an IPv4 address behind a NAT, or
+// a campus LAN's /64. A sign-in that succeeds was no guess and costs its
+// address nothing, so that a class signing in at once is not held to what
+// one address is allowed; guesses from there are, all the same. The account
+// is still held to its own: every sign-in to it counts.
+func TestAClassOnOneNetworkCanAllSignIn(t *testing.T) {
+	a := hardenedWith(t, nil, ratelimit.New(1, 3), nil, func(d *httpapi.Deps) { d.TrustedProxies = []string{"127.0.0.0/8", "::1/128"} })
+	login := func(email, password, from string) response {
+		return a.do(nil, "POST", "/v1/auth/login", "", m{"email": email, "password": password}, "X-Forwarded-For", from)
+	}
+	for i := range 5 {
+		student := a.c.Sato
+		if i > 0 {
+			student = a.c.Actor("human", fmt.Sprintf("Student %d", i))
+		}
+		email := fmt.Sprintf("student%d@example.edu", i)
+		a.c.Exec(`UPDATE actor SET email = $2 WHERE id = $1`, student, email)
+		if err := auth.SetPassword(context.Background(), dbq.New(a.c.Pool), student, "a long enough password", time.Now()); err != nil {
+			t.Fatal(err)
+		}
+		if r := login(email, "a long enough password", fmt.Sprintf("2001:db8:5:6:%x::1", i+1)); r.Status != 200 {
+			t.Fatalf("student %d of five, with the right password, from one /64: %d %s", i+1, r.Status, r.Raw)
+		}
+	}
+	for i := range 2 {
+		if r := login("student0@example.edu", "a long enough password", "198.51.100.7"); r.Status != 200 {
+			t.Fatalf("sign-in %d of three to one account: %d %s", i+2, r.Status, r.Raw)
+		}
+	}
+	if r := login("student0@example.edu", "a long enough password", "198.51.100.7"); r.Status != http.StatusTooManyRequests {
+		t.Fatalf("a fourth sign-in to one account: %d, want 429", r.Status)
+	}
+	for i := range 3 {
+		if r := login(fmt.Sprintf("nobody%d@example.edu", i), "guess", "2001:db8:5:6::99"); r.Status != 401 {
+			t.Fatalf("guess %d from the class's /64: %d", i+1, r.Status)
+		}
+	}
+	if r := login("nobody3@example.edu", "guess", "2001:db8:5:6::99"); r.Status != http.StatusTooManyRequests {
+		t.Fatalf("a fourth guess from the class's /64: %d, want 429", r.Status)
 	}
 }
 
