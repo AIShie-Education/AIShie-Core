@@ -260,11 +260,11 @@ func TestTheRequestLogCarriesNoCredentials(t *testing.T) {
 	a.raw("PUT", putURL, "text/plain", []byte("student work"))
 	a.do(nil, "POST", "/v1/auth/login", "", m{"email": "sato@example.edu", "password": "hunter2-hunter2"})
 	a.do(nil, "GET", "/healthz", "", nil)
-	// An upload given up half way, and a download of a file whose bytes have
-	// gone from the disk, have more said of them in the log. Their URLs are
-	// credentials all the same, and still good.
+	// An upload given up half way fails, and so does a download of a file
+	// whose bytes have gone from the disk, which is ours and has more said of
+	// it in the log. Their URLs are credentials all the same, and still good.
 	cut := a.here(a.do(nil, "GET", course+"/upload-url?kind=material&content_type=text/plain", token, nil).str("result", "upload_url"))
-	a.putHalf(cut)
+	a.putHalf(cut, true)
 	if err := os.WriteFile(filepath.Join(c.Blob.Root(), "lost.meta"), []byte(`{}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -296,9 +296,10 @@ func TestTheRequestLogCarriesNoCredentials(t *testing.T) {
 	}
 }
 
-// putHalf starts a PUT of a hundred bytes to url, sends ten, and hangs up.
-// It returns the answer, which is not written until the request is logged.
-func (a *api) putHalf(url string) (int, string) {
+// putHalf starts a PUT of a hundred bytes to url, sends ten, and hangs up,
+// or with hangUp false sends nothing more and waits. It returns the answer,
+// which is not written until the request is logged.
+func (a *api) putHalf(url string, hangUp bool) (int, string) {
 	a.t.Helper()
 	conn, err := net.Dial("tcp", strings.TrimPrefix(a.srv.URL, "http://"))
 	if err != nil {
@@ -306,7 +307,9 @@ func (a *api) putHalf(url string) (int, string) {
 	}
 	defer conn.Close()
 	_, _ = fmt.Fprintf(conn, "PUT %s HTTP/1.1\r\nHost: lms.test\r\nContent-Type: text/plain\r\nContent-Length: 100\r\n\r\nhalf a fil", strings.TrimPrefix(url, a.srv.URL))
-	_ = conn.(*net.TCPConn).CloseWrite()
+	if hangUp {
+		_ = conn.(*net.TCPConn).CloseWrite()
+	}
 	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	res, err := http.ReadResponse(bufio.NewReader(conn), nil)
 	if err != nil {
@@ -526,6 +529,32 @@ func TestASlowUploadIsAnswered(t *testing.T) {
 	got, _ := io.ReadAll(res.Body)
 	if n := <-sent; res.StatusCode != 200 || !strings.Contains(string(got), fmt.Sprintf(`"byte_size":%d`, n)) {
 		t.Fatalf("the slow upload of %d bytes: %d %s", n, res.StatusCode, got)
+	}
+}
+
+// A file that does not arrive in full is the uploader's to send again, not a
+// fault of ours: whether they hung up half way or had not finished when the
+// transfer timeout ran out, they are told so, nothing is logged as an error,
+// and nothing of it is kept, so that the same URL takes the whole file after.
+func TestAnUploadThatDoesNotArriveCanBeSentAgain(t *testing.T) {
+	var buf bytes.Buffer
+	a := hardenedWith(t, nil, nil, slog.New(slog.NewJSONHandler(&buf, nil)), func(d *httpapi.Deps) { d.TransferTimeout = 300 * time.Millisecond })
+	ask := a.do(nil, "GET", "/v1/courses/"+a.c.Course.String()+"/upload-url?kind=material&content_type=text/plain", a.tokenFor(a.c.Sato), nil)
+	if ask.Status != 200 {
+		t.Fatalf("upload-url: %d %s", ask.Status, ask.Raw)
+	}
+	putURL := a.here(ask.str("result", "upload_url"))
+	for _, hangUp := range []bool{true, false} {
+		if status, body := a.putHalf(putURL, hangUp); status != 400 || !strings.Contains(body, "did not arrive in full within 300ms") {
+			t.Fatalf("ten bytes of a hundred, hanging up %v: %d %s", hangUp, status, body)
+		}
+	}
+	if log := buf.String(); strings.Contains(log, `"level":"ERROR"`) ||
+		!strings.Contains(log, `"level":"INFO","msg":"request","method":"PUT","path":"/v1/blobs/…","status":400`) {
+		t.Fatalf("an upload that did not arrive, in the log:\n%s", log)
+	}
+	if res, body := a.raw("PUT", putURL, "text/plain", []byte("the whole file")); res.StatusCode != 200 || !strings.Contains(string(body), `"byte_size":14`) {
+		t.Fatalf("the whole file, to the same URL: %d %s", res.StatusCode, body)
 	}
 }
 
