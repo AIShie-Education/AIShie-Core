@@ -36,11 +36,50 @@ import (
 const Rule = "ais-canon-1"
 
 // Numbers beyond these bounds are refused rather than expanded: 1e999999999
-// is a short string and a very long decimal.
+// is a short string and a very long decimal. The digits are counted as
+// written and again as expanded, so that what is accepted once is accepted
+// again: a proposal's payload is canonicalized a second time when defaults
+// are pinned into it.
 const (
 	maxExponent = 400
 	maxDigits   = 400
 )
+
+// CheckNumbers applies the bounds on numbers to every number literal in raw,
+// and nothing else. It is linear in the size of raw, and runs before anything
+// parses a literal into a decimal: that parse is quadratic in the digits, and
+// a 1 MiB literal would cost seconds of CPU before the bound was ever looked
+// at. Malformed JSON is left for the parse that follows to report.
+func CheckNumbers(raw []byte) error {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	var v any
+	if dec.Decode(&v) != nil {
+		return nil
+	}
+	return checkNumbers(v)
+}
+
+func checkNumbers(v any) error {
+	switch x := v.(type) {
+	case json.Number:
+		_, err := normalizeNumber(string(x))
+		return err
+	case []any:
+		for _, e := range x {
+			if err := checkNumbers(e); err != nil {
+				return err
+			}
+		}
+	case map[string]any:
+		for _, e := range x {
+			if err := checkNumbers(e); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
 
 // Canonicalize returns the canonical form of raw with the named top-level
 // fields removed.
@@ -209,6 +248,9 @@ func normalizeNumber(lit string) (string, error) {
 		out = "0." + strings.Repeat("0", scale-len(digits)) + digits
 	default:
 		out = digits[:len(digits)-scale] + "." + digits[len(digits)-scale:]
+	}
+	if written := len(out) - strings.Count(out, "."); written > maxDigits {
+		return "", fmt.Errorf("number %q has too many digits written out", lit)
 	}
 	if neg {
 		out = "-" + out

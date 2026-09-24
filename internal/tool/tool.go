@@ -24,6 +24,7 @@ import (
 
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/apperr"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/authz"
+	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/canon"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/db/dbq"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/domain"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/events"
@@ -293,6 +294,11 @@ func Define[In, Out any](s Spec[In, Out]) Tool {
 		if len(raw) == 0 {
 			raw = []byte("{}")
 		}
+		// Before anything below parses a number into a decimal, which is
+		// quadratic in its digits.
+		if err := canon.CheckNumbers(raw); err != nil {
+			return nil, apperr.Invalid("arguments: %v", err)
+		}
 		var instance any
 		if err := json.Unmarshal(raw, &instance); err != nil {
 			return nil, apperr.Invalid("arguments are not valid JSON: %v", err)
@@ -343,12 +349,14 @@ func Define[In, Out any](s Spec[In, Out]) Tool {
 	return t
 }
 
-// decimalString is what a decimal given as a string may look like: a JSON
-// number, held to the bounds canon puts on a number literal — an exponent of
-// at most 400, and no more than 400 digits either side of the point. canon
-// never looks inside strings, and "1e2000000000" is ten bytes that the first
-// comparison would expand into two billion digits.
-const decimalString = `^-?[0-9]{1,400}(\.[0-9]{1,400})?([eE][-+]?(400|[0-3]?[0-9]{1,2}))?$`
+// decimalString is what a decimal given as a string may look like. canon
+// bounds number literals and never looks inside strings, and "1e2000000000"
+// is twelve bytes that the first comparison would expand into two billion
+// digits. A score, a weight or a number of points needs nothing like canon's
+// generous bounds, and a string held well within them stays within them
+// wherever it goes next: pinned into a proposal as a number, canonicalized
+// again, decoded again on approval.
+const decimalString = `^[-+]?([0-9]{1,40}(\.[0-9]{0,40})?|\.[0-9]{1,40})([eE][-+]?[0-9]{1,2})?$`
 
 // schemaOptions teaches schema inference the types that do not look like
 // what they are: a UUID is a [16]byte and a Decimal is a struct.
@@ -356,9 +364,10 @@ var schemaOptions = &jsonschema.ForOptions{
 	TypeSchemas: map[reflect.Type]*jsonschema.Schema{
 		reflect.TypeFor[uuid.UUID](): {Type: "string", Format: "uuid"},
 		reflect.TypeFor[decimal.Decimal](): {
-			Types:       []string{"number", "string"},
-			Pattern:     decimalString, // applies to the string form only
-			Description: "a decimal number; a string is accepted where exactness matters",
+			Types:   []string{"number", "string"},
+			Pattern: decimalString, // applies to the string form only
+			Description: "a decimal number; a string is accepted where exactness matters, " +
+				"with at most 40 digits either side of the point and an exponent of at most two digits",
 		},
 		reflect.TypeFor[json.RawMessage](): {},
 	},

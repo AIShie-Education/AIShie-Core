@@ -128,10 +128,11 @@ func TestAStudentsSeatReachesTheStudent(t *testing.T) {
 	b.do(t, helper, "member.update_perms", m{"course_id": b.course, "member_id": b.yukiM, "perms": m{"rubric_read": "autonomous"}})
 }
 
-// A decimal given as a string is held to the bounds a number is. As a string
-// "1e2000000000" is ten bytes; the first comparison made with it would expand
-// it into two billion digits, on the lowest level that can grade at all.
-func TestADecimalStringIsBoundedLikeANumber(t *testing.T) {
+// A decimal given as a string is bounded like a number, and more tightly: as
+// a string "1e2000000000" is twelve bytes that the first comparison made with
+// it would expand into two billion digits, on the lowest level that can grade
+// at all.
+func TestADecimalStringIsBounded(t *testing.T) {
 	b := build(t)
 	work := uuid.New() // refused before anything is looked up
 	for _, args := range []m{
