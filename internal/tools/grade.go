@@ -659,7 +659,7 @@ func gradePost() tool.Tool {
 			// giving both is refused, and one naming a grade that is already
 			// posted is told so by checkPostable.
 			pinned := in.pinned()
-			if pinned && !ec.ActionCreatedAt.Before(ec.Now) {
+			if pinned && !ec.Approved {
 				return GradePostOut{}, apperr.Invalid("give exactly one of grade_ids and assignment_id")
 			}
 			rows, err := gradesToPost(ctx, ec.Q, in)
