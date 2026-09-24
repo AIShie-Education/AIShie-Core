@@ -143,6 +143,48 @@ func TestArgumentsNameEachKeyOnce(t *testing.T) {
 	}
 }
 
+// post sends body to the MCP endpoint as it is, header pairs after it, as
+// a client that is not the SDK's might.
+func post(t *testing.T, f *fixture, token, body string, headers ...string) (*http.Response, []byte) {
+	t.Helper()
+	req, _ := http.NewRequest(http.MethodPost, f.srv.URL+httpapi.MCPPath, strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	for i := 0; i+1 < len(headers); i += 2 {
+		req.Header.Set(headers[i], headers[i+1])
+	}
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	out, _ := io.ReadAll(res.Body)
+	return res, out
+}
+
+// One request, one message. The per-actor limit counts requests, so a batch
+// would be as many calls as it held for the price of one: it is refused
+// whole, and nothing in it is attempted.
+func TestARequestCarriesOneMessage(t *testing.T) {
+	f := serve(t, 1)
+	c, yuki := f.c, f.c.Students[0]
+	grade := func(id, key string) string {
+		return `{"jsonrpc": "2.0", "id": ` + id + `, "method": "tools/call", "params": {"name": "grade_submit", "arguments": {"course_id": "` +
+			c.Course.String() + `", "submission_id": "` + yuki.HW3.String() + `", "score": 90, "idempotency_key": "` + key + `"}}}`
+	}
+	res, out := post(t, f, f.token(t, c.Sato), " ["+grade("1", "one")+", "+grade("2", "two")+"]")
+	if res.StatusCode != http.StatusBadRequest || !strings.Contains(string(out), "a batch is not taken") {
+		t.Fatalf("a batch: %d %s", res.StatusCode, out)
+	}
+	if n := c.Count(`SELECT count(*) FROM action`); n != 0 {
+		t.Fatalf("%d actions recorded", n)
+	}
+	if res, out := post(t, f, f.token(t, c.Sato), grade("1", "one")); res.StatusCode != http.StatusOK || !strings.Contains(string(out), `\"status\":\"executed\"`) {
+		t.Fatalf("the same call alone: %d %s", res.StatusCode, out)
+	}
+}
+
 // Over MCP a refusal is written twice, as text and as structured content,
 // and the text is escaped once more on the way: a megabyte of input would
 // come back as thirteen. It is held to a few kilobytes all the same, and

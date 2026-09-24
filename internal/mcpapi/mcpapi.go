@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -23,6 +24,7 @@ import (
 
 	"github.com/google/uuid"
 	sdkauth "github.com/modelcontextprotocol/go-sdk/auth"
+	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/apperr"
@@ -81,8 +83,9 @@ func NewHandler(d Deps) http.Handler {
 		// No session survives a request, so any instance can serve any call
 		// and nothing needs to be sticky. Nothing is lost by it: this server
 		// never initiates anything towards a client.
-		Stateless:    true,
-		JSONResponse: true,
+		Stateless:           true,
+		JSONResponse:        true,
+		MaxRequestBodyBytes: maxBody,
 	})
 	// The same verification path as REST. It runs on every request, so a
 	// revoked token stops working on the agent's very next call.
@@ -106,7 +109,50 @@ func NewHandler(d Deps) http.Handler {
 		return info, nil
 	}
 	// An API token need not expire; it is revoked instead.
-	return sdkauth.RequireBearerToken(verify, &sdkauth.RequireBearerTokenOptions{AllowMissingExpiration: true})(limited(d, handler))
+	return sdkauth.RequireBearerToken(verify, &sdkauth.RequireBearerTokenOptions{AllowMissingExpiration: true})(limited(d, screened(handler)))
+}
+
+// maxBody is the most one request may carry. It is the SDK's own default,
+// named here because screened reads the body before the SDK does.
+const maxBody = mcp.DefaultMaxRequestBodyBytes
+
+// screened looks at what a request carries before the SDK is given it.
+//
+// One message per request. JSON-RPC allows a batch, and protocol versions
+// before 2025-06-18 let a client send one, but the per-actor limit counts
+// requests: a batch would be as many calls as it held for the price of one,
+// and as many answers to one request, each tools/list the whole catalogue.
+func screened(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			next.ServeHTTP(w, r) // the SDK refuses it, in a few words
+			return
+		}
+		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBody))
+		if err != nil {
+			var tooLarge *http.MaxBytesError
+			if errors.As(err, &tooLarge) {
+				http.Error(w, fmt.Sprintf("the request body is larger than %d bytes", maxBody), http.StatusRequestEntityTooLarge)
+				return
+			}
+			http.Error(w, "the request body could not be read", http.StatusBadRequest)
+			return
+		}
+		if b := bytes.TrimLeft(body, " \t\r\n"); len(b) > 0 && b[0] == '[' {
+			refuse(w, jsonrpc.CodeInvalidRequest, "one message per request; a batch is not taken")
+			return
+		}
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		next.ServeHTTP(w, r)
+	})
+}
+
+// refuse answers, as JSON-RPC, a request the SDK is not given. The id is
+// null, as it is for a request whose id cannot be told.
+func refuse(w http.ResponseWriter, code int64, message string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusBadRequest)
+	_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": nil, "error": map[string]any{"code": code, "message": message}})
 }
 
 // limited refuses an actor that is calling too fast, before anything is
