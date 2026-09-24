@@ -198,7 +198,7 @@ type UploadURLOut struct {
 	Headers     map[string]string `json:"headers" jsonschema:"headers the PUT must carry"`
 	UploadToken string            `json:"upload_token" jsonschema:"hand this to document.create, document.add_version or grade.submit to attach what you uploaded"`
 	ExpiresAt   time.Time         `json:"expires_at"`
-	MaxBytes    int64             `json:"max_bytes"`
+	MaxBytes    int64             `json:"max_bytes" jsonschema:"the largest file, in bytes, that can be attached. It is checked when the file is attached, which refuses a larger one; where the URL is an object store's, a larger upload is not stopped as it arrives"`
 }
 
 // UploadPrefix begins the key of every upload: courses/<course>/<upload>.

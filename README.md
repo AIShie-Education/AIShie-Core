@@ -120,7 +120,9 @@ curl localhost:8080/v1/tools            # the whole catalogue, with JSON Schemas
 Configuration is environment variables only; `bin/aishiterud help` lists them.
 Files are kept under `var/blobs` by default (`BLOB_STORE=fs`). For more than
 one instance, or for production, use `BLOB_STORE=s3` with the `S3_*` settings
-and a `SIGNING_KEY` shared by every instance. An upload that is not attached
+and a `SIGNING_KEY` shared by every instance. With S3 an upload URL does not
+limit what is PUT to it: `MAX_UPLOAD_BYTES` is checked only when the file is
+attached, which refuses a larger one. An upload that is not attached
 to a document within `PROPOSAL_TTL` plus two days is removed about an hour
 after that, and can no longer be attached: the sweep goes through the store
 once an hour and removes up to 200 such uploads every `JOBS_INTERVAL`, however

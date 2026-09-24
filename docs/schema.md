@@ -292,7 +292,11 @@ within their scope was handed in under, even after the instructions have moved o
 message. `document.upload_url` returns a short-lived URL and an upload token; the client PUTs
 the bytes to the URL — straight to the object store, or to this server when files are kept on
 its own disk — and hands the token to the tool that attaches the file (`document.create`,
-`document.add_version`, or `feedback_files` on `grade.submit`). The token is a signed claim
+`document.add_version`, or `feedback_files` on `grade.submit`). The `max_bytes` it is given
+with the URL is checked when the file is attached: a larger file is refused then, and removed.
+This server's own disk also stops a larger upload as it arrives. An object store's upload URL
+does not: it takes a PUT of any size the store allows, and a larger file that is never
+attached stays until the sweep removes it. The token is a signed claim
 that this member of this course was given this storage key for this purpose; there is no
 table of pending uploads. Its expiry limits the upload, not the attaching: a proposal carrying
 a feedback file may be approved days later, and `unique(storage_key)` is what stops a file
