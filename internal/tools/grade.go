@@ -349,6 +349,9 @@ func gradeSubmit(d Deps) tool.Tool {
 			if err := lockGradeTarget(ctx, ec.Q, s); err != nil {
 				return GradeSubmitOut{}, err
 			}
+			if err := sameWork(ctx, ec, in.CourseID, s); err != nil {
+				return GradeSubmitOut{}, err
+			}
 			// A new draft replaces earlier ones — but this draft is as old as
 			// the call that made it. A proposal approved on Wednesday must
 			// not replace a draft somebody entered on Tuesday: the approver
@@ -397,6 +400,34 @@ func lockGradeTarget(ctx context.Context, q *dbq.Queries, s gradeSubject) error 
 		return q.LockSubmissionForGrading(ctx, s.submission.ID)
 	}
 	return q.LockComponentGradeTarget(ctx, dbq.LockComponentGradeTargetParams{ComponentID: s.component.ID, StudentMemberID: s.student})
+}
+
+// sameWork holds a grade to the work it was given for. Late work takes a
+// 'missing' placeholder over, keeping its id, until the placeholder has a
+// grade; a grade still on its way — proposed and not yet approved, or a call
+// waiting on the lock just taken — would otherwise land on the late work,
+// and a zero for handing in nothing is not a grade of what came in after.
+// So the submission is read again under the lock: it must not be a draft,
+// must not have stopped (or started) being the placeholder since it was
+// first read, and must not have been handed in after this call was made.
+// A handed-in submission never changes, so its submitted_at says when the
+// work the grade is for came in.
+func sameWork(ctx context.Context, ec *tool.ExecCtx, courseID uuid.UUID, s gradeSubject) error {
+	if s.submission == nil {
+		return nil
+	}
+	now, err := ec.Q.GetSubmissionInCourse(ctx, dbq.GetSubmissionInCourseParams{ID: s.submission.ID, CourseID: courseID})
+	if err != nil {
+		return err
+	}
+	switch {
+	case now.State == stateDraft:
+		return apperr.Precondition("the submission has been reopened for late work and not handed in yet")
+	case (now.State == stateMissing) != (s.submission.State == stateMissing),
+		now.SubmittedAt != nil && now.SubmittedAt.After(ec.ActionCreatedAt):
+		return apperr.Precondition("the work was handed in after this grade was given for it; look at it, and grade it again")
+	}
+	return nil
 }
 
 // noNewerDraft refuses to replace a draft entered after this call was made.

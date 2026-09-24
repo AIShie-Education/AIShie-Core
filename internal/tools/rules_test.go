@@ -134,6 +134,75 @@ func TestADecimalStringIsBoundedLikeANumber(t *testing.T) {
 	b.try(t, b.sato, "component.create", m{"course_id": b.course, "parent_id": b.total, "name": "Quiz", "weight": "9e999999"}, apperr.InvalidArgument)
 }
 
+// A zero for handing in nothing is a grade of that nothing. Late work takes a
+// 'missing' placeholder over, keeping its id, until the placeholder has a
+// grade; a grade proposed before that, or waiting on the lock while it
+// happens, does not land on the late work instead.
+func TestAGradeForNothingDoesNotLandOnLateWork(t *testing.T) {
+	b := build(t)
+	missing := func(student uuid.UUID) uuid.UUID {
+		id := uuid.New()
+		b.Exec(`INSERT INTO submission (id, assignment_id, course_id, student_member_id, state) VALUES ($1, $2, $3, $4, 'missing')`,
+			id, b.hw3, b.course, student)
+		return id
+	}
+	nothing := func(work uuid.UUID) m {
+		return m{"course_id": b.course, "submission_id": work, "score": 0, "feedback": "Nothing handed in."}
+	}
+
+	// Proposed for the placeholder; the late work comes in before approval.
+	yuki := missing(b.yukiM)
+	prop := b.MustCall(b.grader, "grade.submit", nothing(yuki), "zero-for-nothing")
+	if prop.Status != domain.StatusProposed {
+		t.Fatalf("proposal: %+v", prop)
+	}
+	late := testkit.Result[tools.SubmissionCreateOut](t, b.do(t, b.yuki, "submission.create",
+		m{"course_id": b.course, "assignment_id": b.hw3, "body": "my late essay"})).SubmissionID
+	if late != yuki {
+		t.Fatal("the late work did not take the placeholder over; the test no longer tests anything")
+	}
+	b.do(t, b.yuki, "submission.submit", m{"course_id": b.course, "submission_id": late})
+	b.do(t, b.sato, "action.decide", m{"course_id": b.course, "action_id": prop.ActionID, "decision": "approve"})
+	if n := b.Count(`SELECT count(*) FROM action WHERE id = $1 AND status = 'failed'`, prop.ActionID); n != 1 {
+		t.Fatal("the zero proposed for nothing was carried out on the late work")
+	}
+
+	// A direct call that waits on the placeholder's lock while
+	// submission.create reopens it for late work.
+	ken := missing(b.kenM)
+	ctx := t.Context()
+	tx, err := b.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `UPDATE submission SET state = 'draft', body = 'draft' WHERE id = $1 AND state = 'missing'`, ken); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan pipeline.Outcome, 1)
+	go func() {
+		out, _ := b.Call(b.sato, "grade.submit", nothing(ken), "zero-while-reopened")
+		done <- out
+	}()
+	// Until grade.submit has read the placeholder and is waiting for its lock.
+	for deadline := time.Now().Add(10 * time.Second); b.Count(`SELECT count(*) FROM pg_locks l
+		JOIN pg_stat_activity a ON a.pid = l.pid WHERE NOT l.granted AND a.datname = current_database()`) == 0; {
+		if len(done) > 0 || time.Now().After(deadline) {
+			t.Fatal("grade.submit never waited for the placeholder's lock")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if out := <-done; out.Status == domain.StatusExecuted {
+		t.Fatalf("a zero for nothing was entered on a reopened draft: %+v", out)
+	}
+	if n := b.Count(`SELECT count(*) FROM grade WHERE submission_id = $1`, ken); n != 0 {
+		t.Fatalf("%d grades on the reopened draft", n)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // docs/schema.md §4, "enforced by the application", one by one
 // ---------------------------------------------------------------------------
