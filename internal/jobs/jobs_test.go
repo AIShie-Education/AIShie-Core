@@ -244,6 +244,40 @@ func TestPastDueAssignments(t *testing.T) {
 	}
 }
 
+// A paused student is still a student of the course, and the sweep comes to a
+// due date once: one paused when it passes is marked missing then, like the
+// rest, and not a second time after being resumed.
+func TestAPausedStudentIsMarkedMissing(t *testing.T) {
+	f := setup(t, 2)
+	ken := f.Students[1]
+	due := f.now.Add(time.Hour)
+	f.Exec(`UPDATE assignment SET due_at = $2 WHERE id = $1`, f.HW4, due)
+	if out := f.MustCall(f.Sato, "member.pause", m{"course_id": f.Course, "member_id": ken.Member}, "pause"); out.Status != domain.StatusExecuted {
+		t.Fatalf("pausing Ken: %+v", out)
+	}
+
+	f.now = due.Add(time.Minute)
+	if rep := f.sweep(t); rep.AssignmentsClosed != 1 || rep.SubmissionsMissing != 2 {
+		t.Fatalf("%+v, want HW4 closed and both students missing", rep)
+	}
+	if n := f.Count(`SELECT count(*) FROM submission WHERE assignment_id = $1 AND student_member_id = $2 AND state = 'missing'`, f.HW4, ken.Member); n != 1 {
+		t.Fatal("a paused student was not marked missing")
+	}
+	if n := f.Count(`SELECT count(*) FROM event WHERE type = 'submission.missing' AND assignment_id = $1 AND student_member_id = $2`, f.HW4, ken.Member); n != 1 {
+		t.Fatalf("%d submission.missing events for the paused student, want 1", n)
+	}
+
+	if out := f.MustCall(f.Sato, "member.resume", m{"course_id": f.Course, "member_id": ken.Member}, "resume"); out.Status != domain.StatusExecuted {
+		t.Fatalf("resuming Ken: %+v", out)
+	}
+	if rep := f.sweep(t); rep.AssignmentsClosed != 0 || rep.SubmissionsMissing != 0 {
+		t.Fatalf("swept again after the resume: %+v", rep)
+	}
+	if n := f.Count(`SELECT count(*) FROM submission WHERE assignment_id = $1 AND student_member_id = $2`, f.HW4, ken.Member); n != 1 {
+		t.Fatalf("%d HW4 rows for Ken, want 1", n)
+	}
+}
+
 // An archived course refuses every write, the sweeps' as much as anyone's: a
 // seat that expires and a proposal that goes stale in one are left as they
 // are, and swept once the course is opened again.

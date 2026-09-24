@@ -227,7 +227,9 @@ type Querier interface {
 	ListStaleProposals(ctx context.Context, arg ListStaleProposalsParams) ([]ListStaleProposalsRow, error)
 	ListStudentScope(ctx context.Context, memberID uuid.UUID) ([]uuid.UUID, error)
 	// Current students of the course with no submission row at all for the
-	// assignment: not a draft, not a hand-in, not an earlier 'missing'.
+	// assignment: not a draft, not a hand-in, not an earlier 'missing'. A paused
+	// student is one: the seat carries on when resumed, and the sweep does not
+	// come back to this due date.
 	ListStudentsWithoutSubmission(ctx context.Context, arg ListStudentsWithoutSubmissionParams) ([]uuid.UUID, error)
 	ListSubmissionDocuments(ctx context.Context, submissionID *uuid.UUID) ([]ListSubmissionDocumentsRow, error)
 	ListSubmissions(ctx context.Context, arg ListSubmissionsParams) ([]ListSubmissionsRow, error)

@@ -48,10 +48,12 @@ LIMIT sqlc.arg(max_rows);
 
 -- name: ListStudentsWithoutSubmission :many
 -- Current students of the course with no submission row at all for the
--- assignment: not a draft, not a hand-in, not an earlier 'missing'.
+-- assignment: not a draft, not a hand-in, not an earlier 'missing'. A paused
+-- student is one: the seat carries on when resumed, and the sweep does not
+-- come back to this due date.
 SELECT m.id
 FROM course_member m
-WHERE m.course_id = $1 AND m.role = 'student' AND m.status = 'active'
+WHERE m.course_id = $1 AND m.role = 'student' AND m.status <> 'removed'
   AND NOT EXISTS (SELECT 1 FROM submission s WHERE s.assignment_id = $2 AND s.student_member_id = m.id)
 ORDER BY m.id;
 

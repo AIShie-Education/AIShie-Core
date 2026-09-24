@@ -317,7 +317,7 @@ func (q *Queries) ListStaleProposals(ctx context.Context, arg ListStaleProposals
 const listStudentsWithoutSubmission = `-- name: ListStudentsWithoutSubmission :many
 SELECT m.id
 FROM course_member m
-WHERE m.course_id = $1 AND m.role = 'student' AND m.status = 'active'
+WHERE m.course_id = $1 AND m.role = 'student' AND m.status <> 'removed'
   AND NOT EXISTS (SELECT 1 FROM submission s WHERE s.assignment_id = $2 AND s.student_member_id = m.id)
 ORDER BY m.id
 `
@@ -328,7 +328,9 @@ type ListStudentsWithoutSubmissionParams struct {
 }
 
 // Current students of the course with no submission row at all for the
-// assignment: not a draft, not a hand-in, not an earlier 'missing'.
+// assignment: not a draft, not a hand-in, not an earlier 'missing'. A paused
+// student is one: the seat carries on when resumed, and the sweep does not
+// come back to this due date.
 func (q *Queries) ListStudentsWithoutSubmission(ctx context.Context, arg ListStudentsWithoutSubmissionParams) ([]uuid.UUID, error) {
 	rows, err := q.db.Query(ctx, listStudentsWithoutSubmission, arg.CourseID, arg.AssignmentID)
 	if err != nil {
