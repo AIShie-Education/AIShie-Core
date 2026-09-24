@@ -10,6 +10,8 @@
 package httpapi
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -363,10 +365,15 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 	// Guessing is limited twice over: by where it comes from, and by whose
 	// account it is aimed at. Each attempt costs a 64 MiB argon2 hash, so
 	// this protects the server as much as the password.
-	keys := []string{"email:" + strings.ToLower(strings.TrimSpace(in.Email))}
+	//
+	// The address is asked first, so that an attempt it refuses touches
+	// nothing under the email: it neither spends the allowance of the account
+	// it was aimed at nor leaves a bucket behind for ten minutes.
+	var keys []string
 	if addr, known := s.clientAddr(r); known {
 		keys = append(keys, "addr:"+addr)
 	}
+	keys = append(keys, emailKey(in.Email))
 	for _, key := range keys {
 		if ok, wait := s.SignIns.Allow(key); !ok {
 			s.tooMany(w, r, wait)
@@ -380,6 +387,13 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 	}
 	http.SetCookie(w, s.sessionCookie(sess.Token, sess.ExpiresAt))
 	writeJSON(w, http.StatusOK, loginOut{ActorID: sess.ActorID.String(), ExpiresAt: sess.ExpiresAt})
+}
+
+// emailKey is the sign-in limit's key for an email: one key for an account
+// however its email is typed, and a small one however long the body made it.
+func emailKey(email string) string {
+	sum := sha256.Sum256([]byte(strings.ToLower(strings.TrimSpace(email))))
+	return "email:" + hex.EncodeToString(sum[:])
 }
 
 func (s *server) logout(w http.ResponseWriter, r *http.Request) {

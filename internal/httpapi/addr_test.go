@@ -46,6 +46,20 @@ func TestClientAddr(t *testing.T) {
 	}
 }
 
+// The sign-in limit keys an email by what it names, in a few dozen bytes
+// however long it came.
+func TestEmailKey(t *testing.T) {
+	if emailKey(" Sato@Example.EDU ") != emailKey("sato@example.edu") {
+		t.Error("one account, typed two ways, has two keys")
+	}
+	if emailKey("sato@example.edu") == emailKey("yuki@example.edu") {
+		t.Error("two accounts share a key")
+	}
+	if k := emailKey(strings.Repeat("a", 1<<20) + "@example.edu"); len(k) > 80 {
+		t.Errorf("a megabyte of email is a %d-byte key", len(k))
+	}
+}
+
 // A panic in a handler is answered like any other fault of ours: logged in
 // full, a JSON 500 to the caller, the connection kept.
 func TestAPanicIsAnsweredNotDropped(t *testing.T) {

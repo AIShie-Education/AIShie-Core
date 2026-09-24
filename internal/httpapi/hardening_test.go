@@ -164,6 +164,33 @@ func TestSignInAttemptsAreLimited(t *testing.T) {
 	}
 }
 
+// A sign-in the address limit refuses leaves nothing behind. Were it to leave
+// a bucket keyed on its email — a megabyte of key, if the body was — for ten
+// minutes, one address the limit had already stopped could fill the server's
+// memory without an account.
+func TestARefusedSignInLeavesNothingBehind(t *testing.T) {
+	signIns := ratelimit.New(1, 3)
+	a := hardened(t, nil, signIns, nil)
+	guess := func(email string) int {
+		return a.do(nil, "POST", "/v1/auth/login", "", m{"email": email, "password": "not the password!"}).Status
+	}
+	long := strings.Repeat("a", 64<<10)
+	for i := range 3 {
+		if got := guess(fmt.Sprintf("%d%s@example.edu", i, long)); got != 401 {
+			t.Fatalf("guess %d: %d", i+1, got)
+		}
+	}
+	for i := 3; i < 20; i++ {
+		if got := guess(fmt.Sprintf("%d%s@example.edu", i, long)); got != http.StatusTooManyRequests {
+			t.Fatalf("guess %d: %d, want 429", i+1, got)
+		}
+	}
+	// One bucket for the address, one for each email it was allowed to try.
+	if n := signIns.Len(); n != 4 {
+		t.Fatalf("%d sign-in buckets kept, want 4", n)
+	}
+}
+
 // The log says who did what and how it went. It never says anything that
 // would let a reader of the log become that person.
 func TestTheRequestLogCarriesNoCredentials(t *testing.T) {
