@@ -437,6 +437,15 @@ to no student (or no assignment) and that scope does not apply. They are filled 
 event is written and never change. Payloads carry ids and small facts only — never a score or
 feedback text; a reader fetches content through the read tools, which authorize it.
 
+Instructions and a rubric are their assignment's (§2.2), and so is news of them. An event
+about one (`document.created`, `document.version_added`, `document.published`,
+`document.rubric_published`, `document.archived`) is written once for each published
+assignment that refers to the document, with that `assignment_id`, so that assignment scope
+applies to it. While no published assignment does, it is written once under the same name
+with `_unreleased` appended (`document.published_unreleased`), which only
+`perm_assignment_write` sees, as only it sees unpublished work. Material's events belong to
+no assignment and are for the whole course.
+
 Nobody approves or reviews their own action. The CHECKs compare seats; the application compares
 actors as well, so the rule holds across every seat one actor has held: someone removed and
 seated again has a new seat, and is still who made the action. The database cannot go further

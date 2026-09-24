@@ -64,6 +64,14 @@ var visibility = map[string][]domain.Perm{
 	EventSubmissionFileAdded: {domain.PermSubmissionRead}, EventSubmissionFileArchived: {domain.PermSubmissionRead},
 	EventFeedbackFileAdded: {domain.PermGradeSubmit, domain.PermGradePost}, EventFeedbackFileArchived: {domain.PermGradeSubmit, domain.PermGradePost},
 
+	// Instructions and a rubric are their assignment's. News of them is filed
+	// under each published assignment that refers to them, for scope to
+	// apply, and until there is one it goes by these names instead: an
+	// unpublished assignment is for those who write assignments.
+	EventDocumentCreatedUnreleased: {domain.PermAssignmentWrite}, EventDocumentVersionAddedUnreleased: {domain.PermAssignmentWrite},
+	EventDocumentPublishedUnreleased: {domain.PermAssignmentWrite}, EventRubricPublishedUnreleased: {domain.PermAssignmentWrite},
+	EventDocumentArchivedUnreleased: {domain.PermAssignmentWrite},
+
 	// Platform events belong to no course, so they are in no course's feed.
 	// They are listed so that leaving them out is visibly a decision.
 	EventActorRegistered: nil, EventActorSuspended: nil, EventActorReactivated: nil,

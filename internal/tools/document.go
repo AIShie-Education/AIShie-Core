@@ -50,6 +50,15 @@ const (
 	EventFeedbackFileAdded      = "grade.feedback_added"
 	EventFeedbackFileArchived   = "grade.feedback_archived"
 
+	// What the document events above are called while they are about
+	// instructions or a rubric that no published assignment refers to yet
+	// (see emitDocumentEvent).
+	EventDocumentCreatedUnreleased      = "document.created_unreleased"
+	EventDocumentVersionAddedUnreleased = "document.version_added_unreleased"
+	EventDocumentPublishedUnreleased    = "document.published_unreleased"
+	EventRubricPublishedUnreleased      = "document.rubric_published_unreleased"
+	EventDocumentArchivedUnreleased     = "document.archived_unreleased"
+
 	uploadWindow = 15 * time.Minute
 	downloadTTL  = 15 * time.Minute
 )
@@ -133,6 +142,44 @@ func feedbackWritePerms(posted bool) []domain.Perm {
 		return []domain.Perm{domain.PermGradeSubmit, domain.PermGradePost}
 	}
 	return []domain.Perm{domain.PermGradeSubmit}
+}
+
+// unreleased is each document event's unreleased name.
+var unreleased = map[string]string{
+	EventDocumentCreated:      EventDocumentCreatedUnreleased,
+	EventDocumentVersionAdded: EventDocumentVersionAddedUnreleased,
+	EventDocumentPublished:    EventDocumentPublishedUnreleased,
+	EventRubricPublished:      EventRubricPublishedUnreleased,
+	EventDocumentArchived:     EventDocumentArchivedUnreleased,
+}
+
+// emitDocumentEvent emits an event about a document of the given kind.
+// Instructions and a rubric are their assignment's (assignmentWithheld), and
+// so is news of them: the event is filed under each published assignment that
+// refers to the document, so that the feed's assignment scope applies to it,
+// and while none does it goes out under its unreleased name, which only those
+// who see unpublished work are shown. Otherwise a student would learn from the
+// feed that next week's exam exists, and when it was finished. Every other
+// event goes out as it is.
+func emitDocumentEvent(ctx context.Context, ec *tool.ExecCtx, kind string, ev events.Event) error {
+	if kind != kindInstructions && kind != kindRubric {
+		ec.Emit(ev)
+		return nil
+	}
+	published, err := ec.Q.ListPublishedAssignmentsUsingDocument(ctx, ev.SubjectID)
+	if err != nil {
+		return err
+	}
+	if len(published) == 0 {
+		ev.Type = unreleased[ev.Type]
+		ec.Emit(ev)
+		return nil
+	}
+	for _, a := range published {
+		ev.AssignmentID = &a
+		ec.Emit(ev)
+	}
+	return nil
 }
 
 // ---------------------------------------------------------------------------
@@ -507,8 +554,7 @@ func documentCreate(d Deps) tool.Tool {
 				}
 			}
 			ev.SubjectID = &out.DocumentID
-			ec.Emit(ev)
-			return out, nil
+			return out, emitDocumentEvent(ctx, ec, in.Kind, ev)
 		},
 	})
 }
@@ -568,8 +614,10 @@ func documentAddVersion(d Deps) tool.Tool {
 			if out.VersionID, err = insertVersion(ctx, d, ec, in.CourseID, doc.ID, doc.Kind, out.Seq, in.Content); err != nil {
 				return DocumentVersionOut{}, err
 			}
-			ec.Emit(events.Event{Type: EventDocumentVersionAdded, CourseID: &in.CourseID, SubjectType: "document", SubjectID: &doc.ID,
-				Payload: map[string]any{"kind": doc.Kind, "seq": out.Seq}})
+			if err := emitDocumentEvent(ctx, ec, doc.Kind, events.Event{Type: EventDocumentVersionAdded, CourseID: &in.CourseID,
+				SubjectType: "document", SubjectID: &doc.ID, Payload: map[string]any{"kind": doc.Kind, "seq": out.Seq}}); err != nil {
+				return DocumentVersionOut{}, err
+			}
 			if in.Publish {
 				if err := publish(ctx, ec, in.CourseID, doc, out.VersionID); err != nil {
 					return DocumentVersionOut{}, err
@@ -590,9 +638,8 @@ func publish(ctx context.Context, ec *tool.ExecCtx, courseID uuid.UUID, doc dbq.
 	if doc.Kind == kindRubric {
 		typ = EventRubricPublished // rubrics have readers of their own
 	}
-	ec.Emit(events.Event{Type: typ, CourseID: &courseID, SubjectType: "document", SubjectID: &doc.ID,
+	return emitDocumentEvent(ctx, ec, doc.Kind, events.Event{Type: typ, CourseID: &courseID, SubjectType: "document", SubjectID: &doc.ID,
 		Payload: map[string]any{"kind": doc.Kind, "version_id": version}})
-	return nil
 }
 
 type DocumentPublishIn struct {
@@ -711,7 +758,9 @@ func documentArchive() tool.Tool {
 			case kindFeedback:
 				ev.Type, ev.StudentMemberID, ev.AssignmentID = EventFeedbackFileArchived, doc.GradeStudent, doc.GradeAssignment
 			}
-			ec.Emit(ev)
+			if err := emitDocumentEvent(ctx, ec, doc.Kind, ev); err != nil {
+				return OK{}, err
+			}
 			return OK{OK: true}, nil
 		},
 	})

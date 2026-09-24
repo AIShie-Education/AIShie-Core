@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -715,14 +716,35 @@ func TestWithdrawnFeedbackIsWithdrawn(t *testing.T) {
 
 // Instructions are the assignment's. Publishing them is a step on the way to
 // publishing the assignment — assignment.publish insists on it — and must not
-// itself put next week's exam in front of the class.
+// itself put next week's exam in front of the class. Nor may the feed, which
+// would otherwise tell the class that the exam's instructions and rubric
+// exist, and when they were finished: until the assignment is published it
+// tells only those who write assignments, and then those whose scope takes
+// the assignment in.
 func TestInstructionsAppearWithTheirAssignment(t *testing.T) {
 	b := build(t)
-	brief := testkit.Result[tools.DocumentCreateOut](t, b.do(t, b.sato, "document.create",
-		m{"course_id": b.course, "kind": "instructions", "title": "Take-home exam", "body_md": "Question 1: ..."})).DocumentID
-	b.do(t, b.sato, "document.publish", m{"course_id": b.course, "document_id": brief})
+	create := func(kind, title, body string) uuid.UUID {
+		t.Helper()
+		doc := testkit.Result[tools.DocumentCreateOut](t, b.do(t, b.sato, "document.create",
+			m{"course_id": b.course, "kind": kind, "title": title, "body_md": body})).DocumentID
+		b.do(t, b.sato, "document.publish", m{"course_id": b.course, "document_id": doc})
+		return doc
+	}
+	brief := create("instructions", "Take-home exam", "Question 1: ...")
+	rubric := create("rubric", "Exam marking scheme", "10 marks a question")
 	exam := testkit.Result[tools.IDOut](t, b.do(t, b.sato, "assignment.create",
-		m{"course_id": b.course, "title": "Take-home exam", "points_possible": 100, "instructions_document_id": brief})).ID
+		m{"course_id": b.course, "title": "Take-home exam", "points_possible": 100, "instructions_document_id": brief, "rubric_document_id": rubric})).ID
+	// told is what the feed tells actor of doc, in order.
+	told := func(actor, doc uuid.UUID) []string {
+		t.Helper()
+		got := []string{}
+		for _, e := range feed(t, b, actor) {
+			if e.SubjectID != nil && *e.SubjectID == doc {
+				got = append(got, e.Type)
+			}
+		}
+		return got
+	}
 
 	listed := func(actor uuid.UUID) bool {
 		for _, d := range testkit.Result[tools.DocumentListOut](t, b.do(t, actor, "document.list", m{"course_id": b.course})).Documents {
@@ -758,6 +780,22 @@ func TestInstructionsAppearWithTheirAssignment(t *testing.T) {
 	if _, err := b.Call(ta, "document.versions", m{"course_id": b.course, "document_id": brief}, ""); !apperr.Is(err, apperr.NotFound) {
 		t.Fatalf("a TA listing the exam's versions before the assignment is published: %v", err)
 	}
+	for name, actor := range map[string]uuid.UUID{"Yuki": b.yuki, "the TA": ta, "the grader": b.grader} {
+		for _, doc := range []uuid.UUID{brief, rubric} {
+			if got := told(actor, doc); len(got) != 0 {
+				t.Fatalf("the feed tells %s of the exam before the assignment is published: %v", name, got)
+			}
+		}
+	}
+	// Another instructor is told, having written none of it.
+	co := testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", m{"kind": "human", "display_name": "Co-instructor"})).ActorID
+	b.do(t, b.sato, "member.add", m{"course_id": b.course, "actor_id": co, "preset": "instructor"})
+	if got := told(co, brief); !slices.Equal(got, []string{"document.created_unreleased", "document.published_unreleased"}) {
+		t.Fatalf("the co-instructor is told of the exam's instructions: %v", got)
+	}
+	if got := told(co, rubric); !slices.Equal(got, []string{"document.created_unreleased", "document.rubric_published_unreleased"}) {
+		t.Fatalf("the co-instructor is told of the exam's rubric: %v", got)
+	}
 
 	b.do(t, b.sato, "assignment.publish", m{"course_id": b.course, "assignment_id": exam})
 	if !listed(ta) {
@@ -776,6 +814,49 @@ func TestInstructionsAppearWithTheirAssignment(t *testing.T) {
 	}
 	if _, err := b.Call(b.grader, "document.get", m{"course_id": b.course, "document_id": brief}, ""); !apperr.Is(err, apperr.NotFound) {
 		t.Fatalf("the grader reading instructions outside its scope: %v", err)
+	}
+
+	// A correction now is the exam's news. It is filed under the exam, and
+	// reaches whoever reads that kind of document with the exam in scope:
+	// Yuki the instructions as published, the TA drafts and all, the grader
+	// nothing. HW3's rubric is the grader's business, and it is told of that.
+	b.do(t, b.sato, "document.add_version", m{"course_id": b.course, "document_id": brief, "body_md": "Question 1, corrected: ...", "publish": true})
+	b.do(t, b.sato, "document.add_version", m{"course_id": b.course, "document_id": rubric, "body_md": "12 marks a question", "publish": true})
+	marking := testkit.Result[tools.DocumentCreateOut](t, b.do(t, b.sato, "document.create",
+		m{"course_id": b.course, "kind": "rubric", "title": "HW3 marking scheme", "body_md": "5 marks for style"})).DocumentID
+	b.do(t, b.sato, "assignment.update", m{"course_id": b.course, "assignment_id": b.hw3, "rubric_document_id": marking})
+	b.do(t, b.sato, "document.publish", m{"course_id": b.course, "document_id": marking})
+	for _, c := range []struct {
+		name       string
+		actor, doc uuid.UUID
+		want       []string
+	}{
+		{"Yuki, of the instructions", b.yuki, brief, []string{"document.published"}},
+		{"Yuki, of the rubric", b.yuki, rubric, []string{}},
+		{"the TA, of the instructions", ta, brief, []string{"document.version_added", "document.published"}},
+		{"the TA, of the rubric", ta, rubric, []string{"document.version_added", "document.rubric_published"}},
+		{"the grader, of the instructions", b.grader, brief, []string{}},
+		{"the grader, of the rubric", b.grader, rubric, []string{}},
+		{"the grader, of HW3's rubric", b.grader, marking, []string{"document.rubric_published"}},
+	} {
+		if got := told(c.actor, c.doc); !slices.Equal(got, c.want) {
+			t.Errorf("the feed tells %s: %v, want %v", c.name, got, c.want)
+		}
+	}
+	if n := b.Count(`SELECT count(*) FROM event WHERE subject_id = ANY($1) AND type NOT LIKE '%unreleased' AND assignment_id IS DISTINCT FROM $2`,
+		[]uuid.UUID{brief, rubric}, exam); n != 0 {
+		t.Fatalf("%d events about the exam's documents are not filed under the exam", n)
+	}
+
+	// A brief no assignment was ever published with goes as quietly as it
+	// came.
+	spare := create("instructions", "Spare questions", "Question 9: ...")
+	b.do(t, b.sato, "document.archive", m{"course_id": b.course, "document_id": spare})
+	if got := told(ta, spare); len(got) != 0 {
+		t.Fatalf("the TA is told of a brief no published assignment refers to: %v", got)
+	}
+	if got := told(co, spare); !slices.Equal(got, []string{"document.created_unreleased", "document.published_unreleased", "document.archived_unreleased"}) {
+		t.Fatalf("the co-instructor is told of the spare brief: %v", got)
 	}
 }
 

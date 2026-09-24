@@ -224,6 +224,9 @@ type Querier interface {
 	ListPresets(ctx context.Context, deptID *uuid.UUID) ([]PermissionPreset, error)
 	ListProposedActionIDsByMember(ctx context.Context, memberID *uuid.UUID) ([]uuid.UUID, error)
 	ListProposedActions(ctx context.Context, arg ListProposedActionsParams) ([]Action, error)
+	// The published assignments that refer to the document as their instructions
+	// or rubric: an event about the document is filed under each of them.
+	ListPublishedAssignmentsUsingDocument(ctx context.Context, documentID *uuid.UUID) ([]uuid.UUID, error)
 	// What the background sweeps look for. Each returns a small batch; the sweep
 	// runs again on the next tick. None of these is what makes the system
 	// correct — authorize() ignores an expired member on every call and approval

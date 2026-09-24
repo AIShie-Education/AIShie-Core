@@ -333,6 +333,35 @@ func (q *Queries) ListGradeDocuments(ctx context.Context, gradeID *uuid.UUID) ([
 	return items, nil
 }
 
+const listPublishedAssignmentsUsingDocument = `-- name: ListPublishedAssignmentsUsingDocument :many
+SELECT a.id FROM assignment a
+WHERE (a.instructions_document_id = $1 OR a.rubric_document_id = $1)
+  AND a.published_at IS NOT NULL
+ORDER BY a.id
+`
+
+// The published assignments that refer to the document as their instructions
+// or rubric: an event about the document is filed under each of them.
+func (q *Queries) ListPublishedAssignmentsUsingDocument(ctx context.Context, documentID *uuid.UUID) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, listPublishedAssignmentsUsingDocument, documentID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listSubmissionDocuments = `-- name: ListSubmissionDocuments :many
 SELECT id, title, status, created_at FROM document WHERE submission_id = $1 AND status = 'active' ORDER BY id
 `
