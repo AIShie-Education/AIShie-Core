@@ -92,11 +92,13 @@ func (p *Pipeline) Decide(ctx context.Context, ec *tool.ExecCtx, in DecideIn) (D
 	if ec.Member == nil || prop.MemberID == nil {
 		return DecideOut{}, apperr.Forbid("only a course member decides a member's proposal")
 	}
-	if *prop.MemberID == ec.Member.ID {
-		// The database refuses this too; saying so here is kinder.
+	if *prop.MemberID == ec.Member.ID || prop.ActorID == ec.Actor.ID {
+		// The database refuses the same seat too; saying so here is kinder.
+		// The actor is compared here as well: someone removed and seated
+		// again has a new seat, and is still who made the proposal.
 		return DecideOut{}, apperr.Forbid("nobody decides their own proposal")
 	}
-	if own, err := judgesOwn(ctx, ec.Q, prop, ec.Member.ID); err != nil {
+	if own, err := judgesOwn(ctx, ec.Q, prop, ec.Member.ID, ec.Actor.ID); err != nil {
 		return DecideOut{}, err
 	} else if own {
 		return DecideOut{}, apperr.Forbid("nobody decides their own proposal, even at one remove: this one decides or reviews an action of yours")
@@ -206,14 +208,15 @@ func (p *Pipeline) Decide(ctx context.Context, ec *tool.ExecCtx, in DecideIn) (D
 }
 
 // judgesOwn reports whether a is a decision or a review about an action of
-// member's, at any remove. The CHECKs on action compare a row with its own
-// decider only, and a decision can itself wait for a decision, or be under
-// review: a triage agent whose approvals a human confirms. Confirming that
-// approval is what carries out the proposal underneath, so if the proposer
-// could confirm it, the four eyes on their proposal would be their own two
-// and an agent's. The chain runs back in time — an action can only be about
-// one that was there before it — so it ends.
-func judgesOwn(ctx context.Context, q *dbq.Queries, a dbq.Action, member uuid.UUID) (bool, error) {
+// member's, or of actor's in any seat, at any remove. The CHECKs on action
+// compare a row with its own decider only, and a decision can itself wait
+// for a decision, or be under review: a triage agent whose approvals a human
+// confirms. Confirming that approval is what carries out the proposal
+// underneath, so if the proposer could confirm it, the four eyes on their
+// proposal would be their own two and an agent's. The chain runs back in
+// time — an action can only be about one that was there before it — so it
+// ends.
+func judgesOwn(ctx context.Context, q *dbq.Queries, a dbq.Action, member, actor uuid.UUID) (bool, error) {
 	for (a.ActionType == ToolActionDecide || a.ActionType == ToolActionReview) && a.TargetID != nil {
 		about, err := q.GetActionInCourse(ctx, dbq.GetActionInCourseParams{ID: *a.TargetID, CourseID: a.CourseID})
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -222,7 +225,7 @@ func judgesOwn(ctx context.Context, q *dbq.Queries, a dbq.Action, member uuid.UU
 		if err != nil {
 			return false, err
 		}
-		if about.MemberID != nil && *about.MemberID == member {
+		if (about.MemberID != nil && *about.MemberID == member) || about.ActorID == actor {
 			return true, nil
 		}
 		a = about
@@ -330,10 +333,12 @@ func (p *Pipeline) Review(ctx context.Context, ec *tool.ExecCtx, in ReviewIn) (R
 	if ec.Member == nil {
 		return ReviewOut{}, apperr.Forbid("only a course member reviews")
 	}
-	if row.MemberID != nil && *row.MemberID == ec.Member.ID {
+	if (row.MemberID != nil && *row.MemberID == ec.Member.ID) || row.ActorID == ec.Actor.ID {
+		// The database refuses only the same seat; the actor is compared
+		// here, so a seat taken since is refused too.
 		return ReviewOut{}, apperr.Forbid("nobody reviews their own action")
 	}
-	if own, err := judgesOwn(ctx, ec.Q, row, ec.Member.ID); err != nil {
+	if own, err := judgesOwn(ctx, ec.Q, row, ec.Member.ID, ec.Actor.ID); err != nil {
 		return ReviewOut{}, err
 	} else if own {
 		return ReviewOut{}, apperr.Forbid("nobody reviews their own action, even at one remove: this one decides or reviews an action of yours")

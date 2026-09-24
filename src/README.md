@@ -126,7 +126,7 @@ MCP, these are the invariants that survive a bug in the tool layer.
 | Every action carries the hash of what was asked, so a key reused for different content can be told from a retry | `action.payload_hash NOT NULL`, `action_payload_hash_valid` |
 | An action's status agrees with its authorization: `denied` ⇔ `denied`; only `confirm_required` is proposed, rejected, cancelled or decided; only an executed `pending_review` is under review | `action_status_matches_authz` |
 | `executed_at` is set exactly when status is `executed` | `action_executed_at_consistent` |
-| Nobody approves or reviews their own action | `action_not_self_decided`, `action_not_self_reviewed` |
+| Nobody approves or reviews their own action from the same seat | `action_not_self_decided`, `action_not_self_reviewed` |
 | `document_version` and `event` are append-only | `reject_mutation()` triggers on UPDATE, DELETE, TRUNCATE |
 | A submitted submission is never changed or deleted, except correcting `submitted` ⇄ `late` | `submission_frozen_after_submit` trigger |
 | A grade has exactly one target | `grade_one_target` |

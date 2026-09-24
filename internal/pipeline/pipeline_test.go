@@ -431,6 +431,16 @@ func TestPendingReview(t *testing.T) {
 	if self := review(ta, "reviewed", "self"); self.Status != domain.StatusFailed || self.Error.Code != apperr.Forbidden {
 		t.Fatalf("self-review: %+v", self)
 	}
+	// Nor from a seat taken since: removed and seated again, the TA is still
+	// who entered the grade.
+	c.Exec(`UPDATE course_member SET status = 'removed' WHERE id = $1`, taM)
+	c.Member(c.Course, ta, "instructor")
+	if self := review(ta, "reviewed", "self-again"); self.Status != domain.StatusFailed || self.Error.Code != apperr.Forbidden {
+		t.Fatalf("self-review from a new seat: %+v", self)
+	}
+	if n := c.Count(`SELECT count(*) FROM action WHERE id = $1 AND review_state = 'pending'`, *out.ActionID); n != 1 {
+		t.Fatal("the TA's grade was marked reviewed from the TA's new seat")
+	}
 	if esc := review(c.Sato, "escalated", "esc"); esc.Status != domain.StatusExecuted {
 		t.Fatalf("escalate: %+v", esc)
 	}
@@ -543,6 +553,23 @@ func TestNobodyDecidesTheirOwnActionAtOneRemove(t *testing.T) {
 	}
 	refused("the TA reviewing the approval of her own proposal",
 		c.MustCall(ta, "action.review", m{"course_id": c.Course, "action_id": approval.ActionID, "outcome": "reviewed"}, "ta-r"))
+
+	// A seat is not who someone is: removed and seated again, with a seat
+	// that may decide anything, the TA is still whose actions these are.
+	last := c.MustCall(ta, "grade.submit", submitArgs(c, c.Students[0], 50), "p4")
+	if last.Status != domain.StatusProposed {
+		t.Fatalf("the TA's last proposal: %+v", last)
+	}
+	c.Exec(`UPDATE course_member SET status = 'removed' WHERE id = $1`, taM)
+	c.Member(c.Course, ta, "instructor")
+	refused("the TA, seated again, deciding her own proposal", decide(ta, last.ActionID, "approve", "ta-again"))
+	refused("the TA, seated again, confirming the review of her own grade", decide(ta, review.ActionID, "approve", "ta-review-again"))
+	refused("the TA, seated again, reviewing the approval of her own proposal",
+		c.MustCall(ta, "action.review", m{"course_id": c.Course, "action_id": approval.ActionID, "outcome": "reviewed"}, "ta-r-again"))
+	if n := c.Count(`SELECT count(*) FROM action WHERE id = ANY($1) AND (status <> 'executed' OR review_state <> 'pending')`,
+		[]uuid.UUID{*done.ActionID, *approval.ActionID}); n != 0 {
+		t.Fatal("an action of the TA's was reviewed from her new seat")
+	}
 }
 
 // ---------------------------------------------------------------------------
