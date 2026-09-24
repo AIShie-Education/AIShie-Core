@@ -22,7 +22,12 @@ WHERE m.id = $1 AND m.course_id = $2
 FOR UPDATE OF m;
 
 -- name: GetLiveMembership :one
-SELECT id, status, expires_at FROM course_member WHERE course_id = $1 AND actor_id = $2 AND status <> 'removed';
+-- Locked, as every removal locks the seat it removes: a seat past its expiry
+-- is removed on the spot, and that waits for its member's calls in flight
+-- and cancels what they proposed. If the sweep removes it first, the row no
+-- longer matches once the lock is had, and there is nothing in the way.
+SELECT id, status, expires_at FROM course_member WHERE course_id = $1 AND actor_id = $2 AND status <> 'removed'
+FOR UPDATE;
 
 -- name: ListMembers :many
 SELECT m.*, a.display_name, a.kind AS actor_kind
@@ -82,3 +87,9 @@ SELECT id FROM action WHERE member_id = $1 AND status = 'proposed' ORDER BY id F
 
 -- name: CancelProposal :execrows
 UPDATE action SET status = 'cancelled', result = $2 WHERE id = $1 AND status = 'proposed';
+
+-- name: ShareSeats :exec
+-- KEY SHARE on the given seats, in id order: what taking them before some
+-- other lock looks like, where that lock would otherwise be held while one of
+-- them is waited for.
+SELECT 1 FROM course_member WHERE id = ANY(sqlc.arg(ids)::uuid[]) ORDER BY id FOR KEY SHARE;

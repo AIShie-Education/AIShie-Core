@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/shopspring/decimal"
 
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/apperr"
@@ -771,5 +772,48 @@ func TestAnUnstorableKeyIsRefusedAsInput(t *testing.T) {
 	}
 	if n := c.Count(`SELECT count(*) FROM action`); n != 0 {
 		t.Fatal("something was recorded")
+	}
+}
+
+type flakyIn struct {
+	tool.InCourse
+}
+
+// A deadlock lost while an approval re-checks its proposal says nothing about
+// the proposal: the decision is undone, the proposal still waits, and
+// deciding again works. It is not failed for good with "try again".
+func TestAnApprovalThatLosesADeadlockLeavesTheProposalWaiting(t *testing.T) {
+	c := testkit.NewCS101(t, 0)
+	flaky := false
+	c.P.Registry().Register(tool.Define(tool.Spec[flakyIn, probeOut]{
+		Name: "probe.flaky", Kind: tool.Write, Gate: tool.Gate{Perms: []domain.Perm{domain.PermGradeSubmit}},
+		Resolve: func(_ context.Context, _ dbq.Querier, in flakyIn) (tool.Target, error) {
+			return tool.Target{CourseID: in.CourseID, Type: "course"}, nil
+		},
+		Validate: func(context.Context, dbq.Querier, *domain.Member, flakyIn) error {
+			if flaky {
+				return &pgconn.PgError{Code: "40P01", Message: "deadlock detected"}
+			}
+			return nil
+		},
+		Execute: func(context.Context, *tool.ExecCtx, flakyIn) (probeOut, error) { return probeOut{OK: true}, nil },
+	}))
+	prop := c.MustCall(c.Grader, "probe.flaky", m{"course_id": c.Course}, "p")
+	if prop.Status != domain.StatusProposed {
+		t.Fatalf("proposal: %+v", prop)
+	}
+	flaky = true
+	decide := func(key string) pipeline.Outcome {
+		return c.MustCall(c.Sato, "action.decide", m{"course_id": c.Course, "action_id": prop.ActionID, "decision": "approve"}, key)
+	}
+	if out := decide("d1"); out.Status != domain.StatusFailed || out.Error == nil || out.Error.Code != apperr.Conflict {
+		t.Fatalf("a decision that lost a deadlock: %+v", out)
+	}
+	if n := c.Count(`SELECT count(*) FROM action WHERE id = $1 AND status = 'proposed'`, prop.ActionID); n != 1 {
+		t.Fatal("the proposal no longer waits")
+	}
+	flaky = false
+	if out := decide("d2"); out.Status != domain.StatusExecuted || !strings.Contains(string(out.Result), `"outcome":"executed"`) {
+		t.Fatalf("deciding again: %+v", out)
 	}
 }

@@ -56,8 +56,11 @@ func (p *Pipeline) write(ctx context.Context, tx pgx.Tx, caller Caller, t tool.T
 	q := dbq.New(tx)
 	now := p.now()
 
-	// Seen before? This is only the fast path; the insert below is what
-	// actually settles a race.
+	if err := q.LockIdempotencyKey(ctx, dbq.LockIdempotencyKeyParams{ActorID: caller.ActorID, IdempotencyKey: key}); err != nil {
+		return Outcome{}, fmt.Errorf("idempotency key lock: %w", err)
+	}
+	// Seen before? A call with this key that is still in flight has been
+	// waited for just above; the insert below still settles any other race.
 	existing, err := q.GetActionByKey(ctx, dbq.GetActionByKeyParams{ActorID: caller.ActorID, IdempotencyKey: key})
 	if err == nil {
 		return replay(existing, hash)

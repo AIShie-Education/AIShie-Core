@@ -25,6 +25,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -199,10 +200,25 @@ func savepoint(ctx context.Context, tx pgx.Tx, fn func(sp pgx.Tx) (any, error)) 
 // keeps that from aborting the transaction its failure is then recorded in.
 // What it locked it keeps when it succeeds, for Execute after it.
 func validate(ctx context.Context, tx pgx.Tx, t tool.Tool, m *domain.Member, in any) error {
-	_, err := savepoint(ctx, tx, func(sp pgx.Tx) (any, error) {
-		return nil, t.Validate(ctx, dbq.New(sp), m, in)
-	})
-	return err
+	sp, err := tx.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	if err := t.Validate(ctx, dbq.New(sp), m, in); err != nil {
+		if rbErr := sp.Rollback(ctx); rbErr != nil {
+			return errors.Join(err, rbErr)
+		}
+		return err
+	}
+	return sp.Commit(ctx)
+}
+
+// transient reports whether err is a conflict between transactions that the
+// database resolved by stopping this one (serialization failure, deadlock):
+// nothing about the call itself was wrong, and making it again can work.
+func transient(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && strings.HasPrefix(pgErr.Code, "40")
 }
 
 func errorResult(e *apperr.Error) []byte {

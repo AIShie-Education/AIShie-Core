@@ -310,6 +310,12 @@ func asStored(t *time.Time) *time.Time {
 // be revived — with everything it held — would depend on when the sweep last
 // ran.
 func loadOther(ctx context.Context, ec *tool.ExecCtx, courseID, memberID uuid.UUID) (dbq.GetMemberInCourseRow, error) {
+	// Refused before the seat is locked: the caller's own seat is already
+	// held, shared, by this call, and upgrading that could deadlock with a
+	// retry of the same call waiting to share it.
+	if memberID == ec.Member.ID {
+		return dbq.GetMemberInCourseRow{}, apperr.Forbid("not on your own membership")
+	}
 	row, err := ec.Q.GetMemberInCourseForUpdate(ctx, dbq.GetMemberInCourseForUpdateParams{ID: memberID, CourseID: courseID})
 	m := dbq.GetMemberInCourseRow(row)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -317,9 +323,6 @@ func loadOther(ctx context.Context, ec *tool.ExecCtx, courseID, memberID uuid.UU
 	}
 	if err != nil {
 		return m, err
-	}
-	if m.ID == ec.Member.ID {
-		return m, apperr.Forbid("not on your own membership")
 	}
 	if m.Status == domain.MemberRemoved || (m.ExpiresAt != nil && !m.ExpiresAt.After(ec.Now)) {
 		return m, apperr.Conflicts("the member has been removed; seat the actor again for a fresh start")

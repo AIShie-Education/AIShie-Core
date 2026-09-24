@@ -1,6 +1,7 @@
 package tools_test
 
 import (
+	"hash/fnv"
 	"strconv"
 	"strings"
 	"sync"
@@ -991,4 +992,190 @@ func TestAKeptListIsNotReValidated(t *testing.T) {
 	b.do(t, b.sato, "member.rescope", m{"course_id": b.course, "member_id": b.tutorM, "assignment_scope": "listed", "listed_assignments": []uuid.UUID{b.hw3}})
 	// Sending the list does check it.
 	b.try(t, b.sato, "member.rescope", m{"course_id": b.course, "member_id": b.tutorM, "listed_students": []uuid.UUID{b.yukiM}}, apperr.FailedPrecondition)
+}
+
+// ---------------------------------------------------------------------------
+// Lock order: calls held at a chosen point, and what may happen meanwhile
+// ---------------------------------------------------------------------------
+
+type callResult struct {
+	out pipeline.Outcome
+	err error
+}
+
+// inFlight starts a call and returns where its result will arrive.
+func (b *built) inFlight(actor uuid.UUID, name string, args m, key string) <-chan callResult {
+	done := make(chan callResult, 1)
+	go func() {
+		out, err := b.Call(actor, name, args, key)
+		done <- callResult{out, err}
+	}()
+	return done
+}
+
+// heldBy runs sql in a transaction on a connection of its own, which keeps
+// its locks until release is called.
+func heldBy(t *testing.T, b *built, sql string, args ...any) (release func()) {
+	t.Helper()
+	ctx := t.Context()
+	conn, err := pgx.Connect(ctx, b.Pool.Config().ConnConfig.ConnString())
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx, err := conn.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(ctx, sql, args...); err != nil {
+		t.Fatal(err)
+	}
+	var once sync.Once
+	release = func() { once.Do(func() { _ = tx.Commit(ctx); _ = conn.Close(ctx) }) }
+	t.Cleanup(release)
+	return release
+}
+
+// waitingFor waits until n lock waits are held up in the test's database; a
+// call in back that has already returned means it did not wait.
+func (b *built) waitingFor(t *testing.T, n int, back ...<-chan callResult) {
+	t.Helper()
+	for deadline := time.Now().Add(10 * time.Second); b.Count(`SELECT count(*) FROM pg_locks l
+		JOIN pg_stat_activity a ON a.pid = l.pid WHERE NOT l.granted AND a.datname = current_database()`) < n; {
+		for _, c := range back {
+			if len(c) > 0 {
+				r := <-c
+				t.Fatalf("a call came back instead of waiting: %v %+v", r.err, r.out)
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("fewer than %d calls ever waited", n)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// settled fails if the call lost a deadlock, and returns what it came back with.
+func settled(t *testing.T, c <-chan callResult) pipeline.Outcome {
+	t.Helper()
+	select {
+	case r := <-c:
+		if r.err != nil || strings.Contains(string(r.out.Result), "collided") || (r.out.Error != nil && strings.Contains(r.out.Error.Message, "collided")) {
+			t.Fatalf("a call lost a deadlock: %v %+v", r.err, r.out)
+		}
+		return r.out
+	case <-time.After(30 * time.Second):
+		t.Fatal("a call never came back")
+	}
+	return pipeline.Outcome{}
+}
+
+// A retry of a call still in flight waits for it holding nothing, then
+// replays it. Here the call is an approval of a change to the approver's own
+// seat, which locks that seat FOR UPDATE; a retry holding the seat shared
+// while it waited for the first call's key would deadlock with it.
+func TestARetryWaitsForItsCallHoldingNothing(t *testing.T) {
+	b := build(t)
+	helper := testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", m{"kind": "agent", "display_name": "Helper"})).ActorID
+	b.do(t, b.sato, "member.add", m{"course_id": b.course, "actor_id": helper, "preset": "ta", "perms": m{"member_manage": "confirm_required"}})
+	prop := b.MustCall(helper, "member.update_perms", m{"course_id": b.course, "member_id": b.satoM, "perms": m{"grade_post": "confirm_required"}}, "narrow-sato")
+	if prop.Status != domain.StatusProposed {
+		t.Fatalf("proposal: %+v", prop)
+	}
+	release := heldBy(t, b, `SELECT 1 FROM action WHERE id = $1 FOR UPDATE`, prop.ActionID)
+	approve := m{"course_id": b.course, "action_id": prop.ActionID, "decision": "approve"}
+	first := b.inFlight(b.sato, "action.decide", approve, "approve")
+	b.waitingFor(t, 1, first)
+	retry := b.inFlight(b.sato, "action.decide", approve, "approve")
+	b.waitingFor(t, 2, first, retry)
+	release()
+	if out := settled(t, first); out.Status != domain.StatusExecuted || out.Replayed {
+		t.Fatalf("the approval: %+v", out)
+	}
+	if out := settled(t, retry); !out.Replayed {
+		t.Fatalf("the retry was not a replay: %+v", out)
+	}
+}
+
+// Pausing a member waits for an approval of their proposal that is under way,
+// and an approval waits for a pause under way and sees it: the proposer's
+// seat is taken before the proposal, the order a change to the seat takes.
+func TestAnApprovalHoldsTheProposersSeat(t *testing.T) {
+	b := build(t)
+	work := b.submit(t, b.yuki, "essay")
+	prop := b.MustCall(b.grader, "grade.submit", m{"course_id": b.course, "submission_id": work, "score": 70}, "p")
+	if prop.Status != domain.StatusProposed {
+		t.Fatalf("proposal: %+v", prop)
+	}
+	// The approval is under way, re-checking the proposal, when the pause
+	// comes: it has read the proposer's seat and is waiting for the work.
+	release := heldBy(t, b, `SELECT 1 FROM submission WHERE id = $1 FOR UPDATE`, work)
+	approval := b.inFlight(b.sato, "action.decide", m{"course_id": b.course, "action_id": prop.ActionID, "decision": "approve"}, "approve")
+	b.waitingFor(t, 1, approval)
+	pause := b.inFlight(b.sato, "member.pause", m{"course_id": b.course, "member_id": b.graderM}, "pause")
+	b.waitingFor(t, 2, approval, pause)
+	release()
+	if out := settled(t, approval); !strings.Contains(string(out.Result), `"outcome":"executed"`) {
+		t.Fatalf("the approval: %+v", out)
+	}
+	if out := settled(t, pause); out.Status != domain.StatusExecuted {
+		t.Fatalf("the pause: %+v", out)
+	}
+}
+
+// Changing a student's seat and writing an event that names the student do
+// not deadlock: the event's writer takes the seat before the course's event
+// stream, so it never holds the stream while it waits for the seat.
+func TestAnEventNamingAStudentTakesTheSeatFirst(t *testing.T) {
+	b := build(t)
+	work := b.submit(t, b.yuki, "essay")
+	// The course's event stream is busy (see events.Flush for its key).
+	h := fnv.New32a()
+	_, _ = h.Write(b.course[:])
+	release := heldBy(t, b, `SELECT pg_advisory_xact_lock($1::int4, $2::int4)`, int32(0x41495345), int32(h.Sum32()))
+	lateness := b.inFlight(b.sato, "submission.set_lateness", m{"course_id": b.course, "submission_id": work, "state": "late"}, "late")
+	b.waitingFor(t, 1, lateness)
+	pause := b.inFlight(b.sato, "member.pause", m{"course_id": b.course, "member_id": b.yukiM}, "pause")
+	b.waitingFor(t, 2, lateness, pause)
+	release()
+	if out := settled(t, lateness); out.Status != domain.StatusExecuted {
+		t.Fatalf("the lateness correction: %+v", out)
+	}
+	if out := settled(t, pause); out.Status != domain.StatusExecuted {
+		t.Fatalf("the pause: %+v", out)
+	}
+}
+
+// Seating an actor over their expired seat removes that seat as any removal
+// does: after the member's calls in flight, cancelling what they proposed. A
+// seat the sweep removes meanwhile is simply out of the way.
+func TestReseatingOverAnExpiredSeatWaitsForItsCalls(t *testing.T) {
+	b := build(t)
+	work := b.submit(t, b.yuki, "essay")
+	b.do(t, b.sato, "member.rescope", m{"course_id": b.course, "member_id": b.graderM, "expires_at": time.Now().Add(time.Hour)})
+	release := heldBy(t, b, `SELECT 1 FROM submission WHERE id = $1 FOR UPDATE`, work)
+	proposing := b.inFlight(b.grader, "grade.submit", m{"course_id": b.course, "submission_id": work, "score": 70}, "p")
+	b.waitingFor(t, 1, proposing)
+	b.P.SetClock(func() time.Time { return time.Now().Add(2 * time.Hour) })
+	reseat := b.inFlight(b.sato, "member.add", m{"course_id": b.course, "actor_id": b.grader, "preset": "grader"}, "reseat")
+	b.waitingFor(t, 2, proposing, reseat)
+	release()
+	settled(t, proposing)
+	if out := settled(t, reseat); out.Status != domain.StatusExecuted {
+		t.Fatalf("re-seating: %+v", out)
+	}
+	if n := b.Count(`SELECT count(*) FROM action WHERE member_id = $1 AND status = 'proposed'`, b.graderM); n != 0 {
+		t.Fatalf("%d proposals outlived the expired seat they were made from", n)
+	}
+
+	// The sweep removes Ken's expired seat while he is being seated again.
+	b.P.SetClock(time.Now)
+	b.do(t, b.sato, "member.rescope", m{"course_id": b.course, "member_id": b.kenM, "expires_at": time.Now().Add(time.Hour)})
+	b.P.SetClock(func() time.Time { return time.Now().Add(2 * time.Hour) })
+	release = heldBy(t, b, `UPDATE course_member SET status = 'removed' WHERE id = $1`, b.kenM)
+	again := b.inFlight(b.sato, "member.add", m{"course_id": b.course, "actor_id": b.ken, "preset": "student"}, "ken-again")
+	b.waitingFor(t, 1, again)
+	release()
+	if out := settled(t, again); out.Status != domain.StatusExecuted {
+		t.Fatalf("seating Ken again as the sweep removed his seat: %+v", out)
+	}
 }

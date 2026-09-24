@@ -111,6 +111,7 @@ func (q *Queries) CountStudentsOfCourse(ctx context.Context, arg CountStudentsOf
 
 const getLiveMembership = `-- name: GetLiveMembership :one
 SELECT id, status, expires_at FROM course_member WHERE course_id = $1 AND actor_id = $2 AND status <> 'removed'
+FOR UPDATE
 `
 
 type GetLiveMembershipParams struct {
@@ -124,6 +125,10 @@ type GetLiveMembershipRow struct {
 	ExpiresAt *time.Time
 }
 
+// Locked, as every removal locks the seat it removes: a seat past its expiry
+// is removed on the spot, and that waits for its member's calls in flight
+// and cancels what they proposed. If the sweep removes it first, the row no
+// longer matches once the lock is had, and there is nothing in the way.
 func (q *Queries) GetLiveMembership(ctx context.Context, arg GetLiveMembershipParams) (GetLiveMembershipRow, error) {
 	row := q.db.QueryRow(ctx, getLiveMembership, arg.CourseID, arg.ActorID)
 	var i GetLiveMembershipRow
@@ -612,4 +617,16 @@ func (q *Queries) SetMemberStatus(ctx context.Context, arg SetMemberStatusParams
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+const shareSeats = `-- name: ShareSeats :exec
+SELECT 1 FROM course_member WHERE id = ANY($1::uuid[]) ORDER BY id FOR KEY SHARE
+`
+
+// KEY SHARE on the given seats, in id order: what taking them before some
+// other lock looks like, where that lock would otherwise be held while one of
+// them is waited for.
+func (q *Queries) ShareSeats(ctx context.Context, ids []uuid.UUID) error {
+	_, err := q.db.Exec(ctx, shareSeats, ids)
+	return err
 }
