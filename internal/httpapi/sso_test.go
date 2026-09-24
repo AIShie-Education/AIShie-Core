@@ -362,15 +362,19 @@ func TestSingleSignOnRejectsWhatItCannotVerify(t *testing.T) {
 }
 
 // return_to is followed after signing in, with this site's name on the
-// redirect. It goes to this server or to the front end, and nowhere else.
+// redirect. It goes to this server or to the front end, and nowhere else;
+// and it is no longer than a cookie can carry.
 func TestSingleSignOnDoesNotRedirectElsewhere(t *testing.T) {
 	a := newSSO(t)
 	a.link(a.c.Sato, "sato@polyu.edu.hk")
+	long := "/courses/1?q=" + strings.Repeat("a", 2<<10-len("/courses/1?q="))
 	for want, tries := range map[string][]string{
 		frontEnd + "/": {"", "https://evil.example/", "//evil.example/x", `/\evil.example`, `\\evil.example`, "https://lms.example.edu.evil.example/",
-			"https://lms.example.edu@evil.example/", "http://lms.example.edu/", "javascript:alert(1)", "evil.example", "/\t/evil.example", "https:evil.example"},
+			"https://lms.example.edu@evil.example/", "http://lms.example.edu/", "javascript:alert(1)", "evil.example", "/\t/evil.example", "https:evil.example",
+			long + "a"},
 		"/courses/1?tab=grades":            {"/courses/1?tab=grades"},
 		frontEnd + "/courses/1#submission": {frontEnd + "/courses/1#submission"},
+		long:                               {long},
 	} {
 		for _, returnTo := range tries {
 			b := browser()

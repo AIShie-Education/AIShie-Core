@@ -398,6 +398,13 @@ func TestARefusalRepeatsLittleOfWhatItRefuses(t *testing.T) {
 	if r.Status != http.StatusUnauthorized || len(r.Raw) > most {
 		t.Errorf("the identity provider's refusal: %d, %d bytes: %.300s", r.Status, len(r.Raw), r.Raw)
 	}
+	// Not a refusal, but as early and as open: where to go after signing
+	// in, which the start carries in a cookie, escaped for JSON and then in
+	// base64.
+	r = s.do(browser(), "GET", "/v1/auth/sso/start?return_to=/"+url.QueryEscape(big[:1<<18]), "", nil)
+	if n := len(r.Raw) + headerBytes(r.Header); r.Status != http.StatusFound || n > most {
+		t.Errorf("the start of a sign-in: %d, %d bytes", r.Status, n)
+	}
 }
 
 // headerBytes is about what a response's headers take on the wire. They
