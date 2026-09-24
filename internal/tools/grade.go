@@ -94,6 +94,15 @@ type GradeContent struct {
 	FeedbackFiles   []FeedbackFile   `json:"feedback_files,omitempty" jsonschema:"files to return with the grade, uploaded beforehand"`
 }
 
+// uploads are the feedback files' upload tokens, for checkUploadAge.
+func (c GradeContent) uploads() []string {
+	tokens := make([]string, len(c.FeedbackFiles))
+	for i, f := range c.FeedbackFiles {
+		tokens[i] = f.UploadToken
+	}
+	return tokens
+}
+
 // ---------------------------------------------------------------------------
 // grade.submit
 // ---------------------------------------------------------------------------
@@ -359,7 +368,10 @@ func gradeSubmit(d Deps) tool.Tool {
 			_, err = checkContent(ctx, q, s, in.GradeContent)
 			return err
 		},
-		Pin: func(ctx context.Context, q dbq.Querier, in GradeSubmitIn) (GradeSubmitIn, error) {
+		Pin: func(ctx context.Context, q dbq.Querier, now time.Time, in GradeSubmitIn) (GradeSubmitIn, error) {
+			if err := checkUploadAge(ctx, d, now, in.uploads()...); err != nil {
+				return in, err
+			}
 			s, err := load(ctx, q, in)
 			if err != nil {
 				return in, err
@@ -630,7 +642,7 @@ func gradePost() tool.Tool {
 		// nobody who could release it, so the proposal names the drafts it
 		// was made about, beside the assignment; stillWaiting is what
 		// approving it posts of them.
-		Pin: func(ctx context.Context, q dbq.Querier, in GradePostIn) (GradePostIn, error) {
+		Pin: func(ctx context.Context, q dbq.Querier, _ time.Time, in GradePostIn) (GradePostIn, error) {
 			if in.AssignmentID == nil {
 				return in, nil
 			}
@@ -873,7 +885,10 @@ func gradeRegrade(d Deps) tool.Tool {
 			}
 			return checkFeedbackFiles(ctx, d, q, m, in.CourseID, in.FeedbackFiles)
 		},
-		Pin: func(ctx context.Context, q dbq.Querier, in GradeRegradeIn) (GradeRegradeIn, error) {
+		Pin: func(ctx context.Context, q dbq.Querier, now time.Time, in GradeRegradeIn) (GradeRegradeIn, error) {
+			if err := checkUploadAge(ctx, d, now, in.uploads()...); err != nil {
+				return in, err
+			}
 			_, s, err := load(ctx, q, in)
 			if err != nil {
 				return in, err

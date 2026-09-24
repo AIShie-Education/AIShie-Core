@@ -105,7 +105,12 @@ func (s *FSStore) Put(_ context.Context, key, contentType string, r io.Reader, m
 		_ = os.Remove(p)
 		return Info{}, ErrTooLarge
 	}
-	info := Info{Size: n, ContentType: contentType, Checksum: "sha256:" + hex.EncodeToString(h.Sum(nil))}
+	written, err := os.Stat(p)
+	if err != nil {
+		_ = os.Remove(p)
+		return Info{}, err
+	}
+	info := Info{Size: n, ContentType: contentType, Checksum: "sha256:" + hex.EncodeToString(h.Sum(nil)), Modified: written.ModTime()}
 	meta, _ := json.Marshal(info)
 	if err := os.WriteFile(p+".meta", meta, 0o640); err != nil { //nolint:gosec // as above
 		_ = os.Remove(p)
@@ -127,7 +132,19 @@ func (s *FSStore) Stat(_ context.Context, key string) (Info, error) {
 		return Info{}, err
 	}
 	var info Info
-	return info, json.Unmarshal(meta, &info)
+	if err := json.Unmarshal(meta, &info); err != nil {
+		return Info{}, err
+	}
+	// When it was written is the file's own, as List reports it.
+	written, err := os.Stat(p)
+	if errors.Is(err, fs.ErrNotExist) {
+		return Info{}, ErrNotFound
+	}
+	if err != nil {
+		return Info{}, err
+	}
+	info.Modified = written.ModTime()
+	return info, nil
 }
 
 func (s *FSStore) Open(ctx context.Context, key string) (io.ReadCloser, Info, error) {

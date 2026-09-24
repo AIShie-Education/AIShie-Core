@@ -294,7 +294,10 @@ its own disk — and hands the token to the tool that attaches the file (`docume
 that this member of this course was given this storage key for this purpose; there is no
 table of pending uploads. Its expiry limits the upload, not the attaching: a proposal carrying
 a feedback file may be approved days later, and `unique(storage_key)` is what stops a file
-being attached twice. Reading returns a short-lived download URL the same way. The storage
+being attached twice. What limits the attaching is the sweep, which removes an upload that
+nothing has attached once it is `PROPOSAL_TTL` plus two days old; and a call that would attach
+one by way of a proposal is refused once the upload is two days old, so that the proposal is
+decided while its files are there. Reading returns a short-lived download URL the same way. The storage
 key is made by the server and is unguessable; nothing the uploader says goes into it.
 
 Once a submission is handed in, its files are frozen with it. The trigger guards the

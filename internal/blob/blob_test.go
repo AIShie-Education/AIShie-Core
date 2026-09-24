@@ -56,7 +56,8 @@ func TestFSStoreRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	// echo -n '%PDF-1.7 the essay' | shasum -a 256
-	if info.Size != int64(len(body)) || info.ContentType != "application/pdf" || !strings.HasPrefix(info.Checksum, "sha256:") || len(info.Checksum) != 71 {
+	if info.Size != int64(len(body)) || info.ContentType != "application/pdf" || !strings.HasPrefix(info.Checksum, "sha256:") || len(info.Checksum) != 71 ||
+		time.Since(info.Modified).Abs() > time.Minute {
 		t.Fatalf("info: %+v", info)
 	}
 	if stat, err := s.Stat(ctx, key); err != nil || stat != info {

@@ -376,7 +376,7 @@ func submissionSubmit() tool.Tool {
 		// The student asks to hand in now, under the instructions they are
 		// reading now. Approved on Thursday, it was still handed in on
 		// Tuesday, so it must still be what it was on Tuesday.
-		Pin: func(ctx context.Context, q dbq.Querier, in SubmissionSubmitIn) (SubmissionSubmitIn, error) {
+		Pin: func(ctx context.Context, q dbq.Querier, _ time.Time, in SubmissionSubmitIn) (SubmissionSubmitIn, error) {
 			s, err := q.GetSubmissionFull(ctx, dbq.GetSubmissionFullParams{ID: in.SubmissionID, CourseID: in.CourseID})
 			if err != nil {
 				return in, err

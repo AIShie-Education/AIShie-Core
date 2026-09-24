@@ -54,8 +54,10 @@ func TestS3Store(t *testing.T) {
 	}
 	res.Body.Close()
 
+	// When it was written is what its age as an upload is told by.
 	info, err := s.Stat(ctx, key)
-	if err != nil || info.Size != int64(len(body)) || info.ContentType != "application/pdf" || info.Checksum == "" {
+	if err != nil || info.Size != int64(len(body)) || info.ContentType != "application/pdf" || info.Checksum == "" ||
+		time.Since(info.Modified).Abs() > time.Minute {
 		t.Fatalf("stat: %+v %v", info, err)
 	}
 	// Listing under a prefix finds what is there and nothing else the bucket

@@ -124,7 +124,9 @@ and a `SIGNING_KEY` shared by every instance. An upload that is not attached
 to a document within `PROPOSAL_TTL` plus two days is removed about an hour
 after that, and can no longer be attached: the sweep goes through the store
 once an hour and removes up to 200 such uploads every `JOBS_INTERVAL`, however
-many attached files it passes on the way. The server keeps its files under
+many attached files it passes on the way. So that no proposal outlives its
+files, a call that would attach an upload by way of a proposal is refused
+once the upload is two days old. The server keeps its files under
 `courses/` (with S3, `attached/courses/` as well) and leaves anything else in
 the directory or bucket alone, uploads under a course its database does not
 have included. Still, two deployments must not share a directory or bucket: a

@@ -47,9 +47,6 @@ const (
 	DefaultInterval  = time.Minute
 	defaultBatch     = 200
 	sessionRetention = 7 * 24 * time.Hour
-	// OrphanGrace is how long past the proposal TTL an unattached upload is
-	// kept. See sweepBlobs.
-	OrphanGrace = 48 * time.Hour
 	// blobSweepEvery: listing every file the server keeps is not something to
 	// do every minute.
 	blobSweepEvery = time.Hour
@@ -222,12 +219,14 @@ func (r *Runner) Sweep(ctx context.Context) (Report, error) {
 // that are not attached yet, and some never are: the tab was closed, the
 // proposal carrying it was rejected, the attaching transaction rolled back
 // after the object had been moved. Which of the unattached ones are still
-// wanted cannot be read from the database — a proposal names its feedback
-// files by upload token, inside its payload — so age decides it. An upload is
-// made before the proposal that names it, and a proposal is decided or
-// cancelled within the TTL; past TTL + OrphanGrace nothing can still be
-// waiting on the file. Without a TTL a proposal may wait for ever, and then
-// nothing is removed at all.
+// wanted cannot be read from the database — a proposal names the files it
+// would attach by upload token, inside its payload — so age decides it. A
+// proposal is decided or cancelled within the TTL, and cannot be made naming
+// an upload already more than tools.OrphanGrace old, going by when the store
+// says it was written, as the sweep does (see checkUploadAge in package
+// tools); so past TTL + OrphanGrace nothing can still be waiting on the file.
+// Without a TTL a proposal may wait for ever, and then nothing is removed at
+// all.
 //
 // An upload token does not expire for attaching (see blob.UploadClaim), so
 // this is also what bounds it: a file not attached within TTL + OrphanGrace
@@ -253,7 +252,7 @@ func (r *Runner) sweepBlobs(ctx context.Context, now time.Time) (int, error) {
 	if r.cfg.Blob == nil || ttl <= 0 || now.Sub(r.blobsSwept) < blobSweepEvery {
 		return 0, nil
 	}
-	cutoff := now.Add(-ttl - OrphanGrace)
+	cutoff := now.Add(-ttl - tools.OrphanGrace)
 	batch := int(r.cfg.Batch)
 	// A tick takes on a batch of orphans, and the next goes on from the last
 	// one it took. What is listed is put to the database a page of old files

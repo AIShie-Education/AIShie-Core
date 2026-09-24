@@ -26,6 +26,10 @@ type Info struct {
 	// Checksum is "sha256:<hex>" when the store computed it from the bytes,
 	// or "etag:<value>" when all it has is the object store's own tag.
 	Checksum string
+	// Modified is when the object was last written, by the store's clock:
+	// the time List reports, and the orphan sweep judges an upload's age by.
+	// It is not recorded.
+	Modified time.Time `json:"-"`
 }
 
 // Store is what the tool layer needs from object storage.

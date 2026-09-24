@@ -82,7 +82,7 @@ func (s *S3Store) Stat(ctx context.Context, key string) (Info, error) {
 	}
 	// A presigned PUT gives the store no chance to demand a SHA-256, so the
 	// object's ETag is what there is. It still changes when the bytes do.
-	return Info{Size: o.Size, ContentType: o.ContentType, Checksum: "etag:" + o.ETag}, nil
+	return Info{Size: o.Size, ContentType: o.ContentType, Checksum: "etag:" + o.ETag, Modified: o.LastModified}, nil
 }
 
 // attachedPrefix holds objects that document versions point at. No presigned

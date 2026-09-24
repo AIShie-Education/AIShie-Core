@@ -72,7 +72,13 @@ func (f *fixture) sweep(t *testing.T) jobs.Report {
 // upload gets an upload URL from Sato and PUTs a file to it.
 func (f *fixture) upload(t *testing.T) (token, key string) {
 	t.Helper()
-	out := f.MustCall(f.Sato, "document.upload_url", m{"course_id": f.Course, "kind": "material", "content_type": "text/plain"}, "")
+	return f.uploadAs(t, f.Sato, "material")
+}
+
+// uploadAs is upload by someone else, or for something else.
+func (f *fixture) uploadAs(t *testing.T, actor uuid.UUID, kind string) (token, key string) {
+	t.Helper()
+	out := f.MustCall(actor, "document.upload_url", m{"course_id": f.Course, "kind": kind, "content_type": "text/plain"}, "")
 	u := testkit.Result[tools.UploadURLOut](t, out)
 	key, ct, err := f.Blob.Redeem(strings.TrimPrefix(u.UploadURL, "http://lms.test"+blob.BlobPath), "PUT")
 	if err != nil {
@@ -423,7 +429,7 @@ func TestOrphanFilesAreRemoved(t *testing.T) {
 	}
 	decide(toApprove, "approve")
 
-	f.now = f.now.Add(jobs.OrphanGrace + 2*time.Hour)
+	f.now = f.now.Add(tools.OrphanGrace + 2*time.Hour)
 	if rep := f.sweep(t); rep.OrphanFilesRemoved != 2 {
 		t.Fatalf("%+v, want the abandoned upload and the rejected proposal's file removed", rep)
 	}
@@ -455,6 +461,42 @@ func TestOrphanFilesAreRemoved(t *testing.T) {
 	rep, err := jobs.New(f.Pool, patient, f.system, jobs.Config{Blob: f.Blob}, nil).Sweep(ctx)
 	if err != nil || rep.OrphanFilesRemoved != 0 || !exists(kept) {
 		t.Fatalf("with no proposal TTL: %+v, %v", rep, err)
+	}
+}
+
+// A proposal is decided within the TTL of being made, and cannot be made
+// naming an upload more than OrphanGrace old; an upload that nothing has
+// attached is kept until it is TTL + OrphanGrace old. So the file named by a
+// proposal made just short of OrphanGrace after the upload is still there
+// on the proposal's last day, however the store keeps it, and approving the
+// proposal then attaches it.
+func TestAnUploadOutlastsTheProposalThatNamesIt(t *testing.T) {
+	for name, wrap := range stores {
+		t.Run(name, func(t *testing.T) {
+			f := setupWith(t, 1, wrap)
+			store := wrap(f.Blob)
+			f.runner = jobs.New(f.Pool, f.P, f.system, jobs.Config{Blob: store}, nil)
+			token, key := f.uploadAs(t, f.Grader, "feedback")
+
+			f.now = f.now.Add(tools.OrphanGrace - time.Minute)
+			out := f.MustCall(f.Grader, "grade.submit", m{"course_id": f.Course, "submission_id": f.Students[0].HW3, "score": 70,
+				"feedback_files": []m{{"title": "notes.txt", "upload_token": token}}}, "propose")
+			if out.Status != domain.StatusProposed {
+				t.Fatalf("a proposal naming an upload just short of %v old: %+v", tools.OrphanGrace, out)
+			}
+			f.now = f.now.Add(pipeline.DefaultProposalTTL - time.Hour)
+			if rep := f.sweep(t); rep.OrphanFilesRemoved != 0 {
+				t.Fatalf("%+v, with a proposal still waiting on the file", rep)
+			}
+			decided := testkit.Result[pipeline.DecideOut](t, f.MustCall(f.Sato, "action.decide",
+				m{"course_id": f.Course, "action_id": *out.ActionID, "decision": "approve"}, "approve"))
+			if decided.Outcome != domain.StatusExecuted {
+				t.Fatalf("approving on the proposal's last day: %+v", decided)
+			}
+			if n := f.Count(`SELECT count(*) FROM document_version WHERE storage_key = $1`, store.FinalKey(key)); n != 1 {
+				t.Fatal("the file was not attached")
+			}
+		})
 	}
 }
 
@@ -497,7 +539,7 @@ func TestTheSweepRemovesOnlyTheServersOwnFiles(t *testing.T) {
 				}
 			}
 
-			f.now = f.now.Add(pipeline.DefaultProposalTTL + jobs.OrphanGrace + time.Hour)
+			f.now = f.now.Add(pipeline.DefaultProposalTTL + tools.OrphanGrace + time.Hour)
 			if rep := f.sweep(t); rep.OrphanFilesRemoved != 2 {
 				t.Fatalf("%+v, want the two old files of ours removed", rep)
 			}
@@ -564,7 +606,7 @@ func TestTheSweepGetsPastAttachedFiles(t *testing.T) {
 				orphans = append(orphans, store.FinalKey(key))
 			}
 
-			f.now = f.now.Add(pipeline.DefaultProposalTTL + jobs.OrphanGrace + time.Hour)
+			f.now = f.now.Add(pipeline.DefaultProposalTTL + tools.OrphanGrace + time.Hour)
 			gone := func(key string) bool {
 				_, err := os.Stat(filepath.Join(f.Blob.Root(), filepath.FromSlash(key)))
 				return errors.Is(err, fs.ErrNotExist)
@@ -620,7 +662,7 @@ func TestTheSweepGetsPastFilesItCannotRemove(t *testing.T) {
 	}
 	store.keep[orphans[0]], store.keep[orphans[1]] = true, true
 
-	f.now = f.now.Add(pipeline.DefaultProposalTTL + jobs.OrphanGrace + time.Hour)
+	f.now = f.now.Add(pipeline.DefaultProposalTTL + tools.OrphanGrace + time.Hour)
 	if rep := f.sweep(t); rep.OrphanFilesRemoved != 0 {
 		t.Fatalf("%+v, and the store deletes neither of the first two", rep)
 	}

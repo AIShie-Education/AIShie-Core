@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"errors"
+	"strconv"
 	"strings"
 	"time"
 
@@ -158,12 +159,19 @@ type UploadURLOut struct {
 // a bucket or directory that holds other things as well loses none of them.
 const UploadPrefix = "courses/"
 
+// OrphanGrace is how long past the proposal TTL the orphan sweep keeps an
+// upload that nothing has attached (see jobs.sweepBlobs), and so how old an
+// upload may be when a proposal that would attach it is made: a proposal is
+// decided within the TTL, and the file it names is there all that time.
+const OrphanGrace = 48 * time.Hour
+
 func documentUploadURL(d Deps) tool.Tool {
 	return tool.Define(tool.Spec[UploadURLIn, UploadURLOut]{
 		Name: "document.upload_url",
 		Description: "Get somewhere to upload a file. Files do not travel through tool calls: PUT the bytes to the URL this " +
 			"returns, then pass the upload_token to the tool that attaches it. Nothing is recorded until then, and an upload " +
-			"that is never attached is eventually discarded.",
+			"that is never attached is eventually discarded. A call that would attach it by way of a proposal is refused once " +
+			"the upload is more than " + strconv.Itoa(int(OrphanGrace.Hours())) + " hours old.",
 		Kind: tool.Read, Gate: anyDocumentWrite,
 		HTTP: tool.Route{Method: "GET", Pattern: "/v1/courses/{course_id}/upload-url"},
 		Resolve: func(_ context.Context, _ dbq.Querier, in UploadURLIn) (tool.Target, error) {
@@ -287,6 +295,47 @@ func claimUpload(ctx context.Context, d Deps, q dbq.Querier, m *domain.Member, c
 	return upload{key: final, info: info}, nil
 }
 
+// checkUploadAge refuses uploads that a proposal made now could outlive. A
+// proposal waits up to the TTL for its decision, and the sweep removes an
+// upload nothing has attached once it is TTL + OrphanGrace old, so what a
+// proposal names must be no older than OrphanGrace when it is made. The age
+// is the store's, which is what the sweep goes by.
+//
+// It is for Pin. A direct call attaches the file there and then, and an
+// approval carries out a proposal that was held to this when it was made,
+// however old the file is by the time it is approved. A token that is not
+// good, or names nothing uploaded yet, is let by: the call that attaches it
+// says what is wrong, and an upload still to come is younger than the
+// proposal.
+func checkUploadAge(ctx context.Context, d Deps, now time.Time, tokens ...string) error {
+	if d.Blob == nil {
+		return nil
+	}
+	for _, token := range tokens {
+		c, err := d.Uploads.VerifyUpload(token)
+		if err != nil {
+			continue
+		}
+		info, err := d.Blob.Stat(ctx, c.Key)
+		if errors.Is(err, blob.ErrNotFound) {
+			// Moved already, by an attach that did not commit; see
+			// claimUpload.
+			info, err = d.Blob.Stat(ctx, d.Blob.FinalKey(c.Key))
+		}
+		if errors.Is(err, blob.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if info.Modified.Before(now.Add(-OrphanGrace)) {
+			return apperr.Precondition("that upload is more than %d hours old and may be discarded before the proposal is decided; upload the file again",
+				int(OrphanGrace.Hours()))
+		}
+	}
+	return nil
+}
+
 // Content is what a version holds: text, a file, or both.
 type Content struct {
 	BodyMD      *string `json:"body_md,omitempty" jsonschema:"markdown text"`
@@ -294,6 +343,14 @@ type Content struct {
 }
 
 func (c Content) empty() bool { return (c.BodyMD == nil || *c.BodyMD == "") && c.UploadToken == nil }
+
+// uploads is the upload token the content names, if any, for checkUploadAge.
+func (c Content) uploads() []string {
+	if c.UploadToken == nil {
+		return nil
+	}
+	return []string{*c.UploadToken}
+}
 
 // insertVersion writes one version. The author is the calling member, who is
 // a member of the document's course because the call was authorized in it —
@@ -377,6 +434,10 @@ func documentCreate(d Deps) tool.Tool {
 				return t, apperr.Invalid("kind must be material, instructions, rubric, submission or feedback")
 			}
 			return t, nil
+		},
+		// The file must still be there when the proposal is approved.
+		Pin: func(ctx context.Context, _ dbq.Querier, now time.Time, in DocumentCreateIn) (DocumentCreateIn, error) {
+			return in, checkUploadAge(ctx, d, now, in.uploads()...)
 		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in DocumentCreateIn) (DocumentCreateOut, error) {
 			if strings.TrimSpace(in.Title) == "" {
@@ -464,6 +525,10 @@ func documentAddVersion(d Deps) tool.Tool {
 		Resolve: func(ctx context.Context, q dbq.Querier, in DocumentAddVersionIn) (tool.Target, error) {
 			return documentTarget(ctx, q, in.CourseID, in.DocumentID, writePerm)
 		},
+		// As document.create.
+		Pin: func(ctx context.Context, _ dbq.Querier, now time.Time, in DocumentAddVersionIn) (DocumentAddVersionIn, error) {
+			return in, checkUploadAge(ctx, d, now, in.uploads()...)
+		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in DocumentAddVersionIn) (DocumentVersionOut, error) {
 			if err := ec.Q.LockDocument(ctx, in.DocumentID); err != nil {
 				return DocumentVersionOut{}, err
@@ -535,7 +600,7 @@ func documentPublish() tool.Tool {
 		// the proposal waits has been read by nobody who asked for it to be
 		// published, and approving must not put it in front of the class, so
 		// the proposal names the version it was made about.
-		Pin: func(ctx context.Context, q dbq.Querier, in DocumentPublishIn) (DocumentPublishIn, error) {
+		Pin: func(ctx context.Context, q dbq.Querier, _ time.Time, in DocumentPublishIn) (DocumentPublishIn, error) {
 			if in.VersionID != nil {
 				return in, nil
 			}
