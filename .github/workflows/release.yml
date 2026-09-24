@@ -118,8 +118,12 @@ jobs:
           else
             echo "No schema changes in this release${PREV:+ since $PREV}." > "$footer"
           fi
-          # The changelog starts where the migration list does.
-          if [ -n "$PREV" ]; then echo "GORELEASER_PREVIOUS_TAG=$PREV" >> "$GITHUB_ENV"; fi
+          # The changelog starts where the migration list does: at the tag it
+          # is compared with or, when there is none, at the first commit. Left
+          # to itself, GoReleaser would start the first stable release at the
+          # pre-release before it.
+          since=${PREV:-$(git rev-list --max-parents=0 HEAD | tail -1)}
+          echo "GORELEASER_PREVIOUS_TAG=$since" >> "$GITHUB_ENV"
       - uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
         with:
           version: ${{ env.GORELEASER_VERSION }}
