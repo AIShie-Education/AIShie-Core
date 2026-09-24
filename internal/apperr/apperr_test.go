@@ -9,12 +9,12 @@ import (
 )
 
 // A message that repeats a megabyte is cut short, between two characters,
-// and says how long it was.
+// and says how long it was, in 400 bytes all told.
 func TestALongMessageIsCutBetweenCharacters(t *testing.T) {
 	for _, r := range []string{"<", "é", "あ", "😀"} {
 		long := strings.Repeat(r, 1<<20)
 		msg := apperr.Invalid("the value %q does not parse", long).Message
-		if len(msg) > 512 || !utf8.ValidString(msg) || !strings.HasPrefix(msg, `the value "`+r) || !strings.HasSuffix(msg, " bytes)") {
+		if len(msg) > 400 || !utf8.ValidString(msg) || !strings.HasPrefix(msg, `the value "`+r) || !strings.HasSuffix(msg, " bytes)") {
 			t.Errorf("%s: %d bytes: %q", r, len(msg), msg)
 		}
 	}
