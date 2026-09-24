@@ -258,7 +258,9 @@ type Querier interface {
 	// A new draft replaces earlier drafts for the same submission.
 	SupersedeSubmissionDrafts(ctx context.Context, arg SupersedeSubmissionDraftsParams) error
 	TermExists(ctx context.Context, id uuid.UUID) (bool, error)
-	// At most one write a minute per credential, however busy it is.
+	// At most one write a minute per credential, however busy it is. The cast is
+	// needed: left to itself, PostgreSQL reads $2 - interval as interval - interval,
+	// and every call fails.
 	TouchCredential(ctx context.Context, arg TouchCredentialParams) error
 	TryJobLock(ctx context.Context, key int64) (bool, error)
 	UpdateAssignment(ctx context.Context, arg UpdateAssignmentParams) error

@@ -265,7 +265,7 @@ func (q *Queries) RevokePasswordCredentials(ctx context.Context, arg RevokePassw
 
 const touchCredential = `-- name: TouchCredential :exec
 UPDATE credential SET last_used_at = $2
-WHERE id = $1 AND (last_used_at IS NULL OR last_used_at < $2 - interval '1 minute')
+WHERE id = $1 AND (last_used_at IS NULL OR last_used_at < $2::timestamptz - interval '1 minute')
 `
 
 type TouchCredentialParams struct {
@@ -273,7 +273,9 @@ type TouchCredentialParams struct {
 	LastUsedAt *time.Time
 }
 
-// At most one write a minute per credential, however busy it is.
+// At most one write a minute per credential, however busy it is. The cast is
+// needed: left to itself, PostgreSQL reads $2 - interval as interval - interval,
+// and every call fails.
 func (q *Queries) TouchCredential(ctx context.Context, arg TouchCredentialParams) error {
 	_, err := q.db.Exec(ctx, touchCredential, arg.ID, arg.LastUsedAt)
 	return err

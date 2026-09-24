@@ -114,12 +114,14 @@ jobs:
         with:
           go-version-file: go.mod
       # A service container cannot be given the `server /data` command MinIO
-      # needs, so it is started by hand.
+      # needs, so it is started by hand. Docker Hub no longer has minio/minio;
+      # quay.io keeps the last community release, and the same one is in
+      # docker-compose.yml.
       - name: Start MinIO
         run: |
           docker run -d --name minio -p 9000:9000 \
             -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
-            minio/minio server /data
+            quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z server /data
           for _ in $(seq 1 30); do curl -sf http://localhost:9000/minio/health/live && exit 0; sleep 1; done
           docker logs minio; exit 1
       - run: make test-s3

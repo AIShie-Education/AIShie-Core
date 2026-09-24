@@ -133,6 +133,39 @@ func TestBootstrapAndAuthenticate(t *testing.T) {
 	}
 }
 
+// A credential notes when it was last used, for its holder's list of tokens,
+// and writes that at most once a minute however busy it is.
+func TestAUseIsNotedAtMostOnceAMinute(t *testing.T) {
+	pool := testdb.New(t)
+	ctx := context.Background()
+	res, err := auth.Bootstrap(ctx, pool, auth.BootstrapInput{DisplayName: "Root"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := auth.NewAuthenticator(pool, time.Hour)
+	t0 := time.Now().Truncate(time.Second)
+	for _, step := range []struct {
+		at, noted time.Time
+	}{
+		{t0, t0},
+		{t0.Add(30 * time.Second), t0},
+		{t0.Add(61 * time.Second), t0.Add(61 * time.Second)},
+	} {
+		a.SetClock(func() time.Time { return step.at })
+		p, err := a.Authenticate(ctx, res.Token.Full)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var noted *time.Time
+		if err := pool.QueryRow(ctx, `SELECT last_used_at FROM credential WHERE id = $1`, p.CredentialID).Scan(&noted); err != nil {
+			t.Fatal(err)
+		}
+		if noted == nil || !noted.Equal(step.noted) {
+			t.Fatalf("used at %s: last_used_at = %v, want %s", step.at, noted, step.noted)
+		}
+	}
+}
+
 func TestLogin(t *testing.T) {
 	pool := testdb.New(t)
 	ctx := context.Background()

@@ -7,9 +7,11 @@ FROM credential
 WHERE token_prefix = $1 AND kind IN ('api_token', 'session');
 
 -- name: TouchCredential :exec
--- At most one write a minute per credential, however busy it is.
+-- At most one write a minute per credential, however busy it is. The cast is
+-- needed: left to itself, PostgreSQL reads $2 - interval as interval - interval,
+-- and every call fails.
 UPDATE credential SET last_used_at = $2
-WHERE id = $1 AND (last_used_at IS NULL OR last_used_at < $2 - interval '1 minute');
+WHERE id = $1 AND (last_used_at IS NULL OR last_used_at < $2::timestamptz - interval '1 minute');
 
 -- name: InsertCredential :exec
 INSERT INTO credential (id, actor_id, kind, secret_hash, provider, subject, token_prefix, label, expires_at, created_at)
