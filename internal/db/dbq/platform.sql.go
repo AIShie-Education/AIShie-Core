@@ -34,6 +34,68 @@ func (q *Queries) EmailTaken(ctx context.Context, lower string) (bool, error) {
 	return exists, err
 }
 
+const emailTakenByAnother = `-- name: EmailTakenByAnother :one
+SELECT EXISTS (SELECT 1 FROM actor WHERE lower(email) = lower($1) AND id <> $2)
+`
+
+type EmailTakenByAnotherParams struct {
+	Email string
+	ID    uuid.UUID
+}
+
+func (q *Queries) EmailTakenByAnother(ctx context.Context, arg EmailTakenByAnotherParams) (bool, error) {
+	row := q.db.QueryRow(ctx, emailTakenByAnother, arg.Email, arg.ID)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
+}
+
+const getActorView = `-- name: GetActorView :one
+SELECT a.id, a.kind, a.display_name, a.email, a.status, a.platform_role, a.created_by_actor_id, a.created_at,
+       EXISTS (SELECT 1 FROM credential p WHERE p.actor_id = a.id AND p.kind = 'password' AND p.revoked_at IS NULL) AS has_password,
+       EXISTS (SELECT 1 FROM credential s WHERE s.actor_id = a.id AND s.kind = 'sso' AND s.revoked_at IS NULL) AS has_sso,
+       i.expires_at AS invite_expires_at
+FROM actor a
+LEFT JOIN credential i ON i.actor_id = a.id AND i.kind = 'invite' AND i.revoked_at IS NULL
+WHERE a.id = $1
+`
+
+type GetActorViewRow struct {
+	ID               uuid.UUID
+	Kind             string
+	DisplayName      string
+	Email            *string
+	Status           string
+	PlatformRole     *string
+	CreatedByActorID *uuid.UUID
+	CreatedAt        time.Time
+	HasPassword      bool
+	HasSso           bool
+	InviteExpiresAt  *time.Time
+}
+
+// One actor as an administrator sees it: the row, and whether they can sign
+// in. At most one invitation is live (credential_one_live_invite), so the
+// join adds no row; it may have expired unused.
+func (q *Queries) GetActorView(ctx context.Context, id uuid.UUID) (GetActorViewRow, error) {
+	row := q.db.QueryRow(ctx, getActorView, id)
+	var i GetActorViewRow
+	err := row.Scan(
+		&i.ID,
+		&i.Kind,
+		&i.DisplayName,
+		&i.Email,
+		&i.Status,
+		&i.PlatformRole,
+		&i.CreatedByActorID,
+		&i.CreatedAt,
+		&i.HasPassword,
+		&i.HasSso,
+		&i.InviteExpiresAt,
+	)
+	return i, err
+}
+
 const getBuiltinPresetByName = `-- name: GetBuiltinPresetByName :one
 SELECT id, dept_id, name, description, role, student_scope, assignment_scope, perm_document_read, perm_document_read_draft, perm_document_write, perm_rubric_read, perm_assignment_write, perm_submission_read, perm_submission_write, perm_grade_read, perm_grade_submit, perm_grade_post, perm_member_read, perm_member_manage, perm_action_decide, created_by_actor_id, created_at FROM permission_preset WHERE name = $1 AND dept_id IS NULL
 `
@@ -240,6 +302,87 @@ func (q *Queries) InsertTerm(ctx context.Context, arg InsertTermParams) error {
 	return err
 }
 
+const listActors = `-- name: ListActors :many
+SELECT a.id, a.kind, a.display_name, a.email, a.status, a.platform_role, a.created_by_actor_id, a.created_at,
+       EXISTS (SELECT 1 FROM credential p WHERE p.actor_id = a.id AND p.kind = 'password' AND p.revoked_at IS NULL) AS has_password,
+       EXISTS (SELECT 1 FROM credential s WHERE s.actor_id = a.id AND s.kind = 'sso' AND s.revoked_at IS NULL) AS has_sso,
+       i.expires_at AS invite_expires_at
+FROM actor a
+LEFT JOIN credential i ON i.actor_id = a.id AND i.kind = 'invite' AND i.revoked_at IS NULL
+WHERE a.id > $1 AND a.kind <> 'system'
+  AND ($2::text IS NULL OR a.kind = $2)
+  AND ($3::text IS NULL OR a.status = $3)
+  AND ($4::text IS NULL
+       OR strpos(lower(a.display_name), lower($4)) > 0
+       OR strpos(lower(coalesce(a.email, '')), lower($4)) > 0)
+ORDER BY a.id
+LIMIT $5
+`
+
+type ListActorsParams struct {
+	After   uuid.UUID
+	Kind    *string
+	Status  *string
+	Search  *string
+	MaxRows int32
+}
+
+type ListActorsRow struct {
+	ID               uuid.UUID
+	Kind             string
+	DisplayName      string
+	Email            *string
+	Status           string
+	PlatformRole     *string
+	CreatedByActorID *uuid.UUID
+	CreatedAt        time.Time
+	HasPassword      bool
+	HasSso           bool
+	InviteExpiresAt  *time.Time
+}
+
+// Everyone registered, as GetActorView sees them: people and agents, not the
+// system actor, which nobody registers or manages. The search is a piece of
+// the name or of the email, in any case, taken as it is: strpos has no
+// wildcards to escape.
+func (q *Queries) ListActors(ctx context.Context, arg ListActorsParams) ([]ListActorsRow, error) {
+	rows, err := q.db.Query(ctx, listActors,
+		arg.After,
+		arg.Kind,
+		arg.Status,
+		arg.Search,
+		arg.MaxRows,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListActorsRow
+	for rows.Next() {
+		var i ListActorsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Kind,
+			&i.DisplayName,
+			&i.Email,
+			&i.Status,
+			&i.PlatformRole,
+			&i.CreatedByActorID,
+			&i.CreatedAt,
+			&i.HasPassword,
+			&i.HasSso,
+			&i.InviteExpiresAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listDepartments = `-- name: ListDepartments :many
 SELECT id, name, created_at FROM department ORDER BY name, id
 `
@@ -369,6 +512,25 @@ func (q *Queries) TermExists(ctx context.Context, id uuid.UUID) (bool, error) {
 	var exists bool
 	err := row.Scan(&exists)
 	return exists, err
+}
+
+const updateActor = `-- name: UpdateActor :exec
+UPDATE actor
+SET display_name = coalesce($1, display_name),
+    email = coalesce($2, email)
+WHERE id = $3
+`
+
+type UpdateActorParams struct {
+	DisplayName *string
+	Email       *string
+	ID          uuid.UUID
+}
+
+// A null leaves the value as it is.
+func (q *Queries) UpdateActor(ctx context.Context, arg UpdateActorParams) error {
+	_, err := q.db.Exec(ctx, updateActor, arg.DisplayName, arg.Email, arg.ID)
+	return err
 }
 
 const updatePreset = `-- name: UpdatePreset :execrows

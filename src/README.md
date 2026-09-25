@@ -26,6 +26,10 @@ src/
                          a trigger refusing to write a credential for the
                          system actor
     0004_no_credential_for_system_actor.down.sql
+    0005_invitations.up.sql
+                         the invite credential kind: a prefix and an expiry,
+                         and one live invitation per actor
+    0005_invitations.down.sql
   seed/
     presets.sql          the six built-in permission presets; safe to re-run
   tests/

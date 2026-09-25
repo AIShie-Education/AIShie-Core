@@ -128,6 +128,7 @@ func NewHandler(d Deps) http.Handler {
 
 	if d.Pipeline != nil {
 		mux.HandleFunc("POST /v1/auth/login", s.login)
+		mux.HandleFunc("POST /v1/auth/invite", s.acceptInvite)
 		if d.SSO != nil {
 			if s.Signer == nil {
 				panic("httpapi: single sign-on needs a Signer for its state cookie")
@@ -410,6 +411,48 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 	}
 	http.SetCookie(w, s.sessionCookie(sess.Token, sess.ExpiresAt))
 	writeJSON(w, http.StatusOK, loginOut{ActorID: sess.ActorID.String(), ExpiresAt: sess.ExpiresAt})
+}
+
+type acceptInviteIn struct {
+	Token    string `json:"token"`
+	Password string `json:"password"`
+}
+
+type acceptInviteOut struct {
+	ActorID   string    `json:"actor_id"`
+	Email     string    `json:"email"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
+// acceptInvite takes up an invitation (actor.invite): the person chooses
+// their password and is signed in, as by login. It is not a tool, for the
+// same reason login is not. Attempts count against the address's sign-in
+// allowance, and one that succeeds has it back, as with login; there is no
+// account to key a second limit on until the invitation is found good, and
+// a wrong one costs no hash.
+func (s *server) acceptInvite(w http.ResponseWriter, r *http.Request) {
+	var in acceptInviteIn
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes)).Decode(&in); err != nil {
+		s.writeError(w, r, apperr.Invalid("the body must be JSON with token and password"))
+		return
+	}
+	addr, known := s.clientAddr(r)
+	if known {
+		if ok, wait := s.SignIns.Allow(addrKey(addr)); !ok {
+			s.tooMany(w, r, wait)
+			return
+		}
+	}
+	acc, err := s.Auth.AcceptInvite(r.Context(), in.Token, in.Password)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	if known {
+		s.SignIns.Refund(addrKey(addr))
+	}
+	http.SetCookie(w, s.sessionCookie(acc.Token, acc.ExpiresAt))
+	writeJSON(w, http.StatusOK, acceptInviteOut{ActorID: acc.ActorID.String(), Email: acc.Email, ExpiresAt: acc.ExpiresAt})
 }
 
 // addrKey is the sign-in limit's key for an address. An IPv6 address is

@@ -22,6 +22,48 @@ UPDATE actor SET status = $2 WHERE id = $1 AND status <> $2;
 -- name: EmailTaken :one
 SELECT EXISTS (SELECT 1 FROM actor WHERE lower(email) = lower($1));
 
+-- name: EmailTakenByAnother :one
+SELECT EXISTS (SELECT 1 FROM actor WHERE lower(email) = lower(sqlc.arg(email)) AND id <> sqlc.arg(id));
+
+-- name: UpdateActor :exec
+-- A null leaves the value as it is.
+UPDATE actor
+SET display_name = coalesce(sqlc.narg(display_name), display_name),
+    email = coalesce(sqlc.narg(email), email)
+WHERE id = sqlc.arg(id);
+
+-- name: GetActorView :one
+-- One actor as an administrator sees it: the row, and whether they can sign
+-- in. At most one invitation is live (credential_one_live_invite), so the
+-- join adds no row; it may have expired unused.
+SELECT a.id, a.kind, a.display_name, a.email, a.status, a.platform_role, a.created_by_actor_id, a.created_at,
+       EXISTS (SELECT 1 FROM credential p WHERE p.actor_id = a.id AND p.kind = 'password' AND p.revoked_at IS NULL) AS has_password,
+       EXISTS (SELECT 1 FROM credential s WHERE s.actor_id = a.id AND s.kind = 'sso' AND s.revoked_at IS NULL) AS has_sso,
+       i.expires_at AS invite_expires_at
+FROM actor a
+LEFT JOIN credential i ON i.actor_id = a.id AND i.kind = 'invite' AND i.revoked_at IS NULL
+WHERE a.id = $1;
+
+-- name: ListActors :many
+-- Everyone registered, as GetActorView sees them: people and agents, not the
+-- system actor, which nobody registers or manages. The search is a piece of
+-- the name or of the email, in any case, taken as it is: strpos has no
+-- wildcards to escape.
+SELECT a.id, a.kind, a.display_name, a.email, a.status, a.platform_role, a.created_by_actor_id, a.created_at,
+       EXISTS (SELECT 1 FROM credential p WHERE p.actor_id = a.id AND p.kind = 'password' AND p.revoked_at IS NULL) AS has_password,
+       EXISTS (SELECT 1 FROM credential s WHERE s.actor_id = a.id AND s.kind = 'sso' AND s.revoked_at IS NULL) AS has_sso,
+       i.expires_at AS invite_expires_at
+FROM actor a
+LEFT JOIN credential i ON i.actor_id = a.id AND i.kind = 'invite' AND i.revoked_at IS NULL
+WHERE a.id > sqlc.arg(after) AND a.kind <> 'system'
+  AND (sqlc.narg(kind)::text IS NULL OR a.kind = sqlc.narg(kind))
+  AND (sqlc.narg(status)::text IS NULL OR a.status = sqlc.narg(status))
+  AND (sqlc.narg(search)::text IS NULL
+       OR strpos(lower(a.display_name), lower(sqlc.narg(search))) > 0
+       OR strpos(lower(coalesce(a.email, '')), lower(sqlc.narg(search))) > 0)
+ORDER BY a.id
+LIMIT sqlc.arg(max_rows);
+
 -- name: GetPreset :one
 SELECT * FROM permission_preset WHERE id = $1;
 

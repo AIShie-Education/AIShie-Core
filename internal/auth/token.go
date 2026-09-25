@@ -23,10 +23,16 @@ import (
 // "ais_" makes a leaked token recognisable to secret scanners. The 12
 // characters after it are the public prefix, stored in credential.token_prefix
 // and safe to show in a list of tokens. The rest is 256 bits of secret.
+//
+// An invitation is made the same way under another scheme, "aisinv_", so
+// that neither is taken for the other: an invitation presented as a bearer
+// token fails at its scheme, before anything is looked up, and a token
+// presented as an invitation does too.
 const (
-	tokenScheme = "ais"
-	prefixLen   = 12
-	secretBytes = 32
+	tokenScheme  = "ais"
+	inviteScheme = "aisinv"
+	prefixLen    = 12
+	secretBytes  = 32
 )
 
 var prefixEncoding = base32.StdEncoding.WithPadding(base32.NoPadding)
@@ -39,7 +45,12 @@ type Token struct {
 	Hash   string
 }
 
-func NewToken() (Token, error) {
+func NewToken() (Token, error) { return newSecret(tokenScheme) }
+
+// NewInvite makes an invitation's secret: a token under the invitation scheme.
+func NewInvite() (Token, error) { return newSecret(inviteScheme) }
+
+func newSecret(scheme string) (Token, error) {
 	var p [8]byte // 8 bytes → 13 base32 characters; 12 are kept
 	var s [secretBytes]byte
 	if _, err := rand.Read(p[:]); err != nil {
@@ -49,7 +60,7 @@ func NewToken() (Token, error) {
 		return Token{}, err
 	}
 	prefix := strings.ToLower(prefixEncoding.EncodeToString(p[:]))[:prefixLen]
-	full := tokenScheme + "_" + prefix + "_" + base64.RawURLEncoding.EncodeToString(s[:])
+	full := scheme + "_" + prefix + "_" + base64.RawURLEncoding.EncodeToString(s[:])
 	return Token{Full: full, Prefix: prefix, Hash: hashToken(full)}, nil
 }
 
@@ -63,11 +74,16 @@ func hashToken(full string) string {
 
 // parsePrefix extracts the public prefix from a presented token, or reports
 // that the string is not shaped like one of ours.
-func parsePrefix(full string) (string, bool) {
+func parsePrefix(full string) (string, bool) { return parseScheme(full, tokenScheme) }
+
+// parseInvitePrefix is parsePrefix for an invitation.
+func parseInvitePrefix(full string) (string, bool) { return parseScheme(full, inviteScheme) }
+
+func parseScheme(full, scheme string) (string, bool) {
 	// Three parts and no more: the secret is base64url and may itself
 	// contain underscores.
 	parts := strings.SplitN(full, "_", 3)
-	if len(parts) != 3 || parts[0] != tokenScheme || len(parts[1]) != prefixLen || len(parts[2]) < 40 {
+	if len(parts) != 3 || parts[0] != scheme || len(parts[1]) != prefixLen || len(parts[2]) < 40 {
 		return "", false
 	}
 	// The prefix is looked up, so it is held first to the alphabet it is

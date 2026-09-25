@@ -171,6 +171,23 @@ Run all of these as root on the server.
   another site altogether, such as `*.vercel.app`, also needs
   `COOKIE_SAMESITE=none`. Safari, and every browser on iOS, still refuses
   that sign-in cookie. Single sign-on is `OIDC_*` (README, Single sign-on).
+- **A person's first sign-in:** register them with their email, then invite
+  them, in the front end from their page, or as below. The invitation's
+  token is for the front end's page that takes invitations, where the person
+  chooses a password and is signed in. It works once, for seven days, and
+  inviting again replaces it: that is also how a forgotten password is reset.
+  Each invitation needs an `Idempotency-Key` of its own. Sent again with the
+  same key, the call answers what it answered then, without the token; for
+  another person, it is refused.
+
+  ```
+  curl -X POST https://lms-staging.example.edu/v1/actors/<actor_id>/invite \
+    -H "Authorization: Bearer $ADMIN_TOKEN" -H "Idempotency-Key: invite-<actor_id>-$(date +%s)" \
+    -H 'Content-Type: application/json' -d '{}'
+  ```
+
+  `GET /v1/actors?search=<a piece of the name or email>` finds someone's
+  `actor_id`, and says whether they have a password yet.
 - **An agent's token:** register the agent with the administrator's token,
   then issue its token by the id that comes back. `--actor` with your own
   email issues a token for you.
