@@ -46,6 +46,13 @@ type Querier interface {
 	// document as its instructions or rubric.
 	DocumentInUseByPublishedAssignment(ctx context.Context, arg DocumentInUseByPublishedAssignmentParams) (bool, error)
 	EmailTaken(ctx context.Context, lower string) (bool, error)
+	// Whether the actor had a hand in escalating the action, from any seat: made
+	// the review that escalated it, or approved that review, or confirmed that
+	// approval, and so on up. An approved review is carried out as its proposer,
+	// so the seat the escalation is recorded against is only the first of these;
+	// each approval is an executed action.decide about the one before, made from
+	// the seat that approved it.
+	EscalatedBy(ctx context.Context, arg EscalatedByParams) (bool, error)
 	// Moves a proposal to its end state. The status guard makes a lost race
 	// between two deciders, or a decider and the expiry sweep, a no-op.
 	FinishProposal(ctx context.Context, arg FinishProposalParams) (int64, error)
@@ -81,6 +88,8 @@ type Querier interface {
 	// A token or a session, found by its public prefix before its hash is
 	// checked. Revoked and expired rows are returned too, so that the caller can
 	// tell them from an unknown prefix in its logs; it rejects all three alike.
+	// The actor's kind comes with it: a credential of the system actor's is
+	// rejected the same way.
 	GetCredentialByPrefix(ctx context.Context, tokenPrefix *string) (GetCredentialByPrefixRow, error)
 	GetCredentialForActor(ctx context.Context, arg GetCredentialForActorParams) (GetCredentialForActorRow, error)
 	GetDeptPresetByName(ctx context.Context, arg GetDeptPresetByNameParams) (PermissionPreset, error)
@@ -119,9 +128,10 @@ type Querier interface {
 	// The account an identity provider's subject is linked to, if any.
 	GetSSOCredential(ctx context.Context, arg GetSSOCredentialParams) (GetSSOCredentialRow, error)
 	GetSubmissionFull(ctx context.Context, arg GetSubmissionFullParams) (Submission, error)
-	// GetSubmissionFull, locked until the hand-in is written, so that what
-	// submission.submit checks is what it hands in: an edit to the draft
-	// meanwhile waits, and then finds it handed in.
+	// GetSubmissionFull, locked until the transaction ends, so that what
+	// submission.submit checks is what it hands in: an edit to the draft, or a
+	// file added to it or archived from it, meanwhile waits, and then finds it
+	// handed in.
 	GetSubmissionFullForUpdate(ctx context.Context, arg GetSubmissionFullForUpdateParams) (Submission, error)
 	// Lookups are always "in this course": an id from another course is not found.
 	GetSubmissionInCourse(ctx context.Context, arg GetSubmissionInCourseParams) (GetSubmissionInCourseRow, error)
@@ -180,6 +190,7 @@ type Querier interface {
 	//     assignments and is for members whose assignment scope is the whole course.
 	ListEvents(ctx context.Context, arg ListEventsParams) ([]ListEventsRow, error)
 	ListEventsForAction(ctx context.Context, actionID *uuid.UUID) ([]ListEventsForActionRow, error)
+	// Not only open courses: a draft course takes writes, and its seats expire.
 	ListExpiredMembers(ctx context.Context, arg ListExpiredMembersParams) ([]ListExpiredMembersRow, error)
 	ListGradeDocuments(ctx context.Context, gradeID *uuid.UUID) ([]ListGradeDocumentsRow, error)
 	// Assignments that count toward the grade. An unpublished one cannot have a
@@ -213,15 +224,25 @@ type Querier interface {
 	ListPresets(ctx context.Context, deptID *uuid.UUID) ([]PermissionPreset, error)
 	ListProposedActionIDsByMember(ctx context.Context, memberID *uuid.UUID) ([]uuid.UUID, error)
 	ListProposedActions(ctx context.Context, arg ListProposedActionsParams) ([]Action, error)
+	// The published assignments that refer to the document as their instructions
+	// or rubric: an event about the document is filed under each of them.
+	ListPublishedAssignmentsUsingDocument(ctx context.Context, documentID *uuid.UUID) ([]uuid.UUID, error)
 	// What the background sweeps look for. Each returns a small batch; the sweep
 	// runs again on the next tick. None of these is what makes the system
 	// correct — authorize() ignores an expired member on every call and approval
 	// re-checks a proposal's age inline — they make the state visible and keep
 	// the queues clean.
+	//
+	// An archived course refuses every write, the sweeps' included, so none of
+	// its proposals, seats or assignments is listed; what expired or fell due in
+	// it meanwhile is swept once it is opened again.
+	// NOT EXISTS rather than a join: an action need not be in a course.
 	ListStaleProposals(ctx context.Context, arg ListStaleProposalsParams) ([]ListStaleProposalsRow, error)
 	ListStudentScope(ctx context.Context, memberID uuid.UUID) ([]uuid.UUID, error)
 	// Current students of the course with no submission row at all for the
-	// assignment: not a draft, not a hand-in, not an earlier 'missing'.
+	// assignment: not a draft, not a hand-in, not an earlier 'missing'. A paused
+	// student is one: the seat carries on when resumed, and the sweep does not
+	// come back to this due date.
 	ListStudentsWithoutSubmission(ctx context.Context, arg ListStudentsWithoutSubmissionParams) ([]uuid.UUID, error)
 	ListSubmissionDocuments(ctx context.Context, submissionID *uuid.UUID) ([]ListSubmissionDocumentsRow, error)
 	ListSubmissions(ctx context.Context, arg ListSubmissionsParams) ([]ListSubmissionsRow, error)

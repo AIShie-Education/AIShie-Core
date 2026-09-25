@@ -65,6 +65,28 @@ func TestSchemaSeesThroughEmbeddingAndKnowsOurTypes(t *testing.T) {
 	}
 }
 
+type issued struct {
+	ID    uuid.UUID `json:"id"`
+	Token string    `json:"token"`
+}
+
+// A secret is not required of the result. The result is stored without it,
+// and a replay returns what was stored, which a client checking it against
+// this schema would otherwise refuse.
+func TestAResultNeedNotCarryItsSecret(t *testing.T) {
+	tl := tool.Define(tool.Spec[in, issued]{
+		Name: "thing.issue", Kind: tool.Write, Gate: tool.Gate{Perms: []domain.Perm{domain.PermGradeSubmit}},
+		SecretOut: []string{"token"}, Resolve: resolve,
+		Execute: func(context.Context, *tool.ExecCtx, in) (issued, error) { return issued{}, nil },
+	})
+	if got := strings.Join(tl.OutputSchema.Required, ","); got != "id" {
+		t.Errorf("required = %q, want id: a replay comes back without the token", got)
+	}
+	if _, ok := tl.OutputSchema.Properties["token"]; !ok {
+		t.Error("the token is no longer described at all")
+	}
+}
+
 func TestDecode(t *testing.T) {
 	tl := tool.Define(valid())
 	course := uuid.New()

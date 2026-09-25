@@ -173,6 +173,33 @@ func TestRegradeKeepsHistory(t *testing.T) {
 	}
 }
 
+// A snapshot shows its working and whether it is complete, not only its
+// number. Yuki's HW4 posted at 80 beside her 80 on HW3 leaves the Assignments
+// bucket at 80, but complete now: that is written down, and said. The total,
+// still waiting on the midterm, shows what it showed before and is left alone.
+func TestATotalThatFillsAGapIsWrittenDownAgain(t *testing.T) {
+	c := testkit.NewCS101(t, 1)
+	yuki := c.Students[0]
+	post(t, c, "p3", grade(t, c, m{"course_id": c.Course, "submission_id": yuki.HW3, "score": 80}, "hw3"))
+	updated := func() int {
+		return c.Count(`SELECT count(*) FROM event WHERE type = 'grade.total_updated' AND payload->>'component_id' = $1`, c.Assignments.String())
+	}
+	before := updated()
+
+	hw4 := c.Submission(c.Course, c.HW4, yuki.Member)
+	if got := post(t, c, "p4", grade(t, c, m{"course_id": c.Course, "submission_id": hw4, "score": 80}, "hw4")); got.Snapshots != 1 {
+		t.Fatalf("snapshots = %d, want 1: the bucket, now complete", got.Snapshots)
+	}
+	wantScore(t, "bucket", liveSnapshot(t, c, c.Assignments, yuki.Member), "80")
+	if n := c.Count(`SELECT count(*) FROM grade WHERE origin = 'computed' AND component_id = $1 AND student_member_id = $2
+		AND superseded_by IS NULL AND breakdown->>'complete' = 'true'`, c.Assignments, yuki.Member); n != 1 {
+		t.Fatal("the bucket's snapshot still says HW4 is ungraded")
+	}
+	if n := updated(); n != before+1 {
+		t.Fatalf("%d grade.total_updated events for the bucket, want %d", n, before+1)
+	}
+}
+
 // Regrade takes both permissions and runs at the lower of their levels.
 func TestRegradeRunsAtTheLowerLevel(t *testing.T) {
 	c := testkit.NewCS101(t, 1)
@@ -538,6 +565,52 @@ func TestTotalsAreWrittenByOneAtATime(t *testing.T) {
 	}
 }
 
+// A post writes its students' totals one at a time, and computes each with
+// the scheme as it is when it gets to them. Here it waits on the first while
+// the midterm is reweighted to 70 and the second student's midterm regraded,
+// which writes their total under the new weights; reaching them, the post
+// must not write it over under the old ones.
+func TestAPostWritesEachTotalUnderTheSchemeAsItIsThen(t *testing.T) {
+	b := build(t)
+	midterms := map[uuid.UUID]uuid.UUID{}
+	for _, s := range []struct{ actor, member uuid.UUID }{{b.yuki, b.yukiM}, {b.ken, b.kenM}} {
+		work := b.submit(t, s.actor, "essay")
+		b.do(t, b.sato, "grade.submit", m{"course_id": b.course, "submission_id": work, "score": 100})
+		midterms[s.member] = testkit.Result[tools.GradeSubmitOut](t, b.do(t, b.sato, "grade.submit",
+			m{"course_id": b.course, "component_id": b.midterm, "student_member_id": s.member, "score": 50})).GradeID
+		b.do(t, b.sato, "grade.post", m{"course_id": b.course, "grade_ids": []uuid.UUID{midterms[s.member]}})
+	}
+	// A post takes its students in the order of their ids (see snapshot),
+	// each under the lock on their totals (LockStudentTotals).
+	first, second := b.yukiM, b.kenM
+	if second.String() < first.String() {
+		first, second = second, first
+	}
+	release := heldBy(t, b, `SELECT pg_advisory_xact_lock(hashtextextended('totals:' || $1::uuid::text || ':' || $2::uuid::text, 0))`, b.course, first)
+	posting := b.inFlight(b.sato, "grade.post", m{"course_id": b.course, "assignment_id": b.hw3}, "post")
+	b.waitingFor(t, 1, posting)
+	b.do(t, b.sato, "component.update", m{"course_id": b.course, "component_id": b.midterm, "weight": 70})
+	b.do(t, b.sato, "grade.regrade", m{"course_id": b.course, "grade_id": midterms[second], "score": 60})
+	release()
+	if out := settled(t, posting); out.Status != domain.StatusExecuted {
+		t.Fatalf("the post: %+v", out)
+	}
+
+	// (40 × 1.00 + 70 × 0.60) / 110, not (40 × 1.00 + 30 × 0.60) / 70.
+	book := testkit.Result[tools.GradebookGetOut](t, b.do(t, b.sato, "gradebook.get", m{"course_id": b.course, "student_member_id": second}))
+	for _, l := range book.Components {
+		if l.ComponentID == b.total {
+			wantScore(t, "the gradebook's total", *l.Percent, "74.55")
+		}
+	}
+	var live decimal.Decimal
+	if err := b.Pool.QueryRow(t.Context(), `SELECT score FROM grade WHERE student_member_id = $1 AND component_id = $2
+		AND origin = 'computed' AND superseded_by IS NULL`, second, b.total).Scan(&live); err != nil {
+		t.Fatal(err)
+	}
+	wantScore(t, "the live total", live, "74.55")
+}
+
 // Final is final. Once a student's totals have been written with ungraded
 // work counted as zero, a later post or regrade beneath them — made without
 // saying so — keeps counting it as zero, rather than quietly turning the
@@ -663,6 +736,68 @@ func TestAProposalPinsTheRubricItWasMadeAgainst(t *testing.T) {
 	if n := b.Count(`SELECT count(*) FROM grade WHERE id = $1 AND rubric_version_id = $2`, direct, *rubric.VersionID); n != 0 {
 		t.Fatal("a direct grade was pinned to the old rubric")
 	}
+}
+
+// The same when no rubric was in force when the proposal was made: the grader
+// was shown none, and the grade approved from it records none, whether the
+// rubric was attached and published while it waited or was attached already
+// and published only then, and for a regrade as for a grade. A call says so
+// only while it is true: no_rubric with a rubric published is refused, from a
+// call and from a proposal as it is made, and so is no_rubric beside a
+// rubric version.
+func TestAProposalMadeWithNoRubricRecordsNone(t *testing.T) {
+	b := build(t)
+	b.do(t, b.sato, "member.update_perms", m{"course_id": b.course, "member_id": b.graderM, "perms": m{"grade_post": "confirm_required"}})
+	propose := func(name string, args m) *uuid.UUID {
+		t.Helper()
+		args["course_id"] = b.course
+		out := b.MustCall(b.grader, name, args, "propose-"+uuid.NewString())
+		if out.Status != domain.StatusProposed {
+			t.Fatalf("the grader's %s: %+v", name, out)
+		}
+		return out.ActionID
+	}
+	approve := func(action *uuid.UUID) uuid.UUID {
+		t.Helper()
+		v := testkit.Result[pipeline.DecideOut](t, b.do(t, b.sato, "action.decide", m{"course_id": b.course, "action_id": action, "decision": "approve"}))
+		if v.Outcome != domain.StatusExecuted {
+			t.Fatalf("approval: %+v", v.Error)
+		}
+		return testkit.Result[tools.GradeSubmitOut](t, pipeline.Outcome{Result: v.Result}).GradeID
+	}
+	shownNone := func(what string, grade uuid.UUID) {
+		t.Helper()
+		if n := b.Count(`SELECT count(*) FROM grade WHERE id = $1 AND rubric_version_id IS NULL`, grade); n != 1 {
+			t.Errorf("%s is pinned to a rubric the grader never saw", what)
+		}
+	}
+	posted := testkit.Result[tools.GradeSubmitOut](t, b.do(t, b.sato, "grade.submit", m{"course_id": b.course, "submission_id": b.submit(t, b.yuki, "essay"), "score": 60})).GradeID
+	b.do(t, b.sato, "grade.post", m{"course_id": b.course, "grade_ids": []uuid.UUID{posted}})
+	kens := b.submit(t, b.ken, "essay")
+
+	// HW3 has no rubric.
+	graded := propose("grade.submit", m{"submission_id": kens, "score": 85})
+	regraded := propose("grade.regrade", m{"grade_id": posted, "score": 65})
+	if n := b.Count(`SELECT count(*) FROM action WHERE id IN ($1, $2) AND payload->>'no_rubric' = 'true'`, graded, regraded); n != 2 {
+		t.Error("a proposal made with no rubric does not say so")
+	}
+	// Then it has one, not yet published.
+	rubric := testkit.Result[tools.DocumentCreateOut](t, b.do(t, b.sato, "document.create",
+		m{"course_id": b.course, "kind": "rubric", "title": "HW3 rubric", "body_md": "v1"}))
+	b.do(t, b.sato, "assignment.update", m{"course_id": b.course, "assignment_id": b.hw3, "rubric_document_id": rubric.DocumentID})
+	unpublished := propose("grade.submit", m{"submission_id": b.submit(t, b.yuki, "revised"), "score": 90})
+	// And then it is published, before anyone decides.
+	b.do(t, b.sato, "document.publish", m{"course_id": b.course, "document_id": rubric.DocumentID})
+	shownNone("Ken's grade, proposed before HW3 had a rubric,", approve(graded))
+	regrade := approve(regraded)
+	shownNone("Yuki's regrade, proposed before HW3 had a rubric,", regrade)
+	shownNone("Yuki's grade, proposed while HW3's rubric was unpublished,", approve(unpublished))
+
+	// A call is against the rubric as it stands.
+	b.try(t, b.sato, "grade.submit", m{"course_id": b.course, "submission_id": kens, "score": 70, "no_rubric": true}, apperr.FailedPrecondition)
+	b.try(t, b.sato, "grade.regrade", m{"course_id": b.course, "grade_id": regrade, "score": 70, "no_rubric": true}, apperr.FailedPrecondition)
+	b.try(t, b.grader, "grade.submit", m{"course_id": b.course, "submission_id": kens, "score": 70, "no_rubric": true}, apperr.FailedPrecondition)
+	b.try(t, b.sato, "grade.submit", m{"course_id": b.course, "submission_id": kens, "score": 70, "no_rubric": true, "rubric_version_id": rubric.VersionID}, apperr.InvalidArgument)
 }
 
 // A proposal to post an assignment's drafts is about the drafts that were

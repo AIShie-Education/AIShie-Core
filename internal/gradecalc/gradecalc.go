@@ -83,6 +83,30 @@ const (
 	KindComponent  = "component"
 )
 
+// Same reports whether two results show the same thing: the same fraction,
+// the same completeness, and the same working line for line. Decimals are
+// compared by value, so a result read back from JSON is the same as the one
+// that was written.
+func (r Result) Same(o Result) bool {
+	if r.Complete != o.Complete || !sameFraction(r.Fraction, o.Fraction) || len(r.Items) != len(o.Items) {
+		return false
+	}
+	for i, a := range r.Items {
+		b := o.Items[i]
+		if a.ID != b.ID || a.Kind != b.Kind || !sameFraction(a.Fraction, b.Fraction) || !a.Weight.Equal(b.Weight) || a.Dropped != b.Dropped {
+			return false
+		}
+	}
+	return true
+}
+
+func sameFraction(a, b *decimal.Decimal) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return a.Equal(*b)
+}
+
 // Percent is a fraction as a score out of 100, to two places: the form a
 // computed snapshot is stored in.
 func Percent(f decimal.Decimal) decimal.Decimal {

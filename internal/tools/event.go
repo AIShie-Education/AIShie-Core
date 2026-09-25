@@ -17,7 +17,9 @@ import (
 func eventTools() []tool.Tool { return []tool.Tool{eventList()} }
 
 // visibility says who may see each type of event: holding ANY of the listed
-// permissions is enough. Scope is applied on top, per row, in SQL.
+// permissions is enough, except for an unreleased type, which also asks for
+// what its released type asks for (seesType). Scope is applied on top, per
+// row, in SQL.
 //
 // A type that is not in this table is visible to nobody but the member whose
 // action caused it. A new event type is therefore private until someone
@@ -64,6 +66,15 @@ var visibility = map[string][]domain.Perm{
 	EventSubmissionFileAdded: {domain.PermSubmissionRead}, EventSubmissionFileArchived: {domain.PermSubmissionRead},
 	EventFeedbackFileAdded: {domain.PermGradeSubmit, domain.PermGradePost}, EventFeedbackFileArchived: {domain.PermGradeSubmit, domain.PermGradePost},
 
+	// Instructions and a rubric are their assignment's. News of them is filed
+	// under each published assignment that refers to them, for scope to
+	// apply, and until there is one it goes by these names instead: an
+	// unpublished assignment is for those who write assignments, and of them
+	// for those who would be told the news by its own name.
+	EventDocumentCreatedUnreleased: {domain.PermAssignmentWrite}, EventDocumentVersionAddedUnreleased: {domain.PermAssignmentWrite},
+	EventDocumentPublishedUnreleased: {domain.PermAssignmentWrite}, EventRubricPublishedUnreleased: {domain.PermAssignmentWrite},
+	EventDocumentArchivedUnreleased: {domain.PermAssignmentWrite},
+
 	// Platform events belong to no course, so they are in no course's feed.
 	// They are listed so that leaving them out is visibly a decision.
 	EventActorRegistered: nil, EventActorSuspended: nil, EventActorReactivated: nil,
@@ -80,15 +91,31 @@ func KnownEventTypes() []string {
 
 func visibleTypes(m *domain.Member) []string {
 	out := []string{}
-	for typ, perms := range visibility {
-		for _, p := range perms {
-			if m.Perm(p).Allowed() {
-				out = append(out, typ)
-				break
-			}
+	for typ := range visibility {
+		if seesType(m, typ) {
+			out = append(out, typ)
 		}
 	}
 	return out
+}
+
+// seesType: any one of the type's permissions is enough. An unreleased type
+// is its released type's news, told early to those who see unpublished work,
+// so it asks for both: a seat that writes assignments but may not read drafts
+// or rubrics is not told here of a draft or a rubric that document.get would
+// not show it.
+func seesType(m *domain.Member, typ string) bool {
+	for released, u := range unreleased {
+		if u == typ && !seesType(m, released) {
+			return false
+		}
+	}
+	for _, p := range visibility[typ] {
+		if m.Perm(p).Allowed() {
+			return true
+		}
+	}
+	return false
 }
 
 type EventListIn struct {

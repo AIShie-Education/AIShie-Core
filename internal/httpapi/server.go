@@ -4,9 +4,19 @@
 // here is transport — finding the arguments in a request, establishing who is
 // calling, and turning an outcome into a status code.
 //
+// A call that is attempted is recorded, and its answer names the action in a
+// top-level action_id:
+//
 //	executed → 200    proposed → 202    denied → 403
-//	failed   → 409 (conflict) or 422 (a rule of the domain)
-//	replayed → the status of the original, plus Idempotency-Replayed: true
+//	failed   → its error's own status: 400, 403, 404, 409 or 422
+//	replayed → as the action stands now, with Idempotency-Replayed: true;
+//	           a proposal since rejected is 409, one cancelled 422
+//
+// An answer with no top-level action_id records nothing, whatever its
+// status: among them every 401 and 429, a 400 or 404 from before the tool
+// runs, a 403 from the cross-origin guard, a 405, a 500, and every read. A
+// key used for another call is a 409 idempotency_conflict naming the earlier
+// action in error.details.action_id, and records nothing either.
 package httpapi
 
 import (

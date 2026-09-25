@@ -13,7 +13,6 @@ SELECT d.id, d.course_id, d.kind, d.title, d.submission_id, d.grade_id, d.publis
        d.sort_order, d.status, d.created_at,
        s.student_member_id  AS submission_student,
        s.assignment_id      AS submission_assignment,
-       s.state              AS submission_state,
        g.student_member_id  AS grade_student,
        gs.assignment_id     AS grade_assignment,
        g.posted_at          AS grade_posted_at,
@@ -77,6 +76,14 @@ SELECT EXISTS (
       AND (sqlc.arg(assignment_all)::bool OR EXISTS (
             SELECT 1 FROM member_assignment_scope y WHERE y.member_id = sqlc.arg(member_id) AND y.assignment_id = a.id))
 );
+
+-- name: ListPublishedAssignmentsUsingDocument :many
+-- The published assignments that refer to the document as their instructions
+-- or rubric: an event about the document is filed under each of them.
+SELECT a.id FROM assignment a
+WHERE (a.instructions_document_id = sqlc.arg(document_id) OR a.rubric_document_id = sqlc.arg(document_id))
+  AND a.published_at IS NOT NULL
+ORDER BY a.id;
 
 -- name: ListSubmissionDocuments :many
 SELECT id, title, status, created_at FROM document WHERE submission_id = $1 AND status = 'active' ORDER BY id;

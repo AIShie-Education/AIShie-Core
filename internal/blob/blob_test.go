@@ -187,6 +187,41 @@ func TestFSStoreListsUnderAPrefix(t *testing.T) {
 	}
 }
 
+// BLOB_FS_ROOT may be a symlink to where the files really are. The store
+// goes through it as through any directory: a listing from the root itself
+// finds the files under it, where a walk that stopped at the link would
+// report the link, as ".", for a file.
+func TestFSStoreUnderASymlinkedRoot(t *testing.T) {
+	signer, err := NewSigner(strings.Repeat("k", 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, "data"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("data", filepath.Join(dir, "blobs")); err != nil {
+		t.Fatal(err)
+	}
+	s, err := NewFSStore(filepath.Join(dir, "blobs"), "http://lms.test/", signer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if _, err := s.Put(ctx, "courses/c1/a", "text/plain", strings.NewReader("x"), 100); err != nil {
+		t.Fatal(err)
+	}
+	for _, prefix := range []string{"courses/", ""} {
+		var keys []string
+		if err := s.List(ctx, prefix, "", func(key string, _ time.Time) error {
+			keys = append(keys, key)
+			return nil
+		}); err != nil || !slices.Equal(keys, []string{"courses/c1/a"}) {
+			t.Errorf("under %q: listed %q, %v", prefix, keys, err)
+		}
+	}
+}
+
 // The root may hold a directory the server cannot read: lost+found, at the
 // top of a volume mounted for the files. Listing the server's own prefix
 // walks only the prefix's directory and never comes to it. A walk of the

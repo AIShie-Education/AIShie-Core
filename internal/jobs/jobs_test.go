@@ -14,6 +14,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/apperr"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/blob"
@@ -22,6 +23,7 @@ import (
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/jobs"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/pipeline"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/testkit"
+	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/tool"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/tools"
 )
 
@@ -244,6 +246,73 @@ func TestPastDueAssignments(t *testing.T) {
 	}
 }
 
+// A paused student is still a student of the course, and the sweep comes to a
+// due date once: one paused when it passes is marked missing then, like the
+// rest, and not a second time after being resumed.
+func TestAPausedStudentIsMarkedMissing(t *testing.T) {
+	f := setup(t, 2)
+	ken := f.Students[1]
+	due := f.now.Add(time.Hour)
+	f.Exec(`UPDATE assignment SET due_at = $2 WHERE id = $1`, f.HW4, due)
+	if out := f.MustCall(f.Sato, "member.pause", m{"course_id": f.Course, "member_id": ken.Member}, "pause"); out.Status != domain.StatusExecuted {
+		t.Fatalf("pausing Ken: %+v", out)
+	}
+
+	f.now = due.Add(time.Minute)
+	if rep := f.sweep(t); rep.AssignmentsClosed != 1 || rep.SubmissionsMissing != 2 {
+		t.Fatalf("%+v, want HW4 closed and both students missing", rep)
+	}
+	if n := f.Count(`SELECT count(*) FROM submission WHERE assignment_id = $1 AND student_member_id = $2 AND state = 'missing'`, f.HW4, ken.Member); n != 1 {
+		t.Fatal("a paused student was not marked missing")
+	}
+	if n := f.Count(`SELECT count(*) FROM event WHERE type = 'submission.missing' AND assignment_id = $1 AND student_member_id = $2`, f.HW4, ken.Member); n != 1 {
+		t.Fatalf("%d submission.missing events for the paused student, want 1", n)
+	}
+
+	if out := f.MustCall(f.Sato, "member.resume", m{"course_id": f.Course, "member_id": ken.Member}, "resume"); out.Status != domain.StatusExecuted {
+		t.Fatalf("resuming Ken: %+v", out)
+	}
+	if rep := f.sweep(t); rep.AssignmentsClosed != 0 || rep.SubmissionsMissing != 0 {
+		t.Fatalf("swept again after the resume: %+v", rep)
+	}
+	if n := f.Count(`SELECT count(*) FROM submission WHERE assignment_id = $1 AND student_member_id = $2`, f.HW4, ken.Member); n != 1 {
+		t.Fatalf("%d HW4 rows for Ken, want 1", n)
+	}
+}
+
+// An archived course refuses every write, the sweeps' as much as anyone's: a
+// seat that expires and a proposal that goes stale in one are left as they
+// are, and swept once the course is opened again.
+func TestTheSweepsLeaveAnArchivedCourseAlone(t *testing.T) {
+	f := setup(t, 1)
+	proposal := f.propose(t, f.Students[0], "p")
+	f.Exec(`UPDATE course_member SET expires_at = $2 WHERE id = $1`, f.GraderM, f.now.Add(time.Hour))
+	f.Exec(`UPDATE course SET status = 'archived' WHERE id = $1`, f.Course)
+	events := f.Count(`SELECT count(*) FROM event`)
+	f.now = f.now.Add(pipeline.DefaultProposalTTL + time.Hour)
+
+	if rep := f.sweep(t); rep.ProposalsExpired != 0 || rep.MembersExpired != 0 {
+		t.Fatalf("an archived course was swept: %+v", rep)
+	}
+	if n := f.Count(`SELECT count(*) FROM course_member WHERE id = $1 AND status = 'active'`, f.GraderM); n != 1 {
+		t.Fatal("a seat in an archived course was removed")
+	}
+	if n := f.Count(`SELECT count(*) FROM action WHERE id = $1 AND status = 'proposed'`, proposal); n != 1 {
+		t.Fatal("a proposal in an archived course was cancelled")
+	}
+	if n := f.Count(`SELECT count(*) FROM event`); n != events {
+		t.Fatalf("%d events written into an archived course", n-events)
+	}
+	if n := f.Count(`SELECT count(*) FROM action WHERE actor_id = $1`, f.system); n != 0 {
+		t.Fatalf("%d sweep actions in an archived course", n)
+	}
+
+	f.Exec(`UPDATE course SET status = 'active' WHERE id = $1`, f.Course)
+	if rep := f.sweep(t); rep.ProposalsExpired != 1 || rep.MembersExpired != 1 {
+		t.Fatalf("%+v, want the proposal and the seat swept once the course is open", rep)
+	}
+}
+
 // Every instance may run the sweeps; only one does at a time, and even if two
 // did, each thing is swept once.
 func TestOnlyOneInstanceSweeps(t *testing.T) {
@@ -320,6 +389,46 @@ func TestASweepLosesRacesQuietly(t *testing.T) {
 	out, err = f.P.InvokeSystem(context.Background(), f.system, tools.ToolMemberExpire, tools.MemberExpireIn{CourseID: f.Course, MemberID: f.GraderM}, "job:member.expire:x")
 	if err != nil || testkit.Result[tools.MemberExpireOut](t, out).Done {
 		t.Fatalf("%+v %v, want a no-op", out, err)
+	}
+}
+
+// A sweep step that loses a deadlock is made again, and one that loses
+// twice is not recorded at all: its key names the thing swept, so a failure
+// stored under it would stand for the sweep: every tick after would replay it
+// or pass the thing over, and never sweep it. The next tick sweeps it.
+func TestASweepStepThatLosesADeadlockIsSweptNextTick(t *testing.T) {
+	f := setup(t, 0)
+	f.Exec(`UPDATE course_member SET expires_at = $2 WHERE id = $1`, f.GraderM, f.now.Add(-time.Hour))
+	losses := 2
+	reg := tool.NewRegistry()
+	for _, tl := range f.P.Registry().All() {
+		if tl.Name == tools.ToolMemberExpire {
+			execute := tl.Execute
+			tl.Execute = func(ctx context.Context, ec *tool.ExecCtx, in any) (any, error) {
+				if losses > 0 {
+					losses--
+					return nil, &pgconn.PgError{Code: "40P01", Message: "deadlock detected"}
+				}
+				return execute(ctx, ec, in)
+			}
+		}
+		reg.Register(tl)
+	}
+	pl := pipeline.New(f.Pool, reg, f.P.Config())
+	pl.SetClock(func() time.Time { return f.now })
+	runner := jobs.New(f.Pool, pl, f.system, jobs.Config{}, nil)
+
+	if rep, err := runner.Sweep(context.Background()); err != nil || rep.MembersExpired != 0 || losses != 0 {
+		t.Fatalf("%+v %v, %d deadlocks still to lose: want the step made twice and not done", rep, err, losses)
+	}
+	if n := f.Count(`SELECT count(*) FROM action WHERE action_type = $1`, tools.ToolMemberExpire); n != 0 {
+		t.Fatal("a sweep step that lost a deadlock twice was recorded")
+	}
+	if rep, err := runner.Sweep(context.Background()); err != nil || rep.MembersExpired != 1 {
+		t.Fatalf("the next tick: %+v %v, want the grader removed", rep, err)
+	}
+	if n := f.Count(`SELECT count(*) FROM course_member WHERE id = $1 AND status = 'removed'`, f.GraderM); n != 1 {
+		t.Fatal("the expired member is not removed")
 	}
 }
 

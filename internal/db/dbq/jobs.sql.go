@@ -174,10 +174,12 @@ func (q *Queries) ListAssignmentsNewlyPastDue(ctx context.Context, arg ListAssig
 }
 
 const listExpiredMembers = `-- name: ListExpiredMembers :many
-SELECT id, course_id, expires_at
-FROM course_member
-WHERE status <> 'removed' AND expires_at IS NOT NULL AND expires_at <= $1
-ORDER BY expires_at
+SELECT m.id, m.course_id, m.expires_at
+FROM course_member m
+JOIN course c ON c.id = m.course_id
+WHERE m.status <> 'removed' AND m.expires_at IS NOT NULL AND m.expires_at <= $1
+  AND c.status <> 'archived'
+ORDER BY m.expires_at
 LIMIT $2
 `
 
@@ -192,6 +194,7 @@ type ListExpiredMembersRow struct {
 	ExpiresAt *time.Time
 }
 
+// Not only open courses: a draft course takes writes, and its seats expire.
 func (q *Queries) ListExpiredMembers(ctx context.Context, arg ListExpiredMembersParams) ([]ListExpiredMembersRow, error) {
 	rows, err := q.db.Query(ctx, listExpiredMembers, arg.Now, arg.MaxRows)
 	if err != nil {
@@ -262,10 +265,11 @@ func (q *Queries) ListOrphanUploads(ctx context.Context, arg ListOrphanUploadsPa
 
 const listStaleProposals = `-- name: ListStaleProposals :many
 
-SELECT id, course_id, created_at
-FROM action
-WHERE status = 'proposed' AND created_at < $1
-ORDER BY created_at
+SELECT a.id, a.course_id, a.created_at
+FROM action a
+WHERE a.status = 'proposed' AND a.created_at < $1
+  AND NOT EXISTS (SELECT 1 FROM course c WHERE c.id = a.course_id AND c.status = 'archived')
+ORDER BY a.created_at
 LIMIT $2
 `
 
@@ -285,6 +289,11 @@ type ListStaleProposalsRow struct {
 // correct — authorize() ignores an expired member on every call and approval
 // re-checks a proposal's age inline — they make the state visible and keep
 // the queues clean.
+//
+// An archived course refuses every write, the sweeps' included, so none of
+// its proposals, seats or assignments is listed; what expired or fell due in
+// it meanwhile is swept once it is opened again.
+// NOT EXISTS rather than a join: an action need not be in a course.
 func (q *Queries) ListStaleProposals(ctx context.Context, arg ListStaleProposalsParams) ([]ListStaleProposalsRow, error) {
 	rows, err := q.db.Query(ctx, listStaleProposals, arg.CreatedBefore, arg.MaxRows)
 	if err != nil {
@@ -308,7 +317,7 @@ func (q *Queries) ListStaleProposals(ctx context.Context, arg ListStaleProposals
 const listStudentsWithoutSubmission = `-- name: ListStudentsWithoutSubmission :many
 SELECT m.id
 FROM course_member m
-WHERE m.course_id = $1 AND m.role = 'student' AND m.status = 'active'
+WHERE m.course_id = $1 AND m.role = 'student' AND m.status <> 'removed'
   AND NOT EXISTS (SELECT 1 FROM submission s WHERE s.assignment_id = $2 AND s.student_member_id = m.id)
 ORDER BY m.id
 `
@@ -319,7 +328,9 @@ type ListStudentsWithoutSubmissionParams struct {
 }
 
 // Current students of the course with no submission row at all for the
-// assignment: not a draft, not a hand-in, not an earlier 'missing'.
+// assignment: not a draft, not a hand-in, not an earlier 'missing'. A paused
+// student is one: the seat carries on when resumed, and the sweep does not
+// come back to this due date.
 func (q *Queries) ListStudentsWithoutSubmission(ctx context.Context, arg ListStudentsWithoutSubmissionParams) ([]uuid.UUID, error) {
 	rows, err := q.db.Query(ctx, listStudentsWithoutSubmission, arg.CourseID, arg.AssignmentID)
 	if err != nil {

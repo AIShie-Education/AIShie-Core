@@ -50,6 +50,15 @@ const (
 	EventFeedbackFileAdded      = "grade.feedback_added"
 	EventFeedbackFileArchived   = "grade.feedback_archived"
 
+	// What the document events above are called while they are about
+	// instructions or a rubric that no published assignment refers to yet
+	// (see emitDocumentEvent).
+	EventDocumentCreatedUnreleased      = "document.created_unreleased"
+	EventDocumentVersionAddedUnreleased = "document.version_added_unreleased"
+	EventDocumentPublishedUnreleased    = "document.published_unreleased"
+	EventRubricPublishedUnreleased      = "document.rubric_published_unreleased"
+	EventDocumentArchivedUnreleased     = "document.archived_unreleased"
+
 	uploadWindow = 15 * time.Minute
 	downloadTTL  = 15 * time.Minute
 )
@@ -135,6 +144,45 @@ func feedbackWritePerms(posted bool) []domain.Perm {
 	return []domain.Perm{domain.PermGradeSubmit}
 }
 
+// unreleased is each document event's unreleased name.
+var unreleased = map[string]string{
+	EventDocumentCreated:      EventDocumentCreatedUnreleased,
+	EventDocumentVersionAdded: EventDocumentVersionAddedUnreleased,
+	EventDocumentPublished:    EventDocumentPublishedUnreleased,
+	EventRubricPublished:      EventRubricPublishedUnreleased,
+	EventDocumentArchived:     EventDocumentArchivedUnreleased,
+}
+
+// emitDocumentEvent emits an event about a document of the given kind.
+// Instructions and a rubric are their assignment's (assignmentWithheld), and
+// so is news of them: the event is filed under each published assignment that
+// refers to the document, so that the feed's assignment scope applies to it,
+// and while none does it goes out under its unreleased name, which only those
+// who see unpublished work, and would be shown the event by its own name, are
+// shown (seesType). Otherwise a student would learn from the feed that next
+// week's exam exists, and when it was finished. Every other event goes out as
+// it is.
+func emitDocumentEvent(ctx context.Context, ec *tool.ExecCtx, kind string, ev events.Event) error {
+	if kind != kindInstructions && kind != kindRubric {
+		ec.Emit(ev)
+		return nil
+	}
+	published, err := ec.Q.ListPublishedAssignmentsUsingDocument(ctx, ev.SubjectID)
+	if err != nil {
+		return err
+	}
+	if len(published) == 0 {
+		ev.Type = unreleased[ev.Type]
+		ec.Emit(ev)
+		return nil
+	}
+	for _, a := range published {
+		ev.AssignmentID = &a
+		ec.Emit(ev)
+	}
+	return nil
+}
+
 // ---------------------------------------------------------------------------
 // Uploads
 // ---------------------------------------------------------------------------
@@ -150,7 +198,7 @@ type UploadURLOut struct {
 	Headers     map[string]string `json:"headers" jsonschema:"headers the PUT must carry"`
 	UploadToken string            `json:"upload_token" jsonschema:"hand this to document.create, document.add_version or grade.submit to attach what you uploaded"`
 	ExpiresAt   time.Time         `json:"expires_at"`
-	MaxBytes    int64             `json:"max_bytes"`
+	MaxBytes    int64             `json:"max_bytes" jsonschema:"the largest file, in bytes, that can be attached. It is checked when the file is attached, which refuses a larger one; where the URL is an object store's, a larger upload is not stopped as it arrives"`
 }
 
 // UploadPrefix begins the key of every upload: courses/<course>/<upload>.
@@ -459,8 +507,11 @@ func documentCreate(d Deps) tool.Tool {
 			switch in.Kind {
 			case kindSubmission:
 				// The freeze trigger guards the submission row, not the files
-				// beside it. Once handed in, nothing more may be added.
-				s, err := ec.Q.GetSubmissionInCourse(ctx, dbq.GetSubmissionInCourseParams{ID: *in.SubmissionID, CourseID: in.CourseID})
+				// beside it. Once handed in, nothing more may be added. The
+				// state is read under the row's lock, the one the hand-in
+				// takes: a file that comes while the draft is being handed in
+				// waits for it, and then finds it handed in.
+				s, err := ec.Q.GetSubmissionFullForUpdate(ctx, dbq.GetSubmissionFullForUpdateParams{ID: *in.SubmissionID, CourseID: in.CourseID})
 				if err != nil {
 					return DocumentCreateOut{}, err
 				}
@@ -504,8 +555,7 @@ func documentCreate(d Deps) tool.Tool {
 				}
 			}
 			ev.SubjectID = &out.DocumentID
-			ec.Emit(ev)
-			return out, nil
+			return out, emitDocumentEvent(ctx, ec, in.Kind, ev)
 		},
 	})
 }
@@ -565,8 +615,10 @@ func documentAddVersion(d Deps) tool.Tool {
 			if out.VersionID, err = insertVersion(ctx, d, ec, in.CourseID, doc.ID, doc.Kind, out.Seq, in.Content); err != nil {
 				return DocumentVersionOut{}, err
 			}
-			ec.Emit(events.Event{Type: EventDocumentVersionAdded, CourseID: &in.CourseID, SubjectType: "document", SubjectID: &doc.ID,
-				Payload: map[string]any{"kind": doc.Kind, "seq": out.Seq}})
+			if err := emitDocumentEvent(ctx, ec, doc.Kind, events.Event{Type: EventDocumentVersionAdded, CourseID: &in.CourseID,
+				SubjectType: "document", SubjectID: &doc.ID, Payload: map[string]any{"kind": doc.Kind, "seq": out.Seq}}); err != nil {
+				return DocumentVersionOut{}, err
+			}
 			if in.Publish {
 				if err := publish(ctx, ec, in.CourseID, doc, out.VersionID); err != nil {
 					return DocumentVersionOut{}, err
@@ -587,9 +639,8 @@ func publish(ctx context.Context, ec *tool.ExecCtx, courseID uuid.UUID, doc dbq.
 	if doc.Kind == kindRubric {
 		typ = EventRubricPublished // rubrics have readers of their own
 	}
-	ec.Emit(events.Event{Type: typ, CourseID: &courseID, SubjectType: "document", SubjectID: &doc.ID,
+	return emitDocumentEvent(ctx, ec, doc.Kind, events.Event{Type: typ, CourseID: &courseID, SubjectType: "document", SubjectID: &doc.ID,
 		Payload: map[string]any{"kind": doc.Kind, "version_id": version}})
-	return nil
 }
 
 type DocumentPublishIn struct {
@@ -677,8 +728,18 @@ func documentArchive() tool.Tool {
 			if err != nil {
 				return OK{}, err
 			}
-			if doc.SubmissionState != nil && *doc.SubmissionState != stateDraft {
-				return OK{}, apperr.Conflicts("the submission has been handed in; its files no longer change")
+			// A submitted file is archived only while its submission is a
+			// draft, and the state is read under the submission's lock, as
+			// document.create reads it: an archive during the hand-in waits
+			// for it, rather than taking away a file the hand-in counted.
+			if doc.SubmissionID != nil {
+				s, err := ec.Q.GetSubmissionFullForUpdate(ctx, dbq.GetSubmissionFullForUpdateParams{ID: *doc.SubmissionID, CourseID: in.CourseID})
+				if err != nil {
+					return OK{}, err
+				}
+				if s.State != stateDraft {
+					return OK{}, apperr.Conflicts("the submission has been handed in; its files no longer change")
+				}
 			}
 			n, err := ec.Q.SetDocumentStatus(ctx, dbq.SetDocumentStatusParams{ID: doc.ID, Status: "archived"})
 			if err != nil {
@@ -698,7 +759,9 @@ func documentArchive() tool.Tool {
 			case kindFeedback:
 				ev.Type, ev.StudentMemberID, ev.AssignmentID = EventFeedbackFileArchived, doc.GradeStudent, doc.GradeAssignment
 			}
-			ec.Emit(ev)
+			if err := emitDocumentEvent(ctx, ec, doc.Kind, ev); err != nil {
+				return OK{}, err
+			}
 			return OK{OK: true}, nil
 		},
 	})
@@ -821,12 +884,7 @@ func documentGet(d Deps) tool.Tool {
 			if err != nil {
 				return DocumentGetOut{}, err
 			}
-			// Feedback on a grade the student cannot see yet is not theirs to
-			// read either. Nor is feedback archived from a posted grade:
-			// archiving it takes back a release (feedbackWritePerms), so like
-			// withdrawn material below it is withdrawn from anyone who kept
-			// the id. Those who grade still read it.
-			if doc.Kind == kindFeedback && (doc.GradePostedAt == nil || doc.GradeSupersededBy != nil || doc.Status == "archived") && !seesDrafts(rc.Member) {
+			if feedbackWithheld(doc, rc.Member) {
 				return DocumentGetOut{}, apperr.Missing("no such document in this course")
 			}
 			drafts := rc.Member.Perm(domain.PermDocumentReadDraft).Allowed()
@@ -920,6 +978,15 @@ type DocumentVersionsOut struct {
 	Versions []VersionSummary `json:"versions"`
 }
 
+// feedbackWithheld: feedback on a grade the student cannot see yet is not
+// theirs to read either. Nor is feedback archived from a posted grade:
+// archiving it takes back a release (feedbackWritePerms), so like withdrawn
+// material it is withdrawn from anyone who kept the id. Those who grade still
+// read it. It holds for the version list as for the document.
+func feedbackWithheld(doc dbq.GetDocumentWithOwnerRow, m *domain.Member) bool {
+	return doc.Kind == kindFeedback && (doc.GradePostedAt == nil || doc.GradeSupersededBy != nil || doc.Status == "archived") && !seesDrafts(m)
+}
+
 // assignmentWithheld: an instructions or rubric document is withheld from a
 // member who does not write assignments unless a published assignment in
 // their scope refers to it — the document is visible exactly when the
@@ -949,6 +1016,9 @@ func documentVersions() tool.Tool {
 			doc, err := loadDocument(ctx, rc.Q, in.CourseID, in.DocumentID)
 			if err != nil {
 				return DocumentVersionsOut{}, err
+			}
+			if feedbackWithheld(doc, rc.Member) {
+				return DocumentVersionsOut{}, apperr.Missing("no such document in this course")
 			}
 			if courseLevel(doc.Kind) && doc.Kind != kindMaterial {
 				if withheld, err := assignmentWithheld(ctx, rc, doc.ID); err != nil {

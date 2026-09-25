@@ -12,6 +12,46 @@ import (
 	"github.com/google/uuid"
 )
 
+const escalatedBy = `-- name: EscalatedBy :one
+WITH RECURSIVE hand (id, member_id) AS (
+    SELECT r.id, r.member_id
+    FROM action r
+    WHERE r.target_type = 'action' AND r.target_id = $2::uuid
+      AND r.action_type = 'action.review' AND r.status = 'executed'
+      AND r.payload->>'outcome' = 'escalated'
+  UNION ALL
+    SELECT d.id, d.member_id
+    FROM hand h
+    JOIN action d ON d.target_type = 'action' AND d.target_id = h.id
+    WHERE d.action_type = 'action.decide' AND d.status = 'executed'
+      AND d.payload->>'decision' = 'approve'
+)
+SELECT EXISTS (
+    SELECT 1
+    FROM hand h
+    JOIN course_member m ON m.id = h.member_id
+    WHERE m.actor_id = $1::uuid
+)
+`
+
+type EscalatedByParams struct {
+	ActorID  uuid.UUID
+	ActionID uuid.UUID
+}
+
+// Whether the actor had a hand in escalating the action, from any seat: made
+// the review that escalated it, or approved that review, or confirmed that
+// approval, and so on up. An approved review is carried out as its proposer,
+// so the seat the escalation is recorded against is only the first of these;
+// each approval is an executed action.decide about the one before, made from
+// the seat that approved it.
+func (q *Queries) EscalatedBy(ctx context.Context, arg EscalatedByParams) (bool, error) {
+	row := q.db.QueryRow(ctx, escalatedBy, arg.ActorID, arg.ActionID)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
+}
+
 const finishProposal = `-- name: FinishProposal :execrows
 UPDATE action
 SET status = $2, decided_by_member_id = $3, decided_at = $4, executed_at = $5, result = $6

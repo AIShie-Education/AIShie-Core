@@ -43,7 +43,7 @@ Usage:
   aishiterud migrate down --all --yes
                                      revert every migration (DESTROYS ALL DATA)
   aishiterud migrate version         print the applied and the embedded version
-  aishiterud migrate force N         record version N without running anything
+  aishiterud migrate force N         record version N (0 for none) without running anything
   aishiterud seed                    insert the built-in permission presets
   aishiterud bootstrap --name N [--email E] [--password-stdin]
                                      create the root actor, once; prints its API token
@@ -142,7 +142,7 @@ func serve(cfg config.Config) error {
 	case err != nil:
 		return fmt.Errorf("read schema version: %w", err)
 	case dirty:
-		return fmt.Errorf("the schema is dirty at version %d: a migration failed half-way; fix it by hand, then `aishiterud migrate force N`", have)
+		return fmt.Errorf("the schema is dirty at version %d: a migration failed half-way; fix it by hand, then `aishiterud migrate force N`, N being the last migration fully applied (0 if none)", have)
 	case have < latest:
 		return fmt.Errorf("the schema is at version %d and this binary needs %d; run `aishiterud migrate up` first", have, latest)
 	case have > latest:
@@ -329,7 +329,7 @@ func schemaReport(version, latest uint, dirty bool) string {
 	s := fmt.Sprintf("schema version %d (embedded latest %d)", version, latest)
 	switch {
 	case dirty:
-		s += " DIRTY — fix the database by hand, then `migrate force N`"
+		s += " DIRTY — fix the database by hand, then `migrate force N`, N being the last migration fully applied (0 if none)"
 	case version > latest:
 		s += " AHEAD — migrated by a newer release, or by a migration since taken out; left as it is"
 	}
@@ -373,6 +373,12 @@ func bootstrap(cfg config.Config, args []string) error {
 			return fmt.Errorf("bootstrap: read password: %w", err)
 		}
 		in.Password = strings.TrimRight(line, "\r\n")
+		// An empty line is not taken as no password: root would be left
+		// without the one it was asked to have, and bootstrap does not run a
+		// second time to put that right.
+		if in.Password == "" {
+			return errors.New("bootstrap: --password-stdin read an empty password; nothing was created")
+		}
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

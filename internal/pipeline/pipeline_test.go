@@ -431,20 +431,42 @@ func TestPendingReview(t *testing.T) {
 	if self := review(ta, "reviewed", "self"); self.Status != domain.StatusFailed || self.Error.Code != apperr.Forbidden {
 		t.Fatalf("self-review: %+v", self)
 	}
+	// Nor from a seat taken since: removed and seated again, the TA is still
+	// who entered the grade.
+	c.Exec(`UPDATE course_member SET status = 'removed' WHERE id = $1`, taM)
+	c.Member(c.Course, ta, "instructor")
+	if self := review(ta, "reviewed", "self-again"); self.Status != domain.StatusFailed || self.Error.Code != apperr.Forbidden {
+		t.Fatalf("self-review from a new seat: %+v", self)
+	}
+	if n := c.Count(`SELECT count(*) FROM action WHERE id = $1 AND review_state = 'pending'`, *out.ActionID); n != 1 {
+		t.Fatal("the TA's grade was marked reviewed from the TA's new seat")
+	}
 	if esc := review(c.Sato, "escalated", "esc"); esc.Status != domain.StatusExecuted {
 		t.Fatalf("escalate: %+v", esc)
 	}
 	if twice := review(c.Sato, "escalated", "esc2"); twice.Status != domain.StatusFailed {
 		t.Fatalf("escalating twice: %+v", twice)
 	}
-	if done := review(c.Sato, "reviewed", "done"); done.Status != domain.StatusExecuted {
+	// An escalation is for someone else to look at: Sato does not close his
+	// own, from his seat or from one he has taken since.
+	if own := review(c.Sato, "reviewed", "own"); own.Status != domain.StatusFailed || own.Error.Code != apperr.Forbidden {
+		t.Fatalf("closing his own escalation: %+v", own)
+	}
+	c.Exec(`UPDATE course_member SET status = 'removed' WHERE id = $1`, c.SatoM)
+	c.Member(c.Course, c.Sato, "instructor")
+	if own := review(c.Sato, "reviewed", "own-again"); own.Status != domain.StatusFailed || own.Error.Code != apperr.Forbidden {
+		t.Fatalf("closing his own escalation from a new seat: %+v", own)
+	}
+	second := c.Actor("human", "Second reviewer")
+	secondM := c.Member(c.Course, second, "instructor")
+	if done := review(second, "reviewed", "done"); done.Status != domain.StatusExecuted {
 		t.Fatalf("review after escalation: %+v", done)
 	}
-	if again := review(c.Sato, "reviewed", "again"); again.Status != domain.StatusFailed {
+	if again := review(second, "reviewed", "again"); again.Status != domain.StatusFailed {
 		t.Fatalf("reviewing twice: %+v", again)
 	}
-	if n := c.Count(`SELECT count(*) FROM action WHERE id = $1 AND review_state = 'reviewed' AND reviewed_by_member_id = $2`, *out.ActionID, c.SatoM); n != 1 {
-		t.Fatal("the review is not recorded against Sato")
+	if n := c.Count(`SELECT count(*) FROM action WHERE id = $1 AND review_state = 'reviewed' AND reviewed_by_member_id = $2`, *out.ActionID, secondM); n != 1 {
+		t.Fatal("the review is not recorded against the second reviewer")
 	}
 	// Reviewing undoes nothing.
 	if n := c.Count(`SELECT count(*) FROM grade WHERE grader_member_id = $1 AND superseded_by IS NULL`, taM); n != 1 {
@@ -543,6 +565,122 @@ func TestNobodyDecidesTheirOwnActionAtOneRemove(t *testing.T) {
 	}
 	refused("the TA reviewing the approval of her own proposal",
 		c.MustCall(ta, "action.review", m{"course_id": c.Course, "action_id": approval.ActionID, "outcome": "reviewed"}, "ta-r"))
+
+	// A seat is not who someone is: removed and seated again, with a seat
+	// that may decide anything, the TA is still whose actions these are.
+	last := c.MustCall(ta, "grade.submit", submitArgs(c, c.Students[0], 50), "p4")
+	if last.Status != domain.StatusProposed {
+		t.Fatalf("the TA's last proposal: %+v", last)
+	}
+	c.Exec(`UPDATE course_member SET status = 'removed' WHERE id = $1`, taM)
+	c.Member(c.Course, ta, "instructor")
+	refused("the TA, seated again, deciding her own proposal", decide(ta, last.ActionID, "approve", "ta-again"))
+	refused("the TA, seated again, confirming the review of her own grade", decide(ta, review.ActionID, "approve", "ta-review-again"))
+	refused("the TA, seated again, reviewing the approval of her own proposal",
+		c.MustCall(ta, "action.review", m{"course_id": c.Course, "action_id": approval.ActionID, "outcome": "reviewed"}, "ta-r-again"))
+	if n := c.Count(`SELECT count(*) FROM action WHERE id = ANY($1) AND (status <> 'executed' OR review_state <> 'pending')`,
+		[]uuid.UUID{*done.ActionID, *approval.ActionID}); n != 0 {
+		t.Fatal("an action of the TA's was reviewed from her new seat")
+	}
+}
+
+// An escalation is for someone else to look at, and approving a review is
+// carrying it out. So whoever escalated an action does not close it by
+// approving someone else's review of it, at any remove; and whoever approved
+// the review that escalated it, or confirmed that approval, escalated it too.
+// Saying no to a review that would close it closes nothing, and is theirs to
+// say.
+func TestNobodyClosesTheirOwnEscalationAtOneRemove(t *testing.T) {
+	c := testkit.NewCS101(t, 3)
+	ta := c.Actor("human", "TA")
+	c.Member(c.Course, ta, "ta", testkit.WithPerm(domain.PermGradeSubmit, domain.PendingReview))
+	triage := c.Actor("agent", "triage")
+	c.Member(c.Course, triage, "ta", testkit.WithPerm(domain.PermActionDecide, domain.ConfirmRequired))
+	second := c.Actor("agent", "second opinion")
+	c.Member(c.Course, second, "ta", testkit.WithPerm(domain.PermActionDecide, domain.ConfirmRequired))
+	other := c.Actor("human", "Other reviewer")
+	c.Member(c.Course, other, "instructor")
+
+	review := func(actor uuid.UUID, action *uuid.UUID, outcome, key string) pipeline.Outcome {
+		t.Helper()
+		return c.MustCall(actor, "action.review", m{"course_id": c.Course, "action_id": action, "outcome": outcome}, key)
+	}
+	decide := func(actor uuid.UUID, action *uuid.UUID, decision, key string) pipeline.Outcome {
+		t.Helper()
+		return c.MustCall(actor, "action.decide", m{"course_id": c.Course, "action_id": action, "decision": decision}, key)
+	}
+	status := func(what string, out pipeline.Outcome, want domain.ActionStatus) {
+		t.Helper()
+		if out.Status != want {
+			t.Fatalf("%s: %+v", what, out)
+		}
+	}
+	refused := func(what string, out pipeline.Outcome) {
+		t.Helper()
+		if out.Status != domain.StatusFailed || out.Error == nil || out.Error.Code != apperr.Forbidden {
+			t.Fatalf("%s: %+v", what, out)
+		}
+	}
+	state := func(what string, action *uuid.UUID, want domain.ReviewState) {
+		t.Helper()
+		if n := c.Count(`SELECT count(*) FROM action WHERE id = $1 AND review_state = $2`, *action, string(want)); n != 1 {
+			t.Fatalf("%s: the TA's grade is not %s", what, want)
+		}
+	}
+
+	// Sato escalates the TA's grade, and the agent proposes marking it
+	// reviewed. Sato does not approve that, nor an approval of it.
+	graded := c.MustCall(ta, "grade.submit", submitArgs(c, c.Students[0], 77), "g1")
+	status("Sato escalating", review(c.Sato, graded.ActionID, "escalated", "esc1"), domain.StatusExecuted)
+	closing := review(triage, graded.ActionID, "reviewed", "close1")
+	status("the agent's review", closing, domain.StatusProposed)
+	refused("Sato approving the agent's review of his escalation", decide(c.Sato, closing.ActionID, "approve", "sato1"))
+	deeper := decide(second, closing.ActionID, "approve", "second1")
+	status("the second agent's approval", deeper, domain.StatusProposed)
+	refused("Sato confirming an approval of that review", decide(c.Sato, deeper.ActionID, "approve", "sato1-deeper"))
+	state("after Sato's approvals", graded.ActionID, domain.ReviewEscalated)
+	if no := decide(c.Sato, deeper.ActionID, "reject", "sato1-no"); no.Status != domain.StatusExecuted || testkit.Result[pipeline.DecideOut](t, no).Outcome != domain.StatusRejected {
+		t.Fatalf("Sato turning down the approval: %+v", no)
+	}
+	if v := testkit.Result[pipeline.DecideOut](t, decide(other, closing.ActionID, "approve", "other1")); v.Outcome != domain.StatusExecuted {
+		t.Fatalf("someone else approving the agent's review: %+v", v)
+	}
+	state("after someone else's approval", graded.ActionID, domain.ReviewReviewed)
+
+	// The agent proposes escalating, and Sato approves it: the escalation is
+	// his as much as the agent's, and he does not close it.
+	graded2 := c.MustCall(ta, "grade.submit", submitArgs(c, c.Students[1], 70), "g2")
+	raised := review(triage, graded2.ActionID, "escalated", "esc2")
+	status("the agent's escalation", raised, domain.StatusProposed)
+	if v := testkit.Result[pipeline.DecideOut](t, decide(c.Sato, raised.ActionID, "approve", "sato2")); v.Outcome != domain.StatusExecuted {
+		t.Fatalf("Sato approving the escalation: %+v", v)
+	}
+	refused("Sato closing an escalation he approved", review(c.Sato, graded2.ActionID, "reviewed", "sato2-close"))
+	// Approving someone else's no to a review that would close it is saying
+	// no too.
+	closing2 := review(triage, graded2.ActionID, "reviewed", "close2")
+	status("the agent's review", closing2, domain.StatusProposed)
+	no := decide(second, closing2.ActionID, "reject", "second2-no")
+	status("the second agent's rejection", no, domain.StatusProposed)
+	if yes := decide(c.Sato, no.ActionID, "approve", "sato2-no"); yes.Status != domain.StatusExecuted || testkit.Result[pipeline.DecideOut](t, yes).Outcome != domain.StatusExecuted {
+		t.Fatalf("Sato approving the rejection: %+v", yes)
+	}
+	state("after the rejection", graded2.ActionID, domain.ReviewEscalated)
+	status("someone else closing it", review(other, graded2.ActionID, "reviewed", "other2"), domain.StatusExecuted)
+
+	// One agent proposes escalating, another approves, and Sato confirms
+	// that approval: two removes are one remove twice.
+	graded3 := c.MustCall(ta, "grade.submit", submitArgs(c, c.Students[2], 64), "g3")
+	raised3 := review(second, graded3.ActionID, "escalated", "esc3")
+	status("the second agent's escalation", raised3, domain.StatusProposed)
+	approval := decide(triage, raised3.ActionID, "approve", "triage3")
+	status("the agent's approval of it", approval, domain.StatusProposed)
+	if v := testkit.Result[pipeline.DecideOut](t, decide(c.Sato, approval.ActionID, "approve", "sato3")); v.Outcome != domain.StatusExecuted {
+		t.Fatalf("Sato confirming the approval: %+v", v)
+	}
+	state("after Sato's confirmation", graded3.ActionID, domain.ReviewEscalated)
+	refused("Sato closing an escalation he confirmed", review(c.Sato, graded3.ActionID, "reviewed", "sato3-close"))
+	status("someone else closing it", review(other, graded3.ActionID, "reviewed", "other3"), domain.StatusExecuted)
 }
 
 // ---------------------------------------------------------------------------
@@ -939,8 +1077,9 @@ type flakyIn struct {
 }
 
 // A deadlock lost while an approval re-checks its proposal says nothing about
-// the proposal: the decision is undone, the proposal still waits, and
-// deciding again works. It is not failed for good with "try again".
+// the proposal. The decision is made again; lost again, it is recorded as
+// failed, "try again", but the proposal still waits, and deciding again
+// works. The proposal is not failed for good.
 func TestAnApprovalThatLosesADeadlockLeavesTheProposalWaiting(t *testing.T) {
 	c := testkit.NewCS101(t, 0)
 	flaky := false
@@ -974,5 +1113,61 @@ func TestAnApprovalThatLosesADeadlockLeavesTheProposalWaiting(t *testing.T) {
 	flaky = false
 	if out := decide("d2"); out.Status != domain.StatusExecuted || !strings.Contains(string(out.Result), `"outcome":"executed"`) {
 		t.Fatalf("deciding again: %+v", out)
+	}
+}
+
+type onceIn struct {
+	tool.InCourse
+	LoseIn string `json:"lose_in"`
+}
+
+// A call that loses a deadlock is made again, once, in a fresh transaction:
+// nothing was wrong with it, and its key is not spent on a failure saying
+// "try again". Here a tool loses one the first time through its Validate,
+// its Pin or its Execute, and the call goes through all the same, once.
+func TestACallThatLosesADeadlockIsMadeAgain(t *testing.T) {
+	c := testkit.NewCS101(t, 0)
+	lost := map[string]int{}
+	lose := func(where string, in onceIn) error {
+		if in.LoseIn != where || lost[where] > 0 {
+			return nil
+		}
+		lost[where]++
+		return &pgconn.PgError{Code: "40P01", Message: "deadlock detected"}
+	}
+	c.P.Registry().Register(tool.Define(tool.Spec[onceIn, probeOut]{
+		Name: "probe.once", Kind: tool.Write, Gate: tool.Gate{Perms: []domain.Perm{domain.PermGradeSubmit}},
+		Resolve: func(_ context.Context, _ dbq.Querier, in onceIn) (tool.Target, error) {
+			return tool.Target{CourseID: in.CourseID, Type: "course"}, nil
+		},
+		Validate: func(_ context.Context, _ dbq.Querier, _ *domain.Member, in onceIn) error {
+			return lose("validate", in)
+		},
+		Pin: func(_ context.Context, _ dbq.Querier, _ time.Time, in onceIn) (onceIn, error) {
+			return in, lose("pin", in)
+		},
+		Execute: func(_ context.Context, _ *tool.ExecCtx, in onceIn) (probeOut, error) {
+			return probeOut{OK: true}, lose("execute", in)
+		},
+	}))
+	for _, tc := range []struct {
+		where  string
+		caller uuid.UUID
+		want   domain.ActionStatus
+	}{
+		{"validate", c.Sato, domain.StatusExecuted},
+		{"execute", c.Sato, domain.StatusExecuted},
+		{"pin", c.Grader, domain.StatusProposed}, // only a proposal is pinned
+	} {
+		out, err := c.Call(tc.caller, "probe.once", m{"course_id": c.Course, "lose_in": tc.where}, tc.where)
+		if err != nil || out.Status != tc.want || out.Replayed || lost[tc.where] != 1 {
+			t.Fatalf("losing a deadlock in %s: %+v %v (lost %d)", tc.where, out, err, lost[tc.where])
+		}
+		if n := c.Count(`SELECT count(*) FROM action WHERE idempotency_key = $1 AND status = $2`, tc.where, string(tc.want)); n != 1 {
+			t.Fatalf("losing a deadlock in %s: %d actions recorded as %s, want the one", tc.where, n, tc.want)
+		}
+	}
+	if n := c.Count(`SELECT count(*) FROM action`); n != 3 {
+		t.Fatalf("%d actions recorded, want one a call", n)
 	}
 }

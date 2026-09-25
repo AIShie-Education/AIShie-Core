@@ -139,6 +139,66 @@ func TestMigrateUpLeavesANewerSchemaAlone(t *testing.T) {
 	}
 }
 
+// A first migration that fails has applied nothing, and leaves version 1
+// recorded as dirty. Forcing 0 once the cause is fixed must record what is
+// true, that no migration has run, and the migrations then apply from there.
+func TestForcingZeroRecoversFromAFailedFirstMigration(t *testing.T) {
+	pool, url := testdb.NewEmpty(t)
+	ctx := context.Background()
+
+	latest, err := db.LatestEmbedded()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A migrator of its own for each step, as each command of the CLI has.
+	migrator := func() *db.Migrator {
+		t.Helper()
+		m, err := db.NewMigrator(url)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return m
+	}
+	assertVersion := func(m *db.Migrator, want uint, wantDirty bool) {
+		t.Helper()
+		got, dirty, err := m.Version()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != want || dirty != wantDirty {
+			t.Fatalf("version = %d (dirty=%v), want %d (dirty=%v)", got, dirty, want, wantDirty)
+		}
+	}
+
+	// 0001 creates this type, and fails if it is there already.
+	if _, err := pool.Exec(ctx, `CREATE TYPE autonomy_level AS ENUM ('x')`); err != nil {
+		t.Fatal(err)
+	}
+	failed := migrator()
+	if err := failed.Up(); err == nil {
+		t.Fatal("up succeeded over a type that was in its way")
+	}
+	failed.Close()
+	if _, err := pool.Exec(ctx, `DROP TYPE autonomy_level`); err != nil {
+		t.Fatal(err)
+	}
+
+	m := migrator()
+	defer m.Close()
+	assertVersion(m, 1, true)
+	if err := m.Force(0); err != nil {
+		t.Fatalf("force 0: %v", err)
+	}
+	assertVersion(m, 0, false)
+	if v, dirty, err := db.SchemaVersion(ctx, pool); err != nil || v != 0 || dirty {
+		t.Fatalf("SchemaVersion = %d (dirty=%v) %v, want 0", v, dirty, err)
+	}
+	if err := m.Up(); err != nil {
+		t.Fatalf("up after force 0: %v", err)
+	}
+	assertVersion(m, latest, false)
+}
+
 func TestEveryMigrationHasBothDirections(t *testing.T) {
 	entries, err := fs.ReadDir(dbfiles.FS, dbfiles.MigrationsDir)
 	if err != nil {

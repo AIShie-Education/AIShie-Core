@@ -19,6 +19,9 @@
 // reason of the caller's making is rolled back to the savepoint and the
 // attempt is recorded as failed. A fault of ours rolls back everything and
 // records nothing; the caller retries with the same key and gets a clean run.
+// A call that loses a deadlock to another is made again, once, from the
+// start in a fresh transaction (see inTx); only if it loses again is it
+// recorded as failed, "try again".
 package pipeline
 
 import (
@@ -35,6 +38,7 @@ import (
 
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/apperr"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/canon"
+	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/db"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/db/dbq"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/domain"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/signing"
@@ -221,6 +225,38 @@ func validate(ctx context.Context, tx pgx.Tx, t tool.Tool, m *domain.Member, in 
 func transient(err error) bool {
 	var pgErr *pgconn.PgError
 	return errors.As(err, &pgErr) && strings.HasPrefix(pgErr.Code, "40")
+}
+
+// attempts is how many transactions a write is given.
+const attempts = 2
+
+// retryPause is how long a write that lost waits before it is made again.
+// The one that won was waiting for the loser's locks, and is let go when the
+// loser's transaction ends; made again at once, the loser can take the same
+// locks back before the winner has woken to take them, and lose again.
+const retryPause = 50 * time.Millisecond
+
+// inTx runs fn in a transaction, and runs it again in a fresh one if it
+// returns an error that is transient and this was not its last attempt,
+// which fn is told by final. A deadlock is between locks the transactions
+// involved hold until they end, the caller's own seat among them, taken
+// before anything else; no savepoint lets go of those, so only ending the
+// transaction lets the other through, and only a fresh one can then try
+// again. Two managers changing each other's seats at once are the case in
+// point: each holds its own seat, shared, and waits to lock the other's.
+func (p *Pipeline) inTx(ctx context.Context, fn func(tx pgx.Tx, final bool) error) error {
+	for attempt := 1; ; attempt++ {
+		final := attempt == attempts
+		err := db.InTx(ctx, p.pool, func(tx pgx.Tx) error { return fn(tx, final) })
+		if err == nil || final || !transient(err) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return err
+		case <-time.After(retryPause):
+		}
+	}
 }
 
 func errorResult(e *apperr.Error) []byte {
