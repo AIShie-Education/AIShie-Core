@@ -60,3 +60,21 @@ WHERE c.kind = 'sso' AND c.provider = $1 AND c.subject = $2;
 -- name: ReviveSSOCredential :exec
 -- Linking again an identity that was unlinked from the same actor.
 UPDATE credential SET revoked_at = NULL WHERE id = $1 AND kind = 'sso';
+
+-- name: RevokeInvites :exec
+-- An actor's live invitation: when another replaces it, when a password is
+-- set (by it or otherwise), and when the email it was sent to changes.
+UPDATE credential SET revoked_at = $2
+WHERE actor_id = $1 AND kind = 'invite' AND revoked_at IS NULL;
+
+-- name: GetInviteByPrefix :one
+-- An invitation, found by its prefix before its hash is checked, and locked:
+-- it is used once, and two tries at it take turns. Revoked and expired rows
+-- are returned too, as GetCredentialByPrefix returns them. The actor comes
+-- with it.
+SELECT c.id, c.actor_id, c.secret_hash, c.expires_at, c.revoked_at,
+       a.kind AS actor_kind, a.status AS actor_status, a.email AS actor_email
+FROM credential c
+JOIN actor a ON a.id = c.actor_id
+WHERE c.token_prefix = $1 AND c.kind = 'invite'
+FOR UPDATE OF c;

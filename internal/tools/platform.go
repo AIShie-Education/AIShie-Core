@@ -25,7 +25,8 @@ import (
 
 func platformTools() []tool.Tool {
 	return []tool.Tool{
-		actorRegister(), actorGet(), actorSuspend(), actorReactivate(), actorIssueToken(), actorLinkSSO(),
+		actorRegister(), actorGet(), actorList(), actorUpdate(), actorSuspend(), actorReactivate(),
+		actorIssueToken(), actorInvite(), actorLinkSSO(),
 		termCreate(), termList(), departmentCreate(), departmentList(),
 		presetList(), presetCreate(), presetUpdate(),
 	}
@@ -38,6 +39,8 @@ var admins = tool.Gate{Platform: []string{domain.PlatformRoot, domain.PlatformAd
 
 const (
 	EventActorRegistered  = "actor.registered"
+	EventActorUpdated     = "actor.updated"
+	EventActorInvited     = "actor.invited"
 	EventActorSuspended   = "actor.suspended"
 	EventActorReactivated = "actor.reactivated"
 )
@@ -61,6 +64,8 @@ func actorRegister() tool.Tool {
 	return tool.Define(tool.Spec[ActorRegisterIn, ActorOut]{
 		Name: "actor.register",
 		Description: "Register a person or an agent. An actor can do nothing until it is seated in a course. " +
+			"A person signs in once they have a password, which they choose through actor.invite, or through " +
+			"single sign-on (actor.link_sso). " +
 			"An agent is registered here and runs elsewhere: no endpoint, model or prompt is stored. " +
 			"Give it a token with actor.issue_token.",
 		Kind: tool.Write, Gate: admins,
@@ -114,6 +119,17 @@ type ActorView struct {
 	PlatformRole     *string    `json:"platform_role,omitempty"`
 	CreatedByActorID *uuid.UUID `json:"created_by_actor_id,omitempty"`
 	CreatedAt        time.Time  `json:"created_at"`
+	// How they can sign in. A person with neither a password nor single
+	// sign-on cannot yet: actor.invite is how they get a password.
+	HasPassword     bool       `json:"has_password"`
+	HasSSO          bool       `json:"has_sso" jsonschema:"an identity at the identity provider is linked (actor.link_sso)"`
+	InviteExpiresAt *time.Time `json:"invite_expires_at,omitempty" jsonschema:"when the invitation not yet taken up expires, which may have passed; absent when there is none"`
+}
+
+func viewActor(a dbq.GetActorViewRow) ActorView {
+	return ActorView{ID: a.ID, Kind: a.Kind, DisplayName: a.DisplayName, Email: a.Email, Status: a.Status,
+		PlatformRole: a.PlatformRole, CreatedByActorID: a.CreatedByActorID, CreatedAt: a.CreatedAt,
+		HasPassword: a.HasPassword, HasSSO: a.HasSso, InviteExpiresAt: a.InviteExpiresAt}
 }
 
 func resolveActor(ctx context.Context, q dbq.Querier, in ActorIDIn) (tool.Target, error) {
@@ -128,17 +144,134 @@ func resolveActor(ctx context.Context, q dbq.Querier, in ActorIDIn) (tool.Target
 func actorGet() tool.Tool {
 	return tool.Define(tool.Spec[ActorIDIn, ActorView]{
 		Name:        "actor.get",
-		Description: "One actor's registration: who they are, their standing, and who registered them.",
+		Description: "One actor's registration: who they are, their standing, who registered them, and how they can sign in.",
 		Kind:        tool.Read, Gate: admins,
 		HTTP:    tool.Route{Method: "GET", Pattern: "/v1/actors/{actor_id}"},
 		Resolve: resolveActor,
 		Query: func(ctx context.Context, rc *tool.ReadCtx, in ActorIDIn) (ActorView, error) {
-			a, err := rc.Q.GetActor(ctx, in.ActorID)
+			a, err := rc.Q.GetActorView(ctx, in.ActorID)
 			if err != nil {
 				return ActorView{}, err
 			}
-			return ActorView{ID: a.ID, Kind: a.Kind, DisplayName: a.DisplayName, Email: a.Email, Status: a.Status,
-				PlatformRole: a.PlatformRole, CreatedByActorID: a.CreatedByActorID, CreatedAt: a.CreatedAt}, nil
+			return viewActor(a), nil
+		},
+	})
+}
+
+type ActorListIn struct {
+	Kind   *string `json:"kind,omitempty" jsonschema:"human or agent"`
+	Status *string `json:"status,omitempty" jsonschema:"active or suspended"`
+	Search *string `json:"search,omitempty" jsonschema:"a piece of the name or of the email, in any case"`
+	Page
+}
+
+type ActorListOut struct {
+	Actors []ActorView `json:"actors"`
+	Next   *uuid.UUID  `json:"next,omitempty"`
+}
+
+func actorList() tool.Tool {
+	return tool.Define(tool.Spec[ActorListIn, ActorListOut]{
+		Name: "actor.list",
+		Description: "Everyone registered, people and agents, oldest first, with how each can sign in. " +
+			"The system actor, which runs the background jobs, is not listed.",
+		Kind: tool.Read, Gate: admins,
+		HTTP:    tool.Route{Method: "GET", Pattern: "/v1/actors"},
+		Resolve: noTarget[ActorListIn]("actor"),
+		Query: func(ctx context.Context, rc *tool.ReadCtx, in ActorListIn) (ActorListOut, error) {
+			if in.Kind != nil && *in.Kind != "human" && *in.Kind != "agent" {
+				return ActorListOut{}, apperr.Invalid("kind must be human or agent")
+			}
+			if in.Status != nil && *in.Status != domain.ActorActive && *in.Status != domain.ActorSuspended {
+				return ActorListOut{}, apperr.Invalid("status must be active or suspended")
+			}
+			if in.Search != nil {
+				if search := strings.TrimSpace(*in.Search); search != "" {
+					in.Search = &search
+				} else {
+					in.Search = nil
+				}
+			}
+			rows, err := rc.Q.ListActors(ctx, dbq.ListActorsParams{After: in.after(), Kind: in.Kind, Status: in.Status,
+				Search: in.Search, MaxRows: in.limit()})
+			out := ActorListOut{Actors: make([]ActorView, 0, len(rows))}
+			for _, r := range rows {
+				out.Actors = append(out.Actors, viewActor(dbq.GetActorViewRow(r)))
+			}
+			if len(rows) > 0 && len(rows) == int(in.limit()) {
+				out.Next = &rows[len(rows)-1].ID
+			}
+			return out, err
+		},
+	})
+}
+
+type ActorUpdateIn struct {
+	ActorID     uuid.UUID `json:"actor_id"`
+	DisplayName *string   `json:"display_name,omitempty"`
+	Email       *string   `json:"email,omitempty" jsonschema:"what a person signs in with; it can be changed, not removed"`
+}
+
+func actorUpdate() tool.Tool {
+	return tool.Define(tool.Spec[ActorUpdateIn, ActorView]{
+		Name: "actor.update",
+		Description: "Correct an actor's display name or email, or give an email to a person registered without one, " +
+			"so that they can sign in with a password. What is left out stays as it is. A change of email " +
+			"withdraws an invitation waiting (actor.invite): it went to the old one.",
+		Kind: tool.Write, Gate: admins,
+		HTTP: tool.Route{Method: "POST", Pattern: "/v1/actors/{actor_id}"},
+		Resolve: func(ctx context.Context, q dbq.Querier, in ActorUpdateIn) (tool.Target, error) {
+			return resolveActor(ctx, q, ActorIDIn{ActorID: in.ActorID})
+		},
+		Execute: func(ctx context.Context, ec *tool.ExecCtx, in ActorUpdateIn) (ActorView, error) {
+			if in.DisplayName == nil && in.Email == nil {
+				return ActorView{}, apperr.Invalid("give display_name, email or both")
+			}
+			if in.DisplayName != nil && strings.TrimSpace(*in.DisplayName) == "" {
+				return ActorView{}, apperr.Invalid("display_name cannot be empty")
+			}
+			if in.Email != nil {
+				email := strings.TrimSpace(*in.Email)
+				if email == "" {
+					return ActorView{}, apperr.Invalid("email cannot be empty; it can be changed, not removed")
+				}
+				in.Email = &email
+			}
+			// An administrator's own name and email are theirs to correct;
+			// anyone else's are held to the rule for acting on them.
+			if in.ActorID != ec.Actor.ID {
+				if err := mayActOn(ctx, ec, in.ActorID); err != nil {
+					return ActorView{}, err
+				}
+			}
+			before, err := ec.Q.GetActor(ctx, in.ActorID)
+			if err != nil {
+				return ActorView{}, err
+			}
+			if in.Email != nil {
+				if taken, err := ec.Q.EmailTakenByAnother(ctx, dbq.EmailTakenByAnotherParams{Email: *in.Email, ID: in.ActorID}); err != nil {
+					return ActorView{}, err
+				} else if taken {
+					return ActorView{}, apperr.Conflicts("that email already belongs to an actor")
+				}
+			}
+			if err := ec.Q.UpdateActor(ctx, dbq.UpdateActorParams{ID: in.ActorID, DisplayName: in.DisplayName, Email: in.Email}); err != nil {
+				return ActorView{}, err
+			}
+			// An invitation waiting went to the email as it was. Once that
+			// changes, it may have gone to the wrong person: it is withdrawn,
+			// and inviting again sends one that is good.
+			if in.Email != nil && (before.Email == nil || !strings.EqualFold(*before.Email, *in.Email)) {
+				if err := ec.Q.RevokeInvites(ctx, dbq.RevokeInvitesParams{ActorID: in.ActorID, RevokedAt: &ec.Now}); err != nil {
+					return ActorView{}, err
+				}
+			}
+			ec.Emit(events.Event{Type: EventActorUpdated, SubjectType: "actor", SubjectID: &in.ActorID})
+			a, err := ec.Q.GetActorView(ctx, in.ActorID)
+			if err != nil {
+				return ActorView{}, err
+			}
+			return viewActor(a), nil
 		},
 	})
 }
@@ -229,6 +362,76 @@ func actorIssueToken() tool.Tool {
 				return IssueTokenOut{}, err
 			}
 			return IssueTokenOut{CredentialID: id, Token: tok.Full, TokenPrefix: tok.Prefix, ExpiresAt: expires}, nil
+		},
+	})
+}
+
+type ActorInviteIn struct {
+	ActorID       uuid.UUID `json:"actor_id"`
+	ExpiresInDays *int      `json:"expires_in_days,omitempty" jsonschema:"default 7, at most 30"`
+}
+
+type ActorInviteOut struct {
+	Token     string    `json:"token" jsonschema:"what the invitation link carries; shown once, and a replay of this call comes back without it"`
+	Email     string    `json:"email" jsonschema:"what the person will sign in with"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
+const (
+	defaultInviteDays = 7
+	maxInviteDays     = 30
+)
+
+func actorInvite() tool.Tool {
+	return tool.Define(tool.Spec[ActorInviteIn, ActorInviteOut]{
+		Name: "actor.invite",
+		Description: "Invite a registered person to choose their password. The token is for the front end's page " +
+			"that takes invitations; the person opens it, chooses a password there (POST /v1/auth/invite) and is signed in. " +
+			"It works once, until it expires, and only the newest invitation works: inviting again replaces it. " +
+			"Taken up by someone who has a password already, it replaces that password. It is withdrawn when the " +
+			"person sets a password some other way, and when their email changes. " +
+			"The person needs an email, which is what they will sign in with (actor.update gives one). " +
+			"An agent is given a token instead (actor.issue_token).",
+		Kind: tool.Write, Gate: admins,
+		HTTP:      tool.Route{Method: "POST", Pattern: "/v1/actors/{actor_id}/invite"},
+		SecretOut: []string{"token"},
+		Resolve: func(ctx context.Context, q dbq.Querier, in ActorInviteIn) (tool.Target, error) {
+			return resolveActor(ctx, q, ActorIDIn{ActorID: in.ActorID})
+		},
+		Execute: func(ctx context.Context, ec *tool.ExecCtx, in ActorInviteIn) (ActorInviteOut, error) {
+			// Setting someone's password is taking over their account, so it
+			// is held to the rule for issuing them a token; and nobody
+			// invites themselves, who can set their own password.
+			if err := mayActOn(ctx, ec, in.ActorID); err != nil {
+				return ActorInviteOut{}, err
+			}
+			days := defaultInviteDays
+			if in.ExpiresInDays != nil {
+				days = *in.ExpiresInDays
+			}
+			if days < 1 || days > maxInviteDays {
+				return ActorInviteOut{}, apperr.Invalid("expires_in_days must be between 1 and %d", maxInviteDays)
+			}
+			a, err := ec.Q.GetActor(ctx, in.ActorID)
+			if err != nil {
+				return ActorInviteOut{}, err
+			}
+			// An agent needs no password: it is given a token. That is the
+			// front end's to steer by, not a rule here, which reads the email
+			// the actor would sign in with, and not their kind.
+			switch {
+			case a.Email == nil:
+				return ActorInviteOut{}, apperr.Precondition("the actor has no email to sign in with: give them one with actor.update first")
+			case a.Status != domain.ActorActive:
+				return ActorInviteOut{}, apperr.Precondition("the actor is suspended: reactivate them first")
+			}
+			expires := ec.Now.AddDate(0, 0, days)
+			tok, _, err := auth.IssueInvite(ctx, ec.Q, in.ActorID, "invited by "+ec.Actor.DisplayName, expires, ec.Now)
+			if err != nil {
+				return ActorInviteOut{}, err
+			}
+			ec.Emit(events.Event{Type: EventActorInvited, SubjectType: "actor", SubjectID: &in.ActorID})
+			return ActorInviteOut{Token: tok.Full, Email: *a.Email, ExpiresAt: expires}, nil
 		},
 	})
 }

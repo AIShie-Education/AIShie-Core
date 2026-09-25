@@ -680,6 +680,111 @@ func TestPlatformRules(t *testing.T) {
 	b.try(t, b.admin, "preset.update", body, apperr.FailedPrecondition)
 }
 
+// An administrator finds everyone registered, corrects a name or an email,
+// and invites a person to choose their password.
+func TestPeopleAreListedCorrectedAndInvited(t *testing.T) {
+	b := build(t)
+	list := func(args m) tools.ActorListOut {
+		t.Helper()
+		return testkit.Result[tools.ActorListOut](t, b.do(t, b.admin, "actor.list", args))
+	}
+	names := func(out tools.ActorListOut) string {
+		var s []string
+		for _, a := range out.Actors {
+			s = append(s, a.DisplayName)
+		}
+		return strings.Join(s, ",")
+	}
+
+	// Everyone but the system actor, oldest first: root, the admin root
+	// made, and the five the admin registered.
+	b.Actor("system", "system")
+	if got := names(list(m{})); got != "root,Admin,Sato,Yuki,Ken,grader-v2,tutor" {
+		t.Fatalf("everyone: %s", got)
+	}
+	if got := names(list(m{"kind": "agent"})); got != "grader-v2,tutor" {
+		t.Fatalf("agents: %s", got)
+	}
+	if got := names(list(m{"search": "  YUK "})); got != "Yuki" {
+		t.Fatalf("a piece of a name, in another case: %s", got)
+	}
+	if got := names(list(m{"search": "%"})); got != "" { // no wildcards
+		t.Fatalf("%% matched: %s", got)
+	}
+	first := list(m{"limit": 3})
+	if names(first) != "root,Admin,Sato" || first.Next == nil {
+		t.Fatalf("first page: %s next %v", names(first), first.Next)
+	}
+	if got := names(list(m{"limit": 3, "after": *first.Next})); got != "Yuki,Ken,grader-v2" {
+		t.Fatalf("second page: %s", got)
+	}
+	b.try(t, b.admin, "actor.list", m{"kind": "system"}, apperr.InvalidArgument)
+	b.try(t, b.admin, "actor.list", m{"status": "gone"}, apperr.InvalidArgument)
+	if out := b.MustCall(b.sato, "actor.list", m{}, ""); out.Status != domain.StatusDenied {
+		t.Fatalf("an instructor listing everyone: %+v", out)
+	}
+
+	// Yuki was registered without an email: she cannot be invited until she
+	// has one, and then it is what she will sign in with.
+	b.try(t, b.admin, "actor.invite", m{"actor_id": b.yuki}, apperr.FailedPrecondition)
+	b.do(t, b.admin, "actor.register", m{"kind": "human", "display_name": "Other", "email": "other@example.edu"})
+	b.try(t, b.admin, "actor.update", m{"actor_id": b.yuki, "email": "OTHER@example.edu"}, apperr.Conflict)
+	b.try(t, b.admin, "actor.update", m{"actor_id": b.yuki, "email": "  "}, apperr.InvalidArgument)
+	b.try(t, b.admin, "actor.update", m{"actor_id": b.yuki}, apperr.InvalidArgument)
+	yuki := testkit.Result[tools.ActorView](t, b.do(t, b.admin, "actor.update", m{"actor_id": b.yuki, "email": " yuki@example.edu "}))
+	if yuki.Email == nil || *yuki.Email != "yuki@example.edu" || yuki.DisplayName != "Yuki" || yuki.HasPassword || yuki.InviteExpiresAt != nil {
+		t.Fatalf("after update: %+v", yuki)
+	}
+	b.do(t, b.admin, "actor.update", m{"actor_id": b.yuki, "email": "Yuki@example.edu"}) // her own, in another case
+	// An administrator corrects their own name; root's is root's.
+	b.do(t, b.admin, "actor.update", m{"actor_id": b.admin, "display_name": "Admin Office"})
+	b.try(t, b.admin, "actor.update", m{"actor_id": b.Root, "display_name": "Not root"}, apperr.Forbidden)
+
+	// The invitation. What an actor is is not read, only the email they
+	// would sign in with: an agent registered without one is refused as a
+	// person would be.
+	b.try(t, b.admin, "actor.invite", m{"actor_id": b.grader}, apperr.FailedPrecondition)
+	b.try(t, b.admin, "actor.invite", m{"actor_id": b.admin}, apperr.Forbidden) // not yourself
+	b.try(t, b.admin, "actor.invite", m{"actor_id": b.Root}, apperr.Forbidden)  // root is root's
+	b.try(t, b.admin, "actor.invite", m{"actor_id": b.yuki, "expires_in_days": 31}, apperr.InvalidArgument)
+	invited := b.do(t, b.admin, "actor.invite", m{"actor_id": b.yuki, "expires_in_days": 3})
+	inv := testkit.Result[tools.ActorInviteOut](t, invited)
+	if !strings.HasPrefix(inv.Token, "aisinv_") || inv.Email != "Yuki@example.edu" || time.Until(inv.ExpiresAt) < 71*time.Hour {
+		t.Fatalf("invitation: %+v", inv)
+	}
+	if n := b.Count(`SELECT count(*) FROM action WHERE id = $1 AND (result ? 'token' OR result::text LIKE '%aisinv_%')`, *invited.ActionID); n != 0 {
+		t.Fatal("the invitation is in the action log")
+	}
+	got := testkit.Result[tools.ActorView](t, b.do(t, b.admin, "actor.get", m{"actor_id": b.yuki}))
+	if got.InviteExpiresAt == nil || got.InviteExpiresAt.Sub(inv.ExpiresAt).Abs() > time.Millisecond || got.HasPassword {
+		t.Fatalf("actor.get after the invitation: %+v", got)
+	}
+	waiting := func(want int, when string) {
+		t.Helper()
+		if n := b.Count(`SELECT count(*) FROM credential WHERE actor_id = $1 AND kind = 'invite' AND revoked_at IS NULL`, b.yuki); n != want {
+			t.Fatalf("%s: %d live invitations, want %d", when, n, want)
+		}
+	}
+	// Inviting again replaces it: one live invitation.
+	b.do(t, b.admin, "actor.invite", m{"actor_id": b.yuki})
+	waiting(1, "invited again")
+	// A new email withdraws it, since it went to the old one; the same email
+	// in another case does not.
+	b.do(t, b.admin, "actor.update", m{"actor_id": b.yuki, "email": "YUKI@example.edu"})
+	waiting(1, "the same email in another case")
+	b.do(t, b.admin, "actor.update", m{"actor_id": b.yuki, "email": "yuki@example.org"})
+	waiting(0, "a new email")
+	// So does a password she sets herself: it was for choosing one.
+	b.do(t, b.admin, "actor.invite", m{"actor_id": b.yuki})
+	b.do(t, b.yuki, "credential.set_password", m{"password": "yukis own password"})
+	waiting(0, "a password set otherwise")
+	if got := testkit.Result[tools.ActorView](t, b.do(t, b.admin, "actor.get", m{"actor_id": b.yuki})); !got.HasPassword || got.InviteExpiresAt != nil {
+		t.Fatalf("actor.get after she set a password: %+v", got)
+	}
+	b.do(t, b.admin, "actor.suspend", m{"actor_id": b.yuki})
+	b.try(t, b.admin, "actor.invite", m{"actor_id": b.yuki}, apperr.FailedPrecondition)
+}
+
 // ---------------------------------------------------------------------------
 // Submissions
 // ---------------------------------------------------------------------------

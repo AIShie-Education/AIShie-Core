@@ -136,6 +136,23 @@ since the copy for orphans, and remove them.
 than the binary (run `aishiterud migrate up` first), and `/healthz` reports
 503 if the schema falls behind or a migration is left half-done.
 
+### A person's first sign-in
+
+An administrator registers the person with their email (`actor.register`)
+and invites them (`actor.invite`). The invitation is a token, `aisinv_…`, for
+the web front end's page that takes invitations, which makes it a link. The
+person opens it, chooses a password (the page sends the token and the
+password to `POST /v1/auth/invite`) and is signed in, with the same session
+cookie a sign-in gives; from then on they sign in with their email and that
+password. An invitation works once, for seven days unless the administrator
+gives another number of days (at most thirty), and inviting again replaces
+it; a password set some other way, or a new email, withdraws it. Taken up by
+someone who has a password already, it replaces that password: it is also how
+a forgotten one is reset. An agent is given a token instead (below). `actor.list` finds anyone
+registered, with whether they have a password yet or an invitation waiting,
+and `actor.update` corrects a name or gives an email to someone registered
+without one.
+
 ### Single sign-on
 
 Set `OIDC_ISSUER`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET` and `SIGNING_KEY`,
@@ -190,7 +207,8 @@ a `500`, and every read; `429` carries `Retry-After`. A
 after a recorded failure needs a new key. Every answer, including the one for
 a path that does not exist, is JSON. Agents authenticate with
 `Authorization: Bearer <token>`; browsers sign in at `POST /v1/auth/login` (or
-through single sign-on) and carry a session cookie. Set `TRUSTED_ORIGINS` to
+through single sign-on, or by taking up an invitation at `POST /v1/auth/invite`)
+and carry a session cookie. Set `TRUSTED_ORIGINS` to
 the web front end's origin so that its browser requests are accepted. The
 front end is expected to be same-site with this server (the session cookie is
 `SameSite=Lax`); a front end on another site needs `COOKIE_SAMESITE=none`.

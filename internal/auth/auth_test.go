@@ -3,11 +3,14 @@ package auth_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/apperr"
@@ -325,5 +328,169 @@ func TestATokenOfTheSystemActorsAuthenticatesNobody(t *testing.T) {
 	exec(`ALTER TABLE credential ENABLE TRIGGER credential_not_for_system_actor`)
 	if p, err := auth.NewAuthenticator(pool, time.Hour).Authenticate(ctx, tok.Full); !apperr.Is(err, apperr.Unauthenticated) {
 		t.Fatalf("the system actor's token authenticated: %+v %v", p, err)
+	}
+}
+
+// An invitation sets a person's password once, signs them in, and is good
+// for nothing else.
+func TestInvitations(t *testing.T) {
+	pool := testdb.New(t)
+	ctx := context.Background()
+	q := dbq.New(pool)
+	res, err := auth.Bootstrap(ctx, pool, auth.BootstrapInput{DisplayName: "Root", Email: "root@example.edu"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	yuki := uuid.Must(uuid.NewV7())
+	email := "Yuki@example.edu"
+	if err := q.InsertActor(ctx, dbq.InsertActorParams{ID: yuki, Kind: "human", DisplayName: "Yuki", Email: &email,
+		CreatedByActorID: &res.RootID, CreatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	a := auth.NewAuthenticator(pool, time.Hour)
+	invite := func(valid time.Duration) string {
+		t.Helper()
+		now := time.Now()
+		tok, _, err := auth.IssueInvite(ctx, q, yuki, "test", now.Add(valid), now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return tok.Full
+	}
+	refused := func(what string, err error) {
+		t.Helper()
+		if !apperr.Is(err, apperr.Unauthenticated) {
+			t.Fatalf("%s: %v, want unauthenticated", what, err)
+		}
+	}
+
+	inv := invite(time.Hour)
+	if !regexp.MustCompile(`^aisinv_[a-z2-7]{12}_[A-Za-z0-9_-]{43}$`).MatchString(inv) {
+		t.Fatalf("invitation %q does not look like aisinv_<prefix>_<secret>", inv)
+	}
+	// It is no bearer token, and a bearer token is no invitation.
+	_, err = a.Authenticate(ctx, inv)
+	refused("the invitation as a bearer token", err)
+	_, err = a.AcceptInvite(ctx, res.Token.Full, "a long enough password")
+	refused("a token as an invitation", err)
+	forged := []byte(inv)
+	forged[30] ^= 'A' ^ 'B' // 'A' <-> 'B'; anything else becomes a character outside the alphabet
+	_, err = a.AcceptInvite(ctx, string(forged), "a long enough password")
+	refused("a forged invitation", err)
+	// A weak password is refused, and the invitation still works.
+	if _, err := a.AcceptInvite(ctx, inv, "short"); !apperr.Is(err, apperr.InvalidArgument) {
+		t.Fatalf("weak password: %v", err)
+	}
+	acc, err := a.AcceptInvite(ctx, inv, "the first password")
+	if err != nil || acc.ActorID != yuki || acc.Email != email {
+		t.Fatalf("accept: %+v %v", acc, err)
+	}
+	if p, err := a.Authenticate(ctx, acc.Token); err != nil || p.ActorID != yuki || p.Kind != auth.KindSession {
+		t.Fatalf("the session it started: %+v %v", p, err)
+	}
+	if _, err := a.Login(ctx, "yuki@example.edu", "the first password"); err != nil {
+		t.Fatalf("signing in with the password it set: %v", err)
+	}
+	// Once.
+	_, err = a.AcceptInvite(ctx, inv, "another long password")
+	refused("an invitation used twice", err)
+	if _, err := a.Login(ctx, "yuki@example.edu", "the first password"); err != nil {
+		t.Fatalf("the password after a second try: %v", err)
+	}
+
+	// Only the newest works, and taken up, it replaces the password.
+	older, newer := invite(time.Hour), invite(time.Hour)
+	_, err = a.AcceptInvite(ctx, older, "another long password")
+	refused("a replaced invitation", err)
+	if _, err := a.AcceptInvite(ctx, newer, "the second password"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.Login(ctx, "yuki@example.edu", "the first password"); !apperr.Is(err, apperr.Unauthenticated) {
+		t.Fatalf("the old password after a second invitation: %v", err)
+	}
+
+	// Not once a password has been set some other way: it was for choosing
+	// one.
+	withdrawn := invite(time.Hour)
+	if err := auth.SetPassword(ctx, q, yuki, "the third password", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	_, err = a.AcceptInvite(ctx, withdrawn, "another long password")
+	refused("an invitation after a password was set otherwise", err)
+
+	// All or nothing: if the session cannot be started, the password is not
+	// set and the invitation still works.
+	whole := invite(time.Hour)
+	for _, stmt := range []string{
+		`CREATE FUNCTION no_sessions() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'no sessions today'; END $$`,
+		`CREATE TRIGGER no_sessions BEFORE INSERT ON credential FOR EACH ROW WHEN (NEW.kind = 'session') EXECUTE FUNCTION no_sessions()`,
+	} {
+		if _, err := pool.Exec(ctx, stmt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := a.AcceptInvite(ctx, whole, "a fourth long password"); err == nil {
+		t.Fatal("accepted with no session started")
+	}
+	if _, err := pool.Exec(ctx, `DROP TRIGGER no_sessions ON credential`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.Login(ctx, "yuki@example.edu", "the third password"); err != nil {
+		t.Fatalf("the password after a half-taken invitation: %v", err)
+	}
+	if _, err := a.AcceptInvite(ctx, whole, "a fourth long password"); err != nil {
+		t.Fatalf("the invitation after a half-taken try: %v", err)
+	}
+
+	// Not once it has expired, nor for someone suspended since.
+	late := invite(time.Hour)
+	a.SetClock(func() time.Time { return time.Now().Add(2 * time.Hour) })
+	_, err = a.AcceptInvite(ctx, late, "a third long password")
+	refused("an expired invitation", err)
+	a.SetClock(time.Now)
+	suspended := invite(time.Hour)
+	if _, err := pool.Exec(ctx, `UPDATE actor SET status = 'suspended' WHERE id = $1`, yuki); err != nil {
+		t.Fatal(err)
+	}
+	_, err = a.AcceptInvite(ctx, suspended, "a third long password")
+	refused("an invitation for someone suspended", err)
+	if _, err := pool.Exec(ctx, `UPDATE actor SET status = 'active' WHERE id = $1`, yuki); err != nil {
+		t.Fatal(err)
+	}
+
+	// Two tries at once: one sets the password, the other finds it used.
+	race := invite(time.Hour)
+	var wg sync.WaitGroup
+	errs := make(chan error, 4)
+	for i := range 4 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := a.AcceptInvite(ctx, race, fmt.Sprintf("racing password %d", i))
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	won := 0
+	for err := range errs {
+		switch {
+		case err == nil:
+			won++
+		case !apperr.Is(err, apperr.Unauthenticated):
+			t.Fatalf("a losing try: %v", err)
+		}
+	}
+	var live int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM credential WHERE actor_id = $1 AND kind = 'password' AND revoked_at IS NULL`, yuki).Scan(&live); err != nil {
+		t.Fatal(err)
+	}
+	if won != 1 || live != 1 {
+		t.Fatalf("%d tries won, %d live passwords; want one of each", won, live)
+	}
+
+	// The system actor is never invited.
+	if _, _, err := auth.IssueInvite(ctx, q, res.SystemID, "test", time.Now().Add(time.Hour), time.Now()); err == nil {
+		t.Fatal("an invitation for the system actor")
 	}
 }

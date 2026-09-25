@@ -58,7 +58,7 @@ actor(id, kind [human|agent|system], display_name, email null,
       status [active|suspended], platform_role null [root|admin],
       created_by_actor_id null→actor, created_at)
 
-credential(id, actor_id→actor, kind [password|sso|api_token|session],
+credential(id, actor_id→actor, kind [password|sso|api_token|session|invite],
            secret_hash null, provider null, subject null, token_prefix null,
            label null, last_used_at null, expires_at null, revoked_at null, created_at,
            unique(provider, subject), unique(token_prefix))
@@ -87,12 +87,16 @@ change with no `action` row: there is no actor yet for it to be an action of. Th
 which cannot sign in to ask, gets its first token — and needs the database access that
 already implies everything. Like the tools, it refuses the system actor.
 
-`credential` covers four kinds of the same thing. SSO rows hold no secret — `provider` and
+`credential` covers five kinds of the same thing. SSO rows hold no secret — `provider` and
 `subject` identify the account at the identity provider (`polyu-adfs` + UPN). API tokens store a
 hash plus a `token_prefix` so the row can be found before the hash is checked. A browser
 `session` is a short-lived token minted at login and is stored exactly like an API token, so
 there is one verification path and no session table; unlike an API token it must carry an
-`expires_at`.
+`expires_at`. An `invite` is how a person an administrator registered comes to have a password
+(`actor.invite`): stored like a session, with an `expires_at`, but under a scheme of its own
+(`aisinv_`) and never looked up as a bearer token. It is taken for setting the password, once,
+and revoked as it is; an actor has one live invitation at most. Setting a password some other
+way revokes it too, and so does a change of email: it went to the old one.
 
 `course.status = 'archived'` refuses every write, from agents included.
 
@@ -554,6 +558,7 @@ check `actor.platform_role` instead. That is the only place it is read.
 | `denied` status ⇔ `denied` authorization; only a `confirm_required` action is proposed, rejected, cancelled or has a decider; only an executed `pending_review` action is under review | `action_status_matches_authz` |
 | `executed_at` is set exactly when status is `executed` | `action_executed_at_consistent` |
 | A session credential has a lookup prefix and an expiry | CHECKs on `credential` |
+| An invitation has a lookup prefix and an expiry, and an actor has one live invitation at most | CHECKs and a partial unique index on `credential` |
 | No credential is written for the system actor | trigger on `credential` |
 | `document_version` and `event` are append-only | triggers |
 | A submitted submission never changes | trigger |
@@ -616,6 +621,13 @@ check `actor.platform_role` instead. That is the only place it is read.
   changing a seat waits for the member's calls in flight, or they wait for it and are refused,
   so nothing is proposed from a seat that is being removed.
 - A token the system actor was given before the database refused them authenticates nobody.
+- An invitation is used once: the password is set, the invitation revoked and the session
+  started in one transaction, under the invitation's row lock, so of two tries at once one sets
+  the password and the other finds it used, and a try that fails half way leaves the invitation
+  as it was. It is refused once it has expired, been replaced or been withdrawn (a password set
+  otherwise, a new email), and for someone suspended since or with no email. Whoever holds one
+  can sign in as its actor, once; it is no bearer token: it is never taken as one, nor a token
+  as an invitation.
 - A call that loses a deadlock — two managers changing each other's seats at once — is made
   again, once, in a fresh transaction, and is recorded as failed ("try again") only if it loses
   again. A sweep's call that loses twice is not recorded at all: its key names what it sweeps,

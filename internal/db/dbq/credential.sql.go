@@ -70,6 +70,46 @@ func (q *Queries) GetCredentialForActor(ctx context.Context, arg GetCredentialFo
 	return i, err
 }
 
+const getInviteByPrefix = `-- name: GetInviteByPrefix :one
+SELECT c.id, c.actor_id, c.secret_hash, c.expires_at, c.revoked_at,
+       a.kind AS actor_kind, a.status AS actor_status, a.email AS actor_email
+FROM credential c
+JOIN actor a ON a.id = c.actor_id
+WHERE c.token_prefix = $1 AND c.kind = 'invite'
+FOR UPDATE OF c
+`
+
+type GetInviteByPrefixRow struct {
+	ID          uuid.UUID
+	ActorID     uuid.UUID
+	SecretHash  *string
+	ExpiresAt   *time.Time
+	RevokedAt   *time.Time
+	ActorKind   string
+	ActorStatus string
+	ActorEmail  *string
+}
+
+// An invitation, found by its prefix before its hash is checked, and locked:
+// it is used once, and two tries at it take turns. Revoked and expired rows
+// are returned too, as GetCredentialByPrefix returns them. The actor comes
+// with it.
+func (q *Queries) GetInviteByPrefix(ctx context.Context, tokenPrefix *string) (GetInviteByPrefixRow, error) {
+	row := q.db.QueryRow(ctx, getInviteByPrefix, tokenPrefix)
+	var i GetInviteByPrefixRow
+	err := row.Scan(
+		&i.ID,
+		&i.ActorID,
+		&i.SecretHash,
+		&i.ExpiresAt,
+		&i.RevokedAt,
+		&i.ActorKind,
+		&i.ActorStatus,
+		&i.ActorEmail,
+	)
+	return i, err
+}
+
 const getPasswordCredential = `-- name: GetPasswordCredential :one
 SELECT id, secret_hash
 FROM credential
@@ -250,6 +290,23 @@ type RevokeCredentialByIDParams struct {
 
 func (q *Queries) RevokeCredentialByID(ctx context.Context, arg RevokeCredentialByIDParams) error {
 	_, err := q.db.Exec(ctx, revokeCredentialByID, arg.ID, arg.RevokedAt)
+	return err
+}
+
+const revokeInvites = `-- name: RevokeInvites :exec
+UPDATE credential SET revoked_at = $2
+WHERE actor_id = $1 AND kind = 'invite' AND revoked_at IS NULL
+`
+
+type RevokeInvitesParams struct {
+	ActorID   uuid.UUID
+	RevokedAt *time.Time
+}
+
+// An actor's live invitation: when another replaces it, when a password is
+// set (by it or otherwise), and when the email it was sent to changes.
+func (q *Queries) RevokeInvites(ctx context.Context, arg RevokeInvitesParams) error {
+	_, err := q.db.Exec(ctx, revokeInvites, arg.ActorID, arg.RevokedAt)
 	return err
 }
 

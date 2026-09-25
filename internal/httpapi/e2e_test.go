@@ -379,6 +379,65 @@ func TestBrowserSession(t *testing.T) {
 	}
 }
 
+// A person an administrator registered chooses their password through an
+// invitation, in the browser, and is signed in.
+func TestInvitationOverHTTP(t *testing.T) {
+	a := newAPI(t, 0)
+	c := a.c
+	root := a.tokenFor(c.Root)
+	reg := a.do(nil, "POST", "/v1/actors", root, m{"kind": "human", "display_name": "Mori", "email": "mori@example.edu"}, "Idempotency-Key", "reg")
+	mori := reg.str("result", "actor_id")
+	if reg.Status != 200 || mori == "" {
+		t.Fatalf("register: %d %s", reg.Status, reg.Raw)
+	}
+	// Found again by a search, with no password yet.
+	found := a.do(nil, "GET", "/v1/actors?search=MORI", root, nil)
+	if found.Status != 200 || !strings.Contains(found.Raw, mori) || !strings.Contains(found.Raw, `"has_password":false`) {
+		t.Fatalf("actor.list: %d %s", found.Status, found.Raw)
+	}
+	inv := a.do(nil, "POST", "/v1/actors/"+mori+"/invite", root, m{}, "Idempotency-Key", "inv")
+	token := inv.str("result", "token")
+	if inv.Status != 200 || !strings.HasPrefix(token, "aisinv_") || inv.str("result", "email") != "mori@example.edu" {
+		t.Fatalf("invite: %d %s", inv.Status, inv.Raw)
+	}
+	if replay := a.do(nil, "POST", "/v1/actors/"+mori+"/invite", root, m{}, "Idempotency-Key", "inv"); replay.Status != 200 || replay.str("result", "token") != "" {
+		t.Fatalf("a replayed invitation carries its token: %s", replay.Raw)
+	}
+	// It is no bearer token.
+	if me := a.do(nil, "GET", "/v1/me", token, nil); me.Status != 401 {
+		t.Fatalf("the invitation as a bearer token: %d", me.Status)
+	}
+
+	jar, _ := cookiejar.New(nil)
+	browser := &http.Client{Jar: jar}
+	// A hostile page cannot take it up on the person's behalf.
+	evil := a.do(browser, "POST", "/v1/auth/invite", "", m{"token": token, "password": "chosen by someone else"},
+		"Origin", "https://evil.example", "Sec-Fetch-Site", "cross-site")
+	if evil.Status != http.StatusForbidden {
+		t.Fatalf("cross-origin: %d %s", evil.Status, evil.Raw)
+	}
+	if weak := a.do(browser, "POST", "/v1/auth/invite", "", m{"token": token, "password": "short"}, "Origin", frontEnd); weak.Status != 400 {
+		t.Fatalf("weak password: %d %s", weak.Status, weak.Raw)
+	}
+	acc := a.do(browser, "POST", "/v1/auth/invite", "", m{"token": token, "password": "moris own password"}, "Origin", frontEnd)
+	if acc.Status != 200 || acc.str("actor_id") != mori || acc.str("email") != "mori@example.edu" ||
+		!strings.Contains(acc.Header.Get("Set-Cookie"), "HttpOnly") || strings.Contains(acc.Raw, "ais_") {
+		t.Fatalf("accept: %d %v %s", acc.Status, acc.Header, acc.Raw)
+	}
+	if me := a.do(browser, "GET", "/v1/me", "", nil); me.Status != 200 || me.str("result", "display_name") != "Mori" {
+		t.Fatalf("me after accepting: %d %s", me.Status, me.Raw)
+	}
+	if again := a.do(nil, "POST", "/v1/auth/invite", "", m{"token": token, "password": "moris own password"}); again.Status != 401 {
+		t.Fatalf("used twice: %d %s", again.Status, again.Raw)
+	}
+	if login := a.do(nil, "POST", "/v1/auth/login", "", m{"email": "MORI@example.edu", "password": "moris own password"}); login.Status != 200 {
+		t.Fatalf("login with the chosen password: %d %s", login.Status, login.Raw)
+	}
+	if got := a.do(nil, "GET", "/v1/actors/"+mori, root, nil); !strings.Contains(got.Raw, `"has_password":true`) || strings.Contains(got.Raw, "invite_expires_at") {
+		t.Fatalf("actor.get after: %s", got.Raw)
+	}
+}
+
 func mustURL(t *testing.T, raw string) *url.URL {
 	t.Helper()
 	u, err := url.Parse(raw)

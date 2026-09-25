@@ -77,7 +77,8 @@ var visibility = map[string][]domain.Perm{
 
 	// Platform events belong to no course, so they are in no course's feed.
 	// They are listed so that leaving them out is visibly a decision.
-	EventActorRegistered: nil, EventActorSuspended: nil, EventActorReactivated: nil,
+	EventActorRegistered: nil, EventActorUpdated: nil, EventActorInvited: nil,
+	EventActorSuspended: nil, EventActorReactivated: nil,
 }
 
 // KnownEventTypes lists every event type that has a visibility rule.

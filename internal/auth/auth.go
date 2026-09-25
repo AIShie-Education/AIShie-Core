@@ -24,6 +24,7 @@ const (
 	KindSSO      = "sso"
 	KindAPIToken = "api_token"
 	KindSession  = "session"
+	KindInvite   = "invite"
 
 	DefaultSessionTTL = 12 * time.Hour
 )
@@ -147,13 +148,18 @@ func (a *Authenticator) Login(ctx context.Context, email, password string) (Sess
 // StartSession mints a session credential for an actor whose identity has
 // already been established, by password here or by an identity provider.
 func (a *Authenticator) StartSession(ctx context.Context, actorID uuid.UUID, label string) (Session, error) {
+	return a.startSession(ctx, dbq.New(a.pool), actorID, label)
+}
+
+// startSession is StartSession through q, which may be a transaction's.
+func (a *Authenticator) startSession(ctx context.Context, q *dbq.Queries, actorID uuid.UUID, label string) (Session, error) {
 	tok, err := NewToken()
 	if err != nil {
 		return Session{}, err
 	}
 	now := a.now()
 	expires := now.Add(a.sessionTTL)
-	if err := dbq.New(a.pool).InsertCredential(ctx, dbq.InsertCredentialParams{
+	if err := q.InsertCredential(ctx, dbq.InsertCredentialParams{
 		ID: ids.New(), ActorID: actorID, Kind: KindSession, SecretHash: &tok.Hash,
 		TokenPrefix: &tok.Prefix, Label: &label, ExpiresAt: &expires, CreatedAt: now,
 	}); err != nil {
@@ -202,21 +208,131 @@ func IssueToken(ctx context.Context, q *dbq.Queries, actorID uuid.UUID, label st
 }
 
 // SetPassword replaces an actor's password. Older passwords are revoked, not
-// deleted: the row says when each stopped working.
+// deleted: the row says when each stopped working. So is an invitation
+// waiting: it was for choosing a password, and one has been chosen.
 func SetPassword(ctx context.Context, q *dbq.Queries, actorID uuid.UUID, password string, now time.Time) error {
-	hash, err := HashPassword(password)
+	hash, err := hashNewPassword(password)
 	if err != nil {
-		if errors.Is(err, ErrWeakPassword) {
-			return apperr.Invalid("%v", err)
-		}
 		return err
 	}
+	return setPasswordHash(ctx, q, actorID, hash, now)
+}
+
+// hashNewPassword is HashPassword, with a weak password the caller's fault.
+func hashNewPassword(password string) (string, error) {
+	hash, err := HashPassword(password)
+	if errors.Is(err, ErrWeakPassword) {
+		return "", apperr.Invalid("%v", err)
+	}
+	return hash, err
+}
+
+func setPasswordHash(ctx context.Context, q *dbq.Queries, actorID uuid.UUID, hash string, now time.Time) error {
 	if err := q.RevokePasswordCredentials(ctx, dbq.RevokePasswordCredentialsParams{ActorID: actorID, RevokedAt: &now}); err != nil {
+		return err
+	}
+	if err := q.RevokeInvites(ctx, dbq.RevokeInvitesParams{ActorID: actorID, RevokedAt: &now}); err != nil {
 		return err
 	}
 	return q.InsertCredential(ctx, dbq.InsertCredentialParams{
 		ID: ids.New(), ActorID: actorID, Kind: KindPassword, SecretHash: &hash, CreatedAt: now,
 	})
+}
+
+// IssueInvite makes an invitation for an actor to set their password, and
+// revokes the one they had: only the newest works. Who may be invited is the
+// tool's to decide (actor.invite); the database holds the one live
+// invitation, and refuses one for the system actor. Setting a password, by
+// the invitation or otherwise, revokes it (SetPassword).
+func IssueInvite(ctx context.Context, q *dbq.Queries, actorID uuid.UUID, label string, expiresAt, now time.Time) (Token, uuid.UUID, error) {
+	tok, err := NewInvite()
+	if err != nil {
+		return Token{}, uuid.Nil, err
+	}
+	if err := q.RevokeInvites(ctx, dbq.RevokeInvitesParams{ActorID: actorID, RevokedAt: &now}); err != nil {
+		return Token{}, uuid.Nil, err
+	}
+	id := ids.New()
+	if err := q.InsertCredential(ctx, dbq.InsertCredentialParams{
+		ID: id, ActorID: actorID, Kind: KindInvite, SecretHash: &tok.Hash,
+		TokenPrefix: &tok.Prefix, Label: &label, ExpiresAt: &expiresAt, CreatedAt: now,
+	}); err != nil {
+		return Token{}, uuid.Nil, err
+	}
+	return tok, id, nil
+}
+
+// errBadInvite is one message for every way an invitation can be wrong:
+// unknown, used, replaced, withdrawn, expired, or for an account that is
+// suspended.
+var errBadInvite = apperr.New(apperr.Unauthenticated,
+	"the invitation is not valid: it may have expired, been used, or been replaced by a newer one")
+
+// Accepted is what taking up an invitation hands back: the session it signs
+// the person in with, and the email they will sign in with from now on.
+type Accepted struct {
+	Session
+	Email string
+}
+
+// AcceptInvite sets the password of the person an invitation was made for,
+// uses the invitation up, and signs them in.
+//
+// The invitation is checked first, and the password hashed only for one
+// that is good: a guess costs a lookup, not an argon2 hash. It is checked
+// again, locked, in the transaction that sets the password, which revokes
+// it, and starts the session: of two tries at once, one sets the password
+// and the other finds the invitation used, and nothing is half done. A weak
+// password is refused before anything changes, and the invitation still
+// works.
+func (a *Authenticator) AcceptInvite(ctx context.Context, presented, password string) (Accepted, error) {
+	prefix, ok := parseInvitePrefix(presented)
+	if !ok {
+		return Accepted{}, errBadInvite
+	}
+	check := func(q *dbq.Queries) (dbq.GetInviteByPrefixRow, error) {
+		inv, err := q.GetInviteByPrefix(ctx, &prefix)
+		switch {
+		case errors.Is(err, pgx.ErrNoRows):
+			return inv, errBadInvite
+		case err != nil:
+			return inv, fmt.Errorf("invitation lookup: %w", err)
+		case inv.SecretHash == nil || !tokenMatches(presented, *inv.SecretHash),
+			inv.RevokedAt != nil,
+			inv.ExpiresAt == nil || !inv.ExpiresAt.After(a.now()),
+			// Only an actor with an email is invited (actor.invite), and a
+			// suspension since then holds. The system actor is refused as
+			// Authenticate refuses it, though it holds no credential.
+			inv.ActorKind == "system", inv.ActorStatus != domain.ActorActive, inv.ActorEmail == nil:
+			return inv, errBadInvite
+		}
+		return inv, nil
+	}
+	if _, err := check(dbq.New(a.pool)); err != nil {
+		return Accepted{}, err
+	}
+	hash, err := hashNewPassword(password)
+	if err != nil {
+		return Accepted{}, err
+	}
+	var acc Accepted
+	err = db.InTx(ctx, a.pool, func(tx pgx.Tx) error {
+		q := dbq.New(tx)
+		inv, err := check(q)
+		if err != nil {
+			return err
+		}
+		if err := setPasswordHash(ctx, q, inv.ActorID, hash, a.now()); err != nil {
+			return err
+		}
+		acc.Email = *inv.ActorEmail
+		acc.Session, err = a.startSession(ctx, q, inv.ActorID, "invitation accepted")
+		return err
+	})
+	if err != nil {
+		return Accepted{}, err
+	}
+	return acc, nil
 }
 
 // BootstrapInput describes the first human of an installation.

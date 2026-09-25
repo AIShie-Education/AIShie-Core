@@ -122,6 +122,22 @@ SELECT pg_temp.fails('session needs a lookup prefix', '23514', $q$
 SELECT pg_temp.fails('session must expire', '23514', $q$
     INSERT INTO credential (actor_id, kind, secret_hash, token_prefix)
     VALUES ('00000000-0000-0000-0000-000000000034', 'session', 'h', 'sess-2') $q$);
+SELECT pg_temp.ok('invitation with a prefix and an expiry', $q$
+    INSERT INTO credential (actor_id, kind, secret_hash, token_prefix, expires_at)
+    VALUES ('00000000-0000-0000-0000-000000000037', 'invite', 'h', 'inv-1', now() + interval '7 days') $q$);
+SELECT pg_temp.fails('invitation needs a lookup prefix', '23514', $q$
+    INSERT INTO credential (actor_id, kind, secret_hash, expires_at)
+    VALUES ('00000000-0000-0000-0000-000000000034', 'invite', 'h', now() + interval '7 days') $q$);
+SELECT pg_temp.fails('invitation must expire', '23514', $q$
+    INSERT INTO credential (actor_id, kind, secret_hash, token_prefix)
+    VALUES ('00000000-0000-0000-0000-000000000034', 'invite', 'h', 'inv-2') $q$);
+SELECT pg_temp.fails('one live invitation per actor', '23505', $q$
+    INSERT INTO credential (actor_id, kind, secret_hash, token_prefix, expires_at)
+    VALUES ('00000000-0000-0000-0000-000000000037', 'invite', 'h', 'inv-3', now() + interval '7 days') $q$);
+SELECT pg_temp.ok('a new invitation once the last is revoked', $q$
+    UPDATE credential SET revoked_at = now() WHERE token_prefix = 'inv-1';
+    INSERT INTO credential (actor_id, kind, secret_hash, token_prefix, expires_at)
+    VALUES ('00000000-0000-0000-0000-000000000037', 'invite', 'h', 'inv-4', now() + interval '7 days') $q$);
 SELECT pg_temp.fails('unknown credential kind is rejected', '23514', $q$
     INSERT INTO credential (actor_id, kind, secret_hash) VALUES ('00000000-0000-0000-0000-000000000034', 'passkey', 'h') $q$);
 SELECT pg_temp.fails('the system actor holds no credential', '23514', $q$

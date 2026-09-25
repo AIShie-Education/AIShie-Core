@@ -46,6 +46,7 @@ type Querier interface {
 	// document as its instructions or rubric.
 	DocumentInUseByPublishedAssignment(ctx context.Context, arg DocumentInUseByPublishedAssignmentParams) (bool, error)
 	EmailTaken(ctx context.Context, lower string) (bool, error)
+	EmailTakenByAnother(ctx context.Context, arg EmailTakenByAnotherParams) (bool, error)
 	// Whether the actor had a hand in escalating the action, from any seat: made
 	// the review that escalated it, or approved that review, or confirmed that
 	// approval, and so on up. An approved review is carried out as its proposer,
@@ -69,6 +70,10 @@ type Querier interface {
 	// here: the actor's type and the member's roster role. Authorization does not
 	// branch on either, and a test fails if this file ever names them.
 	GetActorForAuthz(ctx context.Context, id uuid.UUID) (GetActorForAuthzRow, error)
+	// One actor as an administrator sees it: the row, and whether they can sign
+	// in. At most one invitation is live (credential_one_live_invite), so the
+	// join adds no row; it may have expired unused.
+	GetActorView(ctx context.Context, id uuid.UUID) (GetActorViewRow, error)
 	GetAssignmentInCourse(ctx context.Context, arg GetAssignmentInCourseParams) (GetAssignmentInCourseRow, error)
 	// GetAssignmentInCourse, locked for the rest of the transaction:
 	// assignment.update and assignment.publish read the row, check it and write
@@ -103,6 +108,11 @@ type Querier interface {
 	// Grades by id, with the assignment each belongs to (null for a component
 	// grade). A grade's course is its student's course.
 	GetGradesInCourse(ctx context.Context, arg GetGradesInCourseParams) ([]GetGradesInCourseRow, error)
+	// An invitation, found by its prefix before its hash is checked, and locked:
+	// it is used once, and two tries at it take turns. Revoked and expired rows
+	// are returned too, as GetCredentialByPrefix returns them. The actor comes
+	// with it.
+	GetInviteByPrefix(ctx context.Context, tokenPrefix *string) (GetInviteByPrefixRow, error)
 	GetLatestVersion(ctx context.Context, documentID uuid.UUID) (DocumentVersion, error)
 	GetLiveComputedGrade(ctx context.Context, arg GetLiveComputedGradeParams) (GetLiveComputedGradeRow, error)
 	// The partial unique index allows at most one row per (course, actor) that is
@@ -157,6 +167,11 @@ type Querier interface {
 	InsertSubmission(ctx context.Context, arg InsertSubmissionParams) error
 	InsertTerm(ctx context.Context, arg InsertTermParams) error
 	ListActionsByMember(ctx context.Context, arg ListActionsByMemberParams) ([]Action, error)
+	// Everyone registered, as GetActorView sees them: people and agents, not the
+	// system actor, which nobody registers or manages. The search is a piece of
+	// the name or of the email, in any case, taken as it is: strpos has no
+	// wildcards to escape.
+	ListActors(ctx context.Context, arg ListActorsParams) ([]ListActorsRow, error)
 	ListAssignmentScope(ctx context.Context, memberID uuid.UUID) ([]uuid.UUID, error)
 	// Scope is applied here, not afterwards. A member who may not write
 	// assignments sees only published ones.
@@ -299,6 +314,9 @@ type Querier interface {
 	// Only the owner's own credential; someone else's id changes nothing.
 	RevokeCredential(ctx context.Context, arg RevokeCredentialParams) (int64, error)
 	RevokeCredentialByID(ctx context.Context, arg RevokeCredentialByIDParams) error
+	// An actor's live invitation: when another replaces it, when a password is
+	// set (by it or otherwise), and when the email it was sent to changes.
+	RevokeInvites(ctx context.Context, arg RevokeInvitesParams) error
 	RevokePasswordCredentials(ctx context.Context, arg RevokePasswordCredentialsParams) error
 	SetActionReview(ctx context.Context, arg SetActionReviewParams) (int64, error)
 	SetActorStatus(ctx context.Context, arg SetActorStatusParams) (int64, error)
@@ -336,6 +354,8 @@ type Querier interface {
 	// and every call fails.
 	TouchCredential(ctx context.Context, arg TouchCredentialParams) error
 	TryJobLock(ctx context.Context, key int64) (bool, error)
+	// A null leaves the value as it is.
+	UpdateActor(ctx context.Context, arg UpdateActorParams) error
 	UpdateAssignment(ctx context.Context, arg UpdateAssignmentParams) error
 	UpdateComponent(ctx context.Context, arg UpdateComponentParams) error
 	UpdateCourse(ctx context.Context, arg UpdateCourseParams) error
