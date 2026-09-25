@@ -65,7 +65,11 @@ func (s *S3Store) PresignPut(ctx context.Context, key, contentType string, ttl t
 }
 
 func (s *S3Store) PresignGet(ctx context.Context, key string, ttl time.Duration) (string, error) {
-	u, err := s.client.PresignedGetObject(ctx, s.bucket, key, ttl, url.Values{})
+	// The object keeps the type its uploader declared, which may be
+	// text/html. The URL itself asks for it as a download, so that no page
+	// runs from the bucket, and that holds for what was attached before too.
+	attachment := url.Values{"response-content-disposition": {"attachment"}}
+	u, err := s.client.PresignedGetObject(ctx, s.bucket, key, ttl, attachment)
 	if err != nil {
 		return "", err
 	}

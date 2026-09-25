@@ -1413,6 +1413,62 @@ func TestAnEventNamingAStudentTakesTheSeatFirst(t *testing.T) {
 	}
 }
 
+// A file is added to a submission, or archived from it, only while it is a
+// draft, and the state that says so is read under the submission's lock. A
+// file that comes while the draft is being handed in waits for the hand-in,
+// and then finds the work handed in: it does not land on it afterwards, nor
+// take away a file the hand-in counted. Here the hand-in holds the
+// submission and waits for the course's event stream.
+func TestAFileRacingTheHandInFindsItHandedIn(t *testing.T) {
+	b := build(t)
+	busy := func() (release func()) {
+		h := fnv.New32a()
+		_, _ = h.Write(b.course[:])
+		return heldBy(t, b, `SELECT pg_advisory_xact_lock($1::int4, $2::int4)`, int32(0x41495345), int32(h.Sum32()))
+	}
+
+	// Yuki attaches an appendix as her essay is handed in.
+	essay := testkit.Result[tools.SubmissionCreateOut](t, b.do(t, b.yuki, "submission.create",
+		m{"course_id": b.course, "assignment_id": b.hw3, "body": "essay"})).SubmissionID
+	release := busy()
+	submit := b.inFlight(b.yuki, "submission.submit", m{"course_id": b.course, "submission_id": essay}, "submit-essay")
+	b.waitingFor(t, 1, submit)
+	attach := b.inFlight(b.yuki, "document.create", m{"course_id": b.course, "kind": "submission", "title": "appendix.txt",
+		"submission_id": essay, "body_md": "second thoughts"}, "appendix")
+	b.waitingFor(t, 2, submit, attach)
+	release()
+	if out := settled(t, submit); out.Status != domain.StatusExecuted {
+		t.Fatalf("the hand-in: %+v", out)
+	}
+	if out := settled(t, attach); out.Error == nil || out.Error.Code != apperr.Conflict {
+		t.Fatalf("a file added as the work was handed in: %+v", out)
+	}
+	if n := b.Count(`SELECT count(*) FROM document WHERE submission_id = $1`, essay); n != 0 {
+		t.Fatalf("the handed-in work has %d files; it was handed in with none", n)
+	}
+
+	// Ken archives his only file as his work is handed in.
+	work := testkit.Result[tools.SubmissionCreateOut](t, b.do(t, b.ken, "submission.create",
+		m{"course_id": b.course, "assignment_id": b.hw3})).SubmissionID
+	file := testkit.Result[tools.DocumentCreateOut](t, b.do(t, b.ken, "document.create", m{"course_id": b.course, "kind": "submission",
+		"title": "essay.txt", "submission_id": work, "body_md": "Ken's essay"})).DocumentID
+	release = busy()
+	submit = b.inFlight(b.ken, "submission.submit", m{"course_id": b.course, "submission_id": work}, "submit-work")
+	b.waitingFor(t, 1, submit)
+	archive := b.inFlight(b.ken, "document.archive", m{"course_id": b.course, "document_id": file}, "archive")
+	b.waitingFor(t, 2, submit, archive)
+	release()
+	if out := settled(t, submit); out.Status != domain.StatusExecuted {
+		t.Fatalf("the hand-in: %+v", out)
+	}
+	if out := settled(t, archive); out.Error == nil || out.Error.Code != apperr.Conflict {
+		t.Fatalf("a file archived as the work was handed in: %+v", out)
+	}
+	if n := b.Count(`SELECT count(*) FROM document WHERE id = $1 AND status = 'active'`, file); n != 1 {
+		t.Fatal("the handed-in work lost the file it was handed in with")
+	}
+}
+
 // Seating an actor over their expired seat removes that seat as any removal
 // does: after the member's calls in flight, cancelling what they proposed. A
 // seat the sweep removes meanwhile is simply out of the way; one whose expiry
@@ -1502,12 +1558,15 @@ func TestSeatingYourselfTwiceAtOnceIsRefusedTwice(t *testing.T) {
 }
 
 // An approval that loses a real deadlock while it carries its proposal out
-// leaves the proposal waiting, as one that loses it re-checking does: the
-// decision is recorded as failed, "try again", and deciding again works.
-// Here two helpers each propose pausing the other, and both proposals are
+// is made again, in a fresh transaction, and sees what the other did. Here
+// two helpers each propose pausing the other, and both proposals are
 // approved at once: each approval holds its proposer's seat and wants the
-// other's. Which one PostgreSQL stops is its choice; it stops one.
-func TestAnApprovalThatLosesADeadlockCarryingItOutLeavesTheProposalWaiting(t *testing.T) {
+// other's. Which one PostgreSQL stops is its choice; it stops one, and the
+// other goes through and pauses that one's proposer. Made again, the
+// approval that was stopped finds its proposer paused and cancels the
+// proposal, as any approval of a paused member's proposal does. Neither is
+// recorded as having collided.
+func TestAnApprovalThatLosesADeadlockCarryingItOutIsMadeAgain(t *testing.T) {
 	b := build(t)
 	register := func(name string) uuid.UUID {
 		return testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", m{"kind": "human", "display_name": name})).ActorID
@@ -1524,7 +1583,6 @@ func TestAnApprovalThatLosesADeadlockCarryingItOutLeavesTheProposalWaiting(t *te
 		by, proposerM uuid.UUID
 		prop          *uuid.UUID
 		back          <-chan callResult
-		out           pipeline.Outcome
 	}
 	propose := func(by, proposer, proposerM, target uuid.UUID, key string) *approval {
 		out := b.MustCall(proposer, "member.pause", m{"course_id": b.course, "member_id": target}, key)
@@ -1548,40 +1606,32 @@ func TestAnApprovalThatLosesADeadlockCarryingItOutLeavesTheProposalWaiting(t *te
 	b.waitingFor(t, 2, approvals[0].back, approvals[1].back)
 	release()
 
-	var lost *approval
+	var won, lost *approval
 	for _, a := range approvals {
-		select {
-		case r := <-a.back:
-			if r.err != nil {
-				t.Fatalf("an approval: %v", r.err)
+		out := settled(t, a.back)
+		v := testkit.Result[pipeline.DecideOut](t, out)
+		switch {
+		case out.Status != domain.StatusExecuted:
+			t.Fatalf("an approval: %+v", out)
+		case v.Outcome == domain.StatusExecuted && won == nil:
+			won = a
+		case v.Outcome == domain.StatusCancelled && lost == nil:
+			if v.Error.Details["reason"] != pipeline.CancelReauthorization || v.Error.Details["authz_reason"] != "membership_not_active" {
+				t.Fatalf("the approval made again cancelled its proposal because %v", v.Error.Details)
 			}
-			a.out = r.out
-		case <-time.After(30 * time.Second):
-			t.Fatal("an approval never came back")
+			lost = a
+		default:
+			t.Fatalf("an approval came to %s, and one should go through and the other cancel: %+v", v.Outcome, v)
 		}
-		if strings.Contains(string(a.out.Result), `"outcome":"executed"`) {
-			continue
-		}
-		if lost != nil {
-			t.Fatalf("neither approval went through: %+v, %+v", lost.out, a.out)
-		}
-		lost = a
 	}
-	if lost == nil {
-		t.Fatal("both approvals went through")
+	if n := b.Count(`SELECT count(*) FROM course_member WHERE id = $1 AND status = 'paused'`, lost.proposerM); n != 1 {
+		t.Fatal("the proposer of the approval made again is not the one paused")
 	}
-	if lost.out.Status != domain.StatusFailed || lost.out.Error == nil || lost.out.Error.Code != apperr.Conflict {
-		t.Fatalf("the approval that lost: %+v", lost.out)
+	if n := b.Count(`SELECT count(*) FROM course_member WHERE id = $1 AND status = 'active'`, won.proposerM); n != 1 {
+		t.Fatal("the proposer of the approval that went through was paused as well")
 	}
-	if n := b.Count(`SELECT count(*) FROM action WHERE id = $1 AND status = 'proposed'`, lost.prop); n != 1 {
-		t.Fatal("the proposal whose approval lost no longer waits")
-	}
-
-	// The other approval paused this proposer; resumed, their proposal can
-	// be approved again, and is carried out.
-	b.do(t, b.sato, "member.resume", m{"course_id": b.course, "member_id": lost.proposerM})
-	if out := b.MustCall(lost.by, "action.decide", decide(lost), "again"); !strings.Contains(string(out.Result), `"outcome":"executed"`) {
-		t.Fatalf("deciding again: %+v", out)
+	if n := b.Count(`SELECT count(*) FROM action WHERE action_type = 'action.decide'`); n != 2 {
+		t.Fatalf("%d decisions recorded, want the two", n)
 	}
 }
 
@@ -1599,5 +1649,31 @@ func TestEditingYourOwnSeatTwiceAtOnceIsRefusedTwice(t *testing.T) {
 		if out := settled(t, c); out.Error == nil || out.Error.Message != "not on your own membership" {
 			t.Fatalf("Sato changing his own seat: %+v", out)
 		}
+	}
+}
+
+// Two managers changing each other's seats at once each hold their own seat,
+// shared, as every call holds its caller's, and wait to lock the other's: a
+// deadlock, which PostgreSQL ends by stopping one of them. The one stopped
+// is made again in a fresh transaction, after the other, and both changes
+// go through; neither is failed with "try again", its key spent on that.
+func TestManagersChangingEachOthersSeatsAtOnceBothGoThrough(t *testing.T) {
+	b := build(t)
+	boss := testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", m{"kind": "human", "display_name": "Boss"})).ActorID
+	bossM := testkit.Result[tools.MemberIDOut](t, b.do(t, b.sato, "member.add", m{"course_id": b.course, "actor_id": boss, "preset": "instructor"})).MemberID
+	// Both calls hold their callers' seats and are about to record themselves.
+	release := heldBy(t, b, `SELECT 1 FROM course WHERE id = $1 FOR UPDATE`, b.course)
+	narrow := m{"grade_post": "confirm_required"}
+	satos := b.inFlight(b.sato, "member.update_perms", m{"course_id": b.course, "member_id": bossM, "perms": narrow}, "narrow-boss")
+	bosss := b.inFlight(boss, "member.update_perms", m{"course_id": b.course, "member_id": b.satoM, "perms": narrow}, "narrow-sato")
+	b.waitingFor(t, 2, satos, bosss)
+	release()
+	for _, c := range []<-chan callResult{satos, bosss} {
+		if out := settled(t, c); out.Status != domain.StatusExecuted {
+			t.Fatalf("a manager narrowing the other's seat: %+v", out)
+		}
+	}
+	if n := b.Count(`SELECT count(*) FROM course_member WHERE id = ANY($1) AND perm_grade_post = 'confirm_required'`, []uuid.UUID{b.satoM, bossM}); n != 2 {
+		t.Fatalf("%d of the two seats were narrowed, want both", n)
 	}
 }

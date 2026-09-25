@@ -60,7 +60,9 @@ func (a *Authenticator) SetClock(now func() time.Time) { a.now = now }
 //
 // Nothing about the actor's standing is checked here. A suspended actor still
 // authenticates and is then denied by step 1 of authorize() on every call,
-// which also puts the attempt in the action log.
+// which also puts the attempt in the action log. The system actor is the one
+// exception: it never authenticates, so that a token issued to it before the
+// database refused them lends nobody the sweeps' authority.
 func (a *Authenticator) Authenticate(ctx context.Context, presented string) (Principal, error) {
 	prefix, ok := parsePrefix(presented)
 	if !ok {
@@ -81,6 +83,8 @@ func (a *Authenticator) Authenticate(ctx context.Context, presented string) (Pri
 	case cred.RevokedAt != nil:
 		return Principal{}, errUnauthenticated
 	case cred.ExpiresAt != nil && !cred.ExpiresAt.After(now):
+		return Principal{}, errUnauthenticated
+	case cred.ActorKind == "system":
 		return Principal{}, errUnauthenticated
 	}
 	// Best effort: a failure to note the time of use is no reason to refuse.
@@ -164,9 +168,21 @@ func (a *Authenticator) Logout(ctx context.Context, p Principal) error {
 	return dbq.New(a.pool).RevokeCredentialByID(ctx, dbq.RevokeCredentialByIDParams{ID: p.CredentialID, RevokedAt: &now})
 }
 
-// IssueToken creates an API token for an actor. It is used by the
-// credential.issue_token tool and by the operator's command line.
+// IssueToken creates an API token for an actor. It is used by the tools that
+// issue tokens, by bootstrap and by the operator's command line. The system
+// actor is never given one: a token of its would act as the sweeps do, and
+// could take their idempotency keys before them.
 func IssueToken(ctx context.Context, q *dbq.Queries, actorID uuid.UUID, label string, expiresAt *time.Time, now time.Time) (Token, uuid.UUID, error) {
+	actor, err := q.GetActor(ctx, actorID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Token{}, uuid.Nil, apperr.Missing("no such actor")
+	}
+	if err != nil {
+		return Token{}, uuid.Nil, err
+	}
+	if actor.Kind == "system" {
+		return Token{}, uuid.Nil, apperr.Forbid("the system actor is never issued a token")
+	}
 	tok, err := NewToken()
 	if err != nil {
 		return Token{}, uuid.Nil, err

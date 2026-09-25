@@ -38,7 +38,8 @@ type Store interface {
 	// PresignPut returns a URL that accepts one PUT of the object's bytes,
 	// with the headers the PUT must carry.
 	PresignPut(ctx context.Context, key, contentType string, ttl time.Duration) (url string, headers map[string]string, err error)
-	// PresignGet returns a URL that serves the object for a while.
+	// PresignGet returns a URL that serves the object for a while, as a
+	// download and never as a page, whatever type it was uploaded with.
 	PresignGet(ctx context.Context, key string, ttl time.Duration) (string, error)
 	// Stat describes the object, or returns ErrNotFound.
 	Stat(ctx context.Context, key string) (Info, error)

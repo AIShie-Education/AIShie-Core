@@ -129,6 +129,36 @@ func TestS3Store(t *testing.T) {
 	if !bytes.Equal(got, body) {
 		t.Fatalf("read back %q", got)
 	}
+	// It is served as a download, as the disk store serves it, never as a
+	// page: whatever type the uploader declared, a student's essay.html must
+	// not run as script on the store's origin.
+	if cd := res.Header.Get("Content-Disposition"); !strings.HasPrefix(cd, "attachment") {
+		t.Fatalf("served with Content-Disposition %q, want an attachment", cd)
+	}
+	page := "courses/test/" + uuid.NewString()
+	pageURL, pageHeaders, err := s.PresignPut(ctx, page, "text/html", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, _ = http.NewRequest(http.MethodPut, pageURL, strings.NewReader("<script>alert(document.cookie)</script>"))
+	for k, v := range pageHeaders {
+		req.Header.Set(k, v)
+	}
+	if res, err = http.DefaultClient.Do(req); err != nil || res.StatusCode != http.StatusOK {
+		t.Fatalf("PUT of a page to the presigned URL: %v %v", res, err)
+	}
+	res.Body.Close()
+	defer func() { _ = s.Delete(ctx, page) }()
+	if pageURL, err = s.PresignGet(ctx, page, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if res, err = http.Get(pageURL); err != nil {
+		t.Fatal(err)
+	}
+	res.Body.Close()
+	if cd := res.Header.Get("Content-Disposition"); res.StatusCode != http.StatusOK || !strings.HasPrefix(cd, "attachment") {
+		t.Fatalf("a page uploaded as %s: %d, Content-Disposition %q, want an attachment", res.Header.Get("Content-Type"), res.StatusCode, cd)
+	}
 	if err := s.Delete(ctx, key); err != nil {
 		t.Fatal(err)
 	}

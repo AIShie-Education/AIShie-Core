@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"reflect"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -149,8 +150,11 @@ type Spec[In, Out any] struct {
 	// what changes whether it is archived.
 	OnArchived bool
 	// SecretIn and SecretOut name top-level fields that must never be
-	// stored: they are removed from the recorded payload (and so from the
-	// payload hash) and from the recorded result.
+	// stored: they are removed from the recorded payload and from the
+	// recorded result. A SecretIn field still counts in the payload hash, as
+	// a keyed digest, so that a key reused with another secret is caught. A
+	// replay returns the recorded result, so the output schema does not
+	// require a SecretOut field.
 	SecretIn  []string
 	SecretOut []string
 
@@ -287,6 +291,12 @@ func Define[In, Out any](s Spec[In, Out]) Tool {
 	if err != nil {
 		fail("output schema: %v", err)
 	}
+	// A replay returns the result as it was stored, without its secrets, and
+	// a client that checks it against this schema must not be told to expect
+	// them.
+	outSchema.Required = slices.DeleteFunc(outSchema.Required, func(name string) bool {
+		return slices.Contains(s.SecretOut, name)
+	})
 	resolved, err := inSchema.Resolve(nil)
 	if err != nil {
 		fail("input schema: %v", err)

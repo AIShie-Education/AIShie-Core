@@ -8,6 +8,7 @@ import (
 	"os"
 
 	"github.com/golang-migrate/migrate/v4"
+	"github.com/golang-migrate/migrate/v4/database"
 	pgxmigrate "github.com/golang-migrate/migrate/v4/database/pgx/v5"
 	"github.com/golang-migrate/migrate/v4/source/iofs"
 	_ "github.com/jackc/pgx/v5/stdlib" // registers the "pgx" database/sql driver
@@ -62,8 +63,15 @@ func (g *Migrator) Steps(n int) error { return ignoreNoChange(g.m.Steps(n)) }
 
 // Force records version without running anything. It is how a database first
 // built with psql -f is adopted, and how a dirty flag is cleared after the
-// cause has been fixed by hand.
-func (g *Migrator) Force(version int) error { return g.m.Force(version) }
+// cause has been fixed by hand. Version 0 records that no migration has run,
+// as Version reports it: no migration is numbered 0, and a row saying 0 would
+// leave the next Up looking for one.
+func (g *Migrator) Force(version int) error {
+	if version == 0 {
+		version = database.NilVersion
+	}
+	return g.m.Force(version)
+}
 
 // Version reports the applied version; 0 means no migration has run.
 func (g *Migrator) Version() (version uint, dirty bool, err error) {

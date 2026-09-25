@@ -8,9 +8,10 @@ SELECT id, assignment_id, course_id, student_member_id, attempt, body, instructi
 FROM submission WHERE id = $1 AND course_id = $2;
 
 -- name: GetSubmissionFullForUpdate :one
--- GetSubmissionFull, locked until the hand-in is written, so that what
--- submission.submit checks is what it hands in: an edit to the draft
--- meanwhile waits, and then finds it handed in.
+-- GetSubmissionFull, locked until the transaction ends, so that what
+-- submission.submit checks is what it hands in: an edit to the draft, or a
+-- file added to it or archived from it, meanwhile waits, and then finds it
+-- handed in.
 SELECT id, assignment_id, course_id, student_member_id, attempt, body, instructions_version_id,
        state, submitted_at, created_at
 FROM submission WHERE id = $1 AND course_id = $2

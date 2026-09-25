@@ -150,7 +150,7 @@ type IssueTokenIn struct {
 
 type IssueTokenOut struct {
 	CredentialID uuid.UUID  `json:"credential_id"`
-	Token        string     `json:"token" jsonschema:"shown once; it is not stored and cannot be shown again"`
+	Token        string     `json:"token" jsonschema:"shown once; it is not stored, and a replay of this call comes back without it"`
 	TokenPrefix  string     `json:"token_prefix"`
 	ExpiresAt    *time.Time `json:"expires_at,omitempty"`
 }

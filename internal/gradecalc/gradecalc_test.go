@@ -1,6 +1,7 @@
 package gradecalc
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/google/uuid"
@@ -171,6 +172,52 @@ func TestExtraCreditCanExceedOne(t *testing.T) {
 	c := &Component{ID: id(1), PointsPossible: dp("100")}
 	got := Compute(c, Scores{Component: map[uuid.UUID]decimal.Decimal{id(1): d("105")}}, Policy{})
 	wantFraction(t, got[id(1)], "1.05")
+}
+
+// Same is everything a stored snapshot shows: a result read back from its
+// JSON is the same, and a change to any line of the working is not, even
+// where the number stays put.
+func TestSameIsEverythingASnapshotShows(t *testing.T) {
+	s := Scores{Assignment: map[uuid.UUID]decimal.Decimal{id(13): d("80")}}
+	bucket := Compute(course(), s, Policy{})[id(2)] // HW1, HW2 ungraded; HW3 0.8
+	stored := func() Result {
+		t.Helper()
+		raw, err := json.Marshal(bucket)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var r Result
+		if err := json.Unmarshal(raw, &r); err != nil {
+			t.Fatal(err)
+		}
+		return r
+	}
+	if !bucket.Same(stored()) {
+		t.Fatal("a result is not the same as itself read back")
+	}
+	same := stored()
+	same.Items[0].Weight = d("10.00")
+	if !bucket.Same(same) {
+		t.Error("10 and 10.00 are not the same weight")
+	}
+	for what, change := range map[string]func(r *Result){
+		"complete":        func(r *Result) { r.Complete = true },
+		"the fraction":    func(r *Result) { r.Fraction = dp("0.5") },
+		"no fraction":     func(r *Result) { r.Fraction = nil },
+		"a gap filled":    func(r *Result) { r.Items[1].Fraction = dp("0.8") },
+		"a line's score":  func(r *Result) { r.Items[2].Fraction = dp("0.9") },
+		"a line's weight": func(r *Result) { r.Items[0].Weight = d("20") },
+		"a line dropped":  func(r *Result) { r.Items[2].Dropped = true },
+		"a line's kind":   func(r *Result) { r.Items[2].Kind = KindComponent },
+		"another line":    func(r *Result) { r.Items[2].ID = id(14) },
+		"a line fewer":    func(r *Result) { r.Items = r.Items[:2] },
+	} {
+		r := stored()
+		change(&r)
+		if bucket.Same(r) || r.Same(bucket) {
+			t.Errorf("%s changed, and the result is still the same", what)
+		}
+	}
 }
 
 func TestAncestors(t *testing.T) {

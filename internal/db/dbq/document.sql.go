@@ -42,7 +42,6 @@ SELECT d.id, d.course_id, d.kind, d.title, d.submission_id, d.grade_id, d.publis
        d.sort_order, d.status, d.created_at,
        s.student_member_id  AS submission_student,
        s.assignment_id      AS submission_assignment,
-       s.state              AS submission_state,
        g.student_member_id  AS grade_student,
        gs.assignment_id     AS grade_assignment,
        g.posted_at          AS grade_posted_at,
@@ -72,7 +71,6 @@ type GetDocumentWithOwnerRow struct {
 	CreatedAt            time.Time
 	SubmissionStudent    *uuid.UUID
 	SubmissionAssignment *uuid.UUID
-	SubmissionState      *string
 	GradeStudent         *uuid.UUID
 	GradeAssignment      *uuid.UUID
 	GradePostedAt        *time.Time
@@ -97,7 +95,6 @@ func (q *Queries) GetDocumentWithOwner(ctx context.Context, arg GetDocumentWithO
 		&i.CreatedAt,
 		&i.SubmissionStudent,
 		&i.SubmissionAssignment,
-		&i.SubmissionState,
 		&i.GradeStudent,
 		&i.GradeAssignment,
 		&i.GradePostedAt,
@@ -329,6 +326,35 @@ func (q *Queries) ListGradeDocuments(ctx context.Context, gradeID *uuid.UUID) ([
 			return nil, err
 		}
 		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listPublishedAssignmentsUsingDocument = `-- name: ListPublishedAssignmentsUsingDocument :many
+SELECT a.id FROM assignment a
+WHERE (a.instructions_document_id = $1 OR a.rubric_document_id = $1)
+  AND a.published_at IS NOT NULL
+ORDER BY a.id
+`
+
+// The published assignments that refer to the document as their instructions
+// or rubric: an event about the document is filed under each of them.
+func (q *Queries) ListPublishedAssignmentsUsingDocument(ctx context.Context, documentID *uuid.UUID) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, listPublishedAssignmentsUsingDocument, documentID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err

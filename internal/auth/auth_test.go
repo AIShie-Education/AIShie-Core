@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
+
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/apperr"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/auth"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/db/dbq"
@@ -262,5 +264,66 @@ func TestTokensWithUnderscoresInTheSecretAuthenticate(t *testing.T) {
 	}
 	if withUnderscore == 0 {
 		t.Skip("no token in this run had an underscore in its secret; nothing was exercised")
+	}
+}
+
+// The system actor is who the sweeps act as, and its authority is not to be
+// borrowed: no token is issued for it, and the database takes no credential
+// for it however one is written.
+func TestTheSystemActorIsNeverIssuedAToken(t *testing.T) {
+	pool := testdb.New(t)
+	ctx := context.Background()
+	res, err := auth.Bootstrap(ctx, pool, auth.BootstrapInput{DisplayName: "Root"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := auth.IssueToken(ctx, dbq.New(pool), res.SystemID, "sweeps", nil, time.Now()); !apperr.Is(err, apperr.Forbidden) {
+		t.Fatalf("a token for the system actor: %v", err)
+	}
+	var n int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM credential WHERE actor_id = $1`, res.SystemID).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("the system actor holds %d credentials", n)
+	}
+
+	tok, err := auth.NewToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = pool.Exec(ctx, `INSERT INTO credential (actor_id, kind, secret_hash, token_prefix) VALUES ($1, 'api_token', $2, $3)`,
+		res.SystemID, tok.Hash, tok.Prefix)
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) || pgErr.Code != "23514" {
+		t.Fatalf("the database took a token for the system actor: %v", err)
+	}
+}
+
+// A token the system actor was given before the database refused them
+// authenticates nobody.
+func TestATokenOfTheSystemActorsAuthenticatesNobody(t *testing.T) {
+	pool := testdb.New(t)
+	ctx := context.Background()
+	res, err := auth.Bootstrap(ctx, pool, auth.BootstrapInput{DisplayName: "Root"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok, err := auth.NewToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	exec := func(sql string, args ...any) {
+		t.Helper()
+		if _, err := pool.Exec(ctx, sql, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Written as it was before migration 0004.
+	exec(`ALTER TABLE credential DISABLE TRIGGER credential_not_for_system_actor`)
+	exec(`INSERT INTO credential (actor_id, kind, secret_hash, token_prefix) VALUES ($1, 'api_token', $2, $3)`, res.SystemID, tok.Hash, tok.Prefix)
+	exec(`ALTER TABLE credential ENABLE TRIGGER credential_not_for_system_actor`)
+	if p, err := auth.NewAuthenticator(pool, time.Hour).Authenticate(ctx, tok.Full); !apperr.Is(err, apperr.Unauthenticated) {
+		t.Fatalf("the system actor's token authenticated: %+v %v", p, err)
 	}
 }

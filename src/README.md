@@ -22,6 +22,10 @@ src/
                          queried (pending or escalated, by id), and a
                          course index on submission
     0003_queue_and_course_indexes.down.sql
+    0004_no_credential_for_system_actor.up.sql
+                         a trigger refusing to write a credential for the
+                         system actor
+    0004_no_credential_for_system_actor.down.sql
   seed/
     presets.sql          the six built-in permission presets; safe to re-run
   tests/
@@ -69,8 +73,15 @@ DATABASE_URL=postgres:///aishiteru bin/aishiterud seed
 
 `aishiterud` records the applied version in a `schema_migrations` table; psql
 does not. A database first built with `psql -f` must be adopted once before
-the binary will manage it: `aishiterud migrate force 1` (the number of the
-last migration applied by hand). Pick one way per database and stay with it.
+the binary will manage it: `aishiterud migrate force N`, N being the number of
+the last migration applied by hand (after the loop above, the highest). Pick
+one way per database and stay with it.
+
+A migration that fails under `aishiterud` leaves its version recorded as
+dirty. Each file applies whole or not at all, but the flag is also left when
+a file committed and its version was never recorded, so look at the database
+to see which. Fix the cause, then `aishiterud migrate force N`, N being the
+last migration fully applied (0 if none), and `migrate up` again.
 
 File names follow `NNNN_name.up.sql` / `NNNN_name.down.sql`. Every migration
 needs both directions; a test enforces it.
@@ -115,13 +126,14 @@ MCP, these are the invariants that survive a bug in the tool layer.
 | Every action carries the hash of what was asked, so a key reused for different content can be told from a retry | `action.payload_hash NOT NULL`, `action_payload_hash_valid` |
 | An action's status agrees with its authorization: `denied` ⇔ `denied`; only `confirm_required` is proposed, rejected, cancelled or decided; only an executed `pending_review` is under review | `action_status_matches_authz` |
 | `executed_at` is set exactly when status is `executed` | `action_executed_at_consistent` |
-| Nobody approves or reviews their own action | `action_not_self_decided`, `action_not_self_reviewed` |
+| Nobody approves or reviews their own action from the same seat | `action_not_self_decided`, `action_not_self_reviewed` |
 | `document_version` and `event` are append-only | `reject_mutation()` triggers on UPDATE, DELETE, TRUNCATE |
 | A submitted submission is never changed or deleted, except correcting `submitted` ⇄ `late` | `submission_frozen_after_submit` trigger |
 | A grade has exactly one target | `grade_one_target` |
 | Document owner columns match `kind` | `document_owner_matches_kind` |
 | A version has text or a file; a file has a type and size | `document_version_has_content`, `document_version_file_described` |
 | SSO credentials carry an identity; passwords, tokens and sessions carry a hash; tokens and sessions carry a lookup prefix; sessions expire | `credential_*` CHECKs |
+| No credential is written for the system actor, nor moved to it | `credential_not_for_system_actor` trigger |
 | Status, role, kind and scope columns hold only listed values | `*_valid` CHECKs |
 | Emails are unique regardless of case | unique index on `lower(email)` |
 | Domain rows are never silently cascade-deleted | FKs default to NO ACTION |
@@ -150,6 +162,8 @@ The database cannot express these. Each one is a place a bug can hide.
   when a rolled-up component or the course total is posted.
 - **Component tree acyclicity**: the CHECK blocks only a self-loop.
 - **Cancelling pending proposals** when a member is removed or expires.
+- **A token of the system actor's** written before migration 0004 refused
+  them authenticates nobody.
 - **`actor.kind` and `course_member.role` are never read by authorization.**
 
 ## Regrading
@@ -166,7 +180,7 @@ unique index.
 ## Verification status
 
 Executed against PostgreSQL 18.6: up, down and up again apply cleanly, and
-`tests/constraints_test.sql` passes (91 checks). **Not yet run on PostgreSQL
+`tests/constraints_test.sql` passes (93 checks). **Not yet run on PostgreSQL
 13**, the stated minimum: CI runs this suite and the Go tests on both 13 and
 18, so the first pipeline run settles it — update this paragraph with the
 result.

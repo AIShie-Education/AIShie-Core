@@ -3,19 +3,28 @@
 -- correct — authorize() ignores an expired member on every call and approval
 -- re-checks a proposal's age inline — they make the state visible and keep
 -- the queues clean.
+--
+-- An archived course refuses every write, the sweeps' included, so none of
+-- its proposals, seats or assignments is listed; what expired or fell due in
+-- it meanwhile is swept once it is opened again.
 
 -- name: ListStaleProposals :many
-SELECT id, course_id, created_at
-FROM action
-WHERE status = 'proposed' AND created_at < sqlc.arg(created_before)
-ORDER BY created_at
+-- NOT EXISTS rather than a join: an action need not be in a course.
+SELECT a.id, a.course_id, a.created_at
+FROM action a
+WHERE a.status = 'proposed' AND a.created_at < sqlc.arg(created_before)
+  AND NOT EXISTS (SELECT 1 FROM course c WHERE c.id = a.course_id AND c.status = 'archived')
+ORDER BY a.created_at
 LIMIT sqlc.arg(max_rows);
 
 -- name: ListExpiredMembers :many
-SELECT id, course_id, expires_at
-FROM course_member
-WHERE status <> 'removed' AND expires_at IS NOT NULL AND expires_at <= sqlc.arg(now)
-ORDER BY expires_at
+-- Not only open courses: a draft course takes writes, and its seats expire.
+SELECT m.id, m.course_id, m.expires_at
+FROM course_member m
+JOIN course c ON c.id = m.course_id
+WHERE m.status <> 'removed' AND m.expires_at IS NOT NULL AND m.expires_at <= sqlc.arg(now)
+  AND c.status <> 'archived'
+ORDER BY m.expires_at
 LIMIT sqlc.arg(max_rows);
 
 -- name: ListAssignmentsNewlyPastDue :many
@@ -39,10 +48,12 @@ LIMIT sqlc.arg(max_rows);
 
 -- name: ListStudentsWithoutSubmission :many
 -- Current students of the course with no submission row at all for the
--- assignment: not a draft, not a hand-in, not an earlier 'missing'.
+-- assignment: not a draft, not a hand-in, not an earlier 'missing'. A paused
+-- student is one: the seat carries on when resumed, and the sweep does not
+-- come back to this due date.
 SELECT m.id
 FROM course_member m
-WHERE m.course_id = $1 AND m.role = 'student' AND m.status = 'active'
+WHERE m.course_id = $1 AND m.role = 'student' AND m.status <> 'removed'
   AND NOT EXISTS (SELECT 1 FROM submission s WHERE s.assignment_id = $2 AND s.student_member_id = m.id)
 ORDER BY m.id;
 

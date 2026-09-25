@@ -124,6 +124,11 @@ SELECT pg_temp.fails('session must expire', '23514', $q$
     VALUES ('00000000-0000-0000-0000-000000000034', 'session', 'h', 'sess-2') $q$);
 SELECT pg_temp.fails('unknown credential kind is rejected', '23514', $q$
     INSERT INTO credential (actor_id, kind, secret_hash) VALUES ('00000000-0000-0000-0000-000000000034', 'passkey', 'h') $q$);
+SELECT pg_temp.fails('the system actor holds no credential', '23514', $q$
+    INSERT INTO credential (actor_id, kind, secret_hash, token_prefix)
+    VALUES ('00000000-0000-0000-0000-000000000033', 'api_token', 'h', 'sys-1') $q$);
+SELECT pg_temp.fails('a credential is not moved to the system actor', '23514', $q$
+    UPDATE credential SET actor_id = '00000000-0000-0000-0000-000000000033' WHERE token_prefix = 'sess-1' $q$);
 
 -- Courses and membership -----------------------------------------------------
 SELECT pg_temp.fails('same term, code and section twice', '23505', $q$

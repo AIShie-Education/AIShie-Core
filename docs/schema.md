@@ -73,7 +73,9 @@ course(id, dept_id→department, term_id→term, code, section = '', title, desc
 entirely on its `course_member` rows; `platform_role` covers the few operations outside any
 course. The one exception is `kind = 'system'`, the actor the background sweeps run as: it is
 never seated in a course, and no token is issued for it and no identity linked to it, so that
-its authority cannot be borrowed. Those two refusals read `kind`; nothing that grants does.
+its authority cannot be borrowed. The database takes no credential for it, and a token it was
+given before migration 0004 authenticates nobody. Those refusals read `kind`; nothing that
+grants does.
 
 `created_by_actor_id` is the delegation chain: root (seeded at install, the only null) creates
 admins, an admin creates a course and seats its first instructor, the instructor adds everyone
@@ -83,7 +85,7 @@ Root and the system actor are created by `aishiterud bootstrap`, once. It is the
 change with no `action` row: there is no actor yet for it to be an action of. The operator's
 `aishiterud token issue` is likewise outside the log — it is how a newly registered agent,
 which cannot sign in to ask, gets its first token — and needs the database access that
-already implies everything.
+already implies everything. Like the tools, it refuses the system actor.
 
 `credential` covers four kinds of the same thing. SSO rows hold no secret — `provider` and
 `subject` identify the account at the identity provider (`polyu-adfs` + UPN). API tokens store a
@@ -290,7 +292,11 @@ within their scope was handed in under, even after the instructions have moved o
 message. `document.upload_url` returns a short-lived URL and an upload token; the client PUTs
 the bytes to the URL — straight to the object store, or to this server when files are kept on
 its own disk — and hands the token to the tool that attaches the file (`document.create`,
-`document.add_version`, or `feedback_files` on `grade.submit`). The token is a signed claim
+`document.add_version`, or `feedback_files` on `grade.submit`). The `max_bytes` it is given
+with the URL is checked when the file is attached: a larger file is refused then, and removed.
+This server's own disk also stops a larger upload as it arrives. An object store's upload URL
+does not: it takes a PUT of any size the store allows, and a larger file that is never
+attached stays until the sweep removes it. The token is a signed claim
 that this member of this course was given this storage key for this purpose; there is no
 table of pending uploads. Its expiry limits the upload, not the attaching: a proposal carrying
 a feedback file may be approved days later, and `unique(storage_key)` is what stops a file
@@ -298,8 +304,10 @@ being attached twice. What limits the attaching is the sweep, which removes an u
 nothing has attached once it is `PROPOSAL_TTL` plus two days old; and a call that would attach
 one by way of a proposal is refused once the upload is two days old, so that the proposal is
 decided while its files are there. With `PROPOSAL_TTL=0` proposals wait for ever, and neither
-is done. Reading returns a short-lived download URL the same way. The storage
-key is made by the server and is unguessable; nothing the uploader says goes into it.
+is done. Reading returns a short-lived download URL the same way, and the file is served as a
+download, never as a page, whichever store keeps it: a student's `essay.html` does not run as
+script for whoever opens it. The storage key is made by the server and is unguessable; nothing
+the uploader says goes into it.
 
 Once a submission is handed in, its files are frozen with it. The trigger guards the
 `submission` row; that nothing is added to or archived from its documents afterwards is an
@@ -359,7 +367,8 @@ event(seq, type, course_id null→course, action_id null→action,
 denied. `confirm_required` needs no approval table — the queue is `WHERE status = 'proposed'`,
 and the proposal itself lives in `payload`; nothing else is written until a human approves.
 `pending_review` needs no review table — the queue is `WHERE review_state IN ('pending', 'escalated')`,
-an escalated action still waiting for its second reviewer.
+an escalated action still waiting for its second reviewer: someone other than whoever escalated it
+or approved its escalation.
 
 `unique(actor_id, idempotency_key)` is not optional. A tool call retried after a timeout would
 otherwise post a second grade silently at 3am.
@@ -374,14 +383,16 @@ any secret fields removed; a secret (a password) still counts in the hash, throu
 digest under `SIGNING_KEY`, so that a key reused with a different secret is caught too while
 the hash gives nothing away to whoever reads the table. For a proposal, `payload` also carries
 the defaults that had to be fixed when it was made rather than when it is approved — the rubric
-version a grade is against, the points possible its score is out of, the draft a hand-in is of
-and the instructions it is handed in under, the version that "publish the latest" means, the
-drafts that "post this assignment" means — while the hash stays that of the call as the caller
-made it. A version or a draft that arrives while a proposal waits has been in front of nobody
-who asked for it, and approving the proposal does not release it. A draft that a proposal to
-post grades names, by id or as one that was waiting for the assignment, and that is posted by
-hand meanwhile is out already, as proposed, and the approval posts the rest, failing if there
-are none; one replaced meanwhile fails the approval.
+version a grade is against, or `no_rubric` where none was published, the points possible its
+score is out of, the draft a hand-in is of and the instructions it is handed in under, the
+version that "publish the latest" means, the drafts that "post this assignment" means — while
+the hash stays that of the call as the caller made it. A version or a draft that arrives while
+a proposal waits has been in front of nobody who asked for it, and approving the proposal does
+not release it. A grade proposed with no rubric in force records none, though a rubric is
+attached or published before it is approved. A draft that a proposal to post grades names, by
+id or as one that was waiting for the assignment, and that is posted by hand meanwhile is out
+already, as proposed, and the approval posts the rest, failing if there are none; one replaced
+meanwhile fails the approval.
 `result` holds what the call returned (secrets removed likewise), or `{"error": …}` for a
 failed, denied or cancelled action and `{"decision": …}` for a rejected one; which of those it
 is follows from `status`, never from the shape of `result`.
@@ -408,7 +419,9 @@ proposal's age itself — it makes those facts visible, and keeps the queues fre
 nobody could approve. When a due date passes, every current student with no submission row
 gets one in state `missing`, so that the gap is something a grader can see and grade; late
 work takes that row over, unless a grade has been entered or proposed for it: a zero for
-handing in nothing is a grade of that nothing, and the late work is then a new attempt.
+handing in nothing is a grade of that nothing, and the late work is then a new attempt. An
+archived course is left as archived, by the sweeps as by everyone: its expired seats, stale
+proposals and past due dates are swept once it is activated again.
 
 **`event` is something that happened, written after it did**, in the same transaction as the
 state change. Not every event has an action behind it (a due date passing); one action may
@@ -432,11 +445,23 @@ to no student (or no assignment) and that scope does not apply. They are filled 
 event is written and never change. Payloads carry ids and small facts only — never a score or
 feedback text; a reader fetches content through the read tools, which authorize it.
 
-Nobody approves or reviews their own action. The database cannot go further and require the
-decider to be human, because nothing reads `actor.kind`. Nor can it see past one row: a decision
-is an action like any other, so it may itself wait for a decision or be under review — a triage
-agent whose approvals a human confirms. Confirming it carries out what it decided, so nobody
-confirms or reviews a decision about their own action either, at any remove.
+Instructions and a rubric are their assignment's (§2.2), and so is news of them. An event
+about one (`document.created`, `document.version_added`, `document.published`,
+`document.rubric_published`, `document.archived`) is written once for each published
+assignment that refers to the document, with that `assignment_id`, so that assignment scope
+applies to it. While no published assignment does, it is written once under the same name
+with `_unreleased` appended (`document.published_unreleased`), which is shown to those who
+would be shown the event by its own name and who also hold `perm_assignment_write`, as only
+it sees unpublished work. Material's events belong to no assignment and are for the whole
+course.
+
+Nobody approves or reviews their own action. The CHECKs compare seats; the application compares
+actors as well, so the rule holds across every seat one actor has held: someone removed and
+seated again has a new seat, and is still who made the action. The database cannot go further
+and require the decider to be human, because nothing reads `actor.kind`. Nor can it see past one
+row: a decision is an action like any other, so it may itself wait for a decision or be under
+review — a triage agent whose approvals a human confirms. Confirming it carries out what it
+decided, so nobody confirms or reviews a decision about their own action either, at any remove.
 
 ### 2.7 Grades
 
@@ -466,7 +491,10 @@ serves HW3, the midterm, the assignments bucket and the course total.
   row as posted. The partial indexes guarantee one live grade per target.
 - **Rolled-up components and the course total are computed on read** and stored only when
   posted, as an `origin = 'computed'` snapshot. The number a student was shown must not drift
-  when a lower grade changes later; updating it is a regrade, with history.
+  when a lower grade changes later; updating it is a regrade, with history. A post or regrade
+  beneath a snapshot writes a new one when anything it shows has changed — the number, whether
+  it is complete, or any line of its working, a weight changed since included — and nothing
+  when nothing has.
 - **`breakdown`** holds per-criterion detail for submission grades:
   `[{criterion, points, max, comment}]`. The rubric is prose the model reads; the breakdown is
   its output. Structured criteria tables were dropped as a second copy of the rubric.
@@ -522,10 +550,11 @@ check `actor.platform_role` instead. That is the only place it is read.
 | Every grade names its action | `created_by_action_id NOT NULL` |
 | A retried call cannot act twice | `unique(actor_id, idempotency_key)` |
 | Every action carries the hash of what was asked | `payload_hash NOT NULL`, 64 hex characters |
-| Nobody decides or reviews their own action | CHECKs on `action` |
+| Nobody decides or reviews their own action from the same seat | CHECKs on `action` |
 | `denied` status ⇔ `denied` authorization; only a `confirm_required` action is proposed, rejected, cancelled or has a decider; only an executed `pending_review` action is under review | `action_status_matches_authz` |
 | `executed_at` is set exactly when status is `executed` | `action_executed_at_consistent` |
 | A session credential has a lookup prefix and an expiry | CHECKs on `credential` |
+| No credential is written for the system actor | trigger on `credential` |
 | `document_version` and `event` are append-only | triggers |
 | A submitted submission never changes | trigger |
 | Owner columns match `document.kind`; a version has content; SSO rows carry an identity | CHECKs |
@@ -540,9 +569,15 @@ check `actor.platform_role` instead. That is the only place it is read.
   a different hash is refused.
 - Re-authorizing the proposer when a proposal is approved, and cancelling proposals past
   their TTL.
+- Nobody decides or reviews their own action from another seat (§2.6): the CHECKs compare seats,
+  and the application compares actors, so an actor removed and seated again is still refused.
 - Nobody decides or reviews their own action at one remove (§2.6): a decision or review that is
-  itself proposed or under review is not confirmed or reviewed by whoever's action it is about.
-  The CHECKs compare a row with its own decider only.
+  itself proposed or under review is not confirmed or reviewed by whoever's action it is about,
+  in any seat. The CHECKs compare a row with its own decider only.
+- An escalated action is closed by someone other than whoever escalated it (§2.6), in any seat
+  and at any remove: nobody who made the review that escalated it, approved that review or
+  confirmed that approval marks it reviewed, nor approves someone else's review that would.
+  Saying no to such a review closes nothing, and is still theirs to say.
 - Filling `event.student_member_id` and `event.assignment_id` correctly, and filtering the
   feed by them.
 - The submitting member has `role = 'student'`; `member_*_scope` rows name members and
@@ -552,15 +587,24 @@ check `actor.platform_role` instead. That is the only place it is read.
   authorized in that course).
 - A published assignment's instructions have a published version, for students to read and for
   each submission to pin (§2.4), however publishing and a change of instructions interleave.
-- Grade computation, and writing a `computed` snapshot only on post.
+- Grade computation, and writing a `computed` snapshot only on post. A student's totals have
+  one writer at a time, which reads the scheme and the scores as they stand once it is that
+  writer: a post that reaches a student after a weight has changed does not write their totals
+  over under the old one.
 - Once a grade has been entered for an assignment or a directly graded component, a draft as
   much as a posted one, its `points_possible` and its place in the tree stay as they are
   (§2.3), even when the grade and the change come at the same moment; a proposed grade is
   carried out only against the points possible it was proposed out of.
 - A draft is as old as the call that made it (§2.3), a draft written by an approved proposal
   included: an approval replaces only what came before the proposal.
+- A grade's `rubric_version_id` is the rubric its grader was shown (§2.4): for a proposal, the
+  version published when it was made, or none if none was, whatever is published by the time
+  it is approved. A call that says there is no rubric is refused if one is published.
 - A hand-in approved later counts from when it was asked for, and only if the draft still
   holds what was asked to be handed in (§2.5).
+- Nothing is added to or archived from a handed-in submission's files (§2.4): the state is
+  read under the submission's lock, so a file that comes during the hand-in waits for it and
+  is then refused.
 - The component tree is acyclic beyond the self-loop the CHECK blocks.
 - Cancelling pending proposals when a member is removed or expires.
 - Nobody hands out more than they hold (§2.2): any change that widens a seat is measured as
@@ -571,6 +615,12 @@ check `actor.platform_role` instead. That is the only place it is read.
 - A write takes its caller's seat before anything else and holds it to the end: removing or
   changing a seat waits for the member's calls in flight, or they wait for it and are refused,
   so nothing is proposed from a seat that is being removed.
+- A token the system actor was given before the database refused them authenticates nobody.
+- A call that loses a deadlock — two managers changing each other's seats at once — is made
+  again, once, in a fresh transaction, and is recorded as failed ("try again") only if it loses
+  again. A sweep's call that loses twice is not recorded at all: its key names what it sweeps,
+  and a failure stored under it would stand for the sweep: every sweep after would replay that
+  failure or pass the thing over, and never sweep it.
 - `actor.kind` and `course_member.role` are never read by authorization.
 
 ## 5. Worked example: an agent grades an essay

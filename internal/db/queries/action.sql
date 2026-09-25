@@ -46,6 +46,33 @@ UPDATE action
 SET review_state = $2, reviewed_by_member_id = $3, reviewed_at = $4
 WHERE id = $1 AND review_state IN ('pending', 'escalated');
 
+-- name: EscalatedBy :one
+-- Whether the actor had a hand in escalating the action, from any seat: made
+-- the review that escalated it, or approved that review, or confirmed that
+-- approval, and so on up. An approved review is carried out as its proposer,
+-- so the seat the escalation is recorded against is only the first of these;
+-- each approval is an executed action.decide about the one before, made from
+-- the seat that approved it.
+WITH RECURSIVE hand (id, member_id) AS (
+    SELECT r.id, r.member_id
+    FROM action r
+    WHERE r.target_type = 'action' AND r.target_id = sqlc.arg(action_id)::uuid
+      AND r.action_type = 'action.review' AND r.status = 'executed'
+      AND r.payload->>'outcome' = 'escalated'
+  UNION ALL
+    SELECT d.id, d.member_id
+    FROM hand h
+    JOIN action d ON d.target_type = 'action' AND d.target_id = h.id
+    WHERE d.action_type = 'action.decide' AND d.status = 'executed'
+      AND d.payload->>'decision' = 'approve'
+)
+SELECT EXISTS (
+    SELECT 1
+    FROM hand h
+    JOIN course_member m ON m.id = h.member_id
+    WHERE m.actor_id = sqlc.arg(actor_id)::uuid
+);
+
 -- name: ListProposedActions :many
 SELECT * FROM action
 WHERE course_id = $1 AND status = 'proposed' AND id > sqlc.arg(after)

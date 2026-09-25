@@ -116,7 +116,9 @@ curl localhost:8080/v1/tools            # the whole catalogue, with JSON Schemas
 Configuration is environment variables only; `bin/aishiterud help` lists them.
 Files are kept under `var/blobs` by default (`BLOB_STORE=fs`). For more than
 one instance, or for production, use `BLOB_STORE=s3` with the `S3_*` settings
-and a `SIGNING_KEY` shared by every instance. An upload that is not attached
+and a `SIGNING_KEY` shared by every instance. With S3 an upload URL does not
+limit what is PUT to it: `MAX_UPLOAD_BYTES` is checked only when the file is
+attached, which refuses a larger one. An upload that is not attached
 to a document within `PROPOSAL_TTL` plus two days is removed about an hour
 after that, and can no longer be attached: the sweep goes through the store
 once an hour and removes up to 200 such uploads every `JOBS_INTERVAL`, however
@@ -173,10 +175,19 @@ state is a `POST` and needs an `Idempotency-Key` header: send the same key
 with the same body again and you get the first answer back
 (`Idempotency-Replayed: true`) with nothing done twice; send it with a
 different body and you get `409 idempotency_conflict`. The response says what
-became of the call: `200` executed, `202` proposed (it now waits for a human;
-watch the action id), `403` denied, `409`/`422` failed. All four are recorded.
-`400`, `401`, `404` and `429` mean the call was never attempted, and nothing
-was recorded; `429` carries `Retry-After`. Every answer, including the one for
+became of the call. A call that was attempted is recorded, and the answer
+names the action in a top-level `action_id`: `200` executed, `202` proposed
+(it now waits for a human; watch the action id), `403` denied, and a failure
+with its error's own status, `400`, `403`, `404`, `409` or `422`. A proposal
+replayed says what has become of it: `202` while it waits, `200` executed,
+`409` rejected, `422` cancelled, or its failure's status. An answer with no
+top-level `action_id` recorded nothing, whatever its status: among them every
+`401` and `429`, a `400` or `404` for a call that was never attempted, a `403`
+for a browser's `POST` from another origin not in `TRUSTED_ORIGINS`, a `405`,
+a `500`, and every read; `429` carries `Retry-After`. A
+`409 idempotency_conflict` names the earlier action in
+`error.details.action_id` and records nothing either, so a call corrected
+after a recorded failure needs a new key. Every answer, including the one for
 a path that does not exist, is JSON. Agents authenticate with
 `Authorization: Bearer <token>`; browsers sign in at `POST /v1/auth/login` (or
 through single sign-on) and carry a session cookie. Set `TRUSTED_ORIGINS` to

@@ -2,9 +2,12 @@
 -- A token or a session, found by its public prefix before its hash is
 -- checked. Revoked and expired rows are returned too, so that the caller can
 -- tell them from an unknown prefix in its logs; it rejects all three alike.
-SELECT id, actor_id, kind, secret_hash, expires_at, revoked_at
-FROM credential
-WHERE token_prefix = $1 AND kind IN ('api_token', 'session');
+-- The actor's kind comes with it: a credential of the system actor's is
+-- rejected the same way.
+SELECT c.id, c.actor_id, c.kind, c.secret_hash, c.expires_at, c.revoked_at, a.kind AS actor_kind
+FROM credential c
+JOIN actor a ON a.id = c.actor_id
+WHERE c.token_prefix = $1 AND c.kind IN ('api_token', 'session');
 
 -- name: TouchCredential :exec
 -- At most one write a minute per credential, however busy it is. The cast is
