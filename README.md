@@ -218,6 +218,6 @@ goes to production when somebody runs Deploy for it, from its tag.
 
 deploy.yml reaches no host yet: until a deploy target is configured, a deploy
 records itself in the environment and says which image is ready. What a target
-has to do — `migrate up` with the new image first, then roll out, then wait for
-`/healthz` — is at the top of deploy.yml. How to cut a release, and the
+has to do — back up, `migrate up` and `seed` with the new image, then roll
+out, then wait for `/healthz` — is at the top of deploy.yml. How to cut a release, and the
 repository settings this needs, are in [CONTRIBUTING.md](CONTRIBUTING.md).

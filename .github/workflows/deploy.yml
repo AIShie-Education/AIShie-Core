@@ -13,12 +13,19 @@ name: Deploy
 # says which image is ready. A target, once there is one, does this, in this
 # order:
 #
-#   1. `aishiterud migrate up` with the new image and the environment's
+#   1. Back up the database, so that a migration that goes wrong, or a
+#      rollback further than the release before, has somewhere to go back to.
+#   2. `aishiterud migrate up` with the new image and the environment's
 #      DATABASE_URL. A schema a newer release already migrated is left alone,
 #      so this does not stop a rollback to the release before, which a
-#      migration keeps working (CONTRIBUTING.md, Migrations).
-#   2. Move the servers over to the new image.
-#   3. Wait until GET /healthz answers status "ok" with the new version and
+#      migration keeps working (CONTRIBUTING.md, Migrations). Stop here if it
+#      fails: the servers keep running the old image, and the schema stays
+#      marked dirty, with /healthz at 503, until someone puts it right
+#      (`migrate force`, or the backup).
+#   3. `aishiterud seed` with the new image, which adds the built-in presets a
+#      release brings and leaves the ones already there as they are.
+#   4. Move the servers over to the new image.
+#   5. Wait until GET /healthz answers status "ok" with the new version and
 #      commit.
 #
 # Its credentials go in the environment's secrets, and DEPLOY_TARGET in its
