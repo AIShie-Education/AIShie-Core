@@ -39,9 +39,20 @@ running while the new schema goes in, so a migration must leave the previous
 release working: add a column in one release, stop using the old one in the
 next, drop it in the one after.
 
+A migration that has reached `main` has run on staging: never delete,
+renumber or rewrite it; undo it with a new one. `migrate up` leaves a schema
+that is ahead of the binary as it is, since that is what a rollback looks
+like, so a revert that takes a migration out leaves staging at a version
+`main` no longer has, and the next migration to take its number is never
+applied there. If one must go, run `migrate down` with an image that still
+has it before the revert is deployed.
+
 ## Releasing
 
-Nothing is deployed automatically. A release is made by a tag, from `main`:
+A push to `main` goes out by itself once CI passes: its image is pushed to
+GHCR as `:sha-<commit>` and `:edge`, and deployed to `staging`. When pushes
+come faster than they are published, one that a newer push overtakes while
+it waits is not published. A release is made by a tag, from `main`:
 
 ```
 git switch main && git pull
@@ -50,14 +61,69 @@ git push origin v0.1.0
 ```
 
 `release.yml` re-runs the whole of CI on the tagged commit, then publishes
-binaries (Linux and macOS, amd64 and arm64) with checksums and build
-provenance to the release page, and a multi-architecture image to
-`ghcr.io/aishiteru-lms/aishiteru-core`. The release notes list any migrations
-new in the release. A tag with a hyphen (`v0.1.0-rc.1`) is a pre-release and
-leaves `:latest` alone.
+binaries (Linux and macOS, amd64 and arm64) with checksums to the release
+page, and a multi-architecture image to `ghcr.io/aishiteru-lms/aishiteru-core`.
+The release notes list the migrations new in the release; for a stable
+release, new since the last stable one, pre-releases included. A tag with a
+hyphen (`v0.1.0-rc.1`) is a pre-release: it leaves `:latest` alone and is
+deployed to staging.
+
+A stable release goes to production when somebody runs **Deploy** for it:
+Actions → Deploy → Run workflow, use the workflow from the release's tag, and
+give the environment `production` and the image the release run's summary
+names (`ghcr.io/aishiteru-lms/aishiteru-core:1.2.3`). That run is the decision
+to deploy and to migrate. For production, Deploy takes nothing else: run from
+a branch or a pre-release's tag, or given an image that is not a stable
+release's, it stops before it deploys. To roll back, run Deploy from the
+newest release's tag, which carries the current deploy procedure, with the
+image of the release before: `migrate up` leaves a schema a newer release
+migrated as it is, and a migration keeps the release before it working. A
+release further back may need what a later migration has dropped.
 
 To try the build without publishing anything:
 
 ```
 goreleaser release --snapshot --clean
 ```
+
+### One-time settings
+
+Before the first push to `main` after the CD workflows land, in GitHub:
+
+- **Environments** (repository Settings → Environments): `staging` and
+  `production`. Let `staging` take branch `main` and tags `v*`, and
+  `production` tags `v*` only (Deployment branches and tags → Selected
+  branches and tags). Create them first: a run that names an environment
+  that does not exist creates it, with no rules. Required reviewers on a
+  private repository need GitHub Enterprise; where they are there, add them
+  to `production`. On GitHub Free, GitHub's docs say a private repository
+  cannot configure environments: the workflows still run, the environments
+  carry no rules, and only Deploy's own check keeps production to stable
+  releases.
+- **Packages** (organization Settings → Packages): Package Creation must allow
+  Private, and Default Package Settings should keep "Inherit access from
+  source repository". The first publish then creates the package private,
+  linked to this repository, which its workflows can write to. Do not push
+  the image by hand before that: a package pushed from outside a workflow
+  is not linked, and the workflow cannot push to it until it is given access
+  (package settings, Manage Actions access).
+- **Allowed actions** (organization Settings → Actions → General →
+  Policies): if the organization allows only selected actions, allow
+  `docker/*` and `goreleaser/*` with the rest. Pull requests' CI uses only
+  `actions/*` and `sqlc-dev/*`, so a policy that leaves the others out
+  first shows at the first publish or release.
+- **Variables and secrets**, when they apply: `ATTESTATIONS` = `true` where
+  artifact attestations are available (a public repository, or GitHub
+  Enterprise Cloud); `DEPLOY_TARGET` and the target's credentials once
+  deploy.yml has a deploy step. Put those on the environment where the plan
+  allows environment secrets and variables, else on the repository: a
+  private repository on GitHub Free sees neither the environment's nor the
+  organization's.
+- **Minutes and storage**: on GitHub Free a private repository has 2,000
+  Actions minutes a month, and runs stop when they are used up unless there
+  is a payment method. Every push to `main` runs the whole of CI and a
+  two-architecture image build. Every green push also leaves a `:sha-*`
+  image, with its SBOM and provenance; GitHub says container storage is
+  free for now. Nothing deletes old images automatically, since deleting
+  untagged versions can break a multi-architecture image; prune them from
+  the package page when needed.

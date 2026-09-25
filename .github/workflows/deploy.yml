@@ -1,0 +1,170 @@
+name: Deploy
+
+# The one place a build reaches an environment. publish.yml calls it for
+# staging on every green push to main, and release.yml for staging on a
+# pre-release tag. Production is deployed by running it by hand, from the
+# release's tag: that run is the decision to deploy, and the migration that
+# comes with it, which README says is somebody's to make. For production it
+# takes a stable release's tag (v1.2.3) and a stable release's image (:1.2.3)
+# and nothing else, whatever the plan lets the environment enforce.
+#
+# No host is deployed to yet. Until a deploy target is configured (the
+# variable DEPLOY_TARGET), a run records the deployment in the environment and
+# says which image is ready. A target, once there is one, does this, in this
+# order:
+#
+#   1. Back up the database, so that a migration that goes wrong, or a
+#      rollback further than the release before, has somewhere to go back to.
+#   2. `aishiterud migrate up` with the new image and the environment's
+#      DATABASE_URL. A schema a newer release already migrated is left alone,
+#      so this does not stop a rollback to the release before, which a
+#      migration keeps working (CONTRIBUTING.md, Migrations). Stop here if it
+#      fails: the servers keep running the old image, and the schema stays
+#      marked dirty, with /healthz at 503, until someone puts it right
+#      (`migrate force`, or the backup).
+#   3. `aishiterud seed` with the new image, which adds the built-in presets a
+#      release brings and leaves the ones already there as they are.
+#   4. Move the servers over to the new image.
+#   5. Wait until GET /healthz answers status "ok" with the new version and
+#      commit.
+#
+# Its credentials go in the environment's secrets, and DEPLOY_TARGET in its
+# variables. A private repository on GitHub Free has neither, and does not
+# see the organization's: there they go in the repository's. Every workflow
+# that calls this one passes `secrets: inherit`. A called workflow sees no
+# secret its caller does not pass, and an environment's secrets have been
+# reported to come through empty without it (actions/runner#4453).
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        type: string
+        required: true
+      image:
+        description: The image, by digest
+        type: string
+        required: true
+      migrations:
+        description: The migrations new since the release the image is compared with (scripts/release-notes.sh)
+        type: string
+        default: ""
+      since:
+        description: The tag of that release; empty when there is none
+        type: string
+        default: ""
+  workflow_dispatch:
+    inputs:
+      # A list of its own: the form offers only environments that exist, and
+      # a private repository on GitHub Free may have none.
+      environment:
+        description: Where to deploy
+        type: choice
+        options: [staging, production]
+        required: true
+      image:
+        description: "ghcr.io/aishiteru-lms/aishiteru-core:TAG or @sha256:DIGEST; production takes a release's tag, e.g. :1.2.3"
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+# Each run block is bash with -o pipefail: a pipeline fails when any command
+# in it does, not only when its last one does.
+defaults:
+  run:
+    shell: bash
+
+env:
+  IMAGE: ghcr.io/aishiteru-lms/aishiteru-core
+
+jobs:
+  # What is about to be deployed, said before any approval the environment
+  # asks for, so that whoever approves can see it.
+  plan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: read
+    outputs:
+      image: ${{ steps.resolve.outputs.image }}
+    steps:
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: resolve
+        name: Resolve the image to its digest
+        env:
+          WANT: ${{ inputs.image }}
+          ENVIRONMENT: ${{ inputs.environment }}
+          MIGRATIONS: ${{ inputs.migrations }}
+          SINCE: ${{ inputs.since }}
+        run: |
+          case "$WANT" in
+            "$IMAGE:"* | "$IMAGE@"*) ;;
+            *) echo "::error::$WANT is not an image of $IMAGE"; exit 1 ;;
+          esac
+          # Not a build of main, nor a pre-release, nor a deploy procedure
+          # from a branch: a rollback too is a release's image, run from a
+          # release's tag.
+          if [ "$ENVIRONMENT" = production ]; then
+            [[ $GITHUB_REF_TYPE == tag && $GITHUB_REF_NAME =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+              || { echo "::error::production is deployed from a release's tag, like v1.2.3, not from $GITHUB_REF_NAME"; exit 1; }
+            [[ ${WANT#"$IMAGE:"} =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+              || { echo "::error::production takes a release's image, like $IMAGE:1.2.3, not $WANT"; exit 1; }
+          fi
+          digest=$(docker buildx imagetools inspect "$WANT" --format '{{json .Manifest}}' | jq -r .digest)
+          [[ $digest == sha256:* ]] || { echo "::error::$WANT did not resolve to a digest"; exit 1; }
+          image="$IMAGE@$digest"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          version=$(docker run --rm "$image" version)
+          {
+            echo "## Deploying to $ENVIRONMENT"
+            echo
+            echo "- image: \`$image\`"
+            echo "- asked for: \`$WANT\`"
+            echo "- version: \`$version\`"
+            if [ -n "$MIGRATIONS" ]; then
+              echo "- migrations${SINCE:+ new since $SINCE}: \`${MIGRATIONS// /\`, \`}\`"
+            elif [ -n "$SINCE" ]; then
+              echo "- migrations: none new since $SINCE"
+            else
+              echo "- migrations: see the release notes"
+            fi
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+  deploy:
+    needs: plan
+    runs-on: ubuntu-24.04
+    # A timeout stops a migration half way, as a cancellation would: once
+    # there is a deploy target, keep this above the longest migration.
+    timeout-minutes: 30
+    # GitHub records the deployment here, and any protection the environment
+    # has (required reviewers, allowed branches and tags) applies here.
+    environment: ${{ inputs.environment }}
+    # One deploy to an environment at a time, and never cancelled half way:
+    # a migration stopped in the middle leaves the schema dirty. A deploy
+    # still waiting is cancelled when a newer one for the environment comes,
+    # and the run that asked for it ends as cancelled.
+    concurrency:
+      group: deploy-${{ inputs.environment }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Deploy
+        env:
+          IMAGE_REF: ${{ needs.plan.outputs.image }}
+          TARGET: ${{ vars.DEPLOY_TARGET }}
+        run: |
+          if [ -z "$TARGET" ]; then
+            echo "No deploy target is configured (DEPLOY_TARGET); $IMAGE_REF is ready." | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          echo "::error::DEPLOY_TARGET is $TARGET, but there is no deploy step for it yet: see the contract at the top of deploy.yml"
+          exit 1

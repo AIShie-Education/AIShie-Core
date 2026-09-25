@@ -99,6 +99,46 @@ func TestMigrateUpDownUp(t *testing.T) {
 	}
 }
 
+// Rolling back to an older binary is running its `migrate up` against a
+// schema a newer release has already moved on: there is nothing to apply, and
+// it is not an error. A dirty schema still is, whatever its version.
+func TestMigrateUpLeavesANewerSchemaAlone(t *testing.T) {
+	pool, url := testdb.NewEmpty(t)
+	ctx := context.Background()
+	latest, err := db.LatestEmbedded()
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := db.NewMigrator(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	if err := m.Up(); err != nil {
+		t.Fatalf("up: %v", err)
+	}
+
+	// What a newer release leaves behind: its migration applied, and a
+	// version this binary has no file for.
+	ahead := latest + 1
+	if _, err := pool.Exec(ctx, `UPDATE schema_migrations SET version = $1`, ahead); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Up(); err != nil {
+		t.Fatalf("up against a newer schema: %v", err)
+	}
+	if v, dirty, err := m.Version(); err != nil || v != ahead || dirty {
+		t.Fatalf("version = %d (dirty=%v, %v), want %d left as it was", v, dirty, err, ahead)
+	}
+
+	if _, err := pool.Exec(ctx, `UPDATE schema_migrations SET dirty = true`); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Up(); err == nil {
+		t.Fatal("up against a dirty schema said nothing")
+	}
+}
+
 // A first migration that fails has applied nothing, and leaves version 1
 // recorded as dirty. Forcing 0 once the cause is fixed must record what is
 // true, that no migration has run, and the migrations then apply from there.

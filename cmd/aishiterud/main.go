@@ -317,12 +317,23 @@ func migrate(cfg config.Config, args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("schema version %d (embedded latest %d)", v, latest)
-	if dirty {
-		fmt.Print(" DIRTY — fix the database by hand, then `migrate force N`, N being the last migration fully applied (0 if none)")
-	}
-	fmt.Println()
+	fmt.Println(schemaReport(v, latest, dirty))
 	return nil
+}
+
+// schemaReport is the line every migrate subcommand ends with. `migrate up`
+// leaves a schema that is ahead of the binary as it is, and says so here, so
+// that a deploy's log does not read as if it had brought the schema to this
+// binary's version.
+func schemaReport(version, latest uint, dirty bool) string {
+	s := fmt.Sprintf("schema version %d (embedded latest %d)", version, latest)
+	switch {
+	case dirty:
+		s += " DIRTY — fix the database by hand, then `migrate force N`, N being the last migration fully applied (0 if none)"
+	case version > latest:
+		s += " AHEAD — migrated by a newer release, or by a migration since taken out; left as it is"
+	}
+	return s
 }
 
 func seed(cfg config.Config) error {

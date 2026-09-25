@@ -1,14 +1,16 @@
 name: Release
 
 # The only place anything is built for release, and it runs on version tags
-# only. Nothing is deployed from here or from anywhere else: a release is
-# binaries on the release page and an image in GHCR, and what runs where is
-# somebody's decision, made elsewhere.
+# only:
 #
 #   git tag -s v0.1.0 -m "v0.1.0" && git push origin v0.1.0
 #
-# A tag with a hyphen (v0.1.0-rc.1) is a pre-release: it gets its own version
-# tags on the image and leaves :latest alone.
+# It checks the tagged commit again, then publishes binaries on the release
+# page and a multi-architecture image in GHCR. A tag with a hyphen
+# (v0.1.0-rc.1) is a pre-release: it gets its own version tags on the image,
+# leaves :latest alone, and is deployed to staging through deploy.yml. A
+# stable release is not deployed by itself: production is deployed by running
+# the Deploy workflow by hand, from the tag, and the run's summary says how.
 
 on:
   push:
@@ -20,6 +22,12 @@ concurrency:
 
 permissions:
   contents: read
+
+# Each run block is bash with -o pipefail: a pipeline fails when any command
+# in it does, not only when its last one does.
+defaults:
+  run:
+    shell: bash
 
 env:
   IMAGE: ghcr.io/aishiteru-lms/aishiteru-core
@@ -48,7 +56,10 @@ jobs:
       PGPASSWORD: postgres
       TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable
     outputs:
-      migrations: ${{ steps.migrations.outputs.list }}
+      prev: ${{ steps.release.outputs.prev }}
+      migrations: ${{ steps.release.outputs.migrations }}
+      commit: ${{ steps.release.outputs.commit }}
+      date: ${{ steps.release.outputs.date }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -70,17 +81,17 @@ jobs:
             | sh -s -- -b "$(go env GOPATH)/bin" "${GOLANGCI_LINT_VERSION}"
       - run: make ci
       - run: make vuln
-      - name: Migrations new in this release
-        id: migrations
+      # The tag compared with and the migrations new since (for a stable
+      # tag, since the last stable one), and one commit and date for the
+      # binaries and the image both.
+      - id: release
+        name: What this release is
         run: |
-          prev=$(git describe --tags --abbrev=0 --match 'v[0-9]*' "$GITHUB_SHA^" 2>/dev/null || true)
-          if [ -n "$prev" ]; then
-            list=$(git diff --name-only --diff-filter=A "$prev" "$GITHUB_SHA" -- 'src/migrations/*.up.sql' | xargs -r -n1 basename | paste -sd ' ')
-          else
-            list=$(ls src/migrations/*.up.sql | xargs -n1 basename | paste -sd ' ')
-          fi
-          echo "list=$list" >> "$GITHUB_OUTPUT"
-          echo "new migrations since ${prev:-the beginning}: ${list:-none}"
+          {
+            scripts/release-notes.sh "$GITHUB_REF_NAME" "$GITHUB_SHA"
+            echo "commit=$(git rev-parse --short HEAD)"
+            echo "date=$(TZ=UTC git show -s --format=%cd --date=format-local:%Y-%m-%dT%H:%M:%SZ HEAD)"
+          } | tee -a "$GITHUB_OUTPUT"
 
   binaries:
     needs: verify
@@ -97,20 +108,46 @@ jobs:
         with:
           go-version-file: go.mod
       - name: Release notes footer
+        env:
+          MIGRATIONS: ${{ needs.verify.outputs.migrations }}
+          PREV: ${{ needs.verify.outputs.prev }}
         run: |
-          if [ -n "${{ needs.verify.outputs.migrations }}" ]; then
-            printf '## Migrations in this release\n\nRun `aishiterud migrate up` before starting this version:\n\n' > "$RUNNER_TEMP/footer.md"
-            for m in ${{ needs.verify.outputs.migrations }}; do printf -- '- `%s`\n' "$m" >> "$RUNNER_TEMP/footer.md"; done
+          footer="$RUNNER_TEMP/footer.md"
+          if [ -n "$MIGRATIONS" ]; then
+            {
+              echo "## Migrations in this release"
+              echo
+              echo "Run \`aishiterud migrate up\` before starting this version${PREV:+ (new since $PREV)}:"
+              echo
+              for m in $MIGRATIONS; do echo "- \`$m\`"; done
+            } > "$footer"
           else
-            printf 'No schema changes in this release.\n' > "$RUNNER_TEMP/footer.md"
+            echo "No schema changes in this release${PREV:+ since $PREV}." > "$footer"
           fi
+          # The changelog starts where the migration list does: at the tag it
+          # is compared with or, when there is none, at the first commit. Left
+          # to itself, GoReleaser would start the first stable release at the
+          # pre-release before it.
+          since=${PREV:-$(git rev-list --max-parents=0 HEAD | tail -1)}
+          echo "GORELEASER_PREVIOUS_TAG=$since" >> "$GITHUB_ENV"
       - uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
         with:
           version: ${{ env.GORELEASER_VERSION }}
           args: release --clean --release-footer ${{ runner.temp }}/footer.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # The tag that was pushed. GoReleaser otherwise takes the highest of
+          # the tags on the commit, and git ranks v1.0.0-rc.2 above v1.0.0: a
+          # stable release tagged on its release candidate's commit would be
+          # built and released as the candidate.
+          GORELEASER_CURRENT_TAG: ${{ github.ref_name }}
+          SHORT_COMMIT: ${{ needs.verify.outputs.commit }}
+          COMMIT_DATE: ${{ needs.verify.outputs.date }}
+      # Artifact attestations need GitHub Enterprise Cloud on a private
+      # repository, and would fail the run after the release is published. Set
+      # the variable ATTESTATIONS to "true" where they are available.
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        if: ${{ !github.event.repository.private || vars.ATTESTATIONS == 'true' }}
         with:
           subject-checksums: dist/checksums.txt
 
@@ -122,6 +159,8 @@ jobs:
       packages: write      # push to GHCR
       id-token: write
       attestations: write
+    outputs:
+      image: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
@@ -151,12 +190,50 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             VERSION=${{ github.ref_name }}
-            COMMIT=${{ github.sha }}
-            DATE=${{ github.event.head_commit.timestamp }}
+            COMMIT=${{ needs.verify.outputs.commit }}
+            DATE=${{ needs.verify.outputs.date }}
           provenance: mode=max
           sbom: true
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        if: ${{ !github.event.repository.private || vars.ATTESTATIONS == 'true' }}
         with:
           subject-name: ${{ env.IMAGE }}
           subject-digest: ${{ steps.build.outputs.digest }}
           push-to-registry: true
+
+  # A pre-release goes to staging by itself.
+  staging:
+    needs: [verify, binaries, image]
+    if: contains(github.ref_name, '-')
+    permissions:
+      contents: read
+      packages: read
+    uses: ./.github/workflows/deploy.yml
+    with:
+      environment: staging
+      image: ${{ needs.image.outputs.image }}
+      migrations: ${{ needs.verify.outputs.migrations }}
+      since: ${{ needs.verify.outputs.prev }}
+    secrets: inherit # the deploy target's credentials: see deploy.yml
+
+  # A stable release goes to production only when somebody runs Deploy for it.
+  production:
+    needs: [binaries, image]
+    if: ${{ !contains(github.ref_name, '-') }}
+    runs-on: ubuntu-24.04
+    steps:
+      - name: How to deploy it
+        env:
+          IMAGE_REF: ${{ needs.image.outputs.image }}
+        run: |
+          {
+            echo "## $GITHUB_REF_NAME is released"
+            echo
+            echo "To deploy it to production: Actions → Deploy → Run workflow, with"
+            echo
+            echo "- Use workflow from: tag \`$GITHUB_REF_NAME\`"
+            echo "- environment: \`production\`"
+            echo "- image: \`$IMAGE:${GITHUB_REF_NAME#v}\`"
+            echo
+            echo "This run built it as \`$IMAGE_REF\`; Deploy shows the digest it resolves to before it goes on."
+          } | tee -a "$GITHUB_STEP_SUMMARY"

@@ -213,10 +213,22 @@ lint, generated-code drift, the SQL suite and the Go tests on PostgreSQL 13 and
 Docker image, never pushed) and `govulncheck`. Each job is a `make` target, so
 a green `make ci` locally means the same thing.
 
-Nothing is deployed automatically. Release artifacts are built only from
-version tags (`v*.*.*`): [release.yml](.github/workflows/release.yml) checks
-that the tag is on `main`, runs the whole of CI again, and then publishes
-binaries for Linux and macOS with checksums, a multi-architecture image at
-`ghcr.io/aishiteru-lms/aishiteru-core`, and build provenance for both. A
-pre-release tag (`v1.2.3-rc.1`) does not move `:latest`. How to cut one is in
-[CONTRIBUTING.md](CONTRIBUTING.md).
+A push to `main` whose checks all pass is published:
+[publish.yml](.github/workflows/publish.yml) pushes its image as
+`ghcr.io/aishiteru-lms/aishiteru-core:sha-<commit>`, moves `:edge` to it, and
+hands it to [deploy.yml](.github/workflows/deploy.yml) for the `staging`
+environment.
+
+Releases are built only from version tags (`v*.*.*`):
+[release.yml](.github/workflows/release.yml) checks that the tag is on
+`main`, runs the whole of CI again, and then publishes binaries for Linux and
+macOS with checksums, and a multi-architecture image (`:1.2.3`, `:1.2`,
+`:latest`) with its SBOM and build provenance. A pre-release tag
+(`v1.2.3-rc.1`) does not move `:latest`, and goes to staging. A stable release
+goes to production when somebody runs Deploy for it, from its tag.
+
+deploy.yml reaches no host yet: until a deploy target is configured, a deploy
+records itself in the environment and says which image is ready. What a target
+has to do — back up, `migrate up` and `seed` with the new image, then roll
+out, then wait for `/healthz` — is at the top of deploy.yml. How to cut a release, and the
+repository settings this needs, are in [CONTRIBUTING.md](CONTRIBUTING.md).
