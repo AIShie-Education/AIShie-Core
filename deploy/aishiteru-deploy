@@ -1,0 +1,87 @@
+#!/bin/sh
+# Deploys an image of AIShiteru Core to this server: the first start, an
+# upgrade and a rollback alike. Run as root, by hand or by the Deploy workflow
+# over SSH (docs/deploying.md):
+#
+#   aishiteru-deploy ghcr.io/aishiteru-lms/aishiteru-core:0.2.0
+#
+# In order: back up the database, `migrate up` and `seed` with the new image,
+# replace the container, and wait until /healthz reports the new version and
+# commit. It stops at the first step that fails. Up to replacing the
+# container, the version that was running goes on running.
+#
+# The paths below are the ones deploy/setup-server.sh creates. The variables
+# that override them are for deploy/aishiteru-deploy_test.sh.
+set -eu
+
+ENV_FILE=${AISHITERU_ENV_FILE:-/etc/aishiteru/aishiteru.env}
+DATA_DIR=${AISHITERU_DATA_DIR:-/srv/aishiteru/data}
+BACKUP_DIR=${AISHITERU_BACKUP_DIR:-/var/backups/aishiteru}
+LOG_FILE=${AISHITERU_LOG_FILE:-/var/log/aishiteru-deploy.log}
+LOCK_FILE=${AISHITERU_LOCK_FILE:-/run/lock/aishiteru-deploy.lock}
+HEALTH_TRIES=${AISHITERU_HEALTH_TRIES:-30}
+REPO=ghcr.io/aishiteru-lms/aishiteru-core
+KEEP_BACKUPS=10
+
+die() { echo "aishiteru-deploy: $*" >&2; exit 1; }
+
+IMG=${1:-}
+# The image comes from the command line, or from SSH_ORIGINAL_COMMAND when
+# the Deploy workflow calls: this image's repository, by tag or by digest,
+# and nothing that is not part of such a name.
+case $IMG in
+  "$REPO":* | "$REPO"@sha256:*) ;;
+  *) echo "usage: aishiteru-deploy $REPO:TAG (or @sha256:DIGEST)" >&2; exit 2 ;;
+esac
+case $IMG in *[!A-Za-z0-9._:@/-]*) echo "aishiteru-deploy: not an image name: $IMG" >&2; exit 2 ;; esac
+[ -r "$ENV_FILE" ] || die "$ENV_FILE is missing: see deploy/setup-server.sh"
+
+# One deploy at a time on this server, by hand or from GitHub.
+exec 9>"$LOCK_FILE"
+flock -w 600 9 || die "another deploy has held the lock for 10 minutes"
+
+# Where /healthz answers: HTTP_ADDR from the env file, on this machine.
+addr=$(sed -n 's/^HTTP_ADDR=//p' "$ENV_FILE" | tail -n 1)
+case $addr in
+  '') addr=127.0.0.1:8080 ;;
+  :*) addr=127.0.0.1$addr ;;
+  0.0.0.0:*) addr=127.0.0.1:${addr#0.0.0.0:} ;;
+  '[::]':*) addr="[::1]:${addr#'[::]':}" ;;
+esac
+
+run() { docker run --rm --network host --env-file "$ENV_FILE" "$IMG" "$@"; }
+
+docker pull "$IMG"
+
+backup=$BACKUP_DIR/deploy-$(date -u +%Y%m%d-%H%M%S).dump
+runuser -u postgres -- pg_dump -Fc -f "$backup" aishiteru
+echo "database backed up: $backup"
+# Keep the newest deploy backups; daily ones (docs/deploying.md) are apart.
+# shellcheck disable=SC2012 # the names are this script's own: no spaces
+ls -1t "$BACKUP_DIR"/deploy-*.dump 2>/dev/null | tail -n +$((KEEP_BACKUPS + 1)) | while read -r old; do rm -f -- "$old"; done
+
+run migrate up
+run seed
+
+want=$(docker run --rm "$IMG" version)           # v0.2.0 (abc1234, 2026-09-25T04:10:07Z)
+ver=${want%% *}
+commit=$(printf '%s\n' "$want" | sed -n 's/^[^(]*(\([^,]*\),.*/\1/p')
+if [ -z "$ver" ] || [ -z "$commit" ]; then die "cannot read the version of $IMG: $want"; fi
+
+prev=$(docker inspect -f '{{.Config.Image}}' aishiteru 2>/dev/null || true)
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) ${prev:-none} -> $IMG" >> "$LOG_FILE"
+if [ -n "$prev" ]; then
+  docker stop aishiteru >/dev/null
+  docker rm aishiteru >/dev/null
+fi
+docker run -d --name aishiteru --restart unless-stopped --stop-timeout 20 \
+  --log-opt max-size=20m --log-opt max-file=5 \
+  --network host --env-file "$ENV_FILE" -v "$DATA_DIR":/data "$IMG" >/dev/null
+
+i=0
+until curl -fsS "http://$addr/healthz" 2>/dev/null | grep -q "\"version\":\"$ver\",\"commit\":\"$commit\""; do
+  i=$((i + 1))
+  [ "$i" -lt "$HEALTH_TRIES" ] || die "$want did not report healthy within $((HEALTH_TRIES * 2)) seconds: see docker logs aishiteru. The version before was ${prev:-none}."
+  sleep 2
+done
+echo "deployed: $want (before: ${prev:-none})"
