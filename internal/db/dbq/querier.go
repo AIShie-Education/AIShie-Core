@@ -157,6 +157,14 @@ type Querier interface {
 	InsertSubmission(ctx context.Context, arg InsertSubmissionParams) error
 	InsertTerm(ctx context.Context, arg InsertTermParams) error
 	ListActionsByMember(ctx context.Context, arg ListActionsByMemberParams) ([]Action, error)
+	// pattern is an ILIKE pattern the caller has made from a search term, with
+	// the term's own %, _ and \ escaped. No index serves it, since the term may
+	// start anywhere in a name or an address: the walk is the primary key's, in
+	// id order, and stops at max_rows, which for an installation's actors
+	// (thousands, not millions) is cheap enough. platform_role 'none' asks for
+	// the actors who hold neither role; the column's CHECK keeps it from naming
+	// a real one.
+	ListActors(ctx context.Context, arg ListActorsParams) ([]Actor, error)
 	ListAssignmentScope(ctx context.Context, memberID uuid.UUID) ([]uuid.UUID, error)
 	// Scope is applied here, not afterwards. A member who may not write
 	// assignments sees only published ones.

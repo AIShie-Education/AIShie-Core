@@ -102,6 +102,71 @@ func (q *Queries) InsertActor(ctx context.Context, arg InsertActorParams) error 
 	return err
 }
 
+const listActors = `-- name: ListActors :many
+SELECT id, kind, display_name, email, status, platform_role, created_by_actor_id, created_at
+FROM actor
+WHERE id > $1
+  AND ($2::text IS NULL
+       OR display_name ILIKE $2 OR email ILIKE $2)
+  AND ($3::text IS NULL OR kind = $3)
+  AND ($4::text IS NULL OR status = $4)
+  AND ($5::text IS NULL OR coalesce(platform_role, 'none') = $5)
+ORDER BY id
+LIMIT $6
+`
+
+type ListActorsParams struct {
+	After        uuid.UUID
+	Pattern      *string
+	Kind         *string
+	Status       *string
+	PlatformRole *string
+	MaxRows      int32
+}
+
+// pattern is an ILIKE pattern the caller has made from a search term, with
+// the term's own %, _ and \ escaped. No index serves it, since the term may
+// start anywhere in a name or an address: the walk is the primary key's, in
+// id order, and stops at max_rows, which for an installation's actors
+// (thousands, not millions) is cheap enough. platform_role 'none' asks for
+// the actors who hold neither role; the column's CHECK keeps it from naming
+// a real one.
+func (q *Queries) ListActors(ctx context.Context, arg ListActorsParams) ([]Actor, error) {
+	rows, err := q.db.Query(ctx, listActors,
+		arg.After,
+		arg.Pattern,
+		arg.Kind,
+		arg.Status,
+		arg.PlatformRole,
+		arg.MaxRows,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Actor
+	for rows.Next() {
+		var i Actor
+		if err := rows.Scan(
+			&i.ID,
+			&i.Kind,
+			&i.DisplayName,
+			&i.Email,
+			&i.Status,
+			&i.PlatformRole,
+			&i.CreatedByActorID,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listMembershipsForActor = `-- name: ListMembershipsForActor :many
 SELECT m.id AS member_id, m.course_id, c.code, c.section, c.title, c.status AS course_status,
        m.role, m.status, m.expires_at, m.student_scope, m.assignment_scope

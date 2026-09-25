@@ -2,8 +2,9 @@
 # End to end, from the outside: the real binary, a scratch database, and
 # nothing but curl. It bootstraps an installation and then builds the worked
 # example from docs/schema.md §5 entirely through the REST API — register the
-# actors, create and open the course, seat the instructor, set up grading,
-# publish an assignment, hand in work, have an agent grade it, approve, post.
+# actors and find them again, create and open the course, seat the instructor,
+# set up grading, publish an assignment, hand in work, have an agent grade it,
+# approve, post.
 #
 #   make e2e            (builds first)
 #   scripts/e2e.sh      (expects bin/aishiterud)
@@ -92,6 +93,13 @@ register() { # KIND NAME → sets ACTOR_ID and TOKEN
 register human Sato;      SATO_ID=$ACTOR_ID;   SATO=$TOKEN
 register human Yuki;      YUKI_ID=$ACTOR_ID;   YUKI=$TOKEN
 register agent grader-v2; GRADER_ID=$ACTOR_ID; GRADER=$TOKEN
+
+step "The admin finds them again, by part of a name or by kind; nobody else may look"
+call 200 GET "/v1/actors?q=YU&limit=1" "$ADMIN"
+[ "$(json "$WORK/body" 'd["result"]["actors"][0]["id"]')" = "$YUKI_ID" ] || fail "q=YU does not find Yuki"
+call 200 GET "/v1/actors?kind=agent" "$ADMIN"
+[ "$(json "$WORK/body" '" ".join(a["id"] for a in d["result"]["actors"])')" = "$GRADER_ID" ] || fail "kind=agent is not grader-v2 alone"
+call 403 GET /v1/actors "$SATO"
 
 step "The admin creates CS101, opens it, and seats Sato; from here it is Sato's course"
 call 200 POST /v1/terms "$ADMIN" '{"name":"2026 Autumn","starts_on":"2026-09-01","ends_on":"2026-12-20"}'

@@ -3,8 +3,10 @@ package tools
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -25,7 +27,7 @@ import (
 
 func platformTools() []tool.Tool {
 	return []tool.Tool{
-		actorRegister(), actorGet(), actorSuspend(), actorReactivate(), actorIssueToken(), actorLinkSSO(),
+		actorRegister(), actorList(), actorGet(), actorSuspend(), actorReactivate(), actorIssueToken(), actorLinkSSO(),
 		termCreate(), termList(), departmentCreate(), departmentList(),
 		presetList(), presetCreate(), presetUpdate(),
 	}
@@ -116,6 +118,11 @@ type ActorView struct {
 	CreatedAt        time.Time  `json:"created_at"`
 }
 
+func viewActor(a dbq.Actor) ActorView {
+	return ActorView{ID: a.ID, Kind: a.Kind, DisplayName: a.DisplayName, Email: a.Email, Status: a.Status,
+		PlatformRole: a.PlatformRole, CreatedByActorID: a.CreatedByActorID, CreatedAt: a.CreatedAt}
+}
+
 func resolveActor(ctx context.Context, q dbq.Querier, in ActorIDIn) (tool.Target, error) {
 	if _, err := q.GetActor(ctx, in.ActorID); errors.Is(err, pgx.ErrNoRows) {
 		return tool.Target{}, apperr.Missing("no such actor")
@@ -134,11 +141,81 @@ func actorGet() tool.Tool {
 		Resolve: resolveActor,
 		Query: func(ctx context.Context, rc *tool.ReadCtx, in ActorIDIn) (ActorView, error) {
 			a, err := rc.Q.GetActor(ctx, in.ActorID)
+			return viewActor(a), err
+		},
+	})
+}
+
+type ActorListIn struct {
+	Q            *string `json:"q,omitempty" jsonschema:"part of a display name or an email address, matched in any case; % and _ mean themselves. At most 254 characters"`
+	Kind         *string `json:"kind,omitempty" jsonschema:"human, agent or system"`
+	Status       *string `json:"status,omitempty" jsonschema:"active or suspended"`
+	PlatformRole *string `json:"platform_role,omitempty" jsonschema:"root, admin, or none for the actors who hold neither"`
+	Page
+}
+
+type ActorListOut struct {
+	Actors []ActorView `json:"actors"`
+	Next   *uuid.UUID  `json:"next,omitempty"`
+}
+
+// maxActorQuery bounds q at the longest an email address can be: long
+// enough that a pasted address is never refused, short enough that what is
+// matched against every row stays a search term.
+const maxActorQuery = 254
+
+// likeLiteral escapes what LIKE reads as more than itself — its two
+// wildcards, and the backslash that escapes them — so that a search for
+// "50%" finds "50%" and not everything that starts with 50.
+var likeLiteral = strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+
+func (in ActorListIn) params() (dbq.ListActorsParams, error) {
+	p := dbq.ListActorsParams{After: in.after(), Kind: in.Kind, Status: in.Status, PlatformRole: in.PlatformRole, MaxRows: in.limit()}
+	switch {
+	case in.Kind != nil && !slices.Contains([]string{"human", "agent", "system"}, *in.Kind):
+		return p, apperr.Invalid("kind must be human, agent or system")
+	case in.Status != nil && *in.Status != domain.ActorActive && *in.Status != domain.ActorSuspended:
+		return p, apperr.Invalid("status must be active or suspended")
+	case in.PlatformRole != nil && !slices.Contains([]string{domain.PlatformRoot, domain.PlatformAdmin, "none"}, *in.PlatformRole):
+		return p, apperr.Invalid("platform_role must be root, admin or none")
+	}
+	if in.Q != nil {
+		q := strings.TrimSpace(*in.Q)
+		if utf8.RuneCountInString(q) > maxActorQuery {
+			return p, apperr.Invalid("q is at most %d characters", maxActorQuery)
+		}
+		// A search box that has been emptied asks for everyone, as no q does.
+		if q != "" {
+			pattern := "%" + likeLiteral.Replace(q) + "%"
+			p.Pattern = &pattern
+		}
+	}
+	return p, nil
+}
+
+func actorList() tool.Tool {
+	return tool.Define(tool.Spec[ActorListIn, ActorListOut]{
+		Name: "actor.list",
+		Description: "Every actor on the platform — people, agents and the system actor — in the order they were registered, " +
+			"optionally narrowed by q (part of a name or an email address), kind, status or platform role. This is how " +
+			"someone registered earlier is found again; for one actor by id, use actor.get.",
+		Kind: tool.Read, Gate: admins,
+		HTTP:    tool.Route{Method: "GET", Pattern: "/v1/actors"},
+		Resolve: noTarget[ActorListIn]("actor"),
+		Query: func(ctx context.Context, rc *tool.ReadCtx, in ActorListIn) (ActorListOut, error) {
+			p, err := in.params()
 			if err != nil {
-				return ActorView{}, err
+				return ActorListOut{}, err
 			}
-			return ActorView{ID: a.ID, Kind: a.Kind, DisplayName: a.DisplayName, Email: a.Email, Status: a.Status,
-				PlatformRole: a.PlatformRole, CreatedByActorID: a.CreatedByActorID, CreatedAt: a.CreatedAt}, nil
+			rows, err := rc.Q.ListActors(ctx, p)
+			out := ActorListOut{Actors: make([]ActorView, 0, len(rows))}
+			for _, r := range rows {
+				out.Actors = append(out.Actors, viewActor(r))
+			}
+			if len(rows) > 0 && len(rows) == int(in.limit()) {
+				out.Next = &rows[len(rows)-1].ID
+			}
+			return out, err
 		},
 	})
 }
