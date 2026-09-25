@@ -75,8 +75,8 @@ names (`ghcr.io/aishiteru-lms/aishiteru-core:1.2.3`). That run is the decision
 to deploy and to migrate. For production, Deploy takes nothing else: run from
 a branch or a pre-release's tag, or given an image that is not a stable
 release's, it stops before it deploys. To roll back, run Deploy from the
-newest release's tag, which carries the current deploy procedure, with the
-image of the release before: `migrate up` leaves a schema a newer release
+newest release's tag, whose checks are the current ones, with the image of
+the release before: `migrate up` leaves a schema a newer release
 migrated as it is, and a migration keeps the release before it working. A
 release further back may need what a later migration has dropped.
 
@@ -114,11 +114,12 @@ Before the first push to `main` after the CD workflows land, in GitHub:
   first shows at the first publish or release.
 - **Variables and secrets**, when they apply: `ATTESTATIONS` = `true` where
   artifact attestations are available (a public repository, or GitHub
-  Enterprise Cloud); `DEPLOY_TARGET` and the target's credentials once
-  deploy.yml has a deploy step. Put those on the environment where the plan
-  allows environment secrets and variables, else on the repository: a
-  private repository on GitHub Free sees neither the environment's nor the
-  organization's.
+  Enterprise Cloud). For each environment with a server, the repository
+  variables `DEPLOY_TARGET_STAGING` and `DEPLOY_KNOWN_HOSTS_STAGING` and the
+  repository secret `DEPLOY_SSH_KEY_STAGING` (`_PRODUCTION` for production),
+  which `deploy/setup-server.sh` prints ([docs/deploying.md](docs/deploying.md)).
+  They are the repository's, not the environment's: a private repository on
+  GitHub Free has no environment variables or secrets.
 - **Minutes and storage**: on GitHub Free a private repository has 2,000
   Actions minutes a month, and runs stop when they are used up unless there
   is a payment method. Every push to `main` runs the whole of CI and a

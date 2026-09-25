@@ -6,34 +6,39 @@ name: Deploy
 # release's tag: that run is the decision to deploy, and the migration that
 # comes with it, which README says is somebody's to make. For production it
 # takes a stable release's tag (v1.2.3) and a stable release's image (:1.2.3)
-# and nothing else, whatever the plan lets the environment enforce.
+# and nothing else, whatever the plan lets the environment enforce. Those
+# checks are this workflow's: the server deploys any image of this repository
+# it is handed by whoever holds its key.
 #
-# No host is deployed to yet. Until a deploy target is configured (the
-# variable DEPLOY_TARGET), a run records the deployment in the environment and
-# says which image is ready. A target, once there is one, does this, in this
-# order:
+# A deploy target is a server set up with deploy/setup-server.sh
+# (docs/deploying.md). Once the repository variable DEPLOY_TARGET_STAGING (or
+# _PRODUCTION) names it, the deploy job connects to it with SSH, as a user
+# that can do nothing but run deploy/aishiteru-deploy, and hands it the image
+# by digest. That script does this, in this order:
 #
 #   1. Back up the database, so that a migration that goes wrong, or a
 #      rollback further than the release before, has somewhere to go back to.
-#   2. `aishiterud migrate up` with the new image and the environment's
-#      DATABASE_URL. A schema a newer release already migrated is left alone,
-#      so this does not stop a rollback to the release before, which a
-#      migration keeps working (CONTRIBUTING.md, Migrations). Stop here if it
-#      fails: the servers keep running the old image, and the schema stays
-#      marked dirty, with /healthz at 503, until someone puts it right
-#      (`migrate force`, or the backup).
+#   2. `aishiterud migrate up` with the new image. A schema a newer release
+#      already migrated is left alone, so this does not stop a rollback to the
+#      release before, which a migration keeps working (CONTRIBUTING.md,
+#      Migrations). It stops here if this fails: the server keeps running the
+#      old image, and the schema stays marked dirty, with /healthz at 503,
+#      until someone puts it right (`migrate force`, or the backup).
 #   3. `aishiterud seed` with the new image, which adds the built-in presets a
 #      release brings and leaves the ones already there as they are.
-#   4. Move the servers over to the new image.
+#   4. Replace the container with one of the new image.
 #   5. Wait until GET /healthz answers status "ok" with the new version and
 #      commit.
 #
-# Its credentials go in the environment's secrets, and DEPLOY_TARGET in its
-# variables. A private repository on GitHub Free has neither, and does not
-# see the organization's: there they go in the repository's. Every workflow
-# that calls this one passes `secrets: inherit`. A called workflow sees no
-# secret its caller does not pass, and an environment's secrets have been
-# reported to come through empty without it (actions/runner#4453).
+# Until an environment has a target, a run records the deployment in the
+# environment and says which image is ready.
+#
+# The target, its host key and the SSH key are repository variables and a
+# repository secret, one set per environment: a private repository on GitHub
+# Free has no environment variables or secrets, and every plan has these. The
+# job still names the environment, so whatever protection the environment has
+# applies. Every workflow that calls this one passes `secrets: inherit`: a
+# called workflow sees no secret its caller does not pass.
 
 on:
   workflow_call:
@@ -104,6 +109,10 @@ jobs:
           MIGRATIONS: ${{ inputs.migrations }}
           SINCE: ${{ inputs.since }}
         run: |
+          case "$ENVIRONMENT" in
+            staging | production) ;;
+            *) echo "::error::there is no environment $ENVIRONMENT: staging or production"; exit 1 ;;
+          esac
           case "$WANT" in
             "$IMAGE:"* | "$IMAGE@"*) ;;
             *) echo "::error::$WANT is not an image of $IMAGE"; exit 1 ;;
@@ -140,8 +149,8 @@ jobs:
   deploy:
     needs: plan
     runs-on: ubuntu-24.04
-    # A timeout stops a migration half way, as a cancellation would: once
-    # there is a deploy target, keep this above the longest migration.
+    # A timeout, like a cancellation, can stop a deploy half way: keep this
+    # above the longest migration.
     timeout-minutes: 30
     # GitHub records the deployment here, and any protection the environment
     # has (required reviewers, allowed branches and tags) applies here.
@@ -159,12 +168,47 @@ jobs:
     steps:
       - name: Deploy
         env:
+          ENVIRONMENT: ${{ inputs.environment }}
           IMAGE_REF: ${{ needs.plan.outputs.image }}
-          TARGET: ${{ vars.DEPLOY_TARGET }}
+          NAME: ${{ inputs.environment == 'production' && 'PRODUCTION' || 'STAGING' }}
+          TARGET: ${{ vars[format('DEPLOY_TARGET_{0}', inputs.environment == 'production' && 'PRODUCTION' || 'STAGING')] }}
+          KNOWN_HOSTS: ${{ vars[format('DEPLOY_KNOWN_HOSTS_{0}', inputs.environment == 'production' && 'PRODUCTION' || 'STAGING')] }}
+          SSH_KEY: ${{ secrets[format('DEPLOY_SSH_KEY_{0}', inputs.environment == 'production' && 'PRODUCTION' || 'STAGING')] }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           if [ -z "$TARGET" ]; then
-            echo "No deploy target is configured (DEPLOY_TARGET); $IMAGE_REF is ready." | tee -a "$GITHUB_STEP_SUMMARY"
+            # Half a configuration would otherwise pass as none, green.
+            if [ -n "$SSH_KEY$KNOWN_HOSTS" ]; then
+              echo "::error::DEPLOY_SSH_KEY_$NAME or DEPLOY_KNOWN_HOSTS_$NAME is set, but the variable DEPLOY_TARGET_$NAME is not (a secret of that name is not read)"
+              exit 1
+            fi
+            echo "No deploy target is configured for $ENVIRONMENT (DEPLOY_TARGET_$NAME); $IMAGE_REF is ready." | tee -a "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
-          echo "::error::DEPLOY_TARGET is $TARGET, but there is no deploy step for it yet: see the contract at the top of deploy.yml"
-          exit 1
+          # A re-run of an older push's deploy keeps that run's image, and
+          # would put an older build of main over a newer one.
+          if [ "$GITHUB_EVENT_NAME" = push ] && [ "$GITHUB_REF" = refs/heads/main ] && [ "$GITHUB_RUN_ATTEMPT" -gt 1 ]; then
+            tip=$(gh api "repos/$GITHUB_REPOSITORY/commits/main" --jq .sha)
+            if [ "$tip" != "$GITHUB_SHA" ]; then
+              # Failed, not green: a job that names the environment and passes
+              # would be recorded as a deployment of this older commit.
+              echo "::error::This re-run is for $GITHUB_SHA, and main has moved on to $tip: not deploying an older build over a newer one. To deploy again, run Deploy with the image :edge."
+              exit 1
+            fi
+          fi
+          [ -n "$SSH_KEY" ] || { echo "::error::DEPLOY_TARGET_$NAME is set, but the secret DEPLOY_SSH_KEY_$NAME is not"; exit 1; }
+          # Without the server's host key, nothing tells it from an impostor.
+          [ -n "$KNOWN_HOSTS" ] || { echo "::error::DEPLOY_TARGET_$NAME is set, but DEPLOY_KNOWN_HOSTS_$NAME is not"; exit 1; }
+          # The key and host key live in a directory of their own, named on
+          # the command line: ssh reads ~/.ssh from the passwd entry, not
+          # from $HOME, and no ssh configuration of the runner's applies.
+          dir=$(mktemp -d)
+          trap 'rm -rf "$dir"' EXIT
+          (umask 077 && printf '%s\n' "$SSH_KEY" | tr -d '\r' > "$dir/key")
+          printf '%s\n' "$KNOWN_HOSTS" | tr -d '\r' > "$dir/known_hosts"
+          # The server runs aishiteru-deploy with the image, and nothing else.
+          ssh -F /dev/null -i "$dir/key" -o IdentitiesOnly=yes -o BatchMode=yes \
+            -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$dir/known_hosts" -o GlobalKnownHostsFile=/dev/null \
+            -o ServerAliveInterval=30 -o ServerAliveCountMax=10 \
+            "$TARGET" "$IMAGE_REF"
+          echo "Deployed $IMAGE_REF to $ENVIRONMENT ($TARGET)." >> "$GITHUB_STEP_SUMMARY"

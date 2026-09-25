@@ -103,8 +103,10 @@ actionlint: ## the GitHub Actions workflows
 	go run github.com/rhysd/actionlint/cmd/actionlint@$(ACTIONLINT_VERSION)
 
 .PHONY: script-test
-script-test: ## the tests of scripts/
+script-test: ## the tests of scripts/ and deploy/, and shellcheck over deploy/ where it is installed
 	scripts/release-notes_test.sh
+	deploy/aishiteru-deploy_test.sh
+	@if command -v shellcheck >/dev/null; then shellcheck -s sh deploy/aishiteru-deploy deploy/aishiterud deploy/setup-server.sh && shellcheck deploy/aishiteru-deploy_test.sh; else echo "shellcheck is not installed: deploy/ not checked"; fi
 
 .PHONY: sqlc
 sqlc: ## regenerate internal/db/dbq from the SQL

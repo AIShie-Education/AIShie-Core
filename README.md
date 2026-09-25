@@ -227,8 +227,13 @@ macOS with checksums, and a multi-architecture image (`:1.2.3`, `:1.2`,
 (`v1.2.3-rc.1`) does not move `:latest`, and goes to staging. A stable release
 goes to production when somebody runs Deploy for it, from its tag.
 
-deploy.yml reaches no host yet: until a deploy target is configured, a deploy
-records itself in the environment and says which image is ready. What a target
-has to do — back up, `migrate up` and `seed` with the new image, then roll
-out, then wait for `/healthz` — is at the top of deploy.yml. How to cut a release, and the
-repository settings this needs, are in [CONTRIBUTING.md](CONTRIBUTING.md).
+deploy.yml deploys over SSH to a server set up with
+[deploy/setup-server.sh](deploy/setup-server.sh), once the repository has its
+address and key; until then a deploy records itself in the environment and
+says which image is ready. On the server,
+[deploy/aishiteru-deploy](deploy/aishiteru-deploy) backs up, runs `migrate up`
+and `seed` with the new image, replaces the container, and waits for
+`/healthz` to report the new version. Setting a server up, connecting it, and
+running it day to day are in [docs/deploying.md](docs/deploying.md). How to cut
+a release, and the repository settings this needs, are in
+[CONTRIBUTING.md](CONTRIBUTING.md).
