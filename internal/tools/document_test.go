@@ -242,7 +242,7 @@ func TestFilesRoundTrip(t *testing.T) {
 	mine := b.upload(t, b.sato, "material", "text/plain", []byte("x"))
 	for name, args := range map[string]m{
 		"as a rubric instead":  {"kind": "rubric", "title": "x", "upload_token": mine},
-		"a forged token":       {"kind": "material", "title": "x", "upload_token": mine[:len(mine)-2] + "AA"},
+		"a forged token":       {"kind": "material", "title": "x", "upload_token": testkit.Forged(t, mine)},
 		"a token that is none": {"kind": "material", "title": "x", "upload_token": "nonsense"},
 	} {
 		args["course_id"] = b.course
