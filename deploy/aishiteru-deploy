@@ -8,17 +8,20 @@
 # In order: back up the database, `migrate up` and `seed` with the new image,
 # replace the container, and wait until /healthz reports the new version and
 # commit. It stops at the first step that fails. Up to replacing the
-# container, the version that was running goes on running.
+# container, the version that was running goes on running. If the new version
+# never reports healthy, the version before is started again.
 #
 # The paths below are the ones deploy/setup-server.sh creates. The variables
 # that override them are for deploy/aishiteru-deploy_test.sh.
 set -eu
+# The lock, the log and the backups are root's alone.
+umask 077
 
 ENV_FILE=${AISHITERU_ENV_FILE:-/etc/aishiteru/aishiteru.env}
 DATA_DIR=${AISHITERU_DATA_DIR:-/srv/aishiteru/data}
 BACKUP_DIR=${AISHITERU_BACKUP_DIR:-/var/backups/aishiteru}
 LOG_FILE=${AISHITERU_LOG_FILE:-/var/log/aishiteru-deploy.log}
-LOCK_FILE=${AISHITERU_LOCK_FILE:-/run/lock/aishiteru-deploy.lock}
+LOCK_FILE=${AISHITERU_LOCK_FILE:-/run/aishiteru-deploy.lock}
 HEALTH_TRIES=${AISHITERU_HEALTH_TRIES:-30}
 REPO=ghcr.io/aishiteru-lms/aishiteru-core
 KEEP_BACKUPS=10
@@ -36,7 +39,8 @@ esac
 case $IMG in *[!A-Za-z0-9._:@/-]*) echo "aishiteru-deploy: not an image name: $IMG" >&2; exit 2 ;; esac
 [ -r "$ENV_FILE" ] || die "$ENV_FILE is missing: see deploy/setup-server.sh"
 
-# One deploy at a time on this server, by hand or from GitHub.
+# One deploy at a time on this server, by hand or from GitHub. /run, unlike
+# /run/lock, is root's: nobody else can hold the lock.
 exec 9>"$LOCK_FILE"
 flock -w 600 9 || die "another deploy has held the lock for 10 minutes"
 
@@ -49,19 +53,39 @@ case $addr in
   '[::]':*) addr="[::1]:${addr#'[::]':}" ;;
 esac
 
-run() { docker run --rm --network host --env-file "$ENV_FILE" "$IMG" "$@"; }
+# A one-off command with the new image. Without --sig-proxy=false, a Ctrl-C
+# or a dropped SSH session would be passed on to it and stop a migration half
+# way; this way the migration finishes, and only this script stops.
+run() { docker run --rm --sig-proxy=false --network host --env-file "$ENV_FILE" "$IMG" "$@"; }
+start() {
+  docker run -d --name aishiteru --restart unless-stopped --stop-timeout 20 \
+    --log-opt max-size=20m --log-opt max-file=5 \
+    --network host --env-file "$ENV_FILE" -v "$DATA_DIR":/data "$1" >/dev/null
+}
+# healthy VERSION COMMIT: whether /healthz reports them within the tries.
+healthy() {
+  i=0
+  until curl -fsS "http://$addr/healthz" 2>/dev/null | grep -q "\"version\":\"$1\",\"commit\":\"$2\""; do
+    i=$((i + 1))
+    [ "$i" -lt "$HEALTH_TRIES" ] || return 1
+    sleep 2
+  done
+}
 
-docker pull "$IMG"
+docker pull "$IMG" || die "could not pull $IMG (is this server logged in to ghcr.io?)"
 
 backup=$BACKUP_DIR/deploy-$(date -u +%Y%m%d-%H%M%S).dump
-runuser -u postgres -- pg_dump -Fc -f "$backup" aishiteru
+# Under another name until it is whole: a dump cut short is not a backup.
+runuser -u postgres -- pg_dump -Fc -f "$backup.part" aishiteru ||
+  { rm -f "$backup.part"; die "the database backup failed; nothing was changed"; }
+mv "$backup.part" "$backup"
 echo "database backed up: $backup"
-# Keep the newest deploy backups; daily ones (docs/deploying.md) are apart.
+# Keep the newest deploy backups; the nightly ones (daily-N) are apart.
 # shellcheck disable=SC2012 # the names are this script's own: no spaces
 ls -1t "$BACKUP_DIR"/deploy-*.dump 2>/dev/null | tail -n +$((KEEP_BACKUPS + 1)) | while read -r old; do rm -f -- "$old"; done
 
-run migrate up
-run seed
+run migrate up || die "migrate up failed; the version that was running is still running (docs/deploying.md, A migration failed)"
+run seed || die "seed failed; the version that was running is still running"
 
 want=$(docker run --rm "$IMG" version)           # v0.2.0 (abc1234, 2026-09-25T04:10:07Z)
 ver=${want%% *}
@@ -74,14 +98,23 @@ if [ -n "$prev" ]; then
   docker stop aishiteru >/dev/null
   docker rm aishiteru >/dev/null
 fi
-docker run -d --name aishiteru --restart unless-stopped --stop-timeout 20 \
-  --log-opt max-size=20m --log-opt max-file=5 \
-  --network host --env-file "$ENV_FILE" -v "$DATA_DIR":/data "$IMG" >/dev/null
+start "$IMG"
 
-i=0
-until curl -fsS "http://$addr/healthz" 2>/dev/null | grep -q "\"version\":\"$ver\",\"commit\":\"$commit\""; do
-  i=$((i + 1))
-  [ "$i" -lt "$HEALTH_TRIES" ] || die "$want did not report healthy within $((HEALTH_TRIES * 2)) seconds: see docker logs aishiteru. The version before was ${prev:-none}."
-  sleep 2
-done
+if ! healthy "$ver" "$commit"; then
+  echo "aishiteru-deploy: $want did not report healthy within $((HEALTH_TRIES * 2)) seconds. Its last log lines:" >&2
+  docker logs --tail 30 aishiteru >&2 2>&1 || true
+  # The schema is one the version before works with (CONTRIBUTING.md,
+  # Migrations), so it can take over again.
+  if [ -n "$prev" ] && [ "$prev" != "$IMG" ]; then
+    docker rm -f aishiteru >/dev/null
+    start "$prev"
+    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) $IMG -> $prev (not healthy: rolled back)" >> "$LOG_FILE"
+    die "rolled back: $prev is running again"
+  fi
+  die "the version before was ${prev:-none}: see docs/deploying.md, The new version did not report healthy"
+fi
 echo "deployed: $want (before: ${prev:-none})"
+
+# The images of this project that no container uses, the one before included:
+# a rollback pulls its image again.
+docker image prune -af --filter "label=org.opencontainers.image.source=https://github.com/AIShiteru-LMS/AIShiteru-Core" >/dev/null 2>&1 || true

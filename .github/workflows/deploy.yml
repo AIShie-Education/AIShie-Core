@@ -6,7 +6,9 @@ name: Deploy
 # release's tag: that run is the decision to deploy, and the migration that
 # comes with it, which README says is somebody's to make. For production it
 # takes a stable release's tag (v1.2.3) and a stable release's image (:1.2.3)
-# and nothing else, whatever the plan lets the environment enforce.
+# and nothing else, whatever the plan lets the environment enforce. Those
+# checks are this workflow's: the server deploys any image of this repository
+# it is handed by whoever holds its key.
 #
 # A deploy target is a server set up with deploy/setup-server.sh
 # (docs/deploying.md). Once the repository variable DEPLOY_TARGET_STAGING (or
@@ -172,10 +174,25 @@ jobs:
           TARGET: ${{ vars[format('DEPLOY_TARGET_{0}', inputs.environment == 'production' && 'PRODUCTION' || 'STAGING')] }}
           KNOWN_HOSTS: ${{ vars[format('DEPLOY_KNOWN_HOSTS_{0}', inputs.environment == 'production' && 'PRODUCTION' || 'STAGING')] }}
           SSH_KEY: ${{ secrets[format('DEPLOY_SSH_KEY_{0}', inputs.environment == 'production' && 'PRODUCTION' || 'STAGING')] }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           if [ -z "$TARGET" ]; then
+            # Half a configuration would otherwise pass as none, green.
+            if [ -n "$SSH_KEY$KNOWN_HOSTS" ]; then
+              echo "::error::DEPLOY_SSH_KEY_$NAME or DEPLOY_KNOWN_HOSTS_$NAME is set, but the variable DEPLOY_TARGET_$NAME is not (a secret of that name is not read)"
+              exit 1
+            fi
             echo "No deploy target is configured for $ENVIRONMENT (DEPLOY_TARGET_$NAME); $IMAGE_REF is ready." | tee -a "$GITHUB_STEP_SUMMARY"
             exit 0
+          fi
+          # A re-run of an older push's deploy keeps that run's image, and
+          # would put an older build of main over a newer one.
+          if [ "$GITHUB_EVENT_NAME" = push ] && [ "$GITHUB_REF" = refs/heads/main ] && [ "$GITHUB_RUN_ATTEMPT" -gt 1 ]; then
+            tip=$(gh api "repos/$GITHUB_REPOSITORY/commits/main" --jq .sha)
+            if [ "$tip" != "$GITHUB_SHA" ]; then
+              echo "This re-run is for $GITHUB_SHA, and main has moved on to $tip: not deploying an older build over a newer one. To deploy again, run Deploy with the image :edge." | tee -a "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
           fi
           [ -n "$SSH_KEY" ] || { echo "::error::DEPLOY_TARGET_$NAME is set, but the secret DEPLOY_SSH_KEY_$NAME is not"; exit 1; }
           # Without the server's host key, nothing tells it from an impostor.

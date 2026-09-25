@@ -37,9 +37,10 @@ esac
 EOF
 cat > "$work/bin/runuser" <<'EOF'
 #!/usr/bin/env bash
+# Like pg_dump, it writes the file it is given, and a failing one leaves it.
 echo "runuser $*" >> "$CALLS"
-[ "${BACKUP_FAIL:-0}" = 0 ] || exit 1
-while [ $# -gt 0 ]; do [ "$1" = -f ] && { touch "$2"; break; }; shift; done
+while [ $# -gt 0 ]; do [ "$1" = -f ] && { echo partial > "$2"; break; }; shift; done
+exit "${BACKUP_FAIL:-0}"
 EOF
 cat > "$work/bin/curl" <<'EOF'
 #!/usr/bin/env bash
@@ -92,6 +93,10 @@ for step in "docker pull $IMG" "runuser -u postgres -- pg_dump" "migrate up" "se
   called "$step" || fail "no «$step»"
 done
 [ "$(line 'pg_dump')" -lt "$(line 'migrate up')" ] || fail "migrated before the backup"
+grep -q -- "--sig-proxy=false .* migrate up" "$CALLS" || fail "migrate up passes a Ctrl-C on: $(grep 'migrate up' "$CALLS")"
+[ "$(line 'docker run -d')" -lt "$(line 'docker image prune')" ] || fail "images not pruned after the deploy"
+ls "$STATE/backups"/deploy-*.dump > /dev/null 2>&1 || fail "no backup kept"
+! ls "$STATE/backups"/*.part > /dev/null 2>&1 || fail "a .part file left behind"
 [ "$(line 'migrate up')" -lt "$(line 'docker run -d')" ] || fail "started before migrating"
 ! called "docker stop" || fail "stopped a container that was not there"
 [ "$(cat "$STATE/container")" = "$IMG" ] || fail "running $(cat "$STATE/container")"
@@ -114,12 +119,15 @@ if MIGRATE_FAIL=1 deploy "$IMG"; then fail "went on after a failed migration"; f
 ! called "docker run -d" || fail "started the new version"
 ! called " seed" || fail "seeded after a failed migration"
 [ "$(cat "$STATE/container")" = "$OLD" ] || fail "running $(cat "$STATE/container")"
+grep -q "migrate up failed" "$STATE/out" || fail "said: $(cat "$STATE/out")"
+! called "image prune" || fail "pruned after a failed deploy"
 
-# No backup, no migration.
+# No backup, no migration, and no half a backup left among the good ones.
 setup backup-fails
 echo "$OLD" > "$STATE/container"
 if BACKUP_FAIL=1 deploy "$IMG"; then fail "went on without a backup"; fi
 ! called "migrate up" || fail "migrated without a backup"
+[ -z "$(find "$STATE/backups" -type f)" ] || fail "left $(find "$STATE/backups" -type f)"
 
 # A new version that never reports healthy is a failure, named.
 setup unhealthy
@@ -127,6 +135,23 @@ HEALTH_JSON='{"status":"ok","version":"v0.1.0","commit":"0ld0ld0"}'
 if deploy "$IMG"; then fail "passed while the old version answered"; fi
 grep -q "did not report healthy" "$STATE/out" || fail "said: $(cat "$STATE/out")"
 [ "$(grep -c '^curl' "$CALLS")" = 3 ] || fail "asked $(grep -c '^curl' "$CALLS") times, not 3"
+called "docker logs --tail" || fail "did not show the failed start's log"
+
+# ...and the version before, if there was another, is started again.
+setup unhealthy-rollback
+echo "$OLD" > "$STATE/container"
+HEALTH_JSON='{"status":"ok","version":"v0.1.0","commit":"0ld0ld0"}'
+if deploy "$IMG"; then fail "passed while the new version was not healthy"; fi
+[ "$(cat "$STATE/container")" = "$OLD" ] || fail "left $(cat "$STATE/container") running, not $OLD"
+grep -q "rolled back" "$STATE/log" || fail "log: $(cat "$STATE/log")"
+! called "image prune" || fail "pruned the image rolled back to"
+
+# The same image again (a change to the env file) has nothing to go back to.
+setup unhealthy-same
+echo "$IMG" > "$STATE/container"
+HEALTH_JSON='{"status":"starting"}'
+if deploy "$IMG"; then fail "passed while not healthy"; fi
+[ "$(grep -c 'docker run -d' "$CALLS")" = 1 ] || fail "started $(grep -c 'docker run -d' "$CALLS") containers"
 
 # HTTP_ADDR decides where /healthz is asked.
 for pair in ":9090=127.0.0.1:9090" "0.0.0.0:9091=127.0.0.1:9091" "10.0.0.5:9092=10.0.0.5:9092"; do

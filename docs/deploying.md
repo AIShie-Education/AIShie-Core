@@ -9,7 +9,8 @@ PostgreSQL runs on the same machine. The files people upload are kept under
 
 The scripts in [`deploy/`](../deploy) do the work:
 
-- `setup-server.sh` sets a fresh server up, once.
+- `setup-server.sh` sets a server up. Run again, it installs newer copies of
+  the other two scripts and leaves everything else as it is.
 - `aishiteru-deploy` puts an image on the server. It is used for the first
   start, for every upgrade and for a rollback, by hand or by the Deploy
   workflow.
@@ -21,10 +22,17 @@ The scripts in [`deploy/`](../deploy) do the work:
   with. It keeps grades and students' work, so pick a provider and a region
   your institution allows for that.
 - A DNS name for it, such as `lms-staging.example.edu`, pointing at its
-  address.
+  address. If the name's DNS is on Cloudflare, make the record "DNS only":
+  SSH does not go through Cloudflare's proxy.
 - Ports 22 (SSH), 80 and 443 open. The Deploy workflow connects on 22 from
   GitHub's runners, so 22 is open to the internet. The only key it accepts
-  there can run `aishiteru-deploy` and nothing else.
+  there can run `aishiteru-deploy` and nothing else. Some providers turn ufw
+  on in their images (Vultr does); `setup-server.sh` opens the three ports in
+  it. A firewall in the provider's console must allow them too.
+- Log in to it with a key, not a password: port 22 is open to everyone.
+  `setup-server.sh` warns when SSH still takes passwords. Once your key works,
+  put `PasswordAuthentication no` in a file in `/etc/ssh/sshd_config.d/` and
+  run `systemctl restart ssh`.
 
 ## Setting a server up
 
@@ -43,26 +51,31 @@ The scripts in [`deploy/`](../deploy) do the work:
    the data and backup directories and a nightly backup, and installs the two
    scripts. It points Caddy at the name, which gets a certificate as soon as
    the name resolves to the server. Last, it creates the SSH user `deploy`
-   for the Deploy workflow. Running it again leaves what is already there as
-   it is. Keep a copy of the env file somewhere safe: `SIGNING_KEY` must not
-   change, or every upload and download link already given out stops
-   working.
+   for the Deploy workflow.
 
-2. Let the server pull the image. The package is private. On GitHub, go to
-   Settings → Developer settings → Personal access tokens → Tokens (classic)
-   and make a token with `read:packages` only. GitHub's registry does not take
-   fine-grained tokens. Give it a long expiry and put the date in a calendar:
-   once it expires, deploys fail at the pull, and the running version is not
-   touched. Then, as root:
+   If it stops, fix what it names and run it again. A server that has just
+   booted may still be updating itself, and the script waits for that.
+
+   Keep a copy of the env file somewhere safe. `SIGNING_KEY` must not change,
+   or every upload and download link already given out stops working.
+
+2. Let the server pull the image. The package is private, and GitHub's
+   registry takes only a personal access token (classic), not a fine-grained
+   one. Make the token with `read:packages` only. A classic token reads every
+   package its owner can read, and Docker keeps it unencrypted in
+   `/root/.docker/config.json`. So make it on an account of its own, one that
+   can read this repository and nothing else. Give it a long expiry and put
+   the date in a calendar. Once it expires, deploys fail at the pull, and the
+   running version is not touched. Then, as root:
 
    ```
-   docker login ghcr.io -u <your GitHub user name>
+   docker login ghcr.io -u <that account's user name>
    ```
 
 3. Start it. Every green push to `main` publishes
-   `ghcr.io/aishiteru-lms/aishiteru-core:sha-<commit>`: the Publish job's
-   summary in the Actions tab names it, and so does the package's page. A
-   release publishes `:X.Y.Z`. Production takes only releases.
+   `ghcr.io/aishiteru-lms/aishiteru-core:sha-<commit>`: the CI run's
+   `publish / image` job names it, and so does the package's page. A release
+   publishes `:X.Y.Z`. Production takes only releases.
 
    ```
    aishiteru-deploy ghcr.io/aishiteru-lms/aishiteru-core:sha-de4f548
@@ -79,6 +92,9 @@ The scripts in [`deploy/`](../deploy) do the work:
    docker restart aishiteru
    curl https://lms-staging.example.edu/healthz
    ```
+
+5. The day after, check that the nightly backup ran:
+   `ls -l /var/backups/aishiteru/daily-*`.
 
 ## Connecting the Deploy workflow
 
@@ -101,14 +117,23 @@ the host key line.
 From then on, every green push to `main` deploys to staging, and a
 pre-release tag (`v1.2.3-rc.1`) does too. To try the connection without a
 push, go to Actions → Deploy → Run workflow, from `main`, with environment
-`staging` and image `ghcr.io/aishiteru-lms/aishiteru-core:edge`. Production is
-deployed only by running Deploy by hand, from a release's tag
+`staging` and image `ghcr.io/aishiteru-lms/aishiteru-core:edge`. That is also
+the way to deploy staging again: re-running an older run's deploy does
+nothing once `main` has moved on. Production is deployed only by running
+Deploy by hand, from a release's tag
 ([CONTRIBUTING.md](../CONTRIBUTING.md#releasing)).
 
-Anyone with write access to the repository can run a workflow that uses these
-secrets. On GitHub Free, nothing narrows that down to a branch or to people.
-The key still does only one thing, deploying an image of this repository, but
-it can deploy any such image. Treat write access as deploy access.
+The key only runs `aishiteru-deploy`, but that script deploys any image of
+this repository. Anyone with write access to the repository can run a
+workflow that reads the secret, or copy the key out. They can also push an
+image of their own under this repository's name and deploy it. On GitHub
+Free, nothing narrows that down to a branch or to people: write access is
+access to everything on the servers. When someone loses write access,
+replace the key and delete any package versions they pushed.
+
+To replace the key: on the server, delete `~deploy/.ssh/authorized_keys` and
+any `/root/aishiteru-deploy-key*` left, run `setup-server.sh` again, and put
+the new key it prints into the secret.
 
 ## Day to day
 
@@ -127,11 +152,17 @@ Run all of these as root on the server.
   aishiteru-deploy "$(docker inspect -f '{{.Config.Image}}' aishiteru)"
   ```
 
-  A web front end on another origin needs `TRUSTED_ORIGINS=https://app.example.edu`.
-  Give the origin only: no path, and no `/` at the end, or the server will
-  not start. If the front end is on another site altogether, such as
-  `*.vercel.app`, it also needs `COOKIE_SAMESITE=none`. Single sign-on is
-  `OIDC_*` (README, Single sign-on).
+  The file is one `NAME=value` per line: no quotes, no `export`, and no
+  comment after a value. Docker takes quotes and comments as part of the
+  value.
+
+  A web front end works best on the same site as the server, such as
+  `app.example.edu` next to `lms.example.edu`. It then needs only
+  `TRUSTED_ORIGINS=https://app.example.edu`. Give the origin only: no path,
+  and no `/` at the end, or the server will not start. A front end on
+  another site altogether, such as `*.vercel.app`, also needs
+  `COOKIE_SAMESITE=none`. Safari, and every browser on iOS, still refuses
+  that sign-in cookie. Single sign-on is `OIDC_*` (README, Single sign-on).
 - **An agent's token:** register the agent with the administrator's token,
   then issue its token by the id that comes back. `--actor` with your own
   email issues a token for you.
@@ -143,23 +174,30 @@ Run all of these as root on the server.
   aishiterud token issue --actor <result.actor_id> --label grader-bot --days 90
   ```
 
-  Then seat it in a course (`member.add`, preset `grader` or `tutor`), and
-  point its MCP client at `https://lms-staging.example.edu/mcp`.
-- **Disk:** `docker image prune -a` removes the images no container uses. A
-  rollback pulls its image again.
+  Then an instructor of the course seats it: `member.add`, that is
+  `POST /v1/courses/{course_id}/members`, with preset `grader` or `tutor`.
+  The administrator is no member of the course and cannot. The administrator
+  seats the instructor first, with `course.seat_instructor`. Point the agent's
+  MCP client at `https://lms-staging.example.edu/mcp`.
+- **Updating the scripts:** when `deploy/` changes, copy it to the server
+  again and run `setup-server.sh` as in step 1. It installs the new scripts
+  and leaves the rest.
+- **Disk:** after each deploy, `aishiteru-deploy` removes this project's
+  images that no container uses. A rollback pulls its image again.
 
 ## When something goes wrong
 
 - **A deploy failed before the new version started.** For example, the pull
-  was refused or a migration failed. The old version is still running.
-  `aishiteru-deploy` said which step failed, and the workflow's log has the
-  same.
-- **A migration failed.** `aishiteru-deploy` stops with
-  `Dirty database version N`. The old version keeps serving, but `/healthz`
-  answers 503 until this is put right. Each migration runs in one
-  transaction, so a failed one has usually left nothing behind. Fix the
-  cause the error names, record the migration before it as the last one
-  applied, and deploy again:
+  was refused or a migration failed. The old version is still running. The
+  last lines of `aishiteru-deploy`'s output, and of the workflow's log, name
+  the step and its error.
+- **A migration failed.** `aishiteru-deploy` stops at `migrate up` with the
+  migration's error. The old version keeps serving, but `/healthz` answers
+  503 until this is put right. `aishiterud migrate version` shows
+  `schema version N … DIRTY`, N being the migration that failed. Each
+  migration runs in one transaction, so a failed one has usually left
+  nothing behind. Fix the cause the error names, record the migration before
+  it as the last one applied, and deploy again:
 
   ```
   aishiterud migrate force <N - 1>
@@ -168,6 +206,11 @@ Run all of these as root on the server.
 
   If you are not sure what the failed migration left, restore the backup
   instead.
+- **The new version did not report healthy.** `aishiteru-deploy` printed the
+  new container's last log lines. If another version was running before, it
+  is running again. If the same image was deployed again, most likely after
+  a change to the env file, nothing is running: fix the file and deploy that
+  image again.
 - **Rolling back** to the release before is a deploy of its image. The new
   schema is left as it is, and the release before works with it. Never run
   `migrate down`: it deletes data. Going back further than one release means

@@ -75,8 +75,8 @@ names (`ghcr.io/aishiteru-lms/aishiteru-core:1.2.3`). That run is the decision
 to deploy and to migrate. For production, Deploy takes nothing else: run from
 a branch or a pre-release's tag, or given an image that is not a stable
 release's, it stops before it deploys. To roll back, run Deploy from the
-newest release's tag, which carries the current deploy procedure, with the
-image of the release before: `migrate up` leaves a schema a newer release
+newest release's tag, whose checks are the current ones, with the image of
+the release before: `migrate up` leaves a schema a newer release
 migrated as it is, and a migration keeps the release before it working. A
 release further back may need what a later migration has dropped.
 
