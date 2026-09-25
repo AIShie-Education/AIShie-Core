@@ -62,6 +62,9 @@ start() {
     --log-opt max-size=20m --log-opt max-file=5 \
     --network host --env-file "$ENV_FILE" -v "$DATA_DIR":/data "$1" >/dev/null
 }
+# version_of IMAGE: its `version` line, v0.2.0 (abc1234, 2026-09-25T04:10:07Z).
+version_of() { docker run --rm "$1" version 2>/dev/null || true; }
+commit_of() { printf '%s\n' "$1" | sed -n 's/^[^(]*(\([^,]*\),.*/\1/p'; }
 # healthy VERSION COMMIT: whether /healthz reports them within the tries.
 healthy() {
   i=0
@@ -87,12 +90,13 @@ ls -1t "$BACKUP_DIR"/deploy-*.dump 2>/dev/null | tail -n +$((KEEP_BACKUPS + 1)) 
 run migrate up || die "migrate up failed; the version that was running is still running (docs/deploying.md, A migration failed)"
 run seed || die "seed failed; the version that was running is still running"
 
-want=$(docker run --rm "$IMG" version)           # v0.2.0 (abc1234, 2026-09-25T04:10:07Z)
+want=$(version_of "$IMG")
 ver=${want%% *}
-commit=$(printf '%s\n' "$want" | sed -n 's/^[^(]*(\([^,]*\),.*/\1/p')
+commit=$(commit_of "$want")
 if [ -z "$ver" ] || [ -z "$commit" ]; then die "cannot read the version of $IMG: $want"; fi
 
 prev=$(docker inspect -f '{{.Config.Image}}' aishiteru 2>/dev/null || true)
+prev_id=$(docker inspect -f '{{.Image}}' aishiteru 2>/dev/null || true)
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) ${prev:-none} -> $IMG" >> "$LOG_FILE"
 if [ -n "$prev" ]; then
   docker stop aishiteru >/dev/null
@@ -104,11 +108,15 @@ if ! healthy "$ver" "$commit"; then
   echo "aishiteru-deploy: $want did not report healthy within $((HEALTH_TRIES * 2)) seconds. Its last log lines:" >&2
   docker logs --tail 30 aishiteru >&2 2>&1 || true
   # The schema is one the version before works with (CONTRIBUTING.md,
-  # Migrations), so it can take over again.
-  if [ -n "$prev" ] && [ "$prev" != "$IMG" ]; then
+  # Migrations), so it can take over again: if it is another image, not the
+  # same one by another name, and with the env file as it is now.
+  if [ -n "$prev" ] && [ "$prev_id" != "$(docker image inspect -f '{{.Id}}' "$IMG" 2>/dev/null || true)" ]; then
     docker rm -f aishiteru >/dev/null
     start "$prev"
     echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) $IMG -> $prev (not healthy: rolled back)" >> "$LOG_FILE"
+    back=$(version_of "$prev")
+    healthy "${back%% *}" "$(commit_of "$back")" ||
+      die "started $prev again, but it did not report healthy either: most likely the env file (docker logs aishiteru)"
     die "rolled back: $prev is running again"
   fi
   die "the version before was ${prev:-none}: see docs/deploying.md, The new version did not report healthy"

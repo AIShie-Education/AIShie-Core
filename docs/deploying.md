@@ -31,8 +31,14 @@ The scripts in [`deploy/`](../deploy) do the work:
   it. A firewall in the provider's console must allow them too.
 - Log in to it with a key, not a password: port 22 is open to everyone.
   `setup-server.sh` warns when SSH still takes passwords. Once your key works,
-  put `PasswordAuthentication no` in a file in `/etc/ssh/sshd_config.d/` and
-  run `systemctl restart ssh`.
+  turn them off, in a file whose name sorts first: sshd keeps the first value
+  it reads, and a provider's `50-cloud-init.conf` may say yes.
+
+  ```
+  echo 'PasswordAuthentication no' > /etc/ssh/sshd_config.d/00-no-passwords.conf
+  systemctl restart ssh
+  sshd -T | grep -i passwordauthentication    # passwordauthentication no
+  ```
 
 ## Setting a server up
 
@@ -118,8 +124,9 @@ From then on, every green push to `main` deploys to staging, and a
 pre-release tag (`v1.2.3-rc.1`) does too. To try the connection without a
 push, go to Actions → Deploy → Run workflow, from `main`, with environment
 `staging` and image `ghcr.io/aishiteru-lms/aishiteru-core:edge`. That is also
-the way to deploy staging again: re-running an older run's deploy does
-nothing once `main` has moved on. Production is deployed only by running
+the way to deploy staging again: re-running the deploy of an older push to
+`main` fails once `main` has moved on. (Re-running a pre-release's deploy, or
+a Deploy run by hand, still deploys the image it had.) Production is deployed only by running
 Deploy by hand, from a release's tag
 ([CONTRIBUTING.md](../CONTRIBUTING.md#releasing)).
 
@@ -132,8 +139,9 @@ access to everything on the servers. When someone loses write access,
 replace the key and delete any package versions they pushed.
 
 To replace the key: on the server, delete `~deploy/.ssh/authorized_keys` and
-any `/root/aishiteru-deploy-key*` left, run `setup-server.sh` again, and put
-the new key it prints into the secret.
+any `/root/aishiteru-deploy-key*` left, run `setup-server.sh` again as in step
+1, with the server's name and its environment, and put the new key it prints
+into the secret it names.
 
 ## Day to day
 
@@ -208,9 +216,10 @@ Run all of these as root on the server.
   instead.
 - **The new version did not report healthy.** `aishiteru-deploy` printed the
   new container's last log lines. If another version was running before, it
-  is running again. If the same image was deployed again, most likely after
-  a change to the env file, nothing is running: fix the file and deploy that
-  image again.
+  is started again, with the env file as it is now, and the last line says
+  whether it came up. If it did not, or if the same image was deployed again
+  (most likely after a change to the env file), nothing healthy is running:
+  fix the env file and deploy again.
 - **Rolling back** to the release before is a deploy of its image. The new
   schema is left as it is, and the release before works with it. Never run
   `migrate down`: it deletes data. Going back further than one release means

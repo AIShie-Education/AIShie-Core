@@ -13,14 +13,25 @@ IMG=ghcr.io/aishiteru-lms/aishiteru-core:0.2.0
 OLD=ghcr.io/aishiteru-lms/aishiteru-core:0.1.0
 
 # The stand-ins. Each appends its command line to $CALLS; docker keeps the
-# image of the container named aishiteru in $STATE/container.
+# image of the container named aishiteru in $STATE/container. An image's id
+# is its name, unless $STATE/ids says otherwise ("name id" lines: one image
+# under two names), and its version is $VERSION_OUT, unless $STATE/versions
+# says otherwise ("name version line").
 mkdir -p "$work/bin"
 cat > "$work/bin/docker" <<'EOF'
 #!/usr/bin/env bash
 echo "docker $*" >> "$CALLS"
+id_of() { awk -v n="$1" '$1 == n { print $2; f = 1 } END { if (!f) print "id:" n }' "$STATE/ids" 2>/dev/null || echo "id:$1"; }
+version_of() {
+  v=$(awk -v n="$1" '$1 == n { $1 = ""; sub(/^ /, ""); print }' "$STATE/versions" 2>/dev/null)
+  echo "${v:-$VERSION_OUT}"
+}
 case $1 in
   pull) exit "${PULL_FAIL:-0}" ;;
-  inspect) [ -e "$STATE/container" ] && cat "$STATE/container" || exit 1 ;;
+  inspect)
+    [ -e "$STATE/container" ] || exit 1
+    case $3 in '{{.Image}}') id_of "$(cat "$STATE/container")" ;; *) cat "$STATE/container" ;; esac ;;
+  image) [ "$2" = inspect ] && id_of "${*: -1}" ;;
   stop) : ;;
   rm) rm -f "$STATE/container" ;;
   run)
@@ -29,7 +40,7 @@ case $1 in
       [ ! -e "$STATE/container" ] || { echo "docker: the name aishiteru is taken" >&2; exit 125; }
       echo "${*: -1}" > "$STATE/container"
     elif [ "$last" = version ]; then
-      echo "$VERSION_OUT"
+      version_of "${*: -2:1}"
     elif [ "$last" = up ]; then
       exit "${MIGRATE_FAIL:-0}"
     fi ;;
@@ -137,14 +148,37 @@ grep -q "did not report healthy" "$STATE/out" || fail "said: $(cat "$STATE/out")
 [ "$(grep -c '^curl' "$CALLS")" = 3 ] || fail "asked $(grep -c '^curl' "$CALLS") times, not 3"
 called "docker logs --tail" || fail "did not show the failed start's log"
 
-# ...and the version before, if there was another, is started again.
+# ...and the version before, if there was another, is started again, and
+# said to be running only once it reports healthy.
 setup unhealthy-rollback
 echo "$OLD" > "$STATE/container"
+echo "$OLD v0.1.0 (0ld0ld0, 2026-09-01T00:00:00Z)" > "$STATE/versions"
 HEALTH_JSON='{"status":"ok","version":"v0.1.0","commit":"0ld0ld0"}'
 if deploy "$IMG"; then fail "passed while the new version was not healthy"; fi
 [ "$(cat "$STATE/container")" = "$OLD" ] || fail "left $(cat "$STATE/container") running, not $OLD"
 grep -q "rolled back" "$STATE/log" || fail "log: $(cat "$STATE/log")"
+grep -q "rolled back: $OLD is running again" "$STATE/out" || fail "said: $(tail -n 1 "$STATE/out")"
 ! called "image prune" || fail "pruned the image rolled back to"
+
+# A version before that does not come up either (the env file, most likely)
+# is not reported as running.
+setup unhealthy-rollback-too
+echo "$OLD" > "$STATE/container"
+echo "$OLD v0.1.0 (0ld0ld0, 2026-09-01T00:00:00Z)" > "$STATE/versions"
+HEALTH_JSON='{"status":"starting"}'
+if deploy "$IMG"; then fail "passed while nothing was healthy"; fi
+grep -q "did not report healthy either" "$STATE/out" || fail "said: $(tail -n 1 "$STATE/out")"
+
+# The same image under another name (:sha- by hand, then by digest) is not a
+# version to go back to.
+setup unhealthy-alias
+SHA_NAME=ghcr.io/aishiteru-lms/aishiteru-core:sha-abc1234
+DIGEST_NAME="ghcr.io/aishiteru-lms/aishiteru-core@sha256:$(printf 'd%.0s' $(seq 64))"
+echo "$SHA_NAME" > "$STATE/container"
+printf '%s same\n%s same\n' "$SHA_NAME" "$DIGEST_NAME" > "$STATE/ids"
+HEALTH_JSON='{"status":"starting"}'
+if deploy "$DIGEST_NAME"; then fail "passed while not healthy"; fi
+[ "$(grep -c 'docker run -d' "$CALLS")" = 1 ] || fail "started $(grep -c 'docker run -d' "$CALLS") containers for one image"
 
 # The same image again (a change to the env file) has nothing to go back to.
 setup unhealthy-same

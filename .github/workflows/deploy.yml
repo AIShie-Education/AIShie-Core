@@ -190,8 +190,10 @@ jobs:
           if [ "$GITHUB_EVENT_NAME" = push ] && [ "$GITHUB_REF" = refs/heads/main ] && [ "$GITHUB_RUN_ATTEMPT" -gt 1 ]; then
             tip=$(gh api "repos/$GITHUB_REPOSITORY/commits/main" --jq .sha)
             if [ "$tip" != "$GITHUB_SHA" ]; then
-              echo "This re-run is for $GITHUB_SHA, and main has moved on to $tip: not deploying an older build over a newer one. To deploy again, run Deploy with the image :edge." | tee -a "$GITHUB_STEP_SUMMARY"
-              exit 0
+              # Failed, not green: a job that names the environment and passes
+              # would be recorded as a deployment of this older commit.
+              echo "::error::This re-run is for $GITHUB_SHA, and main has moved on to $tip: not deploying an older build over a newer one. To deploy again, run Deploy with the image :edge."
+              exit 1
             fi
           fi
           [ -n "$SSH_KEY" ] || { echo "::error::DEPLOY_TARGET_$NAME is set, but the secret DEPLOY_SSH_KEY_$NAME is not"; exit 1; }

@@ -4,6 +4,8 @@
 #
 #   sh deploy/setup-server.sh lms-staging.example.edu staging
 #
+# The environment, staging or production, names the GitHub settings it prints.
+#
 # It installs Docker, PostgreSQL and Caddy; creates the database, the env file
 # with a generated database password and SIGNING_KEY, the data and backup
 # directories and a nightly backup; installs aishiteru-deploy and aishiterud;
@@ -18,11 +20,12 @@
 set -eu
 
 HOST=${1:-}
-ENVIRONMENT=${2:-staging}
-case $HOST in '' | *[!A-Za-z0-9.-]* | .* | -*)
-  echo "usage: setup-server.sh HOSTNAME [staging|production], e.g. lms-staging.example.edu" >&2; exit 2 ;;
-esac
-case $ENVIRONMENT in staging | production) ;; *) echo "the environment is staging or production" >&2; exit 2 ;; esac
+ENVIRONMENT=${2:-}
+usage() { echo "usage: setup-server.sh HOSTNAME staging|production, e.g. lms-staging.example.edu staging" >&2; exit 2; }
+case $HOST in '' | *[!A-Za-z0-9.-]* | .* | -*) usage ;; esac
+# It names the GitHub settings this server needs; guessing would name the
+# other environment's.
+case $ENVIRONMENT in staging | production) ;; *) usage ;; esac
 [ "$(id -u)" = 0 ] || { echo "run this as root (sudo -i)" >&2; exit 1; }
 here=$(cd "$(dirname "$0")" && pwd)
 ENV_FILE=/etc/aishiteru/aishiteru.env
@@ -123,15 +126,20 @@ fi
 
 say "Firewall"
 if command -v ufw >/dev/null 2>&1 && ufw status | grep -q '^Status: active'; then
-  ufw allow 22/tcp >/dev/null && ufw allow 80/tcp >/dev/null && ufw allow 443/tcp >/dev/null
+  # One by one, so that set -e stops at one that fails.
+  ufw allow 22/tcp >/dev/null
+  ufw allow 80/tcp >/dev/null
+  ufw allow 443/tcp >/dev/null
   echo "ufw: 22, 80 and 443 allowed"
 else
   echo "ufw is off; a firewall of your provider's must allow 22, 80 and 443"
 fi
 sshd_cfg=$(/usr/sbin/sshd -T 2>/dev/null || true)
 if printf '%s\n' "$sshd_cfg" | grep -qx 'passwordauthentication yes'; then
-  echo "warning: SSH takes passwords. Port 22 is open to the internet for the Deploy workflow;" >&2
-  echo "  once you log in with a key, set PasswordAuthentication no in /etc/ssh/sshd_config.d/ and restart ssh" >&2
+  echo "warning: SSH takes passwords, and port 22 is open to the internet for the Deploy workflow." >&2
+  echo "  Once you log in with a key: echo 'PasswordAuthentication no' > /etc/ssh/sshd_config.d/00-no-passwords.conf" >&2
+  echo "  (sshd keeps the first value it reads, and cloud-init's 50-cloud-init.conf may say yes)," >&2
+  echo "  systemctl restart ssh, and check that sshd -T | grep -i passwordauthentication says no" >&2
 fi
 
 say "SSH user deploy, for the Deploy workflow"
