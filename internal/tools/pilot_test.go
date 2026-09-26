@@ -90,6 +90,15 @@ func TestInstructorFindsWhomToSeatByEmail(t *testing.T) {
 	b.try(t, b.sato, "member.lookup_actor", m{"course_id": b.course, "email": "mei@"}, apperr.NotFound)
 	b.try(t, b.sato, "member.lookup_actor", m{"course_id": b.course, "email": "example.edu"}, apperr.NotFound)
 	b.try(t, b.sato, "member.lookup_actor", m{"course_id": b.course, "email": "  "}, apperr.InvalidArgument)
+	b.try(t, b.sato, "member.lookup_actor", m{"course_id": b.course}, apperr.InvalidArgument)
+	b.try(t, b.sato, "member.lookup_actor", m{"course_id": b.course, "email": "mei@example.edu", "actor_id": mei}, apperr.InvalidArgument)
+	// An id an administrator handed over says whom it names: an agent, here,
+	// which has no email to be found by.
+	if got := testkit.Result[tools.MemberLookupActorOut](t, b.do(t, b.sato, "member.lookup_actor", m{"course_id": b.course, "actor_id": b.tutor})); got.ActorID != b.tutor || got.Kind != "agent" || got.MemberID == nil || *got.MemberID != b.tutorM {
+		t.Fatalf("the tutor by id: %+v", got)
+	}
+	b.try(t, b.sato, "member.lookup_actor", m{"course_id": b.course, "actor_id": uuid.New()}, apperr.NotFound)
+	b.try(t, b.sato, "member.lookup_actor", m{"course_id": b.course, "actor_id": b.Actor("system", "sweeps")}, apperr.NotFound)
 	// For whoever seats members, and nobody else.
 	if out := b.MustCall(b.yuki, "member.lookup_actor", m{"course_id": b.course, "email": "mei@example.edu"}, ""); out.Status != domain.StatusDenied {
 		t.Fatalf("a student looking people up: %+v", out)

@@ -524,19 +524,21 @@ func (q *Queries) ListStudentScope(ctx context.Context, memberID uuid.UUID) ([]u
 	return items, nil
 }
 
-const lookupActorByEmail = `-- name: LookupActorByEmail :one
+const lookupActorForSeating = `-- name: LookupActorForSeating :one
 SELECT a.id, a.kind, a.display_name, a.status, m.id AS member_id
 FROM actor a
 LEFT JOIN course_member m ON m.actor_id = a.id AND m.course_id = $1 AND m.status <> 'removed'
-WHERE lower(a.email) = lower($2) AND a.kind <> 'system'
+WHERE a.kind <> 'system'
+  AND (a.id = $2 OR lower(a.email) = lower($3))
 `
 
-type LookupActorByEmailParams struct {
+type LookupActorForSeatingParams struct {
 	CourseID uuid.UUID
-	Email    string
+	ActorID  *uuid.UUID
+	Email    *string
 }
 
-type LookupActorByEmailRow struct {
+type LookupActorForSeatingRow struct {
 	ID          uuid.UUID
 	Kind        string
 	DisplayName string
@@ -544,12 +546,13 @@ type LookupActorByEmailRow struct {
 	MemberID    *uuid.UUID
 }
 
-// The actor an email belongs to, for someone seating them, with their seat
-// in this course if they have a live one. The email must match whole, in any
-// case: this finds a person whose address one already has, and lists nobody.
-func (q *Queries) LookupActorByEmail(ctx context.Context, arg LookupActorByEmailParams) (LookupActorByEmailRow, error) {
-	row := q.db.QueryRow(ctx, lookupActorByEmail, arg.CourseID, arg.Email)
-	var i LookupActorByEmailRow
+// The actor a whole email address, or an id, belongs to, for someone seating
+// them, with their seat in this course if they have a live one. The email
+// must match whole, in any case: this finds a person whose address one
+// already has, and lists nobody.
+func (q *Queries) LookupActorForSeating(ctx context.Context, arg LookupActorForSeatingParams) (LookupActorForSeatingRow, error) {
+	row := q.db.QueryRow(ctx, lookupActorForSeating, arg.CourseID, arg.ActorID, arg.Email)
+	var i LookupActorForSeatingRow
 	err := row.Scan(
 		&i.ID,
 		&i.Kind,

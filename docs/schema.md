@@ -175,7 +175,7 @@ the nearest one, and the choice is recorded here so that it is a decision and no
 | Correcting lateness (`submission.set_lateness`) | `perm_grade_submit` | not `perm_submission_write`, or a student could un-late themselves |
 | Recording a student as having handed in nothing (`submission.record_missing`) | `perm_grade_submit` | the same: what a student handed in is not theirs to declare |
 | Where every student stands on an assignment (`submission.roster`) | `perm_submission_read` | it is the submission list with the students who have not started |
-| Finding whom to seat by their whole email (`member.lookup_actor`) | `perm_member_manage` | whoever seats members has to name them; it lists nobody |
+| Finding whom to seat by their whole email, or whom an actor id names (`member.lookup_actor`) | `perm_member_manage` | whoever seats members has to name them; it lists nobody |
 | Unpublishing an assignment nobody has started (`assignment.unpublish`) | `perm_assignment_write` | the undo of publishing it |
 | Regrading | the lower of `perm_grade_submit` and `perm_grade_post` | it writes a grade and makes it visible in one step |
 | Course settings, status, first instructor | `platform_role` | outside the course by definition |

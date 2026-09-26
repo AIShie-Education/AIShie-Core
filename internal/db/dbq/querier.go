@@ -316,10 +316,11 @@ type Querier interface {
 	LockSubmissionForGrading(ctx context.Context, id uuid.UUID) (string, error)
 	// All of one student's attempts at one assignment, locked, newest first.
 	LockSubmissionsOf(ctx context.Context, arg LockSubmissionsOfParams) ([]LockSubmissionsOfRow, error)
-	// The actor an email belongs to, for someone seating them, with their seat
-	// in this course if they have a live one. The email must match whole, in any
-	// case: this finds a person whose address one already has, and lists nobody.
-	LookupActorByEmail(ctx context.Context, arg LookupActorByEmailParams) (LookupActorByEmailRow, error)
+	// The actor a whole email address, or an id, belongs to, for someone seating
+	// them, with their seat in this course if they have a live one. The email
+	// must match whole, in any case: this finds a person whose address one
+	// already has, and lists nobody.
+	LookupActorForSeating(ctx context.Context, arg LookupActorForSeatingParams) (LookupActorForSeatingRow, error)
 	MarkActionExecuted(ctx context.Context, arg MarkActionExecutedParams) error
 	MarkActionFailed(ctx context.Context, arg MarkActionFailedParams) error
 	MaxVersionSeq(ctx context.Context, documentID uuid.UUID) (int32, error)

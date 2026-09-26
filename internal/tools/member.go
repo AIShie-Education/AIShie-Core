@@ -129,7 +129,8 @@ func memberGet() tool.Tool {
 
 type MemberLookupActorIn struct {
 	tool.InCourse
-	Email string `json:"email" jsonschema:"the person's whole email address, in any case"`
+	Email   *string    `json:"email,omitempty" jsonschema:"the person's whole email address, in any case"`
+	ActorID *uuid.UUID `json:"actor_id,omitempty" jsonschema:"or the actor id an administrator gave, to see whom it names"`
 }
 
 type MemberLookupActorOut struct {
@@ -141,27 +142,33 @@ type MemberLookupActorOut struct {
 }
 
 // memberLookupActor lets whoever seats members find the actor to seat without
-// asking an administrator for an id. It lists nobody: the whole address must
-// be given, so it tells the caller only whom they could already name.
+// asking an administrator for an id, and see whom an id they were given
+// names. It lists nobody: the whole address or the whole id must be given, so
+// it tells the caller only about someone they could already name.
 func memberLookupActor() tool.Tool {
 	return tool.Define(tool.Spec[MemberLookupActorIn, MemberLookupActorOut]{
 		Name: "member.lookup_actor",
-		Description: "Find the registered person an email address belongs to, to seat them with member.add. The whole " +
-			"address must match (in any case); there is no partial search, and an agent, which has no email, is seated " +
-			"by the actor id an administrator gives.",
+		Description: "Find the registered person an email address belongs to, to seat them with member.add, or see whom " +
+			"an actor id names (an agent has no email: it is seated by the id an administrator gives). Give one of " +
+			"email or actor_id. The whole address must match, in any case; there is no partial search.",
 		Kind: tool.Read, Gate: manageMembers,
 		HTTP: tool.Route{Method: "GET", Pattern: "/v1/courses/{course_id}/actor-lookup"},
 		Resolve: func(_ context.Context, _ dbq.Querier, in MemberLookupActorIn) (tool.Target, error) {
 			return tool.Target{CourseID: in.CourseID, Type: "actor"}, nil
 		},
 		Query: func(ctx context.Context, rc *tool.ReadCtx, in MemberLookupActorIn) (MemberLookupActorOut, error) {
-			email := strings.TrimSpace(in.Email)
-			if email == "" {
-				return MemberLookupActorOut{}, apperr.Invalid("email is required")
+			var email *string
+			if in.Email != nil {
+				if e := strings.TrimSpace(*in.Email); e != "" {
+					email = &e
+				}
 			}
-			a, err := rc.Q.LookupActorByEmail(ctx, dbq.LookupActorByEmailParams{CourseID: in.CourseID, Email: email})
+			if (email == nil) == (in.ActorID == nil) {
+				return MemberLookupActorOut{}, apperr.Invalid("give one of email or actor_id")
+			}
+			a, err := rc.Q.LookupActorForSeating(ctx, dbq.LookupActorForSeatingParams{CourseID: in.CourseID, ActorID: in.ActorID, Email: email})
 			if errors.Is(err, pgx.ErrNoRows) {
-				return MemberLookupActorOut{}, apperr.Missing("nobody is registered with that email")
+				return MemberLookupActorOut{}, apperr.Missing("nobody is registered with that email or id")
 			}
 			if err != nil {
 				return MemberLookupActorOut{}, err
