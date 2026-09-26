@@ -106,6 +106,40 @@ type Assignment struct {
 	CreatedAt              time.Time
 }
 
+type Conversation struct {
+	ID                 uuid.UUID
+	CourseID           uuid.UUID
+	OpenerMemberID     uuid.UUID
+	RespondentMemberID uuid.UUID
+	Title              *string
+	Status             string
+	ClosedReason       *string
+	CreatedAt          time.Time
+	LastMessageAt      *time.Time
+	LastAuthorMemberID *uuid.UUID
+}
+
+type ConversationMessage struct {
+	ID                 uuid.UUID
+	ConversationID     uuid.UUID
+	CourseID           uuid.UUID
+	Seq                int32
+	AuthorMemberID     uuid.UUID
+	InReplyToMessageID *uuid.UUID
+	Body               string
+	CreatedByActionID  uuid.UUID
+	CreatedAt          time.Time
+}
+
+type ConversationMessageRetraction struct {
+	MessageID           uuid.UUID
+	CourseID            uuid.UUID
+	RetractedByMemberID uuid.UUID
+	CreatedByActionID   uuid.UUID
+	Reason              *string
+	CreatedAt           time.Time
+}
+
 type Course struct {
 	ID                 uuid.UUID
 	DeptID             uuid.UUID

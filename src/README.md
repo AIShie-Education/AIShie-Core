@@ -41,6 +41,13 @@ src/
     0007_agent_ownership.down.sql
                          removes the delegate seats, cancelling their
                          proposals, before it drops what 0007 added
+    0008_conversations.up.sql
+                         conversations between two members, their messages
+                         and retractions: append-only, only the participants
+                         write, a closed conversation stays closed
+    0008_conversations.down.sql
+                         cancels answers waiting for approval, then drops the
+                         three tables; the actions that wrote them stay
   seed/
     presets.sql          the eight built-in permission presets; safe to re-run
   tests/

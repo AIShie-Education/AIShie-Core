@@ -49,7 +49,7 @@ END $$;
 -- Fixtures ------------------------------------------------------------------
 -- ids: 11 term · 21 dept · 3x actors · 4x courses · 5x members · 6x components
 --      7x assignments · ex documents · fx versions · ax submissions
---      bx actions · dx grades
+--      bx actions · dx grades · cx conversations · cxx their messages
 INSERT INTO term (id, name, starts_on, ends_on)
 VALUES ('00000000-0000-0000-0000-000000000011', '2026 Autumn', '2026-09-01', '2026-12-20');
 INSERT INTO department (id, name) VALUES ('00000000-0000-0000-0000-000000000021', 'Computing');
@@ -566,6 +566,114 @@ SELECT pg_temp.fails('event scope columns are frozen with the rest of the row', 
     UPDATE event SET student_member_id = NULL $q$);
 SELECT pg_temp.fails('events are append-only', '23001', $q$
     DELETE FROM event $q$);
+
+-- Conversations ----------------------------------------------------------------
+-- c1 Yuki (52) asks the grader (53) in A · c11, c12 its messages · c2 Yuki asks the grader again
+SELECT pg_temp.ok('a member opens a conversation with another', $q$
+    INSERT INTO conversation (id, course_id, opener_member_id, respondent_member_id, title)
+    VALUES ('00000000-0000-0000-0000-0000000000c1', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000000052',
+            '00000000-0000-0000-0000-000000000053', 'HW1') $q$);
+SELECT pg_temp.fails('nobody opens a conversation with themselves', '23514', $q$
+    INSERT INTO conversation (course_id, opener_member_id, respondent_member_id)
+    VALUES ('00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000000052', '00000000-0000-0000-0000-000000000052') $q$);
+SELECT pg_temp.fails('both participants are seats of the conversation''s course', '23503', $q$
+    INSERT INTO conversation (course_id, opener_member_id, respondent_member_id)
+    VALUES ('00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000000052', '00000000-0000-0000-0000-000000000054') $q$);
+SELECT pg_temp.fails('conversation status must be open or closed', '23514', $q$
+    INSERT INTO conversation (course_id, opener_member_id, respondent_member_id, status)
+    VALUES ('00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000000052', '00000000-0000-0000-0000-000000000053', 'paused') $q$);
+SELECT pg_temp.fails('a title is at most 200 characters', '23514', $q$
+    INSERT INTO conversation (course_id, opener_member_id, respondent_member_id, title)
+    VALUES ('00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000000052', '00000000-0000-0000-0000-000000000053', repeat('x', 201)) $q$);
+SELECT pg_temp.fails('an open conversation has no closed reason', '23514', $q$
+    INSERT INTO conversation (course_id, opener_member_id, respondent_member_id, closed_reason)
+    VALUES ('00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000000052', '00000000-0000-0000-0000-000000000053', 'why') $q$);
+SELECT pg_temp.fails('who spoke last is a participant', '23514', $q$
+    UPDATE conversation SET last_message_at = now(), last_author_member_id = '00000000-0000-0000-0000-000000000051'
+    WHERE id = '00000000-0000-0000-0000-0000000000c1' $q$);
+SELECT pg_temp.ok('the opener writes', $q$
+    INSERT INTO conversation_message (id, conversation_id, course_id, seq, author_member_id, body, created_by_action_id)
+    VALUES ('00000000-0000-0000-0000-000000000c11', '00000000-0000-0000-0000-0000000000c1', '00000000-0000-0000-0000-000000000041', 1,
+            '00000000-0000-0000-0000-000000000052', 'Why 8/10?', '00000000-0000-0000-0000-0000000000b1') $q$);
+SELECT pg_temp.fails('only the two participants write', '23514', $q$
+    INSERT INTO conversation_message (conversation_id, course_id, seq, author_member_id, body, created_by_action_id)
+    VALUES ('00000000-0000-0000-0000-0000000000c1', '00000000-0000-0000-0000-000000000041', 2,
+            '00000000-0000-0000-0000-000000000051', 'Because.', '00000000-0000-0000-0000-0000000000b1') $q$);
+SELECT pg_temp.fails('a conversation has one message at each seq', '23505', $q$
+    INSERT INTO conversation_message (conversation_id, course_id, seq, author_member_id, body, created_by_action_id)
+    VALUES ('00000000-0000-0000-0000-0000000000c1', '00000000-0000-0000-0000-000000000041', 1,
+            '00000000-0000-0000-0000-000000000052', 'Again', '00000000-0000-0000-0000-0000000000b1') $q$);
+SELECT pg_temp.fails('a message says something', '23514', $q$
+    INSERT INTO conversation_message (conversation_id, course_id, seq, author_member_id, body, created_by_action_id)
+    VALUES ('00000000-0000-0000-0000-0000000000c1', '00000000-0000-0000-0000-000000000041', 2,
+            '00000000-0000-0000-0000-000000000052', '', '00000000-0000-0000-0000-0000000000b1') $q$);
+SELECT pg_temp.fails('a message is at most 20000 characters', '23514', $q$
+    INSERT INTO conversation_message (conversation_id, course_id, seq, author_member_id, body, created_by_action_id)
+    VALUES ('00000000-0000-0000-0000-0000000000c1', '00000000-0000-0000-0000-000000000041', 2,
+            '00000000-0000-0000-0000-000000000052', repeat('x', 20001), '00000000-0000-0000-0000-0000000000b1') $q$);
+SELECT pg_temp.fails('a message names the action that wrote it', '23502', $q$
+    INSERT INTO conversation_message (conversation_id, course_id, seq, author_member_id, body)
+    VALUES ('00000000-0000-0000-0000-0000000000c1', '00000000-0000-0000-0000-000000000041', 2,
+            '00000000-0000-0000-0000-000000000052', 'Hello') $q$);
+SELECT pg_temp.fails('a message is in its conversation''s course', '23503', $q$
+    INSERT INTO conversation_message (conversation_id, course_id, seq, author_member_id, body, created_by_action_id)
+    VALUES ('00000000-0000-0000-0000-0000000000c1', '00000000-0000-0000-0000-000000000042', 2,
+            '00000000-0000-0000-0000-000000000052', 'Hello', '00000000-0000-0000-0000-0000000000b1') $q$);
+SELECT pg_temp.ok('the respondent answers the opener''s message', $q$
+    INSERT INTO conversation_message (id, conversation_id, course_id, seq, author_member_id, in_reply_to_message_id, body, created_by_action_id)
+    VALUES ('00000000-0000-0000-0000-000000000c12', '00000000-0000-0000-0000-0000000000c1', '00000000-0000-0000-0000-000000000041', 2,
+            '00000000-0000-0000-0000-000000000053', '00000000-0000-0000-0000-000000000c11', 'The evidence is thin.',
+            '00000000-0000-0000-0000-0000000000b1') $q$);
+SELECT pg_temp.fails('an answer is the respondent''s', '23514', $q$
+    INSERT INTO conversation_message (conversation_id, course_id, seq, author_member_id, in_reply_to_message_id, body, created_by_action_id)
+    VALUES ('00000000-0000-0000-0000-0000000000c1', '00000000-0000-0000-0000-000000000041', 3,
+            '00000000-0000-0000-0000-000000000052', '00000000-0000-0000-0000-000000000c11', 'I answer myself',
+            '00000000-0000-0000-0000-0000000000b1') $q$);
+SELECT pg_temp.fails('an answer answers a message of the opener''s', '23514', $q$
+    INSERT INTO conversation_message (conversation_id, course_id, seq, author_member_id, in_reply_to_message_id, body, created_by_action_id)
+    VALUES ('00000000-0000-0000-0000-0000000000c1', '00000000-0000-0000-0000-000000000041', 3,
+            '00000000-0000-0000-0000-000000000053', '00000000-0000-0000-0000-000000000c12', 'And another thing',
+            '00000000-0000-0000-0000-0000000000b1') $q$);
+SELECT pg_temp.fails('an answer answers a message of its own conversation', '23503', $q$
+    INSERT INTO conversation (id, course_id, opener_member_id, respondent_member_id)
+    VALUES ('00000000-0000-0000-0000-0000000000c2', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000000052',
+            '00000000-0000-0000-0000-000000000053');
+    INSERT INTO conversation_message (conversation_id, course_id, seq, author_member_id, in_reply_to_message_id, body, created_by_action_id)
+    VALUES ('00000000-0000-0000-0000-0000000000c2', '00000000-0000-0000-0000-000000000041', 1,
+            '00000000-0000-0000-0000-000000000053', '00000000-0000-0000-0000-000000000c11', 'Not yours to answer',
+            '00000000-0000-0000-0000-0000000000b1') $q$);
+SELECT pg_temp.fails('messages are append-only: no edit', '23001', $q$
+    UPDATE conversation_message SET body = 'Why 9/10?' WHERE id = '00000000-0000-0000-0000-000000000c11' $q$);
+SELECT pg_temp.fails('messages are append-only: no delete', '23001', $q$
+    DELETE FROM conversation_message WHERE id = '00000000-0000-0000-0000-000000000c12' $q$);
+SELECT pg_temp.fails('a conversation''s participants never change', '23001', $q$
+    UPDATE conversation SET respondent_member_id = '00000000-0000-0000-0000-000000000051' WHERE id = '00000000-0000-0000-0000-0000000000c1' $q$);
+SELECT pg_temp.fails('a conversation is kept, not deleted', '23001', $q$
+    DELETE FROM conversation WHERE id = '00000000-0000-0000-0000-0000000000c1' $q$);
+SELECT pg_temp.ok('the author retracts a message', $q$
+    INSERT INTO conversation_message_retraction (message_id, course_id, retracted_by_member_id, created_by_action_id, reason)
+    VALUES ('00000000-0000-0000-0000-000000000c11', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000000052',
+            '00000000-0000-0000-0000-0000000000b1', 'Wrong assignment') $q$);
+SELECT pg_temp.fails('a message is retracted once', '23505', $q$
+    INSERT INTO conversation_message_retraction (message_id, course_id, retracted_by_member_id, created_by_action_id)
+    VALUES ('00000000-0000-0000-0000-000000000c11', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000000051',
+            '00000000-0000-0000-0000-0000000000b1') $q$);
+SELECT pg_temp.fails('a retraction is in its message''s course', '23503', $q$
+    INSERT INTO conversation_message_retraction (message_id, course_id, retracted_by_member_id, created_by_action_id)
+    VALUES ('00000000-0000-0000-0000-000000000c12', '00000000-0000-0000-0000-000000000042', '00000000-0000-0000-0000-000000000055',
+            '00000000-0000-0000-0000-0000000000b1') $q$);
+SELECT pg_temp.fails('retractions are append-only', '23001', $q$
+    DELETE FROM conversation_message_retraction $q$);
+SELECT pg_temp.fails('retractions are not truncated', '23001', $q$
+    TRUNCATE conversation_message_retraction $q$);
+SELECT pg_temp.ok('a participant closes the conversation', $q$
+    UPDATE conversation SET status = 'closed', closed_reason = 'Answered' WHERE id = '00000000-0000-0000-0000-0000000000c1' $q$);
+SELECT pg_temp.fails('nobody writes in a closed conversation', '23514', $q$
+    INSERT INTO conversation_message (conversation_id, course_id, seq, author_member_id, body, created_by_action_id)
+    VALUES ('00000000-0000-0000-0000-0000000000c1', '00000000-0000-0000-0000-000000000041', 3,
+            '00000000-0000-0000-0000-000000000052', 'One more thing', '00000000-0000-0000-0000-0000000000b1') $q$);
+SELECT pg_temp.fails('a closed conversation stays closed', '23001', $q$
+    UPDATE conversation SET status = 'open', closed_reason = NULL WHERE id = '00000000-0000-0000-0000-0000000000c1' $q$);
 
 \o
 ROLLBACK;
