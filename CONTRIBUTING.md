@@ -31,7 +31,10 @@ and `build` green. CI also runs `test (s3 against minio)` and `vuln`.
 - A member's level is `domain.Member.Perm`, never the `Perms` map: a
   delegate's is capped by its principal's there, and a list query takes the
   principal's scope as well as the member's (`authz.ScopeFilter`). A call
-  that takes a seat and its principal takes the seat first.
+  that takes a delegate's seat and its principal's KEY SHARE takes the seat
+  first; one that locks a delegate's seat FOR UPDATE takes the principal's
+  KEY SHARE before it (`holdPrincipalOf`); removing a principal locks it and
+  then its delegates (docs/schema.md §3).
 - SQL lives in `internal/db/queries/*.sql`; run `make sqlc` after editing it.
   List queries filter by scope **in SQL**, never afterwards.
 

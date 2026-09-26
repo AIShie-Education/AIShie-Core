@@ -483,8 +483,12 @@ func agentWithdraw() tool.Tool {
 			if err != nil {
 				return MemberRemoveOut{}, err
 			}
-			// Locked, as every removal locks the seat it removes, and looked
-			// at again: it may have been removed meanwhile.
+			// Locked, as every removal locks the seat it removes, after its
+			// principal's KEY SHARE (holdPrincipalOf), and looked at again:
+			// it may have been removed meanwhile, its principal's with it.
+			if err := holdPrincipalOf(ctx, ec.Q, live.ID); err != nil {
+				return MemberRemoveOut{}, err
+			}
 			locked, err := ec.Q.GetMemberForSweep(ctx, live.ID)
 			if err != nil {
 				return MemberRemoveOut{}, err

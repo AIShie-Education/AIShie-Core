@@ -53,18 +53,31 @@ const (
 //
 // Whoever calls it holds the seat FOR UPDATE already, having read it to
 // decide to remove it: the removal waits for the member's calls in flight,
-// or they wait for it and are refused. The delegates' seats are then only
-// updated (RemoveDelegatesOf), after the principal's: a seat before its
-// principal is the order a delegate's own calls take the two in, and they
-// take the principal's KEY SHARE, which waits for this. The conversations
-// come last: a call writing in one takes both its participants' seats before
-// the conversation, so it has either finished or waits for this, and then
-// finds the conversation closed.
+// or they wait for it and are refused. The order is the seat, then its
+// delegates, then the conversations:
+//
+//   - The delegates' seats are removed by the database, in the statement
+//     that removes the principal's (course_member_delegates_follow), so that
+//     the release before this one, which knows no delegates, removes them
+//     too. They are only updated there, which a delegate's own call in
+//     flight, holding its seat KEY SHARE, does not block: that call waits
+//     for the principal's seat, which it takes second, and finds it removed.
+//     Whoever takes a delegate's seat FOR UPDATE — to change it, withdraw it,
+//     sweep it — takes its principal's KEY SHARE before it, and so waits for
+//     this, or this for it, before either has the other's row.
+//   - The conversations come last, all of them in one statement: a call
+//     writing in one takes both its participants' seats before the
+//     conversation, so it has either finished or waits for this, and then
+//     finds the conversation closed.
 //
 // A removed member's proposals would be refused at approval anyway, since
 // approval re-authorizes the proposer. Cancelling them here as well means the
 // approval queue does not fill with proposals nobody can approve.
 func Remove(ctx context.Context, q *dbq.Queries, emit func(events.Event), courseID, memberID uuid.UUID, reason string) (cancelled int, err error) {
+	delegates, err := q.ListLiveDelegatesOf(ctx, &memberID)
+	if err != nil {
+		return 0, err
+	}
 	n, err := q.SetMemberStatus(ctx, dbq.SetMemberStatusParams{ID: memberID, Status: domain.MemberRemoved, FromStatus: domain.MemberActive})
 	if err != nil {
 		return 0, err
@@ -77,32 +90,32 @@ func Remove(ctx context.Context, q *dbq.Queries, emit func(events.Event), course
 	if n == 0 {
 		return 0, apperr.Conflicts("the member has already been removed")
 	}
-	if cancelled, err = retired(ctx, q, emit, courseID, memberID, reason); err != nil {
-		return cancelled, err
-	}
-	delegates, err := q.RemoveDelegatesOf(ctx, &memberID)
-	if err != nil {
-		return cancelled, err
-	}
+	gone := []retiree{{memberID, reason}}
 	for _, d := range delegates {
-		n, err := retired(ctx, q, emit, courseID, d, ReasonPrincipalRemoved)
-		cancelled += n
-		if err != nil {
-			return cancelled, err
-		}
+		gone = append(gone, retiree{d, ReasonPrincipalRemoved})
 	}
-	return cancelled, nil
+	return retired(ctx, q, emit, courseID, gone)
 }
 
-// retired tells the feed a seat is removed, cancels its proposals and closes
-// its conversations.
-func retired(ctx context.Context, q *dbq.Queries, emit func(events.Event), courseID, memberID uuid.UUID, reason string) (cancelled int, err error) {
-	emit(events.Event{
-		Type: EventRemoved, CourseID: &courseID, SubjectType: "course_member", SubjectID: &memberID,
-		Payload: map[string]any{"reason": reason},
-	})
+type retiree struct {
+	id     uuid.UUID
+	reason string
+}
 
-	closed, err := q.CloseConversationsOf(ctx, memberID)
+// retired tells the feed seats are removed, closes their conversations and
+// cancels their proposals.
+func retired(ctx context.Context, q *dbq.Queries, emit func(events.Event), courseID uuid.UUID, gone []retiree) (cancelled int, err error) {
+	ids := make([]uuid.UUID, len(gone))
+	for i, g := range gone {
+		ids[i] = g.id
+		seat := g.id
+		emit(events.Event{
+			Type: EventRemoved, CourseID: &courseID, SubjectType: "course_member", SubjectID: &seat,
+			Payload: map[string]any{"reason": g.reason},
+		})
+	}
+
+	closed, err := q.CloseConversationsOf(ctx, ids)
 	if err != nil {
 		return 0, err
 	}
@@ -114,26 +127,28 @@ func retired(ctx context.Context, q *dbq.Queries, emit func(events.Event), cours
 		})
 	}
 
-	proposals, err := q.ListProposedActionIDsByMember(ctx, &memberID)
-	if err != nil {
-		return 0, err
-	}
-	_, stored := pipeline.Cancellation(pipeline.CancelMemberRemoved, map[string]any{"member_reason": reason})
-	for _, id := range proposals {
-		n, err := q.CancelProposal(ctx, dbq.CancelProposalParams{ID: id, Result: stored})
+	for _, g := range gone {
+		proposals, err := q.ListProposedActionIDsByMember(ctx, &g.id)
 		if err != nil {
 			return cancelled, err
 		}
-		if n == 0 {
-			continue // decided in the meantime
+		_, stored := pipeline.Cancellation(pipeline.CancelMemberRemoved, map[string]any{"member_reason": g.reason})
+		for _, id := range proposals {
+			n, err := q.CancelProposal(ctx, dbq.CancelProposalParams{ID: id, Result: stored})
+			if err != nil {
+				return cancelled, err
+			}
+			if n == 0 {
+				continue // decided in the meantime
+			}
+			cancelled++
+			proposal := id
+			emit(events.Event{
+				Type: events.ActionCancelled, CourseID: &courseID, ActionID: &proposal,
+				SubjectType: "action", SubjectID: &proposal,
+				Payload: map[string]any{"reason": pipeline.CancelMemberRemoved},
+			})
 		}
-		cancelled++
-		proposal := id
-		emit(events.Event{
-			Type: events.ActionCancelled, CourseID: &courseID, ActionID: &proposal,
-			SubjectType: "action", SubjectID: &proposal,
-			Payload: map[string]any{"reason": pipeline.CancelMemberRemoved},
-		})
 	}
 	return cancelled, nil
 }

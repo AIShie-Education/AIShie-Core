@@ -614,8 +614,12 @@ type LockLiveMemberForAuthzRow struct {
 //
 // Only the caller's own seat is locked here. A delegate's principal is
 // locked next, by LockPrincipalForAuthz, and read again as it then stands:
-// a delegate's seat, then its principal's, is the order everything that
-// takes both takes them in (pipeline.Decide included).
+// a delegate's seat, then its principal's, is the order whatever takes both
+// KEY SHARE takes them in (pipeline.Decide included). What takes a
+// delegate's seat FOR UPDATE takes its principal's KEY SHARE before it
+// (tools.holdPrincipalOf), and a principal's removal holds it FOR UPDATE and
+// then only updates its delegates' rows, so each meets the others at the
+// principal.
 func (q *Queries) LockLiveMemberForAuthz(ctx context.Context, arg LockLiveMemberForAuthzParams) (LockLiveMemberForAuthzRow, error) {
 	row := q.db.QueryRow(ctx, lockLiveMemberForAuthz, arg.CourseID, arg.ActorID)
 	var i LockLiveMemberForAuthzRow

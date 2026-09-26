@@ -260,6 +260,15 @@ Run all of these as root on the server.
   aishiteru-deploy ghcr.io/aishiteru-lms/aishiteru-core:1.2.2
   ```
 
+  Rolled back past migration 0007, the release before knows nothing of the
+  agents people own. The database still removes a delegate's seat with its
+  principal's, but that release neither pauses a delegate with its principal
+  nor cancels the removed delegate's proposals: a student it pauses keeps
+  what their agent's seat allows, through its token, until they are resumed
+  or removed. While it runs, pause nobody who has brought an agent in
+  (`member.list` shows delegates by `principal_member_id`), or remove the
+  agent's seat first.
+
 - **Restoring a backup.** `aishiteru-deploy` takes one before every deploy
   (`/var/backups/aishiteru/deploy-*.dump`, the last ten), and cron takes one
   every night (`daily-1.dump` to `daily-7.dump`). Everything written after

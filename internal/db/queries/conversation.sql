@@ -34,12 +34,18 @@ UPDATE conversation SET status = 'closed', closed_reason = sqlc.narg(reason)
 WHERE id = $1 AND status = 'open';
 
 -- name: CloseConversationsOf :many
--- A seat that is removed takes part in no conversation any more. Whoever
--- removes it holds it FOR UPDATE, which a call writing in one of these waits
--- for (it takes both participants' seats before the conversation), so the
--- two never wait for each other.
+-- Seats that are removed — one, and its delegates' with it — take part in
+-- no conversation any more. Whoever removes them holds the seat FOR UPDATE,
+-- and its delegates' rows are updated already, which a call writing in one
+-- of these waits for (it takes both participants' seats before the
+-- conversation). The conversations are locked in id order, so that two
+-- removals whose seats share conversations take them in one order.
 UPDATE conversation SET status = 'closed', closed_reason = 'seat_removed'
-WHERE status = 'open' AND (opener_member_id = sqlc.arg(member_id) OR respondent_member_id = sqlc.arg(member_id))
+WHERE id IN (SELECT x.id FROM conversation x
+             WHERE x.status = 'open'
+               AND (x.opener_member_id = ANY(sqlc.arg(member_ids)::uuid[]) OR x.respondent_member_id = ANY(sqlc.arg(member_ids)::uuid[]))
+             ORDER BY x.id
+             FOR UPDATE)
 RETURNING id;
 
 -- name: GetConversationMessage :one

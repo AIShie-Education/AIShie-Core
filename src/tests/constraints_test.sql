@@ -292,6 +292,24 @@ SELECT pg_temp.fails('a delegate''s principal is nobody''s delegate', '23514', $
     VALUES ('00000000-0000-0000-0000-00000000005b', '00000000-0000-0000-0000-000000000042', '00000000-0000-0000-0000-000000000035', 'student', 'removed', '00000000-0000-0000-0000-000000000034', 'listed', 'all', '00000000-0000-0000-0000-000000000055');
     INSERT INTO course_member (course_id, actor_id, role, added_by_actor_id, student_scope, assignment_scope, principal_member_id)
     VALUES ('00000000-0000-0000-0000-000000000042', '00000000-0000-0000-0000-000000000038', 'assistant', '00000000-0000-0000-0000-000000000035', 'listed', 'all', '00000000-0000-0000-0000-00000000005b') $q$);
+SELECT pg_temp.ok('a delegate''s seat is removed with its principal''s', $q$
+    -- Mei (3a) seated in A (5d), her agent (39) as her delegate there (5c),
+    -- paused; Mei's seat is then removed, and both are history afterwards.
+    INSERT INTO actor (id, kind, display_name, created_by_actor_id)
+    VALUES ('00000000-0000-0000-0000-00000000003a', 'human', 'Mei', '00000000-0000-0000-0000-000000000031');
+    INSERT INTO actor (id, kind, display_name, owner_actor_id, created_by_actor_id)
+    VALUES ('00000000-0000-0000-0000-000000000039', 'agent', 'Mei''s agent', '00000000-0000-0000-0000-00000000003a', '00000000-0000-0000-0000-00000000003a');
+    INSERT INTO course_member (id, course_id, actor_id, role, added_by_actor_id, student_scope, assignment_scope)
+    VALUES ('00000000-0000-0000-0000-00000000005d', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-00000000003a', 'student', '00000000-0000-0000-0000-000000000034', 'listed', 'all');
+    INSERT INTO course_member (id, course_id, actor_id, role, status, added_by_actor_id, student_scope, assignment_scope, principal_member_id)
+    VALUES ('00000000-0000-0000-0000-00000000005c', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000000039', 'assistant', 'paused', '00000000-0000-0000-0000-00000000003a', 'listed', 'all', '00000000-0000-0000-0000-00000000005d');
+    UPDATE course_member SET status = 'removed' WHERE id = '00000000-0000-0000-0000-00000000005d';
+    DO $chk$
+    BEGIN
+        IF NOT EXISTS (SELECT 1 FROM course_member WHERE id = '00000000-0000-0000-0000-00000000005c' AND status = 'removed') THEN
+            RAISE EXCEPTION 'the delegate outlived its principal''s removal';
+        END IF;
+    END $chk$ $q$);
 SELECT pg_temp.fails('a delegate seat is not resumed once its actor has another owner', '23514', $q$
     UPDATE course_member SET status = 'paused' WHERE id = '00000000-0000-0000-0000-00000000005a';
     UPDATE actor SET owner_actor_id = '00000000-0000-0000-0000-000000000037' WHERE id = '00000000-0000-0000-0000-000000000038';

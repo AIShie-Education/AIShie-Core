@@ -28,6 +28,8 @@ UPDATE action
 UPDATE course_member SET status = 'removed'
  WHERE principal_member_id IS NOT NULL AND status <> 'removed';
 
+DROP TRIGGER IF EXISTS course_member_delegates_follow ON course_member;
+DROP FUNCTION IF EXISTS course_member_remove_delegates();
 DROP TRIGGER IF EXISTS course_member_principal_valid ON course_member;
 DROP FUNCTION IF EXISTS course_member_check_principal();
 DROP TRIGGER IF EXISTS actor_suspension_cleared ON actor;

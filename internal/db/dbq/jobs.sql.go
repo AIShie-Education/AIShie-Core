@@ -288,9 +288,10 @@ type ListOrphanedSeatsRow struct {
 }
 
 // Seats that count for nothing for good (SeatOrphaned), not yet removed: a
-// delegate's whose principal is removed or past its expiry, which the
-// previous release removes without its delegates, and seats that do not
-// match their actor's ownership. authorize() refuses them already; removing
+// delegate's whose principal is removed or past its expiry, and seats that
+// do not match their actor's ownership. The database removes a delegate
+// with its principal (course_member_delegates_follow), so the first are
+// rare: a principal's expiry the expiry sweep has not got to. authorize() refuses them already; removing
 // them cancels what they proposed and clears the way for a fresh seat.
 func (q *Queries) ListOrphanedSeats(ctx context.Context, arg ListOrphanedSeatsParams) ([]ListOrphanedSeatsRow, error) {
 	rows, err := q.db.Query(ctx, listOrphanedSeats, arg.Now, arg.MaxRows)

@@ -77,16 +77,22 @@ func (q *Queries) CloseConversation(ctx context.Context, arg CloseConversationPa
 
 const closeConversationsOf = `-- name: CloseConversationsOf :many
 UPDATE conversation SET status = 'closed', closed_reason = 'seat_removed'
-WHERE status = 'open' AND (opener_member_id = $1 OR respondent_member_id = $1)
+WHERE id IN (SELECT x.id FROM conversation x
+             WHERE x.status = 'open'
+               AND (x.opener_member_id = ANY($1::uuid[]) OR x.respondent_member_id = ANY($1::uuid[]))
+             ORDER BY x.id
+             FOR UPDATE)
 RETURNING id
 `
 
-// A seat that is removed takes part in no conversation any more. Whoever
-// removes it holds it FOR UPDATE, which a call writing in one of these waits
-// for (it takes both participants' seats before the conversation), so the
-// two never wait for each other.
-func (q *Queries) CloseConversationsOf(ctx context.Context, memberID uuid.UUID) ([]uuid.UUID, error) {
-	rows, err := q.db.Query(ctx, closeConversationsOf, memberID)
+// Seats that are removed — one, and its delegates' with it — take part in
+// no conversation any more. Whoever removes them holds the seat FOR UPDATE,
+// and its delegates' rows are updated already, which a call writing in one
+// of these waits for (it takes both participants' seats before the
+// conversation). The conversations are locked in id order, so that two
+// removals whose seats share conversations take them in one order.
+func (q *Queries) CloseConversationsOf(ctx context.Context, memberIds []uuid.UUID) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, closeConversationsOf, memberIds)
 	if err != nil {
 		return nil, err
 	}

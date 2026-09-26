@@ -380,10 +380,8 @@ func loadOther(ctx context.Context, ec *tool.ExecCtx, courseID, memberID uuid.UU
 	if memberID == ec.Member.ID {
 		return dbq.GetMemberInCourseRow{}, apperr.Forbid("not on your own membership")
 	}
-	// Nor on the seat one is a delegate of: a delegate manages nothing
-	// (domain.Member.Perm), least of all what caps it.
-	if p := ec.Member.PrincipalID; p != nil && memberID == *p {
-		return dbq.GetMemberInCourseRow{}, apperr.Forbid("not on the membership you are a delegate of")
+	if err := holdPrincipalOf(ctx, ec.Q, memberID); err != nil {
+		return dbq.GetMemberInCourseRow{}, err
 	}
 	row, err := ec.Q.GetMemberInCourseForUpdate(ctx, dbq.GetMemberInCourseForUpdateParams{ID: memberID, CourseID: courseID})
 	m := dbq.GetMemberInCourseRow(row)
@@ -397,6 +395,27 @@ func loadOther(ctx context.Context, ec *tool.ExecCtx, courseID, memberID uuid.UU
 		return m, apperr.Conflicts("the member has been removed; seat the actor again for a fresh start")
 	}
 	return m, nil
+}
+
+// holdPrincipalOf takes the KEY SHARE of a delegate's principal's seat, for
+// a call about to lock the delegate's seat FOR UPDATE: whoever locks a
+// delegate's seat to change or remove it takes its principal's first. A
+// removal of the principal holds the principal FOR UPDATE and then updates
+// the delegate's row, so the two wait for each other at the principal,
+// before either holds the other's row; and a delegate's own call, which
+// holds its seat and then takes its principal's KEY SHARE, is not blocked
+// by this one. Whose delegate a seat is never changes, so it is read before
+// anything is locked. A seat that is nobody's delegate, or no seat, takes
+// nothing.
+func holdPrincipalOf(ctx context.Context, q *dbq.Queries, seat uuid.UUID) error {
+	principal, err := q.GetSeatPrincipal(ctx, seat)
+	if errors.Is(err, pgx.ErrNoRows) || (err == nil && principal == nil) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return q.ShareSeats(ctx, []uuid.UUID{*principal})
 }
 
 // shape is what a seat amounts to: levels, held over a reach, for a time.
@@ -483,10 +502,11 @@ func grant(ctx context.Context, ec *tool.ExecCtx, before, after shape) error {
 // principal's reach, for no longer than the principal's seat lasts; and never
 // member_manage or agent_delegate. Authorization caps a delegate by its
 // principal on every call regardless, so this keeps the row saying what the
-// delegate can actually do. The principal is read, not locked: its seat
-// comes after the delegate's, the one this call holds, and a removal of the
-// principal takes the two the other way round. A principal narrowed
-// meanwhile narrows the delegate all the same.
+// delegate can actually do. A change to one seat holds the principal's KEY
+// SHARE, taken before the delegate's was locked (holdPrincipalOf), so it is
+// not removed meanwhile; member.update_perms_bulk reads it as it stands.
+// Either way a principal narrowed meanwhile narrows the delegate all the
+// same, since authorization caps it.
 func withinPrincipal(ctx context.Context, q *dbq.Queries, principalID uuid.UUID, after shape) error {
 	p, err := authz.LoadMember(ctx, q, principalID)
 	if err != nil {
@@ -795,9 +815,6 @@ func memberUpdatePermsBulk() tool.Tool {
 			}
 			out := MemberUpdatePermsBulkOut{}
 			for _, id := range seats {
-				if p := ec.Member.PrincipalID; p != nil && id == *p {
-					continue // cannot happen: a delegate manages nothing
-				}
 				m, err := ec.Q.GetMemberInCourse(ctx, dbq.GetMemberInCourseParams{ID: id, CourseID: in.CourseID})
 				if err != nil {
 					return MemberUpdatePermsBulkOut{}, err

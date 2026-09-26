@@ -354,7 +354,12 @@ func seat(ctx context.Context, ec *tool.ExecCtx, s seating) (uuid.UUID, error) {
 		// removes: the removal then waits for its member's calls in flight,
 		// and cancels what they proposed. Then it is looked at again: the
 		// sweep may have removed it meanwhile, and nothing is in the way, or
-		// it may have been given longer, and it is as live as any other.
+		// it may have been given longer, and it is as live as any other. A
+		// delegate's principal is held first, as whatever locks a
+		// delegate's seat takes them (holdPrincipalOf).
+		if err := holdPrincipalOf(ctx, ec.Q, live.ID); err != nil {
+			return uuid.Nil, err
+		}
 		locked, err := ec.Q.GetMemberForSweep(ctx, live.ID)
 		if err != nil {
 			return uuid.Nil, err

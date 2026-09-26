@@ -723,24 +723,24 @@ func TestRemovingAPrincipalRemovesTheirDelegates(t *testing.T) {
 		t.Fatal("no event says the delegate went with its principal")
 	}
 
-	// The previous release removes a principal alone. Seated again, its
-	// owner brings the agent in afresh over the seat left behind, which
-	// counts for nothing.
+	// The previous release removes a principal knowing nothing of its
+	// delegates, and the database removes them with it: the agent counts for
+	// nothing at once, and its owner, seated again, brings it in afresh.
 	yuki := testkit.Result[tools.MemberIDOut](t, b.do(t, b.sato, "member.add", m{"course_id": b.course, "actor_id": b.yuki, "preset": "student"})).MemberID
 	b.do(t, b.sato, "member.update_perms", m{"course_id": b.course, "member_id": yuki, "perms": m{"agent_delegate": "autonomous"}})
 	left := b.delegate(t, b.yuki, bot, m{})
 	b.Exec(`UPDATE course_member SET status = 'removed' WHERE id = $1`, yuki)
-	yuki = testkit.Result[tools.MemberIDOut](t, b.do(t, b.sato, "member.add", m{"course_id": b.course, "actor_id": b.yuki, "preset": "student"})).MemberID
-	b.do(t, b.sato, "member.update_perms", m{"course_id": b.course, "member_id": yuki, "perms": m{"agent_delegate": "autonomous"}})
-	if out := b.MustCall(bot, "course.get", m{"course_id": b.course}, ""); out.Status != domain.StatusDenied || reason(out) != "principal_not_active" {
+	if n := b.Count(`SELECT count(*) FROM course_member WHERE id = $1 AND status = 'removed'`, left); n != 1 {
+		t.Fatal("the delegate outlived its principal's removal by the previous release")
+	}
+	if out := b.MustCall(bot, "course.get", m{"course_id": b.course}, ""); out.Status != domain.StatusDenied || reason(out) != "not_a_member" {
 		t.Fatalf("the delegate of a removed seat: %+v", out)
 	}
+	yuki = testkit.Result[tools.MemberIDOut](t, b.do(t, b.sato, "member.add", m{"course_id": b.course, "actor_id": b.yuki, "preset": "student"})).MemberID
+	b.do(t, b.sato, "member.update_perms", m{"course_id": b.course, "member_id": yuki, "perms": m{"agent_delegate": "autonomous"}})
 	fresh := b.delegate(t, b.yuki, bot, m{})
 	if v := b.memberView(t, fresh); v.PrincipalMemberID == nil || *v.PrincipalMemberID != yuki {
 		t.Fatalf("the fresh seat: %+v", v)
-	}
-	if n := b.Count(`SELECT count(*) FROM event WHERE type = 'member.removed' AND subject_id = $1 AND payload->>'reason' = 'orphaned'`, left); n != 1 {
-		t.Fatal("the seat left behind was not removed as an orphan")
 	}
 }
 
@@ -823,5 +823,73 @@ func TestAMembershipSaysWhatTheSeatMayDo(t *testing.T) {
 	if me := b.membership(t, bot); me.Perms["member_manage"] != "denied" || me.Perms["grade_post"] != "denied" ||
 		me.Perms["conversation_answer"] != "confirm_required" || me.Perms["document_read"] != "autonomous" {
 		t.Fatalf("the delegate's membership: %+v", me.Perms)
+	}
+}
+
+// A principal's removal and a change to its delegate's seat meet at the
+// principal, before either holds the other's row: whatever locks the
+// delegate's seat takes its principal's KEY SHARE first, and the removal
+// holds the principal, then its delegates, and only then the conversations.
+// Taken the other way round, a withdrawal of Yuki's agent and her removal
+// deadlocked over her conversation with it.
+func TestAPrincipalsRemovalAndItsDelegatesMeetAtThePrincipal(t *testing.T) {
+	c := newCast(t)
+	b := c.built
+	conv, _ := b.open(t, b.yuki, c.yukiBot, "Hello, helper")
+	notYet := func(done chan pipeline.Outcome, what string) {
+		t.Helper()
+		select {
+		case out := <-done:
+			t.Fatalf("%s did not wait for the principal: %+v", what, out)
+		default:
+		}
+	}
+
+	// Yuki's removal under way: her seat is held. Taking her agent out, or
+	// removing its seat, waits for it before touching the agent's seat.
+	for _, tc := range []struct {
+		name  string
+		actor uuid.UUID
+		args  func() m
+	}{
+		{"agent.withdraw", b.yuki, func() m { return m{"actor_id": c.bot, "course_id": b.course} }},
+		{"member.remove", b.sato, func() m { return m{"course_id": b.course, "member_id": c.yukiBot} }},
+	} {
+		release := b.hold(t, `SELECT 1 FROM course_member WHERE id = $1 FOR UPDATE`, b.yukiM)
+		done := make(chan pipeline.Outcome, 1)
+		b.start(t, done, tc.actor, tc.name, tc.args())
+		b.blocked(t, 1, done)
+		notYet(done, tc.name)
+		release()
+		if out := <-done; out.Status != domain.StatusExecuted {
+			t.Fatalf("%s once Yuki's seat was let go: %+v", tc.name, out)
+		}
+		// Seated again, for what comes next.
+		c.yukiBot = b.delegate(t, b.yuki, c.bot, m{})
+		conv, _ = b.open(t, b.yuki, c.yukiBot, "Hello again")
+	}
+
+	// The other way round: the agent's seat is held by a change under way,
+	// and Yuki's removal waits for it at her delegates, before it has locked
+	// a single conversation.
+	release := b.hold(t, `SELECT 1 FROM course_member WHERE id = $1 FOR UPDATE`, c.yukiBot)
+	done := make(chan pipeline.Outcome, 1)
+	b.start(t, done, b.sato, "member.remove", m{"course_id": b.course, "member_id": b.yukiM})
+	b.blocked(t, 1, done)
+	notYet(done, "Yuki's removal")
+	tx, err := b.Pool.Begin(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(t.Context(), `SELECT 1 FROM conversation WHERE id = $1 FOR UPDATE NOWAIT`, conv); err != nil {
+		t.Fatalf("Yuki's removal holds her conversation while it waits for her agent's seat: %v", err)
+	}
+	_ = tx.Rollback(t.Context())
+	release()
+	if out := <-done; out.Status != domain.StatusExecuted {
+		t.Fatalf("Yuki's removal: %+v", out)
+	}
+	if n := b.Count(`SELECT count(*) FROM conversation WHERE id = $1 AND status = 'closed'`, conv); n != 1 {
+		t.Fatal("Yuki's conversation with her agent was not closed with her")
 	}
 }

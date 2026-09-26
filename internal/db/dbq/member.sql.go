@@ -432,6 +432,42 @@ func (q *Queries) ListAssignmentScope(ctx context.Context, memberID uuid.UUID) (
 	return items, nil
 }
 
+const listLiveDelegatesOf = `-- name: ListLiveDelegatesOf :many
+SELECT id FROM course_member
+WHERE principal_member_id = $1 AND status <> 'removed'
+ORDER BY id
+`
+
+// The seats of a principal's delegates that are not removed, whatever their
+// status: what its removal removes with it. Read, not locked, by whoever
+// holds the principal FOR UPDATE, before the removal: no delegate is seated
+// by it meanwhile, since that takes its seat, and none is removed by anyone
+// else, since that takes its seat's KEY SHARE first. The removal itself is
+// the database's (course_member_delegates_follow), in the statement that
+// removes the principal; the delegates' rows are only updated there, which
+// the KEY SHARE a delegate's call in flight holds on its own seat does not
+// wait for: the call waits instead for the principal, and then finds it
+// removed.
+func (q *Queries) ListLiveDelegatesOf(ctx context.Context, principalMemberID *uuid.UUID) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, listLiveDelegatesOf, principalMemberID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listMembers = `-- name: ListMembers :many
 SELECT m.id, m.course_id, m.actor_id, m.role, m.status, m.preset_id, m.added_by_actor_id, m.expires_at, m.student_scope, m.assignment_scope, m.perm_document_read, m.perm_document_read_draft, m.perm_document_write, m.perm_rubric_read, m.perm_assignment_write, m.perm_submission_read, m.perm_submission_write, m.perm_grade_read, m.perm_grade_submit, m.perm_grade_post, m.perm_member_read, m.perm_member_manage, m.perm_action_decide, m.created_at, m.principal_member_id, m.answers_course, m.perm_agent_delegate, m.perm_conversation_ask, m.perm_conversation_answer, a.display_name, a.kind AS actor_kind, a.owner_actor_id, o.display_name AS owner_name
 FROM course_member m
@@ -685,37 +721,6 @@ func (q *Queries) LookupActorForSeating(ctx context.Context, arg LookupActorForS
 	return i, err
 }
 
-const removeDelegatesOf = `-- name: RemoveDelegatesOf :many
-UPDATE course_member SET status = 'removed'
-WHERE principal_member_id = $1 AND status <> 'removed'
-RETURNING id
-`
-
-// A principal's removal takes its delegates' seats with it, whatever their
-// status. The principal is held FOR UPDATE by whoever removes it; these rows
-// are only updated, FOR NO KEY UPDATE, which the KEY SHARE a delegate's call
-// in flight holds on its own seat does not wait for: the call waits instead
-// for the principal, and then finds it removed.
-func (q *Queries) RemoveDelegatesOf(ctx context.Context, principalMemberID *uuid.UUID) ([]uuid.UUID, error) {
-	rows, err := q.db.Query(ctx, removeDelegatesOf, principalMemberID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var items []uuid.UUID
-	for rows.Next() {
-		var id uuid.UUID
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
-		}
-		items = append(items, id)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
 const seatOrphaned = `-- name: SeatOrphaned :one
 SELECT (CASE WHEN m.principal_member_id IS NULL THEN a.owner_actor_id IS NOT NULL
              ELSE p.status = 'removed' OR (p.expires_at IS NOT NULL AND p.expires_at <= $1)
@@ -852,7 +857,9 @@ SELECT 1 FROM course_member WHERE id = ANY($1::uuid[]) ORDER BY id FOR KEY SHARE
 // other lock looks like, where that lock would otherwise be held while one of
 // them is waited for. A delegate's seat and its principal's are not taken
 // together in id order but in two calls, the delegate's first: that is the
-// order its own calls take them in (LockLiveMemberForAuthz).
+// order its own calls take them in (LockLiveMemberForAuthz). Taking the
+// principal's alone, before a delegate's seat is locked FOR UPDATE, is
+// tools.holdPrincipalOf.
 func (q *Queries) ShareSeats(ctx context.Context, ids []uuid.UUID) error {
 	_, err := q.db.Exec(ctx, shareSeats, ids)
 	return err

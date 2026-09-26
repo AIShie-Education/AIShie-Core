@@ -11,10 +11,13 @@
 --     only while the principal is. Owning an agent, and holding its tokens,
 --     gives nobody more than their own seat.
 --   * The previous release keeps working while this one goes in: every
---     column is new and nullable, or defaults to 'denied', and nothing the
---     previous release writes is refused unless it would seat an agent
---     someone owns, which only this release makes, and refuses to seat so
---     itself.
+--     column is new and nullable, or defaults to 'denied' or false, and
+--     nothing the previous release writes is refused unless it would seat
+--     an agent someone owns, which only this release makes, and refuses to
+--     seat so itself. A delegate's seat is removed with its principal's by
+--     the database, so that the previous release — during a rolling deploy,
+--     or rolled back to — does not leave one behind; it does not pause one
+--     with its principal (docs/deploying.md).
 --
 -- Backfill, a one-time decision of policy recorded here and in
 -- docs/schema.md §2.2: every seat that is not removed, and every
@@ -154,6 +157,30 @@ $$;
 CREATE TRIGGER course_member_principal_valid
     BEFORE INSERT OR UPDATE OF principal_member_id, actor_id, status ON course_member
     FOR EACH ROW EXECUTE FUNCTION course_member_check_principal();
+
+-- A delegate's seat is removed with its principal's, in the same statement,
+-- whoever removes the principal: this release, which also cancels the
+-- delegates' proposals and closes their conversations (members.Remove), or
+-- the previous release, which knows nothing of delegates — during a rolling
+-- deploy, or after a rollback, which deploys the previous image without
+-- running a migration down. Without it, a student removed by the previous
+-- release would go on reading their course and their grades through their
+-- agent's token for as long as it ran. Pausing a principal is not followed:
+-- this release's authorization pauses the delegate with it, and the
+-- previous release's does not (docs/deploying.md).
+CREATE FUNCTION course_member_remove_delegates() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+    UPDATE course_member SET status = 'removed'
+     WHERE principal_member_id = NEW.id AND status <> 'removed';
+    RETURN NULL;
+END;
+$$;
+
+CREATE TRIGGER course_member_delegates_follow
+    AFTER UPDATE OF status ON course_member
+    FOR EACH ROW WHEN (NEW.status = 'removed' AND OLD.status <> 'removed')
+    EXECUTE FUNCTION course_member_remove_delegates();
 
 -- ---------------------------------------------------------------------------
 -- Three permissions, on both tables, in this order

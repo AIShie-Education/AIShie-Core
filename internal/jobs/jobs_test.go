@@ -187,9 +187,10 @@ func TestExpiredMembersAreRemoved(t *testing.T) {
 }
 
 // A delegate lives no longer than its principal. Removing a principal takes
-// its delegates with it; what the sweep finds is what was left behind — a
-// principal the previous release removed alone, a seat whose agent changed
-// hands — and it removes that too, cancelling what it proposed.
+// its delegates with it, the previous release's removal included, which the
+// database follows; what the sweep finds is what is left behind — a seat
+// whose agent changed hands — and it removes that too, cancelling what it
+// proposed.
 func TestOrphanedDelegatesAreRemoved(t *testing.T) {
 	f := setup(t, 2)
 	yuki, ken := f.Students[0], f.Students[1]
@@ -212,8 +213,8 @@ func TestOrphanedDelegatesAreRemoved(t *testing.T) {
 
 	// Yuki's seat expires, and the expiry sweep takes her delegate with it.
 	f.Exec(`UPDATE course_member SET expires_at = $2 WHERE id = $1`, yuki.Member, f.now.Add(time.Hour))
-	// Ken's is removed by the previous release, which leaves his delegate.
-	f.Exec(`UPDATE course_member SET status = 'removed' WHERE id = $1`, ken.Member)
+	// Ken's agent changes hands under its seat.
+	f.Exec(`UPDATE actor SET owner_actor_id = $2 WHERE id = $1`, kenBot, yuki.Actor)
 	f.now = f.now.Add(2 * time.Hour)
 	if rep := f.sweep(t); rep.MembersExpired != 1 || rep.OrphansRemoved != 1 {
 		t.Fatalf("%+v, want Yuki expired with her delegate, and Ken's delegate removed as an orphan", rep)
@@ -225,6 +226,15 @@ func TestOrphanedDelegatesAreRemoved(t *testing.T) {
 	}
 	if n := f.Count(`SELECT count(*) FROM action WHERE id = ANY($1) AND status = 'cancelled'`, []uuid.UUID{yukiDraft, kenDraft}); n != 2 {
 		t.Fatal("an orphaned delegate's proposal was not cancelled")
+	}
+	// The previous release removes a principal knowing nothing of its
+	// delegates; the database removes them with it, and there is nothing
+	// for the sweep to find.
+	f.Exec(`UPDATE actor SET owner_actor_id = $2 WHERE id = $1`, kenBot, ken.Actor)
+	_, left := delegate(ken.Actor, ken.Member, ken.Member)
+	f.Exec(`UPDATE course_member SET status = 'removed' WHERE id = $1`, ken.Member)
+	if n := f.Count(`SELECT count(*) FROM course_member WHERE id = $1 AND status = 'removed'`, left); n != 1 {
+		t.Fatal("a delegate outlived the previous release's removal of its principal")
 	}
 	if rep := f.sweep(t); rep.OrphansRemoved != 0 {
 		t.Fatalf("removed twice: %+v", rep)

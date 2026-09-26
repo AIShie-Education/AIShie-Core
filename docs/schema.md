@@ -324,10 +324,12 @@ id). `expires_at` is an automatic remove. Every one of these is itself an action
 (`member.add`, `member.remove`, ...) and lands in the log. Removing a seat removes its delegates'
 seats with it, whatever their status, and cancels their proposals too; pausing, narrowing or
 changing a principal changes nothing on its delegates' rows, since `authorize()` caps them by
-the principal anyway. An owner takes their agent out of a course with `agent.withdraw`. A
-delegate's seat left behind — its principal removed by the release before 0007, which knew no
-delegates, or its agent changed hands — is removed by a sweep (`member.remove_orphan`), and by
-seating the agent again. `member.update_perms_bulk` changes a permission on every live seat of
+the principal anyway. The database removes a delegate's seat with its principal's, so that the
+release before 0007, which knows no delegates, does not leave one behind; that release does not
+cancel its proposals, which approval refuses and the expiry sweep cancels. An owner takes their
+agent out of a course with `agent.withdraw`. A delegate's seat left behind — its agent changed
+hands, or its principal's seat past its expiry — is removed by a sweep (`member.remove_orphan`),
+and by seating the agent again. `member.update_perms_bulk` changes a permission on every live seat of
 one roster role at once, other than the caller's — "students may bring agents only with
 approval" — each change held to the rules of a change to one seat, all or none. Choosing seats
 by role is what the manager asked for, as `member.list` filters by it; it is not
@@ -819,7 +821,11 @@ principal comes in the same lookup. There is no walk, no most-specific-wins rule
 invalidate: removing an agent, or its owner, takes effect on its next call. A delegate goes one
 step and no further, since a principal is nobody's delegate. A write takes its caller's seat
 first and, for a delegate, its principal's second, KEY SHARE, and reads the principal again as it
-then stands; everything that takes both takes them in that order.
+then stands; whatever else takes both KEY SHARE (`action.decide`, a write in a conversation)
+takes them in that order. What takes a delegate's seat FOR UPDATE, to change or remove it, takes
+its principal's KEY SHARE before it; and removing a principal holds it FOR UPDATE and then
+removes its delegates. Every path that takes both therefore meets the other at the principal
+first.
 
 Platform-level operations (`course.create`, `actor.register`, seating the first instructor)
 check `actor.platform_role` instead. That is the only place it is read.
@@ -855,6 +861,7 @@ check `actor.platform_role` instead. That is the only place it is read.
 | An agent someone owns holds no platform role | CHECK `actor_owned_holds_no_platform_role` |
 | Making an actor active forgets who suspended it | trigger `actor_suspension_cleared` |
 | A seat that is not removed has a principal exactly when its actor has an owner; the principal is the owner's seat, in the same course, and nobody's delegate | composite FK and trigger `course_member_principal_valid` on `course_member` |
+| A delegate's seat is removed with its principal's, whichever release removes it | trigger `course_member_delegates_follow` |
 | Only a delegate's seat answers the course | CHECK `course_member_answers_course_is_delegate` |
 | A conversation's two participants are two seats of its course, and never change; a closed conversation stays closed; none is deleted | composite FKs, CHECKs and trigger `conversation_guarded` on `conversation` |
 | Only a conversation's participants write in it, only while it is open; a reply is the respondent's, to a message of the opener's in the same conversation | trigger `conversation_message_author_valid`, composite FKs on `conversation_message` |
@@ -934,9 +941,12 @@ check `actor.platform_role` instead. That is the only place it is read.
   otherwise, a new email), and for someone suspended since or with no email. Whoever holds one
   can sign in as its actor, once; it is no bearer token: it is never taken as one, nor a token
   as an invitation.
-- A call that loses a deadlock — two managers changing each other's seats at once — is made
-  again, once, in a fresh transaction, and is recorded as failed ("try again") only if it loses
-  again. A sweep's call that loses twice is not recorded at all: its key names what it sweeps,
+- A call that loses a deadlock — two managers changing each other's seats at once, or
+  `member.update_perms_bulk`, which locks every seat of a role in id order, against a write that
+  holds one seat of that role and then takes another's KEY SHARE (a message between two seats of
+  the role, `action.decide` between them, a delegate's own call whose principal has the role) —
+  is made again, once, in a fresh transaction, and is recorded as failed ("try again") only if
+  it loses again. A sweep's call that loses twice is not recorded at all: its key names what it sweeps,
   and a failure stored under it would stand for the sweep: every sweep after would replay that
   failure or pass the thing over, and never sweep it.
 - A delegate holds no more than its principal (§2.2, Delegates): its levels capped by the
@@ -950,12 +960,17 @@ check `actor.platform_role` instead. That is the only place it is read.
   without `member_manage`, no life past the owner's; the same worked out again on approval, and
   refused if the owner no longer holds it. Only the owner seats their agent, and only as their
   delegate: `member.add` and `course.seat_instructor` refuse an owned agent.
-- A change that widens a delegate's seat is within its principal's as well as the granter's, and
-  nobody manages the seat they are a delegate of.
-- Removing a seat removes its delegates' seats and cancels their proposals, holding the seat FOR
-  UPDATE and only then updating theirs; a seat before its principal is the order every call that
-  takes both takes them in. The sweep removes a delegate seat left orphaned, and so does seating
-  the agent again.
+- A change that widens a delegate's seat is within its principal's as well as the granter's.
+  Nobody manages the seat they are a delegate of: a delegate never holds `member_manage`
+  (`domain.Member.Perm`).
+- Removing a seat cancels its delegates' proposals and closes their conversations with its own;
+  the database removes the delegates' seats with it (trigger `course_member_delegates_follow`).
+  The order is the principal FOR UPDATE, then its delegates' rows, only updated, then the
+  conversations, all in one statement, in id order. A delegate's own call takes its seat KEY
+  SHARE and then its principal's, which it then waits for; whatever takes a delegate's seat FOR
+  UPDATE — `member.*` on it, `agent.withdraw`, the sweeps, seating over it — takes its principal's
+  KEY SHARE first. The sweep removes a delegate seat left orphaned, and so does seating the agent
+  again.
 - Four eyes counts parties (§2.6): an actor, the agents it owns or its owner, and the owner's
   other agents are one, in `action.decide`, `action.review`, at any remove and for escalations.
 - Only an agent's owner acts on it through `agent.*`, and to anyone else it does not exist.

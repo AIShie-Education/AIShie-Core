@@ -113,6 +113,9 @@ func memberExpire() tool.Tool {
 			return tool.Target{CourseID: in.CourseID, Type: "course_member", ID: &in.MemberID}, nil
 		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in MemberExpireIn) (MemberExpireOut, error) {
+			if err := holdPrincipalOf(ctx, ec.Q, in.MemberID); err != nil {
+				return MemberExpireOut{}, err
+			}
 			m, err := ec.Q.GetMemberForSweep(ctx, in.MemberID)
 			if errors.Is(err, pgx.ErrNoRows) {
 				return MemberExpireOut{}, apperr.Missing("no such member")
@@ -155,10 +158,12 @@ func memberRemoveOrphan() tool.Tool {
 		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in MemberRemoveOrphanIn) (MemberExpireOut, error) {
 			// The delegate's seat is locked, as the expiry sweep locks the
-			// seat it removes. Its principal is only read: a removal of the
-			// principal holds it and then updates this seat, and locking the
-			// two the other way round here could deadlock with it. Nothing
+			// seat it removes, after its principal's KEY SHARE, as whatever
+			// locks a delegate's seat takes them (holdPrincipalOf). Nothing
 			// the principal can come to undoes an orphan (SeatOrphaned).
+			if err := holdPrincipalOf(ctx, ec.Q, in.MemberID); err != nil {
+				return MemberExpireOut{}, err
+			}
 			m, err := ec.Q.GetMemberForSweep(ctx, in.MemberID)
 			if errors.Is(err, pgx.ErrNoRows) {
 				return MemberExpireOut{}, apperr.Missing("no such member")

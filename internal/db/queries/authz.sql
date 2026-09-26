@@ -55,8 +55,12 @@ WHERE m.course_id = $1 AND m.actor_id = $2 AND m.status <> 'removed';
 --
 -- Only the caller's own seat is locked here. A delegate's principal is
 -- locked next, by LockPrincipalForAuthz, and read again as it then stands:
--- a delegate's seat, then its principal's, is the order everything that
--- takes both takes them in (pipeline.Decide included).
+-- a delegate's seat, then its principal's, is the order whatever takes both
+-- KEY SHARE takes them in (pipeline.Decide included). What takes a
+-- delegate's seat FOR UPDATE takes its principal's KEY SHARE before it
+-- (tools.holdPrincipalOf), and a principal's removal holds it FOR UPDATE and
+-- then only updates its delegates' rows, so each meets the others at the
+-- principal.
 SELECT m.id, m.course_id, m.actor_id, m.status, m.expires_at, m.student_scope, m.assignment_scope,
        m.perm_document_read, m.perm_document_read_draft, m.perm_document_write, m.perm_rubric_read,
        m.perm_assignment_write, m.perm_submission_read, m.perm_submission_write, m.perm_grade_read,

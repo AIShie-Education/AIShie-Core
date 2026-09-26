@@ -31,11 +31,13 @@ type Querier interface {
 	ClearAssignmentScope(ctx context.Context, memberID uuid.UUID) error
 	ClearStudentScope(ctx context.Context, memberID uuid.UUID) error
 	CloseConversation(ctx context.Context, arg CloseConversationParams) (int64, error)
-	// A seat that is removed takes part in no conversation any more. Whoever
-	// removes it holds it FOR UPDATE, which a call writing in one of these waits
-	// for (it takes both participants' seats before the conversation), so the
-	// two never wait for each other.
-	CloseConversationsOf(ctx context.Context, memberID uuid.UUID) ([]uuid.UUID, error)
+	// Seats that are removed — one, and its delegates' with it — take part in
+	// no conversation any more. Whoever removes them holds the seat FOR UPDATE,
+	// and its delegates' rows are updated already, which a call writing in one
+	// of these waits for (it takes both participants' seats before the
+	// conversation). The conversations are locked in id order, so that two
+	// removals whose seats share conversations take them in one order.
+	CloseConversationsOf(ctx context.Context, memberIds []uuid.UUID) ([]uuid.UUID, error)
 	ComponentHasGrades(ctx context.Context, componentID *uuid.UUID) (bool, error)
 	ComponentHasLiveGrades(ctx context.Context, componentID *uuid.UUID) (bool, error)
 	// Any origin: an entered grade, or a total written down when it was a parent.
@@ -338,6 +340,17 @@ type Querier interface {
 	// has one.
 	ListLiveAssignmentScores(ctx context.Context, arg ListLiveAssignmentScoresParams) ([]ListLiveAssignmentScoresRow, error)
 	ListLiveComponentScores(ctx context.Context, studentMemberID uuid.UUID) ([]ListLiveComponentScoresRow, error)
+	// The seats of a principal's delegates that are not removed, whatever their
+	// status: what its removal removes with it. Read, not locked, by whoever
+	// holds the principal FOR UPDATE, before the removal: no delegate is seated
+	// by it meanwhile, since that takes its seat, and none is removed by anyone
+	// else, since that takes its seat's KEY SHARE first. The removal itself is
+	// the database's (course_member_delegates_follow), in the statement that
+	// removes the principal; the delegates' rows are only updated there, which
+	// the KEY SHARE a delegate's call in flight holds on its own seat does not
+	// wait for: the call waits instead for the principal, and then finds it
+	// removed.
+	ListLiveDelegatesOf(ctx context.Context, principalMemberID *uuid.UUID) ([]uuid.UUID, error)
 	ListMembers(ctx context.Context, arg ListMembersParams) ([]ListMembersRow, error)
 	ListMembershipsForActor(ctx context.Context, actorID uuid.UUID) ([]ListMembershipsForActorRow, error)
 	// Which of these uploads, each given with the course its key names, are
@@ -351,9 +364,10 @@ type Querier interface {
 	// removes, under the lock attaching takes.
 	ListOrphanUploads(ctx context.Context, arg ListOrphanUploadsParams) ([]ListOrphanUploadsRow, error)
 	// Seats that count for nothing for good (SeatOrphaned), not yet removed: a
-	// delegate's whose principal is removed or past its expiry, which the
-	// previous release removes without its delegates, and seats that do not
-	// match their actor's ownership. authorize() refuses them already; removing
+	// delegate's whose principal is removed or past its expiry, and seats that
+	// do not match their actor's ownership. The database removes a delegate
+	// with its principal (course_member_delegates_follow), so the first are
+	// rare: a principal's expiry the expiry sweep has not got to. authorize() refuses them already; removing
 	// them cancels what they proposed and clears the way for a fresh seat.
 	ListOrphanedSeats(ctx context.Context, arg ListOrphanedSeatsParams) ([]ListOrphanedSeatsRow, error)
 	ListPendingReviewActions(ctx context.Context, arg ListPendingReviewActionsParams) ([]Action, error)
@@ -449,8 +463,12 @@ type Querier interface {
 	//
 	// Only the caller's own seat is locked here. A delegate's principal is
 	// locked next, by LockPrincipalForAuthz, and read again as it then stands:
-	// a delegate's seat, then its principal's, is the order everything that
-	// takes both takes them in (pipeline.Decide included).
+	// a delegate's seat, then its principal's, is the order whatever takes both
+	// KEY SHARE takes them in (pipeline.Decide included). What takes a
+	// delegate's seat FOR UPDATE takes its principal's KEY SHARE before it
+	// (tools.holdPrincipalOf), and a principal's removal holds it FOR UPDATE and
+	// then only updates its delegates' rows, so each meets the others at the
+	// principal.
 	LockLiveMemberForAuthz(ctx context.Context, arg LockLiveMemberForAuthzParams) (LockLiveMemberForAuthzRow, error)
 	// Every seat of one roster role that is not removed or past its expiry,
 	// except one, locked in id order: member.update_perms_bulk changes them all
@@ -497,12 +515,6 @@ type Querier interface {
 	// before this was recorded, is an administrator's to lift.
 	ReactivateAgentByOwner(ctx context.Context, arg ReactivateAgentByOwnerParams) (int64, error)
 	ReleaseJobLock(ctx context.Context, key int64) (bool, error)
-	// A principal's removal takes its delegates' seats with it, whatever their
-	// status. The principal is held FOR UPDATE by whoever removes it; these rows
-	// are only updated, FOR NO KEY UPDATE, which the KEY SHARE a delegate's call
-	// in flight holds on its own seat does not wait for: the call waits instead
-	// for the principal, and then finds it removed.
-	RemoveDelegatesOf(ctx context.Context, principalMemberID *uuid.UUID) ([]uuid.UUID, error)
 	// A 'missing' row is a placeholder written when the due date passed with
 	// nothing handed in. Late work takes it over rather than sitting beside it.
 	ReopenMissingSubmission(ctx context.Context, arg ReopenMissingSubmissionParams) error
@@ -562,7 +574,9 @@ type Querier interface {
 	// other lock looks like, where that lock would otherwise be held while one of
 	// them is waited for. A delegate's seat and its principal's are not taken
 	// together in id order but in two calls, the delegate's first: that is the
-	// order its own calls take them in (LockLiveMemberForAuthz).
+	// order its own calls take them in (LockLiveMemberForAuthz). Taking the
+	// principal's alone, before a delegate's seat is locked FOR UPDATE, is
+	// tools.holdPrincipalOf.
 	ShareSeats(ctx context.Context, ids []uuid.UUID) error
 	StorageKeyInUse(ctx context.Context, storageKey *string) (bool, error)
 	// A grade entered, or proposed and not yet decided: either way, one is on its

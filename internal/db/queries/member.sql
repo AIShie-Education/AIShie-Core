@@ -114,7 +114,9 @@ UPDATE action SET status = 'cancelled', result = $2 WHERE id = $1 AND status = '
 -- other lock looks like, where that lock would otherwise be held while one of
 -- them is waited for. A delegate's seat and its principal's are not taken
 -- together in id order but in two calls, the delegate's first: that is the
--- order its own calls take them in (LockLiveMemberForAuthz).
+-- order its own calls take them in (LockLiveMemberForAuthz). Taking the
+-- principal's alone, before a delegate's seat is locked FOR UPDATE, is
+-- tools.holdPrincipalOf.
 SELECT 1 FROM course_member WHERE id = ANY(sqlc.arg(ids)::uuid[]) ORDER BY id FOR KEY SHARE;
 
 -- name: LookupActorForSeating :one
@@ -130,15 +132,20 @@ LEFT JOIN actor o ON o.id = a.owner_actor_id
 WHERE a.kind <> 'system'
   AND (a.id = sqlc.narg(actor_id) OR lower(a.email) = lower(sqlc.narg(email)));
 
--- name: RemoveDelegatesOf :many
--- A principal's removal takes its delegates' seats with it, whatever their
--- status. The principal is held FOR UPDATE by whoever removes it; these rows
--- are only updated, FOR NO KEY UPDATE, which the KEY SHARE a delegate's call
--- in flight holds on its own seat does not wait for: the call waits instead
--- for the principal, and then finds it removed.
-UPDATE course_member SET status = 'removed'
+-- name: ListLiveDelegatesOf :many
+-- The seats of a principal's delegates that are not removed, whatever their
+-- status: what its removal removes with it. Read, not locked, by whoever
+-- holds the principal FOR UPDATE, before the removal: no delegate is seated
+-- by it meanwhile, since that takes its seat, and none is removed by anyone
+-- else, since that takes its seat's KEY SHARE first. The removal itself is
+-- the database's (course_member_delegates_follow), in the statement that
+-- removes the principal; the delegates' rows are only updated there, which
+-- the KEY SHARE a delegate's call in flight holds on its own seat does not
+-- wait for: the call waits instead for the principal, and then finds it
+-- removed.
+SELECT id FROM course_member
 WHERE principal_member_id = $1 AND status <> 'removed'
-RETURNING id;
+ORDER BY id;
 
 -- name: GetSeatPrincipal :one
 -- Which seat a seat is a delegate of, if any. Whose delegate a seat is never
