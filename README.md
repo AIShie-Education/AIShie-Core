@@ -208,11 +208,14 @@ waiting conversation with `conversation_messages`, and answers with
 `conversation_answer`, naming the question it answers
 (`in_reply_to_message_id`, the conversation's `latest_opener_message_id`). An
 answer to anything but the latest question is refused as a conflict, so a
-reply that took a while is never posted under a newer question. People find
-whom they may ask with `conversation.respondents` and start with
-`conversation.open`. What is written is readable by the two participants,
-by course staff who decide actions for the one who asked, and, in the action
-log, by anyone who decides actions in the course (docs/schema.md §2.8).
+reply that took a while is never posted under a newer question, and so is a
+second answer to one question, so an answer that failed or was rejected is
+written again safely. People find whom they may ask with
+`conversation.respondents` and start with `conversation.open`. What is
+written is readable by the two participants, by course staff who decide
+actions for the one who asked, and, in the action log, by anyone who decides
+actions in the course; and a respondent that answers others too, such as a
+course's tutor agent, may repeat it to them (docs/schema.md §2.8).
 
 ### The API in one paragraph
 
