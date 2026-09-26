@@ -18,7 +18,8 @@ import (
 )
 
 func submissionTools() []tool.Tool {
-	return []tool.Tool{submissionList(), submissionGet(), submissionCreate(), submissionUpdateDraft(), submissionSubmit(), submissionSetLateness()}
+	return []tool.Tool{submissionList(), submissionRoster(), submissionGet(), submissionCreate(), submissionUpdateDraft(),
+		submissionSubmit(), submissionSetLateness(), submissionRecordMissing()}
 }
 
 var (
@@ -85,6 +86,80 @@ func submissionList() tool.Tool {
 			}
 			if len(rows) > 0 && len(rows) == int(in.limit()) {
 				out.Next = &rows[len(rows)-1].ID
+			}
+			return out, err
+		},
+	})
+}
+
+type SubmissionRosterIn struct {
+	tool.InCourse
+	AssignmentID uuid.UUID `json:"assignment_id"`
+	Page
+}
+
+type RosterEntry struct {
+	StudentMemberID uuid.UUID  `json:"student_member_id"`
+	DisplayName     *string    `json:"display_name,omitempty" jsonschema:"only for a caller who may read the member list (perm_member_read)"`
+	MemberStatus    *string    `json:"member_status,omitempty" jsonschema:"active or paused; only for a caller who may read the member list"`
+	State           string     `json:"state" jsonschema:"not_started (no submission at all), draft, submitted, late or missing: the latest attempt's"`
+	SubmissionID    *uuid.UUID `json:"submission_id,omitempty" jsonschema:"the latest attempt; absent when not started"`
+	Attempt         *int32     `json:"attempt,omitempty"`
+	SubmittedAt     *time.Time `json:"submitted_at,omitempty"`
+}
+
+type SubmissionRosterOut struct {
+	Students []RosterEntry `json:"students"`
+	Next     *uuid.UUID    `json:"next,omitempty"`
+}
+
+const stateNotStarted = "not_started"
+
+func submissionRoster() tool.Tool {
+	return tool.Define(tool.Spec[SubmissionRosterIn, SubmissionRosterOut]{
+		Name: "submission.roster",
+		Description: "Where every student stands on one assignment: each current student within the caller's scope, with " +
+			"their latest attempt's state, including those who have not started, whom submission.list cannot show. " +
+			"A student who has not started can be recorded as having handed in nothing with submission.record_missing. " +
+			"Names and seat status come only to a caller who may read the member list; to anyone else a student is " +
+			"their member id, as in submission.list.",
+		Kind: tool.Read, Gate: readSubmissions,
+		HTTP: tool.Route{Method: "GET", Pattern: "/v1/courses/{course_id}/assignments/{assignment_id}/roster"},
+		Resolve: func(ctx context.Context, q dbq.Querier, in SubmissionRosterIn) (tool.Target, error) {
+			// The assignment is checked against the caller's assignment
+			// scope here; the students are filtered by student scope in SQL.
+			return assignmentTarget(ctx, q, in.CourseID, in.AssignmentID)
+		},
+		Query: func(ctx context.Context, rc *tool.ReadCtx, in SubmissionRosterIn) (SubmissionRosterOut, error) {
+			a, err := rc.Q.GetAssignmentInCourse(ctx, dbq.GetAssignmentInCourseParams{ID: in.AssignmentID, CourseID: in.CourseID})
+			if err != nil {
+				return SubmissionRosterOut{}, err
+			}
+			if a.PublishedAt == nil && !canSeeUnpublished(rc.Member) {
+				// As in assignment.get: to this caller it does not exist yet.
+				return SubmissionRosterOut{}, apperr.Missing("no such assignment in this course")
+			}
+			rows, err := rc.Q.ListAssignmentRoster(ctx, dbq.ListAssignmentRosterParams{
+				CourseID: in.CourseID, AssignmentID: in.AssignmentID, After: in.after(), MaxRows: in.limit(),
+				StudentAll: rc.Scope.StudentAll, MemberID: rc.Scope.MemberID,
+			})
+			out := SubmissionRosterOut{Students: make([]RosterEntry, 0, len(rows))}
+			// Names and seat status are the member list's: submission_read
+			// alone gets member ids, as submission.list gives.
+			members := rc.Member.Perm(domain.PermMemberRead).Allowed()
+			for _, r := range rows {
+				e := RosterEntry{StudentMemberID: r.StudentMemberID,
+					State: stateNotStarted, SubmissionID: r.SubmissionID, Attempt: r.Attempt, SubmittedAt: r.SubmittedAt}
+				if members {
+					e.DisplayName, e.MemberStatus = &r.DisplayName, &r.MemberStatus
+				}
+				if r.State != nil {
+					e.State = *r.State
+				}
+				out.Students = append(out.Students, e)
+			}
+			if len(rows) > 0 && len(rows) == int(in.limit()) {
+				out.Next = &rows[len(rows)-1].StudentMemberID
 			}
 			return out, err
 		},
@@ -200,7 +275,7 @@ func submissionCreate() tool.Tool {
 			if entry.Role != "student" || entry.Status != domain.MemberActive {
 				return SubmissionCreateOut{}, apperr.Precondition("work is submitted by, or for, a current student of the course")
 			}
-			a, err := ec.Q.GetAssignmentInCourse(ctx, dbq.GetAssignmentInCourseParams{ID: in.AssignmentID, CourseID: in.CourseID})
+			a, err := ec.Q.GetAssignmentForSubmission(ctx, dbq.GetAssignmentForSubmissionParams{ID: in.AssignmentID, CourseID: in.CourseID})
 			if err != nil {
 				return SubmissionCreateOut{}, err
 			}
@@ -506,6 +581,87 @@ func submissionSetLateness() tool.Tool {
 			ec.Emit(events.Event{Type: EventSubmissionLateness, CourseID: &in.CourseID, SubjectType: "submission", SubjectID: &s.ID,
 				StudentMemberID: &s.StudentMemberID, AssignmentID: &s.AssignmentID, Payload: map[string]any{"state": in.State}})
 			return OK{OK: true}, nil
+		},
+	})
+}
+
+type SubmissionRecordMissingIn struct {
+	tool.InCourse
+	AssignmentID    uuid.UUID `json:"assignment_id"`
+	StudentMemberID uuid.UUID `json:"student_member_id"`
+}
+
+type SubmissionIDOut struct {
+	SubmissionID uuid.UUID `json:"submission_id"`
+}
+
+// submissionRecordMissing is by hand what the sweep does when a due date
+// passes, for one student: for an assignment with no due date, or a student
+// the grader need not wait for. It is gated like set_lateness, by
+// perm_grade_submit: what a student has handed in is not theirs to declare.
+func submissionRecordMissing() tool.Tool {
+	return tool.Define(tool.Spec[SubmissionRecordMissingIn, SubmissionIDOut]{
+		Name: "submission.record_missing",
+		Description: "Record that a student has handed in nothing for a published assignment: they get a 'missing' " +
+			"submission, which can be graded (a zero, say). Only for a student with no submission at all, not even a " +
+			"draft. If they hand work in afterwards it takes the missing row over, as it does after a due date passes, " +
+			"unless a grade has been entered or proposed for it: then the work is a new attempt, and the missing row " +
+			"keeps its grade.",
+		Kind: tool.Write, Gate: tool.Gate{Perms: []domain.Perm{domain.PermGradeSubmit}},
+		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/assignments/{assignment_id}/missing"},
+		Resolve: func(ctx context.Context, q dbq.Querier, in SubmissionRecordMissingIn) (tool.Target, error) {
+			t, err := assignmentTarget(ctx, q, in.CourseID, in.AssignmentID)
+			if err != nil {
+				return t, err
+			}
+			t.Type, t.ID = "submission", nil
+			t.Scope.StudentMemberIDs = []uuid.UUID{in.StudentMemberID}
+			return t, nil
+		},
+		Execute: func(ctx context.Context, ec *tool.ExecCtx, in SubmissionRecordMissingIn) (SubmissionIDOut, error) {
+			// The assignment first: to a caller who may not see an
+			// unpublished one, it is not there, whoever the student is.
+			a, err := ec.Q.GetAssignmentForSubmission(ctx, dbq.GetAssignmentForSubmissionParams{ID: in.AssignmentID, CourseID: in.CourseID})
+			if err != nil {
+				return SubmissionIDOut{}, err
+			}
+			if a.PublishedAt == nil {
+				if !canSeeUnpublished(ec.Member) {
+					return SubmissionIDOut{}, apperr.Missing("no such assignment in this course")
+				}
+				return SubmissionIDOut{}, apperr.Precondition("the assignment is not published; nobody can have missed it")
+			}
+			entry, err := ec.Q.GetRosterEntry(ctx, dbq.GetRosterEntryParams{ID: in.StudentMemberID, CourseID: in.CourseID})
+			if errors.Is(err, pgx.ErrNoRows) {
+				return SubmissionIDOut{}, apperr.Missing("no such member in this course")
+			}
+			if err != nil {
+				return SubmissionIDOut{}, err
+			}
+			if entry.Role != "student" || entry.Status == domain.MemberRemoved {
+				return SubmissionIDOut{}, apperr.Precondition("only a current student of the course hands work in")
+			}
+			prior, err := ec.Q.LockSubmissionsOf(ctx, dbq.LockSubmissionsOfParams{AssignmentID: a.ID, StudentMemberID: in.StudentMemberID})
+			if err != nil {
+				return SubmissionIDOut{}, err
+			}
+			if len(prior) > 0 {
+				return SubmissionIDOut{}, apperr.Conflicts("the student already has a submission (%s) for this assignment", prior[0].State).
+					With("submission_id", prior[0].ID)
+			}
+			id := ids.New()
+			n, err := ec.Q.InsertMissingSubmission(ctx, dbq.InsertMissingSubmissionParams{ID: id, AssignmentID: a.ID,
+				CourseID: in.CourseID, StudentMemberID: in.StudentMemberID, CreatedAt: ec.Now})
+			if err != nil {
+				return SubmissionIDOut{}, err
+			}
+			if n == 0 {
+				return SubmissionIDOut{}, apperr.Conflicts("the student started a submission just now")
+			}
+			student := in.StudentMemberID
+			ec.Emit(events.Event{Type: EventSubmissionMissing, CourseID: &in.CourseID, SubjectType: "submission",
+				SubjectID: &id, StudentMemberID: &student, AssignmentID: &a.ID})
+			return SubmissionIDOut{SubmissionID: id}, nil
 		},
 	})
 }

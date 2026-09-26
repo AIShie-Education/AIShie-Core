@@ -163,21 +163,23 @@ func (q *Queries) GetSSOCredential(ctx context.Context, arg GetSSOCredentialPara
 }
 
 const insertCredential = `-- name: InsertCredential :exec
-INSERT INTO credential (id, actor_id, kind, secret_hash, provider, subject, token_prefix, label, expires_at, created_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+INSERT INTO credential (id, actor_id, kind, secret_hash, provider, subject, token_prefix, label, expires_at, created_at,
+                        issued_by_actor_id)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 `
 
 type InsertCredentialParams struct {
-	ID          uuid.UUID
-	ActorID     uuid.UUID
-	Kind        string
-	SecretHash  *string
-	Provider    *string
-	Subject     *string
-	TokenPrefix *string
-	Label       *string
-	ExpiresAt   *time.Time
-	CreatedAt   time.Time
+	ID              uuid.UUID
+	ActorID         uuid.UUID
+	Kind            string
+	SecretHash      *string
+	Provider        *string
+	Subject         *string
+	TokenPrefix     *string
+	Label           *string
+	ExpiresAt       *time.Time
+	CreatedAt       time.Time
+	IssuedByActorID *uuid.UUID
 }
 
 func (q *Queries) InsertCredential(ctx context.Context, arg InsertCredentialParams) error {
@@ -192,31 +194,37 @@ func (q *Queries) InsertCredential(ctx context.Context, arg InsertCredentialPara
 		arg.Label,
 		arg.ExpiresAt,
 		arg.CreatedAt,
+		arg.IssuedByActorID,
 	)
 	return err
 }
 
 const listCredentialsForActor = `-- name: ListCredentialsForActor :many
-SELECT id, kind, provider, subject, token_prefix, label, last_used_at, expires_at, revoked_at, created_at
-FROM credential
-WHERE actor_id = $1
-ORDER BY created_at DESC, id
+SELECT c.id, c.kind, c.provider, c.subject, c.token_prefix, c.label, c.last_used_at, c.expires_at, c.revoked_at,
+       c.created_at, c.issued_by_actor_id, i.display_name AS issued_by_name
+FROM credential c
+LEFT JOIN actor i ON i.id = c.issued_by_actor_id
+WHERE c.actor_id = $1
+ORDER BY c.created_at DESC, c.id
 `
 
 type ListCredentialsForActorRow struct {
-	ID          uuid.UUID
-	Kind        string
-	Provider    *string
-	Subject     *string
-	TokenPrefix *string
-	Label       *string
-	LastUsedAt  *time.Time
-	ExpiresAt   *time.Time
-	RevokedAt   *time.Time
-	CreatedAt   time.Time
+	ID              uuid.UUID
+	Kind            string
+	Provider        *string
+	Subject         *string
+	TokenPrefix     *string
+	Label           *string
+	LastUsedAt      *time.Time
+	ExpiresAt       *time.Time
+	RevokedAt       *time.Time
+	CreatedAt       time.Time
+	IssuedByActorID *uuid.UUID
+	IssuedByName    *string
 }
 
-// Never the hash.
+// Never the hash. The issuer's name comes with the row, for an administrator
+// telling one token from another.
 func (q *Queries) ListCredentialsForActor(ctx context.Context, actorID uuid.UUID) ([]ListCredentialsForActorRow, error) {
 	rows, err := q.db.Query(ctx, listCredentialsForActor, actorID)
 	if err != nil {
@@ -237,6 +245,8 @@ func (q *Queries) ListCredentialsForActor(ctx context.Context, actorID uuid.UUID
 			&i.ExpiresAt,
 			&i.RevokedAt,
 			&i.CreatedAt,
+			&i.IssuedByActorID,
+			&i.IssuedByName,
 		); err != nil {
 			return nil, err
 		}

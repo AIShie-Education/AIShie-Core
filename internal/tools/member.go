@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -18,7 +19,7 @@ import (
 )
 
 func memberTools() []tool.Tool {
-	return []tool.Tool{memberList(), memberGet(), memberAdd(), memberUpdatePerms(), memberRescope(),
+	return []tool.Tool{memberList(), memberGet(), memberLookupActor(), memberAdd(), memberUpdatePerms(), memberRescope(),
 		memberPause(), memberResume(), memberRemove()}
 }
 
@@ -122,6 +123,57 @@ func memberGet() tool.Tool {
 			}
 			v.ListedAssignments, err = rc.Q.ListAssignmentScope(ctx, m.ID)
 			return v, err
+		},
+	})
+}
+
+type MemberLookupActorIn struct {
+	tool.InCourse
+	Email   *string    `json:"email,omitempty" jsonschema:"the person's whole email address, in any case"`
+	ActorID *uuid.UUID `json:"actor_id,omitempty" jsonschema:"or the actor id an administrator gave, to see whom it names"`
+}
+
+type MemberLookupActorOut struct {
+	ActorID     uuid.UUID  `json:"actor_id" jsonschema:"what member.add takes"`
+	DisplayName string     `json:"display_name"`
+	Kind        string     `json:"kind" jsonschema:"human or agent; for display only"`
+	Status      string     `json:"status" jsonschema:"active or suspended"`
+	MemberID    *uuid.UUID `json:"member_id,omitempty" jsonschema:"their seat in this course, when they already have one"`
+}
+
+// memberLookupActor lets whoever seats members find the actor to seat without
+// asking an administrator for an id, and see whom an id they were given
+// names. It lists nobody: the whole address or the whole id must be given, so
+// it tells the caller only about someone they could already name.
+func memberLookupActor() tool.Tool {
+	return tool.Define(tool.Spec[MemberLookupActorIn, MemberLookupActorOut]{
+		Name: "member.lookup_actor",
+		Description: "Find the registered person an email address belongs to, to seat them with member.add, or see whom " +
+			"an actor id names (an agent has no email: it is seated by the id an administrator gives). Give one of " +
+			"email or actor_id. The whole address must match, in any case; there is no partial search.",
+		Kind: tool.Read, Gate: manageMembers,
+		HTTP: tool.Route{Method: "GET", Pattern: "/v1/courses/{course_id}/actor-lookup"},
+		Resolve: func(_ context.Context, _ dbq.Querier, in MemberLookupActorIn) (tool.Target, error) {
+			return tool.Target{CourseID: in.CourseID, Type: "actor"}, nil
+		},
+		Query: func(ctx context.Context, rc *tool.ReadCtx, in MemberLookupActorIn) (MemberLookupActorOut, error) {
+			var email *string
+			if in.Email != nil {
+				if e := strings.TrimSpace(*in.Email); e != "" {
+					email = &e
+				}
+			}
+			if (email == nil) == (in.ActorID == nil) {
+				return MemberLookupActorOut{}, apperr.Invalid("give one of email or actor_id")
+			}
+			a, err := rc.Q.LookupActorForSeating(ctx, dbq.LookupActorForSeatingParams{CourseID: in.CourseID, ActorID: in.ActorID, Email: email})
+			if errors.Is(err, pgx.ErrNoRows) {
+				return MemberLookupActorOut{}, apperr.Missing("nobody is registered with that email or id")
+			}
+			if err != nil {
+				return MemberLookupActorOut{}, err
+			}
+			return MemberLookupActorOut{ActorID: a.ID, DisplayName: a.DisplayName, Kind: a.Kind, Status: a.Status, MemberID: a.MemberID}, nil
 		},
 	})
 }

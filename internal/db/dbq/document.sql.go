@@ -338,10 +338,14 @@ SELECT a.id FROM assignment a
 WHERE (a.instructions_document_id = $1 OR a.rubric_document_id = $1)
   AND a.published_at IS NOT NULL
 ORDER BY a.id
+FOR KEY SHARE
 `
 
 // The published assignments that refer to the document as their instructions
-// or rubric: an event about the document is filed under each of them.
+// or rubric: an event about the document is filed under each of them. KEY
+// SHARE waits for an assignment.unpublish under way (LockAssignmentForUnpublish),
+// after which the row is read again as it left it: an assignment unpublished
+// meanwhile is not listed, and the event goes out under its unreleased name.
 func (q *Queries) ListPublishedAssignmentsUsingDocument(ctx context.Context, documentID *uuid.UUID) ([]uuid.UUID, error) {
 	rows, err := q.db.Query(ctx, listPublishedAssignmentsUsingDocument, documentID)
 	if err != nil {

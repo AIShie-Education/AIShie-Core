@@ -254,7 +254,7 @@ func TestTokensWithUnderscoresInTheSecretAuthenticate(t *testing.T) {
 	a := auth.NewAuthenticator(pool, time.Hour)
 	withUnderscore := 0
 	for range 60 {
-		tok, _, err := auth.IssueToken(ctx, dbq.New(pool), res.RootID, "t", nil, time.Now())
+		tok, _, err := auth.IssueToken(ctx, dbq.New(pool), res.RootID, nil, "t", nil, time.Now())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -280,7 +280,7 @@ func TestTheSystemActorIsNeverIssuedAToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := auth.IssueToken(ctx, dbq.New(pool), res.SystemID, "sweeps", nil, time.Now()); !apperr.Is(err, apperr.Forbidden) {
+	if _, _, err := auth.IssueToken(ctx, dbq.New(pool), res.SystemID, nil, "sweeps", nil, time.Now()); !apperr.Is(err, apperr.Forbidden) {
 		t.Fatalf("a token for the system actor: %v", err)
 	}
 	var n int

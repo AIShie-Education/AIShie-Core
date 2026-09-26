@@ -146,18 +146,19 @@ type CourseMember struct {
 }
 
 type Credential struct {
-	ID          uuid.UUID
-	ActorID     uuid.UUID
-	Kind        string
-	SecretHash  *string
-	Provider    *string
-	Subject     *string
-	TokenPrefix *string
-	Label       *string
-	LastUsedAt  *time.Time
-	ExpiresAt   *time.Time
-	RevokedAt   *time.Time
-	CreatedAt   time.Time
+	ID              uuid.UUID
+	ActorID         uuid.UUID
+	Kind            string
+	SecretHash      *string
+	Provider        *string
+	Subject         *string
+	TokenPrefix     *string
+	Label           *string
+	LastUsedAt      *time.Time
+	ExpiresAt       *time.Time
+	RevokedAt       *time.Time
+	CreatedAt       time.Time
+	IssuedByActorID *uuid.UUID
 }
 
 type Department struct {

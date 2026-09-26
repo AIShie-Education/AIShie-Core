@@ -61,6 +61,7 @@ actor(id, kind [human|agent|system], display_name, email null,
 credential(id, actor_id→actor, kind [password|sso|api_token|session|invite],
            secret_hash null, provider null, subject null, token_prefix null,
            label null, last_used_at null, expires_at null, revoked_at null, created_at,
+           issued_by_actor_id null→actor,
            unique(provider, subject), unique(token_prefix))
 
 course(id, dept_id→department, term_id→term, code, section = '', title, description null,
@@ -97,6 +98,15 @@ there is one verification path and no session table; unlike an API token it must
 (`aisinv_`) and never looked up as a bearer token. It is taken for setting the password, once,
 and revoked as it is; an actor has one live invitation at most. Setting a password some other
 way revokes it too, and so does a change of email: it went to the old one.
+
+`issued_by_actor_id` says who issued an API token: the actor themself (`credential.issue_token`)
+or an administrator (`actor.issue_token`). It is null for the other kinds, for a token made on the
+command line (`aishiterud bootstrap`, `aishiterud token issue`), and for a token issued by a
+release older than migration 0006, including one that release issues while it still runs after
+the migration. An administrator lists an actor's credentials with `actor.list_credentials` and
+revokes one with `actor.revoke_credential`, so that a token that leaks is revoked alone rather
+than by suspending its agent. Both are held to the rule for acting on an actor: only root reaches
+the credentials of another holder of a platform role, and nobody the system actor's.
 
 `course.status = 'archived'` refuses every write, from agents included.
 
@@ -166,6 +176,10 @@ the nearest one, and the choice is recorded here so that it is a decision and no
 | Reading assignments, the course, the event feed | `perm_document_read` | the most basic permission a seated member holds; what the feed *shows* is decided per event |
 | Reading the grading scheme | `perm_grade_read` | |
 | Correcting lateness (`submission.set_lateness`) | `perm_grade_submit` | not `perm_submission_write`, or a student could un-late themselves |
+| Recording a student as having handed in nothing (`submission.record_missing`) | `perm_grade_submit` | the same: what a student handed in is not theirs to declare |
+| Where every student stands on an assignment (`submission.roster`) | `perm_submission_read` | it is the submission list with the students who have not started; names and seat status only with `perm_member_read`, as the member list gives them |
+| Finding whom to seat by their whole email, or whom an actor id names (`member.lookup_actor`) | `perm_member_manage` | whoever seats members has to name them; it lists nobody |
+| Unpublishing an assignment nobody has started (`assignment.unpublish`) | `perm_assignment_write` | the undo of publishing it |
 | Regrading | the lower of `perm_grade_submit` and `perm_grade_post` | it writes a grade and makes it visible in one step |
 | Course settings, status, first instructor | `platform_role` | outside the course by definition |
 
@@ -338,6 +352,11 @@ submission(id, assignment_id, course_id, student_member_id, attempt = 1, body nu
 the submitting member belong to the same course" a database fact. That the member is a
 *student* is an application check.
 
+**Publishing can be taken back until anyone starts.** `assignment.unpublish` returns an assignment
+published by mistake to where it was, while it has no submission of any kind: a draft, a hand-in,
+or a `missing` row (recorded by hand, or when its due date passed). What the feed has already
+shown stays in it.
+
 **Submissions freeze on submit.** Once `submitted` or `late`, a trigger rejects deletion and
 every change except correcting lateness. Resubmitting is a new `attempt`. The work a grade was
 given for never changes underneath it. A hand-in that waits for approval counts from when it
@@ -426,6 +445,11 @@ work takes that row over, unless a grade has been entered or proposed for it: a 
 handing in nothing is a grade of that nothing, and the late work is then a new attempt. An
 archived course is left as archived, by the sweeps as by everyone: its expired seats, stale
 proposals and past due dates are swept once it is activated again.
+A grader need not wait for a due date, or have one: `submission.record_missing` gives one
+student with no submission row at all the same `missing` row, by hand. An assignment unpublished,
+or whose due date moved or was cleared, between the sweep's listing it and its step reaching it
+is not recorded under the step's key (`ErrSweepMoot`): published again, or given back the same
+due date, it is swept then.
 
 **`event` is something that happened, written after it did**, in the same transaction as the
 state change. Not every event has an action behind it (a due date passing); one action may
@@ -592,6 +616,15 @@ check `actor.platform_role` instead. That is the only place it is read.
   authorized in that course).
 - A published assignment's instructions have a published version, for students to read and for
   each submission to pin (§2.4), however publishing and a change of instructions interleave.
+- A submission is only ever added to a published assignment, and an assignment is unpublished
+  only while it has no submission of any kind, a draft or a `missing` row included (§2.5).
+  `assignment.unpublish` holds the assignment FOR UPDATE while it looks, and every writer of a
+  submission (`submission.create`, `submission.record_missing`, the due sweep) reads it FOR KEY
+  SHARE before it checks `published_at`: a submission made meanwhile waits and is then refused,
+  or is made first and stops the unpublish. Because that lock conflicts with every foreign key
+  to the assignment, an event naming it takes it before the event-stream lock, never under it
+  (`events.Flush`), and news of instructions or a rubric reads which assignments are published
+  under the same lock, so it is never filed under one unpublished meanwhile.
 - Grade computation, and writing a `computed` snapshot only on post. A student's totals have
   one writer at a time, which reads the scheme and the scores as they stand once it is that
   writer: a post that reaches a student after a weight has changed does not write their totals

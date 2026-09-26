@@ -17,8 +17,9 @@ UPDATE credential SET last_used_at = $2
 WHERE id = $1 AND (last_used_at IS NULL OR last_used_at < $2::timestamptz - interval '1 minute');
 
 -- name: InsertCredential :exec
-INSERT INTO credential (id, actor_id, kind, secret_hash, provider, subject, token_prefix, label, expires_at, created_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10);
+INSERT INTO credential (id, actor_id, kind, secret_hash, provider, subject, token_prefix, label, expires_at, created_at,
+                        issued_by_actor_id)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11);
 
 -- name: GetPasswordCredential :one
 SELECT id, secret_hash
@@ -44,11 +45,14 @@ WHERE id = $1 AND revoked_at IS NULL;
 SELECT id, kind FROM credential WHERE id = $1 AND actor_id = $2;
 
 -- name: ListCredentialsForActor :many
--- Never the hash.
-SELECT id, kind, provider, subject, token_prefix, label, last_used_at, expires_at, revoked_at, created_at
-FROM credential
-WHERE actor_id = $1
-ORDER BY created_at DESC, id;
+-- Never the hash. The issuer's name comes with the row, for an administrator
+-- telling one token from another.
+SELECT c.id, c.kind, c.provider, c.subject, c.token_prefix, c.label, c.last_used_at, c.expires_at, c.revoked_at,
+       c.created_at, c.issued_by_actor_id, i.display_name AS issued_by_name
+FROM credential c
+LEFT JOIN actor i ON i.id = c.issued_by_actor_id
+WHERE c.actor_id = $1
+ORDER BY c.created_at DESC, c.id;
 
 -- name: GetSSOCredential :one
 -- The account an identity provider's subject is linked to, if any.

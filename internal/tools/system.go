@@ -130,6 +130,14 @@ func memberExpire() tool.Tool {
 	})
 }
 
+// ErrSweepMoot is what submission.mark_missing returns for an assignment that
+// is no longer published and due as the sweep listed it: unpublished, or its
+// due date moved or cleared, since. It is not an apperr, so the pipeline keeps
+// nothing of the call: the sweep's key names the due date, and a no-op stored
+// under it would pass the assignment over for good once it is published again,
+// or given back the same due date.
+var ErrSweepMoot = errors.New("the assignment is no longer published and due as the sweep listed it")
+
 type MarkMissingIn struct {
 	CourseID     uuid.UUID `json:"course_id"`
 	AssignmentID uuid.UUID `json:"assignment_id"`
@@ -148,13 +156,13 @@ func submissionMarkMissing() tool.Tool {
 		Name: ToolSubmissionMarkMissing,
 		Description: "When an assignment's due date passes: record that it has, and give every current student who has " +
 			"handed in nothing a 'missing' submission, so that the gap is a row a grader can see and grade. Late work " +
-			"takes the missing row over.",
+			"takes the missing row over, unless a grade has been entered or proposed for it.",
 		Kind: tool.Write, Internal: true,
 		Resolve: func(ctx context.Context, q dbq.Querier, in MarkMissingIn) (tool.Target, error) {
 			return tool.Target{CourseID: in.CourseID, Type: "assignment", ID: &in.AssignmentID}, nil
 		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in MarkMissingIn) (MarkMissingOut, error) {
-			a, err := ec.Q.GetAssignmentInCourse(ctx, dbq.GetAssignmentInCourseParams{ID: in.AssignmentID, CourseID: in.CourseID})
+			a, err := ec.Q.GetAssignmentForSubmission(ctx, dbq.GetAssignmentForSubmissionParams{ID: in.AssignmentID, CourseID: in.CourseID})
 			if errors.Is(err, pgx.ErrNoRows) {
 				return MarkMissingOut{}, apperr.Missing("no such assignment")
 			}
@@ -162,7 +170,7 @@ func submissionMarkMissing() tool.Tool {
 				return MarkMissingOut{}, err
 			}
 			if a.PublishedAt == nil || a.DueAt == nil || !a.DueAt.Equal(in.DueAt) || a.DueAt.After(ec.Now) {
-				return MarkMissingOut{}, nil // unpublished, or the due date has moved
+				return MarkMissingOut{}, ErrSweepMoot
 			}
 			ec.Emit(events.Event{Type: EventAssignmentDuePassed, CourseID: &in.CourseID, SubjectType: "assignment",
 				SubjectID: &a.ID, AssignmentID: &a.ID})

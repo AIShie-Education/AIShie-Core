@@ -91,3 +91,14 @@ UPDATE action SET status = 'cancelled', result = $2 WHERE id = $1 AND status = '
 -- other lock looks like, where that lock would otherwise be held while one of
 -- them is waited for.
 SELECT 1 FROM course_member WHERE id = ANY(sqlc.arg(ids)::uuid[]) ORDER BY id FOR KEY SHARE;
+
+-- name: LookupActorForSeating :one
+-- The actor a whole email address, or an id, belongs to, for someone seating
+-- them, with their seat in this course if they have a live one. The email
+-- must match whole, in any case: this finds a person whose address one
+-- already has, and lists nobody.
+SELECT a.id, a.kind, a.display_name, a.status, m.id AS member_id
+FROM actor a
+LEFT JOIN course_member m ON m.actor_id = a.id AND m.course_id = sqlc.arg(course_id) AND m.status <> 'removed'
+WHERE a.kind <> 'system'
+  AND (a.id = sqlc.narg(actor_id) OR lower(a.email) = lower(sqlc.narg(email)));

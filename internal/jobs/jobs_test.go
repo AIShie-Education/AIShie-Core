@@ -905,3 +905,65 @@ func TestADueDateWithAFractionOfASecondIsSweptOnce(t *testing.T) {
 		}
 	}
 }
+
+// An assignment unpublished after the sweep listed it, and before the sweep
+// reached it, is not recorded as swept: its key names the due date, and a
+// no-op kept under it would pass the assignment over for good once it is
+// published again with the same due date.
+func TestAnAssignmentUnpublishedUnderTheSweepIsSweptWhenRepublished(t *testing.T) {
+	f := setup(t, 2)
+	due := f.now.Add(-time.Minute)
+	f.Exec(`UPDATE assignment SET due_at = $2 WHERE id = $1`, f.HW4, due)
+	hw4 := m{"course_id": f.Course, "assignment_id": f.HW4}
+	if out := f.MustCall(f.Sato, "assignment.unpublish", hw4, "oops"); out.Status != domain.StatusExecuted {
+		t.Fatalf("unpublishing HW4: %+v", out)
+	}
+	// The sweep, which listed HW4 a moment ago, reaches it now.
+	key := "job:submission.mark_missing:" + f.HW4.String() + ":" + fmt.Sprint(due.Unix())
+	_, err := f.P.InvokeSystem(context.Background(), f.system, tools.ToolSubmissionMarkMissing,
+		tools.MarkMissingIn{CourseID: f.Course, AssignmentID: f.HW4, DueAt: due}, key)
+	if !errors.Is(err, tools.ErrSweepMoot) {
+		t.Fatalf("%v, want ErrSweepMoot", err)
+	}
+	if n := f.Count(`SELECT count(*) FROM action WHERE idempotency_key = $1`, key); n != 0 {
+		t.Fatal("a sweep of an unpublished assignment was recorded under its key")
+	}
+	if rep := f.sweep(t); rep.AssignmentsClosed != 0 {
+		t.Fatalf("an unpublished assignment was swept: %+v", rep)
+	}
+	if out := f.MustCall(f.Sato, "assignment.publish", hw4, "again"); out.Status != domain.StatusExecuted {
+		t.Fatalf("publishing HW4 again: %+v", out)
+	}
+	if rep := f.sweep(t); rep.AssignmentsClosed != 1 || rep.SubmissionsMissing != 2 {
+		t.Fatalf("%+v, want HW4 closed and both students missing", rep)
+	}
+	if rep := f.sweep(t); rep.AssignmentsClosed != 0 {
+		t.Fatalf("swept twice: %+v", rep)
+	}
+}
+
+// So is one whose due date moved, or was cleared, in the same moment: given
+// back the due date the sweep listed it under, it is swept then.
+func TestAnAssignmentWhoseDueDateMovedUnderTheSweepIsSweptWhenItComesBack(t *testing.T) {
+	for name, move := range map[string]string{
+		"moved":   `UPDATE assignment SET due_at = now() + interval '1 day' WHERE id = $1`,
+		"cleared": `UPDATE assignment SET due_at = NULL WHERE id = $1`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := setup(t, 2)
+			due := f.now.Add(-time.Minute)
+			f.Exec(`UPDATE assignment SET due_at = $2 WHERE id = $1`, f.HW4, due)
+			f.Exec(move, f.HW4)
+			key := "job:submission.mark_missing:" + f.HW4.String() + ":" + fmt.Sprint(due.Unix())
+			_, err := f.P.InvokeSystem(context.Background(), f.system, tools.ToolSubmissionMarkMissing,
+				tools.MarkMissingIn{CourseID: f.Course, AssignmentID: f.HW4, DueAt: due}, key)
+			if !errors.Is(err, tools.ErrSweepMoot) {
+				t.Fatalf("%v, want ErrSweepMoot", err)
+			}
+			f.Exec(`UPDATE assignment SET due_at = $2 WHERE id = $1`, f.HW4, due)
+			if rep := f.sweep(t); rep.AssignmentsClosed != 1 || rep.SubmissionsMissing != 2 {
+				t.Fatalf("%+v, want HW4 closed and both students missing", rep)
+			}
+		})
+	}
+}

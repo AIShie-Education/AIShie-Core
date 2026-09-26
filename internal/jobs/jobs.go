@@ -24,6 +24,7 @@ package jobs
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strconv"
@@ -413,6 +414,8 @@ func (r *Runner) removeIfOrphan(ctx context.Context, u upload) (bool, error) {
 // are independent of it.
 func (r *Runner) did(out pipeline.Outcome, err error, what string, id uuid.UUID) bool {
 	switch {
+	case errors.Is(err, tools.ErrSweepMoot):
+		return false // unpublished, or its due date moved, meanwhile; swept once it is due again
 	case err != nil:
 		r.log.Error("sweep step failed", "step", what, "id", id, "err", err)
 		return false

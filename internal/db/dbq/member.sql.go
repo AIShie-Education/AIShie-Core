@@ -524,6 +524,45 @@ func (q *Queries) ListStudentScope(ctx context.Context, memberID uuid.UUID) ([]u
 	return items, nil
 }
 
+const lookupActorForSeating = `-- name: LookupActorForSeating :one
+SELECT a.id, a.kind, a.display_name, a.status, m.id AS member_id
+FROM actor a
+LEFT JOIN course_member m ON m.actor_id = a.id AND m.course_id = $1 AND m.status <> 'removed'
+WHERE a.kind <> 'system'
+  AND (a.id = $2 OR lower(a.email) = lower($3))
+`
+
+type LookupActorForSeatingParams struct {
+	CourseID uuid.UUID
+	ActorID  *uuid.UUID
+	Email    *string
+}
+
+type LookupActorForSeatingRow struct {
+	ID          uuid.UUID
+	Kind        string
+	DisplayName string
+	Status      string
+	MemberID    *uuid.UUID
+}
+
+// The actor a whole email address, or an id, belongs to, for someone seating
+// them, with their seat in this course if they have a live one. The email
+// must match whole, in any case: this finds a person whose address one
+// already has, and lists nobody.
+func (q *Queries) LookupActorForSeating(ctx context.Context, arg LookupActorForSeatingParams) (LookupActorForSeatingRow, error) {
+	row := q.db.QueryRow(ctx, lookupActorForSeating, arg.CourseID, arg.ActorID, arg.Email)
+	var i LookupActorForSeatingRow
+	err := row.Scan(
+		&i.ID,
+		&i.Kind,
+		&i.DisplayName,
+		&i.Status,
+		&i.MemberID,
+	)
+	return i, err
+}
+
 const setMemberExpiry = `-- name: SetMemberExpiry :exec
 UPDATE course_member SET expires_at = $2 WHERE id = $1
 `

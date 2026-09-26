@@ -20,16 +20,17 @@ import (
 )
 
 func assignmentTools() []tool.Tool {
-	return []tool.Tool{assignmentList(), assignmentGet(), assignmentCreate(), assignmentUpdate(), assignmentPublish()}
+	return []tool.Tool{assignmentList(), assignmentGet(), assignmentCreate(), assignmentUpdate(), assignmentPublish(), assignmentUnpublish()}
 }
 
 var writeAssignments = tool.Gate{Perms: []domain.Perm{domain.PermAssignmentWrite}}
 
 const (
-	EventAssignmentCreated   = "assignment.created"
-	EventAssignmentUpdated   = "assignment.updated"
-	EventAssignmentPublished = "assignment.published"
-	EventAssignmentDuePassed = "assignment.due_passed"
+	EventAssignmentCreated     = "assignment.created"
+	EventAssignmentUpdated     = "assignment.updated"
+	EventAssignmentPublished   = "assignment.published"
+	EventAssignmentUnpublished = "assignment.unpublished"
+	EventAssignmentDuePassed   = "assignment.due_passed"
 )
 
 type AssignmentView struct {
@@ -376,6 +377,46 @@ func assignmentPublish() tool.Tool {
 				return OK{}, apperr.Conflicts("the assignment is already published")
 			}
 			ec.Emit(events.Event{Type: EventAssignmentPublished, CourseID: &in.CourseID, SubjectType: "assignment", SubjectID: &a.ID, AssignmentID: &a.ID})
+			return OK{OK: true}, nil
+		},
+	})
+}
+
+func assignmentUnpublish() tool.Tool {
+	return tool.Define(tool.Spec[AssignmentIDIn, OK]{
+		Name: "assignment.unpublish",
+		Description: "Take back an assignment published by mistake: students no longer see it and cannot submit to it. " +
+			"Only while nobody has a submission of any kind for it, not even a draft, and no 'missing' row has been " +
+			"recorded (a due date that has passed records them); after that it stays published. " +
+			"What the activity feed has already shown stays there.",
+		Kind: tool.Write, Gate: writeAssignments,
+		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/assignments/{assignment_id}/unpublish"},
+		Resolve: func(ctx context.Context, q dbq.Querier, in AssignmentIDIn) (tool.Target, error) {
+			return assignmentTarget(ctx, q, in.CourseID, in.AssignmentID)
+		},
+		Execute: func(ctx context.Context, ec *tool.ExecCtx, in AssignmentIDIn) (OK, error) {
+			a, err := ec.Q.LockAssignmentForUnpublish(ctx, dbq.LockAssignmentForUnpublishParams{ID: in.AssignmentID, CourseID: in.CourseID})
+			if err != nil {
+				return OK{}, err
+			}
+			if a.PublishedAt == nil {
+				return OK{}, apperr.Conflicts("the assignment is not published")
+			}
+			// Once someone has started, their work hangs on the assignment
+			// being there; so does a grade for a 'missing' placeholder.
+			if started, err := ec.Q.AssignmentHasSubmissions(ctx, a.ID); err != nil {
+				return OK{}, err
+			} else if started {
+				return OK{}, apperr.Precondition("it already has submissions — a draft, a hand-in, or the 'missing' rows recorded by hand or when its due date passed — so it can no longer be unpublished")
+			}
+			n, err := ec.Q.UnpublishAssignment(ctx, a.ID)
+			if err != nil {
+				return OK{}, err
+			}
+			if n == 0 {
+				return OK{}, apperr.Conflicts("the assignment is not published")
+			}
+			ec.Emit(events.Event{Type: EventAssignmentUnpublished, CourseID: &in.CourseID, SubjectType: "assignment", SubjectID: &a.ID, AssignmentID: &a.ID})
 			return OK{OK: true}, nil
 		},
 	})

@@ -29,6 +29,63 @@ func (q *Queries) AssignmentHasLiveGrades(ctx context.Context, assignmentID uuid
 	return exists, err
 }
 
+const assignmentHasSubmissions = `-- name: AssignmentHasSubmissions :one
+SELECT EXISTS (SELECT 1 FROM submission WHERE assignment_id = $1)
+`
+
+// Any row at all: a draft, a hand-in, a 'missing' placeholder.
+func (q *Queries) AssignmentHasSubmissions(ctx context.Context, assignmentID uuid.UUID) (bool, error) {
+	row := q.db.QueryRow(ctx, assignmentHasSubmissions, assignmentID)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
+}
+
+const getAssignmentForSubmission = `-- name: GetAssignmentForSubmission :one
+SELECT id, course_id, component_id, title, instructions_document_id, rubric_document_id,
+       points_possible, due_at, published_at
+FROM assignment
+WHERE id = $1 AND course_id = $2
+FOR KEY SHARE
+`
+
+type GetAssignmentForSubmissionParams struct {
+	ID       uuid.UUID
+	CourseID uuid.UUID
+}
+
+type GetAssignmentForSubmissionRow struct {
+	ID                     uuid.UUID
+	CourseID               uuid.UUID
+	ComponentID            *uuid.UUID
+	Title                  string
+	InstructionsDocumentID *uuid.UUID
+	RubricDocumentID       *uuid.UUID
+	PointsPossible         decimal.Decimal
+	DueAt                  *time.Time
+	PublishedAt            *time.Time
+}
+
+// GetAssignmentInCourse for a tool about to add a submission to it. KEY SHARE
+// holds up nothing but LockAssignmentForUnpublish, which it waits for; then
+// the assignment is read as that left it.
+func (q *Queries) GetAssignmentForSubmission(ctx context.Context, arg GetAssignmentForSubmissionParams) (GetAssignmentForSubmissionRow, error) {
+	row := q.db.QueryRow(ctx, getAssignmentForSubmission, arg.ID, arg.CourseID)
+	var i GetAssignmentForSubmissionRow
+	err := row.Scan(
+		&i.ID,
+		&i.CourseID,
+		&i.ComponentID,
+		&i.Title,
+		&i.InstructionsDocumentID,
+		&i.RubricDocumentID,
+		&i.PointsPossible,
+		&i.DueAt,
+		&i.PublishedAt,
+	)
+	return i, err
+}
+
 const getAssignmentInCourseForUpdate = `-- name: GetAssignmentInCourseForUpdate :one
 SELECT id, course_id, component_id, title, instructions_document_id, rubric_document_id,
        points_possible, due_at, published_at
@@ -207,6 +264,40 @@ func (q *Queries) ListAssignments(ctx context.Context, arg ListAssignmentsParams
 	return items, nil
 }
 
+const lockAssignmentForUnpublish = `-- name: LockAssignmentForUnpublish :one
+SELECT id, published_at
+FROM assignment
+WHERE id = $1 AND course_id = $2
+FOR UPDATE
+`
+
+type LockAssignmentForUnpublishParams struct {
+	ID       uuid.UUID
+	CourseID uuid.UUID
+}
+
+type LockAssignmentForUnpublishRow struct {
+	ID          uuid.UUID
+	PublishedAt *time.Time
+}
+
+// FOR UPDATE, not the NO KEY UPDATE of an ordinary update: it conflicts with
+// the KEY SHARE that inserting a submission takes, and that
+// GetAssignmentForSubmission takes before it checks that the assignment is
+// published. So a submission being made waits for an unpublish and then sees
+// the assignment unpublished, or is made first and is seen by it.
+//
+// It also conflicts with the KEY SHARE of every foreign key to the
+// assignment: an event filed under it, a member's assignment scope. Those are
+// taken before the event-stream lock, never under it (events.Flush,
+// ShareAssignments), since unpublishing takes the stream lock last.
+func (q *Queries) LockAssignmentForUnpublish(ctx context.Context, arg LockAssignmentForUnpublishParams) (LockAssignmentForUnpublishRow, error) {
+	row := q.db.QueryRow(ctx, lockAssignmentForUnpublish, arg.ID, arg.CourseID)
+	var i LockAssignmentForUnpublishRow
+	err := row.Scan(&i.ID, &i.PublishedAt)
+	return i, err
+}
+
 const publishAssignment = `-- name: PublishAssignment :execrows
 UPDATE assignment SET published_at = $2 WHERE id = $1 AND published_at IS NULL
 `
@@ -218,6 +309,31 @@ type PublishAssignmentParams struct {
 
 func (q *Queries) PublishAssignment(ctx context.Context, arg PublishAssignmentParams) (int64, error) {
 	result, err := q.db.Exec(ctx, publishAssignment, arg.ID, arg.PublishedAt)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const shareAssignments = `-- name: ShareAssignments :exec
+SELECT 1 FROM assignment WHERE id = ANY($1::uuid[]) ORDER BY id FOR KEY SHARE
+`
+
+// KEY SHARE on the given assignments, in id order, for events.Flush to take
+// before the event-stream lock: an event's foreign key to its assignment
+// would otherwise wait under that lock for an unpublish, which is holding
+// the assignment and waiting for the same lock to write its own event.
+func (q *Queries) ShareAssignments(ctx context.Context, ids []uuid.UUID) error {
+	_, err := q.db.Exec(ctx, shareAssignments, ids)
+	return err
+}
+
+const unpublishAssignment = `-- name: UnpublishAssignment :execrows
+UPDATE assignment SET published_at = NULL WHERE id = $1 AND published_at IS NOT NULL
+`
+
+func (q *Queries) UnpublishAssignment(ctx context.Context, id uuid.UUID) (int64, error) {
+	result, err := q.db.Exec(ctx, unpublishAssignment, id)
 	if err != nil {
 		return 0, err
 	}

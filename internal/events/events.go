@@ -108,6 +108,13 @@ func Flush(ctx context.Context, q *dbq.Queries, b *Buffer) error {
 			return fmt.Errorf("event seats: %w", err)
 		}
 	}
+	// So with an event's assignment, which assignment.unpublish holds FOR
+	// UPDATE until it has taken the stream lock to write its own event.
+	if assignments := assignmentsOf(b.events); len(assignments) > 0 {
+		if err := q.ShareAssignments(ctx, assignments); err != nil {
+			return fmt.Errorf("event assignments: %w", err)
+		}
+	}
 	for _, key := range lockKeys(b.events) {
 		if err := q.LockEventStream(ctx, dbq.LockEventStreamParams{Namespace: lockNamespace, Stream: key}); err != nil {
 			return fmt.Errorf("event stream lock: %w", err)
@@ -146,6 +153,19 @@ func studentSeats(evs []Event) []uuid.UUID {
 		if e.StudentMemberID != nil && !seen[*e.StudentMemberID] {
 			seen[*e.StudentMemberID] = true
 			ids = append(ids, *e.StudentMemberID)
+		}
+	}
+	return ids
+}
+
+// assignmentsOf returns the distinct assignments the events name.
+func assignmentsOf(evs []Event) []uuid.UUID {
+	seen := map[uuid.UUID]bool{}
+	var ids []uuid.UUID
+	for _, e := range evs {
+		if e.AssignmentID != nil && !seen[*e.AssignmentID] {
+			seen[*e.AssignmentID] = true
+			ids = append(ids, *e.AssignmentID)
 		}
 	}
 	return ids

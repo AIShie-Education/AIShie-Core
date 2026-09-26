@@ -441,7 +441,7 @@ func token(cfg config.Config, args []string) error {
 		t := now.AddDate(0, 0, *days)
 		expires = &t
 	}
-	tok, _, err := auth.IssueToken(ctx, q, actorID, *label, expires, now)
+	tok, _, err := auth.IssueToken(ctx, q, actorID, nil, *label, expires, now)
 	if err != nil {
 		return err
 	}

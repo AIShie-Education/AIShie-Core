@@ -52,3 +52,22 @@ WHERE s.course_id = $1 AND s.id > sqlc.arg(after)
         SELECT 1 FROM member_assignment_scope y WHERE y.member_id = sqlc.arg(member_id) AND y.assignment_id = s.assignment_id))
 ORDER BY s.id
 LIMIT sqlc.arg(max_rows);
+
+-- name: ListAssignmentRoster :many
+-- Every current student of the course whom the caller's student scope
+-- reaches, with their latest attempt at one assignment, if any: the students
+-- who have not started are rows too, with no submission. The caller's
+-- assignment scope is checked on the target, before this runs.
+SELECT m.id AS student_member_id, a.display_name, m.status AS member_status,
+       s.id AS submission_id, s.attempt, s.state, s.submitted_at
+FROM course_member m
+JOIN actor a ON a.id = m.actor_id
+LEFT JOIN submission s ON s.assignment_id = sqlc.arg(assignment_id) AND s.student_member_id = m.id
+    AND s.attempt = (SELECT max(z.attempt) FROM submission z
+                     WHERE z.assignment_id = sqlc.arg(assignment_id) AND z.student_member_id = m.id)
+WHERE m.course_id = sqlc.arg(course_id) AND m.role = 'student' AND m.status <> 'removed'
+  AND m.id > sqlc.arg(after)
+  AND (sqlc.arg(student_all)::bool OR EXISTS (
+        SELECT 1 FROM member_student_scope y WHERE y.member_id = sqlc.arg(member_id) AND y.student_member_id = m.id))
+ORDER BY m.id
+LIMIT sqlc.arg(max_rows);
