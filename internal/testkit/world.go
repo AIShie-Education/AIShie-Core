@@ -127,11 +127,13 @@ func (w *World) Member(course, actor uuid.UUID, preset string, opts ...MemberOpt
 			id, course_id, actor_id, role, preset_id, added_by_actor_id, student_scope, assignment_scope,
 			perm_document_read, perm_document_read_draft, perm_document_write, perm_rubric_read,
 			perm_assignment_write, perm_submission_read, perm_submission_write, perm_grade_read,
-			perm_grade_submit, perm_grade_post, perm_member_read, perm_member_manage, perm_action_decide)
+			perm_grade_submit, perm_grade_post, perm_member_read, perm_member_manage, perm_action_decide,
+			perm_agent_delegate, perm_conversation_ask, perm_conversation_answer)
 		SELECT $1, $2, $3, p.role, p.id, $4, p.student_scope, p.assignment_scope,
 			p.perm_document_read, p.perm_document_read_draft, p.perm_document_write, p.perm_rubric_read,
 			p.perm_assignment_write, p.perm_submission_read, p.perm_submission_write, p.perm_grade_read,
-			p.perm_grade_submit, p.perm_grade_post, p.perm_member_read, p.perm_member_manage, p.perm_action_decide
+			p.perm_grade_submit, p.perm_grade_post, p.perm_member_read, p.perm_member_manage, p.perm_action_decide,
+			p.perm_agent_delegate, p.perm_conversation_ask, p.perm_conversation_answer
 		FROM permission_preset p WHERE p.name = $5 AND p.dept_id IS NULL`,
 		id, course, actor, w.Root, preset)
 
@@ -142,6 +144,41 @@ func (w *World) Member(course, actor uuid.UUID, preset string, opts ...MemberOpt
 	}
 	w.Exec(`INSERT INTO member_student_scope (member_id, student_member_id)
 	        SELECT id, id FROM course_member WHERE id = $1 AND role = 'student' AND student_scope = 'listed'`, id)
+	for _, o := range opts {
+		o(w, id)
+	}
+	return id
+}
+
+// OwnedAgent registers an agent that owner owns.
+func (w *World) OwnedAgent(owner uuid.UUID, name string) uuid.UUID {
+	w.T.Helper()
+	id := ids.New()
+	w.Exec(`INSERT INTO actor (id, kind, display_name, owner_actor_id, created_by_actor_id) VALUES ($1, 'agent', $2, $3, $3)`,
+		id, name, owner)
+	return id
+}
+
+// Delegate seats an owned agent as the delegate of principal, its owner's
+// seat, copying a built-in preset as Member does. Its scope is left as the
+// preset says, lists empty: opts narrow or widen it.
+func (w *World) Delegate(course, agent, principal uuid.UUID, preset string, opts ...MemberOpt) uuid.UUID {
+	w.T.Helper()
+	id := ids.New()
+	w.Exec(`
+		INSERT INTO course_member (
+			id, course_id, actor_id, role, preset_id, added_by_actor_id, student_scope, assignment_scope,
+			perm_document_read, perm_document_read_draft, perm_document_write, perm_rubric_read,
+			perm_assignment_write, perm_submission_read, perm_submission_write, perm_grade_read,
+			perm_grade_submit, perm_grade_post, perm_member_read, perm_member_manage, perm_action_decide,
+			perm_agent_delegate, perm_conversation_ask, perm_conversation_answer, principal_member_id)
+		SELECT $1, $2, $3, p.role, p.id, $4, p.student_scope, p.assignment_scope,
+			p.perm_document_read, p.perm_document_read_draft, p.perm_document_write, p.perm_rubric_read,
+			p.perm_assignment_write, p.perm_submission_read, p.perm_submission_write, p.perm_grade_read,
+			p.perm_grade_submit, p.perm_grade_post, p.perm_member_read, p.perm_member_manage, p.perm_action_decide,
+			p.perm_agent_delegate, p.perm_conversation_ask, p.perm_conversation_answer, $6
+		FROM permission_preset p WHERE p.name = $5 AND p.dept_id IS NULL`,
+		id, course, agent, w.Root, preset, principal)
 	for _, o := range opts {
 		o(w, id)
 	}

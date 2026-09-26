@@ -19,19 +19,30 @@ SELECT EXISTS (
       AND a.published_at IS NOT NULL
       AND ($2::bool OR EXISTS (
             SELECT 1 FROM member_assignment_scope y WHERE y.member_id = $3 AND y.assignment_id = a.id))
+      AND ($4::bool OR EXISTS (
+            SELECT 1 FROM member_assignment_scope py WHERE py.member_id = $5 AND py.assignment_id = a.id))
 )
 `
 
 type DocumentInUseByPublishedAssignmentParams struct {
-	DocumentID    *uuid.UUID
-	AssignmentAll bool
-	MemberID      uuid.UUID
+	DocumentID             *uuid.UUID
+	AssignmentAll          bool
+	MemberID               uuid.UUID
+	PrincipalAssignmentAll bool
+	PrincipalID            uuid.UUID
 }
 
 // Whether a published assignment within the member's scope refers to the
-// document as its instructions or rubric.
+// document as its instructions or rubric. A delegate's scope is its
+// principal's too.
 func (q *Queries) DocumentInUseByPublishedAssignment(ctx context.Context, arg DocumentInUseByPublishedAssignmentParams) (bool, error) {
-	row := q.db.QueryRow(ctx, documentInUseByPublishedAssignment, arg.DocumentID, arg.AssignmentAll, arg.MemberID)
+	row := q.db.QueryRow(ctx, documentInUseByPublishedAssignment,
+		arg.DocumentID,
+		arg.AssignmentAll,
+		arg.MemberID,
+		arg.PrincipalAssignmentAll,
+		arg.PrincipalID,
+	)
 	var exists bool
 	err := row.Scan(&exists)
 	return exists, err
@@ -227,21 +238,25 @@ WHERE d.course_id = $1 AND d.id > $2
         SELECT 1 FROM assignment a
         WHERE (a.instructions_document_id = d.id OR a.rubric_document_id = d.id) AND a.published_at IS NOT NULL
           AND ($7::bool OR EXISTS (
-                SELECT 1 FROM member_assignment_scope y WHERE y.member_id = $8 AND y.assignment_id = a.id))))
+                SELECT 1 FROM member_assignment_scope y WHERE y.member_id = $8 AND y.assignment_id = a.id))
+          AND ($9::bool OR EXISTS (
+                SELECT 1 FROM member_assignment_scope py WHERE py.member_id = $10 AND py.assignment_id = a.id))))
 ORDER BY d.id
-LIMIT $9
+LIMIT $11
 `
 
 type ListCourseDocumentsParams struct {
-	CourseID           uuid.UUID
-	After              uuid.UUID
-	Kinds              []string
-	IncludeUnpublished bool
-	IncludeArchived    bool
-	WritesAssignments  bool
-	AssignmentAll      bool
-	MemberID           uuid.UUID
-	MaxRows            int32
+	CourseID               uuid.UUID
+	After                  uuid.UUID
+	Kinds                  []string
+	IncludeUnpublished     bool
+	IncludeArchived        bool
+	WritesAssignments      bool
+	AssignmentAll          bool
+	MemberID               uuid.UUID
+	PrincipalAssignmentAll bool
+	PrincipalID            uuid.UUID
+	MaxRows                int32
 }
 
 type ListCourseDocumentsRow struct {
@@ -269,6 +284,8 @@ func (q *Queries) ListCourseDocuments(ctx context.Context, arg ListCourseDocumen
 		arg.WritesAssignments,
 		arg.AssignmentAll,
 		arg.MemberID,
+		arg.PrincipalAssignmentAll,
+		arg.PrincipalID,
 		arg.MaxRows,
 	)
 	if err != nil {
@@ -526,14 +543,21 @@ SELECT EXISTS (
             SELECT 1 FROM member_student_scope x WHERE x.member_id = $3 AND x.student_member_id = s.student_member_id))
       AND ($4::bool OR EXISTS (
             SELECT 1 FROM member_assignment_scope y WHERE y.member_id = $3 AND y.assignment_id = s.assignment_id))
+      AND ($5::bool OR EXISTS (
+            SELECT 1 FROM member_student_scope px WHERE px.member_id = $6 AND px.student_member_id = s.student_member_id))
+      AND ($7::bool OR EXISTS (
+            SELECT 1 FROM member_assignment_scope py WHERE py.member_id = $6 AND py.assignment_id = s.assignment_id))
 )
 `
 
 type VersionPinnedInScopeParams struct {
-	VersionID     *uuid.UUID
-	StudentAll    bool
-	MemberID      uuid.UUID
-	AssignmentAll bool
+	VersionID              *uuid.UUID
+	StudentAll             bool
+	MemberID               uuid.UUID
+	AssignmentAll          bool
+	PrincipalStudentAll    bool
+	PrincipalID            uuid.UUID
+	PrincipalAssignmentAll bool
 }
 
 // Is this version the one some submission within the member's scope was
@@ -545,6 +569,9 @@ func (q *Queries) VersionPinnedInScope(ctx context.Context, arg VersionPinnedInS
 		arg.StudentAll,
 		arg.MemberID,
 		arg.AssignmentAll,
+		arg.PrincipalStudentAll,
+		arg.PrincipalID,
+		arg.PrincipalAssignmentAll,
 	)
 	var exists bool
 	err := row.Scan(&exists)

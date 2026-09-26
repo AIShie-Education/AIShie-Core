@@ -37,7 +37,7 @@ test: ## Go tests, against TEST_DATABASE_URL
 	go test -race -shuffle=on -coverprofile=cover.out ./...
 
 .PHONY: db-test-sql
-db-test-sql: ## psql suite: migrations up, seed, constraint tests, down, up again
+db-test-sql: ## psql suite: migrations up, seed, constraint tests, down (over the fixtures in src/tests/down), up again
 	@createdb $(SQLTEST_DB)
 	@trap 'dropdb --if-exists $(SQLTEST_DB)' EXIT; \
 	ups=$$(ls src/migrations/*.up.sql | sort); \
@@ -47,7 +47,12 @@ db-test-sql: ## psql suite: migrations up, seed, constraint tests, down, up agai
 	out=$$(psql -X -d $(SQLTEST_DB) -f src/tests/constraints_test.sql 2>&1) || { echo "$$out" | grep -E 'FAIL|ERROR' ; exit 1; }; \
 	echo "$$out" | grep -q 'All checks passed.' || { echo "$$out" | tail -5; exit 1; }; \
 	echo "tests $$(echo "$$out" | grep -c 'NOTICE:  PASS') checks passed"; \
-	for f in $$downs; do echo "down  $$f"; $(PSQL) -d $(SQLTEST_DB) -f $$f; done; \
+	for f in $$downs; do \
+		n=$$(basename $$f | cut -c1-4); \
+		if [ -f src/tests/down/$$n.before.sql ]; then echo "fixt  src/tests/down/$$n.before.sql"; $(PSQL) -d $(SQLTEST_DB) -f src/tests/down/$$n.before.sql; fi; \
+		echo "down  $$f"; $(PSQL) -d $(SQLTEST_DB) -f $$f; \
+		if [ -f src/tests/down/$$n.after.sql ]; then $(PSQL) -d $(SQLTEST_DB) -f src/tests/down/$$n.after.sql; fi; \
+	done; \
 	left=$$(psql -X -At -d $(SQLTEST_DB) -c "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public'"); \
 	[ "$$left" = "0" ] || { echo "down left $$left tables behind"; exit 1; }; \
 	for f in $$ups; do echo "up    $$f"; $(PSQL) -d $(SQLTEST_DB) -f $$f; done

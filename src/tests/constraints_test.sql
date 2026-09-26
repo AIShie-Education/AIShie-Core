@@ -231,6 +231,85 @@ SELECT pg_temp.fails('preset_id must name an existing preset', '23503', $q$
     VALUES ('00000000-0000-0000-0000-000000000042', '00000000-0000-0000-0000-000000000032',
             '00000000-0000-0000-0000-000000000034', '00000000-0000-0000-0000-000000000099', 'student', 'listed', 'all') $q$);
 
+-- Agents a person owns, and their delegate seats ------------------------------
+-- 38 Yuki's agent · 5a its seat in A, as Yuki's (52) delegate
+SELECT pg_temp.ok('a person owns an agent', $q$
+    INSERT INTO actor (id, kind, display_name, owner_actor_id, created_by_actor_id)
+    VALUES ('00000000-0000-0000-0000-000000000038', 'agent', 'Yuki''s agent', '00000000-0000-0000-0000-000000000035', '00000000-0000-0000-0000-000000000035') $q$);
+SELECT pg_temp.fails('an agent owns no agent', '23514', $q$
+    INSERT INTO actor (kind, display_name, owner_actor_id, created_by_actor_id)
+    VALUES ('agent', 'x', '00000000-0000-0000-0000-000000000036', '00000000-0000-0000-0000-000000000031') $q$);
+SELECT pg_temp.fails('the system actor owns nothing', '23514', $q$
+    INSERT INTO actor (kind, display_name, owner_actor_id, created_by_actor_id)
+    VALUES ('agent', 'x', '00000000-0000-0000-0000-000000000033', '00000000-0000-0000-0000-000000000031') $q$);
+SELECT pg_temp.fails('only an agent has an owner', '23514', $q$
+    INSERT INTO actor (kind, display_name, owner_actor_id, created_by_actor_id)
+    VALUES ('human', 'x', '00000000-0000-0000-0000-000000000035', '00000000-0000-0000-0000-000000000031') $q$);
+SELECT pg_temp.fails('an owner is an actor that exists', '23514', $q$
+    INSERT INTO actor (kind, display_name, owner_actor_id, created_by_actor_id)
+    VALUES ('agent', 'x', '00000000-0000-0000-0000-0000000000ff', '00000000-0000-0000-0000-000000000031') $q$);
+SELECT pg_temp.fails('an agent is not moved under another agent', '23514', $q$
+    UPDATE actor SET owner_actor_id = '00000000-0000-0000-0000-000000000036' WHERE id = '00000000-0000-0000-0000-000000000038' $q$);
+SELECT pg_temp.fails('nothing owns itself', '23514', $q$
+    UPDATE actor SET owner_actor_id = id WHERE id = '00000000-0000-0000-0000-000000000038' $q$);
+SELECT pg_temp.fails('who suspended an actor is an actor', '23503', $q$
+    UPDATE actor SET suspended_by_actor_id = '00000000-0000-0000-0000-0000000000ff' WHERE id = '00000000-0000-0000-0000-000000000038' $q$);
+SELECT pg_temp.ok('making an actor active again forgets who suspended it', $q$
+    UPDATE actor SET status = 'suspended', suspended_by_actor_id = '00000000-0000-0000-0000-000000000035' WHERE id = '00000000-0000-0000-0000-000000000038';
+    UPDATE actor SET status = 'active' WHERE id = '00000000-0000-0000-0000-000000000038';
+    DO $chk$
+    BEGIN
+        IF EXISTS (SELECT 1 FROM actor WHERE id = '00000000-0000-0000-0000-000000000038' AND suspended_by_actor_id IS NOT NULL) THEN
+            RAISE EXCEPTION 'suspended_by_actor_id outlived the suspension';
+        END IF;
+    END $chk$ $q$);
+SELECT pg_temp.ok('an owned agent is seated as its owner''s delegate', $q$
+    INSERT INTO course_member (id, course_id, actor_id, role, added_by_actor_id, student_scope, assignment_scope, principal_member_id)
+    VALUES ('00000000-0000-0000-0000-00000000005a', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000000038', 'assistant', '00000000-0000-0000-0000-000000000035', 'listed', 'all', '00000000-0000-0000-0000-000000000052') $q$);
+SELECT pg_temp.fails('an owned agent is not seated without a principal', '23514', $q$
+    INSERT INTO course_member (course_id, actor_id, role, added_by_actor_id, student_scope, assignment_scope)
+    VALUES ('00000000-0000-0000-0000-000000000042', '00000000-0000-0000-0000-000000000038', 'assistant', '00000000-0000-0000-0000-000000000034', 'all', 'all') $q$);
+SELECT pg_temp.fails('nor as the delegate of someone other than its owner', '23514', $q$
+    INSERT INTO course_member (course_id, actor_id, role, added_by_actor_id, student_scope, assignment_scope, principal_member_id)
+    VALUES ('00000000-0000-0000-0000-000000000042', '00000000-0000-0000-0000-000000000038', 'assistant', '00000000-0000-0000-0000-000000000035', 'listed', 'all', '00000000-0000-0000-0000-000000000055') $q$);
+SELECT pg_temp.fails('a principal is a seat in the same course', '23503', $q$
+    INSERT INTO course_member (course_id, actor_id, role, added_by_actor_id, student_scope, assignment_scope, principal_member_id)
+    VALUES ('00000000-0000-0000-0000-000000000042', '00000000-0000-0000-0000-000000000038', 'assistant', '00000000-0000-0000-0000-000000000035', 'listed', 'all', '00000000-0000-0000-0000-000000000052') $q$);
+SELECT pg_temp.fails('an actor nobody owns is nobody''s delegate', '23514', $q$
+    INSERT INTO course_member (course_id, actor_id, role, added_by_actor_id, student_scope, assignment_scope, principal_member_id)
+    VALUES ('00000000-0000-0000-0000-000000000042', '00000000-0000-0000-0000-000000000036', 'assistant', '00000000-0000-0000-0000-000000000034', 'all', 'all', '00000000-0000-0000-0000-000000000055') $q$);
+SELECT pg_temp.fails('a seat is not its own principal', '23514', $q$
+    UPDATE course_member SET principal_member_id = id WHERE id = '00000000-0000-0000-0000-00000000005a' $q$);
+SELECT pg_temp.fails('a delegate''s principal is nobody''s delegate', '23514', $q$
+    -- A removed seat is history and is not checked, so it can name a
+    -- principal it should not; a delegate cannot then name it.
+    INSERT INTO course_member (id, course_id, actor_id, role, status, added_by_actor_id, student_scope, assignment_scope, principal_member_id)
+    VALUES ('00000000-0000-0000-0000-00000000005b', '00000000-0000-0000-0000-000000000042', '00000000-0000-0000-0000-000000000035', 'student', 'removed', '00000000-0000-0000-0000-000000000034', 'listed', 'all', '00000000-0000-0000-0000-000000000055');
+    INSERT INTO course_member (course_id, actor_id, role, added_by_actor_id, student_scope, assignment_scope, principal_member_id)
+    VALUES ('00000000-0000-0000-0000-000000000042', '00000000-0000-0000-0000-000000000038', 'assistant', '00000000-0000-0000-0000-000000000035', 'listed', 'all', '00000000-0000-0000-0000-00000000005b') $q$);
+SELECT pg_temp.fails('a delegate seat is not resumed once its actor has another owner', '23514', $q$
+    UPDATE course_member SET status = 'paused' WHERE id = '00000000-0000-0000-0000-00000000005a';
+    UPDATE actor SET owner_actor_id = '00000000-0000-0000-0000-000000000037' WHERE id = '00000000-0000-0000-0000-000000000038';
+    UPDATE course_member SET status = 'active' WHERE id = '00000000-0000-0000-0000-00000000005a' $q$);
+SELECT pg_temp.ok('a removed delegate seat is history: its actor''s owner may change', $q$
+    UPDATE course_member SET status = 'removed' WHERE id = '00000000-0000-0000-0000-00000000005a';
+    UPDATE actor SET owner_actor_id = '00000000-0000-0000-0000-000000000037' WHERE id = '00000000-0000-0000-0000-000000000038';
+    UPDATE actor SET owner_actor_id = NULL WHERE id = '00000000-0000-0000-0000-000000000038';
+    INSERT INTO course_member (course_id, actor_id, role, added_by_actor_id, student_scope, assignment_scope)
+    VALUES ('00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000000038', 'assistant', '00000000-0000-0000-0000-000000000034', 'all', 'all') $q$);
+SELECT pg_temp.ok('the new permissions default to denied on both tables', $q$
+    DO $chk$
+    BEGIN
+        IF EXISTS (SELECT 1 FROM course_member WHERE id = '00000000-0000-0000-0000-00000000005a'
+                   AND (perm_agent_delegate, perm_conversation_ask, perm_conversation_answer)
+                       <> ('denied', 'denied', 'denied'))
+           OR EXISTS (SELECT 1 FROM permission_preset WHERE id = '00000000-0000-0000-0000-000000000091'
+                   AND (perm_agent_delegate, perm_conversation_ask, perm_conversation_answer)
+                       <> ('denied', 'denied', 'denied')) THEN
+            RAISE EXCEPTION 'a new permission does not default to denied';
+        END IF;
+    END $chk$ $q$);
+
 -- Grading scheme -------------------------------------------------------------
 SELECT pg_temp.fails('one root component per course', '23505', $q$
     INSERT INTO grade_component (course_id, name) VALUES ('00000000-0000-0000-0000-000000000041', 'Another total') $q$);

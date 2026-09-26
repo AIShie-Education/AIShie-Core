@@ -8,6 +8,7 @@ import (
 
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/apperr"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/auth"
+	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/authz"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/db/dbq"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/tool"
 )
@@ -66,6 +67,9 @@ type Membership struct {
 	ExpiresAt       *time.Time `json:"expires_at,omitempty"`
 	StudentScope    string     `json:"student_scope"`
 	AssignmentScope string     `json:"assignment_scope"`
+	// A member may always know their own seat, as authorization reads it.
+	PrincipalMemberID *uuid.UUID `json:"principal_member_id,omitempty" jsonschema:"when you are someone's delegate, their seat in the course: you hold nothing they do not"`
+	Perms             PermLevels `json:"perms" jsonschema:"what you may do in the course now, before scope: your own levels, capped by your principal's if you are a delegate; all denied while the seat does not count"`
 }
 
 type MembershipsOut struct {
@@ -75,7 +79,7 @@ type MembershipsOut struct {
 func meMemberships() tool.Tool {
 	return tool.Define(tool.Spec[Empty, MembershipsOut]{
 		Name: "me.memberships",
-		Description: "The courses the caller is seated in, with the member id for each. " +
+		Description: "The courses the caller is seated in, with the member id for each and what the caller may do there. " +
 			"An agent starting cold begins here: every other tool takes a course_id.",
 		Kind: tool.Read, Gate: self,
 		HTTP:    tool.Route{Method: "GET", Pattern: "/v1/me/memberships"},
@@ -87,10 +91,17 @@ func meMemberships() tool.Tool {
 			}
 			out := MembershipsOut{Memberships: make([]Membership, 0, len(rows))}
 			for _, r := range rows {
+				// One more lookup a seat: an actor holds few, and what each
+				// allows is worked out as authorization works it out.
+				m, err := authz.LoadMember(ctx, rc.Q, r.MemberID)
+				if err != nil {
+					return MembershipsOut{}, err
+				}
 				out.Memberships = append(out.Memberships, Membership{
 					MemberID: r.MemberID, CourseID: r.CourseID, Code: r.Code, Section: r.Section, Title: r.Title,
 					CourseStatus: r.CourseStatus, Role: r.Role, Status: r.Status, ExpiresAt: r.ExpiresAt,
 					StudentScope: r.StudentScope, AssignmentScope: r.AssignmentScope,
+					PrincipalMemberID: r.PrincipalMemberID, Perms: effectivePerms(m, rc.Now),
 				})
 			}
 			return out, nil

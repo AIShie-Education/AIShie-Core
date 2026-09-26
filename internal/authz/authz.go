@@ -5,14 +5,19 @@
 //	1. actor.status = 'active' and course.status ≠ 'archived' (for writes), else denied
 //	2. member = the actor's course_member in this course with status = 'active'
 //	   and (expires_at null or in the future); none → denied
+//	   a delegate's seat: its principal the same, held by its actor's
+//	   active owner; else denied
 //	3. level = member.perm_<action_type>; 'denied' → denied
+//	   a delegate's: the lower of its own and its principal's
 //	4. if the target belongs to a student: member.student_scope = 'all', or
 //	   that student ∈ member_student_scope; else denied
+//	   a delegate: its principal's scope too
 //	5. if the target belongs to an assignment: same with assignment_scope
 //	6. return level
 //
-// One indexed lookup and at most two existence checks. Nothing is cached, so
-// removing a member takes effect on its next call.
+// One indexed lookup and at most two existence checks, for a delegate twice
+// that. Nothing is cached, so removing a member takes effect on its next
+// call.
 //
 // Two facts are never read here: whether the actor is a human or an agent,
 // and the member's roster role. domain.Actor and domain.Member do not carry
@@ -39,15 +44,19 @@ import (
 type Reason string
 
 const (
-	ReasonNone            Reason = ""
-	ReasonActorNotActive  Reason = "actor_not_active"
-	ReasonCourseArchived  Reason = "course_archived"
-	ReasonNotAMember      Reason = "not_a_member"
-	ReasonMemberNotLive   Reason = "membership_not_active" // paused, removed or expired
-	ReasonPermDenied      Reason = "permission_denied"
-	ReasonStudentScope    Reason = "student_out_of_scope"
-	ReasonAssignmentScope Reason = "assignment_out_of_scope"
-	ReasonPlatformRole    Reason = "platform_role_required"
+	ReasonNone           Reason = ""
+	ReasonActorNotActive Reason = "actor_not_active"
+	ReasonCourseArchived Reason = "course_archived"
+	ReasonNotAMember     Reason = "not_a_member"
+	ReasonMemberNotLive  Reason = "membership_not_active" // paused, removed or expired
+	// A delegate whose principal is paused, removed or expired, or held by
+	// an owner who is suspended or is no longer the delegate's; or an owned
+	// agent's seat with no principal at all.
+	ReasonPrincipalNotActive Reason = "principal_not_active"
+	ReasonPermDenied         Reason = "permission_denied"
+	ReasonStudentScope       Reason = "student_out_of_scope"
+	ReasonAssignmentScope    Reason = "assignment_out_of_scope"
+	ReasonPlatformRole       Reason = "platform_role_required"
 )
 
 // Decision is the result of a check. Member is set whenever a membership row
@@ -95,6 +104,9 @@ func Evaluate(actor domain.Actor, courseStatus string, member *domain.Member, pe
 	if !member.Live(now) {
 		return deny(ReasonMemberNotLive, member)
 	}
+	if !member.PrincipalLive(now) {
+		return deny(ReasonPrincipalNotActive, member)
+	}
 	levels := make([]domain.Level, len(perms))
 	for i, p := range perms {
 		levels[i] = member.Perm(p)
@@ -123,10 +135,17 @@ func ForActor(ctx context.Context, q dbq.Querier, actorID, courseID uuid.UUID, p
 	var member *domain.Member
 	var row dbq.GetLiveMemberForAuthzRow
 	if write {
-		// A write holds its caller's seat to the end, and takes it first.
+		// A write holds its caller's seat to the end, and takes it first;
+		// a delegate's principal second, read again once it is held.
 		var locked dbq.LockLiveMemberForAuthzRow
 		locked, err = q.LockLiveMemberForAuthz(ctx, dbq.LockLiveMemberForAuthzParams{CourseID: courseID, ActorID: actorID})
 		row = dbq.GetLiveMemberForAuthzRow(locked)
+		if err == nil && row.PrincipalMemberID != nil {
+			var p dbq.LockPrincipalForAuthzRow
+			if p, err = q.LockPrincipalForAuthz(ctx, *row.PrincipalMemberID); err == nil {
+				withPrincipal(&row, p)
+			}
+		}
 	} else {
 		row, err = q.GetLiveMemberForAuthz(ctx, dbq.GetLiveMemberForAuthzParams{CourseID: courseID, ActorID: actorID})
 	}
@@ -164,10 +183,37 @@ func ForMember(ctx context.Context, q dbq.Querier, memberID uuid.UUID, perms []d
 	return Evaluate(actor, course.Status, member, perms, write, now), nil
 }
 
+// LoadMember reads one seat by id as authorization sees it, principal and
+// all, locking nothing. It is for what shows or measures a seat — what a
+// member may do, what a delegate may be given — not for deciding a call.
+func LoadMember(ctx context.Context, q dbq.Querier, memberID uuid.UUID) (*domain.Member, error) {
+	row, err := q.GetMemberForAuthz(ctx, memberID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, apperr.Missing("no such member")
+	}
+	if err != nil {
+		return nil, fmt.Errorf("load member: %w", err)
+	}
+	return memberFromRow(row), nil
+}
+
 // CheckScope is steps 4 and 5. It returns ReasonNone when the whole target is
 // within the member's scope. 'listed' with nothing listed matches nothing:
-// scope fails closed.
+// scope fails closed. A delegate reaches only what it and its principal both
+// reach: the principal's scope may have narrowed since the delegate was
+// seated, and nothing narrows the delegate's with it.
 func CheckScope(ctx context.Context, q dbq.Querier, m *domain.Member, t Target) (Reason, error) {
+	reason, err := checkOwnScope(ctx, q, m, t)
+	if err != nil || reason != ReasonNone || m.PrincipalID == nil {
+		return reason, err
+	}
+	if m.Principal == nil {
+		return ReasonPrincipalNotActive, nil
+	}
+	return checkOwnScope(ctx, q, m.Principal, t)
+}
+
+func checkOwnScope(ctx context.Context, q dbq.Querier, m *domain.Member, t Target) (Reason, error) {
 	if students := distinct(t.StudentMemberIDs); len(students) > 0 && m.StudentScope != domain.ScopeAll {
 		n, err := q.CountStudentsInScope(ctx, dbq.CountStudentsInScopeParams{MemberID: m.ID, StudentMemberIds: students})
 		if err != nil {
@@ -246,29 +292,43 @@ func LoadActor(ctx context.Context, q dbq.Querier, id uuid.UUID) (domain.Actor, 
 //	(@student_all OR EXISTS (SELECT 1 FROM member_student_scope
 //	                         WHERE member_id = @member_id AND student_member_id = x.student_member_id))
 //
-// and the same for assignments.
+// and the same for assignments; and the same again with the principal's, for
+// a delegate, which reaches only what its principal reaches too. For any
+// other seat the principal's pair is "all", and adds nothing. The lists never
+// lean on anything a write keeps in step: the previous release narrows a
+// principal without touching its delegates.
 type ScopeFilter struct {
 	MemberID      uuid.UUID
 	StudentAll    bool
 	AssignmentAll bool
+
+	PrincipalID            uuid.UUID
+	PrincipalStudentAll    bool
+	PrincipalAssignmentAll bool
 }
 
 func FilterFor(m *domain.Member) ScopeFilter {
-	return ScopeFilter{
-		MemberID:      m.ID,
-		StudentAll:    m.StudentScope == domain.ScopeAll,
-		AssignmentAll: m.AssignmentScope == domain.ScopeAll,
+	f := ScopeFilter{
+		MemberID:               m.ID,
+		StudentAll:             m.StudentScope == domain.ScopeAll,
+		AssignmentAll:          m.AssignmentScope == domain.ScopeAll,
+		PrincipalStudentAll:    true,
+		PrincipalAssignmentAll: true,
 	}
+	if m.PrincipalID != nil {
+		// A delegate whose principal was not loaded reaches nobody: the
+		// principal's lists are then those of no seat at all.
+		f.PrincipalID, f.PrincipalStudentAll, f.PrincipalAssignmentAll = *m.PrincipalID, false, false
+		if p := m.Principal; p != nil {
+			f.PrincipalStudentAll = p.StudentScope == domain.ScopeAll
+			f.PrincipalAssignmentAll = p.AssignmentScope == domain.ScopeAll
+		}
+	}
+	return f
 }
 
 func memberFromRow(r dbq.GetMemberForAuthzRow) *domain.Member {
-	lv := func(l dbq.AutonomyLevel) domain.Level {
-		// The enum and domain.Level share their names; an unknown value
-		// cannot come out of the column, and would be Denied if it did.
-		v, _ := domain.ParseLevel(string(l))
-		return v
-	}
-	return &domain.Member{
+	m := &domain.Member{
 		ID:              r.ID,
 		CourseID:        r.CourseID,
 		ActorID:         r.ActorID,
@@ -276,22 +336,79 @@ func memberFromRow(r dbq.GetMemberForAuthzRow) *domain.Member {
 		ExpiresAt:       r.ExpiresAt,
 		StudentScope:    r.StudentScope,
 		AssignmentScope: r.AssignmentScope,
-		Perms: map[domain.Perm]domain.Level{
-			domain.PermDocumentRead:      lv(r.PermDocumentRead),
-			domain.PermDocumentReadDraft: lv(r.PermDocumentReadDraft),
-			domain.PermDocumentWrite:     lv(r.PermDocumentWrite),
-			domain.PermRubricRead:        lv(r.PermRubricRead),
-			domain.PermAssignmentWrite:   lv(r.PermAssignmentWrite),
-			domain.PermSubmissionRead:    lv(r.PermSubmissionRead),
-			domain.PermSubmissionWrite:   lv(r.PermSubmissionWrite),
-			domain.PermGradeRead:         lv(r.PermGradeRead),
-			domain.PermGradeSubmit:       lv(r.PermGradeSubmit),
-			domain.PermGradePost:         lv(r.PermGradePost),
-			domain.PermMemberRead:        lv(r.PermMemberRead),
-			domain.PermMemberManage:      lv(r.PermMemberManage),
-			domain.PermActionDecide:      lv(r.PermActionDecide),
-		},
+		Perms: levels(r.PermDocumentRead, r.PermDocumentReadDraft, r.PermDocumentWrite, r.PermRubricRead,
+			r.PermAssignmentWrite, r.PermSubmissionRead, r.PermSubmissionWrite, r.PermGradeRead,
+			r.PermGradeSubmit, r.PermGradePost, r.PermMemberRead, r.PermMemberManage, r.PermActionDecide,
+			r.PermAgentDelegate, r.PermConversationAsk, r.PermConversationAnswer),
+		PrincipalID: r.PrincipalMemberID,
+		SeatValid:   r.OwnerMatches,
 	}
+	if r.PrincipalMemberID == nil {
+		return m
+	}
+	if r.PrincipalActorID == nil || r.PrincipalStatus == nil || r.PrincipalStudentScope == nil || r.PrincipalAssignmentScope == nil {
+		// The composite key makes this impossible; if it happens, the
+		// delegate holds nothing.
+		m.SeatValid = false
+		return m
+	}
+	m.SeatValid = m.SeatValid && r.PrincipalActorStatus != nil && *r.PrincipalActorStatus == domain.ActorActive
+	m.Principal = &domain.Member{
+		ID:              *r.PrincipalMemberID,
+		CourseID:        r.CourseID,
+		ActorID:         *r.PrincipalActorID,
+		Status:          *r.PrincipalStatus,
+		ExpiresAt:       r.PrincipalExpiresAt,
+		StudentScope:    *r.PrincipalStudentScope,
+		AssignmentScope: *r.PrincipalAssignmentScope,
+		Perms: levels(orDenied(r.PrincipalPermDocumentRead), orDenied(r.PrincipalPermDocumentReadDraft), orDenied(r.PrincipalPermDocumentWrite),
+			orDenied(r.PrincipalPermRubricRead), orDenied(r.PrincipalPermAssignmentWrite), orDenied(r.PrincipalPermSubmissionRead),
+			orDenied(r.PrincipalPermSubmissionWrite), orDenied(r.PrincipalPermGradeRead), orDenied(r.PrincipalPermGradeSubmit),
+			orDenied(r.PrincipalPermGradePost), orDenied(r.PrincipalPermMemberRead), orDenied(r.PrincipalPermMemberManage),
+			orDenied(r.PrincipalPermActionDecide), orDenied(r.PrincipalPermAgentDelegate), orDenied(r.PrincipalPermConversationAsk),
+			orDenied(r.PrincipalPermConversationAnswer)),
+		// A principal is nobody's delegate (course_member_principal_valid),
+		// and its actor is a person, whom nobody owns.
+		SeatValid: true,
+	}
+	return m
+}
+
+// withPrincipal puts the principal as it was read under its lock in place of
+// what the seat's own query read of it before.
+func withPrincipal(row *dbq.GetLiveMemberForAuthzRow, p dbq.LockPrincipalForAuthzRow) {
+	row.PrincipalActorID, row.PrincipalStatus, row.PrincipalExpiresAt = &p.ActorID, &p.Status, p.ExpiresAt
+	row.PrincipalStudentScope, row.PrincipalAssignmentScope = &p.StudentScope, &p.AssignmentScope
+	row.PrincipalActorStatus = &p.ActorStatus
+	row.PrincipalPermDocumentRead, row.PrincipalPermDocumentReadDraft = &p.PermDocumentRead, &p.PermDocumentReadDraft
+	row.PrincipalPermDocumentWrite, row.PrincipalPermRubricRead = &p.PermDocumentWrite, &p.PermRubricRead
+	row.PrincipalPermAssignmentWrite, row.PrincipalPermSubmissionRead = &p.PermAssignmentWrite, &p.PermSubmissionRead
+	row.PrincipalPermSubmissionWrite, row.PrincipalPermGradeRead = &p.PermSubmissionWrite, &p.PermGradeRead
+	row.PrincipalPermGradeSubmit, row.PrincipalPermGradePost = &p.PermGradeSubmit, &p.PermGradePost
+	row.PrincipalPermMemberRead, row.PrincipalPermMemberManage = &p.PermMemberRead, &p.PermMemberManage
+	row.PrincipalPermActionDecide, row.PrincipalPermAgentDelegate = &p.PermActionDecide, &p.PermAgentDelegate
+	row.PrincipalPermConversationAsk, row.PrincipalPermConversationAnswer = &p.PermConversationAsk, &p.PermConversationAnswer
+}
+
+// levels maps column values, given in domain.AllPerms order, to the ladder.
+// The enum and domain.Level share their names; an unknown value cannot come
+// out of the column, and would be Denied if it did.
+func levels(cols ...dbq.AutonomyLevel) map[domain.Perm]domain.Level {
+	out := make(map[domain.Perm]domain.Level, len(domain.AllPerms))
+	for i, p := range domain.AllPerms {
+		if i < len(cols) {
+			out[p], _ = domain.ParseLevel(string(cols[i]))
+		}
+	}
+	return out
+}
+
+// orDenied reads a column of an outer join: absent is denied.
+func orDenied(l *dbq.AutonomyLevel) dbq.AutonomyLevel {
+	if l == nil {
+		return dbq.AutonomyLevel(domain.Denied.String())
+	}
+	return *l
 }
 
 func distinct(ids []uuid.UUID) []uuid.UUID {

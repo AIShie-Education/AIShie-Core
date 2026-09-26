@@ -80,7 +80,7 @@ var visibility = map[string][]domain.Perm{
 	// Platform events belong to no course, so they are in no course's feed.
 	// They are listed so that leaving them out is visibly a decision.
 	EventActorRegistered: nil, EventActorUpdated: nil, EventActorInvited: nil, EventActorCredentialRevoked: nil,
-	EventActorSuspended: nil, EventActorReactivated: nil,
+	EventActorSuspended: nil, EventActorReactivated: nil, EventAgentCreated: nil,
 }
 
 // KnownEventTypes lists every event type that has a visibility rule.
@@ -170,6 +170,7 @@ func eventList() tool.Tool {
 			rows, err := rc.Q.ListEvents(ctx, dbq.ListEventsParams{
 				CourseID: &in.CourseID, SinceSeq: in.SinceSeq, MaxRows: limit, VisibleTypes: visibleTypes(rc.Member),
 				MemberID: &rc.Scope.MemberID, StudentAll: rc.Scope.StudentAll, AssignmentAll: rc.Scope.AssignmentAll,
+				PrincipalID: rc.Scope.PrincipalID, PrincipalStudentAll: rc.Scope.PrincipalStudentAll, PrincipalAssignmentAll: rc.Scope.PrincipalAssignmentAll,
 			})
 			out := EventListOut{Events: make([]EventView, 0, len(rows)), NextSeq: in.SinceSeq, More: len(rows) == int(limit)}
 			for _, r := range rows {

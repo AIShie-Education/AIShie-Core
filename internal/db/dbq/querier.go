@@ -14,6 +14,8 @@ import (
 type Querier interface {
 	AddAssignmentScope(ctx context.Context, arg AddAssignmentScopeParams) error
 	AddStudentScope(ctx context.Context, arg AddStudentScopeParams) error
+	// When an agent last used a token that still works: no row if never.
+	AgentLastSeen(ctx context.Context, arg AgentLastSeenParams) ([]*time.Time, error)
 	// Entered and not replaced: a draft waiting to be posted counts, since what it
 	// was entered against would change under it just the same.
 	AssignmentHasLiveGrades(ctx context.Context, assignmentID uuid.UUID) (bool, error)
@@ -29,12 +31,17 @@ type Querier interface {
 	// Any entered grade, live, on the component, on a component beneath it, or
 	// on a submission to an assignment beneath it.
 	ComponentSubtreeHasLiveGrades(ctx context.Context, componentID uuid.UUID) (bool, error)
+	// The agents a person owns that are not suspended: what the limit counts.
+	CountActiveAgentsOf(ctx context.Context, ownerActorID *uuid.UUID) (int64, error)
 	CountAssignmentsInScope(ctx context.Context, arg CountAssignmentsInScopeParams) (int64, error)
 	CountAssignmentsOfCourse(ctx context.Context, arg CountAssignmentsOfCourseParams) (int64, error)
 	CountBuiltinPresets(ctx context.Context) (int64, error)
 	CountComponentAssignments(ctx context.Context, componentID *uuid.UUID) (int64, error)
 	CountComponentChildren(ctx context.Context, parentID *uuid.UUID) (int64, error)
 	CountRootActors(ctx context.Context) (int64, error)
+	// Seats an actor holds, not removed, in courses that are not archived: while
+	// there is one, its owner does not change.
+	CountSeatsInOpenCourses(ctx context.Context, actorID uuid.UUID) (int64, error)
 	CountStudentsInScope(ctx context.Context, arg CountStudentsInScopeParams) (int64, error)
 	// How many of the given member ids are current students of this course.
 	CountStudentsOfCourse(ctx context.Context, arg CountStudentsOfCourseParams) (int64, error)
@@ -45,16 +52,18 @@ type Querier interface {
 	DeleteStaleSessions(ctx context.Context, expiredBefore *time.Time) (int64, error)
 	DepartmentExists(ctx context.Context, id uuid.UUID) (bool, error)
 	// Whether a published assignment within the member's scope refers to the
-	// document as its instructions or rubric.
+	// document as its instructions or rubric. A delegate's scope is its
+	// principal's too.
 	DocumentInUseByPublishedAssignment(ctx context.Context, arg DocumentInUseByPublishedAssignmentParams) (bool, error)
 	EmailTaken(ctx context.Context, lower string) (bool, error)
 	EmailTakenByAnother(ctx context.Context, arg EmailTakenByAnotherParams) (bool, error)
-	// Whether the actor had a hand in escalating the action, from any seat: made
-	// the review that escalated it, or approved that review, or confirmed that
-	// approval, and so on up. An approved review is carried out as its proposer,
-	// so the seat the escalation is recorded against is only the first of these;
-	// each approval is an executed action.decide about the one before, made from
-	// the seat that approved it.
+	// Whether the actor, or anyone of the same party (SameParty), had a hand in
+	// escalating the action, from any seat: made the review that escalated it,
+	// or approved that review, or confirmed that approval, and so on up. An
+	// approved review is carried out as its proposer, so the seat the escalation
+	// is recorded against is only the first of these; each approval is an
+	// executed action.decide about the one before, made from the seat that
+	// approved it.
 	EscalatedBy(ctx context.Context, arg EscalatedByParams) (bool, error)
 	// Moves a proposal to its end state. The status guard makes a lost race
 	// between two deciders, or a decider and the expiry sweep, a no-op.
@@ -121,17 +130,25 @@ type Querier interface {
 	GetInviteByPrefix(ctx context.Context, tokenPrefix *string) (GetInviteByPrefixRow, error)
 	GetLatestVersion(ctx context.Context, documentID uuid.UUID) (DocumentVersion, error)
 	GetLiveComputedGrade(ctx context.Context, arg GetLiveComputedGradeParams) (GetLiveComputedGradeRow, error)
+	// A seat comes with its principal, when it is a delegate's: the principal's
+	// standing, scope and levels cap the delegate's (domain.Member). The three
+	// queries below select the same columns, in the same order. owner_matches
+	// says the seat is what its actor's ownership says it must be: no principal
+	// for an actor nobody owns, the owner's seat for one somebody does. An owner
+	// can change after a seat was taken, and the seat then stops counting.
 	// The partial unique index allows at most one row per (course, actor) that is
 	// not removed. A paused row is returned so the caller can say why it denied.
 	GetLiveMemberForAuthz(ctx context.Context, arg GetLiveMemberForAuthzParams) (GetLiveMemberForAuthzRow, error)
 	// Not locked: a live seat found here is only refused, and locking it would
 	// wait for its member's calls in flight, and could deadlock with them, to say
-	// no. A seat past its expiry is locked by id before it is removed.
+	// no. A seat past its expiry, or orphaned (SeatOrphaned), is locked by id
+	// before it is removed.
 	GetLiveMembership(ctx context.Context, arg GetLiveMembershipParams) (GetLiveMembershipRow, error)
 	// By id, removed rows included: re-authorizing a proposal checks the very
 	// membership it was made under, not whatever row the actor holds today.
 	GetMemberForAuthz(ctx context.Context, id uuid.UUID) (GetMemberForAuthzRow, error)
 	GetMemberForSweep(ctx context.Context, id uuid.UUID) (GetMemberForSweepRow, error)
+	// The seat, with whom it is and, for an agent someone owns, whose.
 	GetMemberInCourse(ctx context.Context, arg GetMemberInCourseParams) (GetMemberInCourseRow, error)
 	// The same row, locked for the rest of the transaction: the management tools
 	// read a seat and write it back, and two of them at once must take turns.
@@ -143,6 +160,9 @@ type Querier interface {
 	GetRosterEntry(ctx context.Context, arg GetRosterEntryParams) (GetRosterEntryRow, error)
 	// The account an identity provider's subject is linked to, if any.
 	GetSSOCredential(ctx context.Context, arg GetSSOCredentialParams) (GetSSOCredentialRow, error)
+	// Which seat a seat is a delegate of, if any. Whose delegate a seat is never
+	// changes, so it may be read before anything is locked.
+	GetSeatPrincipal(ctx context.Context, id uuid.UUID) (*uuid.UUID, error)
 	GetSubmissionFull(ctx context.Context, arg GetSubmissionFullParams) (Submission, error)
 	// GetSubmissionFull, locked until the transaction ends, so that what
 	// submission.submit checks is what it hands in: an edit to the draft, or a
@@ -178,14 +198,20 @@ type Querier interface {
 	// the name or of the email, in any case, taken as it is: strpos has no
 	// wildcards to escape.
 	ListActors(ctx context.Context, arg ListActorsParams) ([]ListActorsRow, error)
+	// A person's agents, oldest first, with what their owner needs to see at a
+	// glance: when one last used a token that still works, how many seats it
+	// holds that count now, and how many requests to seat it wait for a
+	// decision.
+	ListAgentsOf(ctx context.Context, arg ListAgentsOfParams) ([]ListAgentsOfRow, error)
 	// Every current student of the course whom the caller's student scope
 	// reaches, with their latest attempt at one assignment, if any: the students
 	// who have not started are rows too, with no submission. The caller's
-	// assignment scope is checked on the target, before this runs.
+	// assignment scope is checked on the target, before this runs. A delegate
+	// reaches only the students its principal reaches too.
 	ListAssignmentRoster(ctx context.Context, arg ListAssignmentRosterParams) ([]ListAssignmentRosterRow, error)
 	ListAssignmentScope(ctx context.Context, memberID uuid.UUID) ([]uuid.UUID, error)
-	// Scope is applied here, not afterwards. A member who may not write
-	// assignments sees only published ones.
+	// Scope is applied here, not afterwards, a delegate's principal's included. A
+	// member who may not write assignments sees only published ones.
 	ListAssignments(ctx context.Context, arg ListAssignmentsParams) ([]Assignment, error)
 	// Published assignments of open courses whose due date has passed and which
 	// have not been swept for that due date yet. The sweep's own action row is
@@ -204,6 +230,9 @@ type Querier interface {
 	// Never the hash. The issuer's name comes with the row, for an administrator
 	// telling one token from another.
 	ListCredentialsForActor(ctx context.Context, actorID uuid.UUID) ([]ListCredentialsForActorRow, error)
+	// The proposals to seat an agent as someone's delegate that wait for a
+	// decision.
+	ListDelegateRequestsFor(ctx context.Context, targetID *uuid.UUID) ([]ListDelegateRequestsForRow, error)
 	ListDepartments(ctx context.Context) ([]Department, error)
 	// The live drafts waiting to be posted for one assignment.
 	ListDraftGradeIDsForAssignment(ctx context.Context, arg ListDraftGradeIDsForAssignmentParams) ([]uuid.UUID, error)
@@ -214,7 +243,9 @@ type Querier interface {
 	//   * student scope, exactly as authorize() step 4;
 	//   * assignment scope as step 5, including its extra case: an event that
 	//     names a student but no assignment (a total, a component grade) spans
-	//     assignments and is for members whose assignment scope is the whole course.
+	//     assignments and is for members whose assignment scope is the whole course;
+	//   * for a delegate, both again with its principal's scope ("all" for any
+	//     other seat).
 	ListEvents(ctx context.Context, arg ListEventsParams) ([]ListEventsRow, error)
 	ListEventsForAction(ctx context.Context, actionID *uuid.UUID) ([]ListEventsForActionRow, error)
 	// Not only open courses: a draft course takes writes, and its seats expire.
@@ -246,6 +277,12 @@ type Querier interface {
 	// a page of listed files at a time to it, and asks again about each one it
 	// removes, under the lock attaching takes.
 	ListOrphanUploads(ctx context.Context, arg ListOrphanUploadsParams) ([]ListOrphanUploadsRow, error)
+	// Seats that count for nothing for good (SeatOrphaned), not yet removed: a
+	// delegate's whose principal is removed or past its expiry, which the
+	// previous release removes without its delegates, and seats that do not
+	// match their actor's ownership. authorize() refuses them already; removing
+	// them cancels what they proposed and clears the way for a fresh seat.
+	ListOrphanedSeats(ctx context.Context, arg ListOrphanedSeatsParams) ([]ListOrphanedSeatsRow, error)
 	ListPendingReviewActions(ctx context.Context, arg ListPendingReviewActionsParams) ([]Action, error)
 	// Built-ins, plus one department's own when a department is named.
 	ListPresets(ctx context.Context, deptID *uuid.UUID) ([]PermissionPreset, error)
@@ -257,6 +294,9 @@ type Querier interface {
 	// after which the row is read again as it left it: an assignment unpublished
 	// meanwhile is not listed, and the event goes out under its unreleased name.
 	ListPublishedAssignmentsUsingDocument(ctx context.Context, documentID *uuid.UUID) ([]uuid.UUID, error)
+	// Every seat an actor holds that is not removed, with its course and the
+	// name of the preset it was copied from.
+	ListSeatsOfActor(ctx context.Context, actorID uuid.UUID) ([]ListSeatsOfActorRow, error)
 	// What the background sweeps look for. Each returns a small batch; the sweep
 	// runs again on the next tick. None of these is what makes the system
 	// correct — authorize() ignores an expired member on every call and approval
@@ -312,7 +352,28 @@ type Querier interface {
 	// which then waits for the call, or the call waits for it and sees what it
 	// did. Taking the seat before anything else keeps one order for every write,
 	// the seat first: the order the action row's foreign key to it always had.
+	//
+	// Only the caller's own seat is locked here. A delegate's principal is
+	// locked next, by LockPrincipalForAuthz, and read again as it then stands:
+	// a delegate's seat, then its principal's, is the order everything that
+	// takes both takes them in (pipeline.Decide included).
 	LockLiveMemberForAuthz(ctx context.Context, arg LockLiveMemberForAuthzParams) (LockLiveMemberForAuthzRow, error)
+	// Every seat of one roster role that is not removed or past its expiry,
+	// except one, locked in id order: member.update_perms_bulk changes them all
+	// or none. Choosing seats by role is what the manager asked for; it is not
+	// authorization, which each change goes through on its own.
+	LockLiveSeatsByRole(ctx context.Context, arg LockLiveSeatsByRoleParams) ([]uuid.UUID, error)
+	// An owner's agents are counted against the limit one creation, or one
+	// reactivation, at a time. NO KEY UPDATE, not UPDATE: the call's own action
+	// row, and every other action row naming the owner, holds KEY SHARE on this
+	// row through its foreign key, and FOR UPDATE would wait for all of them,
+	// and deadlock with another call of the owner's doing the same.
+	LockOwnerForAgents(ctx context.Context, id uuid.UUID) error
+	// A delegate's principal, KEY SHARE, to the end of a call the delegate
+	// writes: removing, pausing or narrowing the principal waits for the call,
+	// or the call waits for it and, reading the row again here, sees what it
+	// did.
+	LockPrincipalForAuthz(ctx context.Context, id uuid.UUID) (LockPrincipalForAuthzRow, error)
 	// Serialises attaching one upload. Held until the transaction ends.
 	LockStorageKey(ctx context.Context, storageKey string) error
 	// One writer of a student's rolled-up totals at a time.
@@ -325,9 +386,10 @@ type Querier interface {
 	// All of one student's attempts at one assignment, locked, newest first.
 	LockSubmissionsOf(ctx context.Context, arg LockSubmissionsOfParams) ([]LockSubmissionsOfRow, error)
 	// The actor a whole email address, or an id, belongs to, for someone seating
-	// them, with their seat in this course if they have a live one. The email
-	// must match whole, in any case: this finds a person whose address one
-	// already has, and lists nobody.
+	// them, with their seat in this course if they have a live one, and their
+	// owner if they are an agent someone owns. The email must match whole, in
+	// any case: this finds a person whose address one already has, and lists
+	// nobody.
 	LookupActorForSeating(ctx context.Context, arg LookupActorForSeatingParams) (LookupActorForSeatingRow, error)
 	MarkActionExecuted(ctx context.Context, arg MarkActionExecutedParams) error
 	MarkActionFailed(ctx context.Context, arg MarkActionFailedParams) error
@@ -336,12 +398,25 @@ type Querier interface {
 	NewestSubmissionDraftAt(ctx context.Context, submissionID *uuid.UUID) (time.Time, error)
 	PostGrade(ctx context.Context, arg PostGradeParams) (int64, error)
 	PublishAssignment(ctx context.Context, arg PublishAssignmentParams) (int64, error)
+	ReactivateActor(ctx context.Context, id uuid.UUID) (int64, error)
+	// Only a suspension the owner made: one an administrator made, or one made
+	// before this was recorded, is an administrator's to lift.
+	ReactivateAgentByOwner(ctx context.Context, arg ReactivateAgentByOwnerParams) (int64, error)
 	ReleaseJobLock(ctx context.Context, key int64) (bool, error)
+	// A principal's removal takes its delegates' seats with it, whatever their
+	// status. The principal is held FOR UPDATE by whoever removes it; these rows
+	// are only updated, FOR NO KEY UPDATE, which the KEY SHARE a delegate's call
+	// in flight holds on its own seat does not wait for: the call waits instead
+	// for the principal, and then finds it removed.
+	RemoveDelegatesOf(ctx context.Context, principalMemberID *uuid.UUID) ([]uuid.UUID, error)
 	// A 'missing' row is a placeholder written when the due date passed with
 	// nothing handed in. Late work takes it over rather than sitting beside it.
 	ReopenMissingSubmission(ctx context.Context, arg ReopenMissingSubmissionParams) error
 	// Linking again an identity that was unlinked from the same actor.
 	ReviveSSOCredential(ctx context.Context, id uuid.UUID) error
+	// Every token and session an actor has: they may be in the hands of
+	// whoever owned it before.
+	RevokeBearerCredentials(ctx context.Context, arg RevokeBearerCredentialsParams) error
 	// Only the owner's own credential; someone else's id changes nothing.
 	RevokeCredential(ctx context.Context, arg RevokeCredentialParams) (int64, error)
 	RevokeCredentialByID(ctx context.Context, arg RevokeCredentialByIDParams) error
@@ -349,8 +424,21 @@ type Querier interface {
 	// set (by it or otherwise), and when the email it was sent to changes.
 	RevokeInvites(ctx context.Context, arg RevokeInvitesParams) error
 	RevokePasswordCredentials(ctx context.Context, arg RevokePasswordCredentialsParams) error
+	// Whether two actors are one party, for four eyes: the same actor, one the
+	// other's owner, or two agents of one owner. An agent acts only as its
+	// owner's delegate, so neither of them checks the other's work, and nor does
+	// another of the owner's agents. Null owners compare as nothing.
+	SameParty(ctx context.Context, arg SamePartyParams) (bool, error)
+	// Whether a seat counts for nothing for good, whatever becomes of it: a
+	// delegate's whose principal is removed or past its expiry, or one that does
+	// not match its actor's ownership (an owned agent's seat with no principal,
+	// or with one that is not its owner's). Neither a removed seat nor an expired
+	// one comes back, and an owner is not changed while the agent has a seat in
+	// a course that is not archived (actor.set_owner), where only this could
+	// find it.
+	SeatOrphaned(ctx context.Context, arg SeatOrphanedParams) (bool, error)
 	SetActionReview(ctx context.Context, arg SetActionReviewParams) (int64, error)
-	SetActorStatus(ctx context.Context, arg SetActorStatusParams) (int64, error)
+	SetActorOwner(ctx context.Context, arg SetActorOwnerParams) error
 	SetComponentParent(ctx context.Context, arg SetComponentParentParams) error
 	SetCourseStatus(ctx context.Context, arg SetCourseStatusParams) (int64, error)
 	SetDocumentStatus(ctx context.Context, arg SetDocumentStatusParams) (int64, error)
@@ -373,7 +461,9 @@ type Querier interface {
 	ShareAssignments(ctx context.Context, ids []uuid.UUID) error
 	// KEY SHARE on the given seats, in id order: what taking them before some
 	// other lock looks like, where that lock would otherwise be held while one of
-	// them is waited for.
+	// them is waited for. A delegate's seat and its principal's are not taken
+	// together in id order but in two calls, the delegate's first: that is the
+	// order its own calls take them in (LockLiveMemberForAuthz).
 	ShareSeats(ctx context.Context, ids []uuid.UUID) error
 	StorageKeyInUse(ctx context.Context, storageKey *string) (bool, error)
 	// A grade entered, or proposed and not yet decided: either way, one is on its
@@ -384,6 +474,11 @@ type Querier interface {
 	SupersedeGrade(ctx context.Context, arg SupersedeGradeParams) (int64, error)
 	// A new draft replaces earlier drafts for the same submission.
 	SupersedeSubmissionDrafts(ctx context.Context, arg SupersedeSubmissionDraftsParams) error
+	// An administrator's suspension. It is made over an active actor, or over
+	// one its owner has suspended, which it then takes over: from then on it is
+	// the administrator's to lift, not the owner's.
+	SuspendActor(ctx context.Context, arg SuspendActorParams) (int64, error)
+	SuspendAgentByOwner(ctx context.Context, arg SuspendAgentByOwnerParams) (int64, error)
 	TermExists(ctx context.Context, id uuid.UUID) (bool, error)
 	// At most one write a minute per credential, however busy it is. The cast is
 	// needed: left to itself, PostgreSQL reads $2 - interval as interval - interval,

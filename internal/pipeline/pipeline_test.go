@@ -683,6 +683,100 @@ func TestNobodyClosesTheirOwnEscalationAtOneRemove(t *testing.T) {
 	status("someone else closing it", review(other, graded3.ActionID, "reviewed", "other3"), domain.StatusExecuted)
 }
 
+// An agent someone owns acts only as their delegate, so four eyes counts
+// its owner and it, and any other agent of the owner's, as one party: none
+// decides or reviews another's action, at any remove, nor closes an
+// escalation another raised. Anyone else may.
+func TestOneOwnersAgentsAndTheOwnerAreOneParty(t *testing.T) {
+	c := testkit.NewCS101(t, 3)
+	decider := []testkit.MemberOpt{testkit.ListedStudents(c.Students[0].Member, c.Students[1].Member, c.Students[2].Member),
+		testkit.WithPerm(domain.PermActionDecide, domain.Autonomous)}
+	satoBot := c.OwnedAgent(c.Sato, "Sato's agent")
+	c.Delegate(c.Course, satoBot, c.SatoM, "delegate", append(decider, testkit.WithPerm(domain.PermGradeSubmit, domain.ConfirmRequired))...)
+	satoBot2 := c.OwnedAgent(c.Sato, "Sato's other agent")
+	c.Delegate(c.Course, satoBot2, c.SatoM, "delegate", decider...)
+	mori := c.Actor("human", "Mori")
+	moriM := c.Member(c.Course, mori, "instructor", testkit.WithPerm(domain.PermGradeSubmit, domain.ConfirmRequired))
+	moriBot := c.OwnedAgent(mori, "Mori's agent")
+	c.Delegate(c.Course, moriBot, moriM, "delegate", decider...)
+	triage := c.Actor("agent", "triage")
+	c.Member(c.Course, triage, "ta", testkit.WithPerm(domain.PermActionDecide, domain.ConfirmRequired))
+
+	decide := func(actor uuid.UUID, action *uuid.UUID, key string) pipeline.Outcome {
+		t.Helper()
+		return c.MustCall(actor, "action.decide", m{"course_id": c.Course, "action_id": action, "decision": "approve"}, key)
+	}
+	review := func(actor uuid.UUID, action *uuid.UUID, outcome, key string) pipeline.Outcome {
+		t.Helper()
+		return c.MustCall(actor, "action.review", m{"course_id": c.Course, "action_id": action, "outcome": outcome}, key)
+	}
+	refused := func(what string, out pipeline.Outcome) {
+		t.Helper()
+		if out.Status != domain.StatusFailed || out.Error == nil || out.Error.Code != apperr.Forbidden {
+			t.Fatalf("%s: %+v", what, out)
+		}
+	}
+	executed := func(what string, out pipeline.Outcome) {
+		t.Helper()
+		if out.Status != domain.StatusExecuted {
+			t.Fatalf("%s: %+v", what, out)
+		}
+		if out.Result != nil {
+			if v := testkit.Result[pipeline.DecideOut](t, out); v.Outcome != "" && v.Outcome != domain.StatusExecuted {
+				t.Fatalf("%s: %+v", what, v)
+			}
+		}
+	}
+
+	// The owner does not approve their agent's proposal, nor does another
+	// of their agents.
+	fromBot := c.MustCall(satoBot, "grade.submit", submitArgs(c, c.Students[0], 81), "bot")
+	if fromBot.Status != domain.StatusProposed {
+		t.Fatalf("Sato's agent grading: %+v", fromBot)
+	}
+	refused("Sato approving his agent's proposal", decide(c.Sato, fromBot.ActionID, "sato"))
+	refused("Sato's other agent approving it", decide(satoBot2, fromBot.ActionID, "bot2"))
+	// Nor at one remove: someone else's approval of it that waits for a
+	// person is not Sato's to confirm.
+	nested := decide(triage, fromBot.ActionID, "triage")
+	if nested.Status != domain.StatusProposed {
+		t.Fatalf("the triage agent's approval: %+v", nested)
+	}
+	refused("Sato confirming an approval of his agent's proposal", decide(c.Sato, nested.ActionID, "sato-nested"))
+	refused("Sato's other agent confirming it", decide(satoBot2, nested.ActionID, "bot2-nested"))
+	executed("Mori confirming it", decide(mori, nested.ActionID, "mori-nested"))
+
+	// An agent does not approve its owner's proposal.
+	fromMori := c.MustCall(mori, "grade.submit", submitArgs(c, c.Students[1], 62), "mori")
+	if fromMori.Status != domain.StatusProposed {
+		t.Fatalf("Mori grading: %+v", fromMori)
+	}
+	refused("Mori's agent approving Mori's proposal", decide(moriBot, fromMori.ActionID, "moribot"))
+	executed("Sato's agent approving Mori's", decide(satoBot, fromMori.ActionID, "satobot"))
+
+	// Nor reviews it, and an escalation one of the party raised is for
+	// someone outside it to close.
+	c.Exec(`UPDATE course_member SET perm_grade_submit = 'pending_review' WHERE id = $1`, moriM)
+	underReview := c.MustCall(mori, "grade.submit", submitArgs(c, c.Students[2], 55), "mori-review")
+	if underReview.ReviewState != domain.ReviewPending {
+		t.Fatalf("Mori's grade under review: %+v", underReview)
+	}
+	refused("Mori's agent reviewing Mori's grade", review(moriBot, underReview.ActionID, "reviewed", "moribot-review"))
+	executed("Sato escalating Mori's grade", review(c.Sato, underReview.ActionID, "escalated", "sato-escalate"))
+	refused("Sato's agent closing Sato's escalation", review(satoBot, underReview.ActionID, "reviewed", "satobot-close"))
+	closing := review(triage, underReview.ActionID, "reviewed", "triage-close")
+	if closing.Status != domain.StatusProposed {
+		t.Fatalf("the triage agent's review: %+v", closing)
+	}
+	refused("Sato's agent approving a review that closes Sato's escalation", decide(satoBot2, closing.ActionID, "bot2-close"))
+	other := c.Actor("human", "Other reviewer")
+	c.Member(c.Course, other, "instructor")
+	executed("someone outside both parties closing it", decide(other, closing.ActionID, "other-close"))
+	if n := c.Count(`SELECT count(*) FROM action WHERE id = $1 AND review_state = 'reviewed'`, *underReview.ActionID); n != 1 {
+		t.Fatal("Mori's grade was not closed by someone outside the parties")
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Proposals: re-authorization and expiry
 // ---------------------------------------------------------------------------
@@ -1143,7 +1237,7 @@ func TestACallThatLosesADeadlockIsMadeAgain(t *testing.T) {
 		Validate: func(_ context.Context, _ dbq.Querier, _ *domain.Member, in onceIn) error {
 			return lose("validate", in)
 		},
-		Pin: func(_ context.Context, _ dbq.Querier, _ time.Time, in onceIn) (onceIn, error) {
+		Pin: func(_ context.Context, _ dbq.Querier, _ *domain.Member, _ time.Time, in onceIn) (onceIn, error) {
 			return in, lose("pin", in)
 		},
 		Execute: func(_ context.Context, _ *tool.ExecCtx, in onceIn) (probeOut, error) {

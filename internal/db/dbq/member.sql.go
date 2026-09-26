@@ -126,7 +126,8 @@ type GetLiveMembershipRow struct {
 
 // Not locked: a live seat found here is only refused, and locking it would
 // wait for its member's calls in flight, and could deadlock with them, to say
-// no. A seat past its expiry is locked by id before it is removed.
+// no. A seat past its expiry, or orphaned (SeatOrphaned), is locked by id
+// before it is removed.
 func (q *Queries) GetLiveMembership(ctx context.Context, arg GetLiveMembershipParams) (GetLiveMembershipRow, error) {
 	row := q.db.QueryRow(ctx, getLiveMembership, arg.CourseID, arg.ActorID)
 	var i GetLiveMembershipRow
@@ -135,9 +136,10 @@ func (q *Queries) GetLiveMembership(ctx context.Context, arg GetLiveMembershipPa
 }
 
 const getMemberInCourse = `-- name: GetMemberInCourse :one
-SELECT m.id, m.course_id, m.actor_id, m.role, m.status, m.preset_id, m.added_by_actor_id, m.expires_at, m.student_scope, m.assignment_scope, m.perm_document_read, m.perm_document_read_draft, m.perm_document_write, m.perm_rubric_read, m.perm_assignment_write, m.perm_submission_read, m.perm_submission_write, m.perm_grade_read, m.perm_grade_submit, m.perm_grade_post, m.perm_member_read, m.perm_member_manage, m.perm_action_decide, m.created_at, a.display_name, a.kind AS actor_kind
+SELECT m.id, m.course_id, m.actor_id, m.role, m.status, m.preset_id, m.added_by_actor_id, m.expires_at, m.student_scope, m.assignment_scope, m.perm_document_read, m.perm_document_read_draft, m.perm_document_write, m.perm_rubric_read, m.perm_assignment_write, m.perm_submission_read, m.perm_submission_write, m.perm_grade_read, m.perm_grade_submit, m.perm_grade_post, m.perm_member_read, m.perm_member_manage, m.perm_action_decide, m.created_at, m.principal_member_id, m.perm_agent_delegate, m.perm_conversation_ask, m.perm_conversation_answer, a.display_name, a.kind AS actor_kind, a.owner_actor_id, o.display_name AS owner_name
 FROM course_member m
 JOIN actor a ON a.id = m.actor_id
+LEFT JOIN actor o ON o.id = a.owner_actor_id
 WHERE m.id = $1 AND m.course_id = $2
 `
 
@@ -147,34 +149,41 @@ type GetMemberInCourseParams struct {
 }
 
 type GetMemberInCourseRow struct {
-	ID                    uuid.UUID
-	CourseID              uuid.UUID
-	ActorID               uuid.UUID
-	Role                  string
-	Status                string
-	PresetID              *uuid.UUID
-	AddedByActorID        uuid.UUID
-	ExpiresAt             *time.Time
-	StudentScope          string
-	AssignmentScope       string
-	PermDocumentRead      AutonomyLevel
-	PermDocumentReadDraft AutonomyLevel
-	PermDocumentWrite     AutonomyLevel
-	PermRubricRead        AutonomyLevel
-	PermAssignmentWrite   AutonomyLevel
-	PermSubmissionRead    AutonomyLevel
-	PermSubmissionWrite   AutonomyLevel
-	PermGradeRead         AutonomyLevel
-	PermGradeSubmit       AutonomyLevel
-	PermGradePost         AutonomyLevel
-	PermMemberRead        AutonomyLevel
-	PermMemberManage      AutonomyLevel
-	PermActionDecide      AutonomyLevel
-	CreatedAt             time.Time
-	DisplayName           string
-	ActorKind             string
+	ID                     uuid.UUID
+	CourseID               uuid.UUID
+	ActorID                uuid.UUID
+	Role                   string
+	Status                 string
+	PresetID               *uuid.UUID
+	AddedByActorID         uuid.UUID
+	ExpiresAt              *time.Time
+	StudentScope           string
+	AssignmentScope        string
+	PermDocumentRead       AutonomyLevel
+	PermDocumentReadDraft  AutonomyLevel
+	PermDocumentWrite      AutonomyLevel
+	PermRubricRead         AutonomyLevel
+	PermAssignmentWrite    AutonomyLevel
+	PermSubmissionRead     AutonomyLevel
+	PermSubmissionWrite    AutonomyLevel
+	PermGradeRead          AutonomyLevel
+	PermGradeSubmit        AutonomyLevel
+	PermGradePost          AutonomyLevel
+	PermMemberRead         AutonomyLevel
+	PermMemberManage       AutonomyLevel
+	PermActionDecide       AutonomyLevel
+	CreatedAt              time.Time
+	PrincipalMemberID      *uuid.UUID
+	PermAgentDelegate      AutonomyLevel
+	PermConversationAsk    AutonomyLevel
+	PermConversationAnswer AutonomyLevel
+	DisplayName            string
+	ActorKind              string
+	OwnerActorID           *uuid.UUID
+	OwnerName              *string
 }
 
+// The seat, with whom it is and, for an agent someone owns, whose.
 func (q *Queries) GetMemberInCourse(ctx context.Context, arg GetMemberInCourseParams) (GetMemberInCourseRow, error) {
 	row := q.db.QueryRow(ctx, getMemberInCourse, arg.ID, arg.CourseID)
 	var i GetMemberInCourseRow
@@ -203,16 +212,23 @@ func (q *Queries) GetMemberInCourse(ctx context.Context, arg GetMemberInCoursePa
 		&i.PermMemberManage,
 		&i.PermActionDecide,
 		&i.CreatedAt,
+		&i.PrincipalMemberID,
+		&i.PermAgentDelegate,
+		&i.PermConversationAsk,
+		&i.PermConversationAnswer,
 		&i.DisplayName,
 		&i.ActorKind,
+		&i.OwnerActorID,
+		&i.OwnerName,
 	)
 	return i, err
 }
 
 const getMemberInCourseForUpdate = `-- name: GetMemberInCourseForUpdate :one
-SELECT m.id, m.course_id, m.actor_id, m.role, m.status, m.preset_id, m.added_by_actor_id, m.expires_at, m.student_scope, m.assignment_scope, m.perm_document_read, m.perm_document_read_draft, m.perm_document_write, m.perm_rubric_read, m.perm_assignment_write, m.perm_submission_read, m.perm_submission_write, m.perm_grade_read, m.perm_grade_submit, m.perm_grade_post, m.perm_member_read, m.perm_member_manage, m.perm_action_decide, m.created_at, a.display_name, a.kind AS actor_kind
+SELECT m.id, m.course_id, m.actor_id, m.role, m.status, m.preset_id, m.added_by_actor_id, m.expires_at, m.student_scope, m.assignment_scope, m.perm_document_read, m.perm_document_read_draft, m.perm_document_write, m.perm_rubric_read, m.perm_assignment_write, m.perm_submission_read, m.perm_submission_write, m.perm_grade_read, m.perm_grade_submit, m.perm_grade_post, m.perm_member_read, m.perm_member_manage, m.perm_action_decide, m.created_at, m.principal_member_id, m.perm_agent_delegate, m.perm_conversation_ask, m.perm_conversation_answer, a.display_name, a.kind AS actor_kind, a.owner_actor_id, o.display_name AS owner_name
 FROM course_member m
 JOIN actor a ON a.id = m.actor_id
+LEFT JOIN actor o ON o.id = a.owner_actor_id
 WHERE m.id = $1 AND m.course_id = $2
 FOR UPDATE OF m
 `
@@ -223,32 +239,38 @@ type GetMemberInCourseForUpdateParams struct {
 }
 
 type GetMemberInCourseForUpdateRow struct {
-	ID                    uuid.UUID
-	CourseID              uuid.UUID
-	ActorID               uuid.UUID
-	Role                  string
-	Status                string
-	PresetID              *uuid.UUID
-	AddedByActorID        uuid.UUID
-	ExpiresAt             *time.Time
-	StudentScope          string
-	AssignmentScope       string
-	PermDocumentRead      AutonomyLevel
-	PermDocumentReadDraft AutonomyLevel
-	PermDocumentWrite     AutonomyLevel
-	PermRubricRead        AutonomyLevel
-	PermAssignmentWrite   AutonomyLevel
-	PermSubmissionRead    AutonomyLevel
-	PermSubmissionWrite   AutonomyLevel
-	PermGradeRead         AutonomyLevel
-	PermGradeSubmit       AutonomyLevel
-	PermGradePost         AutonomyLevel
-	PermMemberRead        AutonomyLevel
-	PermMemberManage      AutonomyLevel
-	PermActionDecide      AutonomyLevel
-	CreatedAt             time.Time
-	DisplayName           string
-	ActorKind             string
+	ID                     uuid.UUID
+	CourseID               uuid.UUID
+	ActorID                uuid.UUID
+	Role                   string
+	Status                 string
+	PresetID               *uuid.UUID
+	AddedByActorID         uuid.UUID
+	ExpiresAt              *time.Time
+	StudentScope           string
+	AssignmentScope        string
+	PermDocumentRead       AutonomyLevel
+	PermDocumentReadDraft  AutonomyLevel
+	PermDocumentWrite      AutonomyLevel
+	PermRubricRead         AutonomyLevel
+	PermAssignmentWrite    AutonomyLevel
+	PermSubmissionRead     AutonomyLevel
+	PermSubmissionWrite    AutonomyLevel
+	PermGradeRead          AutonomyLevel
+	PermGradeSubmit        AutonomyLevel
+	PermGradePost          AutonomyLevel
+	PermMemberRead         AutonomyLevel
+	PermMemberManage       AutonomyLevel
+	PermActionDecide       AutonomyLevel
+	CreatedAt              time.Time
+	PrincipalMemberID      *uuid.UUID
+	PermAgentDelegate      AutonomyLevel
+	PermConversationAsk    AutonomyLevel
+	PermConversationAnswer AutonomyLevel
+	DisplayName            string
+	ActorKind              string
+	OwnerActorID           *uuid.UUID
+	OwnerName              *string
 }
 
 // The same row, locked for the rest of the transaction: the management tools
@@ -281,10 +303,29 @@ func (q *Queries) GetMemberInCourseForUpdate(ctx context.Context, arg GetMemberI
 		&i.PermMemberManage,
 		&i.PermActionDecide,
 		&i.CreatedAt,
+		&i.PrincipalMemberID,
+		&i.PermAgentDelegate,
+		&i.PermConversationAsk,
+		&i.PermConversationAnswer,
 		&i.DisplayName,
 		&i.ActorKind,
+		&i.OwnerActorID,
+		&i.OwnerName,
 	)
 	return i, err
+}
+
+const getSeatPrincipal = `-- name: GetSeatPrincipal :one
+SELECT principal_member_id FROM course_member WHERE id = $1
+`
+
+// Which seat a seat is a delegate of, if any. Whose delegate a seat is never
+// changes, so it may be read before anything is locked.
+func (q *Queries) GetSeatPrincipal(ctx context.Context, id uuid.UUID) (*uuid.UUID, error) {
+	row := q.db.QueryRow(ctx, getSeatPrincipal, id)
+	var principal_member_id *uuid.UUID
+	err := row.Scan(&principal_member_id)
+	return principal_member_id, err
 }
 
 const insertMember = `-- name: InsertMember :exec
@@ -292,34 +333,40 @@ INSERT INTO course_member (
     id, course_id, actor_id, role, status, preset_id, added_by_actor_id, expires_at, student_scope, assignment_scope,
     perm_document_read, perm_document_read_draft, perm_document_write, perm_rubric_read,
     perm_assignment_write, perm_submission_read, perm_submission_write, perm_grade_read,
-    perm_grade_submit, perm_grade_post, perm_member_read, perm_member_manage, perm_action_decide, created_at)
-VALUES ($1, $2, $3, $4, 'active', $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)
+    perm_grade_submit, perm_grade_post, perm_member_read, perm_member_manage, perm_action_decide,
+    perm_agent_delegate, perm_conversation_ask, perm_conversation_answer, created_at, principal_member_id)
+VALUES ($1, $2, $3, $4, 'active', $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22,
+        $23, $24, $25, $26, $27)
 `
 
 type InsertMemberParams struct {
-	ID                    uuid.UUID
-	CourseID              uuid.UUID
-	ActorID               uuid.UUID
-	Role                  string
-	PresetID              *uuid.UUID
-	AddedByActorID        uuid.UUID
-	ExpiresAt             *time.Time
-	StudentScope          string
-	AssignmentScope       string
-	PermDocumentRead      AutonomyLevel
-	PermDocumentReadDraft AutonomyLevel
-	PermDocumentWrite     AutonomyLevel
-	PermRubricRead        AutonomyLevel
-	PermAssignmentWrite   AutonomyLevel
-	PermSubmissionRead    AutonomyLevel
-	PermSubmissionWrite   AutonomyLevel
-	PermGradeRead         AutonomyLevel
-	PermGradeSubmit       AutonomyLevel
-	PermGradePost         AutonomyLevel
-	PermMemberRead        AutonomyLevel
-	PermMemberManage      AutonomyLevel
-	PermActionDecide      AutonomyLevel
-	CreatedAt             time.Time
+	ID                     uuid.UUID
+	CourseID               uuid.UUID
+	ActorID                uuid.UUID
+	Role                   string
+	PresetID               *uuid.UUID
+	AddedByActorID         uuid.UUID
+	ExpiresAt              *time.Time
+	StudentScope           string
+	AssignmentScope        string
+	PermDocumentRead       AutonomyLevel
+	PermDocumentReadDraft  AutonomyLevel
+	PermDocumentWrite      AutonomyLevel
+	PermRubricRead         AutonomyLevel
+	PermAssignmentWrite    AutonomyLevel
+	PermSubmissionRead     AutonomyLevel
+	PermSubmissionWrite    AutonomyLevel
+	PermGradeRead          AutonomyLevel
+	PermGradeSubmit        AutonomyLevel
+	PermGradePost          AutonomyLevel
+	PermMemberRead         AutonomyLevel
+	PermMemberManage       AutonomyLevel
+	PermActionDecide       AutonomyLevel
+	PermAgentDelegate      AutonomyLevel
+	PermConversationAsk    AutonomyLevel
+	PermConversationAnswer AutonomyLevel
+	CreatedAt              time.Time
+	PrincipalMemberID      *uuid.UUID
 }
 
 func (q *Queries) InsertMember(ctx context.Context, arg InsertMemberParams) error {
@@ -346,7 +393,11 @@ func (q *Queries) InsertMember(ctx context.Context, arg InsertMemberParams) erro
 		arg.PermMemberRead,
 		arg.PermMemberManage,
 		arg.PermActionDecide,
+		arg.PermAgentDelegate,
+		arg.PermConversationAsk,
+		arg.PermConversationAnswer,
 		arg.CreatedAt,
+		arg.PrincipalMemberID,
 	)
 	return err
 }
@@ -376,9 +427,10 @@ func (q *Queries) ListAssignmentScope(ctx context.Context, memberID uuid.UUID) (
 }
 
 const listMembers = `-- name: ListMembers :many
-SELECT m.id, m.course_id, m.actor_id, m.role, m.status, m.preset_id, m.added_by_actor_id, m.expires_at, m.student_scope, m.assignment_scope, m.perm_document_read, m.perm_document_read_draft, m.perm_document_write, m.perm_rubric_read, m.perm_assignment_write, m.perm_submission_read, m.perm_submission_write, m.perm_grade_read, m.perm_grade_submit, m.perm_grade_post, m.perm_member_read, m.perm_member_manage, m.perm_action_decide, m.created_at, a.display_name, a.kind AS actor_kind
+SELECT m.id, m.course_id, m.actor_id, m.role, m.status, m.preset_id, m.added_by_actor_id, m.expires_at, m.student_scope, m.assignment_scope, m.perm_document_read, m.perm_document_read_draft, m.perm_document_write, m.perm_rubric_read, m.perm_assignment_write, m.perm_submission_read, m.perm_submission_write, m.perm_grade_read, m.perm_grade_submit, m.perm_grade_post, m.perm_member_read, m.perm_member_manage, m.perm_action_decide, m.created_at, m.principal_member_id, m.perm_agent_delegate, m.perm_conversation_ask, m.perm_conversation_answer, a.display_name, a.kind AS actor_kind, a.owner_actor_id, o.display_name AS owner_name
 FROM course_member m
 JOIN actor a ON a.id = m.actor_id
+LEFT JOIN actor o ON o.id = a.owner_actor_id
 WHERE m.course_id = $1 AND m.id > $2
   AND ($3::text IS NULL OR m.role = $3)
   AND ($4::bool OR m.status <> 'removed')
@@ -395,32 +447,38 @@ type ListMembersParams struct {
 }
 
 type ListMembersRow struct {
-	ID                    uuid.UUID
-	CourseID              uuid.UUID
-	ActorID               uuid.UUID
-	Role                  string
-	Status                string
-	PresetID              *uuid.UUID
-	AddedByActorID        uuid.UUID
-	ExpiresAt             *time.Time
-	StudentScope          string
-	AssignmentScope       string
-	PermDocumentRead      AutonomyLevel
-	PermDocumentReadDraft AutonomyLevel
-	PermDocumentWrite     AutonomyLevel
-	PermRubricRead        AutonomyLevel
-	PermAssignmentWrite   AutonomyLevel
-	PermSubmissionRead    AutonomyLevel
-	PermSubmissionWrite   AutonomyLevel
-	PermGradeRead         AutonomyLevel
-	PermGradeSubmit       AutonomyLevel
-	PermGradePost         AutonomyLevel
-	PermMemberRead        AutonomyLevel
-	PermMemberManage      AutonomyLevel
-	PermActionDecide      AutonomyLevel
-	CreatedAt             time.Time
-	DisplayName           string
-	ActorKind             string
+	ID                     uuid.UUID
+	CourseID               uuid.UUID
+	ActorID                uuid.UUID
+	Role                   string
+	Status                 string
+	PresetID               *uuid.UUID
+	AddedByActorID         uuid.UUID
+	ExpiresAt              *time.Time
+	StudentScope           string
+	AssignmentScope        string
+	PermDocumentRead       AutonomyLevel
+	PermDocumentReadDraft  AutonomyLevel
+	PermDocumentWrite      AutonomyLevel
+	PermRubricRead         AutonomyLevel
+	PermAssignmentWrite    AutonomyLevel
+	PermSubmissionRead     AutonomyLevel
+	PermSubmissionWrite    AutonomyLevel
+	PermGradeRead          AutonomyLevel
+	PermGradeSubmit        AutonomyLevel
+	PermGradePost          AutonomyLevel
+	PermMemberRead         AutonomyLevel
+	PermMemberManage       AutonomyLevel
+	PermActionDecide       AutonomyLevel
+	CreatedAt              time.Time
+	PrincipalMemberID      *uuid.UUID
+	PermAgentDelegate      AutonomyLevel
+	PermConversationAsk    AutonomyLevel
+	PermConversationAnswer AutonomyLevel
+	DisplayName            string
+	ActorKind              string
+	OwnerActorID           *uuid.UUID
+	OwnerName              *string
 }
 
 func (q *Queries) ListMembers(ctx context.Context, arg ListMembersParams) ([]ListMembersRow, error) {
@@ -463,8 +521,14 @@ func (q *Queries) ListMembers(ctx context.Context, arg ListMembersParams) ([]Lis
 			&i.PermMemberManage,
 			&i.PermActionDecide,
 			&i.CreatedAt,
+			&i.PrincipalMemberID,
+			&i.PermAgentDelegate,
+			&i.PermConversationAsk,
+			&i.PermConversationAnswer,
 			&i.DisplayName,
 			&i.ActorKind,
+			&i.OwnerActorID,
+			&i.OwnerName,
 		); err != nil {
 			return nil, err
 		}
@@ -524,10 +588,55 @@ func (q *Queries) ListStudentScope(ctx context.Context, memberID uuid.UUID) ([]u
 	return items, nil
 }
 
+const lockLiveSeatsByRole = `-- name: LockLiveSeatsByRole :many
+SELECT id FROM course_member
+WHERE course_id = $1 AND role = $2 AND status <> 'removed'
+  AND (expires_at IS NULL OR expires_at > $3) AND id <> $4
+ORDER BY id
+FOR UPDATE
+`
+
+type LockLiveSeatsByRoleParams struct {
+	CourseID       uuid.UUID
+	Role           string
+	Now            *time.Time
+	ExceptMemberID uuid.UUID
+}
+
+// Every seat of one roster role that is not removed or past its expiry,
+// except one, locked in id order: member.update_perms_bulk changes them all
+// or none. Choosing seats by role is what the manager asked for; it is not
+// authorization, which each change goes through on its own.
+func (q *Queries) LockLiveSeatsByRole(ctx context.Context, arg LockLiveSeatsByRoleParams) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, lockLiveSeatsByRole,
+		arg.CourseID,
+		arg.Role,
+		arg.Now,
+		arg.ExceptMemberID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const lookupActorForSeating = `-- name: LookupActorForSeating :one
-SELECT a.id, a.kind, a.display_name, a.status, m.id AS member_id
+SELECT a.id, a.kind, a.display_name, a.status, m.id AS member_id, a.owner_actor_id, o.display_name AS owner_name
 FROM actor a
 LEFT JOIN course_member m ON m.actor_id = a.id AND m.course_id = $1 AND m.status <> 'removed'
+LEFT JOIN actor o ON o.id = a.owner_actor_id
 WHERE a.kind <> 'system'
   AND (a.id = $2 OR lower(a.email) = lower($3))
 `
@@ -539,17 +648,20 @@ type LookupActorForSeatingParams struct {
 }
 
 type LookupActorForSeatingRow struct {
-	ID          uuid.UUID
-	Kind        string
-	DisplayName string
-	Status      string
-	MemberID    *uuid.UUID
+	ID           uuid.UUID
+	Kind         string
+	DisplayName  string
+	Status       string
+	MemberID     *uuid.UUID
+	OwnerActorID *uuid.UUID
+	OwnerName    *string
 }
 
 // The actor a whole email address, or an id, belongs to, for someone seating
-// them, with their seat in this course if they have a live one. The email
-// must match whole, in any case: this finds a person whose address one
-// already has, and lists nobody.
+// them, with their seat in this course if they have a live one, and their
+// owner if they are an agent someone owns. The email must match whole, in
+// any case: this finds a person whose address one already has, and lists
+// nobody.
 func (q *Queries) LookupActorForSeating(ctx context.Context, arg LookupActorForSeatingParams) (LookupActorForSeatingRow, error) {
 	row := q.db.QueryRow(ctx, lookupActorForSeating, arg.CourseID, arg.ActorID, arg.Email)
 	var i LookupActorForSeatingRow
@@ -559,8 +671,70 @@ func (q *Queries) LookupActorForSeating(ctx context.Context, arg LookupActorForS
 		&i.DisplayName,
 		&i.Status,
 		&i.MemberID,
+		&i.OwnerActorID,
+		&i.OwnerName,
 	)
 	return i, err
+}
+
+const removeDelegatesOf = `-- name: RemoveDelegatesOf :many
+UPDATE course_member SET status = 'removed'
+WHERE principal_member_id = $1 AND status <> 'removed'
+RETURNING id
+`
+
+// A principal's removal takes its delegates' seats with it, whatever their
+// status. The principal is held FOR UPDATE by whoever removes it; these rows
+// are only updated, FOR NO KEY UPDATE, which the KEY SHARE a delegate's call
+// in flight holds on its own seat does not wait for: the call waits instead
+// for the principal, and then finds it removed.
+func (q *Queries) RemoveDelegatesOf(ctx context.Context, principalMemberID *uuid.UUID) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, removeDelegatesOf, principalMemberID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const seatOrphaned = `-- name: SeatOrphaned :one
+SELECT (CASE WHEN m.principal_member_id IS NULL THEN a.owner_actor_id IS NOT NULL
+             ELSE p.status = 'removed' OR (p.expires_at IS NOT NULL AND p.expires_at <= $1)
+                  OR a.owner_actor_id IS DISTINCT FROM p.actor_id END)::bool AS orphaned
+FROM course_member m
+JOIN actor a ON a.id = m.actor_id
+LEFT JOIN course_member p ON p.id = m.principal_member_id
+WHERE m.id = $2
+`
+
+type SeatOrphanedParams struct {
+	Now      *time.Time
+	MemberID uuid.UUID
+}
+
+// Whether a seat counts for nothing for good, whatever becomes of it: a
+// delegate's whose principal is removed or past its expiry, or one that does
+// not match its actor's ownership (an owned agent's seat with no principal,
+// or with one that is not its owner's). Neither a removed seat nor an expired
+// one comes back, and an owner is not changed while the agent has a seat in
+// a course that is not archived (actor.set_owner), where only this could
+// find it.
+func (q *Queries) SeatOrphaned(ctx context.Context, arg SeatOrphanedParams) (bool, error) {
+	row := q.db.QueryRow(ctx, seatOrphaned, arg.Now, arg.MemberID)
+	var orphaned bool
+	err := row.Scan(&orphaned)
+	return orphaned, err
 }
 
 const setMemberExpiry = `-- name: SetMemberExpiry :exec
@@ -582,25 +756,28 @@ UPDATE course_member SET
     perm_document_read = $2, perm_document_read_draft = $3, perm_document_write = $4, perm_rubric_read = $5,
     perm_assignment_write = $6, perm_submission_read = $7, perm_submission_write = $8, perm_grade_read = $9,
     perm_grade_submit = $10, perm_grade_post = $11, perm_member_read = $12, perm_member_manage = $13,
-    perm_action_decide = $14
+    perm_action_decide = $14, perm_agent_delegate = $15, perm_conversation_ask = $16, perm_conversation_answer = $17
 WHERE id = $1
 `
 
 type SetMemberPermsParams struct {
-	ID                    uuid.UUID
-	PermDocumentRead      AutonomyLevel
-	PermDocumentReadDraft AutonomyLevel
-	PermDocumentWrite     AutonomyLevel
-	PermRubricRead        AutonomyLevel
-	PermAssignmentWrite   AutonomyLevel
-	PermSubmissionRead    AutonomyLevel
-	PermSubmissionWrite   AutonomyLevel
-	PermGradeRead         AutonomyLevel
-	PermGradeSubmit       AutonomyLevel
-	PermGradePost         AutonomyLevel
-	PermMemberRead        AutonomyLevel
-	PermMemberManage      AutonomyLevel
-	PermActionDecide      AutonomyLevel
+	ID                     uuid.UUID
+	PermDocumentRead       AutonomyLevel
+	PermDocumentReadDraft  AutonomyLevel
+	PermDocumentWrite      AutonomyLevel
+	PermRubricRead         AutonomyLevel
+	PermAssignmentWrite    AutonomyLevel
+	PermSubmissionRead     AutonomyLevel
+	PermSubmissionWrite    AutonomyLevel
+	PermGradeRead          AutonomyLevel
+	PermGradeSubmit        AutonomyLevel
+	PermGradePost          AutonomyLevel
+	PermMemberRead         AutonomyLevel
+	PermMemberManage       AutonomyLevel
+	PermActionDecide       AutonomyLevel
+	PermAgentDelegate      AutonomyLevel
+	PermConversationAsk    AutonomyLevel
+	PermConversationAnswer AutonomyLevel
 }
 
 func (q *Queries) SetMemberPerms(ctx context.Context, arg SetMemberPermsParams) error {
@@ -619,6 +796,9 @@ func (q *Queries) SetMemberPerms(ctx context.Context, arg SetMemberPermsParams) 
 		arg.PermMemberRead,
 		arg.PermMemberManage,
 		arg.PermActionDecide,
+		arg.PermAgentDelegate,
+		arg.PermConversationAsk,
+		arg.PermConversationAnswer,
 	)
 	return err
 }
@@ -662,7 +842,9 @@ SELECT 1 FROM course_member WHERE id = ANY($1::uuid[]) ORDER BY id FOR KEY SHARE
 
 // KEY SHARE on the given seats, in id order: what taking them before some
 // other lock looks like, where that lock would otherwise be held while one of
-// them is waited for.
+// them is waited for. A delegate's seat and its principal's are not taken
+// together in id order but in two calls, the delegate's first: that is the
+// order its own calls take them in (LockLiveMemberForAuthz).
 func (q *Queries) ShareSeats(ctx context.Context, ids []uuid.UUID) error {
 	_, err := q.db.Exec(ctx, shareSeats, ids)
 	return err

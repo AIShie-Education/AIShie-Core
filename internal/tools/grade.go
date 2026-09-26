@@ -403,7 +403,7 @@ func gradeSubmit(d Deps) tool.Tool {
 			_, err = checkContent(ctx, q, s, in.GradeContent, true)
 			return err
 		},
-		Pin: func(ctx context.Context, q dbq.Querier, now time.Time, in GradeSubmitIn) (GradeSubmitIn, error) {
+		Pin: func(ctx context.Context, q dbq.Querier, _ *domain.Member, now time.Time, in GradeSubmitIn) (GradeSubmitIn, error) {
 			if err := checkUploadAge(ctx, d, now, in.uploads()...); err != nil {
 				return in, err
 			}
@@ -680,7 +680,7 @@ func gradePost() tool.Tool {
 		// nobody who could release it, so the proposal names the drafts it
 		// was made about, beside the assignment; stillWaiting is what
 		// approving it posts of them.
-		Pin: func(ctx context.Context, q dbq.Querier, _ time.Time, in GradePostIn) (GradePostIn, error) {
+		Pin: func(ctx context.Context, q dbq.Querier, _ *domain.Member, _ time.Time, in GradePostIn) (GradePostIn, error) {
 			if in.AssignmentID == nil {
 				// Validate left the drafts named to Execute. A proposal
 				// being made is not an approval, and is held to them as a
@@ -933,7 +933,7 @@ func gradeRegrade(d Deps) tool.Tool {
 			}
 			return checkFeedbackFiles(ctx, d, q, m, in.CourseID, in.FeedbackFiles)
 		},
-		Pin: func(ctx context.Context, q dbq.Querier, now time.Time, in GradeRegradeIn) (GradeRegradeIn, error) {
+		Pin: func(ctx context.Context, q dbq.Querier, _ *domain.Member, now time.Time, in GradeRegradeIn) (GradeRegradeIn, error) {
 			if err := checkUploadAge(ctx, d, now, in.uploads()...); err != nil {
 				return in, err
 			}

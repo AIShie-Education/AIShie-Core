@@ -84,18 +84,27 @@ WHERE e.course_id = $1 AND e.seq > $2
         OR (e.assignment_id IS NULL AND e.student_member_id IS NULL)
         OR (e.assignment_id IS NOT NULL AND EXISTS (
               SELECT 1 FROM member_assignment_scope y WHERE y.member_id = $4 AND y.assignment_id = e.assignment_id)) )
+  AND ( e.student_member_id IS NULL OR $7::bool OR EXISTS (
+        SELECT 1 FROM member_student_scope px WHERE px.member_id = $8 AND px.student_member_id = e.student_member_id) )
+  AND ( $9::bool
+        OR (e.assignment_id IS NULL AND e.student_member_id IS NULL)
+        OR (e.assignment_id IS NOT NULL AND EXISTS (
+              SELECT 1 FROM member_assignment_scope py WHERE py.member_id = $8 AND py.assignment_id = e.assignment_id)) )
 ORDER BY e.seq
-LIMIT $7
+LIMIT $10
 `
 
 type ListEventsParams struct {
-	CourseID      *uuid.UUID
-	SinceSeq      int64
-	VisibleTypes  []string
-	MemberID      *uuid.UUID
-	StudentAll    bool
-	AssignmentAll bool
-	MaxRows       int32
+	CourseID               *uuid.UUID
+	SinceSeq               int64
+	VisibleTypes           []string
+	MemberID               *uuid.UUID
+	StudentAll             bool
+	AssignmentAll          bool
+	PrincipalStudentAll    bool
+	PrincipalID            uuid.UUID
+	PrincipalAssignmentAll bool
+	MaxRows                int32
 }
 
 type ListEventsRow struct {
@@ -118,7 +127,9 @@ type ListEventsRow struct {
 //   - student scope, exactly as authorize() step 4;
 //   - assignment scope as step 5, including its extra case: an event that
 //     names a student but no assignment (a total, a component grade) spans
-//     assignments and is for members whose assignment scope is the whole course.
+//     assignments and is for members whose assignment scope is the whole course;
+//   - for a delegate, both again with its principal's scope ("all" for any
+//     other seat).
 func (q *Queries) ListEvents(ctx context.Context, arg ListEventsParams) ([]ListEventsRow, error) {
 	rows, err := q.db.Query(ctx, listEvents,
 		arg.CourseID,
@@ -127,6 +138,9 @@ func (q *Queries) ListEvents(ctx context.Context, arg ListEventsParams) ([]ListE
 		arg.MemberID,
 		arg.StudentAll,
 		arg.AssignmentAll,
+		arg.PrincipalStudentAll,
+		arg.PrincipalID,
+		arg.PrincipalAssignmentAll,
 		arg.MaxRows,
 	)
 	if err != nil {
@@ -173,20 +187,28 @@ WHERE sm.course_id = $1 AND g.id > $2
         SELECT 1 FROM member_student_scope x WHERE x.member_id = $7 AND x.student_member_id = g.student_member_id))
   AND ($8::bool OR (s.assignment_id IS NOT NULL AND EXISTS (
         SELECT 1 FROM member_assignment_scope y WHERE y.member_id = $7 AND y.assignment_id = s.assignment_id)))
+  -- A delegate's principal's scope, the same way; "all" for any other seat.
+  AND ($9::bool OR EXISTS (
+        SELECT 1 FROM member_student_scope px WHERE px.member_id = $10 AND px.student_member_id = g.student_member_id))
+  AND ($11::bool OR (s.assignment_id IS NOT NULL AND EXISTS (
+        SELECT 1 FROM member_assignment_scope py WHERE py.member_id = $10 AND py.assignment_id = s.assignment_id)))
 ORDER BY g.id
-LIMIT $9
+LIMIT $12
 `
 
 type ListGradesParams struct {
-	CourseID        uuid.UUID
-	After           uuid.UUID
-	StudentMemberID *uuid.UUID
-	AssignmentID    *uuid.UUID
-	IncludeDrafts   bool
-	StudentAll      bool
-	MemberID        uuid.UUID
-	AssignmentAll   bool
-	MaxRows         int32
+	CourseID               uuid.UUID
+	After                  uuid.UUID
+	StudentMemberID        *uuid.UUID
+	AssignmentID           *uuid.UUID
+	IncludeDrafts          bool
+	StudentAll             bool
+	MemberID               uuid.UUID
+	AssignmentAll          bool
+	PrincipalStudentAll    bool
+	PrincipalID            uuid.UUID
+	PrincipalAssignmentAll bool
+	MaxRows                int32
 }
 
 type ListGradesRow struct {
@@ -223,6 +245,9 @@ func (q *Queries) ListGrades(ctx context.Context, arg ListGradesParams) ([]ListG
 		arg.StudentAll,
 		arg.MemberID,
 		arg.AssignmentAll,
+		arg.PrincipalStudentAll,
+		arg.PrincipalID,
+		arg.PrincipalAssignmentAll,
 		arg.MaxRows,
 	)
 	if err != nil {

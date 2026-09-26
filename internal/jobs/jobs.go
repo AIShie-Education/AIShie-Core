@@ -1,6 +1,7 @@
 // Package jobs runs the background sweeps: proposals that have waited too
-// long, memberships past their expiry, assignments whose due date has passed,
-// sessions long dead, uploaded files that nothing came to point at.
+// long, memberships past their expiry, delegates' seats whose principal has
+// gone, assignments whose due date has passed, sessions long dead, uploaded
+// files that nothing came to point at.
 //
 // Nothing here is what makes the system correct. authorize() ignores an
 // expired member from the instant of expiry, and approving a stale proposal
@@ -101,7 +102,7 @@ func (r *Runner) Run(ctx context.Context) {
 			}
 			r.log.Error("sweep failed", "err", err)
 		} else if rep.Ran && rep.total() > 0 {
-			r.log.Info("swept", "proposals_expired", rep.ProposalsExpired, "members_expired", rep.MembersExpired,
+			r.log.Info("swept", "proposals_expired", rep.ProposalsExpired, "members_expired", rep.MembersExpired, "orphans_removed", rep.OrphansRemoved,
 				"assignments_closed", rep.AssignmentsClosed, "submissions_missing", rep.SubmissionsMissing, "sessions_deleted", rep.SessionsDeleted,
 				"orphan_files_removed", rep.OrphanFilesRemoved)
 		}
@@ -119,6 +120,7 @@ type Report struct {
 	Ran                bool
 	ProposalsExpired   int
 	MembersExpired     int
+	OrphansRemoved     int
 	AssignmentsClosed  int
 	SubmissionsMissing int
 	SessionsDeleted    int64
@@ -126,7 +128,7 @@ type Report struct {
 }
 
 func (r Report) total() int64 {
-	return int64(r.ProposalsExpired+r.MembersExpired+r.AssignmentsClosed+r.SubmissionsMissing+r.OrphanFilesRemoved) + r.SessionsDeleted
+	return int64(r.ProposalsExpired+r.MembersExpired+r.OrphansRemoved+r.AssignmentsClosed+r.SubmissionsMissing+r.OrphanFilesRemoved) + r.SessionsDeleted
 }
 
 // Sweep does one round of everything, if no other instance is doing so.
@@ -183,6 +185,23 @@ func (r *Runner) Sweep(ctx context.Context) (Report, error) {
 		out, err := r.pl.InvokeSystem(ctx, r.system, tools.ToolMemberExpire, tools.MemberExpireIn{CourseID: m.CourseID, MemberID: m.ID}, key)
 		if r.did(out, err, "member.expire", m.ID) {
 			rep.MembersExpired++
+		}
+	}
+
+	// After the expiry sweep, which takes delegates with the principals it
+	// removes: what is left is what the previous release removed without
+	// them, and seats that no longer match their actor's owner.
+	orphans, err := q.ListOrphanedSeats(ctx, dbq.ListOrphanedSeatsParams{Now: &now, MaxRows: r.cfg.Batch})
+	if err != nil {
+		return rep, fmt.Errorf("orphaned seats: %w", err)
+	}
+	for _, m := range orphans {
+		// Once orphaned, a seat stays so, and once removed, removed: the
+		// seat alone names the sweep.
+		out, err := r.pl.InvokeSystem(ctx, r.system, tools.ToolMemberRemoveOrphan,
+			tools.MemberRemoveOrphanIn{CourseID: m.CourseID, MemberID: m.ID}, "job:member.remove_orphan:"+m.ID.String())
+		if r.did(out, err, "member.remove_orphan", m.ID) {
+			rep.OrphansRemoved++
 		}
 	}
 
@@ -416,6 +435,8 @@ func (r *Runner) did(out pipeline.Outcome, err error, what string, id uuid.UUID)
 	switch {
 	case errors.Is(err, tools.ErrSweepMoot):
 		return false // unpublished, or its due date moved, meanwhile; swept once it is due again
+	case errors.Is(err, tools.ErrNotOrphaned):
+		return false // removed meanwhile, by someone or by the expiry sweep's cascade
 	case err != nil:
 		r.log.Error("sweep step failed", "step", what, "id", id, "err", err)
 		return false

@@ -263,6 +263,55 @@ func (q *Queries) ListOrphanUploads(ctx context.Context, arg ListOrphanUploadsPa
 	return items, nil
 }
 
+const listOrphanedSeats = `-- name: ListOrphanedSeats :many
+SELECT m.id, m.course_id
+FROM course_member m
+JOIN course c ON c.id = m.course_id
+JOIN actor a ON a.id = m.actor_id
+LEFT JOIN course_member p ON p.id = m.principal_member_id
+WHERE m.status <> 'removed' AND c.status <> 'archived'
+  AND (CASE WHEN m.principal_member_id IS NULL THEN a.owner_actor_id IS NOT NULL
+            ELSE p.status = 'removed' OR (p.expires_at IS NOT NULL AND p.expires_at <= $1)
+                 OR a.owner_actor_id IS DISTINCT FROM p.actor_id END)
+ORDER BY m.id
+LIMIT $2
+`
+
+type ListOrphanedSeatsParams struct {
+	Now     *time.Time
+	MaxRows int32
+}
+
+type ListOrphanedSeatsRow struct {
+	ID       uuid.UUID
+	CourseID uuid.UUID
+}
+
+// Seats that count for nothing for good (SeatOrphaned), not yet removed: a
+// delegate's whose principal is removed or past its expiry, which the
+// previous release removes without its delegates, and seats that do not
+// match their actor's ownership. authorize() refuses them already; removing
+// them cancels what they proposed and clears the way for a fresh seat.
+func (q *Queries) ListOrphanedSeats(ctx context.Context, arg ListOrphanedSeatsParams) ([]ListOrphanedSeatsRow, error) {
+	rows, err := q.db.Query(ctx, listOrphanedSeats, arg.Now, arg.MaxRows)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListOrphanedSeatsRow
+	for rows.Next() {
+		var i ListOrphanedSeatsRow
+		if err := rows.Scan(&i.ID, &i.CourseID); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listStaleProposals = `-- name: ListStaleProposals :many
 
 SELECT a.id, a.course_id, a.created_at

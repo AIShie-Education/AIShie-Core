@@ -81,8 +81,8 @@ SELECT EXISTS (
 );
 
 -- name: ListAssignments :many
--- Scope is applied here, not afterwards. A member who may not write
--- assignments sees only published ones.
+-- Scope is applied here, not afterwards, a delegate's principal's included. A
+-- member who may not write assignments sees only published ones.
 SELECT id, course_id, component_id, title, instructions_document_id, rubric_document_id,
        points_possible, due_at, published_at, created_at
 FROM assignment a
@@ -90,5 +90,7 @@ WHERE a.course_id = $1 AND a.id > sqlc.arg(after)
   AND (sqlc.arg(include_unpublished)::bool OR a.published_at IS NOT NULL)
   AND (sqlc.arg(assignment_all)::bool OR EXISTS (
         SELECT 1 FROM member_assignment_scope y WHERE y.member_id = sqlc.arg(member_id) AND y.assignment_id = a.id))
+  AND (sqlc.arg(principal_assignment_all)::bool OR EXISTS (
+        SELECT 1 FROM member_assignment_scope py WHERE py.member_id = sqlc.arg(principal_id) AND py.assignment_id = a.id))
 ORDER BY a.id
 LIMIT sqlc.arg(max_rows);

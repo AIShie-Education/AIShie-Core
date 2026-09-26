@@ -27,6 +27,24 @@ WHERE m.status <> 'removed' AND m.expires_at IS NOT NULL AND m.expires_at <= sql
 ORDER BY m.expires_at
 LIMIT sqlc.arg(max_rows);
 
+-- name: ListOrphanedSeats :many
+-- Seats that count for nothing for good (SeatOrphaned), not yet removed: a
+-- delegate's whose principal is removed or past its expiry, which the
+-- previous release removes without its delegates, and seats that do not
+-- match their actor's ownership. authorize() refuses them already; removing
+-- them cancels what they proposed and clears the way for a fresh seat.
+SELECT m.id, m.course_id
+FROM course_member m
+JOIN course c ON c.id = m.course_id
+JOIN actor a ON a.id = m.actor_id
+LEFT JOIN course_member p ON p.id = m.principal_member_id
+WHERE m.status <> 'removed' AND c.status <> 'archived'
+  AND (CASE WHEN m.principal_member_id IS NULL THEN a.owner_actor_id IS NOT NULL
+            ELSE p.status = 'removed' OR (p.expires_at IS NOT NULL AND p.expires_at <= sqlc.arg(now))
+                 OR a.owner_actor_id IS DISTINCT FROM p.actor_id END)
+ORDER BY m.id
+LIMIT sqlc.arg(max_rows);
+
 -- name: ListAssignmentsNewlyPastDue :many
 -- Published assignments of open courses whose due date has passed and which
 -- have not been swept for that due date yet. The sweep's own action row is

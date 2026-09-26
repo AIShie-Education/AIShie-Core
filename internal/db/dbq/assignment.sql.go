@@ -211,21 +211,25 @@ WHERE a.course_id = $1 AND a.id > $2
   AND ($3::bool OR a.published_at IS NOT NULL)
   AND ($4::bool OR EXISTS (
         SELECT 1 FROM member_assignment_scope y WHERE y.member_id = $5 AND y.assignment_id = a.id))
+  AND ($6::bool OR EXISTS (
+        SELECT 1 FROM member_assignment_scope py WHERE py.member_id = $7 AND py.assignment_id = a.id))
 ORDER BY a.id
-LIMIT $6
+LIMIT $8
 `
 
 type ListAssignmentsParams struct {
-	CourseID           uuid.UUID
-	After              uuid.UUID
-	IncludeUnpublished bool
-	AssignmentAll      bool
-	MemberID           uuid.UUID
-	MaxRows            int32
+	CourseID               uuid.UUID
+	After                  uuid.UUID
+	IncludeUnpublished     bool
+	AssignmentAll          bool
+	MemberID               uuid.UUID
+	PrincipalAssignmentAll bool
+	PrincipalID            uuid.UUID
+	MaxRows                int32
 }
 
-// Scope is applied here, not afterwards. A member who may not write
-// assignments sees only published ones.
+// Scope is applied here, not afterwards, a delegate's principal's included. A
+// member who may not write assignments sees only published ones.
 func (q *Queries) ListAssignments(ctx context.Context, arg ListAssignmentsParams) ([]Assignment, error) {
 	rows, err := q.db.Query(ctx, listAssignments,
 		arg.CourseID,
@@ -233,6 +237,8 @@ func (q *Queries) ListAssignments(ctx context.Context, arg ListAssignmentsParams
 		arg.IncludeUnpublished,
 		arg.AssignmentAll,
 		arg.MemberID,
+		arg.PrincipalAssignmentAll,
+		arg.PrincipalID,
 		arg.MaxRows,
 	)
 	if err != nil {

@@ -12,13 +12,14 @@ import (
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/apperr"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/db/dbq"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/domain"
+	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/events"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/pipeline"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/tool"
 )
 
 func actionTools(d Deps) []tool.Tool {
 	return []tool.Tool{
-		actionDecide(d), actionReview(d),
+		actionDecide(d), actionReview(d), actionWithdraw(),
 		actionListProposed(), actionListPendingReview(), actionListMine(), actionGet(),
 	}
 }
@@ -205,6 +206,62 @@ func actionGet() tool.Tool {
 				return ActionView{}, apperr.Missing("no such action in this course")
 			}
 			return viewAction(a), err
+		},
+	})
+}
+
+type ActionWithdrawIn struct {
+	tool.InCourse
+	ActionID uuid.UUID `json:"action_id" jsonschema:"your proposal that is still waiting for a decision"`
+}
+
+// actionWithdraw lets a proposer take back what they proposed while nobody
+// has decided it: a student who asked to bring an agent in and thought
+// better of it, say. It is gated by perm_document_read, like action.list_mine,
+// only because every seated member holds some permission and this is the most
+// basic one; that the proposal is the caller's own is what the tool checks.
+// The actor is compared, not the seat: someone removed and seated again is
+// still who made it.
+func actionWithdraw() tool.Tool {
+	return tool.Define(tool.Spec[ActionWithdrawIn, OK]{
+		Name: "action.withdraw",
+		Description: "Take back a proposal of yours that is still waiting for a decision. It is cancelled, and nothing of " +
+			"it is carried out. A proposal already decided, or someone else's, cannot be withdrawn.",
+		Kind: tool.Write,
+		Gate: tool.Gate{Perms: []domain.Perm{domain.PermDocumentRead}},
+		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/actions/{action_id}/withdraw"},
+		Resolve: func(ctx context.Context, q dbq.Querier, in ActionWithdrawIn) (tool.Target, error) {
+			return actionTarget(ctx, q, in.CourseID, in.ActionID)
+		},
+		Execute: func(ctx context.Context, ec *tool.ExecCtx, in ActionWithdrawIn) (OK, error) {
+			prop, err := ec.Q.GetActionInCourseForUpdate(ctx, dbq.GetActionInCourseForUpdateParams{ID: in.ActionID, CourseID: &in.CourseID})
+			if errors.Is(err, pgx.ErrNoRows) {
+				return OK{}, apperr.Missing("no such action in this course")
+			}
+			if err != nil {
+				return OK{}, err
+			}
+			if prop.ActorID != ec.Actor.ID {
+				return OK{}, apperr.Forbid("only whoever proposed it withdraws a proposal")
+			}
+			if prop.Status != string(domain.StatusProposed) {
+				return OK{}, apperr.Conflicts("the action is %s, not awaiting a decision", prop.Status)
+			}
+			_, stored := pipeline.Cancellation(pipeline.CancelWithdrawn, nil)
+			n, err := ec.Q.CancelProposal(ctx, dbq.CancelProposalParams{ID: prop.ID, Result: stored})
+			if err != nil {
+				return OK{}, err
+			}
+			if n == 0 {
+				return OK{}, apperr.Conflicts("the proposal was decided just now")
+			}
+			// Filed under the proposal, so that it reads in the proposer's
+			// feed like any other end of a proposal.
+			id := prop.ID
+			ec.Emit(events.Event{Type: events.ActionCancelled, CourseID: prop.CourseID, ActionID: &id,
+				SubjectType: "action", SubjectID: &id,
+				Payload: map[string]any{"action_type": prop.ActionType, "reason": pipeline.CancelWithdrawn, "by_action_id": ec.ActionID}})
+			return OK{OK: true}, nil
 		},
 	})
 }

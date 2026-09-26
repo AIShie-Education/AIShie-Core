@@ -496,7 +496,7 @@ func documentCreate(d Deps) tool.Tool {
 			return t, nil
 		},
 		// The file must still be there when the proposal is approved.
-		Pin: func(ctx context.Context, _ dbq.Querier, now time.Time, in DocumentCreateIn) (DocumentCreateIn, error) {
+		Pin: func(ctx context.Context, _ dbq.Querier, _ *domain.Member, now time.Time, in DocumentCreateIn) (DocumentCreateIn, error) {
 			return in, checkUploadAge(ctx, d, now, in.uploads()...)
 		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in DocumentCreateIn) (DocumentCreateOut, error) {
@@ -588,7 +588,7 @@ func documentAddVersion(d Deps) tool.Tool {
 			return documentTarget(ctx, q, in.CourseID, in.DocumentID, writePerm)
 		},
 		// As document.create.
-		Pin: func(ctx context.Context, _ dbq.Querier, now time.Time, in DocumentAddVersionIn) (DocumentAddVersionIn, error) {
+		Pin: func(ctx context.Context, _ dbq.Querier, _ *domain.Member, now time.Time, in DocumentAddVersionIn) (DocumentAddVersionIn, error) {
 			return in, checkUploadAge(ctx, d, now, in.uploads()...)
 		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in DocumentAddVersionIn) (DocumentVersionOut, error) {
@@ -663,7 +663,7 @@ func documentPublish() tool.Tool {
 		// the proposal waits has been read by nobody who asked for it to be
 		// published, and approving must not put it in front of the class, so
 		// the proposal names the version it was made about.
-		Pin: func(ctx context.Context, q dbq.Querier, _ time.Time, in DocumentPublishIn) (DocumentPublishIn, error) {
+		Pin: func(ctx context.Context, q dbq.Querier, _ *domain.Member, _ time.Time, in DocumentPublishIn) (DocumentPublishIn, error) {
 			if in.VersionID != nil {
 				return in, nil
 			}
@@ -828,6 +828,7 @@ func documentList() tool.Tool {
 				IncludeArchived:    in.IncludeArchived && rc.Member.Perm(domain.PermDocumentReadDraft).Allowed(),
 				WritesAssignments:  canSeeUnpublished(rc.Member),
 				AssignmentAll:      rc.Scope.AssignmentAll, MemberID: rc.Scope.MemberID,
+				PrincipalID: rc.Scope.PrincipalID, PrincipalAssignmentAll: rc.Scope.PrincipalAssignmentAll,
 			})
 			out := DocumentListOut{Documents: make([]DocumentSummary, 0, len(rows))}
 			for _, r := range rows {
@@ -923,7 +924,8 @@ func documentGet(d Deps) tool.Tool {
 					// Not the published one and no right to drafts. One more
 					// way in: it is what the caller's own work was pinned to.
 					pinned, perr := rc.Q.VersionPinnedInScope(ctx, dbq.VersionPinnedInScopeParams{VersionID: &v.ID,
-						StudentAll: rc.Scope.StudentAll, AssignmentAll: rc.Scope.AssignmentAll, MemberID: rc.Scope.MemberID})
+						StudentAll: rc.Scope.StudentAll, AssignmentAll: rc.Scope.AssignmentAll, MemberID: rc.Scope.MemberID,
+						PrincipalID: rc.Scope.PrincipalID, PrincipalStudentAll: rc.Scope.PrincipalStudentAll, PrincipalAssignmentAll: rc.Scope.PrincipalAssignmentAll})
 					if perr != nil {
 						return DocumentGetOut{}, perr
 					}
@@ -996,7 +998,8 @@ func assignmentWithheld(ctx context.Context, rc *tool.ReadCtx, docID uuid.UUID) 
 		return false, nil
 	}
 	inUse, err := rc.Q.DocumentInUseByPublishedAssignment(ctx, dbq.DocumentInUseByPublishedAssignmentParams{
-		DocumentID: &docID, AssignmentAll: rc.Scope.AssignmentAll, MemberID: rc.Scope.MemberID})
+		DocumentID: &docID, AssignmentAll: rc.Scope.AssignmentAll, MemberID: rc.Scope.MemberID,
+		PrincipalID: rc.Scope.PrincipalID, PrincipalAssignmentAll: rc.Scope.PrincipalAssignmentAll})
 	return !inUse, err
 }
 

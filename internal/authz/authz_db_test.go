@@ -284,3 +284,63 @@ func TestEveryPermIsLoaded(t *testing.T) {
 		}
 	}
 }
+
+// A delegate is authorized as its own seat capped by its principal's, read
+// with it: levels, liveness, reach, and the owner behind it.
+func TestADelegateHoldsNoMoreThanItsPrincipal(t *testing.T) {
+	c := newCS101(t)
+	w := c.w
+	agent := w.OwnedAgent(c.yuki, "Yuki's agent")
+	d := w.Delegate(c.course, agent, c.yukiM, "delegate", testkit.ListedStudents(c.yukiM))
+	yuki := authz.Target{StudentMemberIDs: []uuid.UUID{c.yukiM}, AssignmentIDs: []uuid.UUID{c.hw3}}
+	ken := authz.Target{StudentMemberIDs: []uuid.UUID{c.kenM}}
+	expect := func(name string, perm domain.Perm, write bool, target authz.Target, want domain.Level, reason authz.Reason) {
+		t.Helper()
+		got := run(t, c, check{name, agent, c.course, perm, write, target, 0, ""})
+		if got.Level != want || got.Reason != reason {
+			t.Fatalf("%s: got %s (%q), want %s (%q)", name, got.Level, got.Reason, want, reason)
+		}
+		m, err := authz.ForMember(context.Background(), w.Q, d, []domain.Perm{perm}, write, time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if reason == "" || reason == authz.ReasonPrincipalNotActive || reason == authz.ReasonPermDenied {
+			if m.Level != want || m.Reason != reason {
+				t.Fatalf("%s, by its row: got %s (%q), want %s (%q)", name, m.Level, m.Reason, want, reason)
+			}
+		}
+	}
+
+	expect("reads its principal's work", domain.PermSubmissionRead, false, yuki, domain.Autonomous, "")
+	expect("and takes its principal's seat with its own for a write", domain.PermSubmissionRead, true, yuki, domain.Autonomous, "")
+	expect("not another student's", domain.PermSubmissionRead, false, ken, domain.Denied, authz.ReasonStudentScope)
+	// Its own row widened behind everyone's back, as the previous release
+	// could: still no further than its principal.
+	w.Exec(`UPDATE course_member SET student_scope = 'all', perm_grade_submit = 'autonomous', perm_member_manage = 'autonomous' WHERE id = $1`, d)
+	expect("its principal's reach caps its own", domain.PermSubmissionRead, false, ken, domain.Denied, authz.ReasonStudentScope)
+	expect("its principal's level caps its own", domain.PermGradeSubmit, true, yuki, domain.Denied, authz.ReasonPermDenied)
+	expect("it never manages the course", domain.PermMemberManage, true, authz.Target{}, domain.Denied, authz.ReasonPermDenied)
+	w.Exec(`UPDATE course_member SET perm_submission_read = 'confirm_required' WHERE id = $1`, c.yukiM)
+	expect("a principal's level lowered lowers the delegate's", domain.PermSubmissionRead, true, yuki, domain.ConfirmRequired, "")
+	w.Exec(`UPDATE course_member SET perm_submission_read = 'autonomous' WHERE id = $1`, c.yukiM)
+
+	w.Exec(`UPDATE course_member SET status = 'paused' WHERE id = $1`, c.yukiM)
+	expect("paused with its principal", domain.PermDocumentRead, false, authz.Target{}, domain.Denied, authz.ReasonPrincipalNotActive)
+	w.Exec(`UPDATE course_member SET status = 'active' WHERE id = $1`, c.yukiM)
+	w.Exec(`UPDATE actor SET status = 'suspended' WHERE id = $1`, c.yuki)
+	expect("nothing while its owner is suspended", domain.PermDocumentRead, false, authz.Target{}, domain.Denied, authz.ReasonPrincipalNotActive)
+	w.Exec(`UPDATE actor SET status = 'active' WHERE id = $1`, c.yuki)
+	expect("back with its owner", domain.PermDocumentRead, false, authz.Target{}, domain.Autonomous, "")
+	w.Exec(`UPDATE actor SET owner_actor_id = $2 WHERE id = $1`, agent, c.ken)
+	expect("nothing once another owns it", domain.PermDocumentRead, false, authz.Target{}, domain.Denied, authz.ReasonPrincipalNotActive)
+	w.Exec(`UPDATE actor SET owner_actor_id = NULL WHERE id = $1`, agent)
+	expect("nor once nobody does", domain.PermDocumentRead, false, authz.Target{}, domain.Denied, authz.ReasonPrincipalNotActive)
+
+	// An agent seated before anyone owned it counts for nothing once someone
+	// does: it must be brought in again, by its owner.
+	w.Exec(`UPDATE actor SET owner_actor_id = $2 WHERE id = $1`, c.tutor, c.sato)
+	got := run(t, c, check{"", c.tutor, c.course, domain.PermDocumentRead, false, authz.Target{}, 0, ""})
+	if got.Level != domain.Denied || got.Reason != authz.ReasonPrincipalNotActive {
+		t.Fatalf("an owned agent's seat with no principal: %s (%q)", got.Level, got.Reason)
+	}
+}

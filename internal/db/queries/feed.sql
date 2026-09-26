@@ -18,6 +18,11 @@ WHERE sm.course_id = $1 AND g.id > sqlc.arg(after)
         SELECT 1 FROM member_student_scope x WHERE x.member_id = sqlc.arg(member_id) AND x.student_member_id = g.student_member_id))
   AND (sqlc.arg(assignment_all)::bool OR (s.assignment_id IS NOT NULL AND EXISTS (
         SELECT 1 FROM member_assignment_scope y WHERE y.member_id = sqlc.arg(member_id) AND y.assignment_id = s.assignment_id)))
+  -- A delegate's principal's scope, the same way; "all" for any other seat.
+  AND (sqlc.arg(principal_student_all)::bool OR EXISTS (
+        SELECT 1 FROM member_student_scope px WHERE px.member_id = sqlc.arg(principal_id) AND px.student_member_id = g.student_member_id))
+  AND (sqlc.arg(principal_assignment_all)::bool OR (s.assignment_id IS NOT NULL AND EXISTS (
+        SELECT 1 FROM member_assignment_scope py WHERE py.member_id = sqlc.arg(principal_id) AND py.assignment_id = s.assignment_id)))
 ORDER BY g.id
 LIMIT sqlc.arg(max_rows);
 
@@ -38,7 +43,9 @@ WHERE g.id = $1 AND sm.course_id = $2;
 --   * student scope, exactly as authorize() step 4;
 --   * assignment scope as step 5, including its extra case: an event that
 --     names a student but no assignment (a total, a component grade) spans
---     assignments and is for members whose assignment scope is the whole course.
+--     assignments and is for members whose assignment scope is the whole course;
+--   * for a delegate, both again with its principal's scope ("all" for any
+--     other seat).
 SELECT e.seq, e.type, e.course_id, e.action_id, e.subject_type, e.subject_id,
        e.student_member_id, e.assignment_id, e.payload, e.occurred_at
 FROM event e
@@ -51,5 +58,11 @@ WHERE e.course_id = $1 AND e.seq > sqlc.arg(since_seq)
         OR (e.assignment_id IS NULL AND e.student_member_id IS NULL)
         OR (e.assignment_id IS NOT NULL AND EXISTS (
               SELECT 1 FROM member_assignment_scope y WHERE y.member_id = sqlc.arg(member_id) AND y.assignment_id = e.assignment_id)) )
+  AND ( e.student_member_id IS NULL OR sqlc.arg(principal_student_all)::bool OR EXISTS (
+        SELECT 1 FROM member_student_scope px WHERE px.member_id = sqlc.arg(principal_id) AND px.student_member_id = e.student_member_id) )
+  AND ( sqlc.arg(principal_assignment_all)::bool
+        OR (e.assignment_id IS NULL AND e.student_member_id IS NULL)
+        OR (e.assignment_id IS NOT NULL AND EXISTS (
+              SELECT 1 FROM member_assignment_scope py WHERE py.member_id = sqlc.arg(principal_id) AND py.assignment_id = e.assignment_id)) )
 ORDER BY e.seq
 LIMIT sqlc.arg(max_rows);
