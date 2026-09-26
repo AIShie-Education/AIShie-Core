@@ -507,7 +507,7 @@ func TestFileUploadOverHTTP(t *testing.T) {
 	if res, _ := a.raw("PUT", putURL, "application/pdf", []byte("other bytes")); res.StatusCode != 409 {
 		t.Fatalf("a second PUT: %d", res.StatusCode)
 	}
-	if res, _ := a.raw("PUT", putURL[:len(putURL)-3]+"AAA", "application/pdf", pdf); res.StatusCode != 403 {
+	if res, _ := a.raw("PUT", testkit.Forged(t, putURL), "application/pdf", pdf); res.StatusCode != 403 {
 		t.Fatalf("a forged upload URL: %d", res.StatusCode)
 	}
 	if res, _ := a.raw("GET", putURL, "", nil); res.StatusCode != 403 { // a PUT URL is not a GET URL
