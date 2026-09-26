@@ -3,7 +3,8 @@
 # nothing but curl. It bootstraps an installation and then builds the worked
 # example from docs/schema.md §5 entirely through the REST API — register the
 # actors, create and open the course, seat the instructor, set up grading,
-# publish an assignment, hand in work, have an agent grade it, approve, post.
+# publish an assignment, hand in work, have an agent grade it, approve, post;
+# and have the instructor's own tutor agent answer the student's question.
 #
 #   make e2e            (builds first)
 #   scripts/e2e.sh      (expects bin/aishiterud)
@@ -162,6 +163,24 @@ call 200 GET "$C/gradebook/$YUKI_M" "$YUKI"
 call 200 GET "$C/events?since_seq=0" "$GRADER"
 json "$WORK/body" '"action.approved" in [e["type"] for e in d["result"]["events"]] or sys.exit("no action.approved in the agent feed")' >/dev/null
 KEY=yuki-hw3 call 200 POST "$C/grades" "$GRADER" "$GRADE" # the original call, replayed now, reports executed
+
+step "Sato brings in a tutor agent of his own; Yuki asks it; it finds the question in its inbox and answers"
+call 200 POST /v1/me/agents "$SATO" '{"display_name":"Course tutor"}'
+TUTOR_ID=$(json "$WORK/body" 'd["result"]["actor_id"]')
+call 200 POST "/v1/me/agents/$TUTOR_ID/tokens" "$SATO" '{"label":"runtime"}'
+TUTOR=$(json "$WORK/body" 'd["result"]["token"]')
+call 200 POST "$C/delegates" "$SATO" "{\"actor_id\":\"$TUTOR_ID\",\"preset\":\"course_tutor\"}"
+TUTOR_M=$(json "$WORK/body" 'd["result"]["member_id"]')
+call 200 GET "$C/conversations/respondents" "$YUKI"
+json "$WORK/body" '"'"$TUTOR_M"'" in [r["member_id"] for r in d["result"]["respondents"]] or sys.exit("the tutor is not offered to Yuki")' >/dev/null
+call 200 POST "$C/conversations" "$YUKI" "{\"respondent_member_id\":\"$TUTOR_M\",\"body\":\"What does HW3 ask for?\"}"
+CONV=$(json "$WORK/body" 'd["result"]["conversation_id"]')
+call 200 GET "$C/conversations/inbox" "$TUTOR"
+QUESTION=$(json "$WORK/body" 'd["result"]["conversations"][0]["latest_opener_message_id"]')
+KEY="answer:$CONV:$QUESTION" call 200 POST "$C/conversations/$CONV/answer" "$TUTOR" "{\"in_reply_to_message_id\":\"$QUESTION\",\"body\":\"An essay with a thesis.\"}"
+call 200 GET "$C/conversations/$CONV/messages" "$YUKI"
+[ "$(json "$WORK/body" 'd["result"]["messages"][-1]["body"]')" = "An essay with a thesis." ] || fail "Yuki does not see the answer"
+call 404 GET "$C/conversations/$CONV" "$GRADER" # nobody else's to read
 
 step "The same server over MCP: an agent's own door, with the same token"
 mcp() { # JSON-RPC body → $WORK/body

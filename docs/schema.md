@@ -34,6 +34,7 @@ course
  ├ assignment ── submission
  ├ action
  ├ grade
+ ├ conversation ── conversation_message ── conversation_message_retraction
  └ event
 ```
 
@@ -217,6 +218,7 @@ the nearest one, and the choice is recorded here so that it is a decision and no
 | Finding whom to seat by their whole email, or whom an actor id names (`member.lookup_actor`) | `perm_member_manage` | whoever seats members has to name them; it lists nobody |
 | Unpublishing an assignment nobody has started (`assignment.unpublish`) | `perm_assignment_write` | the undo of publishing it |
 | Taking back one's own proposal while nobody has decided it (`action.withdraw`) | `perm_document_read` | the most basic permission a seated member holds; that the proposal is the caller's own is what decides, as `action.list_mine` shows only the caller's own |
+| Closing a conversation (`conversation.close`), retracting a message (`conversation.retract`), listing and reading conversations (`conversation.list`, `.get`, `.messages`) | `perm_document_read` | the most basic permission a seated member holds; the conversation decides who may: its two participants, and whoever decides actions for its opener (§2.8) |
 | Regrading | the lower of `perm_grade_submit` and `perm_grade_post` | it writes a grade and makes it visible in one step |
 | Course settings, status, first instructor | `platform_role` | outside the course by definition |
 
@@ -563,7 +565,8 @@ a member's *own* actions are always visible to it: `action.approved`, `action.re
 `action.cancelled` are filed under the proposal's id, which is how a pull-based agent learns
 what became of what it proposed. `action.approved` carries an `outcome` — `executed`, or
 `failed` when the approved call was refused by the domain — so that the two are never taken
-for one another. Then scope, per row, as below.
+for one another. News of a conversation is the exception both ways: its two participants see
+it, and nobody else (§2.8). Then scope, per row, as below.
 
 `student_member_id` and `assignment_id` say whose the event is, so that the feed is
 scope-filtered in SQL exactly as `authorize()` filters a target: null means the event belongs
@@ -630,6 +633,117 @@ serves HW3, the midterm, the assignments bucket and the course total.
   its output. Structured criteria tables were dropped as a second copy of the rubric.
 - **Every grade names the action that created it.** When a student disputes an agent's mark,
   `created_by_action_id` is the whole query: which agent, which membership, who approved.
+
+### 2.8 Conversations
+
+```
+conversation(id, course_id→course, opener_member_id, respondent_member_id, title null,
+             status [open|closed], closed_reason null, created_at,
+             last_message_at null, last_author_member_id null,
+             unique(id, course_id))
+    composite FKs (course_id, opener_member_id | respondent_member_id | last_author_member_id)
+                  → course_member(course_id, id)
+    check: opener ≠ respondent;  title 1..200 characters;  closed_reason only once closed;
+           the last author is a participant, and set with last_message_at
+    trigger: the participants and the course never change; a closed conversation stays as
+             it is; none is deleted
+
+conversation_message(id, conversation_id, course_id, seq, author_member_id,
+                     in_reply_to_message_id null, body, created_by_action_id→action, created_at,
+                     unique(conversation_id, seq), unique(id, conversation_id), unique(id, course_id))
+    composite FK (conversation_id, course_id) → conversation(id, course_id)
+    composite FK (course_id, author_member_id) → course_member(course_id, id)
+    composite FK (in_reply_to_message_id, conversation_id) → conversation_message(id, conversation_id)
+    check: body 1..20000 characters
+    trigger: only the two participants write, only while the conversation is open; a reply
+             is the respondent's, to a message of the opener's
+    append-only
+
+conversation_message_retraction(message_id, course_id, retracted_by_member_id,
+                                created_by_action_id→action, reason null, created_at)
+    composite FKs (message_id, course_id) → conversation_message,
+                  (course_id, retracted_by_member_id) → course_member
+    append-only
+```
+
+A conversation is one member asking one other member questions, and that member answering
+them: a student and the course's tutor agent, a person and their own agent. It is not a
+discussion (§6): it has two participants, the one who opened it and its respondent, fixed
+for good, and each message is an action — `conversation.open`, `conversation.ask`,
+`conversation.answer` — recorded, authorized and, for an answer, governed by the
+respondent's level of `perm_conversation_answer`: posted at once, posted and reviewed after,
+or waiting for a person's approval.
+
+**Nobody gains through a conversation more than they hold.** A member may address a
+respondent only if the respondent can see and do nothing the member cannot — the
+respondent's seat is within the member's — or the respondent is the member's own delegate.
+So a question cannot make an agent a confused deputy: whatever it answers from, the one who
+asked could have read for themselves. Precisely, O may address R when:
+
+- they are two seats, both live, a delegate's principal included (§2.2), held by active
+  actors;
+- R answers: its `conversation_answer`, as `authorize()` caps it, is allowed;
+- R is O's own delegate, which answers its principal whatever it holds; or R is within O:
+  for every permission but `conversation_answer`, which is what being addressed is, R's
+  level (capped, for a delegate) is no higher than O's, and R reaches no student and no
+  assignment O does not (O `all` reaches everything; a list must lie within O's list; a
+  delegate's reach is its own and its principal's both);
+- a delegate answers only its principal, unless its principal manages the course's
+  members: the delegate of someone who holds `perm_member_manage` is the course's own agent,
+  a `course_tutor` an instructor brought in (§2.2), and answers whomever it is within. So a
+  student may ask the course's tutor, which reads the material and nobody's work, and
+  nobody — not another student, not an instructor — asks a student's own agent anything.
+
+The rule is one function, which every conversation tool goes by, and it is measured now, on
+every call, not when the conversation began: seats are narrowed, widened, paused and
+removed. `conversation.respondents` lists those the caller may address, each with how its
+answers arrive and, for an agent, when it last used a token. `conversation.ask` is refused
+once the respondent may no longer be addressed ("start a new conversation"), and
+`conversation.answer` once its opener may no longer address the one answering. The
+respondent reads the conversation (`conversation.get`, `.messages`) only while its opener
+may still address it; the opener always; and so does whoever oversees the opener: holds
+`perm_action_decide` and reaches the opener in its student scope, as staff see what is said
+by and to the students they answer for. To anyone else a conversation does not exist.
+`conversation.list` lists, in SQL, the caller's own conversations and those it oversees,
+without what was written; `conversation.inbox` those addressed to the caller that wait for
+it: open, the opener spoke last, the opener still live and still able to address the
+caller, and no answer of the caller's waiting for approval.
+
+**An answer answers the latest question.** It names the opener's message it answers
+(`in_reply_to_message_id`), and is refused as a conflict if the opener has written since: a
+reply a slow model wrote, or one that waited for approval, is not posted under a question it
+never saw. Writing a message first updates who spoke last, `WHERE status = 'open'`, which
+takes the conversation's row lock; the check for a newer question and the insert come under
+it. So a close and a message never pass each other, and messages in one conversation are
+written one at a time: `seq` is their order, 1, 2, 3, as the lock gave it, not as any
+instance's clock would. A call writing in a conversation takes its caller's seat first, the
+other participant's next, KEY SHARE (its principal's after it), and the conversation last.
+An answer that waits for approval is a proposal; approving it runs every check again. Four
+eyes count parties (§2.6), so the answers of a course tutor an instructor owns, when they
+wait for approval or review, are decided by someone other than that instructor.
+
+Either participant closes a conversation (`conversation.close`); nothing more is written in
+it, and it stays readable. A message is withdrawn (`conversation.retract`) by its author, or
+by whoever oversees the opener, with a row beside it: the read tools then show it retracted,
+by whom and why, without its text. Removing a seat closes every open conversation it takes
+part in (`closed_reason = 'seat_removed'`), a delegate's with its principal's. A seat the
+release before 0008 removes leaves its conversations open, where nobody can write any more,
+since both participants must be live to.
+
+**The action log holds what was written.** Each message is an action whose payload holds its
+body, so it is readable, in the action views, by anyone who holds `perm_action_decide` in the
+course, unscoped (§7), and a retraction does not take it back from there. That is said
+plainly to whoever reads a conversation (`visible_to`): its participants, course staff who
+decide actions for its opener, and anyone who decides actions in the course, through the
+log. There is no privacy promised beyond that. `action.list_mine` takes `exclude_types`, so
+that a list of what one has done need not be a transcript.
+
+**Its news is its participants'.** `conversation.opened`, `.message_posted`, `.closed` and
+`.message_retracted` are filed under the conversation (`subject_type = 'conversation'`), name
+no student and no assignment, and carry ids only, never a body. They are shown to the two
+participants and to nobody else, whatever they hold: not by permission (the visibility table
+lists none for them), and not by the rule that shows a member the events of its own actions,
+so a manager whose removal of a seat closed a conversation is not told of it.
 
 ## 3. Authorization
 
@@ -702,6 +816,11 @@ check `actor.platform_role` instead. That is the only place it is read.
 | Only an agent has an owner, and its owner is a person: not an agent, not the system actor, not itself | CHECKs on `actor`, trigger `actor_owner_valid` |
 | Making an actor active forgets who suspended it | trigger `actor_suspension_cleared` |
 | A seat that is not removed has a principal exactly when its actor has an owner; the principal is the owner's seat, in the same course, and nobody's delegate | composite FK and trigger `course_member_principal_valid` on `course_member` |
+| A conversation's two participants are two seats of its course, and never change; a closed conversation stays closed; none is deleted | composite FKs, CHECKs and trigger `conversation_guarded` on `conversation` |
+| Only a conversation's participants write in it, only while it is open; a reply is the respondent's, to a message of the opener's in the same conversation | trigger `conversation_message_author_valid`, composite FKs on `conversation_message` |
+| A message and its retraction are in their conversation's course; one message at each `seq`; a message is retracted once | composite FKs, `unique(conversation_id, seq)`, primary key on `conversation_message_retraction` |
+| Every message and retraction names its action | `created_by_action_id NOT NULL` |
+| `conversation_message` and `conversation_message_retraction` are append-only | triggers |
 
 **Enforced by the application.** Each is a place a bug can hide, and each needs a test.
 
@@ -809,6 +928,23 @@ check `actor.platform_role` instead. That is the only place it is read.
 - `member.update_perms_bulk` changes every seat of the role but the caller's, each through the
   rule for one seat, all or none.
 - A proposal is withdrawn only by its proposer, and only while nobody has decided it.
+- Nobody gains through a conversation more than they hold (§2.8): a member addresses only a
+  respondent within their own seat, or their own delegate; a delegate answers only its
+  principal unless that principal manages the course's members. One function decides it for
+  every conversation tool, measured on every call: whom one is offered, whom one may ask,
+  who may answer, and whether a respondent may still read what it was asked.
+- A conversation is read by its opener, by its respondent only while the opener may still
+  address it, and by whoever decides actions for the opener; to anyone else it does not
+  exist. Lists take the caller's own and those it oversees, in SQL.
+- An answer answers the opener's latest message, checked under the conversation's row lock,
+  which writing a message takes first (`WHERE status = 'open'`), so that a close and a
+  message never pass each other; a proposed answer is checked again when approved.
+- A call writing in a conversation takes its caller's seat, then the other participant's
+  and its principal's, then the conversation: a removal, which holds the seat and then
+  closes its conversations, waits for it or is waited for.
+- Removing a seat closes its open conversations, a delegate's with its principal's.
+- A message is retracted by its author, or by whoever decides actions for the opener.
+- News of a conversation reaches its two participants and nobody else (`event.list`).
 - `actor.kind` and `course_member.role` are never read by authorization.
 
 ## 5. Worked example: an agent grades an essay
@@ -835,6 +971,7 @@ garbage in the grades, full record in the log.
 
 - **Discussion.** Course-wide threads and posts (`discussion_thread`, `discussion_post`),
   with agent posts governed like any other action. Attachments via `document.post_id`.
+  Conversations (§2.8) are one member and one respondent, not a forum.
 - **Runs and budgets.** Call and wall-clock budgets per membership. `expires_at`, pause and
   remove are the v1 controls.
 - **Redis.** The event feed is read from Postgres; `event.seq` is already the cursor a stream
@@ -848,6 +985,16 @@ garbage in the grades, full record in the log.
 - **Agent memory.** Agents key their own stores on `course_member.id`, which is the durable
   handle for "this agent in this course".
 - **The concept graph**, quizzes, retention policy.
+- **Waiting for news.** `event.list` and `conversation.inbox` are polled. A long poll, or
+  `LISTEN`/`NOTIFY` behind one, would let an agent answer as soon as it is asked without
+  polling hard; `event.seq` and `last_message_at` are the cursors it would use.
+- **One inbox for every course.** `conversation.inbox` is per course; an agent seated in
+  several polls each (from `me.memberships`).
+- **A course tutor reaching the asker's own work.** The course's tutor reads nobody's work,
+  which is what puts it within every student's seat. Widening its reach for one conversation
+  to the asker's own submissions and grades, and no one else's, is deferred.
+- **Token streaming.** An answer arrives whole, as one message; nothing is streamed while it
+  is written.
 - **Agents that belong to no one person.** An agent is owned by a person or by nobody; a course's
   or a department's own agent is seated as an ordinary member, or as its instructor's delegate
   (`course_tutor`). Agents do not own agents, and a delegate brings in no delegate of its own.
@@ -859,6 +1006,12 @@ garbage in the grades, full record in the log.
 - **Scope on `perm_action_decide`.** The permission is unscoped, so a member who may decide
   sees every proposal's payload in the course, including for students outside their own
   scope. Narrowing it needs scope columns on `action`.
+- **What the action log shows of a conversation.** Every message is an action whose payload
+  holds its body, so whoever holds `perm_action_decide` reads every conversation in the
+  course through the action views — beyond the opener-within-scope rule that governs reading
+  the conversation itself (§2.8), and after a message is retracted. Narrowing that needs the
+  scope columns above, or keeping message bodies out of `payload`, from which an answer
+  that waited for approval is carried out.
 - **A delegate's row and what it may do.** A delegate's row may say more than it may do —
   its principal narrowed since, or the row written by the release before 0007 — and
   `authorize()` goes by the lower. `me.memberships` and `agent.get` say what a seat may do;
