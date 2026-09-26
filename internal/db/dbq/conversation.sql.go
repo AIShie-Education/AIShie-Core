@@ -258,9 +258,8 @@ func (q *Queries) GetConversationInCourse(ctx context.Context, arg GetConversati
 }
 
 const getConversationMessage = `-- name: GetConversationMessage :one
-SELECT m.id, m.conversation_id, m.seq, m.author_member_id, m.in_reply_to_message_id,
-       c.opener_member_id, c.respondent_member_id,
-       EXISTS (SELECT 1 FROM conversation_message_retraction r WHERE r.message_id = m.id)::bool AS retracted
+SELECT m.id, m.conversation_id, m.author_member_id, m.in_reply_to_message_id,
+       c.opener_member_id, c.respondent_member_id
 FROM conversation_message m
 JOIN conversation c ON c.id = m.conversation_id
 WHERE m.id = $1 AND m.course_id = $2
@@ -274,12 +273,10 @@ type GetConversationMessageParams struct {
 type GetConversationMessageRow struct {
 	ID                 uuid.UUID
 	ConversationID     uuid.UUID
-	Seq                int32
 	AuthorMemberID     uuid.UUID
 	InReplyToMessageID *uuid.UUID
 	OpenerMemberID     uuid.UUID
 	RespondentMemberID uuid.UUID
-	Retracted          bool
 }
 
 // A message with what its conversation says about who may act on it.
@@ -289,12 +286,10 @@ func (q *Queries) GetConversationMessage(ctx context.Context, arg GetConversatio
 	err := row.Scan(
 		&i.ID,
 		&i.ConversationID,
-		&i.Seq,
 		&i.AuthorMemberID,
 		&i.InReplyToMessageID,
 		&i.OpenerMemberID,
 		&i.RespondentMemberID,
-		&i.Retracted,
 	)
 	return i, err
 }

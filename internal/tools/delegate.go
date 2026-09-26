@@ -90,7 +90,7 @@ func resolveDelegateSeat(ctx context.Context, q dbq.Querier, m *domain.Member, i
 
 	perms := presetPerms(preset)
 	for _, p := range domain.AllPerms {
-		perms[p] = min(perms[p], delegateCap(m, p))
+		perms[p] = min(perms[p], domain.DelegateCap(m, p))
 	}
 	named := permSet{}
 	if err := named.apply(in.Perms); err != nil {
@@ -101,7 +101,7 @@ func resolveDelegateSeat(ctx context.Context, q dbq.Querier, m *domain.Member, i
 		if !ok {
 			continue
 		}
-		if limit := delegateCap(m, p); l > limit {
+		if limit := domain.DelegateCap(m, p); l > limit {
 			if p == domain.PermMemberManage || p == domain.PermAgentDelegate {
 				return seating{}, apperr.Forbid("a delegate never holds %s", p).With("permission", string(p))
 			}

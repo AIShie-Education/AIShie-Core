@@ -50,9 +50,8 @@ RETURNING id;
 
 -- name: GetConversationMessage :one
 -- A message with what its conversation says about who may act on it.
-SELECT m.id, m.conversation_id, m.seq, m.author_member_id, m.in_reply_to_message_id,
-       c.opener_member_id, c.respondent_member_id,
-       EXISTS (SELECT 1 FROM conversation_message_retraction r WHERE r.message_id = m.id)::bool AS retracted
+SELECT m.id, m.conversation_id, m.author_member_id, m.in_reply_to_message_id,
+       c.opener_member_id, c.respondent_member_id
 FROM conversation_message m
 JOIN conversation c ON c.id = m.conversation_id
 WHERE m.id = $1 AND m.course_id = $2;

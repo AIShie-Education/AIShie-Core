@@ -513,7 +513,7 @@ func withinPrincipal(ctx context.Context, q *dbq.Queries, principalID uuid.UUID,
 		return err
 	}
 	for _, perm := range domain.AllPerms {
-		if limit := delegateCap(p, perm); after.perms[perm] > limit {
+		if limit := domain.DelegateCap(p, perm); after.perms[perm] > limit {
 			return apperr.Forbid("the delegate's principal holds %s at %s, so the delegate cannot hold it at %s", perm, limit, after.perms[perm]).
 				With("permission", string(perm))
 		}
@@ -528,17 +528,6 @@ func withinPrincipal(ctx context.Context, q *dbq.Queries, principalID uuid.UUID,
 		return apperr.Forbid("a delegate lasts no longer than its principal, whose membership ends at %s", p.ExpiresAt.UTC().Format(time.RFC3339))
 	}
 	return nil
-}
-
-// delegateCap is the most a delegate of p may hold of perm (domain.Member.Perm).
-func delegateCap(p *domain.Member, perm domain.Perm) domain.Level {
-	switch perm {
-	case domain.PermMemberManage, domain.PermAgentDelegate:
-		return domain.Denied
-	case domain.PermConversationAnswer:
-		return p.Perm(domain.PermConversationAsk)
-	}
-	return p.Perm(perm)
 }
 
 type MemberUpdatePermsIn struct {
@@ -790,7 +779,8 @@ func memberUpdatePermsBulk() tool.Tool {
 		Description: "Change individual permissions on every seat with one roster role — every student, say — other than " +
 			"your own, removed and expired seats left out. Each change is held to the rules of member.update_perms: " +
 			"raising a level is a grant that must be within what you hold yourself, over that member's whole scope. " +
-			"If any one seat cannot be changed, none is.",
+			"If any one seat cannot be changed, none is. It changes the seats there are now: a seat added later takes its " +
+			"preset's levels, so repeat the call, give the levels to member.add, or use a department preset.",
 		Kind: tool.Write, Gate: manageMembers,
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/members/bulk-perms"},
 		Resolve: func(_ context.Context, _ dbq.Querier, in MemberUpdatePermsBulkIn) (tool.Target, error) {

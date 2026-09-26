@@ -86,13 +86,22 @@ func (m *Member) Perm(p Perm) Level {
 	if m.Principal == nil {
 		return Denied // a delegate whose principal was not loaded holds nothing
 	}
+	return MinLevel(own, DelegateCap(m.Principal, p))
+}
+
+// DelegateCap is the most a delegate of principal may hold of p: the
+// principal's own level, but conversation_answer capped by the principal's
+// conversation_ask, and member_manage and agent_delegate never. Perm applies
+// it on every call; seating and changing a delegate's seat hold the row to
+// it, so that the row says what the delegate can do.
+func DelegateCap(principal *Member, p Perm) Level {
 	switch p {
 	case PermMemberManage, PermAgentDelegate:
 		return Denied
 	case PermConversationAnswer:
-		return MinLevel(own, m.Principal.Perm(PermConversationAsk))
+		return principal.Perm(PermConversationAsk)
 	}
-	return MinLevel(own, m.Principal.Perm(p))
+	return principal.Perm(p)
 }
 
 // AnswersOthers reports whether a delegate may be addressed by anyone but

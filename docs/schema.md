@@ -334,7 +334,9 @@ agent out of a course with `agent.withdraw`. A delegate's seat left behind — i
 hands, or its principal's seat past its expiry — is removed by a sweep (`member.remove_orphan`),
 and by seating the agent again. `member.update_perms_bulk` changes a permission on every live seat of
 one roster role at once, other than the caller's — "students may bring agents only with
-approval" — each change held to the rules of a change to one seat, all or none. Choosing seats
+approval" — each change held to the rules of a change to one seat, all or none. It changes the
+seats there are; a seat added later takes its preset's levels, so it is not a standing setting
+of the course: repeat it, give the levels to `member.add`, or use a department preset. Choosing seats
 by role is what the manager asked for, as `member.list` filters by it; it is not
 authorization.
 
