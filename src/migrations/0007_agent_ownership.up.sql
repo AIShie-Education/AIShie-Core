@@ -41,7 +41,9 @@ SET LOCAL lock_timeout = '10s';
 -- An owner is a person. Agents do not own agents, and the system actor owns
 -- nothing: the trigger below reads the owner's kind, as the credential
 -- trigger of 0004 reads the system actor's, to refuse. Nothing that grants
--- reads it.
+-- reads it. An agent someone owns holds no platform role: owning it, and
+-- holding its tokens, gives nobody more than their own seat, and the
+-- previous release sets no owner and gives a role only at registration.
 --
 -- suspended_by_actor_id says who made the suspension in force, and is read
 -- only while status is 'suspended'. Null there means "not the owner's":
@@ -55,7 +57,8 @@ ALTER TABLE actor
     ADD COLUMN owner_actor_id        uuid REFERENCES actor (id),
     ADD COLUMN suspended_by_actor_id uuid REFERENCES actor (id),
     ADD CONSTRAINT actor_not_own_owner    CHECK (owner_actor_id <> id),
-    ADD CONSTRAINT actor_owned_is_agent   CHECK (owner_actor_id IS NULL OR kind = 'agent');
+    ADD CONSTRAINT actor_owned_is_agent   CHECK (owner_actor_id IS NULL OR kind = 'agent'),
+    ADD CONSTRAINT actor_owned_holds_no_platform_role CHECK (owner_actor_id IS NULL OR platform_role IS NULL);
 CREATE INDEX actor_owner_idx ON actor (owner_actor_id) WHERE owner_actor_id IS NOT NULL;
 
 CREATE FUNCTION actor_owner_is_person() RETURNS trigger

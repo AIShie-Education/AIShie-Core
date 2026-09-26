@@ -54,6 +54,7 @@ ALTER TABLE course_member
     DROP COLUMN IF EXISTS principal_member_id;
 
 ALTER TABLE actor
+    DROP CONSTRAINT IF EXISTS actor_owned_holds_no_platform_role,
     DROP CONSTRAINT IF EXISTS actor_owned_is_agent,
     DROP CONSTRAINT IF EXISTS actor_not_own_owner,
     DROP COLUMN IF EXISTS suspended_by_actor_id,

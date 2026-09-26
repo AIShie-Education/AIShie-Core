@@ -15,6 +15,7 @@ import (
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/domain"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/events"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/ids"
+	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/pipeline"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/tool"
 )
 
@@ -99,6 +100,11 @@ func actorRegister() tool.Tool {
 			if in.OwnerActorID != nil {
 				if in.Kind != "agent" {
 					return ActorOut{}, apperr.Invalid("only an agent has an owner")
+				}
+				// Owning an agent, and holding its tokens, gives nobody more
+				// than their own seat; a platform role is not a seat.
+				if in.PlatformRole != nil {
+					return ActorOut{}, apperr.Invalid("an agent someone owns holds no platform role")
 				}
 				if err := mayOwn(ctx, ec, *in.OwnerActorID); err != nil {
 					return ActorOut{}, err
@@ -411,15 +417,25 @@ func actorSetOwner() tool.Tool {
 	return tool.Define(tool.Spec[ActorSetOwnerIn, OK]{
 		Name: "actor.set_owner",
 		Description: "Give an agent an owner, change it, or take it away (owner_actor_id null). An agent someone owns " +
-			"acts only as their delegate. Refused while the agent is seated in a course that is not archived: its owner " +
-			"withdraws it first (agent.withdraw). Every token and session the agent has is revoked, since whoever owned " +
-			"it before may hold them; issue it a new one. A seat it keeps in an archived course counts for nothing from then on.",
+			"acts only as their delegate. Refused while the agent is seated in a course that is not archived: take it out " +
+			"first (agent.withdraw by its owner, or member.remove), and for an agent that holds a platform role, which an " +
+			"agent someone owns does not. Every credential the agent has — tokens, sessions, password, invitation, linked " +
+			"identity — is revoked, since whoever owned it before may hold them, and the old owner's requests to seat it " +
+			"that wait for a decision are cancelled; issue it a new token. A seat it keeps in an archived course counts " +
+			"for nothing from then on.",
 		Kind: tool.Write, Gate: admins,
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/actors/{actor_id}/owner"},
 		Resolve: func(ctx context.Context, q dbq.Querier, in ActorSetOwnerIn) (tool.Target, error) {
 			return resolveActor(ctx, q, ActorIDIn{ActorID: in.ActorID})
 		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in ActorSetOwnerIn) (OK, error) {
+			// The agent is held first, and everything about it read after:
+			// a token issued or a seat taken meanwhile, which read who owns
+			// it FOR SHARE, has finished, and is revoked or counted below,
+			// or waits for this and finds the new owner.
+			if err := ec.Q.LockAgentForOwnerChange(ctx, in.ActorID); err != nil {
+				return OK{}, err
+			}
 			if err := mayActOn(ctx, ec, in.ActorID); err != nil {
 				return OK{}, err
 			}
@@ -430,6 +446,8 @@ func actorSetOwner() tool.Tool {
 			switch {
 			case in.OwnerActorID != nil && a.Kind != "agent":
 				return OK{}, apperr.Precondition("only an agent has an owner")
+			case in.OwnerActorID != nil && a.PlatformRole != nil:
+				return OK{}, apperr.Precondition("the agent holds a platform role, and an agent someone owns holds none")
 			case (a.OwnerActorID == nil && in.OwnerActorID == nil) ||
 				(a.OwnerActorID != nil && in.OwnerActorID != nil && *a.OwnerActorID == *in.OwnerActorID):
 				return OK{}, apperr.Conflicts("the agent already has that owner")
@@ -453,8 +471,29 @@ func actorSetOwner() tool.Tool {
 			if err := ec.Q.SetActorOwner(ctx, dbq.SetActorOwnerParams{ID: in.ActorID, OwnerActorID: in.OwnerActorID}); err != nil {
 				return OK{}, err
 			}
-			if err := ec.Q.RevokeBearerCredentials(ctx, dbq.RevokeBearerCredentialsParams{ActorID: in.ActorID, RevokedAt: &ec.Now}); err != nil {
+			if err := ec.Q.RevokeAllCredentials(ctx, dbq.RevokeAllCredentialsParams{ActorID: in.ActorID, RevokedAt: &ec.Now}); err != nil {
 				return OK{}, err
+			}
+			// Whoever owned it before may have asked to seat it somewhere.
+			// Those requests are theirs, name a seat of theirs as principal,
+			// and could only fail if approved: they go, and the new owner is
+			// not shown them.
+			requests, err := ec.Q.LockDelegateRequestsFor(ctx, &in.ActorID)
+			if err != nil {
+				return OK{}, err
+			}
+			_, stored := pipeline.Cancellation(pipeline.CancelTargetGone, map[string]any{"why": "owner_changed"})
+			for _, r := range requests {
+				n, err := ec.Q.CancelProposal(ctx, dbq.CancelProposalParams{ID: r.ID, Result: stored})
+				if err != nil {
+					return OK{}, err
+				}
+				if n == 0 {
+					continue
+				}
+				proposal := r.ID
+				ec.Emit(events.Event{Type: events.ActionCancelled, CourseID: r.CourseID, ActionID: &proposal,
+					SubjectType: "action", SubjectID: &proposal, Payload: map[string]any{"reason": pipeline.CancelTargetGone}})
 			}
 			ec.Emit(events.Event{Type: EventActorUpdated, SubjectType: "actor", SubjectID: &in.ActorID,
 				Payload: map[string]any{"owner_actor_id": in.OwnerActorID}})

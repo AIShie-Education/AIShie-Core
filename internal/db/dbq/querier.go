@@ -100,6 +100,15 @@ type Querier interface {
 	// here: the actor's type and the member's roster role. Authorization does not
 	// branch on either, and a test fails if this file ever names them.
 	GetActorForAuthz(ctx context.Context, id uuid.UUID) (GetActorForAuthzRow, error)
+	// The same, FOR SHARE, for a write that acts on who owns the actor, or on
+	// whether it may be seated, and does not change the row: issuing an owned
+	// agent a token, seating it, taking it out of a course. An owner's change
+	// (actor.set_owner) locks the row first, FOR NO KEY UPDATE, so either it
+	// waits for the write, and its revocations and its count of seats then see
+	// what the write did, or the write waits for it and reads the owner it
+	// made. The foreign keys to the row take only KEY SHARE, which neither
+	// conflicts with.
+	GetActorForShare(ctx context.Context, id uuid.UUID) (Actor, error)
 	// One actor as an administrator sees it: the row, and whether they can sign
 	// in. At most one invitation is live (credential_one_live_invite), so the
 	// join adds no row; it may have expired unused.
@@ -240,8 +249,8 @@ type Querier interface {
 	ListActors(ctx context.Context, arg ListActorsParams) ([]ListActorsRow, error)
 	// A person's agents, oldest first, with what their owner needs to see at a
 	// glance: when one last used a token that still works, how many seats it
-	// holds that count now, and how many requests to seat it wait for a
-	// decision.
+	// holds that count now, and how many requests of the owner's to seat it
+	// wait for a decision.
 	ListAgentsOf(ctx context.Context, arg ListAgentsOfParams) ([]ListAgentsOfRow, error)
 	// Every current student of the course whom the caller's student scope
 	// reaches, with their latest attempt at one assignment, if any: the students
@@ -282,8 +291,9 @@ type Querier interface {
 	// Never the hash. The issuer's name comes with the row, for an administrator
 	// telling one token from another.
 	ListCredentialsForActor(ctx context.Context, actorID uuid.UUID) ([]ListCredentialsForActorRow, error)
-	// The proposals to seat an agent as someone's delegate that wait for a
-	// decision.
+	// The proposals of its owner's to seat an agent as their delegate that wait
+	// for a decision. Only the owner's: an owner changed since is not shown what
+	// the one before asked for (actor.set_owner cancels those anyway).
 	ListDelegateRequestsFor(ctx context.Context, targetID *uuid.UUID) ([]ListDelegateRequestsForRow, error)
 	ListDepartments(ctx context.Context) ([]Department, error)
 	// The live drafts waiting to be posted for one assignment.
@@ -393,6 +403,12 @@ type Querier interface {
 	ListVersions(ctx context.Context, documentID uuid.UUID) ([]ListVersionsRow, error)
 	LiveComponentGradeExists(ctx context.Context, arg LiveComponentGradeExistsParams) (bool, error)
 	LiveSubmissionGradeExists(ctx context.Context, submissionID *uuid.UUID) (bool, error)
+	// The agent's row, for the rest of an owner's change, before anything about
+	// it is looked at. NO KEY UPDATE, as LockOwnerForAgents, not UPDATE: every
+	// action row naming the agent holds KEY SHARE on it through its foreign key.
+	// The writes that act on who owns it read it FOR SHARE (GetActorForShare),
+	// and wait for this, or this for them.
+	LockAgentForOwnerChange(ctx context.Context, id uuid.UUID) error
 	// FOR UPDATE, not the NO KEY UPDATE of an ordinary update: it conflicts with
 	// the KEY SHARE that inserting a submission takes, and that
 	// GetAssignmentForSubmission takes before it checks that the assignment is
@@ -408,6 +424,11 @@ type Querier interface {
 	// Taken before changing the tree's shape, so that two moves cannot each
 	// check for a cycle and then create one between them.
 	LockCourseComponents(ctx context.Context, courseID uuid.UUID) error
+	// Every proposal to seat an agent that waits for a decision, locked, for an
+	// owner's change to cancel. One a decision holds already is passed over:
+	// the decision is waiting for the agent's row, which the owner's change
+	// holds, and finds the agent is no longer the proposer's once it has it.
+	LockDelegateRequestsFor(ctx context.Context, targetID *uuid.UUID) ([]LockDelegateRequestsForRow, error)
 	// Serialises version numbering: two writers must not both take seq n+1.
 	LockDocument(ctx context.Context, id uuid.UUID) error
 	// Held until the transaction ends. See events.Flush for why.
@@ -487,9 +508,11 @@ type Querier interface {
 	ReopenMissingSubmission(ctx context.Context, arg ReopenMissingSubmissionParams) error
 	// Linking again an identity that was unlinked from the same actor.
 	ReviveSSOCredential(ctx context.Context, id uuid.UUID) error
-	// Every token and session an actor has: they may be in the hands of
-	// whoever owned it before.
-	RevokeBearerCredentials(ctx context.Context, arg RevokeBearerCredentialsParams) error
+	// Every credential an actor has, of every kind: tokens and sessions, a
+	// password, an invitation, a linked identity. When an agent changes hands,
+	// whoever owned it before may hold any of them: a token issued, a password
+	// set through one, an invitation waiting.
+	RevokeAllCredentials(ctx context.Context, arg RevokeAllCredentialsParams) error
 	// Only the owner's own credential; someone else's id changes nothing.
 	RevokeCredential(ctx context.Context, arg RevokeCredentialParams) (int64, error)
 	RevokeCredentialByID(ctx context.Context, arg RevokeCredentialByIDParams) error

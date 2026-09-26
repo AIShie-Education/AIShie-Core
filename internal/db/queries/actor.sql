@@ -6,6 +6,21 @@ SELECT id, kind, display_name, email, status, platform_role, created_by_actor_id
 FROM actor
 WHERE id = $1;
 
+-- name: GetActorForShare :one
+-- The same, FOR SHARE, for a write that acts on who owns the actor, or on
+-- whether it may be seated, and does not change the row: issuing an owned
+-- agent a token, seating it, taking it out of a course. An owner's change
+-- (actor.set_owner) locks the row first, FOR NO KEY UPDATE, so either it
+-- waits for the write, and its revocations and its count of seats then see
+-- what the write did, or the write waits for it and reads the owner it
+-- made. The foreign keys to the row take only KEY SHARE, which neither
+-- conflicts with.
+SELECT id, kind, display_name, email, status, platform_role, created_by_actor_id, created_at,
+       owner_actor_id, suspended_by_actor_id
+FROM actor
+WHERE id = $1
+FOR SHARE;
+
 -- name: GetActorByEmail :one
 SELECT id, status FROM actor WHERE lower(email) = lower($1);
 
@@ -42,15 +57,15 @@ SELECT count(*) FROM actor WHERE owner_actor_id = $1 AND status <> 'suspended';
 -- name: ListAgentsOf :many
 -- A person's agents, oldest first, with what their owner needs to see at a
 -- glance: when one last used a token that still works, how many seats it
--- holds that count now, and how many requests to seat it wait for a
--- decision.
+-- holds that count now, and how many requests of the owner's to seat it
+-- wait for a decision.
 SELECT a.id, a.display_name, a.status, a.suspended_by_actor_id, a.created_at, seen.last_used_at AS last_seen_at,
        (SELECT count(*) FROM course_member m
          WHERE m.actor_id = a.id AND m.status = 'active'
            AND (m.expires_at IS NULL OR m.expires_at > sqlc.arg(now))) AS live_seats,
        (SELECT count(*) FROM action x
          WHERE x.target_type = 'actor' AND x.target_id = a.id AND x.action_type = 'member.add_delegate'
-           AND x.status = 'proposed') AS pending_requests
+           AND x.status = 'proposed' AND x.actor_id = a.owner_actor_id) AS pending_requests
 FROM actor a
 LEFT JOIN LATERAL (
     SELECT c.last_used_at FROM credential c
@@ -80,13 +95,27 @@ WHERE m.actor_id = $1 AND m.status <> 'removed'
 ORDER BY c.code, c.section, m.id;
 
 -- name: ListDelegateRequestsFor :many
--- The proposals to seat an agent as someone's delegate that wait for a
--- decision.
+-- The proposals of its owner's to seat an agent as their delegate that wait
+-- for a decision. Only the owner's: an owner changed since is not shown what
+-- the one before asked for (actor.set_owner cancels those anyway).
 SELECT x.id, x.course_id, c.code, c.section, c.title, x.created_at
 FROM action x
 JOIN course c ON c.id = x.course_id
+JOIN actor a ON a.id = x.target_id
 WHERE x.target_type = 'actor' AND x.target_id = $1 AND x.action_type = 'member.add_delegate' AND x.status = 'proposed'
+  AND x.actor_id = a.owner_actor_id
 ORDER BY x.id;
+
+-- name: LockDelegateRequestsFor :many
+-- Every proposal to seat an agent that waits for a decision, locked, for an
+-- owner's change to cancel. One a decision holds already is passed over:
+-- the decision is waiting for the agent's row, which the owner's change
+-- holds, and finds the agent is no longer the proposer's once it has it.
+SELECT x.id, x.course_id
+FROM action x
+WHERE x.target_type = 'actor' AND x.target_id = $1 AND x.action_type = 'member.add_delegate' AND x.status = 'proposed'
+ORDER BY x.id
+FOR UPDATE SKIP LOCKED;
 
 -- name: SuspendAgentByOwner :execrows
 UPDATE actor SET status = 'suspended', suspended_by_actor_id = sqlc.arg(owner_actor_id)
@@ -99,6 +128,14 @@ UPDATE actor SET status = 'active', suspended_by_actor_id = NULL
 WHERE id = sqlc.arg(id) AND owner_actor_id = sqlc.arg(owner_actor_id) AND status = 'suspended'
   AND suspended_by_actor_id = sqlc.arg(owner_actor_id);
 
+-- name: LockAgentForOwnerChange :exec
+-- The agent's row, for the rest of an owner's change, before anything about
+-- it is looked at. NO KEY UPDATE, as LockOwnerForAgents, not UPDATE: every
+-- action row naming the agent holds KEY SHARE on it through its foreign key.
+-- The writes that act on who owns it read it FOR SHARE (GetActorForShare),
+-- and wait for this, or this for them.
+SELECT 1 FROM actor WHERE id = $1 FOR NO KEY UPDATE;
+
 -- name: SetActorOwner :exec
 UPDATE actor SET owner_actor_id = sqlc.narg(owner_actor_id) WHERE id = sqlc.arg(id);
 
@@ -108,8 +145,10 @@ UPDATE actor SET owner_actor_id = sqlc.narg(owner_actor_id) WHERE id = sqlc.arg(
 SELECT count(*) FROM course_member m JOIN course c ON c.id = m.course_id
 WHERE m.actor_id = $1 AND m.status <> 'removed' AND c.status <> 'archived';
 
--- name: RevokeBearerCredentials :exec
--- Every token and session an actor has: they may be in the hands of
--- whoever owned it before.
+-- name: RevokeAllCredentials :exec
+-- Every credential an actor has, of every kind: tokens and sessions, a
+-- password, an invitation, a linked identity. When an agent changes hands,
+-- whoever owned it before may hold any of them: a token issued, a password
+-- set through one, an invitation waiting.
 UPDATE credential SET revoked_at = $2
-WHERE actor_id = $1 AND kind IN ('api_token', 'session') AND revoked_at IS NULL;
+WHERE actor_id = $1 AND revoked_at IS NULL;

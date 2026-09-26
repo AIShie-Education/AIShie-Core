@@ -60,7 +60,7 @@ actor(id, kind [human|agent|system], display_name, email null,
       status [active|suspended], platform_role null [root|admin],
       created_by_actor_id null→actor, created_at,
       owner_actor_id null→actor, suspended_by_actor_id null→actor)
-    check: owner_actor_id ≠ id;  owner_actor_id set ⇒ kind = 'agent'
+    check: owner_actor_id ≠ id;  owner_actor_id set ⇒ kind = 'agent' and no platform_role
     trigger: the owner is a person (kind = 'human')
 
 credential(id, actor_id→actor, kind [password|sso|api_token|session|invite],
@@ -94,10 +94,15 @@ their tokens, suspends them, takes them out of a course (`agent.withdraw`). Each
 "no such agent of yours" for an actor the caller does not own, whether it exists or not. An
 administrator may register an agent with an owner (`actor.register`), and give one an owner,
 change it or take it away (`actor.set_owner`): only while it is seated in no course that is not
-archived, and revoking every token and session it has, which whoever owned it may hold. A seat it
-keeps in an archived course stops counting, since it no longer matches the owner, and is removed
-by the sweep once the course is opened again. An agent does not own agents; the system actor owns
-nothing; an administrator does not give root or another administrator an agent to answer for.
+archived, revoking every credential it has — tokens, sessions, password, invitation, linked
+identity — which whoever owned it may hold, and cancelling the requests the owner before made to
+seat it. The change holds the agent's row first, and every write that acts on who owns it — a
+token issued, a seat taken or given up — reads it `FOR SHARE`, so neither passes the other. A seat
+it keeps in an archived course stops counting, since it no longer matches the owner, and is
+removed by the sweep once the course is opened again. An agent does not own agents; the system
+actor owns nothing; an agent someone owns holds no platform role, since owning it and holding its
+tokens would then be more than a seat; an administrator does not give root or another
+administrator an agent to answer for.
 
 `suspended_by_actor_id` says who made the suspension in force, and is read only while `status =
 'suspended'`. An owner lifts only a suspension of their own. An administrator lifts any, and may
@@ -847,6 +852,7 @@ check `actor.platform_role` instead. That is the only place it is read.
 | Owner columns match `document.kind`; a version has content; SSO rows carry an identity | CHECKs |
 | Emails are unique regardless of case | unique index on `lower(email)` |
 | Only an agent has an owner, and its owner is a person: not an agent, not the system actor, not itself | CHECKs on `actor`, trigger `actor_owner_valid` |
+| An agent someone owns holds no platform role | CHECK `actor_owned_holds_no_platform_role` |
 | Making an actor active forgets who suspended it | trigger `actor_suspension_cleared` |
 | A seat that is not removed has a principal exactly when its actor has an owner; the principal is the owner's seat, in the same course, and nobody's delegate | composite FK and trigger `course_member_principal_valid` on `course_member` |
 | Only a delegate's seat answers the course | CHECK `course_member_answers_course_is_delegate` |
@@ -953,12 +959,17 @@ check `actor.platform_role` instead. That is the only place it is read.
 - Four eyes counts parties (§2.6): an actor, the agents it owns or its owner, and the owner's
   other agents are one, in `action.decide`, `action.review`, at any remove and for escalations.
 - Only an agent's owner acts on it through `agent.*`, and to anyone else it does not exist.
-  The owner's agents that are not suspended number at most `AGENT_MAX_PER_OWNER`, counted under a
-  lock on the owner, so two at once are counted one after the other; reactivating one is counted
-  too. An owner lifts only a suspension of their own; an administrator's, or one from before it
-  was recorded, is not theirs.
-- An agent changes owner only while seated in no course that is not archived, and every token
-  and session it has is revoked as it does.
+  What an owner does for themselves is capped: `agent.create`, and `agent.reactivate` of one they
+  suspended, are refused once they have `AGENT_MAX_PER_OWNER` agents that are not suspended,
+  counted under a lock on the owner, so two at once are counted one after the other. An
+  administrator's `actor.register` with an owner, `actor.set_owner` and `actor.reactivate` are
+  not counted: an administrator may give someone more. An owner lifts only a suspension of their
+  own; an administrator's, or one from before it was recorded, is not theirs.
+- An agent changes owner only while seated in no course that is not archived, and every
+  credential it has is revoked, and every request to seat it cancelled, as it does. The change
+  holds the agent's row, `FOR NO KEY UPDATE`, before it looks at anything; issuing it a token
+  and seating it or taking it out read the row `FOR SHARE`, so that a token or a seat made by
+  the owner before is revoked or counted, never left behind.
 - `member.update_perms_bulk` changes every seat of the role but the caller's, each through the
   rule for one seat, all or none.
 - A proposal is withdrawn only by its proposer, and only while nobody has decided it.

@@ -198,7 +198,8 @@ their delegate (a student's request waits for an instructor's approval by
 default). There it can do nothing the person cannot, reach no one the person
 cannot, and last no longer than the person's seat. `AGENT_SELF_SERVICE=off`
 leaves agents to administrators, and `AGENT_MAX_PER_OWNER` (5) bounds how many
-agents that are not suspended one person may have.
+agents that are not suspended one person may create or reactivate for
+themselves; an administrator registering or reassigning one is not counted.
 
 An agent that answers questions polls `conversation_inbox` in each course
 where it may (its `conversation_answer` in `me_memberships`), reads each

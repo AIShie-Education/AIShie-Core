@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/apperr"
+	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/auth"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/domain"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/pipeline"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/testkit"
@@ -315,6 +316,82 @@ func TestAnAgentChangesHandsOnlyOutOfItsCourses(t *testing.T) {
 	fresh := b.delegate(t, b.yuki, bot, m{})
 	if fresh == seat || b.Count(`SELECT count(*) FROM course_member WHERE id = $1 AND status = 'removed'`, seat) != 1 {
 		t.Fatal("the old seat was not removed for the fresh one")
+	}
+}
+
+// When an agent changes hands, nothing its owner before held of it survives:
+// no credential of any kind — a password set through a token included — and
+// no request of theirs to seat it.
+func TestAnAgentChangesHandsWithNothingLeftBehind(t *testing.T) {
+	b := build(t)
+	bot := testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register",
+		m{"kind": "agent", "display_name": "Lab bot", "email": "labbot@example.edu", "owner_actor_id": b.yuki})).ActorID
+	b.do(t, b.yuki, "agent.issue_token", m{"actor_id": bot, "label": "laptop"})
+	b.do(t, bot, "credential.set_password", m{"password": "a long enough password"})
+	b.do(t, b.admin, "actor.invite", m{"actor_id": bot})
+	asked := b.MustCall(b.yuki, "member.add_delegate", m{"course_id": b.course, "actor_id": bot}, "ask")
+	if asked.Status != domain.StatusProposed {
+		t.Fatalf("Yuki's request: %+v", asked)
+	}
+
+	b.do(t, b.admin, "actor.set_owner", m{"actor_id": bot, "owner_actor_id": b.ken})
+	if n := b.Count(`SELECT count(*) FROM credential WHERE actor_id = $1 AND revoked_at IS NULL`, bot); n != 0 {
+		t.Fatalf("%d of the agent's credentials outlived the change of owner", n)
+	}
+	if _, err := auth.NewAuthenticator(b.Pool, 0).Login(t.Context(), "labbot@example.edu", "a long enough password"); !apperr.Is(err, apperr.Unauthenticated) {
+		t.Fatalf("signing in as the agent with the password set while it was Yuki's: %v", err)
+	}
+	if n := b.Count(`SELECT count(*) FROM action WHERE id = $1 AND status = 'cancelled' AND result->'error'->'details'->>'why' = 'owner_changed'`,
+		asked.ActionID); n != 1 {
+		t.Fatal("Yuki's request to seat the agent was not cancelled")
+	}
+	if got := testkit.Result[tools.AgentGetOut](t, b.do(t, b.ken, "agent.get", m{"actor_id": bot})); len(got.Requests) != 0 {
+		t.Fatalf("Ken is shown Yuki's requests: %+v", got.Requests)
+	}
+	if got := testkit.Result[tools.AgentListOut](t, b.do(t, b.ken, "agent.list", m{})); len(got.Agents) != 1 || got.Agents[0].PendingRequests != 0 {
+		t.Fatalf("Ken's agents: %+v", got.Agents)
+	}
+}
+
+// An agent someone owns holds no platform role: owning it and holding its
+// tokens would be more than a seat.
+func TestAnOwnedAgentHoldsNoPlatformRole(t *testing.T) {
+	b := build(t)
+	out := b.MustCall(b.Root, "actor.register", m{"kind": "agent", "display_name": "Admin bot", "platform_role": "admin", "owner_actor_id": b.yuki}, "reg")
+	if out.Status != domain.StatusFailed || out.Error.Code != apperr.InvalidArgument {
+		t.Fatalf("an owned agent with a platform role: %+v", out)
+	}
+	bot := testkit.Result[tools.ActorOut](t, b.do(t, b.Root, "actor.register", m{"kind": "agent", "display_name": "Admin bot", "platform_role": "admin"})).ActorID
+	b.try(t, b.Root, "actor.set_owner", m{"actor_id": bot, "owner_actor_id": b.yuki}, apperr.FailedPrecondition)
+}
+
+// A change of owner and a write that acts on who owns the agent do not pass
+// each other: while the change is under way, a token its owner before asks
+// for, or a seat, waits for it, and is then refused.
+func TestAChangeOfOwnerIsNotPassedByItsOwnerBefore(t *testing.T) {
+	b := build(t)
+	bot := b.agent(t, b.yuki, "Yuki's helper")
+	for _, tc := range []struct {
+		name string
+		args m
+	}{
+		{"agent.issue_token", m{"actor_id": bot, "label": "late"}},
+		{"member.add_delegate", m{"course_id": b.course, "actor_id": bot}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			release := b.hold(t, `UPDATE actor SET owner_actor_id = $2 WHERE id = $1`, bot, b.ken)
+			done := make(chan pipeline.Outcome, 1)
+			b.start(t, done, b.yuki, tc.name, tc.args)
+			b.blocked(t, 1, done)
+			release()
+			if out := <-done; out.Status != domain.StatusFailed || out.Error.Code != apperr.NotFound {
+				t.Fatalf("%s racing a change of owner: %+v", tc.name, out)
+			}
+			b.hold(t, `UPDATE actor SET owner_actor_id = $2 WHERE id = $1`, bot, b.yuki)()
+		})
+	}
+	if n := b.Count(`SELECT count(*) FROM credential WHERE actor_id = $1`, bot); n != 0 {
+		t.Fatalf("the owner before was issued %d tokens during the change", n)
 	}
 }
 

@@ -125,6 +125,40 @@ func (q *Queries) GetActorByEmail(ctx context.Context, lower string) (GetActorBy
 	return i, err
 }
 
+const getActorForShare = `-- name: GetActorForShare :one
+SELECT id, kind, display_name, email, status, platform_role, created_by_actor_id, created_at,
+       owner_actor_id, suspended_by_actor_id
+FROM actor
+WHERE id = $1
+FOR SHARE
+`
+
+// The same, FOR SHARE, for a write that acts on who owns the actor, or on
+// whether it may be seated, and does not change the row: issuing an owned
+// agent a token, seating it, taking it out of a course. An owner's change
+// (actor.set_owner) locks the row first, FOR NO KEY UPDATE, so either it
+// waits for the write, and its revocations and its count of seats then see
+// what the write did, or the write waits for it and reads the owner it
+// made. The foreign keys to the row take only KEY SHARE, which neither
+// conflicts with.
+func (q *Queries) GetActorForShare(ctx context.Context, id uuid.UUID) (Actor, error) {
+	row := q.db.QueryRow(ctx, getActorForShare, id)
+	var i Actor
+	err := row.Scan(
+		&i.ID,
+		&i.Kind,
+		&i.DisplayName,
+		&i.Email,
+		&i.Status,
+		&i.PlatformRole,
+		&i.CreatedByActorID,
+		&i.CreatedAt,
+		&i.OwnerActorID,
+		&i.SuspendedByActorID,
+	)
+	return i, err
+}
+
 const getSystemActor = `-- name: GetSystemActor :one
 SELECT id FROM actor WHERE kind = 'system' ORDER BY created_at LIMIT 1
 `
@@ -173,7 +207,7 @@ SELECT a.id, a.display_name, a.status, a.suspended_by_actor_id, a.created_at, se
            AND (m.expires_at IS NULL OR m.expires_at > $1)) AS live_seats,
        (SELECT count(*) FROM action x
          WHERE x.target_type = 'actor' AND x.target_id = a.id AND x.action_type = 'member.add_delegate'
-           AND x.status = 'proposed') AS pending_requests
+           AND x.status = 'proposed' AND x.actor_id = a.owner_actor_id) AS pending_requests
 FROM actor a
 LEFT JOIN LATERAL (
     SELECT c.last_used_at FROM credential c
@@ -202,8 +236,8 @@ type ListAgentsOfRow struct {
 
 // A person's agents, oldest first, with what their owner needs to see at a
 // glance: when one last used a token that still works, how many seats it
-// holds that count now, and how many requests to seat it wait for a
-// decision.
+// holds that count now, and how many requests of the owner's to seat it
+// wait for a decision.
 func (q *Queries) ListAgentsOf(ctx context.Context, arg ListAgentsOfParams) ([]ListAgentsOfRow, error) {
 	rows, err := q.db.Query(ctx, listAgentsOf, arg.Now, arg.OwnerActorID)
 	if err != nil {
@@ -237,7 +271,9 @@ const listDelegateRequestsFor = `-- name: ListDelegateRequestsFor :many
 SELECT x.id, x.course_id, c.code, c.section, c.title, x.created_at
 FROM action x
 JOIN course c ON c.id = x.course_id
+JOIN actor a ON a.id = x.target_id
 WHERE x.target_type = 'actor' AND x.target_id = $1 AND x.action_type = 'member.add_delegate' AND x.status = 'proposed'
+  AND x.actor_id = a.owner_actor_id
 ORDER BY x.id
 `
 
@@ -250,8 +286,9 @@ type ListDelegateRequestsForRow struct {
 	CreatedAt time.Time
 }
 
-// The proposals to seat an agent as someone's delegate that wait for a
-// decision.
+// The proposals of its owner's to seat an agent as their delegate that wait
+// for a decision. Only the owner's: an owner changed since is not shown what
+// the one before asked for (actor.set_owner cancels those anyway).
 func (q *Queries) ListDelegateRequestsFor(ctx context.Context, targetID *uuid.UUID) ([]ListDelegateRequestsForRow, error) {
 	rows, err := q.db.Query(ctx, listDelegateRequestsFor, targetID)
 	if err != nil {
@@ -401,6 +438,57 @@ func (q *Queries) ListSeatsOfActor(ctx context.Context, actorID uuid.UUID) ([]Li
 	return items, nil
 }
 
+const lockAgentForOwnerChange = `-- name: LockAgentForOwnerChange :exec
+SELECT 1 FROM actor WHERE id = $1 FOR NO KEY UPDATE
+`
+
+// The agent's row, for the rest of an owner's change, before anything about
+// it is looked at. NO KEY UPDATE, as LockOwnerForAgents, not UPDATE: every
+// action row naming the agent holds KEY SHARE on it through its foreign key.
+// The writes that act on who owns it read it FOR SHARE (GetActorForShare),
+// and wait for this, or this for them.
+func (q *Queries) LockAgentForOwnerChange(ctx context.Context, id uuid.UUID) error {
+	_, err := q.db.Exec(ctx, lockAgentForOwnerChange, id)
+	return err
+}
+
+const lockDelegateRequestsFor = `-- name: LockDelegateRequestsFor :many
+SELECT x.id, x.course_id
+FROM action x
+WHERE x.target_type = 'actor' AND x.target_id = $1 AND x.action_type = 'member.add_delegate' AND x.status = 'proposed'
+ORDER BY x.id
+FOR UPDATE SKIP LOCKED
+`
+
+type LockDelegateRequestsForRow struct {
+	ID       uuid.UUID
+	CourseID *uuid.UUID
+}
+
+// Every proposal to seat an agent that waits for a decision, locked, for an
+// owner's change to cancel. One a decision holds already is passed over:
+// the decision is waiting for the agent's row, which the owner's change
+// holds, and finds the agent is no longer the proposer's once it has it.
+func (q *Queries) LockDelegateRequestsFor(ctx context.Context, targetID *uuid.UUID) ([]LockDelegateRequestsForRow, error) {
+	rows, err := q.db.Query(ctx, lockDelegateRequestsFor, targetID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []LockDelegateRequestsForRow
+	for rows.Next() {
+		var i LockDelegateRequestsForRow
+		if err := rows.Scan(&i.ID, &i.CourseID); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const lockOwnerForAgents = `-- name: LockOwnerForAgents :exec
 SELECT 1 FROM actor WHERE id = $1 FOR NO KEY UPDATE
 `
@@ -436,20 +524,22 @@ func (q *Queries) ReactivateAgentByOwner(ctx context.Context, arg ReactivateAgen
 	return result.RowsAffected(), nil
 }
 
-const revokeBearerCredentials = `-- name: RevokeBearerCredentials :exec
+const revokeAllCredentials = `-- name: RevokeAllCredentials :exec
 UPDATE credential SET revoked_at = $2
-WHERE actor_id = $1 AND kind IN ('api_token', 'session') AND revoked_at IS NULL
+WHERE actor_id = $1 AND revoked_at IS NULL
 `
 
-type RevokeBearerCredentialsParams struct {
+type RevokeAllCredentialsParams struct {
 	ActorID   uuid.UUID
 	RevokedAt *time.Time
 }
 
-// Every token and session an actor has: they may be in the hands of
-// whoever owned it before.
-func (q *Queries) RevokeBearerCredentials(ctx context.Context, arg RevokeBearerCredentialsParams) error {
-	_, err := q.db.Exec(ctx, revokeBearerCredentials, arg.ActorID, arg.RevokedAt)
+// Every credential an actor has, of every kind: tokens and sessions, a
+// password, an invitation, a linked identity. When an agent changes hands,
+// whoever owned it before may hold any of them: a token issued, a password
+// set through one, an invitation waiting.
+func (q *Queries) RevokeAllCredentials(ctx context.Context, arg RevokeAllCredentialsParams) error {
+	_, err := q.db.Exec(ctx, revokeAllCredentials, arg.ActorID, arg.RevokedAt)
 	return err
 }
 

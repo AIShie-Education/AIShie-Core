@@ -250,6 +250,11 @@ SELECT pg_temp.fails('an owner is an actor that exists', '23514', $q$
     VALUES ('agent', 'x', '00000000-0000-0000-0000-0000000000ff', '00000000-0000-0000-0000-000000000031') $q$);
 SELECT pg_temp.fails('an agent is not moved under another agent', '23514', $q$
     UPDATE actor SET owner_actor_id = '00000000-0000-0000-0000-000000000036' WHERE id = '00000000-0000-0000-0000-000000000038' $q$);
+SELECT pg_temp.fails('an agent someone owns holds no platform role', '23514', $q$
+    UPDATE actor SET platform_role = 'admin' WHERE id = '00000000-0000-0000-0000-000000000038' $q$);
+SELECT pg_temp.fails('nor is an agent that holds one given an owner', '23514', $q$
+    INSERT INTO actor (kind, display_name, platform_role, owner_actor_id, created_by_actor_id)
+    VALUES ('agent', 'x', 'admin', '00000000-0000-0000-0000-000000000035', '00000000-0000-0000-0000-000000000031') $q$);
 SELECT pg_temp.fails('nothing owns itself', '23514', $q$
     UPDATE actor SET owner_actor_id = id WHERE id = '00000000-0000-0000-0000-000000000038' $q$);
 SELECT pg_temp.fails('who suspended an actor is an actor', '23503', $q$

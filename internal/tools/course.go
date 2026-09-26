@@ -312,7 +312,10 @@ var errSeated = apperr.Conflicts("the actor already has a seat in this course; c
 // preset_id is kept as provenance only — nothing reads it afterwards, so
 // editing the preset later changes nobody already seated.
 func seat(ctx context.Context, ec *tool.ExecCtx, s seating) (uuid.UUID, error) {
-	a, err := ec.Q.GetActor(ctx, s.actorID)
+	// FOR SHARE: whether the actor is someone's, and whose, holds until the
+	// seat is made, or waits for an owner's change under way to finish
+	// (actor.set_owner, which counts the agent's seats once it has the row).
+	a, err := ec.Q.GetActorForShare(ctx, s.actorID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return uuid.Nil, apperr.Missing("no such actor")
 	}
