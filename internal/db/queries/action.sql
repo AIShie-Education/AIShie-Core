@@ -87,6 +87,15 @@ SELECT ((a.id = b.id OR a.owner_actor_id = b.id OR b.owner_actor_id = a.id
 FROM actor a, actor b
 WHERE a.id = sqlc.arg(a)::uuid AND b.id = sqlc.arg(b)::uuid;
 
+-- name: SamePartyAmong :many
+-- Which of the given actors are of one party with the actor (SameParty):
+-- whose actions it neither decides nor reviews.
+SELECT x.id
+FROM actor x, actor me
+WHERE me.id = sqlc.arg(actor_id)::uuid AND x.id = ANY(sqlc.arg(ids)::uuid[])
+  AND ((x.id = me.id OR x.owner_actor_id = me.id OR me.owner_actor_id = x.id
+       OR x.owner_actor_id = me.owner_actor_id) IS TRUE);
+
 -- name: ListProposedActions :many
 SELECT * FROM action
 WHERE course_id = $1 AND status = 'proposed' AND id > sqlc.arg(after)

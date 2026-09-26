@@ -503,6 +503,41 @@ func (q *Queries) SameParty(ctx context.Context, arg SamePartyParams) (bool, err
 	return same, err
 }
 
+const samePartyAmong = `-- name: SamePartyAmong :many
+SELECT x.id
+FROM actor x, actor me
+WHERE me.id = $1::uuid AND x.id = ANY($2::uuid[])
+  AND ((x.id = me.id OR x.owner_actor_id = me.id OR me.owner_actor_id = x.id
+       OR x.owner_actor_id = me.owner_actor_id) IS TRUE)
+`
+
+type SamePartyAmongParams struct {
+	ActorID uuid.UUID
+	Ids     []uuid.UUID
+}
+
+// Which of the given actors are of one party with the actor (SameParty):
+// whose actions it neither decides nor reviews.
+func (q *Queries) SamePartyAmong(ctx context.Context, arg SamePartyAmongParams) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, samePartyAmong, arg.ActorID, arg.Ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const setActionReview = `-- name: SetActionReview :execrows
 UPDATE action
 SET review_state = $2, reviewed_by_member_id = $3, reviewed_at = $4

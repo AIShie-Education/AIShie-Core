@@ -16,6 +16,12 @@ type Querier interface {
 	AddStudentScope(ctx context.Context, arg AddStudentScopeParams) error
 	// When an agent last used a token that still works: no row if never.
 	AgentLastSeen(ctx context.Context, arg AgentLastSeenParams) ([]*time.Time, error)
+	// Whether an answer of the member's to one question waits for a decision.
+	AnswerPendingFor(ctx context.Context, arg AnswerPendingForParams) (bool, error)
+	// Whether the respondent has written since a seq: an answer to the opener's
+	// latest message is there already. Asked under the conversation's row lock,
+	// which every message is written under.
+	AnsweredSince(ctx context.Context, arg AnsweredSinceParams) (bool, error)
 	// Entered and not replaced: a draft waiting to be posted counts, since what it
 	// was entered against would change under it just the same.
 	AssignmentHasLiveGrades(ctx context.Context, assignmentID uuid.UUID) (bool, error)
@@ -38,8 +44,11 @@ type Querier interface {
 	// on a submission to an assignment beneath it.
 	ComponentSubtreeHasLiveGrades(ctx context.Context, componentID uuid.UUID) (bool, error)
 	// What the views show of each conversation: its two participants, whether a
-	// reply waits for a decision, and the opener's newest message. last_seen_at
-	// is an agent's: when it last used a token that still works.
+	// reply to the opener's newest message waits for a decision, that message,
+	// and when a message in it was last retracted. last_seen_at is an agent's:
+	// when it last used a token that still works. A reply waiting for a decision
+	// about an older message is not waited for: approving it can only fail,
+	// since the conversation has moved on.
 	ConversationDetails(ctx context.Context, arg ConversationDetailsParams) ([]ConversationDetailsRow, error)
 	// The agents a person owns that are not suspended: what the limit counts.
 	CountActiveAgentsOf(ctx context.Context, ownerActorID *uuid.UUID) (int64, error)
@@ -255,7 +264,8 @@ type Querier interface {
 	// The conversations a member may list, paged by id: those it opened, those
 	// addressed to it, and, for someone who decides actions, those whose opener
 	// is within its student scope (and its principal's, for a delegate), in SQL.
-	// state is a ConversationView state, or open.
+	// state is a ConversationView state, or open; a reply waits for approval
+	// only if it answers the opener's newest message (ConversationDetails).
 	ListConversationIDs(ctx context.Context, arg ListConversationIDsParams) ([]uuid.UUID, error)
 	// Oldest first, after a seq.
 	ListConversationMessagesAfter(ctx context.Context, arg ListConversationMessagesAfterParams) ([]ListConversationMessagesAfterRow, error)
@@ -305,10 +315,15 @@ type Querier interface {
 	//   * a grade on a component belongs to no single assignment, so a member
 	//     limited to listed assignments does not see it at all.
 	ListGrades(ctx context.Context, arg ListGradesParams) ([]ListGradesRow, error)
-	// Open conversations addressed to a seat in which the opener spoke last and
-	// no answer of the seat's waits for a decision, the longest waiting first.
-	// Whether each is still addressable is for the caller to say, in Go.
-	ListInboxConversationIDs(ctx context.Context, arg ListInboxConversationIDsParams) ([]uuid.UUID, error)
+	// Open conversations addressed to a seat in which the opener spoke last,
+	// the opener's newest message is not retracted, and no answer of the seat's
+	// to that message waits for a decision, the longest waiting first, after a
+	// (last_message_at, id) cursor. The opener's seat, its actor and, for a
+	// delegate, its principal's seat must be live: whatever cannot count again
+	// by itself is left out here, so that it does not stand for good in front
+	// of what can be answered. Whether each opener may still address the seat
+	// is for the caller to say, in Go.
+	ListInboxConversationIDs(ctx context.Context, arg ListInboxConversationIDsParams) ([]ListInboxConversationIDsRow, error)
 	// Per assignment, the student's live posted grade on the highest attempt that
 	// has one.
 	ListLiveAssignmentScores(ctx context.Context, arg ListLiveAssignmentScoresParams) ([]ListLiveAssignmentScoresRow, error)
@@ -487,6 +502,9 @@ type Querier interface {
 	// owner's delegate, so neither of them checks the other's work, and nor does
 	// another of the owner's agents. Null owners compare as nothing.
 	SameParty(ctx context.Context, arg SamePartyParams) (bool, error)
+	// Which of the given actors are of one party with the actor (SameParty):
+	// whose actions it neither decides nor reviews.
+	SamePartyAmong(ctx context.Context, arg SamePartyAmongParams) ([]uuid.UUID, error)
 	// Whether a seat counts for nothing for good, whatever becomes of it: a
 	// delegate's whose principal is removed or past its expiry, or one that does
 	// not match its actor's ownership (an owned agent's seat with no principal,

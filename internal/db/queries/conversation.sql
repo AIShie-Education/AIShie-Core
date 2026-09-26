@@ -60,6 +60,24 @@ WHERE m.conversation_id = $1 AND m.author_member_id = c.opener_member_id
 ORDER BY m.seq DESC
 LIMIT 1;
 
+-- name: AnsweredSince :one
+-- Whether the respondent has written since a seq: an answer to the opener's
+-- latest message is there already. Asked under the conversation's row lock,
+-- which every message is written under.
+SELECT EXISTS (
+    SELECT 1 FROM conversation_message m
+    JOIN conversation c ON c.id = m.conversation_id
+    WHERE m.conversation_id = sqlc.arg(conversation_id) AND m.author_member_id = c.respondent_member_id
+      AND m.seq > sqlc.arg(after_seq))::bool AS answered;
+
+-- name: AnswerPendingFor :one
+-- Whether an answer of the member's to one question waits for a decision.
+SELECT EXISTS (
+    SELECT 1 FROM action a
+    WHERE a.target_type = 'conversation' AND a.target_id = sqlc.arg(conversation_id)::uuid
+      AND a.action_type = 'conversation.answer' AND a.status = 'proposed' AND a.member_id = sqlc.arg(member_id)::uuid
+      AND a.payload->>'in_reply_to_message_id' = sqlc.arg(in_reply_to_message_id)::uuid::text)::bool AS pending;
+
 -- name: InsertRetraction :execrows
 INSERT INTO conversation_message_retraction (message_id, course_id, retracted_by_member_id, created_by_action_id, reason, created_at)
 VALUES ($1, $2, $3, $4, sqlc.narg(reason), $5)
@@ -88,15 +106,18 @@ LIMIT sqlc.arg(max_rows);
 
 -- name: ConversationDetails :many
 -- What the views show of each conversation: its two participants, whether a
--- reply waits for a decision, and the opener's newest message. last_seen_at
--- is an agent's: when it last used a token that still works.
+-- reply to the opener's newest message waits for a decision, that message,
+-- and when a message in it was last retracted. last_seen_at is an agent's:
+-- when it last used a token that still works. A reply waiting for a decision
+-- about an older message is not waited for: approving it can only fail,
+-- since the conversation has moved on.
 SELECT c.id, c.course_id, c.title, c.status, c.closed_reason, c.created_at, c.last_message_at, c.last_author_member_id,
        c.opener_member_id, oa.display_name AS opener_name, oa.kind AS opener_kind,
        c.respondent_member_id, ra.display_name AS respondent_name, ra.kind AS respondent_kind, r.role AS respondent_role,
        r.status AS respondent_status, r.expires_at AS respondent_expires_at,
        r.principal_member_id AS respondent_principal_member_id, own.display_name AS respondent_owner_name,
        seen.last_used_at AS respondent_last_seen_at, pending.id AS pending_reply_action_id,
-       latest.id AS latest_opener_message_id
+       latest.id AS latest_opener_message_id, retracted.created_at AS last_retracted_at
 FROM conversation c
 JOIN course_member o ON o.id = c.opener_member_id
 JOIN actor oa ON oa.id = o.actor_id
@@ -108,15 +129,21 @@ LEFT JOIN LATERAL (
     WHERE ra.kind = 'agent' AND cr.actor_id = ra.id AND cr.kind = 'api_token' AND cr.revoked_at IS NULL
       AND cr.last_used_at IS NOT NULL AND (cr.expires_at IS NULL OR cr.expires_at > sqlc.arg(now))
     ORDER BY cr.last_used_at DESC LIMIT 1) seen ON true
-LEFT JOIN action pending ON pending.id = (
-    SELECT a.id FROM action a
-    WHERE a.target_type = 'conversation' AND a.target_id = c.id AND a.action_type = 'conversation.answer'
-      AND a.status = 'proposed' AND a.member_id = c.respondent_member_id
-    ORDER BY a.id DESC LIMIT 1)
 LEFT JOIN conversation_message latest ON latest.id = (
     SELECT m.id FROM conversation_message m
     WHERE m.conversation_id = c.id AND m.author_member_id = c.opener_member_id
     ORDER BY m.seq DESC LIMIT 1)
+LEFT JOIN conversation_message_retraction retracted ON retracted.message_id = (
+    SELECT x.message_id FROM conversation_message_retraction x
+    JOIN conversation_message xm ON xm.id = x.message_id
+    WHERE xm.conversation_id = c.id
+    ORDER BY x.created_at DESC LIMIT 1)
+LEFT JOIN action pending ON pending.id = (
+    SELECT a.id FROM action a
+    WHERE a.target_type = 'conversation' AND a.target_id = c.id AND a.action_type = 'conversation.answer'
+      AND a.status = 'proposed' AND a.member_id = c.respondent_member_id
+      AND a.payload->>'in_reply_to_message_id' = latest.id::text
+    ORDER BY a.id DESC LIMIT 1)
 WHERE c.id = ANY(sqlc.arg(ids)::uuid[])
 ORDER BY c.id;
 
@@ -124,7 +151,8 @@ ORDER BY c.id;
 -- The conversations a member may list, paged by id: those it opened, those
 -- addressed to it, and, for someone who decides actions, those whose opener
 -- is within its student scope (and its principal's, for a delegate), in SQL.
--- state is a ConversationView state, or open.
+-- state is a ConversationView state, or open; a reply waits for approval
+-- only if it answers the opener's newest message (ConversationDetails).
 SELECT c.id
 FROM conversation c
 WHERE c.course_id = $1 AND c.id > sqlc.arg(after)
@@ -141,25 +169,46 @@ WHERE c.course_id = $1 AND c.id > sqlc.arg(after)
             WHEN c.status = 'closed' THEN 'closed'
             WHEN EXISTS (SELECT 1 FROM action a
                           WHERE a.target_type = 'conversation' AND a.target_id = c.id AND a.action_type = 'conversation.answer'
-                            AND a.status = 'proposed' AND a.member_id = c.respondent_member_id) THEN 'reply_pending_approval'
+                            AND a.status = 'proposed' AND a.member_id = c.respondent_member_id
+                            AND a.payload->>'in_reply_to_message_id' = (
+                                SELECT m.id::text FROM conversation_message m
+                                WHERE m.conversation_id = c.id AND m.author_member_id = c.opener_member_id
+                                ORDER BY m.seq DESC LIMIT 1)) THEN 'reply_pending_approval'
             WHEN c.last_author_member_id = c.opener_member_id THEN 'awaiting_answer'
             ELSE 'answered' END) )
 ORDER BY c.id
 LIMIT sqlc.arg(max_rows);
 
 -- name: ListInboxConversationIDs :many
--- Open conversations addressed to a seat in which the opener spoke last and
--- no answer of the seat's waits for a decision, the longest waiting first.
--- Whether each is still addressable is for the caller to say, in Go.
-SELECT c.id
+-- Open conversations addressed to a seat in which the opener spoke last,
+-- the opener's newest message is not retracted, and no answer of the seat's
+-- to that message waits for a decision, the longest waiting first, after a
+-- (last_message_at, id) cursor. The opener's seat, its actor and, for a
+-- delegate, its principal's seat must be live: whatever cannot count again
+-- by itself is left out here, so that it does not stand for good in front
+-- of what can be answered. Whether each opener may still address the seat
+-- is for the caller to say, in Go.
+SELECT c.id, c.last_message_at
 FROM conversation c
 JOIN course_member o ON o.id = c.opener_member_id
+JOIN actor oa ON oa.id = o.actor_id AND oa.status = 'active'
+LEFT JOIN course_member op ON op.id = o.principal_member_id
+JOIN LATERAL (
+    SELECT m.id FROM conversation_message m
+    WHERE m.conversation_id = c.id AND m.author_member_id = c.opener_member_id
+    ORDER BY m.seq DESC LIMIT 1) latest ON true
 WHERE c.respondent_member_id = sqlc.arg(member_id) AND c.status = 'open'
   AND c.last_author_member_id = c.opener_member_id
   AND o.status = 'active' AND (o.expires_at IS NULL OR o.expires_at > sqlc.arg(now))
+  AND (o.principal_member_id IS NULL
+       OR (op.status = 'active' AND (op.expires_at IS NULL OR op.expires_at > sqlc.arg(now))))
+  AND NOT EXISTS (SELECT 1 FROM conversation_message_retraction x WHERE x.message_id = latest.id)
   AND NOT EXISTS (SELECT 1 FROM action a
                    WHERE a.target_type = 'conversation' AND a.target_id = c.id AND a.action_type = 'conversation.answer'
-                     AND a.status = 'proposed' AND a.member_id = sqlc.arg(member_id))
+                     AND a.status = 'proposed' AND a.member_id = sqlc.arg(member_id)
+                     AND a.payload->>'in_reply_to_message_id' = latest.id::text)
+  AND (sqlc.narg(after_at)::timestamptz IS NULL
+       OR (c.last_message_at, c.id) > (sqlc.narg(after_at)::timestamptz, sqlc.narg(after_id)::uuid))
 ORDER BY c.last_message_at, c.id
 LIMIT sqlc.arg(max_rows);
 

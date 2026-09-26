@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"time"
 
 	"github.com/google/uuid"
@@ -94,6 +95,8 @@ type ActionView struct {
 	ExecutedAt         *time.Time      `json:"executed_at,omitempty"`
 	Result             json.RawMessage `json:"result,omitempty"`
 	CreatedAt          time.Time       `json:"created_at"`
+	// YoursToDecide is set in the approval and review queues.
+	YoursToDecide *bool `json:"yours_to_decide,omitempty" jsonschema:"in the approval and review queues: false when the action is yours, your agent's, your owner's or another agent of your owner's, which someone else decides and reviews; true otherwise, though a decision about a decision may still be refused at one remove"`
 }
 
 func viewAction(a dbq.Action) ActionView {
@@ -129,51 +132,84 @@ func actionPage(rows []dbq.Action, limit int32) ActionListOut {
 	return out
 }
 
+// queuePage is a page of a queue, each action saying whether the caller may
+// decide or review it: not if it is the caller's own party's (pipeline.Decide,
+// pipeline.Review), which the queue lists all the same, since it is the
+// course's queue and someone else's to clear.
+func queuePage(ctx context.Context, rc *tool.ReadCtx, rows []dbq.Action, limit int32) (ActionListOut, error) {
+	out := actionPage(rows, limit)
+	if len(rows) == 0 {
+		return out, nil
+	}
+	actors := make([]uuid.UUID, 0, len(rows))
+	for _, r := range rows {
+		actors = append(actors, r.ActorID)
+	}
+	ours, err := rc.Q.SamePartyAmong(ctx, dbq.SamePartyAmongParams{ActorID: rc.Actor.ID, Ids: actors})
+	if err != nil {
+		return out, err
+	}
+	for i := range out.Actions {
+		yours := !slices.Contains(ours, out.Actions[i].ActorID)
+		out.Actions[i].YoursToDecide = &yours
+	}
+	return out, nil
+}
+
 func courseOnly(_ context.Context, _ dbq.Querier, in ActionListIn) (tool.Target, error) {
 	return tool.Target{CourseID: in.CourseID, Type: "action"}, nil
 }
 
 func actionListProposed() tool.Tool {
 	return tool.Define(tool.Spec[ActionListIn, ActionListOut]{
-		Name:        "action.list_proposed",
-		Description: "The approval queue: proposals in this course waiting for a decision, oldest first.",
-		Kind:        tool.Read,
-		Gate:        decidePerm,
-		HTTP:        tool.Route{Method: "GET", Pattern: "/v1/courses/{course_id}/actions/proposed"},
-		Resolve:     courseOnly,
+		Name: "action.list_proposed",
+		Description: "The approval queue: proposals in this course waiting for a decision, oldest first. yours_to_decide is " +
+			"false on those of your own party — yours, your agents', your owner's — which someone else decides.",
+		Kind:    tool.Read,
+		Gate:    decidePerm,
+		HTTP:    tool.Route{Method: "GET", Pattern: "/v1/courses/{course_id}/actions/proposed"},
+		Resolve: courseOnly,
 		Query: func(ctx context.Context, rc *tool.ReadCtx, in ActionListIn) (ActionListOut, error) {
 			rows, err := rc.Q.ListProposedActions(ctx, dbq.ListProposedActionsParams{CourseID: &in.CourseID, After: in.after(), MaxRows: in.limit()})
-			return actionPage(rows, in.limit()), err
+			if err != nil {
+				return ActionListOut{}, err
+			}
+			return queuePage(ctx, rc, rows, in.limit())
 		},
 	})
 }
 
 func actionListPendingReview() tool.Tool {
 	return tool.Define(tool.Spec[ActionListIn, ActionListOut]{
-		Name:        "action.list_pending_review",
-		Description: "The review queue: actions that executed pending review and have not been reviewed, or were escalated.",
-		Kind:        tool.Read,
-		Gate:        decidePerm,
-		HTTP:        tool.Route{Method: "GET", Pattern: "/v1/courses/{course_id}/actions/pending-review"},
-		Resolve:     courseOnly,
+		Name: "action.list_pending_review",
+		Description: "The review queue: actions that executed pending review and have not been reviewed, or were escalated. " +
+			"yours_to_decide is false on those of your own party — yours, your agents', your owner's — which someone else reviews.",
+		Kind:    tool.Read,
+		Gate:    decidePerm,
+		HTTP:    tool.Route{Method: "GET", Pattern: "/v1/courses/{course_id}/actions/pending-review"},
+		Resolve: courseOnly,
 		Query: func(ctx context.Context, rc *tool.ReadCtx, in ActionListIn) (ActionListOut, error) {
 			rows, err := rc.Q.ListPendingReviewActions(ctx, dbq.ListPendingReviewActionsParams{CourseID: &in.CourseID, After: in.after(), MaxRows: in.limit()})
-			return actionPage(rows, in.limit()), err
+			if err != nil {
+				return ActionListOut{}, err
+			}
+			return queuePage(ctx, rc, rows, in.limit())
 		},
 	})
 }
 
-// action.list_mine lets any member follow its own attempts. For an agent it is
-// the way to find out what became of a proposal, alongside the event feed.
-// It is gated by perm_document_read only because every seated member has
-// some permission and this is the most basic one; what it returns is limited
-// to the caller's own rows by the query, not by the gate.
+// ActionListMineIn is a page of the caller's own actions.
 type ActionListMineIn struct {
 	tool.InCourse
 	ExcludeTypes []string `json:"exclude_types,omitempty" jsonschema:"action types to leave out, such as conversation.ask and conversation.answer"`
 	Page
 }
 
+// actionListMine lets any member follow its own attempts. For an agent it is
+// the way to find out what became of a proposal, alongside the event feed.
+// It is gated by perm_document_read only because every seated member has
+// some permission and this is the most basic one; what it returns is limited
+// to the caller's own rows by the query, not by the gate.
 func actionListMine() tool.Tool {
 	return tool.Define(tool.Spec[ActionListMineIn, ActionListOut]{
 		Name: "action.list_mine",

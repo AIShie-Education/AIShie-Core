@@ -17,6 +17,7 @@ import (
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/domain"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/events"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/ids"
+	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/members"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/tool"
 )
 
@@ -111,8 +112,9 @@ func (r reach) within(o reach) bool {
 // addressing decides who may address whom, as seats stand at now. It reads
 // seats as authorization reads them (domain.Member: levels capped for a
 // delegate, liveness its principal's too), and never an actor's kind or a
-// seat's role. What it looks up it keeps, so that a list of candidates costs
-// a few statements, not a few per candidate.
+// seat's role. What it looks up it keeps: the lists of seats given to load
+// together cost two statements, and whether each actor is active one
+// statement per distinct actor.
 type addressing struct {
 	q           dbq.Querier
 	now         time.Time
@@ -381,7 +383,7 @@ func holdSeat(ctx context.Context, q dbq.Querier, id uuid.UUID) (*domain.Member,
 }
 
 var (
-	errClosed        = apperr.Conflicts("the conversation is closed; start a new one")
+	errClosed        = apperr.Conflicts("the conversation is closed; start a new one").With("reason", "closed")
 	errNotOpener     = apperr.Forbid("only whoever opened a conversation asks in it; the member it is addressed to answers, with conversation.answer")
 	errNotRespondent = apperr.Forbid("only the member a conversation is addressed to answers in it")
 )
@@ -628,16 +630,28 @@ func checkAnswer(ctx context.Context, q dbq.Querier, m, opener *domain.Member, n
 }
 
 // newerQuestion refuses an answer to anything but the opener's latest
-// message: whoever answers answers what was last asked, and a reply made for
-// an older question — one that waited for approval, or one a slow model
-// wrote — is not given to a conversation that has moved on.
+// message, and to that message once it is answered: whoever answers answers
+// what was last asked, once. A reply made for an older question — one that
+// waited for approval, or one a slow model wrote — is not given to a
+// conversation that has moved on, and a second reply to one question — a
+// retry under a new key, two proposals both approved — is not posted beside
+// the first. Asked under the conversation's row lock, it is what makes an
+// answer safe to write again after one failed.
 func newerQuestion(ctx context.Context, q dbq.Querier, c dbq.Conversation, answered uuid.UUID) error {
 	latest, err := q.LatestOpenerMessage(ctx, c.ID)
 	if err != nil {
 		return err
 	}
 	if latest.ID != answered {
-		return apperr.Conflicts("the conversation moved on; answer the latest message").With("latest_opener_message_id", latest.ID)
+		return apperr.Conflicts("the conversation moved on; answer the latest message").
+			With("reason", "moved_on").With("latest_opener_message_id", latest.ID)
+	}
+	done, err := q.AnsweredSince(ctx, dbq.AnsweredSinceParams{ConversationID: c.ID, AfterSeq: latest.Seq})
+	if err != nil {
+		return err
+	}
+	if done {
+		return apperr.Conflicts("the latest message is answered already").With("reason", "already_answered")
 	}
 	return nil
 }
@@ -646,10 +660,12 @@ func conversationAnswer() tool.Tool {
 	return tool.Define(tool.Spec[ConversationAnswerIn, MessageIDOut]{
 		Name: ToolConversationAnswer,
 		Description: "Answer in a conversation addressed to you (conversation.inbox lists those waiting), replying to the " +
-			"opener's latest message, whose id you give as in_reply_to_message_id. If the opener has written again since, the " +
-			"answer is refused as a conflict: read the new message and answer that. Your level of conversation_answer decides " +
-			"whether an answer is posted at once, posted and reviewed after, or waits for a person's approval; one that waits " +
-			"is checked again when approved, and refused then if the conversation has moved on.",
+			"opener's latest message, whose id you give as in_reply_to_message_id. It is refused as a conflict, with a reason: " +
+			"moved_on if the opener has written again since (read the new message and answer that), already_answered if that " +
+			"message has its answer, answer_pending if an answer of yours to it waits for approval, closed if the conversation " +
+			"is. Your level of conversation_answer decides whether an answer is posted at once, posted and reviewed after, or " +
+			"waits for a person's approval; one that waits is checked again when approved, and refused then if the " +
+			"conversation has moved on. An answer that failed or was rejected may be written again, under a new idempotency key.",
 		Kind: tool.Write, Gate: answers,
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/conversations/{conversation_id}/answer"},
 		Resolve: func(ctx context.Context, q dbq.Querier, in ConversationAnswerIn) (tool.Target, error) {
@@ -669,7 +685,20 @@ func conversationAnswer() tool.Tool {
 			if err := checkAnswer(ctx, q, m, opener, now, c, in); err != nil {
 				return in, err
 			}
-			return in, newerQuestion(ctx, q, c, in.InReplyToMessageID)
+			if err := newerQuestion(ctx, q, c, in.InReplyToMessageID); err != nil {
+				return in, err
+			}
+			// One answer to a question waits for a decision at a time: a
+			// second would be approved beside the first.
+			pending, err := q.AnswerPendingFor(ctx, dbq.AnswerPendingForParams{ConversationID: c.ID, MemberID: m.ID,
+				InReplyToMessageID: in.InReplyToMessageID})
+			if err != nil {
+				return in, err
+			}
+			if pending {
+				return in, apperr.Conflicts("an answer of yours to that message already waits for a decision").With("reason", "answer_pending")
+			}
+			return in, nil
 		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in ConversationAnswerIn) (MessageIDOut, error) {
 			c, err := findConversation(ctx, ec.Q, in.CourseID, in.ConversationID)
@@ -723,6 +752,11 @@ func conversationClose() tool.Tool {
 			reason, err := optionalText("reason", in.Reason, maxReasonChars)
 			if err != nil {
 				return OK{}, err
+			}
+			// What the system writes when a seat is removed is not a
+			// participant's to write: it would read as the other one leaving.
+			if reason != nil && strings.EqualFold(*reason, members.ConversationSeatRemoved) {
+				return OK{}, apperr.Invalid("%q is what closing a removed seat's conversations says; give another reason", *reason)
 			}
 			n, err := ec.Q.CloseConversation(ctx, dbq.CloseConversationParams{ID: c.ID, Reason: reason})
 			if err != nil {
@@ -844,6 +878,7 @@ type ConversationView struct {
 	LastMessageAt         *time.Time             `json:"last_message_at,omitempty"`
 	LastAuthorMemberID    *uuid.UUID             `json:"last_author_member_id,omitempty"`
 	LatestOpenerMessageID *uuid.UUID             `json:"latest_opener_message_id,omitempty" jsonschema:"what an answer replies to"`
+	LastRetractedAt       *time.Time             `json:"last_retracted_at,omitempty" jsonschema:"when a message in it was last retracted: a retraction adds no message, so a reader polling with after_seq reads the messages again when this changes"`
 }
 
 // conversationViews reads the views of the given conversations, in id order.
@@ -869,7 +904,7 @@ func conversationViews(ctx context.Context, q dbq.Querier, now time.Time, list [
 	for _, r := range rows {
 		v := ConversationView{ID: r.ID, Title: r.Title, Status: r.Status, ClosedReason: r.ClosedReason,
 			PendingReplyActionID: r.PendingReplyActionID, CreatedAt: r.CreatedAt, LastMessageAt: r.LastMessageAt,
-			LastAuthorMemberID: r.LastAuthorMemberID, LatestOpenerMessageID: r.LatestOpenerMessageID,
+			LastAuthorMemberID: r.LastAuthorMemberID, LatestOpenerMessageID: r.LatestOpenerMessageID, LastRetractedAt: r.LastRetractedAt,
 			Opener: ConversationParty{MemberID: r.OpenerMemberID, DisplayName: r.OpenerName, Kind: r.OpenerKind},
 			Respondent: ConversationRespondent{
 				ConversationParty: ConversationParty{MemberID: r.RespondentMemberID, DisplayName: r.RespondentName, Kind: r.RespondentKind},
@@ -1210,13 +1245,21 @@ type ConversationInboxOut struct {
 	Conversations []ConversationView `json:"conversations" jsonschema:"longest waiting first; answer each with in_reply_to_message_id = its latest_opener_message_id"`
 }
 
+// maxInboxScan bounds how many waiting conversations one call of
+// conversation.inbox looks through for those whose opener may still address
+// the caller. What can never count again — an opener removed, paused,
+// suspended, or whose principal is — is left out in SQL; what is left and
+// still refused is an opener whose seat, or the caller's, has been narrowed
+// or widened since, which is rare, and is looked past a batch at a time.
+const maxInboxScan = 2000
+
 func conversationInbox() tool.Tool {
 	return tool.Define(tool.Spec[ConversationInboxIn, ConversationInboxOut]{
 		Name: "conversation.inbox",
-		Description: "Conversations addressed to you that wait for an answer: open, the opener wrote last, and no answer " +
-			"of yours waits for approval; the longest waiting first. Read each with conversation.messages and answer with " +
-			"conversation.answer, in_reply_to_message_id = its latest_opener_message_id. Poll this, per course: nothing is " +
-			"pushed to you.",
+		Description: "Conversations addressed to you that wait for an answer: open, the opener wrote last, the opener's " +
+			"latest message not retracted, and no answer of yours to it waiting for approval; the longest waiting first. " +
+			"Read each with conversation.messages and answer with conversation.answer, in_reply_to_message_id = its " +
+			"latest_opener_message_id. Poll this, per course: nothing is pushed to you.",
 		Kind: tool.Read, Gate: answers,
 		HTTP: tool.Route{Method: "GET", Pattern: "/v1/courses/{course_id}/conversations/inbox"},
 		Resolve: func(_ context.Context, _ dbq.Querier, in ConversationInboxIn) (tool.Target, error) {
@@ -1228,47 +1271,84 @@ func conversationInbox() tool.Tool {
 				limit = min(in.Limit, 100)
 			}
 			// Whether each opener may still address the caller is decided
-			// in Go, so more are fetched than are wanted: a conversation
-			// whose opener no longer may is left out, not answered.
-			rows, err := rc.Q.ListInboxConversationIDs(ctx, dbq.ListInboxConversationIDsParams{MemberID: rc.Member.ID,
-				Now: &rc.Now, MaxRows: int32(4 * limit)})
-			if err != nil {
-				return ConversationInboxOut{}, err
-			}
+			// in Go, so the waiting conversations are read a batch at a
+			// time, oldest first, until enough are found: a conversation
+			// whose opener no longer may is passed over, not answered, and
+			// does not hide those behind it.
+			out := ConversationInboxOut{Conversations: []ConversationView{}}
 			a := newAddressing(rc.Q, rc.Now)
-			views, err := conversationViews(ctx, rc.Q, rc.Now, rows)
-			if err != nil {
-				return ConversationInboxOut{}, err
-			}
-			openers := make([]uuid.UUID, 0, len(views))
-			for _, v := range views {
-				openers = append(openers, v.Opener.MemberID)
-			}
-			seats, err := authz.LoadMembers(ctx, rc.Q, openers)
-			if err != nil {
-				return ConversationInboxOut{}, err
-			}
-			waiting := map[uuid.UUID]ConversationView{}
-			for _, v := range views {
-				opener, ok := seats[v.Opener.MemberID]
-				if !ok {
-					continue
-				}
-				why, err := a.refusal(ctx, opener, rc.Member)
+			batch := int32(4 * limit)
+			var afterAt *time.Time
+			var afterID *uuid.UUID
+			for scanned := 0; len(out.Conversations) < limit && scanned < maxInboxScan; {
+				rows, err := rc.Q.ListInboxConversationIDs(ctx, dbq.ListInboxConversationIDsParams{MemberID: rc.Member.ID,
+					Now: &rc.Now, AfterAt: afterAt, AfterID: afterID, MaxRows: batch})
 				if err != nil {
 					return ConversationInboxOut{}, err
 				}
-				if why == "" {
-					waiting[v.ID] = v
+				if len(rows) == 0 {
+					break
 				}
-			}
-			out := ConversationInboxOut{Conversations: []ConversationView{}}
-			for _, id := range rows { // the order waited, not the views' order
-				if v, ok := waiting[id]; ok && len(out.Conversations) < limit {
-					out.Conversations = append(out.Conversations, v)
+				scanned += len(rows)
+				list := make([]uuid.UUID, len(rows))
+				for i, r := range rows {
+					list[i] = r.ID
 				}
+				waiting, err := addressable(ctx, rc, a, list)
+				if err != nil {
+					return ConversationInboxOut{}, err
+				}
+				for _, id := range list { // the order waited, not the views' order
+					if v, ok := waiting[id]; ok && len(out.Conversations) < limit {
+						out.Conversations = append(out.Conversations, v)
+					}
+				}
+				if len(rows) < int(batch) {
+					break
+				}
+				last := rows[len(rows)-1]
+				afterAt, afterID = last.LastMessageAt, &last.ID
 			}
 			return out, nil
 		},
 	})
+}
+
+// addressable is the views of the given conversations whose openers may
+// still address the caller, by id.
+func addressable(ctx context.Context, rc *tool.ReadCtx, a *addressing, list []uuid.UUID) (map[uuid.UUID]ConversationView, error) {
+	views, err := conversationViews(ctx, rc.Q, rc.Now, list)
+	if err != nil {
+		return nil, err
+	}
+	openers := make([]uuid.UUID, 0, len(views))
+	for _, v := range views {
+		openers = append(openers, v.Opener.MemberID)
+	}
+	seats, err := authz.LoadMembers(ctx, rc.Q, openers)
+	if err != nil {
+		return nil, err
+	}
+	all := []*domain.Member{rc.Member}
+	for _, s := range seats {
+		all = append(all, s)
+	}
+	if err := a.load(ctx, all...); err != nil {
+		return nil, err
+	}
+	waiting := map[uuid.UUID]ConversationView{}
+	for _, v := range views {
+		opener, ok := seats[v.Opener.MemberID]
+		if !ok {
+			continue
+		}
+		why, err := a.refusal(ctx, opener, rc.Member)
+		if err != nil {
+			return nil, err
+		}
+		if why == "" {
+			waiting[v.ID] = v
+		}
+	}
+	return waiting, nil
 }

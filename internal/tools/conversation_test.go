@@ -613,3 +613,156 @@ func TestMyActionsLeaveOutTheChat(t *testing.T) {
 		}
 	}
 }
+
+func (b *built) inboxOf(t *testing.T, actor uuid.UUID, limit int) []tools.ConversationView {
+	t.Helper()
+	return testkit.Result[tools.ConversationInboxOut](t, b.do(t, actor, "conversation.inbox", m{"course_id": b.course, "limit": limit})).Conversations
+}
+
+// The inbox lists what can be answered. Conversations whose openers may no
+// longer address the one asked, however many and however old, do not stand
+// in front of one that can; nor does one whose latest question is
+// retracted, nor an answer waiting for approval to a question overtaken.
+func TestTheInboxShowsWhatCanBeAnswered(t *testing.T) {
+	c := newCast(t)
+	b := c.built
+	// Ken asks the course tutor five times, then may no longer ask it: it
+	// reads the material, which he no longer may.
+	for i := range 5 {
+		b.open(t, b.ken, c.courseTutor, fmt.Sprintf("Question %d", i))
+	}
+	b.do(t, b.sato, "member.update_perms", m{"course_id": b.course, "member_id": b.kenM, "perms": m{"document_read": "denied"}})
+	yukis, _ := b.open(t, b.yuki, c.courseTutor, "A question that can be answered")
+	tutor := b.seatActor(t, c.courseTutor)
+	if in := b.inboxOf(t, tutor, 1); len(in) != 1 || in[0].ID != yukis {
+		t.Fatalf("the inbox behind five conversations it cannot answer: %+v", in)
+	}
+	// An opener suspended everywhere is left out before anything is looked at.
+	b.do(t, b.sato, "member.update_perms", m{"course_id": b.course, "member_id": b.kenM, "perms": m{"document_read": "autonomous"}})
+	b.do(t, b.admin, "actor.suspend", m{"actor_id": b.ken})
+	if in := b.inboxOf(t, tutor, 1); len(in) != 1 || in[0].ID != yukis {
+		t.Fatalf("the inbox behind a suspended opener's conversations: %+v", in)
+	}
+	b.do(t, b.admin, "actor.reactivate", m{"actor_id": b.ken})
+	if in := b.inboxOf(t, tutor, 20); len(in) != 6 {
+		t.Fatalf("the inbox with Ken back: %d conversations", len(in))
+	}
+
+	// A question its writer took back waits for nothing.
+	conv, q := b.open(t, b.yuki, b.tutorM, "oops, wrong window: my password is x")
+	b.do(t, b.yuki, "conversation.retract", m{"course_id": b.course, "message_id": q})
+	for _, v := range b.inbox(t, b.tutor) {
+		if v.ID == conv {
+			t.Fatal("a conversation whose only question is retracted waits for an answer")
+		}
+	}
+	if got := b.conversation(t, b.yuki, conv); got.LastRetractedAt == nil {
+		t.Fatalf("the conversation does not say a message in it was retracted: %+v", got)
+	}
+	q2 := b.ask(t, b.yuki, conv, "What is a thesis?")
+	if in := b.inbox(t, b.tutor); len(in) != 1 || in[0].ID != conv || *in[0].LatestOpenerMessageID != q2 {
+		t.Fatalf("the inbox once she asks again: %+v", in)
+	}
+
+	// An answer waiting for approval to a question since overtaken hides
+	// nothing: approving it can only fail.
+	b.do(t, b.sato, "member.update_perms", m{"course_id": b.course, "member_id": b.tutorM, "perms": m{"conversation_answer": "confirm_required"}})
+	waiting := b.MustCall(b.tutor, "conversation.answer", answerArgs(b, conv, q2, "A claim."), "answer:"+conv.String()+":"+q2.String()+":1")
+	if waiting.Status != domain.StatusProposed || len(b.inbox(t, b.tutor)) != 0 {
+		t.Fatalf("an answer waiting: %+v", waiting)
+	}
+	q3 := b.ask(t, b.yuki, conv, "And an argument?")
+	if in := b.inbox(t, b.tutor); len(in) != 1 || in[0].State != tools.StateAwaitingAnswer || in[0].PendingReplyActionID != nil {
+		t.Fatalf("the inbox with an answer waiting to an older question: %+v", in)
+	}
+	if got := b.conversation(t, b.yuki, conv); got.State != tools.StateAwaitingAnswer {
+		t.Fatalf("the conversation, an answer to an older question waiting: %+v", got)
+	}
+	if got := b.listConversations(t, b.yuki, m{"state": tools.StateReplyPendingApproval}); len(got) != 0 {
+		t.Fatalf("listed as waiting for approval: %+v", got)
+	}
+	if n := len(b.listConversations(t, b.yuki, m{"state": tools.StateAwaitingAnswer})); n != 2 {
+		t.Fatalf("%d listed as awaiting an answer", n)
+	}
+	if next := b.MustCall(b.tutor, "conversation.answer", answerArgs(b, conv, q3, "Reasons for the claim."), "answer:"+conv.String()+":"+q3.String()+":1"); next.Status != domain.StatusProposed {
+		t.Fatalf("an answer to the newest question: %+v", next)
+	}
+}
+
+// A question is answered once. A second answer to it — a retry under a new
+// key, a second proposal — is refused, however it comes; and an answer
+// rejected is written again under a new key.
+func TestAQuestionIsAnsweredOnce(t *testing.T) {
+	b := build(t)
+	conv, q := b.open(t, b.yuki, b.tutorM, "Is HW3 due on Friday?")
+	b.do(t, b.tutor, "conversation.answer", answerArgs(b, conv, q, "Yes."))
+	again := b.MustCall(b.tutor, "conversation.answer", answerArgs(b, conv, q, "Yes, at noon."), "answer:"+conv.String()+":"+q.String()+":2")
+	if again.Status != domain.StatusFailed || again.Error.Code != apperr.Conflict || reason(again) != "already_answered" {
+		t.Fatalf("a second answer to one question: %+v", again)
+	}
+
+	b.do(t, b.sato, "member.update_perms", m{"course_id": b.course, "member_id": b.tutorM, "perms": m{"conversation_answer": "confirm_required"}})
+	q2 := b.ask(t, b.yuki, conv, "And HW4?")
+	key := func(attempt int) string { return fmt.Sprintf("answer:%s:%s:%d", conv, q2, attempt) }
+	first := b.MustCall(b.tutor, "conversation.answer", answerArgs(b, conv, q2, "Yes"), key(1))
+	if first.Status != domain.StatusProposed {
+		t.Fatalf("the first answer: %+v", first)
+	}
+	second := b.MustCall(b.tutor, "conversation.answer", answerArgs(b, conv, q2, "No, Monday"), key(2))
+	if second.Status != domain.StatusFailed || reason(second) != "answer_pending" {
+		t.Fatalf("a second answer to a question whose first waits: %+v", second)
+	}
+	// Rejected, the conversation is back in the inbox, and the answer is
+	// written again under the next attempt.
+	b.do(t, b.sato, "action.decide", m{"course_id": b.course, "action_id": first.ActionID, "decision": "reject", "reason": "HW4 is due Monday"})
+	if in := b.inbox(t, b.tutor); len(in) != 1 || in[0].ID != conv {
+		t.Fatalf("the inbox after a rejection: %+v", in)
+	}
+	if replay := b.MustCall(b.tutor, "conversation.answer", answerArgs(b, conv, q2, "Yes"), key(1)); replay.Status != domain.StatusRejected {
+		t.Fatalf("the rejected attempt, retried: %+v", replay)
+	}
+	third := b.MustCall(b.tutor, "conversation.answer", answerArgs(b, conv, q2, "No, Monday"), key(3))
+	if third.Status != domain.StatusProposed {
+		t.Fatalf("the answer written again: %+v", third)
+	}
+	d := testkit.Result[pipeline.DecideOut](t, b.do(t, b.sato, "action.decide", m{"course_id": b.course, "action_id": third.ActionID, "decision": "approve"}))
+	if d.Outcome != domain.StatusExecuted {
+		t.Fatalf("approving it: %+v", d)
+	}
+	if n := b.Count(`SELECT count(*) FROM conversation_message WHERE in_reply_to_message_id = $1`, q2); n != 1 {
+		t.Fatalf("%d answers to one question", n)
+	}
+
+	// Nobody passes a close off as a seat removal.
+	b.try(t, b.yuki, "conversation.close", m{"course_id": b.course, "conversation_id": conv, "reason": "seat_removed"}, apperr.InvalidArgument)
+	b.try(t, b.yuki, "conversation.close", m{"course_id": b.course, "conversation_id": conv, "reason": " Seat_Removed "}, apperr.InvalidArgument)
+	b.do(t, b.yuki, "conversation.close", m{"course_id": b.course, "conversation_id": conv, "reason": "Thanks"})
+}
+
+// The answers of a course tutor its instructor owns are that instructor's
+// party's: the queues list them, and say they are someone else's to decide.
+func TestAnInstructorsOwnTutorIsDecidedBySomeoneElse(t *testing.T) {
+	c := newCast(t)
+	b := c.built
+	b.do(t, b.sato, "member.update_perms", m{"course_id": b.course, "member_id": c.courseTutor, "perms": m{"conversation_answer": "confirm_required"}})
+	conv, q := b.open(t, b.ken, c.courseTutor, "Is HW3 due on Friday?")
+	answer := b.MustCall(b.seatActor(t, c.courseTutor), "conversation.answer", answerArgs(b, conv, q, "Yes."), "answer:1")
+	if answer.Status != domain.StatusProposed {
+		t.Fatalf("the tutor's answer: %+v", answer)
+	}
+	request := b.MustCall(b.ken, "member.add_delegate", m{"course_id": b.course, "actor_id": b.agent(t, b.ken, "Ken's helper")}, "request")
+	queue := map[uuid.UUID]*bool{}
+	for _, a := range testkit.Result[tools.ActionListOut](t, b.do(t, b.sato, "action.list_proposed", m{"course_id": b.course})).Actions {
+		queue[a.ID] = a.YoursToDecide
+	}
+	if v := queue[*answer.ActionID]; v == nil || *v {
+		t.Fatalf("Sato's own tutor's answer, as his queue lists it: %v", v)
+	}
+	if v := queue[*request.ActionID]; v == nil || !*v {
+		t.Fatalf("Ken's request, as Sato's queue lists it: %v", v)
+	}
+	d := b.MustCall(b.sato, "action.decide", m{"course_id": b.course, "action_id": answer.ActionID, "decision": "approve"}, "decide")
+	if d.Status != domain.StatusFailed || d.Error.Code != apperr.Forbidden {
+		t.Fatalf("Sato deciding his own tutor's answer: %+v", d)
+	}
+}

@@ -597,7 +597,9 @@ seated again has a new seat, and is still who made the action. It compares parti
 actor, an agent it owns or its owner, and another agent of the same owner are one party, since an
 agent someone owns acts only as their delegate. An owner does not approve or review what their
 agent did, nor an agent what its owner or a sibling did, nor does any of them close an escalation
-another of them raised. The database cannot go further
+another of them raised. The approval and review queues list such actions all the same — they are
+the course's queues — and mark each with whether it is the caller's to decide
+(`yours_to_decide`). The database cannot go further
 and require the decider to be human, because nothing reads `actor.kind`. Nor can it see past one
 row: a decision is an action like any other, so it may itself wait for a decision or be under
 review — a triage agent whose approvals a human confirms. Confirming it carries out what it
@@ -715,13 +717,22 @@ may still address it; the opener always; and so does whoever oversees the opener
 by and to the students they answer for. To anyone else a conversation does not exist.
 `conversation.list` lists, in SQL, the caller's own conversations and those it oversees,
 without what was written; `conversation.inbox` those addressed to the caller that wait for
-it: open, the opener spoke last, the opener still live and still able to address the
-caller, and no answer of the caller's waiting for approval.
+it: open, the opener spoke last and has not retracted what it last wrote, the opener still
+live and still able to address the caller, and no answer of the caller's to that message
+waiting for approval. What can never count again — an opener removed, paused, suspended, or
+whose principal is — is left out in SQL, and the rest is read a batch at a time, oldest
+first, until enough are found, so that conversations whose openers may no longer ask do not
+stand for good in front of those that may.
 
-**An answer answers the latest question.** It names the opener's message it answers
-(`in_reply_to_message_id`), and is refused as a conflict if the opener has written since: a
-reply a slow model wrote, or one that waited for approval, is not posted under a question it
-never saw. Writing a message first updates who spoke last, `WHERE status = 'open'`, which
+**An answer answers the latest question, once.** It names the opener's message it answers
+(`in_reply_to_message_id`), and is refused as a conflict if the opener has written since
+(`moved_on`): a reply a slow model wrote, or one that waited for approval, is not posted under a
+question it never saw. It is refused as well once that message is answered
+(`already_answered`), and a second proposal to one message is refused while the first waits
+for a decision (`answer_pending`): so an answer that failed, or was rejected, is written again
+under a new idempotency key without any risk of two answers to one question. An answer waiting
+for approval to a message since overtaken holds nothing up: the conversation is back in the
+inbox, and approving the answer can only fail. Writing a message first updates who spoke last, `WHERE status = 'open'`, which
 takes the conversation's row lock; the check for a newer question and the insert come under
 it. So a close and a message never pass each other, and messages in one conversation are
 written one at a time: `seq` is their order, 1, 2, 3, as the lock gave it, not as any
@@ -729,12 +740,15 @@ instance's clock would. A call writing in a conversation takes its caller's seat
 other participant's next, KEY SHARE (its principal's after it), and the conversation last.
 An answer that waits for approval is a proposal; approving it runs every check again. Four
 eyes count parties (§2.6), so the answers of a course tutor an instructor owns, when they
-wait for approval or review, are decided by someone other than that instructor.
+wait for approval or review, are decided by someone other than that instructor. Where that
+instructor is the only one who decides actions, nobody can: such a tutor's answers stay
+autonomous there, or someone else is seated to decide them.
 
-Either participant closes a conversation (`conversation.close`); nothing more is written in
-it, and it stays readable. A message is withdrawn (`conversation.retract`) by its author, or
+Either participant closes a conversation (`conversation.close`), with a reason if they like,
+which may not be `seat_removed`; nothing more is written in it, and it stays readable. A message is withdrawn (`conversation.retract`) by its author, or
 by whoever oversees the opener, with a row beside it: the read tools then show it retracted,
-by whom and why, without its text. Removing a seat closes every open conversation it takes
+by whom and why, without its text, and the conversation says when a message in it was last
+retracted (`last_retracted_at`), since a retraction adds no message for a reader to poll. Removing a seat closes every open conversation it takes
 part in (`closed_reason = 'seat_removed'`), a delegate's with its principal's. A seat the
 release before 0008 removes leaves its conversations open, where nobody can write any more,
 since both participants must be live to.
@@ -948,9 +962,10 @@ check `actor.platform_role` instead. That is the only place it is read.
 - A conversation is read by its opener, by its respondent only while the opener may still
   address it, and by whoever decides actions for the opener; to anyone else it does not
   exist. Lists take the caller's own and those it oversees, in SQL.
-- An answer answers the opener's latest message, checked under the conversation's row lock,
-  which writing a message takes first (`WHERE status = 'open'`), so that a close and a
-  message never pass each other; a proposed answer is checked again when approved.
+- An answer answers the opener's latest message, and only while nothing answers it yet,
+  checked under the conversation's row lock, which writing a message takes first (`WHERE
+  status = 'open'`), so that a close and a message never pass each other; a proposed answer is
+  checked again when approved, and one proposal to a message waits at a time.
 - A call writing in a conversation takes its caller's seat, then the other participant's
   and its principal's, then the conversation: a removal, which holds the seat and then
   closes its conversations, waits for it or is waited for.

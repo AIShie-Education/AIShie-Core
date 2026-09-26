@@ -12,6 +12,51 @@ import (
 	"github.com/google/uuid"
 )
 
+const answerPendingFor = `-- name: AnswerPendingFor :one
+SELECT EXISTS (
+    SELECT 1 FROM action a
+    WHERE a.target_type = 'conversation' AND a.target_id = $1::uuid
+      AND a.action_type = 'conversation.answer' AND a.status = 'proposed' AND a.member_id = $2::uuid
+      AND a.payload->>'in_reply_to_message_id' = $3::uuid::text)::bool AS pending
+`
+
+type AnswerPendingForParams struct {
+	ConversationID     uuid.UUID
+	MemberID           uuid.UUID
+	InReplyToMessageID uuid.UUID
+}
+
+// Whether an answer of the member's to one question waits for a decision.
+func (q *Queries) AnswerPendingFor(ctx context.Context, arg AnswerPendingForParams) (bool, error) {
+	row := q.db.QueryRow(ctx, answerPendingFor, arg.ConversationID, arg.MemberID, arg.InReplyToMessageID)
+	var pending bool
+	err := row.Scan(&pending)
+	return pending, err
+}
+
+const answeredSince = `-- name: AnsweredSince :one
+SELECT EXISTS (
+    SELECT 1 FROM conversation_message m
+    JOIN conversation c ON c.id = m.conversation_id
+    WHERE m.conversation_id = $1 AND m.author_member_id = c.respondent_member_id
+      AND m.seq > $2)::bool AS answered
+`
+
+type AnsweredSinceParams struct {
+	ConversationID uuid.UUID
+	AfterSeq       int32
+}
+
+// Whether the respondent has written since a seq: an answer to the opener's
+// latest message is there already. Asked under the conversation's row lock,
+// which every message is written under.
+func (q *Queries) AnsweredSince(ctx context.Context, arg AnsweredSinceParams) (bool, error) {
+	row := q.db.QueryRow(ctx, answeredSince, arg.ConversationID, arg.AfterSeq)
+	var answered bool
+	err := row.Scan(&answered)
+	return answered, err
+}
+
 const closeConversation = `-- name: CloseConversation :execrows
 UPDATE conversation SET status = 'closed', closed_reason = $2
 WHERE id = $1 AND status = 'open'
@@ -67,7 +112,7 @@ SELECT c.id, c.course_id, c.title, c.status, c.closed_reason, c.created_at, c.la
        r.status AS respondent_status, r.expires_at AS respondent_expires_at,
        r.principal_member_id AS respondent_principal_member_id, own.display_name AS respondent_owner_name,
        seen.last_used_at AS respondent_last_seen_at, pending.id AS pending_reply_action_id,
-       latest.id AS latest_opener_message_id
+       latest.id AS latest_opener_message_id, retracted.created_at AS last_retracted_at
 FROM conversation c
 JOIN course_member o ON o.id = c.opener_member_id
 JOIN actor oa ON oa.id = o.actor_id
@@ -79,15 +124,21 @@ LEFT JOIN LATERAL (
     WHERE ra.kind = 'agent' AND cr.actor_id = ra.id AND cr.kind = 'api_token' AND cr.revoked_at IS NULL
       AND cr.last_used_at IS NOT NULL AND (cr.expires_at IS NULL OR cr.expires_at > $1)
     ORDER BY cr.last_used_at DESC LIMIT 1) seen ON true
-LEFT JOIN action pending ON pending.id = (
-    SELECT a.id FROM action a
-    WHERE a.target_type = 'conversation' AND a.target_id = c.id AND a.action_type = 'conversation.answer'
-      AND a.status = 'proposed' AND a.member_id = c.respondent_member_id
-    ORDER BY a.id DESC LIMIT 1)
 LEFT JOIN conversation_message latest ON latest.id = (
     SELECT m.id FROM conversation_message m
     WHERE m.conversation_id = c.id AND m.author_member_id = c.opener_member_id
     ORDER BY m.seq DESC LIMIT 1)
+LEFT JOIN conversation_message_retraction retracted ON retracted.message_id = (
+    SELECT x.message_id FROM conversation_message_retraction x
+    JOIN conversation_message xm ON xm.id = x.message_id
+    WHERE xm.conversation_id = c.id
+    ORDER BY x.created_at DESC LIMIT 1)
+LEFT JOIN action pending ON pending.id = (
+    SELECT a.id FROM action a
+    WHERE a.target_type = 'conversation' AND a.target_id = c.id AND a.action_type = 'conversation.answer'
+      AND a.status = 'proposed' AND a.member_id = c.respondent_member_id
+      AND a.payload->>'in_reply_to_message_id' = latest.id::text
+    ORDER BY a.id DESC LIMIT 1)
 WHERE c.id = ANY($2::uuid[])
 ORDER BY c.id
 `
@@ -120,11 +171,15 @@ type ConversationDetailsRow struct {
 	RespondentLastSeenAt        *time.Time
 	PendingReplyActionID        *uuid.UUID
 	LatestOpenerMessageID       *uuid.UUID
+	LastRetractedAt             *time.Time
 }
 
 // What the views show of each conversation: its two participants, whether a
-// reply waits for a decision, and the opener's newest message. last_seen_at
-// is an agent's: when it last used a token that still works.
+// reply to the opener's newest message waits for a decision, that message,
+// and when a message in it was last retracted. last_seen_at is an agent's:
+// when it last used a token that still works. A reply waiting for a decision
+// about an older message is not waited for: approving it can only fail,
+// since the conversation has moved on.
 func (q *Queries) ConversationDetails(ctx context.Context, arg ConversationDetailsParams) ([]ConversationDetailsRow, error) {
 	rows, err := q.db.Query(ctx, conversationDetails, arg.Now, arg.Ids)
 	if err != nil {
@@ -157,6 +212,7 @@ func (q *Queries) ConversationDetails(ctx context.Context, arg ConversationDetai
 			&i.RespondentLastSeenAt,
 			&i.PendingReplyActionID,
 			&i.LatestOpenerMessageID,
+			&i.LastRetractedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -400,7 +456,11 @@ WHERE c.course_id = $1 AND c.id > $2
             WHEN c.status = 'closed' THEN 'closed'
             WHEN EXISTS (SELECT 1 FROM action a
                           WHERE a.target_type = 'conversation' AND a.target_id = c.id AND a.action_type = 'conversation.answer'
-                            AND a.status = 'proposed' AND a.member_id = c.respondent_member_id) THEN 'reply_pending_approval'
+                            AND a.status = 'proposed' AND a.member_id = c.respondent_member_id
+                            AND a.payload->>'in_reply_to_message_id' = (
+                                SELECT m.id::text FROM conversation_message m
+                                WHERE m.conversation_id = c.id AND m.author_member_id = c.opener_member_id
+                                ORDER BY m.seq DESC LIMIT 1)) THEN 'reply_pending_approval'
             WHEN c.last_author_member_id = c.opener_member_id THEN 'awaiting_answer'
             ELSE 'answered' END) )
 ORDER BY c.id
@@ -424,7 +484,8 @@ type ListConversationIDsParams struct {
 // The conversations a member may list, paged by id: those it opened, those
 // addressed to it, and, for someone who decides actions, those whose opener
 // is within its student scope (and its principal's, for a delegate), in SQL.
-// state is a ConversationView state, or open.
+// state is a ConversationView state, or open; a reply waits for approval
+// only if it answers the opener's newest message (ConversationDetails).
 func (q *Queries) ListConversationIDs(ctx context.Context, arg ListConversationIDsParams) ([]uuid.UUID, error) {
 	rows, err := q.db.Query(ctx, listConversationIDs,
 		arg.CourseID,
@@ -577,41 +638,71 @@ func (q *Queries) ListConversationMessagesBefore(ctx context.Context, arg ListCo
 }
 
 const listInboxConversationIDs = `-- name: ListInboxConversationIDs :many
-SELECT c.id
+SELECT c.id, c.last_message_at
 FROM conversation c
 JOIN course_member o ON o.id = c.opener_member_id
+JOIN actor oa ON oa.id = o.actor_id AND oa.status = 'active'
+LEFT JOIN course_member op ON op.id = o.principal_member_id
+JOIN LATERAL (
+    SELECT m.id FROM conversation_message m
+    WHERE m.conversation_id = c.id AND m.author_member_id = c.opener_member_id
+    ORDER BY m.seq DESC LIMIT 1) latest ON true
 WHERE c.respondent_member_id = $1 AND c.status = 'open'
   AND c.last_author_member_id = c.opener_member_id
   AND o.status = 'active' AND (o.expires_at IS NULL OR o.expires_at > $2)
+  AND (o.principal_member_id IS NULL
+       OR (op.status = 'active' AND (op.expires_at IS NULL OR op.expires_at > $2)))
+  AND NOT EXISTS (SELECT 1 FROM conversation_message_retraction x WHERE x.message_id = latest.id)
   AND NOT EXISTS (SELECT 1 FROM action a
                    WHERE a.target_type = 'conversation' AND a.target_id = c.id AND a.action_type = 'conversation.answer'
-                     AND a.status = 'proposed' AND a.member_id = $1)
+                     AND a.status = 'proposed' AND a.member_id = $1
+                     AND a.payload->>'in_reply_to_message_id' = latest.id::text)
+  AND ($3::timestamptz IS NULL
+       OR (c.last_message_at, c.id) > ($3::timestamptz, $4::uuid))
 ORDER BY c.last_message_at, c.id
-LIMIT $3
+LIMIT $5
 `
 
 type ListInboxConversationIDsParams struct {
 	MemberID uuid.UUID
 	Now      *time.Time
+	AfterAt  *time.Time
+	AfterID  *uuid.UUID
 	MaxRows  int32
 }
 
-// Open conversations addressed to a seat in which the opener spoke last and
-// no answer of the seat's waits for a decision, the longest waiting first.
-// Whether each is still addressable is for the caller to say, in Go.
-func (q *Queries) ListInboxConversationIDs(ctx context.Context, arg ListInboxConversationIDsParams) ([]uuid.UUID, error) {
-	rows, err := q.db.Query(ctx, listInboxConversationIDs, arg.MemberID, arg.Now, arg.MaxRows)
+type ListInboxConversationIDsRow struct {
+	ID            uuid.UUID
+	LastMessageAt *time.Time
+}
+
+// Open conversations addressed to a seat in which the opener spoke last,
+// the opener's newest message is not retracted, and no answer of the seat's
+// to that message waits for a decision, the longest waiting first, after a
+// (last_message_at, id) cursor. The opener's seat, its actor and, for a
+// delegate, its principal's seat must be live: whatever cannot count again
+// by itself is left out here, so that it does not stand for good in front
+// of what can be answered. Whether each opener may still address the seat
+// is for the caller to say, in Go.
+func (q *Queries) ListInboxConversationIDs(ctx context.Context, arg ListInboxConversationIDsParams) ([]ListInboxConversationIDsRow, error) {
+	rows, err := q.db.Query(ctx, listInboxConversationIDs,
+		arg.MemberID,
+		arg.Now,
+		arg.AfterAt,
+		arg.AfterID,
+		arg.MaxRows,
+	)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []uuid.UUID
+	var items []ListInboxConversationIDsRow
 	for rows.Next() {
-		var id uuid.UUID
-		if err := rows.Scan(&id); err != nil {
+		var i ListInboxConversationIDsRow
+		if err := rows.Scan(&i.ID, &i.LastMessageAt); err != nil {
 			return nil, err
 		}
-		items = append(items, id)
+		items = append(items, i)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
