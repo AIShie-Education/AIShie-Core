@@ -554,7 +554,10 @@ type Querier interface {
 	// or with one that is not its owner's). Neither a removed seat nor an expired
 	// one comes back, and an owner is not changed while the agent has a seat in
 	// a course that is not archived (actor.set_owner), where only this could
-	// find it.
+	// find it. With no clock (now null), a principal's expiry is not judged:
+	// whoever asks leaves it to seat(), which has one. ListOrphanedSeats is the
+	// same rule for every seat, and the authorization queries' owner_matches
+	// its other half: a change to one is a change to all three.
 	SeatOrphaned(ctx context.Context, arg SeatOrphanedParams) (bool, error)
 	SetActionReview(ctx context.Context, arg SetActionReviewParams) (int64, error)
 	SetActorOwner(ctx context.Context, arg SetActorOwnerParams) error

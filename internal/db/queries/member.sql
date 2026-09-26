@@ -40,9 +40,12 @@ SELECT id, status, expires_at FROM course_member WHERE course_id = $1 AND actor_
 -- or with one that is not its owner's). Neither a removed seat nor an expired
 -- one comes back, and an owner is not changed while the agent has a seat in
 -- a course that is not archived (actor.set_owner), where only this could
--- find it.
+-- find it. With no clock (now null), a principal's expiry is not judged:
+-- whoever asks leaves it to seat(), which has one. ListOrphanedSeats is the
+-- same rule for every seat, and the authorization queries' owner_matches
+-- its other half: a change to one is a change to all three.
 SELECT (CASE WHEN m.principal_member_id IS NULL THEN a.owner_actor_id IS NOT NULL
-             ELSE p.status = 'removed' OR (p.expires_at IS NOT NULL AND p.expires_at <= sqlc.arg(now))
+             ELSE p.status = 'removed' OR coalesce(p.expires_at <= sqlc.arg(now), false)
                   OR a.owner_actor_id IS DISTINCT FROM p.actor_id END)::bool AS orphaned
 FROM course_member m
 JOIN actor a ON a.id = m.actor_id

@@ -542,6 +542,18 @@ func TestADelegateIsSeatedWithinItsPrincipal(t *testing.T) {
 	}
 }
 
+// Asking again for an agent seated already is refused as a conflict before
+// anyone is asked, even once its principal's seat has been given an end the
+// agent's seat does not share.
+func TestAnAgentSeatedAlreadyIsRefusedOnceItsPrincipalHasAnEnd(t *testing.T) {
+	b := build(t)
+	b.do(t, b.sato, "member.update_perms", m{"course_id": b.course, "member_id": b.yukiM, "perms": m{"agent_delegate": "autonomous"}})
+	bot := b.agent(t, b.yuki, "Yuki's helper")
+	b.delegate(t, b.yuki, bot, m{})
+	b.do(t, b.sato, "member.rescope", m{"course_id": b.course, "member_id": b.yukiM, "expires_at": time.Now().Add(30 * 24 * time.Hour)})
+	b.try(t, b.yuki, "member.add_delegate", m{"course_id": b.course, "actor_id": bot}, apperr.Conflict)
+}
+
 // An approval seats what was asked for only if the proposer still holds it.
 func TestAnApprovalSeatsOnlyWhatTheProposerStillHolds(t *testing.T) {
 	b := build(t)
