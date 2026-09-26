@@ -49,13 +49,15 @@ type MemberView struct {
 	PrincipalMemberID *uuid.UUID `json:"principal_member_id,omitempty" jsonschema:"for a delegate, its principal's seat: its owner's in this course, which caps everything it holds"`
 	OwnerActorID      *uuid.UUID `json:"owner_actor_id,omitempty" jsonschema:"for an agent a person owns, that person"`
 	OwnerName         *string    `json:"owner_name,omitempty"`
+	AnswersCourse     bool       `json:"answers_course" jsonschema:"for a delegate, whether its seat answers the course, and not its principal alone; it does while its principal manages the course's members"`
 }
 
 func viewMember(m dbq.GetMemberInCourseRow) MemberView {
 	return MemberView{ID: m.ID, ActorID: m.ActorID, DisplayName: m.DisplayName, Kind: m.ActorKind, Role: m.Role,
 		Status: m.Status, PresetID: m.PresetID, ExpiresAt: m.ExpiresAt, StudentScope: m.StudentScope,
 		AssignmentScope: m.AssignmentScope, Perms: memberPerms(m).view(), CreatedAt: m.CreatedAt,
-		PrincipalMemberID: m.PrincipalMemberID, OwnerActorID: m.OwnerActorID, OwnerName: m.OwnerName}
+		PrincipalMemberID: m.PrincipalMemberID, OwnerActorID: m.OwnerActorID, OwnerName: m.OwnerName,
+		AnswersCourse: m.AnswersCourse}
 }
 
 type MemberListIn struct {

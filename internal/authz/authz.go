@@ -358,8 +358,9 @@ func memberFromRow(r dbq.GetMemberForAuthzRow) *domain.Member {
 			r.PermAssignmentWrite, r.PermSubmissionRead, r.PermSubmissionWrite, r.PermGradeRead,
 			r.PermGradeSubmit, r.PermGradePost, r.PermMemberRead, r.PermMemberManage, r.PermActionDecide,
 			r.PermAgentDelegate, r.PermConversationAsk, r.PermConversationAnswer),
-		PrincipalID: r.PrincipalMemberID,
-		SeatValid:   r.OwnerMatches,
+		PrincipalID:   r.PrincipalMemberID,
+		AnswersCourse: r.AnswersCourse,
+		SeatValid:     r.OwnerMatches,
 	}
 	if r.PrincipalMemberID == nil {
 		return m

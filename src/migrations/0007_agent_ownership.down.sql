@@ -46,9 +46,11 @@ ALTER TABLE permission_preset
 ALTER TABLE course_member
     DROP CONSTRAINT IF EXISTS course_member_principal_fk,
     DROP CONSTRAINT IF EXISTS course_member_not_own_principal,
+    DROP CONSTRAINT IF EXISTS course_member_answers_course_is_delegate,
     DROP COLUMN IF EXISTS perm_conversation_answer,
     DROP COLUMN IF EXISTS perm_conversation_ask,
     DROP COLUMN IF EXISTS perm_agent_delegate,
+    DROP COLUMN IF EXISTS answers_course,
     DROP COLUMN IF EXISTS principal_member_id;
 
 ALTER TABLE actor

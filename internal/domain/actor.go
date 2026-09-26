@@ -47,6 +47,9 @@ type Member struct {
 	// as it stands: loaded with it, never itself a delegate.
 	PrincipalID *uuid.UUID
 	Principal   *Member
+	// AnswersCourse is set on a delegate's seat that answers the course and
+	// not its principal alone (AnswersOthers).
+	AnswersCourse bool
 	// SeatValid says the seat is what its actor's ownership says it must
 	// be: a seat with no principal for an actor nobody owns, or the owner's
 	// own seat as principal, held by an active owner. An owner can change
@@ -90,6 +93,15 @@ func (m *Member) Perm(p Perm) Level {
 		return MinLevel(own, m.Principal.Perm(PermConversationAsk))
 	}
 	return MinLevel(own, m.Principal.Perm(p))
+}
+
+// AnswersOthers reports whether a delegate may be addressed by anyone but
+// its principal: its seat was made to answer the course, by someone who
+// manages the course's members, and its principal still does. A delegate
+// answers its principal alone otherwise, and a seat that is nobody's
+// delegate is not a delegate to begin with.
+func (m *Member) AnswersOthers() bool {
+	return m.PrincipalID != nil && m.AnswersCourse && m.Principal != nil && m.Principal.Perm(PermMemberManage).Allowed()
 }
 
 // Live reports whether the membership counts at the given moment. expires_at

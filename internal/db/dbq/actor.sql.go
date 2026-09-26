@@ -281,7 +281,7 @@ func (q *Queries) ListDelegateRequestsFor(ctx context.Context, targetID *uuid.UU
 
 const listMembershipsForActor = `-- name: ListMembershipsForActor :many
 SELECT m.id AS member_id, m.course_id, c.code, c.section, c.title, c.status AS course_status,
-       m.role, m.status, m.expires_at, m.student_scope, m.assignment_scope, m.principal_member_id
+       m.role, m.status, m.expires_at, m.student_scope, m.assignment_scope, m.principal_member_id, m.answers_course
 FROM course_member m
 JOIN course c ON c.id = m.course_id
 WHERE m.actor_id = $1 AND m.status <> 'removed'
@@ -301,6 +301,7 @@ type ListMembershipsForActorRow struct {
 	StudentScope      string
 	AssignmentScope   string
 	PrincipalMemberID *uuid.UUID
+	AnswersCourse     bool
 }
 
 func (q *Queries) ListMembershipsForActor(ctx context.Context, actorID uuid.UUID) ([]ListMembershipsForActorRow, error) {
@@ -325,6 +326,7 @@ func (q *Queries) ListMembershipsForActor(ctx context.Context, actorID uuid.UUID
 			&i.StudentScope,
 			&i.AssignmentScope,
 			&i.PrincipalMemberID,
+			&i.AnswersCourse,
 		); err != nil {
 			return nil, err
 		}
@@ -338,7 +340,8 @@ func (q *Queries) ListMembershipsForActor(ctx context.Context, actorID uuid.UUID
 
 const listSeatsOfActor = `-- name: ListSeatsOfActor :many
 SELECT m.id AS member_id, m.course_id, c.code, c.section, c.title, c.status AS course_status,
-       m.status, m.expires_at, m.student_scope, m.assignment_scope, m.principal_member_id, p.name AS preset_name
+       m.status, m.expires_at, m.student_scope, m.assignment_scope, m.principal_member_id, m.answers_course,
+       p.name AS preset_name
 FROM course_member m
 JOIN course c ON c.id = m.course_id
 LEFT JOIN permission_preset p ON p.id = m.preset_id
@@ -358,6 +361,7 @@ type ListSeatsOfActorRow struct {
 	StudentScope      string
 	AssignmentScope   string
 	PrincipalMemberID *uuid.UUID
+	AnswersCourse     bool
 	PresetName        *string
 }
 
@@ -384,6 +388,7 @@ func (q *Queries) ListSeatsOfActor(ctx context.Context, actorID uuid.UUID) ([]Li
 			&i.StudentScope,
 			&i.AssignmentScope,
 			&i.PrincipalMemberID,
+			&i.AnswersCourse,
 			&i.PresetName,
 		); err != nil {
 			return nil, err

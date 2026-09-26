@@ -24,7 +24,7 @@ BEGIN
     END IF;
     IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public'
                AND column_name IN ('owner_actor_id', 'suspended_by_actor_id', 'principal_member_id',
-                                   'perm_agent_delegate', 'perm_conversation_ask', 'perm_conversation_answer')) THEN
+                                   'perm_agent_delegate', 'perm_conversation_ask', 'perm_conversation_answer', 'answers_course')) THEN
         RAISE EXCEPTION 'FAIL  0007 down: a column it added is still there';
     END IF;
     IF (SELECT count(*) FROM permission_preset WHERE dept_id IS NULL AND name IN ('delegate', 'course_tutor')) <> 2 THEN

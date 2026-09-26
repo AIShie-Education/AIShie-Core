@@ -165,15 +165,19 @@ LIMIT sqlc.arg(max_rows);
 
 -- name: ListRespondentCandidates :many
 -- The seats that might answer a caller: live, held by an active actor, with
--- conversation_answer not denied on the row. Which of them the caller may
--- address is decided in Go (tools.addressing). Unpaged: the seats that answer
--- are a course's agents and staff, a handful, and max_rows bounds them
--- anyway.
-SELECT m.id, a.display_name, a.kind, m.role, m.principal_member_id, own.display_name AS owner_name,
+-- conversation_answer not denied on the row, and, for a delegate, either the
+-- caller's own or one that answers the course, whose principal's row holds
+-- member_manage. Which of them the caller may address is decided in Go
+-- (tools.addressing), which this only narrows to what it could accept: every
+-- student's own agent answers, and only its principal. Unpaged: what is left
+-- is a course's agents and staff, and the caller's own agents, a handful;
+-- max_rows bounds them anyway.
+SELECT m.id, a.display_name, a.kind, m.role, m.principal_member_id, m.answers_course, own.display_name AS owner_name,
        seen.last_used_at AS last_seen_at
 FROM course_member m
 JOIN actor a ON a.id = m.actor_id
 LEFT JOIN actor own ON own.id = a.owner_actor_id
+LEFT JOIN course_member p ON p.id = m.principal_member_id
 LEFT JOIN LATERAL (
     SELECT cr.last_used_at FROM credential cr
     WHERE a.kind = 'agent' AND cr.actor_id = a.id AND cr.kind = 'api_token' AND cr.revoked_at IS NULL
@@ -182,6 +186,8 @@ LEFT JOIN LATERAL (
 WHERE m.course_id = $1 AND m.id <> sqlc.arg(caller_member_id)
   AND m.status = 'active' AND (m.expires_at IS NULL OR m.expires_at > sqlc.arg(now))
   AND m.perm_conversation_answer <> 'denied' AND a.status = 'active'
+  AND (m.principal_member_id IS NULL OR m.principal_member_id = sqlc.arg(caller_member_id)
+       OR (m.answers_course AND p.perm_member_manage <> 'denied'))
 ORDER BY m.id
 LIMIT sqlc.arg(max_rows);
 

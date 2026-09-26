@@ -292,8 +292,10 @@ type seating struct {
 	listedAssignments             []uuid.UUID
 	expiresAt                     *time.Time
 	// principal is set for a delegate's seat: the seat, in this course, of
-	// the person who owns the actor (member.add_delegate).
-	principal *uuid.UUID
+	// the person who owns the actor (member.add_delegate); answersCourse
+	// says it answers the course, not its principal alone.
+	principal     *uuid.UUID
+	answersCourse bool
 }
 
 // listsItself reports whether the seat's student list will be the seat
@@ -385,7 +387,7 @@ func seat(ctx context.Context, ec *tool.ExecCtx, s seating) (uuid.UUID, error) {
 		PermMemberRead: s.perms.col(domain.PermMemberRead), PermMemberManage: s.perms.col(domain.PermMemberManage),
 		PermActionDecide: s.perms.col(domain.PermActionDecide), PermAgentDelegate: s.perms.col(domain.PermAgentDelegate),
 		PermConversationAsk: s.perms.col(domain.PermConversationAsk), PermConversationAnswer: s.perms.col(domain.PermConversationAnswer),
-		CreatedAt: ec.Now, PrincipalMemberID: s.principal,
+		CreatedAt: ec.Now, PrincipalMemberID: s.principal, AnswersCourse: s.answersCourse,
 	}
 	if s.preset != nil {
 		row.PresetID = &s.preset.ID
@@ -406,7 +408,7 @@ func seat(ctx context.Context, ec *tool.ExecCtx, s seating) (uuid.UUID, error) {
 	}
 	payload := map[string]any{"actor_id": s.actorID, "role": s.role}
 	if s.principal != nil {
-		payload["delegate"], payload["principal_member_id"] = true, *s.principal
+		payload["delegate"], payload["principal_member_id"], payload["answers_course"] = true, *s.principal, s.answersCourse
 	}
 	ec.Emit(events.Event{
 		Type: members.EventAdded, CourseID: &s.courseID, SubjectType: "course_member", SubjectID: &id, Payload: payload,

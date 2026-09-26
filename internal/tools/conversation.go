@@ -241,13 +241,15 @@ func (a *addressing) within(ctx context.Context, r, o *domain.Member) (bool, err
 //     allowed;
 //   - r is o's own delegate, which answers its principal whatever it holds,
 //     since it holds nothing its principal does not; or r is within o's seat
-//     (within), so that nothing it answers from is out of o's own reach.
+//     (within), so that nothing its seat reads is out of o's own reach.
 //
-// A delegate answers only its principal, with one exception: the delegate of
-// someone who manages the course's members is the course's own agent — a
-// course_tutor an instructor brought in — and answers whomever it is within.
-// So nobody asks a student's own agent anything, not even an instructor,
-// and a student may ask the course's tutor, which reads nobody's work.
+// A delegate answers only its principal, with one exception: a delegate
+// whose seat answers the course — a course_tutor an instructor brought in as
+// the course's agent — answers whomever it is within, for as long as its
+// principal manages the course's members (domain.Member.AnswersOthers). So
+// nobody asks a student's own agent anything, not even an instructor, nor an
+// instructor's own assistant, and a student may ask the course's tutor,
+// which reads nobody's work.
 func (a *addressing) refusal(ctx context.Context, o, r *domain.Member) (string, error) {
 	if o.ID == r.ID {
 		return "nobody addresses themselves", nil
@@ -264,7 +266,7 @@ func (a *addressing) refusal(ctx context.Context, o, r *domain.Member) (string, 
 	if r.PrincipalID != nil && *r.PrincipalID == o.ID {
 		return "", nil
 	}
-	if r.PrincipalID != nil && (r.Principal == nil || !r.Principal.Perm(domain.PermMemberManage).Allowed()) {
+	if r.PrincipalID != nil && !r.AnswersOthers() {
 		return "the respondent is someone else's own agent, and answers only them", nil
 	}
 	if ok, err := a.within(ctx, r, o); err != nil || !ok {
@@ -902,14 +904,15 @@ func seatStatus(status string, expires *time.Time, now time.Time) string {
 
 // RespondentView is a member the caller may address.
 type RespondentView struct {
-	MemberID     uuid.UUID  `json:"member_id"`
-	DisplayName  string     `json:"display_name"`
-	Kind         string     `json:"kind" jsonschema:"human or agent; for display only"`
-	Role         string     `json:"role" jsonschema:"roster fact, for display"`
-	IsMyDelegate bool       `json:"is_my_delegate" jsonschema:"your own agent, seated as your delegate"`
-	OwnerName    *string    `json:"owner_name,omitempty" jsonschema:"for an agent a person owns, that person"`
-	AnswerLevel  string     `json:"answer_level" jsonschema:"autonomous: answers appear at once; pending_review: they appear and are reviewed after; confirm_required: each waits for a person's approval"`
-	LastSeenAt   *time.Time `json:"last_seen_at,omitempty" jsonschema:"an agent's: when it last used a token that still works; absent if never, which may mean nothing is running it"`
+	MemberID      uuid.UUID  `json:"member_id"`
+	DisplayName   string     `json:"display_name"`
+	Kind          string     `json:"kind" jsonschema:"human or agent; for display only"`
+	Role          string     `json:"role" jsonschema:"roster fact, for display"`
+	IsMyDelegate  bool       `json:"is_my_delegate" jsonschema:"your own agent, seated as your delegate"`
+	AnswersCourse bool       `json:"answers_course" jsonschema:"an agent seated to answer the course, not its owner alone: it answers other members as well, and may repeat to them what it is told"`
+	OwnerName     *string    `json:"owner_name,omitempty" jsonschema:"for an agent a person owns, that person"`
+	AnswerLevel   string     `json:"answer_level" jsonschema:"autonomous: answers appear at once; pending_review: they appear and are reviewed after; confirm_required: each waits for a person's approval"`
+	LastSeenAt    *time.Time `json:"last_seen_at,omitempty" jsonschema:"an agent's: when it last used a token that still works; absent if never, which may mean nothing is running it"`
 }
 
 type RespondentsOut struct {
@@ -969,7 +972,8 @@ func conversationRespondents() tool.Tool {
 				}
 				out.Respondents = append(out.Respondents, RespondentView{MemberID: r.ID, DisplayName: r.DisplayName, Kind: r.Kind,
 					Role: r.Role, IsMyDelegate: r.PrincipalMemberID != nil && *r.PrincipalMemberID == rc.Member.ID,
-					OwnerName: r.OwnerName, AnswerLevel: seat.Perm(domain.PermConversationAnswer).String(), LastSeenAt: r.LastSeenAt})
+					OwnerName: r.OwnerName, AnswerLevel: seat.Perm(domain.PermConversationAnswer).String(), LastSeenAt: r.LastSeenAt,
+					AnswersCourse: seat.AnswersOthers()})
 			}
 			return out, nil
 		},

@@ -180,6 +180,7 @@ type CourseMember struct {
 	PermActionDecide       AutonomyLevel
 	CreatedAt              time.Time
 	PrincipalMemberID      *uuid.UUID
+	AnswersCourse          bool
 	PermAgentDelegate      AutonomyLevel
 	PermConversationAsk    AutonomyLevel
 	PermConversationAnswer AutonomyLevel

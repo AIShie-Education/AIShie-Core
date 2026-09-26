@@ -4,9 +4,9 @@ INSERT INTO course_member (
     perm_document_read, perm_document_read_draft, perm_document_write, perm_rubric_read,
     perm_assignment_write, perm_submission_read, perm_submission_write, perm_grade_read,
     perm_grade_submit, perm_grade_post, perm_member_read, perm_member_manage, perm_action_decide,
-    perm_agent_delegate, perm_conversation_ask, perm_conversation_answer, created_at, principal_member_id)
+    perm_agent_delegate, perm_conversation_ask, perm_conversation_answer, created_at, principal_member_id, answers_course)
 VALUES ($1, $2, $3, $4, 'active', $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22,
-        $23, $24, $25, $26, sqlc.narg(principal_member_id));
+        $23, $24, $25, $26, sqlc.narg(principal_member_id), sqlc.arg(answers_course));
 
 -- name: GetMemberInCourse :one
 -- The seat, with whom it is and, for an agent someone owns, whose.

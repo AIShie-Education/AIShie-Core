@@ -70,6 +70,7 @@ type Membership struct {
 	// A member may always know their own seat, as authorization reads it.
 	PrincipalMemberID *uuid.UUID `json:"principal_member_id,omitempty" jsonschema:"when you are someone's delegate, their seat in the course: you hold nothing they do not"`
 	Perms             PermLevels `json:"perms" jsonschema:"what you may do in the course now, before scope: your own levels, capped by your principal's if you are a delegate; all denied while the seat does not count"`
+	AnswersCourse     bool       `json:"answers_course" jsonschema:"when you are someone's delegate: true if you answer the course — other members may ask you, and you keep what each tells you from the others — false if you answer your principal alone"`
 }
 
 type MembershipsOut struct {
@@ -101,7 +102,7 @@ func meMemberships() tool.Tool {
 					MemberID: r.MemberID, CourseID: r.CourseID, Code: r.Code, Section: r.Section, Title: r.Title,
 					CourseStatus: r.CourseStatus, Role: r.Role, Status: r.Status, ExpiresAt: r.ExpiresAt,
 					StudentScope: r.StudentScope, AssignmentScope: r.AssignmentScope,
-					PrincipalMemberID: r.PrincipalMemberID, Perms: effectivePerms(m, rc.Now),
+					PrincipalMemberID: r.PrincipalMemberID, Perms: effectivePerms(m, rc.Now), AnswersCourse: m.AnswersOthers(),
 				})
 			}
 			return out, nil

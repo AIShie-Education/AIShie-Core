@@ -309,6 +309,8 @@ SELECT pg_temp.ok('the new permissions default to denied on both tables', $q$
             RAISE EXCEPTION 'a new permission does not default to denied';
         END IF;
     END $chk$ $q$);
+SELECT pg_temp.fails('only a delegate''s seat answers the course', '23514', $q$
+    UPDATE course_member SET answers_course = true WHERE id = '00000000-0000-0000-0000-000000000051' $q$);
 
 -- Grading scheme -------------------------------------------------------------
 SELECT pg_temp.fails('one root component per course', '23505', $q$

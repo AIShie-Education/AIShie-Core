@@ -343,10 +343,13 @@ type Querier interface {
 	// meanwhile is not listed, and the event goes out under its unreleased name.
 	ListPublishedAssignmentsUsingDocument(ctx context.Context, documentID *uuid.UUID) ([]uuid.UUID, error)
 	// The seats that might answer a caller: live, held by an active actor, with
-	// conversation_answer not denied on the row. Which of them the caller may
-	// address is decided in Go (tools.addressing). Unpaged: the seats that answer
-	// are a course's agents and staff, a handful, and max_rows bounds them
-	// anyway.
+	// conversation_answer not denied on the row, and, for a delegate, either the
+	// caller's own or one that answers the course, whose principal's row holds
+	// member_manage. Which of them the caller may address is decided in Go
+	// (tools.addressing), which this only narrows to what it could accept: every
+	// student's own agent answers, and only its principal. Unpaged: what is left
+	// is a course's agents and staff, and the caller's own agents, a handful;
+	// max_rows bounds them anyway.
 	ListRespondentCandidates(ctx context.Context, arg ListRespondentCandidatesParams) ([]ListRespondentCandidatesRow, error)
 	// Every seat an actor holds that is not removed, with its course and the
 	// name of the preset it was copied from.

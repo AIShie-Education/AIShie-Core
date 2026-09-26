@@ -21,7 +21,7 @@ SELECT id FROM actor WHERE kind = 'system' ORDER BY created_at LIMIT 1;
 
 -- name: ListMembershipsForActor :many
 SELECT m.id AS member_id, m.course_id, c.code, c.section, c.title, c.status AS course_status,
-       m.role, m.status, m.expires_at, m.student_scope, m.assignment_scope, m.principal_member_id
+       m.role, m.status, m.expires_at, m.student_scope, m.assignment_scope, m.principal_member_id, m.answers_course
 FROM course_member m
 JOIN course c ON c.id = m.course_id
 WHERE m.actor_id = $1 AND m.status <> 'removed'
@@ -71,7 +71,8 @@ ORDER BY c.last_used_at DESC LIMIT 1;
 -- Every seat an actor holds that is not removed, with its course and the
 -- name of the preset it was copied from.
 SELECT m.id AS member_id, m.course_id, c.code, c.section, c.title, c.status AS course_status,
-       m.status, m.expires_at, m.student_scope, m.assignment_scope, m.principal_member_id, p.name AS preset_name
+       m.status, m.expires_at, m.student_scope, m.assignment_scope, m.principal_member_id, m.answers_course,
+       p.name AS preset_name
 FROM course_member m
 JOIN course c ON c.id = m.course_id
 LEFT JOIN permission_preset p ON p.id = m.preset_id

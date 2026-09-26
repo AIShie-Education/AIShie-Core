@@ -26,6 +26,11 @@ import (
 // members, the most it may be given.
 const DelegatePreset = "delegate"
 
+// CourseTutorPreset is the built-in preset of a course's own
+// question-answering agent: seated with it by someone who manages the
+// course's members, a delegate answers the course unless told otherwise.
+const CourseTutorPreset = "course_tutor"
+
 var bringsAgents = tool.Gate{Perms: []domain.Perm{domain.PermAgentDelegate}}
 
 type MemberAddDelegateIn struct {
@@ -41,6 +46,7 @@ type MemberAddDelegateIn struct {
 	AssignmentScope   *string      `json:"assignment_scope,omitempty" jsonschema:"all or listed"`
 	ListedAssignments *[]uuid.UUID `json:"listed_assignments,omitempty"`
 	ExpiresAt         *time.Time   `json:"expires_at,omitempty" jsonschema:"by default when your own membership ends; no later"`
+	AnswersCourse     *bool        `json:"answers_course,omitempty" jsonschema:"true: a course agent, which the students it can see and do no more than may ask, as well as you; false: it answers you alone. Only someone who manages the course's members may make it true; by default true for the course_tutor preset when you do, false otherwise"`
 	// Filled in when the call waits for a decision, for whoever makes it.
 	AgentDisplayName *string `json:"agent_display_name,omitempty" jsonschema:"set by the server on a proposal, for whoever decides it; ignored"`
 	OwnerDisplayName *string `json:"owner_display_name,omitempty" jsonschema:"set by the server on a proposal, for whoever decides it; ignored"`
@@ -61,6 +67,9 @@ type MemberAddDelegateIn struct {
 //     that reaches the whole class is narrowed to m's list when m has one.
 //     A kind or list named in the call must be within m's own;
 //   - life: m's own, unless an earlier end is named;
+//   - whom it answers: m alone, unless it answers the course, which only
+//     someone who manages the course's members may say, and which the
+//     course_tutor preset says for them unless they say otherwise;
 //   - role assistant, principal m.
 //
 // It refuses outright a caller who is a delegate: an agent brings in no
@@ -118,6 +127,15 @@ func resolveDelegateSeat(ctx context.Context, q dbq.Querier, m *domain.Member, i
 	}
 
 	s := seating{courseID: in.CourseID, actorID: in.ActorID, preset: &preset, perms: perms, role: "assistant", principal: &m.ID}
+	manages := m.Perm(domain.PermMemberManage).Allowed()
+	s.answersCourse = manages && preset.Name == CourseTutorPreset
+	if in.AnswersCourse != nil {
+		if *in.AnswersCourse && !manages {
+			return seating{}, apperr.Forbid("only someone who manages the course's members brings in an agent that answers the course; "+
+				"yours answers you alone").With("field", "answers_course")
+		}
+		s.answersCourse = *in.AnswersCourse
+	}
 	if s.studentScope, s.listedStudents, err = delegateReach(m.StudentScope, func() ([]uuid.UUID, error) {
 		return q.ListStudentScope(ctx, m.ID)
 	}, preset.StudentScope, in.StudentScope, in.ListedStudents); err != nil {
@@ -221,6 +239,9 @@ func memberAddDelegate() tool.Tool {
 			"never do more than you can here, nor reach further, nor outlast your seat; it is paused while you are, and removed " +
 			"with you. It is seated with the delegate preset — your own assistant, which reads and answers you — unless you " +
 			"name another, such as course_tutor, clipped to what you hold; member.delegate_defaults shows what it would get. " +
+			"It answers you alone unless it answers the course (answers_course), which only someone who manages the course's " +
+			"members may choose, and which course_tutor chooses for them: then the students it can see and do no more than " +
+			"may ask it too, and whatever anyone tells it, it may repeat to the others it answers. " +
 			"Your level of agent_delegate decides whether this needs an instructor's approval first. " +
 			"Unless you manage the course's members, your agent holds no more than the delegate preset gives.",
 		Kind: tool.Write, Gate: bringsAgents,
@@ -252,7 +273,7 @@ func memberAddDelegate() tool.Tool {
 			students, assignments := s.listedStudents, s.listedAssignments
 			pinned := MemberAddDelegateIn{InCourse: in.InCourse, ActorID: in.ActorID, PresetID: &s.preset.ID,
 				Perms: s.perms.view(), StudentScope: &s.studentScope, AssignmentScope: &s.assignmentScope,
-				ExpiresAt: s.expiresAt}
+				ExpiresAt: s.expiresAt, AnswersCourse: &s.answersCourse}
 			if s.studentScope == domain.ScopeListed {
 				pinned.ListedStudents = &students
 			}
@@ -299,6 +320,7 @@ type DelegateDefaultsOut struct {
 	AssignmentScope   string      `json:"assignment_scope"`
 	ListedAssignments []uuid.UUID `json:"listed_assignments"`
 	ExpiresAt         *time.Time  `json:"expires_at,omitempty"`
+	AnswersCourse     bool        `json:"answers_course" jsonschema:"whether it would answer the course, and not you alone"`
 	// Level is the caller's agent_delegate: what member.add_delegate would
 	// come to.
 	Level string `json:"level" jsonschema:"autonomous: seated at once; pending_review: seated, and reviewed after; confirm_required: a request an instructor approves"`
@@ -309,7 +331,7 @@ func memberDelegateDefaults() tool.Tool {
 		Name: "member.delegate_defaults",
 		Description: "What member.add_delegate would seat your agent with here if you named nothing but the preset: its " +
 			"permissions, which students and assignments it would reach, when it would end, and whether bringing it in " +
-			"needs an instructor's approval first.",
+			"needs an instructor's approval first, and whether it would answer the course or you alone.",
 		Kind: tool.Read, Gate: bringsAgents,
 		HTTP: tool.Route{Method: "GET", Pattern: "/v1/courses/{course_id}/delegates/defaults"},
 		Resolve: func(_ context.Context, _ dbq.Querier, in DelegateDefaultsIn) (tool.Target, error) {
@@ -323,7 +345,7 @@ func memberDelegateDefaults() tool.Tool {
 			out := DelegateDefaultsOut{PresetID: s.preset.ID, Preset: s.preset.Name, Role: s.role, Perms: s.perms.view(),
 				StudentScope: s.studentScope, ListedStudents: nonNil(s.listedStudents),
 				AssignmentScope: s.assignmentScope, ListedAssignments: nonNil(s.listedAssignments),
-				ExpiresAt: s.expiresAt, Level: rc.Member.Perm(domain.PermAgentDelegate).String()}
+				ExpiresAt: s.expiresAt, AnswersCourse: s.answersCourse, Level: rc.Member.Perm(domain.PermAgentDelegate).String()}
 			return out, nil
 		},
 	})

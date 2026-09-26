@@ -186,6 +186,7 @@ type AgentSeat struct {
 	Perms             PermLevels `json:"perms" jsonschema:"what it may do there now: its own levels, capped by yours; all denied while its seat or yours does not count"`
 	StudentScope      string     `json:"student_scope"`
 	AssignmentScope   string     `json:"assignment_scope"`
+	AnswersCourse     bool       `json:"answers_course" jsonschema:"it answers the course, not you alone: the students it can see and do no more than may ask it too"`
 }
 
 type AgentRequest struct {
@@ -242,7 +243,7 @@ func agentGet() tool.Tool {
 				out.Seats = append(out.Seats, AgentSeat{MemberID: s.MemberID, CourseID: s.CourseID, Code: s.Code, Section: s.Section,
 					Title: s.Title, CourseStatus: s.CourseStatus, Status: s.Status, ExpiresAt: s.ExpiresAt, Preset: s.PresetName,
 					PrincipalMemberID: s.PrincipalMemberID, Perms: effectivePerms(m, rc.Now),
-					StudentScope: s.StudentScope, AssignmentScope: s.AssignmentScope})
+					StudentScope: s.StudentScope, AssignmentScope: s.AssignmentScope, AnswersCourse: s.AnswersCourse})
 			}
 			requests, err := rc.Q.ListDelegateRequestsFor(ctx, &a.ID)
 			if err != nil {

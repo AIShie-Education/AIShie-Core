@@ -157,12 +157,12 @@ course_member(id, course_id→course, actor_id→actor,
               added_by_actor_id→actor, expires_at null,
               student_scope [all|listed], assignment_scope [all|listed],
               perm_<action> autonomy_level = 'denied'   ×16, see below
-              created_at, principal_member_id null,
+              created_at, principal_member_id null, answers_course = false,
               unique(course_id, id))
 
     unique(course_id, actor_id) where status <> 'removed'
     composite FK (course_id, principal_member_id) → course_member(course_id, id)
-    check: principal_member_id ≠ id
+    check: principal_member_id ≠ id;  answers_course ⇒ principal_member_id set
     trigger, for a row not removed: principal set ⇔ the actor has an owner; the principal is
              the owner's seat; a principal has no principal
 
@@ -240,9 +240,10 @@ overridden. A test asserts that the two tables' `perm_*` columns stay identical.
 
 The two agent presets are for delegates. `delegate` is a person's own assistant: it reads the
 material and, being listed for its principal's own students — for a student, the student — their
-work and grades, and answers its principal. `course_tutor` is a course's question-answering agent:
-it reads the material and, listed for nobody, nobody's work, which is what puts it within every
-student's seat. Of the three permissions migration 0007 added, students and TAs get
+work and grades, and answers its principal alone. `course_tutor` is a course's question-answering
+agent: it reads the material and, listed for nobody, nobody's work, which is what puts it within
+every student's seat, and, brought in by someone who manages the course's members, it answers the
+course (`answers_course`, below). Of the three permissions migration 0007 added, students and TAs get
 `agent_delegate` at `confirm_required` (a student's agent comes in with an instructor's approval)
 and `conversation_ask` autonomous; instructors all three autonomous; `tutor`, `delegate` and
 `course_tutor` answer; observers and graders none. The migration gave every seat that was not
@@ -300,7 +301,13 @@ is refused, not cut down. Without `member_manage`, the seat holds no more than t
 principal. A listed scope defaults to the owner's own list, or to nobody when the owner reaches
 the whole class; a list named must be within the owner's; a preset that reaches everything is
 narrowed to the owner's list when the owner has one. It ends when the owner's seat does, or
-earlier if asked. A proposal stores the seat worked out in full, with the agent's and the
+earlier if asked. It answers its owner alone unless its seat *answers the course*
+(`answers_course`): chosen when it is brought in, only by someone who effectively holds
+`member_manage`, and so by default for the `course_tutor` preset and for no other. The students
+it is within may then ask it too (§2.8), for as long as its principal manages the members. Nothing
+else marks a seat as a course's agent — not its preset, not its role, which authorization never
+reads — so an instructor's own assistant, which reads no more than a student may, still answers
+the instructor alone. To change it, the agent is withdrawn and brought in again. A proposal stores the seat worked out in full, with the agent's and the
 owner's names for whoever decides it; approving it works the seat out again from those and
 refuses anything the owner no longer holds. `member.delegate_defaults` shows what the call would
 seat. `member.add` and `course.seat_instructor` refuse an owned agent: only its owner seats it,
@@ -688,11 +695,13 @@ asked could have read for themselves. Precisely, O may address R when:
   level (capped, for a delegate) is no higher than O's, and R reaches no student and no
   assignment O does not (O `all` reaches everything; a list must lie within O's list; a
   delegate's reach is its own and its principal's both);
-- a delegate answers only its principal, unless its principal manages the course's
-  members: the delegate of someone who holds `perm_member_manage` is the course's own agent,
-  a `course_tutor` an instructor brought in (§2.2), and answers whomever it is within. So a
-  student may ask the course's tutor, which reads the material and nobody's work, and
-  nobody — not another student, not an instructor — asks a student's own agent anything.
+- a delegate answers only its principal, unless its seat answers the course
+  (`answers_course`, §2.2), which only someone who manages the course's members chooses, and
+  which counts only while its principal still manages them: such a delegate is the course's
+  own agent, a `course_tutor` an instructor brought in, and answers whomever it is within. So
+  a student may ask the course's tutor, which reads the material and nobody's work; nobody —
+  not another student, not an instructor — asks a student's own agent anything; and a student
+  does not ask an instructor's own assistant, whatever it reads.
 
 The rule is one function, which every conversation tool goes by, and it is measured now, on
 every call, not when the conversation began: seats are narrowed, widened, paused and
@@ -816,6 +825,7 @@ check `actor.platform_role` instead. That is the only place it is read.
 | Only an agent has an owner, and its owner is a person: not an agent, not the system actor, not itself | CHECKs on `actor`, trigger `actor_owner_valid` |
 | Making an actor active forgets who suspended it | trigger `actor_suspension_cleared` |
 | A seat that is not removed has a principal exactly when its actor has an owner; the principal is the owner's seat, in the same course, and nobody's delegate | composite FK and trigger `course_member_principal_valid` on `course_member` |
+| Only a delegate's seat answers the course | CHECK `course_member_answers_course_is_delegate` |
 | A conversation's two participants are two seats of its course, and never change; a closed conversation stays closed; none is deleted | composite FKs, CHECKs and trigger `conversation_guarded` on `conversation` |
 | Only a conversation's participants write in it, only while it is open; a reply is the respondent's, to a message of the opener's in the same conversation | trigger `conversation_message_author_valid`, composite FKs on `conversation_message` |
 | A message and its retraction are in their conversation's course; one message at each `seq`; a message is retracted once | composite FKs, `unique(conversation_id, seq)`, primary key on `conversation_message_retraction` |
@@ -930,7 +940,9 @@ check `actor.platform_role` instead. That is the only place it is read.
 - A proposal is withdrawn only by its proposer, and only while nobody has decided it.
 - Nobody gains through a conversation more than they hold (§2.8): a member addresses only a
   respondent within their own seat, or their own delegate; a delegate answers only its
-  principal unless that principal manages the course's members. One function decides it for
+  principal unless its seat answers the course, which only someone who manages the course's
+  members chooses (`member.add_delegate`), and only while its principal still manages them.
+  One function decides it for
   every conversation tool, measured on every call: whom one is offered, whom one may ask,
   who may answer, and whether a respondent may still read what it was asked.
 - A conversation is read by its opener, by its respondent only while the opener may still

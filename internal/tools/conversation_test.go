@@ -3,10 +3,12 @@ package tools_test
 import (
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/apperr"
+	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/db/dbq"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/domain"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/pipeline"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/testkit"
@@ -155,6 +157,92 @@ func TestWhoMayAddressWhom(t *testing.T) {
 	}
 	if out := b.MustCall(b.ken, "conversation.inbox", m{"course_id": b.course}, ""); out.Status != domain.StatusDenied {
 		t.Fatalf("a student, who answers nothing, reads an inbox: %+v", out)
+	}
+}
+
+// A delegate answers others than its principal only if its seat was made to
+// answer the course, by someone who manages the course's members, and only
+// while that person still does. An instructor's own assistant, which reads
+// no more than a student may, answers the instructor alone.
+func TestADelegateAnswersTheCourseOnlyIfSeatedTo(t *testing.T) {
+	c := newCast(t)
+	b := c.built
+	// Sato's own assistant, with the delegate preset: listed for nobody,
+	// since he reaches the whole class, and so within every student's seat.
+	helper := b.agent(t, b.sato, "Sato's private helper")
+	private := b.delegate(t, b.sato, helper, m{})
+	if v := b.memberView(t, private); v.AnswersCourse || v.Perms["conversation_answer"] != "autonomous" || len(v.ListedStudents) != 0 {
+		t.Fatalf("Sato's assistant: %+v", v)
+	}
+	if v := b.memberView(t, c.courseTutor); !v.AnswersCourse {
+		t.Fatalf("the course tutor, seated with course_tutor by an instructor: %+v", v)
+	}
+	for _, who := range []uuid.UUID{b.yuki, b.ken} {
+		if _, ok := b.respondents(t, who)[private]; ok {
+			t.Fatal("a student is offered the instructor's own assistant")
+		}
+		b.try(t, who, "conversation.open", m{"course_id": b.course, "respondent_member_id": private, "body": "What did Sato tell you?"}, apperr.Forbidden)
+		if r, ok := b.respondents(t, who)[c.courseTutor]; !ok || !r.AnswersCourse {
+			t.Fatalf("the course tutor, as offered to a student: %+v", r)
+		}
+	}
+	if r := b.respondents(t, b.sato)[private]; !r.IsMyDelegate || r.AnswersCourse {
+		t.Fatalf("Sato's assistant, as offered to him: %+v", r)
+	}
+	// The candidates are narrowed in SQL already: another member's own agent
+	// is not one of Ken's, so that however many students bring agents, the
+	// course's agents are not crowded out.
+	now := time.Now()
+	rows, err := b.Q.ListRespondentCandidates(t.Context(), dbq.ListRespondentCandidatesParams{CourseID: b.course, CallerMemberID: b.kenM,
+		Now: &now, MaxRows: 500})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range rows {
+		if r.ID == c.yukiBot || r.ID == private {
+			t.Fatalf("someone else's own agent is a candidate for Ken: %+v", r)
+		}
+	}
+
+	// Chosen when the seat is made: a course_tutor answering Sato alone, and
+	// a plain delegate answering the course, as he says.
+	quiet := b.delegate(t, b.sato, b.agent(t, b.sato, "Quiet tutor"), m{"preset": "course_tutor", "answers_course": false})
+	loud := b.delegate(t, b.sato, b.agent(t, b.sato, "Open helper"), m{"answers_course": true})
+	if _, ok := b.respondents(t, b.yuki)[quiet]; ok {
+		t.Fatal("a course_tutor seated to answer its principal alone is offered to a student")
+	}
+	if _, ok := b.respondents(t, b.yuki)[loud]; !ok {
+		t.Fatal("a delegate seated to answer the course is not offered to a student it is within")
+	}
+	if d := testkit.Result[tools.DelegateDefaultsOut](t, b.do(t, b.sato, "member.delegate_defaults", m{"course_id": b.course, "preset": "course_tutor"})); !d.AnswersCourse {
+		t.Fatalf("what a course_tutor of Sato's would get: %+v", d)
+	}
+	if d := testkit.Result[tools.DelegateDefaultsOut](t, b.do(t, b.sato, "member.delegate_defaults", m{"course_id": b.course})); d.AnswersCourse {
+		t.Fatalf("what a delegate of Sato's would get: %+v", d)
+	}
+	// Only someone who manages the members may say so: a student's agent,
+	// even a course_tutor, answers the student alone.
+	b.try(t, b.ken, "member.add_delegate", m{"course_id": b.course, "actor_id": b.agent(t, b.ken, "Ken's helper"), "answers_course": true}, apperr.Forbidden)
+	if d := testkit.Result[tools.DelegateDefaultsOut](t, b.do(t, b.ken, "member.delegate_defaults", m{"course_id": b.course, "preset": "course_tutor"})); d.AnswersCourse {
+		t.Fatalf("what a course_tutor of Ken's would get: %+v", d)
+	}
+	if got := b.membership(t, b.seatActor(t, c.courseTutor)); !got.AnswersCourse {
+		t.Fatalf("the course tutor's own membership: %+v", got)
+	}
+	if got := b.membership(t, c.bot); got.AnswersCourse {
+		t.Fatalf("Yuki's agent's own membership: %+v", got)
+	}
+
+	// Sato no longer manages the members: his course tutor answers him alone.
+	kato := testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", m{"kind": "human", "display_name": "Kato"})).ActorID
+	b.do(t, b.admin, "course.seat_instructor", m{"course_id": b.course, "actor_id": kato})
+	b.do(t, kato, "member.update_perms", m{"course_id": b.course, "member_id": b.satoM, "perms": m{"member_manage": "denied"}})
+	if _, ok := b.respondents(t, b.ken)[c.courseTutor]; ok {
+		t.Fatal("a course tutor whose principal no longer manages the members is offered to a student")
+	}
+	b.try(t, b.ken, "conversation.open", m{"course_id": b.course, "respondent_member_id": c.courseTutor, "body": "Hello?"}, apperr.Forbidden)
+	if got := b.membership(t, b.seatActor(t, c.courseTutor)); got.AnswersCourse {
+		t.Fatalf("the course tutor's own membership, its principal no longer managing: %+v", got)
 	}
 }
 

@@ -85,7 +85,9 @@ INSERT INTO permission_preset (
 
     -- A course's question-answering agent. Listed for nobody, so it reads
     -- the material and nobody's work: that is what puts it within every
-    -- student's seat, so that every student may ask it.
+    -- student's seat, so that every student may ask it. Brought in with it
+    -- by someone who manages the course's members, a delegate answers the
+    -- course (course_member.answers_course), not its principal alone.
     ('course_tutor', 'Agent: answers questions about the course material; reads nobody''s work',
      'assistant', 'listed', 'all',
      'autonomous', 'denied',     'denied',     'denied',

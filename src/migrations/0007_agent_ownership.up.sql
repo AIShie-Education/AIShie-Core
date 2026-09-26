@@ -95,11 +95,21 @@ CREATE TRIGGER actor_suspension_cleared
 -- A delegate seat names its principal: the seat, in the same course, of the
 -- person who owns the delegate's actor. The composite key keeps the two in
 -- one course.
+--
+-- A delegate answers its principal alone, unless its seat says it answers
+-- the course (answers_course): a course's own question-answering agent,
+-- brought in by someone who manages the course's members, whom the students
+-- it is within may ask as well (docs/schema.md §2.8). It is chosen when the
+-- seat is made, counts only while the principal still manages the members,
+-- and only a delegate's seat carries it. The previous release writes no
+-- delegate seats, and its seats take the default.
 ALTER TABLE course_member
     ADD COLUMN principal_member_id uuid,
+    ADD COLUMN answers_course boolean NOT NULL DEFAULT false,
     ADD CONSTRAINT course_member_principal_fk
         FOREIGN KEY (course_id, principal_member_id) REFERENCES course_member (course_id, id),
-    ADD CONSTRAINT course_member_not_own_principal CHECK (principal_member_id <> id);
+    ADD CONSTRAINT course_member_not_own_principal CHECK (principal_member_id <> id),
+    ADD CONSTRAINT course_member_answers_course_is_delegate CHECK (NOT answers_course OR principal_member_id IS NOT NULL);
 CREATE INDEX course_member_principal_idx ON course_member (principal_member_id)
     WHERE principal_member_id IS NOT NULL;
 

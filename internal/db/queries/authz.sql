@@ -27,7 +27,7 @@ SELECT m.id, m.course_id, m.actor_id, m.status, m.expires_at, m.student_scope, m
        m.perm_assignment_write, m.perm_submission_read, m.perm_submission_write, m.perm_grade_read,
        m.perm_grade_submit, m.perm_grade_post, m.perm_member_read, m.perm_member_manage,
        m.perm_action_decide, m.perm_agent_delegate, m.perm_conversation_ask, m.perm_conversation_answer,
-       m.principal_member_id,
+       m.principal_member_id, m.answers_course,
        (CASE WHEN m.principal_member_id IS NULL THEN a.owner_actor_id IS NULL
              ELSE a.owner_actor_id IS NOT DISTINCT FROM p.actor_id END)::bool AS owner_matches,
        p.actor_id AS principal_actor_id, p.status AS principal_status, p.expires_at AS principal_expires_at,
@@ -62,7 +62,7 @@ SELECT m.id, m.course_id, m.actor_id, m.status, m.expires_at, m.student_scope, m
        m.perm_assignment_write, m.perm_submission_read, m.perm_submission_write, m.perm_grade_read,
        m.perm_grade_submit, m.perm_grade_post, m.perm_member_read, m.perm_member_manage,
        m.perm_action_decide, m.perm_agent_delegate, m.perm_conversation_ask, m.perm_conversation_answer,
-       m.principal_member_id,
+       m.principal_member_id, m.answers_course,
        (CASE WHEN m.principal_member_id IS NULL THEN a.owner_actor_id IS NULL
              ELSE a.owner_actor_id IS NOT DISTINCT FROM p.actor_id END)::bool AS owner_matches,
        p.actor_id AS principal_actor_id, p.status AS principal_status, p.expires_at AS principal_expires_at,
@@ -89,7 +89,7 @@ SELECT m.id, m.course_id, m.actor_id, m.status, m.expires_at, m.student_scope, m
        m.perm_assignment_write, m.perm_submission_read, m.perm_submission_write, m.perm_grade_read,
        m.perm_grade_submit, m.perm_grade_post, m.perm_member_read, m.perm_member_manage,
        m.perm_action_decide, m.perm_agent_delegate, m.perm_conversation_ask, m.perm_conversation_answer,
-       m.principal_member_id,
+       m.principal_member_id, m.answers_course,
        (CASE WHEN m.principal_member_id IS NULL THEN a.owner_actor_id IS NULL
              ELSE a.owner_actor_id IS NOT DISTINCT FROM p.actor_id END)::bool AS owner_matches,
        p.actor_id AS principal_actor_id, p.status AS principal_status, p.expires_at AS principal_expires_at,
@@ -116,7 +116,7 @@ SELECT m.id, m.course_id, m.actor_id, m.status, m.expires_at, m.student_scope, m
        m.perm_assignment_write, m.perm_submission_read, m.perm_submission_write, m.perm_grade_read,
        m.perm_grade_submit, m.perm_grade_post, m.perm_member_read, m.perm_member_manage,
        m.perm_action_decide, m.perm_agent_delegate, m.perm_conversation_ask, m.perm_conversation_answer,
-       m.principal_member_id,
+       m.principal_member_id, m.answers_course,
        (CASE WHEN m.principal_member_id IS NULL THEN a.owner_actor_id IS NULL
              ELSE a.owner_actor_id IS NOT DISTINCT FROM p.actor_id END)::bool AS owner_matches,
        p.actor_id AS principal_actor_id, p.status AS principal_status, p.expires_at AS principal_expires_at,
