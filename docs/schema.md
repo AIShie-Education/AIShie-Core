@@ -686,8 +686,16 @@ or waiting for a person's approval.
 **Nobody gains through a conversation more than they hold.** A member may address a
 respondent only if the respondent can see and do nothing the member cannot — the
 respondent's seat is within the member's — or the respondent is the member's own delegate.
-So a question cannot make an agent a confused deputy: whatever it answers from, the one who
-asked could have read for themselves. Precisely, O may address R when:
+So a question cannot make an agent a confused deputy over what its seat reads: whatever that
+seat can read, the one who asked could have read for themselves. Addressability bounds the
+seat, and only the seat. A respondent that answers several people — the course's tutor, a
+tutor listed for several students, a member of staff — also holds what each of them wrote to
+it, and an agent can be asked to repeat it: nothing written to such a respondent is private
+from the others who may ask it, and `visible_to` says so. Core cannot keep one asker's words
+from another inside an agent — one token serves every conversation the agent is in, and it may
+read each of them — so the agent is told to (the MCP instructions): answer each conversation
+from that conversation alone, and never repeat to one person what another wrote. Precisely, O
+may address R when:
 
 - they are two seats, both live, a delegate's principal included (§2.2), held by active
   actors;
@@ -756,9 +764,11 @@ since both participants must be live to.
 **The action log holds what was written.** Each message is an action whose payload holds its
 body, so it is readable, in the action views, by anyone who holds `perm_action_decide` in the
 course, unscoped (§7), and a retraction does not take it back from there. That is said
-plainly to whoever reads a conversation (`visible_to`): its participants, course staff who
-decide actions for its opener, and anyone who decides actions in the course, through the
-log. There is no privacy promised beyond that. `action.list_mine` takes `exclude_types`, so
+plainly to whoever reads a conversation, in `visible_to`, as codes for the reader to put in
+its own words: its `participants`, course staff who decide actions for its opener
+(`overseers`), anyone who decides actions in the course, through the log (`action_record`),
+and, unless the respondent is the opener's own delegate, whomever else the respondent answers
+(`respondent_answers_others`). There is no privacy promised beyond that. `action.list_mine` takes `exclude_types`, so
 that a list of what one has done need not be a transcript.
 
 **Its news is its participants'.** `conversation.opened`, `.message_posted`, `.closed` and
@@ -1010,7 +1020,8 @@ garbage in the grades, full record in the log.
 - **Organisation hierarchy** above `department`; cross-course administrative roles beyond
   `platform_role`.
 - **Agent memory.** Agents key their own stores on `course_member.id`, which is the durable
-  handle for "this agent in this course".
+  handle for "this agent in this course", and keep what people wrote to them per
+  conversation: an agent that answers several people shares none of it between them (§2.8).
 - **The concept graph**, quizzes, retention policy.
 - **Waiting for news.** `event.list` and `conversation.inbox` are polled. A long poll, or
   `LISTEN`/`NOTIFY` behind one, would let an agent answer as soon as it is asked without

@@ -6,7 +6,9 @@
 -- gains through a conversation more than they hold. A member may address a
 -- respondent only if the respondent can see and do nothing the member
 -- cannot, or is the member's own delegate, so that a question cannot make an
--- agent a confused deputy (docs/schema.md §2.8). What the database holds is
+-- agent a confused deputy over what its seat reads (docs/schema.md §2.8); a
+-- respondent that answers several people also holds what each wrote to it,
+-- which the read tools say. What the database holds is
 -- the shape: who the two participants are never changes, only they write, a
 -- closed conversation stays closed, an answer answers the opener, and what
 -- was written stays written. A message is withdrawn by a retraction row

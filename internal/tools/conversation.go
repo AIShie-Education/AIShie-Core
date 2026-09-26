@@ -28,8 +28,15 @@ import (
 // Nobody gains through a conversation more than they hold. A member may
 // address a respondent only if the respondent can see and do nothing the
 // member cannot, or is the member's own delegate (addressing.refusal), so a
-// question cannot make an agent a confused deputy: whatever it answers from,
-// the asker could have read for themselves. The rule is one function, which
+// question cannot make an agent a confused deputy over what its seat reads:
+// whatever that seat can read, the asker could have read for themselves.
+// That bounds the seat, not what the respondent has been told. A respondent
+// that answers several people — a course's tutor — holds what each of them
+// wrote to it, and an agent can be asked to repeat it: nothing written to
+// such a respondent is private from the others who may ask it, and
+// visible_to says so. Keeping one asker's words from another is the agent's
+// to do (the MCP instructions tell it to), not something Core can hold it
+// to: one token serves every conversation it is in. The rule is one function, which
 // every tool here goes by — who is offered as a respondent, who may be asked,
 // who may answer, and whether a respondent may still read what it was asked —
 // and it is measured now, on every call, since seats change.
@@ -468,7 +475,8 @@ func conversationOpen() tool.Tool {
 		Description: "Start a conversation with one member of the course — the course's tutor agent, your own agent — and, " +
 			"if you give body, ask the first question. You may address only someone who can see and do nothing you cannot, " +
 			"or your own agent: conversation.respondents lists them. Keep asking with conversation.ask; answers come back " +
-			"as messages (conversation.messages). Both of you, and course staff who decide actions for you, can read it.",
+			"as messages (conversation.messages). Both of you, and course staff who decide actions for you, can read it; " +
+			"and a respondent that answers others too, such as the course's tutor, may repeat to them what you write.",
 		Kind: tool.Write, Gate: asks,
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/conversations"},
 		Resolve: func(ctx context.Context, q dbq.Querier, in ConversationOpenIn) (tool.Target, error) {
@@ -963,8 +971,8 @@ func conversationRespondents() tool.Tool {
 	return tool.Define(tool.Spec[tool.InCourse, RespondentsOut]{
 		Name: "conversation.respondents",
 		Description: "Whom you may start a conversation with here: members who answer questions and can see and do nothing " +
-			"you cannot — the course's tutor agent, say — and your own agents. Each says how its answers arrive and, for an " +
-			"agent, when it was last seen.",
+			"you cannot — the course's tutor agent, say — and your own agents. Each says how its answers arrive, whether it " +
+			"answers others too (answers_course: it may repeat to them what you write), and, for an agent, when it was last seen.",
 		Kind: tool.Read, Gate: asks,
 		HTTP: tool.Route{Method: "GET", Pattern: "/v1/courses/{course_id}/conversations/respondents"},
 		Resolve: func(_ context.Context, _ dbq.Querier, in tool.InCourse) (tool.Target, error) {
@@ -1082,15 +1090,29 @@ type ConversationIDIn struct {
 
 type ConversationGetOut struct {
 	ConversationView
-	VisibleTo []string `json:"visible_to" jsonschema:"who can read what is written here"`
+	VisibleTo []string `json:"visible_to" jsonschema:"who can read what is written here, as codes: participants, the two who take part; overseers, course staff who decide actions for the opener; action_record, anyone who decides actions in the course, through the record of each message's action; respondent_answers_others, the respondent answers other members too and may repeat to them what is written here"`
 }
 
+// Who can read what is written in a conversation (visible_to), as codes for
+// a reader to say in its own words and language.
+const (
+	VisibleToParticipants      = "participants"
+	VisibleToOverseers         = "overseers"
+	VisibleToActionRecord      = "action_record"
+	VisibleToRespondentsOthers = "respondent_answers_others"
+)
+
 // visibleTo is said with every conversation, so that nobody writes in one
-// thinking it more private than it is.
-var visibleTo = []string{
-	"participants",
-	"course staff who decide actions for the opener",
-	"anyone who decides actions in this course, in the record of each message's action",
+// thinking it more private than it is. A respondent that is not the
+// opener's own delegate may answer others as well — the course's tutor, a
+// tutor listed for several students, staff — and what it is told it may
+// repeat to them.
+func visibleTo(v ConversationView) []string {
+	out := []string{VisibleToParticipants, VisibleToOverseers, VisibleToActionRecord}
+	if !v.Respondent.IsDelegateOfOpener {
+		out = append(out, VisibleToRespondentsOthers)
+	}
+	return out
 }
 
 // readable finds a conversation the caller may read (mayRead), and answers a
@@ -1139,7 +1161,7 @@ func conversationGet() tool.Tool {
 				return ConversationGetOut{}, err
 			}
 			v, err := conversationView(ctx, rc, in.ConversationID)
-			return ConversationGetOut{ConversationView: v, VisibleTo: slices.Clone(visibleTo)}, err
+			return ConversationGetOut{ConversationView: v, VisibleTo: visibleTo(v)}, err
 		},
 	})
 }
