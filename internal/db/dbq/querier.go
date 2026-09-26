@@ -24,6 +24,12 @@ type Querier interface {
 	CancelProposal(ctx context.Context, arg CancelProposalParams) (int64, error)
 	ClearAssignmentScope(ctx context.Context, memberID uuid.UUID) error
 	ClearStudentScope(ctx context.Context, memberID uuid.UUID) error
+	CloseConversation(ctx context.Context, arg CloseConversationParams) (int64, error)
+	// A seat that is removed takes part in no conversation any more. Whoever
+	// removes it holds it FOR UPDATE, which a call writing in one of these waits
+	// for (it takes both participants' seats before the conversation), so the
+	// two never wait for each other.
+	CloseConversationsOf(ctx context.Context, memberID uuid.UUID) ([]uuid.UUID, error)
 	ComponentHasGrades(ctx context.Context, componentID *uuid.UUID) (bool, error)
 	ComponentHasLiveGrades(ctx context.Context, componentID *uuid.UUID) (bool, error)
 	// Any origin: an entered grade, or a total written down when it was a parent.
@@ -31,6 +37,10 @@ type Querier interface {
 	// Any entered grade, live, on the component, on a component beneath it, or
 	// on a submission to an assignment beneath it.
 	ComponentSubtreeHasLiveGrades(ctx context.Context, componentID uuid.UUID) (bool, error)
+	// What the views show of each conversation: its two participants, whether a
+	// reply waits for a decision, and the opener's newest message. last_seen_at
+	// is an agent's: when it last used a token that still works.
+	ConversationDetails(ctx context.Context, arg ConversationDetailsParams) ([]ConversationDetailsRow, error)
 	// The agents a person owns that are not suspended: what the limit counts.
 	CountActiveAgentsOf(ctx context.Context, ownerActorID *uuid.UUID) (int64, error)
 	CountAssignmentsInScope(ctx context.Context, arg CountAssignmentsInScopeParams) (int64, error)
@@ -103,6 +113,9 @@ type Querier interface {
 	GetBuiltinPresetByName(ctx context.Context, name string) (PermissionPreset, error)
 	GetComponentInCourse(ctx context.Context, arg GetComponentInCourseParams) (GetComponentInCourseRow, error)
 	GetComponentParent(ctx context.Context, id uuid.UUID) (*uuid.UUID, error)
+	GetConversationInCourse(ctx context.Context, arg GetConversationInCourseParams) (Conversation, error)
+	// A message with what its conversation says about who may act on it.
+	GetConversationMessage(ctx context.Context, arg GetConversationMessageParams) (GetConversationMessageRow, error)
 	GetCourse(ctx context.Context, id uuid.UUID) (GetCourseRow, error)
 	GetCourseForAuthz(ctx context.Context, id uuid.UUID) (GetCourseForAuthzRow, error)
 	// A token or a session, found by its public prefix before its hash is
@@ -153,6 +166,10 @@ type Querier interface {
 	// The same row, locked for the rest of the transaction: the management tools
 	// read a seat and write it back, and two of them at once must take turns.
 	GetMemberInCourseForUpdate(ctx context.Context, arg GetMemberInCourseForUpdateParams) (GetMemberInCourseForUpdateRow, error)
+	// The same for several seats at once, by id: what a list shows of what each
+	// of its seats may do (a conversation's respondent), for a list's worth of
+	// seats in one statement. Locks nothing.
+	GetMembersForAuthz(ctx context.Context, ids []uuid.UUID) ([]GetMembersForAuthzRow, error)
 	GetPasswordCredential(ctx context.Context, actorID uuid.UUID) (GetPasswordCredentialRow, error)
 	GetPreset(ctx context.Context, id uuid.UUID) (PermissionPreset, error)
 	// Roster facts about a member. This is not authorization: that a grade can
@@ -180,6 +197,15 @@ type Querier interface {
 	InsertActor(ctx context.Context, arg InsertActorParams) error
 	InsertAssignment(ctx context.Context, arg InsertAssignmentParams) error
 	InsertComponent(ctx context.Context, arg InsertComponentParams) error
+	// Conversations (docs/schema.md §2.8). Who may address whom is decided in
+	// Go, by one function (tools.addressing), from the seats as authorization
+	// reads them; these queries find candidates and write rows, and every list
+	// among them is limited in SQL to what the caller may list: their own
+	// conversations, and those they oversee within their scope.
+	InsertConversation(ctx context.Context, arg InsertConversationParams) error
+	// The second half, under the lock TouchConversation took: the next seq in
+	// this conversation.
+	InsertConversationMessage(ctx context.Context, arg InsertConversationMessageParams) (int32, error)
 	InsertCourse(ctx context.Context, arg InsertCourseParams) error
 	InsertCredential(ctx context.Context, arg InsertCredentialParams) error
 	InsertDepartment(ctx context.Context, arg InsertDepartmentParams) error
@@ -190,8 +216,13 @@ type Querier interface {
 	InsertMember(ctx context.Context, arg InsertMemberParams) error
 	InsertMissingSubmission(ctx context.Context, arg InsertMissingSubmissionParams) (int64, error)
 	InsertPreset(ctx context.Context, arg InsertPresetParams) error
+	InsertRetraction(ctx context.Context, arg InsertRetractionParams) (int64, error)
 	InsertSubmission(ctx context.Context, arg InsertSubmissionParams) error
 	InsertTerm(ctx context.Context, arg InsertTermParams) error
+	// The opener's newest message: the one an answer is to answer.
+	LatestOpenerMessage(ctx context.Context, conversationID uuid.UUID) (LatestOpenerMessageRow, error)
+	// exclude_types leaves out whole action types: a chat's messages from a
+	// list of what one has done, say.
 	ListActionsByMember(ctx context.Context, arg ListActionsByMemberParams) ([]Action, error)
 	// Everyone registered, as GetActorView sees them: people and agents, not the
 	// system actor, which nobody registers or manages. The search is a piece of
@@ -210,6 +241,7 @@ type Querier interface {
 	// reaches only the students its principal reaches too.
 	ListAssignmentRoster(ctx context.Context, arg ListAssignmentRosterParams) ([]ListAssignmentRosterRow, error)
 	ListAssignmentScope(ctx context.Context, memberID uuid.UUID) ([]uuid.UUID, error)
+	ListAssignmentScopesOf(ctx context.Context, memberIds []uuid.UUID) ([]MemberAssignmentScope, error)
 	// Scope is applied here, not afterwards, a delegate's principal's included. A
 	// member who may not write assignments sees only published ones.
 	ListAssignments(ctx context.Context, arg ListAssignmentsParams) ([]Assignment, error)
@@ -220,6 +252,16 @@ type Querier interface {
 	ListAssignmentsNewlyPastDue(ctx context.Context, arg ListAssignmentsNewlyPastDueParams) ([]ListAssignmentsNewlyPastDueRow, error)
 	// What gradecalc needs -------------------------------------------------------
 	ListComponents(ctx context.Context, courseID uuid.UUID) ([]ListComponentsRow, error)
+	// The conversations a member may list, paged by id: those it opened, those
+	// addressed to it, and, for someone who decides actions, those whose opener
+	// is within its student scope (and its principal's, for a delegate), in SQL.
+	// state is a ConversationView state, or open.
+	ListConversationIDs(ctx context.Context, arg ListConversationIDsParams) ([]uuid.UUID, error)
+	// Oldest first, after a seq.
+	ListConversationMessagesAfter(ctx context.Context, arg ListConversationMessagesAfterParams) ([]ListConversationMessagesAfterRow, error)
+	// Newest first, before a seq: the tail of a conversation, turned round by
+	// the caller.
+	ListConversationMessagesBefore(ctx context.Context, arg ListConversationMessagesBeforeParams) ([]ListConversationMessagesBeforeRow, error)
 	// Course-level documents: material, instructions, rubrics. Owned documents
 	// (submitted files, feedback) are reached through their owners instead.
 	// Instructions and rubrics are the assignment's: to anyone who does not
@@ -240,6 +282,8 @@ type Querier interface {
 	//   * type: what kinds of event this member's permissions let it see, worked
 	//     out by the caller from the member row — plus, always, the events of
 	//     its own actions, which is how an agent learns what became of a proposal;
+	//     news of a conversation instead goes to its two participants and nobody
+	//     else, whoever caused it (a removal that closed it, say);
 	//   * student scope, exactly as authorize() step 4;
 	//   * assignment scope as step 5, including its extra case: an event that
 	//     names a student but no assignment (a total, a component grade) spans
@@ -261,6 +305,10 @@ type Querier interface {
 	//   * a grade on a component belongs to no single assignment, so a member
 	//     limited to listed assignments does not see it at all.
 	ListGrades(ctx context.Context, arg ListGradesParams) ([]ListGradesRow, error)
+	// Open conversations addressed to a seat in which the opener spoke last and
+	// no answer of the seat's waits for a decision, the longest waiting first.
+	// Whether each is still addressable is for the caller to say, in Go.
+	ListInboxConversationIDs(ctx context.Context, arg ListInboxConversationIDsParams) ([]uuid.UUID, error)
 	// Per assignment, the student's live posted grade on the highest attempt that
 	// has one.
 	ListLiveAssignmentScores(ctx context.Context, arg ListLiveAssignmentScoresParams) ([]ListLiveAssignmentScoresRow, error)
@@ -294,6 +342,12 @@ type Querier interface {
 	// after which the row is read again as it left it: an assignment unpublished
 	// meanwhile is not listed, and the event goes out under its unreleased name.
 	ListPublishedAssignmentsUsingDocument(ctx context.Context, documentID *uuid.UUID) ([]uuid.UUID, error)
+	// The seats that might answer a caller: live, held by an active actor, with
+	// conversation_answer not denied on the row. Which of them the caller may
+	// address is decided in Go (tools.addressing). Unpaged: the seats that answer
+	// are a course's agents and staff, a handful, and max_rows bounds them
+	// anyway.
+	ListRespondentCandidates(ctx context.Context, arg ListRespondentCandidatesParams) ([]ListRespondentCandidatesRow, error)
 	// Every seat an actor holds that is not removed, with its course and the
 	// name of the preset it was copied from.
 	ListSeatsOfActor(ctx context.Context, actorID uuid.UUID) ([]ListSeatsOfActorRow, error)
@@ -309,6 +363,7 @@ type Querier interface {
 	// NOT EXISTS rather than a join: an action need not be in a course.
 	ListStaleProposals(ctx context.Context, arg ListStaleProposalsParams) ([]ListStaleProposalsRow, error)
 	ListStudentScope(ctx context.Context, memberID uuid.UUID) ([]uuid.UUID, error)
+	ListStudentScopesOf(ctx context.Context, memberIds []uuid.UUID) ([]MemberStudentScope, error)
 	// Current students of the course with no submission row at all for the
 	// assignment: not a draft, not a hand-in, not an earlier 'missing'. A paused
 	// student is one: the seat carries on when resumed, and the sweep does not
@@ -480,6 +535,11 @@ type Querier interface {
 	SuspendActor(ctx context.Context, arg SuspendActorParams) (int64, error)
 	SuspendAgentByOwner(ctx context.Context, arg SuspendAgentByOwnerParams) (int64, error)
 	TermExists(ctx context.Context, id uuid.UUID) (bool, error)
+	// The first half of writing a message: who spoke last, WHERE the
+	// conversation is open. It takes the conversation's row lock, so a close
+	// waits for the message or the message finds it closed (no row), and two
+	// messages in one conversation are written one after the other.
+	TouchConversation(ctx context.Context, arg TouchConversationParams) (int64, error)
 	// At most one write a minute per credential, however busy it is. The cast is
 	// needed: left to itself, PostgreSQL reads $2 - interval as interval - interval,
 	// and every call fails.

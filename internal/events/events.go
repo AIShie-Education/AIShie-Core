@@ -31,6 +31,14 @@ const (
 	GradePosted       = "grade.posted"
 	GradeRegraded     = "grade.regraded"
 	GradeTotalUpdated = "grade.total_updated"
+
+	// A conversation's news is its two participants' and nobody else's
+	// (docs/schema.md §2.8). Its subject is the conversation, and its
+	// payload never holds what was written.
+	ConversationOpened           = "conversation.opened"
+	ConversationMessagePosted    = "conversation.message_posted"
+	ConversationClosed           = "conversation.closed"
+	ConversationMessageRetracted = "conversation.message_retracted"
 )
 
 // Event is one row of the feed.

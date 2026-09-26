@@ -168,17 +168,30 @@ func actionListPendingReview() tool.Tool {
 // It is gated by perm_document_read only because every seated member has
 // some permission and this is the most basic one; what it returns is limited
 // to the caller's own rows by the query, not by the gate.
+type ActionListMineIn struct {
+	tool.InCourse
+	ExcludeTypes []string `json:"exclude_types,omitempty" jsonschema:"action types to leave out, such as conversation.ask and conversation.answer"`
+	Page
+}
+
 func actionListMine() tool.Tool {
-	return tool.Define(tool.Spec[ActionListIn, ActionListOut]{
-		Name:        "action.list_mine",
-		Description: "The caller's own actions in this course — proposals and their outcomes included — oldest first.",
-		Kind:        tool.Read,
-		Gate:        tool.Gate{Perms: []domain.Perm{domain.PermDocumentRead}},
-		HTTP:        tool.Route{Method: "GET", Pattern: "/v1/courses/{course_id}/actions/mine"},
-		Resolve:     courseOnly,
-		Query: func(ctx context.Context, rc *tool.ReadCtx, in ActionListIn) (ActionListOut, error) {
+	return tool.Define(tool.Spec[ActionListMineIn, ActionListOut]{
+		Name: "action.list_mine",
+		Description: "The caller's own actions in this course — proposals and their outcomes included — oldest first. " +
+			"exclude_types leaves out whole kinds of action: a chat's messages, say.",
+		Kind: tool.Read,
+		Gate: tool.Gate{Perms: []domain.Perm{domain.PermDocumentRead}},
+		HTTP: tool.Route{Method: "GET", Pattern: "/v1/courses/{course_id}/actions/mine"},
+		Resolve: func(_ context.Context, _ dbq.Querier, in ActionListMineIn) (tool.Target, error) {
+			return tool.Target{CourseID: in.CourseID, Type: "action"}, nil
+		},
+		Query: func(ctx context.Context, rc *tool.ReadCtx, in ActionListMineIn) (ActionListOut, error) {
+			exclude := in.ExcludeTypes
+			if exclude == nil {
+				exclude = []string{}
+			}
 			rows, err := rc.Q.ListActionsByMember(ctx, dbq.ListActionsByMemberParams{
-				CourseID: &in.CourseID, MemberID: &rc.Member.ID, After: in.after(), MaxRows: in.limit(),
+				CourseID: &in.CourseID, MemberID: &rc.Member.ID, After: in.after(), MaxRows: in.limit(), ExcludeTypes: exclude,
 			})
 			return actionPage(rows, in.limit()), err
 		},

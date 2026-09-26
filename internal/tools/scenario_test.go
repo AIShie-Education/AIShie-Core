@@ -2,6 +2,7 @@ package tools_test
 
 import (
 	"context"
+	"slices"
 	"sort"
 	"testing"
 
@@ -129,6 +130,25 @@ func TestWorkedExampleBuiltThroughToolsAlone(t *testing.T) {
 		}
 	}
 
+	// Yuki asks the tutor listed for her about her work, and it answers; she
+	// withdraws what she asked and closes the conversation. News of it is the
+	// two participants' alone.
+	conv, question := b.open(t, b.yuki, b.tutorM, "Why was my essay marked down?")
+	b.do(t, b.tutor, "conversation.answer", answerArgs(b, conv, question, "Section 2 asserts more than it shows."))
+	b.do(t, b.yuki, "conversation.retract", m{"course_id": b.course, "message_id": question})
+	b.do(t, b.yuki, "conversation.close", m{"course_id": b.course, "conversation_id": conv})
+	for who, want := range map[uuid.UUID]int{b.yuki: 5, b.tutor: 5, b.ken: 0, b.sato: 0} {
+		n := 0
+		for _, e := range feed(t, b, who) {
+			if e.SubjectType == "conversation" {
+				n++
+			}
+		}
+		if n != want {
+			t.Fatalf("%d events of the conversation in the feed of %s, want %d", n, who, want)
+		}
+	}
+
 	// Every action in the course traces back to someone seated by someone:
 	// the delegation chain has no gaps.
 	if n := b.Count(`SELECT count(*) FROM actor WHERE created_by_actor_id IS NULL`); n != 1 {
@@ -161,6 +181,11 @@ func TestWorkedExampleBuiltThroughToolsAlone(t *testing.T) {
 		}
 	}
 	sort.Strings(emitted)
+	for _, typ := range []string{"conversation.opened", "conversation.message_posted", "conversation.message_retracted", "conversation.closed"} {
+		if !slices.Contains(emitted, typ) {
+			t.Errorf("a full run emitted no %s", typ)
+		}
+	}
 	if len(emitted) < 10 {
 		t.Fatalf("only %d event types in a full run: %v", len(emitted), emitted)
 	}

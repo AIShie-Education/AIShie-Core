@@ -100,7 +100,10 @@ ORDER BY id
 LIMIT sqlc.arg(max_rows);
 
 -- name: ListActionsByMember :many
+-- exclude_types leaves out whole action types: a chat's messages from a
+-- list of what one has done, say.
 SELECT * FROM action
 WHERE course_id = $1 AND member_id = $2 AND id > sqlc.arg(after)
+  AND NOT (action_type = ANY(sqlc.arg(exclude_types)::text[]))
 ORDER BY id
 LIMIT sqlc.arg(max_rows);

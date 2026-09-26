@@ -197,6 +197,24 @@ func LoadMember(ctx context.Context, q dbq.Querier, memberID uuid.UUID) (*domain
 	return memberFromRow(row), nil
 }
 
+// LoadMembers is LoadMember for several seats at once, in one statement:
+// what a list shows of what each of its seats may do. A seat that does not
+// exist is left out of the map.
+func LoadMembers(ctx context.Context, q dbq.Querier, ids []uuid.UUID) (map[uuid.UUID]*domain.Member, error) {
+	out := make(map[uuid.UUID]*domain.Member, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+	rows, err := q.GetMembersForAuthz(ctx, distinct(ids))
+	if err != nil {
+		return nil, fmt.Errorf("load members: %w", err)
+	}
+	for _, r := range rows {
+		out[r.ID] = memberFromRow(dbq.GetMemberForAuthzRow(r))
+	}
+	return out, nil
+}
+
 // CheckScope is steps 4 and 5. It returns ReasonNone when the whole target is
 // within the member's scope. 'listed' with nothing listed matches nothing:
 // scope fails closed. A delegate reaches only what it and its principal both

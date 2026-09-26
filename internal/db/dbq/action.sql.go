@@ -252,22 +252,27 @@ func (q *Queries) InsertAction(ctx context.Context, arg InsertActionParams) (int
 const listActionsByMember = `-- name: ListActionsByMember :many
 SELECT id, actor_id, course_id, member_id, action_type, target_type, target_id, payload, idempotency_key, authz_result, status, decided_by_member_id, decided_at, review_state, reviewed_by_member_id, reviewed_at, executed_at, created_at, payload_hash, result FROM action
 WHERE course_id = $1 AND member_id = $2 AND id > $3
+  AND NOT (action_type = ANY($4::text[]))
 ORDER BY id
-LIMIT $4
+LIMIT $5
 `
 
 type ListActionsByMemberParams struct {
-	CourseID *uuid.UUID
-	MemberID *uuid.UUID
-	After    uuid.UUID
-	MaxRows  int32
+	CourseID     *uuid.UUID
+	MemberID     *uuid.UUID
+	After        uuid.UUID
+	ExcludeTypes []string
+	MaxRows      int32
 }
 
+// exclude_types leaves out whole action types: a chat's messages from a
+// list of what one has done, say.
 func (q *Queries) ListActionsByMember(ctx context.Context, arg ListActionsByMemberParams) ([]Action, error) {
 	rows, err := q.db.Query(ctx, listActionsByMember,
 		arg.CourseID,
 		arg.MemberID,
 		arg.After,
+		arg.ExcludeTypes,
 		arg.MaxRows,
 	)
 	if err != nil {
