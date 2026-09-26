@@ -1,6 +1,9 @@
 package tools_test
 
 import (
+	"context"
+	"encoding/json"
+	"hash/fnv"
 	"testing"
 
 	"github.com/google/uuid"
@@ -58,6 +61,15 @@ func TestAdminRevokesOneOfAnAgentsTokens(t *testing.T) {
 	// Root's are root's; an instructor has no platform role at all.
 	rootTok := testkit.Result[tools.IssueTokenOut](t, b.do(t, b.Root, "credential.issue_token", m{"label": "cli"}))
 	b.try(t, b.admin, "actor.revoke_credential", m{"actor_id": b.Root, "credential_id": rootTok.CredentialID}, apperr.Forbidden)
+	// Nor are they listed to an admin: what is listed is there to be revoked.
+	b.try(t, b.admin, "actor.list_credentials", m{"actor_id": b.Root}, apperr.Forbidden)
+	if got := testkit.Result[tools.CredentialListOut](t, b.do(t, b.Root, "actor.list_credentials", m{"actor_id": b.admin})); len(got.Credentials) != 0 {
+		t.Fatalf("root listing the admin's credentials: %+v", got)
+	}
+	// An administrator's own are theirs, through this door too.
+	own := testkit.Result[tools.IssueTokenOut](t, b.do(t, b.admin, "credential.issue_token", m{"label": "own"}))
+	b.do(t, b.admin, "actor.list_credentials", m{"actor_id": b.admin})
+	b.do(t, b.admin, "actor.revoke_credential", m{"actor_id": b.admin, "credential_id": own.CredentialID})
 	if out := b.MustCall(b.sato, "actor.list_credentials", m{"actor_id": b.grader}, ""); out.Status != domain.StatusDenied {
 		t.Fatalf("an instructor listing an agent's tokens: %+v", out)
 	}
@@ -120,8 +132,28 @@ func TestRosterShowsWhoHasNotStartedAndMissingIsRecordedByHand(t *testing.T) {
 	}
 	all := roster(b.sato)
 	if len(all) != 2 || all[b.yukiM].State != "submitted" || all[b.yukiM].SubmissionID == nil || *all[b.yukiM].SubmissionID != yukiWork ||
-		all[b.kenM].State != "not_started" || all[b.kenM].SubmissionID != nil || all[b.kenM].DisplayName != "Ken" {
+		all[b.kenM].State != "not_started" || all[b.kenM].SubmissionID != nil ||
+		all[b.kenM].DisplayName == nil || *all[b.kenM].DisplayName != "Ken" || *all[b.kenM].MemberStatus != "active" {
 		t.Fatalf("the instructor's roster: %+v", all)
+	}
+	// Names and seat status are the member list's: the grader, who may not
+	// read it, gets the students by member id, as submission.list gives them.
+	for _, e := range roster(b.grader) {
+		if e.DisplayName != nil || e.MemberStatus != nil {
+			t.Fatalf("the grader was told a name or a seat's status: %+v", e)
+		}
+	}
+	// A paused student is a row still, and says so.
+	b.do(t, b.sato, "member.pause", m{"course_id": b.course, "member_id": b.kenM})
+	if got := roster(b.sato)[b.kenM]; got.MemberStatus == nil || *got.MemberStatus != "paused" {
+		t.Fatalf("a paused student: %+v", got)
+	}
+	b.do(t, b.sato, "member.resume", m{"course_id": b.course, "member_id": b.kenM})
+	// Assignment scope is the target's: the grader is listed for HW3 alone.
+	hw5 := testkit.Result[tools.IDOut](t, b.do(t, b.sato, "assignment.create", m{"course_id": b.course, "title": "HW5", "points_possible": 10})).ID
+	b.do(t, b.sato, "assignment.publish", m{"course_id": b.course, "assignment_id": hw5})
+	if out := b.MustCall(b.grader, "submission.roster", m{"course_id": b.course, "assignment_id": hw5}, ""); out.Status != domain.StatusDenied {
+		t.Fatalf("the grader reading another assignment's roster: %+v", out)
 	}
 	// Scope applies: the tutor is listed for Yuki alone, and a student sees
 	// themselves.
@@ -140,8 +172,25 @@ func TestRosterShowsWhoHasNotStartedAndMissingIsRecordedByHand(t *testing.T) {
 	}
 	b.try(t, b.sato, "submission.record_missing", m{"course_id": b.course, "assignment_id": b.hw3, "student_member_id": b.yukiM}, apperr.Conflict)
 	b.try(t, b.sato, "submission.record_missing", m{"course_id": b.course, "assignment_id": b.hw3, "student_member_id": b.graderM}, apperr.FailedPrecondition)
+	// Student scope is the target's: a TA listed for Yuki cannot record Ken.
+	ta := testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", m{"kind": "human", "display_name": "TA"})).ActorID
+	b.do(t, b.sato, "member.add", m{"course_id": b.course, "actor_id": ta, "preset": "ta", "student_scope": "listed", "listed_students": []uuid.UUID{b.yukiM}})
+	if out := b.MustCall(ta, "submission.record_missing", args, uuid.NewString()); out.Status != domain.StatusDenied {
+		t.Fatalf("a TA recording a student outside their scope: %+v", out)
+	}
 
-	missing := testkit.Result[tools.SubmissionIDOut](t, b.do(t, b.sato, "submission.record_missing", args)).SubmissionID
+	// The grader grades only with approval, and so records missing work:
+	// a proposal, which Sato approves.
+	proposed := b.MustCall(b.grader, "submission.record_missing", args, uuid.NewString())
+	if proposed.Status != domain.StatusProposed {
+		t.Fatalf("the grader recording Ken missing: %+v", proposed)
+	}
+	decided := testkit.Result[pipeline.DecideOut](t, b.do(t, b.sato, "action.decide", m{"course_id": b.course, "action_id": proposed.ActionID, "decision": "approve"}))
+	var recorded tools.SubmissionIDOut
+	if decided.Outcome != domain.StatusExecuted || json.Unmarshal(decided.Result, &recorded) != nil {
+		t.Fatalf("approving the grader's proposal: %+v", decided)
+	}
+	missing := recorded.SubmissionID
 	if got := roster(b.sato)[b.kenM]; got.State != "missing" || got.SubmissionID == nil || *got.SubmissionID != missing {
 		t.Fatalf("Ken after being recorded missing: %+v", got)
 	}
@@ -155,9 +204,18 @@ func TestRosterShowsWhoHasNotStartedAndMissingIsRecordedByHand(t *testing.T) {
 		t.Fatalf("late work after missing: %+v", late)
 	}
 
-	// An unpublished assignment has nobody missing from it.
+	// An unpublished assignment has nobody missing from it; and to whoever
+	// may not see it yet, it is not there at all.
 	hw4 := testkit.Result[tools.IDOut](t, b.do(t, b.sato, "assignment.create", m{"course_id": b.course, "title": "HW4", "points_possible": 10})).ID
 	b.try(t, b.sato, "submission.record_missing", m{"course_id": b.course, "assignment_id": hw4, "student_member_id": b.kenM}, apperr.FailedPrecondition)
+	b.try(t, ta, "submission.record_missing", m{"course_id": b.course, "assignment_id": hw4, "student_member_id": b.yukiM}, apperr.NotFound)
+	if _, err := b.Call(b.ken, "submission.roster", m{"course_id": b.course, "assignment_id": hw4}, ""); !apperr.Is(err, apperr.NotFound) {
+		t.Fatalf("a student reading an unpublished assignment's roster: %v", err)
+	}
+	if _, err := b.Call(b.tutor, "submission.roster", m{"course_id": b.course, "assignment_id": hw4}, ""); !apperr.Is(err, apperr.NotFound) {
+		t.Fatalf("the tutor reading an unpublished assignment's roster: %v", err)
+	}
+	b.do(t, b.sato, "submission.roster", m{"course_id": b.course, "assignment_id": hw4})
 }
 
 func TestUnpublishOnlyBeforeAnyoneStarts(t *testing.T) {
@@ -201,5 +259,60 @@ func TestUnpublishHoldsOffASubmissionUnderWay(t *testing.T) {
 	}
 	if n := b.Count(`SELECT count(*) FROM submission WHERE assignment_id = $1`, id); n != 0 {
 		t.Fatalf("%d submissions to an unpublished assignment", n)
+	}
+}
+
+// A change to an assignment's instructions made while the assignment is being
+// unpublished neither deadlocks with it nor tells students about it. The
+// unpublish holds the assignment FOR UPDATE and takes the course's event
+// stream last; the document change must therefore wait for the assignment
+// before it takes the stream, and then see it unpublished.
+func TestInstructionsChangedDuringAnUnpublish(t *testing.T) {
+	b := build(t)
+	doc := testkit.Result[tools.DocumentCreateOut](t, b.do(t, b.sato, "document.create",
+		m{"course_id": b.course, "kind": "instructions", "title": "Oops", "body_md": "v1"})).DocumentID
+	b.do(t, b.sato, "document.publish", m{"course_id": b.course, "document_id": doc})
+	id := testkit.Result[tools.IDOut](t, b.do(t, b.sato, "assignment.create",
+		m{"course_id": b.course, "title": "Oops", "points_possible": 10, "instructions_document_id": doc})).ID
+	b.do(t, b.sato, "assignment.publish", m{"course_id": b.course, "assignment_id": id})
+
+	// What assignment.unpublish does, up to its event.
+	ctx := context.Background()
+	tx, err := b.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = tx.Rollback(ctx) })
+	if _, err := tx.Exec(ctx, `WITH l AS (SELECT id FROM assignment WHERE id = $1 FOR UPDATE)
+		UPDATE assignment SET published_at = NULL WHERE id IN (SELECT id FROM l)`, id); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan pipeline.Outcome, 1)
+	b.start(t, done, b.sato, "document.add_version", m{"course_id": b.course, "document_id": doc, "body_md": "v2", "publish": true})
+	b.blocked(t, 1, done)
+	// The change waits for the assignment, holding no stream lock: had it
+	// taken one, the unpublish would now wait for it, and it for the unpublish.
+	if n := b.Count(`SELECT count(*) FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid
+		WHERE l.locktype = 'advisory' AND l.objsubid = 2 AND l.classid = $1 AND l.granted AND a.datname = current_database()`,
+		0x41495345); n != 0 {
+		t.Fatalf("the document change holds %d event-stream locks while it waits for the assignment", n)
+	}
+	h := fnv.New32a()
+	_, _ = h.Write(b.course[:])
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1, $2)`, int32(0x41495345), int32(h.Sum32())); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if out := <-done; out.Status != domain.StatusExecuted {
+		t.Fatalf("the document change: %+v", out)
+	}
+	// Told under its unreleased name: students are not told about it.
+	if n := b.Count(`SELECT count(*) FROM event WHERE subject_id = $1 AND type = 'document.version_added' AND assignment_id = $2`, doc, id); n != 0 {
+		t.Fatal("news of an unpublished assignment's instructions went out under its released name")
+	}
+	if n := b.Count(`SELECT count(*) FROM event WHERE subject_id = $1 AND type = 'document.version_added_unreleased'`, doc); n != 1 {
+		t.Fatalf("%d unreleased version events", n)
 	}
 }

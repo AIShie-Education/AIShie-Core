@@ -252,7 +252,10 @@ type Querier interface {
 	ListProposedActionIDsByMember(ctx context.Context, memberID *uuid.UUID) ([]uuid.UUID, error)
 	ListProposedActions(ctx context.Context, arg ListProposedActionsParams) ([]Action, error)
 	// The published assignments that refer to the document as their instructions
-	// or rubric: an event about the document is filed under each of them.
+	// or rubric: an event about the document is filed under each of them. KEY
+	// SHARE waits for an assignment.unpublish under way (LockAssignmentForUnpublish),
+	// after which the row is read again as it left it: an assignment unpublished
+	// meanwhile is not listed, and the event goes out under its unreleased name.
 	ListPublishedAssignmentsUsingDocument(ctx context.Context, documentID *uuid.UUID) ([]uuid.UUID, error)
 	// What the background sweeps look for. Each returns a small batch; the sweep
 	// runs again on the next tick. None of these is what makes the system
@@ -282,6 +285,11 @@ type Querier interface {
 	// GetAssignmentForSubmission takes before it checks that the assignment is
 	// published. So a submission being made waits for an unpublish and then sees
 	// the assignment unpublished, or is made first and is seen by it.
+	//
+	// It also conflicts with the KEY SHARE of every foreign key to the
+	// assignment: an event filed under it, a member's assignment scope. Those are
+	// taken before the event-stream lock, never under it (events.Flush,
+	// ShareAssignments), since unpublishing takes the stream lock last.
 	LockAssignmentForUnpublish(ctx context.Context, arg LockAssignmentForUnpublishParams) (LockAssignmentForUnpublishRow, error)
 	LockComponentGradeTarget(ctx context.Context, arg LockComponentGradeTargetParams) error
 	// Taken before changing the tree's shape, so that two moves cannot each
@@ -358,6 +366,11 @@ type Querier interface {
 	// and holds the next one off until the grade is there for its check to find.
 	// Graders of the same assignment do not wait for one another.
 	ShareAssignmentForGrading(ctx context.Context, arg ShareAssignmentForGradingParams) (ShareAssignmentForGradingRow, error)
+	// KEY SHARE on the given assignments, in id order, for events.Flush to take
+	// before the event-stream lock: an event's foreign key to its assignment
+	// would otherwise wait under that lock for an unpublish, which is holding
+	// the assignment and waiting for the same lock to write its own event.
+	ShareAssignments(ctx context.Context, ids []uuid.UUID) error
 	// KEY SHARE on the given seats, in id order: what taking them before some
 	// other lock looks like, where that lock would otherwise be held while one of
 	// them is waited for.

@@ -283,11 +283,18 @@ func mayActOn(ctx context.Context, ec *tool.ExecCtx, target uuid.UUID) error {
 	if target == ec.Actor.ID {
 		return apperr.Forbid("not on your own account")
 	}
-	a, err := ec.Q.GetActor(ctx, target)
+	return mayReach(ctx, ec.Q, ec.Actor, target)
+}
+
+// mayReach is mayActOn without the rule about oneself, for a read that shows
+// what only acting on the actor would need: only root reaches another holder
+// of a platform role, and nobody the system actor.
+func mayReach(ctx context.Context, q *dbq.Queries, caller domain.Actor, target uuid.UUID) error {
+	a, err := q.GetActor(ctx, target)
 	if err != nil {
 		return err
 	}
-	if a.PlatformRole != nil && ec.Actor.PlatformRole != domain.PlatformRoot {
+	if a.PlatformRole != nil && caller.PlatformRole != domain.PlatformRoot {
 		return apperr.Forbid("only root acts on an actor who holds a platform role")
 	}
 	if a.Kind == "system" {
@@ -371,12 +378,20 @@ func actorListCredentials() tool.Tool {
 	return tool.Define(tool.Spec[ActorIDIn, CredentialListOut]{
 		Name: "actor.list_credentials",
 		Description: "An actor's credentials, newest first: tokens with their label, prefix, issuer, expiry and last use, " +
-			"sessions, password and linked identities, revoked ones included. Secrets are never shown. Revoke one with " +
-			"actor.revoke_credential.",
+			"sessions, invitations, password and linked identities, revoked ones included. Secrets are never shown. " +
+			"Revoke one, a pending invitation included, with actor.revoke_credential. Held to the rule for acting on " +
+			"the actor: only root lists the credentials of another holder of a platform role.",
 		Kind: tool.Read, Gate: admins,
 		HTTP:    tool.Route{Method: "GET", Pattern: "/v1/actors/{actor_id}/credentials"},
 		Resolve: resolveActor,
 		Query: func(ctx context.Context, rc *tool.ReadCtx, in ActorIDIn) (CredentialListOut, error) {
+			// What is listed is there to be revoked, so it is shown to those
+			// who could revoke it; one's own included.
+			if in.ActorID != rc.Actor.ID {
+				if err := mayReach(ctx, rc.Q, rc.Actor, in.ActorID); err != nil {
+					return CredentialListOut{}, err
+				}
+			}
 			rows, err := rc.Q.ListCredentialsForActor(ctx, in.ActorID)
 			return viewCredentials(rows), err
 		},

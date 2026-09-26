@@ -100,8 +100,8 @@ type SubmissionRosterIn struct {
 
 type RosterEntry struct {
 	StudentMemberID uuid.UUID  `json:"student_member_id"`
-	DisplayName     string     `json:"display_name"`
-	MemberStatus    string     `json:"member_status" jsonschema:"active or paused"`
+	DisplayName     *string    `json:"display_name,omitempty" jsonschema:"only for a caller who may read the member list (perm_member_read)"`
+	MemberStatus    *string    `json:"member_status,omitempty" jsonschema:"active or paused; only for a caller who may read the member list"`
 	State           string     `json:"state" jsonschema:"not_started (no submission at all), draft, submitted, late or missing: the latest attempt's"`
 	SubmissionID    *uuid.UUID `json:"submission_id,omitempty" jsonschema:"the latest attempt; absent when not started"`
 	Attempt         *int32     `json:"attempt,omitempty"`
@@ -120,7 +120,9 @@ func submissionRoster() tool.Tool {
 		Name: "submission.roster",
 		Description: "Where every student stands on one assignment: each current student within the caller's scope, with " +
 			"their latest attempt's state, including those who have not started, whom submission.list cannot show. " +
-			"A student who has not started can be recorded as having handed in nothing with submission.record_missing.",
+			"A student who has not started can be recorded as having handed in nothing with submission.record_missing. " +
+			"Names and seat status come only to a caller who may read the member list; to anyone else a student is " +
+			"their member id, as in submission.list.",
 		Kind: tool.Read, Gate: readSubmissions,
 		HTTP: tool.Route{Method: "GET", Pattern: "/v1/courses/{course_id}/assignments/{assignment_id}/roster"},
 		Resolve: func(ctx context.Context, q dbq.Querier, in SubmissionRosterIn) (tool.Target, error) {
@@ -129,14 +131,28 @@ func submissionRoster() tool.Tool {
 			return assignmentTarget(ctx, q, in.CourseID, in.AssignmentID)
 		},
 		Query: func(ctx context.Context, rc *tool.ReadCtx, in SubmissionRosterIn) (SubmissionRosterOut, error) {
+			a, err := rc.Q.GetAssignmentInCourse(ctx, dbq.GetAssignmentInCourseParams{ID: in.AssignmentID, CourseID: in.CourseID})
+			if err != nil {
+				return SubmissionRosterOut{}, err
+			}
+			if a.PublishedAt == nil && !canSeeUnpublished(rc.Member) {
+				// As in assignment.get: to this caller it does not exist yet.
+				return SubmissionRosterOut{}, apperr.Missing("no such assignment in this course")
+			}
 			rows, err := rc.Q.ListAssignmentRoster(ctx, dbq.ListAssignmentRosterParams{
 				CourseID: in.CourseID, AssignmentID: in.AssignmentID, After: in.after(), MaxRows: in.limit(),
 				StudentAll: rc.Scope.StudentAll, MemberID: rc.Scope.MemberID,
 			})
 			out := SubmissionRosterOut{Students: make([]RosterEntry, 0, len(rows))}
+			// Names and seat status are the member list's: submission_read
+			// alone gets member ids, as submission.list gives.
+			members := rc.Member.Perm(domain.PermMemberRead).Allowed()
 			for _, r := range rows {
-				e := RosterEntry{StudentMemberID: r.StudentMemberID, DisplayName: r.DisplayName, MemberStatus: r.MemberStatus,
+				e := RosterEntry{StudentMemberID: r.StudentMemberID,
 					State: stateNotStarted, SubmissionID: r.SubmissionID, Attempt: r.Attempt, SubmittedAt: r.SubmittedAt}
+				if members {
+					e.DisplayName, e.MemberStatus = &r.DisplayName, &r.MemberStatus
+				}
 				if r.State != nil {
 					e.State = *r.State
 				}
@@ -588,7 +604,9 @@ func submissionRecordMissing() tool.Tool {
 		Name: "submission.record_missing",
 		Description: "Record that a student has handed in nothing for a published assignment: they get a 'missing' " +
 			"submission, which can be graded (a zero, say). Only for a student with no submission at all, not even a " +
-			"draft. If they hand work in afterwards it takes the missing row over, as it does after a due date passes.",
+			"draft. If they hand work in afterwards it takes the missing row over, as it does after a due date passes, " +
+			"unless a grade has been entered or proposed for it: then the work is a new attempt, and the missing row " +
+			"keeps its grade.",
 		Kind: tool.Write, Gate: tool.Gate{Perms: []domain.Perm{domain.PermGradeSubmit}},
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/assignments/{assignment_id}/missing"},
 		Resolve: func(ctx context.Context, q dbq.Querier, in SubmissionRecordMissingIn) (tool.Target, error) {
@@ -601,6 +619,18 @@ func submissionRecordMissing() tool.Tool {
 			return t, nil
 		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in SubmissionRecordMissingIn) (SubmissionIDOut, error) {
+			// The assignment first: to a caller who may not see an
+			// unpublished one, it is not there, whoever the student is.
+			a, err := ec.Q.GetAssignmentForSubmission(ctx, dbq.GetAssignmentForSubmissionParams{ID: in.AssignmentID, CourseID: in.CourseID})
+			if err != nil {
+				return SubmissionIDOut{}, err
+			}
+			if a.PublishedAt == nil {
+				if !canSeeUnpublished(ec.Member) {
+					return SubmissionIDOut{}, apperr.Missing("no such assignment in this course")
+				}
+				return SubmissionIDOut{}, apperr.Precondition("the assignment is not published; nobody can have missed it")
+			}
 			entry, err := ec.Q.GetRosterEntry(ctx, dbq.GetRosterEntryParams{ID: in.StudentMemberID, CourseID: in.CourseID})
 			if errors.Is(err, pgx.ErrNoRows) {
 				return SubmissionIDOut{}, apperr.Missing("no such member in this course")
@@ -610,13 +640,6 @@ func submissionRecordMissing() tool.Tool {
 			}
 			if entry.Role != "student" || entry.Status == domain.MemberRemoved {
 				return SubmissionIDOut{}, apperr.Precondition("only a current student of the course hands work in")
-			}
-			a, err := ec.Q.GetAssignmentForSubmission(ctx, dbq.GetAssignmentForSubmissionParams{ID: in.AssignmentID, CourseID: in.CourseID})
-			if err != nil {
-				return SubmissionIDOut{}, err
-			}
-			if a.PublishedAt == nil {
-				return SubmissionIDOut{}, apperr.Precondition("the assignment is not published; nobody can have missed it")
 			}
 			prior, err := ec.Q.LockSubmissionsOf(ctx, dbq.LockSubmissionsOfParams{AssignmentID: a.ID, StudentMemberID: in.StudentMemberID})
 			if err != nil {

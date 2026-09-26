@@ -286,6 +286,11 @@ type LockAssignmentForUnpublishRow struct {
 // GetAssignmentForSubmission takes before it checks that the assignment is
 // published. So a submission being made waits for an unpublish and then sees
 // the assignment unpublished, or is made first and is seen by it.
+//
+// It also conflicts with the KEY SHARE of every foreign key to the
+// assignment: an event filed under it, a member's assignment scope. Those are
+// taken before the event-stream lock, never under it (events.Flush,
+// ShareAssignments), since unpublishing takes the stream lock last.
 func (q *Queries) LockAssignmentForUnpublish(ctx context.Context, arg LockAssignmentForUnpublishParams) (LockAssignmentForUnpublishRow, error) {
 	row := q.db.QueryRow(ctx, lockAssignmentForUnpublish, arg.ID, arg.CourseID)
 	var i LockAssignmentForUnpublishRow
@@ -308,6 +313,19 @@ func (q *Queries) PublishAssignment(ctx context.Context, arg PublishAssignmentPa
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+const shareAssignments = `-- name: ShareAssignments :exec
+SELECT 1 FROM assignment WHERE id = ANY($1::uuid[]) ORDER BY id FOR KEY SHARE
+`
+
+// KEY SHARE on the given assignments, in id order, for events.Flush to take
+// before the event-stream lock: an event's foreign key to its assignment
+// would otherwise wait under that lock for an unpublish, which is holding
+// the assignment and waiting for the same lock to write its own event.
+func (q *Queries) ShareAssignments(ctx context.Context, ids []uuid.UUID) error {
+	_, err := q.db.Exec(ctx, shareAssignments, ids)
+	return err
 }
 
 const unpublishAssignment = `-- name: UnpublishAssignment :execrows

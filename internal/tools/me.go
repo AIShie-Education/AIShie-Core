@@ -113,7 +113,7 @@ type CredentialView struct {
 	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
 	RevokedAt   *time.Time `json:"revoked_at,omitempty"`
 	CreatedAt   time.Time  `json:"created_at"`
-	IssuedByID  *uuid.UUID `json:"issued_by_actor_id,omitempty" jsonschema:"who issued a token: the actor themself or an administrator; absent for other kinds and for older tokens"`
+	IssuedByID  *uuid.UUID `json:"issued_by_actor_id,omitempty" jsonschema:"who issued a token: the actor themself or an administrator; absent for other kinds, for tokens made on the command line, and for tokens issued by a release before this field"`
 	IssuedBy    *string    `json:"issued_by_name,omitempty" jsonschema:"the issuer's display name"`
 }
 

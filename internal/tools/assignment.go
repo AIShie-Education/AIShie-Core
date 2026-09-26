@@ -386,7 +386,8 @@ func assignmentUnpublish() tool.Tool {
 	return tool.Define(tool.Spec[AssignmentIDIn, OK]{
 		Name: "assignment.unpublish",
 		Description: "Take back an assignment published by mistake: students no longer see it and cannot submit to it. " +
-			"Only while nobody has a submission of any kind for it, not even a draft; after that it stays published. " +
+			"Only while nobody has a submission of any kind for it, not even a draft, and no 'missing' row has been " +
+			"recorded (a due date that has passed records them); after that it stays published. " +
 			"What the activity feed has already shown stays there.",
 		Kind: tool.Write, Gate: writeAssignments,
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/assignments/{assignment_id}/unpublish"},
@@ -406,7 +407,7 @@ func assignmentUnpublish() tool.Tool {
 			if started, err := ec.Q.AssignmentHasSubmissions(ctx, a.ID); err != nil {
 				return OK{}, err
 			} else if started {
-				return OK{}, apperr.Precondition("students have already started on it; it can no longer be unpublished")
+				return OK{}, apperr.Precondition("it already has submissions — a draft, a hand-in, or the 'missing' rows recorded by hand or when its due date passed — so it can no longer be unpublished")
 			}
 			n, err := ec.Q.UnpublishAssignment(ctx, a.ID)
 			if err != nil {
