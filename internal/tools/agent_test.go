@@ -145,8 +145,10 @@ func TestSelfServiceAgentsCanBeTurnedOff(t *testing.T) {
 	b.try(t, b.yuki, "agent.create", m{"display_name": "Yuki's helper"}, apperr.Forbidden)
 	bot := testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register",
 		m{"kind": "agent", "display_name": "Yuki's helper", "owner_actor_id": b.yuki})).ActorID
-	// What is registered is looked after by its owner all the same.
-	if got := testkit.Result[tools.AgentListOut](t, b.do(t, b.yuki, "agent.list", m{})).Agents; len(got) != 1 || got[0].ActorID != bot {
+	// What is registered is looked after by its owner all the same, and
+	// the list says who registers them.
+	if got := testkit.Result[tools.AgentListOut](t, b.do(t, b.yuki, "agent.list", m{})); len(got.Agents) != 1 || got.Agents[0].ActorID != bot ||
+		got.SelfService || got.Limit != tools.DefaultMaxAgentsPerOwner {
 		t.Fatalf("Yuki's agents: %+v", got)
 	}
 	b.do(t, b.yuki, "agent.issue_token", m{"actor_id": bot, "label": "laptop"})
@@ -158,6 +160,9 @@ func TestAPersonHasALimitedNumberOfAgents(t *testing.T) {
 	b := buildOn(t, testkit.NewPlatformWithDeps(t, func(d *tools.Deps) { d.MaxAgentsPerOwner = 2 }))
 	first, _ := b.agent(t, b.yuki, "one"), b.agent(t, b.yuki, "two")
 	b.try(t, b.yuki, "agent.create", m{"display_name": "three"}, apperr.FailedPrecondition)
+	if got := testkit.Result[tools.AgentListOut](t, b.do(t, b.yuki, "agent.list", m{})); got.Limit != 2 || !got.SelfService {
+		t.Fatalf("what the list says of the limit: %+v", got)
+	}
 	b.do(t, b.yuki, "agent.suspend", m{"actor_id": first})
 	b.agent(t, b.yuki, "three")
 	b.try(t, b.yuki, "agent.reactivate", m{"actor_id": first}, apperr.FailedPrecondition)

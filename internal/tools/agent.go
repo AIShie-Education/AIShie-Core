@@ -33,7 +33,7 @@ import (
 // is resolved: Resolve does not know who is calling.
 
 func agentTools(d Deps) []tool.Tool {
-	return []tool.Tool{agentCreate(d), agentList(), agentGet(), agentUpdate(), agentSuspend(), agentReactivate(d),
+	return []tool.Tool{agentCreate(d), agentList(d), agentGet(), agentUpdate(), agentSuspend(), agentReactivate(d),
 		agentIssueToken(), agentListCredentials(), agentRevokeCredential(), agentWithdraw()}
 }
 
@@ -157,18 +157,24 @@ type AgentSummary struct {
 
 type AgentListOut struct {
 	Agents []AgentSummary `json:"agents"`
+	// What this installation lets people do, so that whatever shows the
+	// list need not guess it.
+	Limit       int  `json:"limit" jsonschema:"how many agents that are not suspended you may have; suspended ones do not count, and an administrator may give you more"`
+	SelfService bool `json:"self_service" jsonschema:"whether you may register agents yourself (agent.create); if not, an administrator does"`
 }
 
-func agentList() tool.Tool {
+func agentList(d Deps) tool.Tool {
 	return tool.Define(tool.Spec[Empty, AgentListOut]{
-		Name:        "agent.list",
-		Description: "Your own agents, oldest first: their standing, when each was last seen, how many courses each is seated in, and how many requests to seat one wait for a decision.",
-		Kind:        tool.Read, Gate: self,
+		Name: "agent.list",
+		Description: "Your own agents, oldest first: their standing, when each was last seen, how many courses each is seated " +
+			"in, and how many requests to seat one wait for a decision; with how many you may have, and whether you may " +
+			"register one yourself.",
+		Kind: tool.Read, Gate: self,
 		HTTP:    tool.Route{Method: "GET", Pattern: "/v1/me/agents"},
 		Resolve: noTarget[Empty]("actor"),
 		Query: func(ctx context.Context, rc *tool.ReadCtx, _ Empty) (AgentListOut, error) {
 			rows, err := rc.Q.ListAgentsOf(ctx, dbq.ListAgentsOfParams{OwnerActorID: &rc.Actor.ID, Now: &rc.Now})
-			out := AgentListOut{Agents: make([]AgentSummary, 0, len(rows))}
+			out := AgentListOut{Agents: make([]AgentSummary, 0, len(rows)), Limit: d.MaxAgentsPerOwner, SelfService: !d.DisableAgentSelfService}
 			for _, r := range rows {
 				out.Agents = append(out.Agents, AgentSummary{
 					AgentView:       agentView(rc.Actor.ID, r.ID, r.DisplayName, r.Status, r.SuspendedByActorID, r.CreatedAt, r.LastSeenAt),

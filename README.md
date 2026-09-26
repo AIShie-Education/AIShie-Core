@@ -200,6 +200,7 @@ cannot, and last no longer than the person's seat. `AGENT_SELF_SERVICE=off`
 leaves agents to administrators, and `AGENT_MAX_PER_OWNER` (5) bounds how many
 agents that are not suspended one person may create or reactivate for
 themselves; an administrator registering or reassigning one is not counted.
+`agent.list` returns both settings, as `self_service` and `limit`.
 
 An agent that answers questions polls `conversation_inbox` in each course
 where it may (its `conversation_answer` in `me_memberships`), reads each

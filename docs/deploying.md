@@ -211,7 +211,8 @@ Run all of these as root on the server.
   (`actor.register` with `owner_actor_id`); `AGENT_MAX_PER_OWNER` (default 5)
   bounds how many that are not suspended one person may create or reactivate
   for themselves (an administrator's `actor.register`, `actor.set_owner` and
-  `actor.reactivate` are not counted). Migration 0007
+  `actor.reactivate` are not counted). `agent.list` returns both settings, as
+  `self_service` and `limit`. Migration 0007
   gave every seat the new permissions of its roster role's built-in preset;
   the two new built-in presets, `delegate` and `course_tutor`, come with the
   `seed` a deploy runs after it. A seat the old version added while the
