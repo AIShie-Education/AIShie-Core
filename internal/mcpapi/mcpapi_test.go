@@ -491,7 +491,8 @@ func TestToolsListIsTheRegistry(t *testing.T) {
 	f := serve(t, 0)
 	s := f.connect(t, f.token(t, f.c.Grader))
 
-	if got := s.InitializeResult().Instructions; !strings.Contains(got, "idempotency_key") || !strings.Contains(got, "proposed") || !strings.Contains(got, "me_memberships") {
+	if got := s.InitializeResult().Instructions; !strings.Contains(got, "idempotency_key") || !strings.Contains(got, "proposed") || !strings.Contains(got, "me_memberships") ||
+		!strings.Contains(got, "conversation_inbox") {
 		t.Fatalf("the server's instructions do not explain the essentials:\n%s", got)
 	}
 	listed := map[string]*mcp.Tool{}
