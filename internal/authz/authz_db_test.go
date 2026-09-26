@@ -2,6 +2,7 @@ package authz_test
 
 import (
 	"context"
+	"errors"
 	"os"
 	"regexp"
 	"sort"
@@ -10,9 +11,11 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/apperr"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/authz"
+	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/db/dbq"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/domain"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/testkit"
 )
@@ -312,7 +315,27 @@ func TestADelegateHoldsNoMoreThanItsPrincipal(t *testing.T) {
 	}
 
 	expect("reads its principal's work", domain.PermSubmissionRead, false, yuki, domain.Autonomous, "")
-	expect("and takes its principal's seat with its own for a write", domain.PermSubmissionRead, true, yuki, domain.Autonomous, "")
+	expect("and for a write", domain.PermSubmissionRead, true, yuki, domain.Autonomous, "")
+	// A write holds its principal's seat with its own, KEY SHARE, to the end
+	// of its transaction: removing or changing the principal waits for it.
+	func() {
+		ctx := context.Background()
+		tx, err := w.Pool.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = tx.Rollback(ctx) }()
+		if got, err := authz.Authorize(ctx, dbq.New(tx), agent, c.course, []domain.Perm{domain.PermSubmissionRead}, true, yuki, time.Now()); err != nil || got.Level != domain.Autonomous {
+			t.Fatalf("a delegate's write: %+v %v", got, err)
+		}
+		for seat, what := range map[uuid.UUID]string{d: "its own seat", c.yukiM: "its principal's seat"} {
+			_, err := w.Pool.Exec(ctx, `SELECT 1 FROM course_member WHERE id = $1 FOR UPDATE NOWAIT`, seat)
+			var pgErr *pgconn.PgError
+			if !errors.As(err, &pgErr) || pgErr.Code != "55P03" {
+				t.Fatalf("a delegate's write does not hold %s: %v", what, err)
+			}
+		}
+	}()
 	expect("not another student's", domain.PermSubmissionRead, false, ken, domain.Denied, authz.ReasonStudentScope)
 	// Its own row widened behind everyone's back, as the previous release
 	// could: still no further than its principal.

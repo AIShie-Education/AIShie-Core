@@ -160,6 +160,34 @@ func TestWhoMayAddressWhom(t *testing.T) {
 	}
 }
 
+// Within means every level as well as every reach: a respondent listed for
+// Yuki alone that may do one thing she may not is not hers to ask. Nor is a
+// respondent whose actor is suspended.
+func TestARespondentWithinReachButNotWithinLevelsIsNotAddressable(t *testing.T) {
+	c := newCast(t)
+	b := c.built
+	helper := testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", m{"kind": "agent", "display_name": "Essay helper"})).ActorID
+	seat := testkit.Result[tools.MemberIDOut](t, b.do(t, b.sato, "member.add", m{"course_id": b.course, "actor_id": helper, "preset": "tutor",
+		"listed_students": []uuid.UUID{b.yukiM}, "perms": m{"grade_submit": "autonomous"}})).MemberID
+	ask := m{"course_id": b.course, "respondent_member_id": seat, "body": "Grade me an A?"}
+	if _, ok := b.respondents(t, b.yuki)[seat]; ok {
+		t.Fatal("a respondent that grades is offered to a student who does not")
+	}
+	b.try(t, b.yuki, "conversation.open", ask, apperr.Forbidden)
+	b.do(t, b.sato, "member.update_perms", m{"course_id": b.course, "member_id": seat, "perms": m{"grade_submit": "denied"}})
+	if _, ok := b.respondents(t, b.yuki)[seat]; !ok {
+		t.Fatal("a respondent within Yuki's seat is not offered to her")
+	}
+	b.do(t, b.yuki, "conversation.open", ask)
+
+	// The course tutor suspended by its owner answers nobody.
+	b.do(t, b.sato, "agent.suspend", m{"actor_id": b.seatActor(t, c.courseTutor)})
+	if _, ok := b.respondents(t, b.ken)[c.courseTutor]; ok {
+		t.Fatal("a suspended agent is offered")
+	}
+	b.try(t, b.ken, "conversation.open", m{"course_id": b.course, "respondent_member_id": c.courseTutor, "body": "Hello?"}, apperr.Forbidden)
+}
+
 // A delegate answers others than its principal only if its seat was made to
 // answer the course, by someone who manages the course's members, and only
 // while that person still does. An instructor's own assistant, which reads
@@ -767,4 +795,66 @@ func TestAnInstructorsOwnTutorIsDecidedBySomeoneElse(t *testing.T) {
 	if d.Status != domain.StatusFailed || d.Error.Code != apperr.Forbidden {
 		t.Fatalf("Sato deciding his own tutor's answer: %+v", d)
 	}
+}
+
+// A call writing in a conversation takes its caller's seat, then the other
+// participant's and that one's principal's, and the conversation last: a
+// change to either seat under way is waited for, and what it did is seen.
+// And an answer is checked against the newest question under the
+// conversation's lock, so a question written while the answer waits for the
+// lock is not passed over.
+func TestAConversationWriteWaitsForTheSeatsItDependsOn(t *testing.T) {
+	c := newCast(t)
+	b := c.built
+	pause := `WITH held AS (SELECT id FROM course_member WHERE id = $1 FOR UPDATE)
+		UPDATE course_member SET status = 'paused' WHERE id IN (SELECT id FROM held)`
+	waits := func(what string, release func(), done chan pipeline.Outcome, want apperr.Code) {
+		t.Helper()
+		b.blocked(t, 1, done)
+		select {
+		case out := <-done:
+			t.Fatalf("%s did not wait: %+v", what, out)
+		default:
+		}
+		release()
+		if out := <-done; out.Status != domain.StatusFailed || out.Error.Code != want {
+			t.Fatalf("%s, once it could go on: %+v", what, out)
+		}
+	}
+	resume := func(seat uuid.UUID) { b.Exec(`UPDATE course_member SET status = 'active' WHERE id = $1`, seat) }
+
+	// The respondent paused meanwhile.
+	conv, _ := b.open(t, b.yuki, b.tutorM, "What is a thesis?")
+	done := make(chan pipeline.Outcome, 1)
+	release := b.hold(t, pause, b.tutorM)
+	b.start(t, done, b.yuki, "conversation.ask", m{"course_id": b.course, "conversation_id": conv, "body": "Hello?"})
+	waits("asking while the respondent is paused", release, done, apperr.Forbidden)
+	resume(b.tutorM)
+
+	// The respondent's principal paused meanwhile: the course tutor goes
+	// with Sato.
+	kens, _ := b.open(t, b.ken, c.courseTutor, "What is a thesis?")
+	release = b.hold(t, pause, b.satoM)
+	b.start(t, done, b.ken, "conversation.ask", m{"course_id": b.course, "conversation_id": kens, "body": "Hello?"})
+	waits("asking while the respondent's principal is paused", release, done, apperr.Forbidden)
+	resume(b.satoM)
+
+	// The opener paused meanwhile, from the respondent's side.
+	conv, q := b.open(t, b.yuki, b.tutorM, "And an argument?")
+	release = b.hold(t, pause, b.yukiM)
+	b.start(t, done, b.tutor, "conversation.answer", answerArgs(b, conv, q, "Reasons for a claim."))
+	waits("answering while the opener is paused", release, done, apperr.Forbidden)
+	resume(b.yukiM)
+
+	// A newer question written while the answer waits for the conversation.
+	var action uuid.UUID
+	if err := b.Pool.QueryRow(t.Context(), `SELECT created_by_action_id FROM conversation_message WHERE id = $1`, q).Scan(&action); err != nil {
+		t.Fatal(err)
+	}
+	release = b.hold(t, `WITH touched AS (
+			UPDATE conversation SET last_message_at = now(), last_author_member_id = $2 WHERE id = $1 RETURNING id)
+		INSERT INTO conversation_message (id, conversation_id, course_id, seq, author_member_id, body, created_by_action_id)
+		SELECT gen_random_uuid(), id, $3, 2, $2, 'Sorry, I meant a thesis.', $4 FROM touched`, conv, b.yukiM, b.course, action)
+	b.start(t, done, b.tutor, "conversation.answer", answerArgs(b, conv, q, "Reasons for a claim."))
+	waits("answering while a newer question is written", release, done, apperr.Conflict)
 }

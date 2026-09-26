@@ -905,3 +905,154 @@ func TestAPrincipalsRemovalAndItsDelegatesMeetAtThePrincipal(t *testing.T) {
 		t.Fatal("Yuki's conversation with her agent was not closed with her")
 	}
 }
+
+// A delegate's write, and a decision about a delegate's proposal, take the
+// principal's seat as well as the delegate's: pausing the principal under
+// way is waited for, and what it did is seen.
+func TestADelegatesWriteWaitsForItsPrincipal(t *testing.T) {
+	b := build(t)
+	bot := b.agent(t, b.yuki, "Yuki's helper")
+	seat := b.delegate(t, b.yuki, bot, m{})
+	b.do(t, b.sato, "member.update_perms", m{"course_id": b.course, "member_id": seat, "perms": m{"submission_write": "confirm_required"}})
+	conv, _ := b.open(t, b.yuki, seat, "Hello, helper")
+	pause := `WITH held AS (SELECT id FROM course_member WHERE id = $1 FOR UPDATE)
+		UPDATE course_member SET status = 'paused' WHERE id IN (SELECT id FROM held)`
+	notYet := func(done chan pipeline.Outcome, what string) {
+		t.Helper()
+		select {
+		case out := <-done:
+			t.Fatalf("%s did not wait for the principal: %+v", what, out)
+		default:
+		}
+	}
+
+	done := make(chan pipeline.Outcome, 1)
+	release := b.hold(t, pause, b.yukiM)
+	b.start(t, done, bot, "conversation.close", m{"course_id": b.course, "conversation_id": conv})
+	b.blocked(t, 1, done)
+	notYet(done, "the delegate's write")
+	release()
+	if out := <-done; out.Status != domain.StatusDenied || reason(out) != "principal_not_active" {
+		t.Fatalf("the delegate's write once its principal was paused: %+v", out)
+	}
+	b.Exec(`UPDATE course_member SET status = 'active' WHERE id = $1`, b.yukiM)
+
+	waiting := b.MustCall(bot, "submission.create", m{"course_id": b.course, "assignment_id": b.hw3, "student_member_id": b.yukiM, "body": "draft"}, "bot-draft")
+	if waiting.Status != domain.StatusProposed {
+		t.Fatalf("the delegate's draft: %+v", waiting)
+	}
+	release = b.hold(t, pause, b.yukiM)
+	b.start(t, done, b.sato, "action.decide", m{"course_id": b.course, "action_id": waiting.ActionID, "decision": "approve"})
+	b.blocked(t, 1, done)
+	notYet(done, "approving the delegate's proposal")
+	release()
+	out := <-done
+	d := testkit.Result[pipeline.DecideOut](t, out)
+	if d.Outcome != domain.StatusCancelled {
+		t.Fatalf("approving the delegate's proposal once its principal was paused: %+v", d)
+	}
+}
+
+// A delegate reaches only what its principal reaches as well, in every list,
+// in SQL — assignments as much as students — however far its own row says
+// it reaches: its own row can be wider than its principal's, as the
+// previous release, which narrows a principal and not its delegates, leaves
+// it.
+func TestADelegateListsNothingItsPrincipalCannotReach(t *testing.T) {
+	c := newCast(t)
+	b := c.built
+	publish := func(args m) tools.DocumentCreateOut {
+		t.Helper()
+		args["course_id"] = b.course
+		made := testkit.Result[tools.DocumentCreateOut](t, b.do(t, b.sato, "document.create", args))
+		b.do(t, b.sato, "document.publish", m{"course_id": b.course, "document_id": made.DocumentID})
+		return made
+	}
+	yukis, _ := b.open(t, b.yuki, c.courseTutor, "Yuki's question")
+	kens, _ := b.open(t, b.ken, c.courseTutor, "Ken's question")
+	// HW3 with instructions Yuki handed in under, since replaced; HW5 with
+	// its own. Yuki's work on both, graded and posted.
+	brief := publish(m{"kind": "instructions", "title": "HW3", "body_md": "Write 1000 words."})
+	b.do(t, b.sato, "assignment.update", m{"course_id": b.course, "assignment_id": b.hw3, "instructions_document_id": brief.DocumentID})
+	hw3 := b.submit(t, b.yuki, "1000 words")
+	revised := publish(m{"kind": "instructions", "title": "HW3 (revised)", "body_md": "Write 2000 words."})
+	b.do(t, b.sato, "assignment.update", m{"course_id": b.course, "assignment_id": b.hw3, "instructions_document_id": revised.DocumentID})
+	hw5brief := publish(m{"kind": "instructions", "title": "HW5", "body_md": "Draw a graph."})
+	hw5 := testkit.Result[tools.IDOut](t, b.do(t, b.sato, "assignment.create", m{"course_id": b.course, "title": "HW5",
+		"points_possible": 10, "component_id": b.bucket, "instructions_document_id": hw5brief.DocumentID})).ID
+	b.do(t, b.sato, "assignment.publish", m{"course_id": b.course, "assignment_id": hw5})
+	onHW5 := testkit.Result[tools.SubmissionCreateOut](t, b.do(t, b.yuki, "submission.create", m{"course_id": b.course, "assignment_id": hw5, "body": "a graph"})).SubmissionID
+	b.do(t, b.yuki, "submission.submit", m{"course_id": b.course, "submission_id": onHW5})
+	for _, s := range []uuid.UUID{hw3, onHW5} {
+		b.do(t, b.sato, "grade.submit", m{"course_id": b.course, "submission_id": s, "score": 8})
+	}
+	for _, a := range []uuid.UUID{b.hw3, hw5} {
+		b.do(t, b.sato, "grade.post", m{"course_id": b.course, "assignment_id": a})
+	}
+
+	// Yuki is narrowed to HW3; her agent's own row reaches every assignment.
+	b.Exec(`UPDATE course_member SET assignment_scope = 'listed' WHERE id = $1`, b.yukiM)
+	b.Exec(`INSERT INTO member_assignment_scope (member_id, assignment_id) VALUES ($1, $2)`, b.yukiM, b.hw3)
+	reached := map[string]bool{}
+	for _, a := range testkit.Result[tools.AssignmentListOut](t, b.do(t, c.bot, "assignment.list", m{"course_id": b.course})).Assignments {
+		reached["assignment "+a.ID.String()] = true
+	}
+	for _, s := range testkit.Result[tools.SubmissionListOut](t, b.do(t, c.bot, "submission.list", m{"course_id": b.course})).Submissions {
+		reached["submission on "+s.AssignmentID.String()] = true
+	}
+	for _, g := range testkit.Result[tools.GradeListOut](t, b.do(t, c.bot, "grade.list", m{"course_id": b.course})).Grades {
+		if g.AssignmentID != nil {
+			reached["grade on "+g.AssignmentID.String()] = true
+		}
+	}
+	for _, e := range feed(t, b, c.bot) {
+		if e.AssignmentID != nil {
+			reached["event on "+e.AssignmentID.String()] = true
+		}
+	}
+	for _, d := range testkit.Result[tools.DocumentListOut](t, b.do(t, c.bot, "document.list", m{"course_id": b.course})).Documents {
+		reached["document "+d.ID.String()] = true
+	}
+	for _, want := range []string{"assignment " + b.hw3.String(), "submission on " + b.hw3.String(), "grade on " + b.hw3.String(),
+		"event on " + b.hw3.String(), "document " + revised.DocumentID.String()} {
+		if !reached[want] {
+			t.Fatalf("the delegate does not reach %s: %v", want, reached)
+		}
+	}
+	for _, not := range []string{"assignment " + hw5.String(), "submission on " + hw5.String(), "grade on " + hw5.String(),
+		"event on " + hw5.String(), "document " + hw5brief.DocumentID.String()} {
+		if reached[not] {
+			t.Fatalf("the delegate reaches %s, which its principal does not", not)
+		}
+	}
+
+	// Yuki is narrowed to nobody, not even herself; her agent's own row
+	// reaches the whole class. It reads no roster line and no version she
+	// handed in under.
+	b.Exec(`UPDATE course_member SET student_scope = 'all' WHERE id = $1`, c.yukiBot)
+	if got := b.get(t, c.bot, m{"document_id": brief.DocumentID, "version_id": brief.VersionID}); got.Version.BodyMD == nil {
+		t.Fatalf("the version Yuki handed in under, read by her agent: %+v", got)
+	}
+	b.Exec(`DELETE FROM member_student_scope WHERE member_id = $1`, b.yukiM)
+	if got := testkit.Result[tools.SubmissionRosterOut](t, b.do(t, c.bot, "submission.roster", m{"course_id": b.course, "assignment_id": b.hw3})).Students; len(got) != 0 {
+		t.Fatalf("the roster, to the delegate of someone who reaches nobody: %+v", got)
+	}
+	if out, err := b.Call(c.bot, "document.get", m{"course_id": b.course, "document_id": brief.DocumentID, "version_id": brief.VersionID}, ""); err == nil && out.Status == domain.StatusExecuted {
+		t.Fatal("the delegate of someone who reaches nobody reads a version pinned in her work")
+	}
+
+	// An overseer's delegate lists the conversations of the students its
+	// principal oversees, and no others.
+	watcher := b.agent(t, b.sato, "Sato's watcher")
+	watch := b.delegate(t, b.sato, watcher, m{"perms": m{"action_decide": "autonomous"}})
+	b.Exec(`UPDATE course_member SET student_scope = 'all' WHERE id = $1`, watch)
+	b.Exec(`UPDATE course_member SET student_scope = 'listed' WHERE id = $1`, b.satoM)
+	b.Exec(`INSERT INTO member_student_scope (member_id, student_member_id) VALUES ($1, $2)`, b.satoM, b.kenM)
+	got := map[uuid.UUID]bool{}
+	for _, v := range b.listConversations(t, watcher, m{"as": "overseer"}) {
+		got[v.ID] = true
+	}
+	if !got[kens] || got[yukis] {
+		t.Fatalf("what Sato's watcher oversees, Sato overseeing Ken alone: %v", got)
+	}
+}
