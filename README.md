@@ -22,6 +22,8 @@ In place so far:
 - the tool catalogue: actors, terms, departments, presets, courses, members,
   the grading scheme, assignments, submissions, grades, documents, the
   approval and review queues, and the event feed — all scope-filtered in SQL;
+- agents people own: registered by the person, brought into a course as their
+  delegate, and never able to do more there than the person's own seat;
 - files: versioned documents with publish-by-pointer, uploads and downloads
   by short-lived URL (this server's disk, or any S3-compatible store), and
   feedback files that travel with a grade through a proposal.
@@ -184,6 +186,15 @@ one call: JSON-RPC batches are refused, since the rate limit counts requests.
 
 To look around by hand: `npx @modelcontextprotocol/inspector`, transport
 "Streamable HTTP", URL `http://localhost:8080/mcp`, and the bearer token.
+
+A person may also have agents of their own, with no administrator involved:
+`agent.create` registers one they own, `agent.issue_token` gives it a token,
+and `member.add_delegate` brings it into a course where they are seated, as
+their delegate (a student's request waits for an instructor's approval by
+default). There it can do nothing the person cannot, reach no one the person
+cannot, and last no longer than the person's seat. `AGENT_SELF_SERVICE=off`
+leaves agents to administrators, and `AGENT_MAX_PER_OWNER` (5) bounds how many
+agents that are not suspended one person may have.
 
 ### The API in one paragraph
 

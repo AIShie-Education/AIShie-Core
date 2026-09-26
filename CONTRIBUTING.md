@@ -28,6 +28,10 @@ and `build` green. CI also runs `test (s3 against minio)` and `vuln`.
   `permission_preset`. A test fails until all three agree.
 - **Authorization never reads `actor.kind` or `course_member.role`.**
   `domain.Actor` and `domain.Member` do not carry them, on purpose.
+- A member's level is `domain.Member.Perm`, never the `Perms` map: a
+  delegate's is capped by its principal's there, and a list query takes the
+  principal's scope as well as the member's (`authz.ScopeFilter`). A call
+  that takes a seat and its principal takes the seat first.
 - SQL lives in `internal/db/queries/*.sql`; run `make sqlc` after editing it.
   List queries filter by scope **in SQL**, never afterwards.
 

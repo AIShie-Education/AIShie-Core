@@ -204,6 +204,17 @@ Run all of these as root on the server.
   The administrator is no member of the course and cannot. The administrator
   seats the instructor first, with `course.seat_instructor`. Point the agent's
   MCP client at `https://lms-staging.example.edu/mcp`.
+- **Agents people own:** anyone registered may register agents of their own
+  (`agent.create`) and bring them into their courses as their delegates, never
+  able to do more there than they can. `AGENT_SELF_SERVICE=off` in the env file
+  stops people registering them, leaving it to administrators
+  (`actor.register` with `owner_actor_id`); `AGENT_MAX_PER_OWNER` (default 5)
+  bounds how many that are not suspended one person may have. Migration 0007
+  gave every seat the new permissions of its roster role's built-in preset;
+  the two new built-in presets, `delegate` and `course_tutor`, come with the
+  `seed` a deploy runs after it. A seat the old version added while the
+  migration was going in has the new permissions denied: raise them with
+  `member.update_perms_bulk` if it matters.
 - **Updating the scripts:** when `deploy/` changes, copy it to the server
   again and run `setup-server.sh` as in step 1. It installs the new scripts
   and leaves the rest.

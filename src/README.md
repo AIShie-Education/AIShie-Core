@@ -30,10 +30,24 @@ src/
                          the invite credential kind: a prefix and an expiry,
                          and one live invitation per actor
     0005_invitations.down.sql
+    0006_credential_issuer.up.sql
+                         who issued an API token
+    0006_credential_issuer.down.sql
+    0007_agent_ownership.up.sql
+                         agents a person owns and the delegate seats they act
+                         from; who suspended an actor; the permissions
+                         agent_delegate, conversation_ask and
+                         conversation_answer, backfilled by roster role
+    0007_agent_ownership.down.sql
+                         removes the delegate seats, cancelling their
+                         proposals, before it drops what 0007 added
   seed/
-    presets.sql          the six built-in permission presets; safe to re-run
+    presets.sql          the eight built-in permission presets; safe to re-run
   tests/
     constraints_test.sql checks the database-enforced rules; rolls back
+    down/NNNN.before.sql, NNNN.after.sql
+                         data for a down migration to go over, and what must
+                         hold once it has, run around NNNN's down
   embed.go               compiles migrations/ and seed/ into the server binary
 ```
 
@@ -108,7 +122,10 @@ SQLSTATE it expected versus what it got.
 `make db-test-sql` at the repository root does all of this against a scratch
 database — every migration up, the seed, the checks, every migration down, a
 check that nothing was left behind, and up again — and is what CI runs on
-PostgreSQL 13 and 18.
+PostgreSQL 13 and 18. On the way down, a migration with files in
+`tests/down/` goes down over the data its `.before.sql` commits, and its
+`.after.sql` checks what became of it: 0007 over a delegate with a proposal
+waiting.
 
 ## What the database enforces
 
@@ -140,6 +157,9 @@ MCP, these are the invariants that survive a bug in the tool layer.
 | No credential is written for the system actor, nor moved to it | `credential_not_for_system_actor` trigger |
 | Status, role, kind and scope columns hold only listed values | `*_valid` CHECKs |
 | Emails are unique regardless of case | unique index on `lower(email)` |
+| Only an agent has an owner; its owner is a person, not an agent, the system actor or itself | `actor_not_own_owner`, `actor_owned_is_agent`, trigger `actor_owner_valid` |
+| Making an actor active forgets who suspended it | trigger `actor_suspension_cleared` |
+| A seat that is not removed has a principal exactly when its actor has an owner; the principal is the owner's seat, in the same course, and nobody's delegate | composite FK `course_member_principal_fk`, trigger `course_member_principal_valid` |
 | Domain rows are never silently cascade-deleted | FKs default to NO ACTION |
 
 ## What the application must enforce
@@ -165,7 +185,10 @@ The database cannot express these. Each one is a place a bug can hide.
 - **Grade computation**, and writing an `origin = 'computed'` snapshot only
   when a rolled-up component or the course total is posted.
 - **Component tree acyclicity**: the CHECK blocks only a self-loop.
-- **Cancelling pending proposals** when a member is removed or expires.
+- **Cancelling pending proposals** when a member is removed or expires, and
+  removing a member's delegates with them.
+- **A delegate holds no more than its principal**: levels, reach and life,
+  read with the principal on every call and in every list.
 - **A token of the system actor's** written before migration 0004 refused
   them authenticates nobody.
 - **`actor.kind` and `course_member.role` are never read by authorization.**
@@ -184,7 +207,8 @@ unique index.
 ## Verification status
 
 Executed against PostgreSQL 18.6: up, down and up again apply cleanly, and
-`tests/constraints_test.sql` passes (93 checks). **Not yet run on PostgreSQL
+`tests/constraints_test.sql` passes (93 checks; 117 since migration 0007,
+which has been run on PostgreSQL 16). **Not yet run on PostgreSQL
 13**, the stated minimum: CI runs this suite and the Go tests on both 13 and
 18, so the first pipeline run settles it — update this paragraph with the
 result.
