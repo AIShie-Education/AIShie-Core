@@ -264,16 +264,25 @@ func (q *Queries) ListOrphanUploads(ctx context.Context, arg ListOrphanUploadsPa
 }
 
 const listOrphanedSeats = `-- name: ListOrphanedSeats :many
-SELECT m.id, m.course_id
-FROM course_member m
-JOIN course c ON c.id = m.course_id
-JOIN actor a ON a.id = m.actor_id
-LEFT JOIN course_member p ON p.id = m.principal_member_id
-WHERE m.status <> 'removed' AND c.status <> 'archived'
-  AND (CASE WHEN m.principal_member_id IS NULL THEN a.owner_actor_id IS NOT NULL
-            ELSE p.status = 'removed' OR (p.expires_at IS NOT NULL AND p.expires_at <= $1)
-                 OR a.owner_actor_id IS DISTINCT FROM p.actor_id END)
-ORDER BY m.id
+SELECT o.id, o.course_id
+FROM (
+    SELECT m.id, m.course_id
+    FROM course_member m
+    JOIN course_member p ON p.id = m.principal_member_id
+    JOIN actor a ON a.id = m.actor_id
+    JOIN course c ON c.id = m.course_id
+    WHERE m.principal_member_id IS NOT NULL AND m.status <> 'removed' AND c.status <> 'archived'
+      AND (p.status = 'removed' OR (p.expires_at IS NOT NULL AND p.expires_at <= $1)
+           OR a.owner_actor_id IS DISTINCT FROM p.actor_id)
+  UNION ALL
+    SELECT m.id, m.course_id
+    FROM actor a
+    JOIN course_member m ON m.actor_id = a.id
+    JOIN course c ON c.id = m.course_id
+    WHERE a.owner_actor_id IS NOT NULL AND m.principal_member_id IS NULL
+      AND m.status <> 'removed' AND c.status <> 'archived'
+) o
+ORDER BY o.id
 LIMIT $2
 `
 
@@ -293,6 +302,14 @@ type ListOrphanedSeatsRow struct {
 // with its principal (course_member_delegates_follow), so the first are
 // rare: a principal's expiry the expiry sweep has not got to. authorize() refuses them already; removing
 // them cancels what they proposed and clears the way for a fresh seat.
+//
+// The two kinds are found apart, each from an index of its own, so that the
+// sweep, which runs every minute, looks at delegates' seats and owned
+// agents' seats and not at every seat on the platform: a delegate's whose
+// principal is gone or not its owner's seat, from course_member_principal_idx;
+// an owned agent's with no principal, from actor_owner_idx. SeatOrphaned is
+// the same rule for one seat, and the authorization queries' owner_matches
+// its other half: a change to one is a change to all three.
 func (q *Queries) ListOrphanedSeats(ctx context.Context, arg ListOrphanedSeatsParams) ([]ListOrphanedSeatsRow, error) {
 	rows, err := q.db.Query(ctx, listOrphanedSeats, arg.Now, arg.MaxRows)
 	if err != nil {

@@ -610,6 +610,18 @@ SELECT pg_temp.fails('conversation status must be open or closed', '23514', $q$
 SELECT pg_temp.fails('a title is at most 200 characters', '23514', $q$
     INSERT INTO conversation (course_id, opener_member_id, respondent_member_id, title)
     VALUES ('00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000000052', '00000000-0000-0000-0000-000000000053', repeat('x', 201)) $q$);
+SELECT pg_temp.fails('a title says something', '23514', $q$
+    INSERT INTO conversation (course_id, opener_member_id, respondent_member_id, title)
+    VALUES ('00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000000052', '00000000-0000-0000-0000-000000000053', '') $q$);
+SELECT pg_temp.fails('a closed reason is at most 500 characters', '23514', $q$
+    INSERT INTO conversation (course_id, opener_member_id, respondent_member_id, status, closed_reason)
+    VALUES ('00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000000052', '00000000-0000-0000-0000-000000000053', 'closed', repeat('x', 501)) $q$);
+SELECT pg_temp.fails('when the last message came and who wrote it are set together', '23514', $q$
+    UPDATE conversation SET last_message_at = now() WHERE id = '00000000-0000-0000-0000-0000000000c1' $q$);
+SELECT pg_temp.fails('a conversation''s title never changes', '23001', $q$
+    UPDATE conversation SET title = 'HW2' WHERE id = '00000000-0000-0000-0000-0000000000c1' $q$);
+SELECT pg_temp.fails('nor when it began', '23001', $q$
+    UPDATE conversation SET created_at = now() - interval '1 day' WHERE id = '00000000-0000-0000-0000-0000000000c1' $q$);
 SELECT pg_temp.fails('an open conversation has no closed reason', '23514', $q$
     INSERT INTO conversation (course_id, opener_member_id, respondent_member_id, closed_reason)
     VALUES ('00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000000052', '00000000-0000-0000-0000-000000000053', 'why') $q$);
@@ -628,6 +640,10 @@ SELECT pg_temp.fails('a conversation has one message at each seq', '23505', $q$
     INSERT INTO conversation_message (conversation_id, course_id, seq, author_member_id, body, created_by_action_id)
     VALUES ('00000000-0000-0000-0000-0000000000c1', '00000000-0000-0000-0000-000000000041', 1,
             '00000000-0000-0000-0000-000000000052', 'Again', '00000000-0000-0000-0000-0000000000b1') $q$);
+SELECT pg_temp.fails('a message''s seq counts from 1', '23514', $q$
+    INSERT INTO conversation_message (conversation_id, course_id, seq, author_member_id, body, created_by_action_id)
+    VALUES ('00000000-0000-0000-0000-0000000000c1', '00000000-0000-0000-0000-000000000041', 0,
+            '00000000-0000-0000-0000-000000000052', 'Before the first', '00000000-0000-0000-0000-0000000000b1') $q$);
 SELECT pg_temp.fails('a message says something', '23514', $q$
     INSERT INTO conversation_message (conversation_id, course_id, seq, author_member_id, body, created_by_action_id)
     VALUES ('00000000-0000-0000-0000-0000000000c1', '00000000-0000-0000-0000-000000000041', 2,
@@ -671,6 +687,8 @@ SELECT pg_temp.fails('messages are append-only: no edit', '23001', $q$
     UPDATE conversation_message SET body = 'Why 9/10?' WHERE id = '00000000-0000-0000-0000-000000000c11' $q$);
 SELECT pg_temp.fails('messages are append-only: no delete', '23001', $q$
     DELETE FROM conversation_message WHERE id = '00000000-0000-0000-0000-000000000c12' $q$);
+SELECT pg_temp.fails('messages are not truncated', '23001', $q$
+    TRUNCATE conversation_message CASCADE $q$);
 SELECT pg_temp.fails('a conversation''s participants never change', '23001', $q$
     UPDATE conversation SET respondent_member_id = '00000000-0000-0000-0000-000000000051' WHERE id = '00000000-0000-0000-0000-0000000000c1' $q$);
 SELECT pg_temp.fails('a conversation is kept, not deleted', '23001', $q$
@@ -687,6 +705,19 @@ SELECT pg_temp.fails('a retraction is in its message''s course', '23503', $q$
     INSERT INTO conversation_message_retraction (message_id, course_id, retracted_by_member_id, created_by_action_id)
     VALUES ('00000000-0000-0000-0000-000000000c12', '00000000-0000-0000-0000-000000000042', '00000000-0000-0000-0000-000000000055',
             '00000000-0000-0000-0000-0000000000b1') $q$);
+SELECT pg_temp.fails('whoever retracts is a seat of the message''s course', '23503', $q$
+    INSERT INTO conversation_message_retraction (message_id, course_id, retracted_by_member_id, created_by_action_id)
+    VALUES ('00000000-0000-0000-0000-000000000c12', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000000055',
+            '00000000-0000-0000-0000-0000000000b1') $q$);
+SELECT pg_temp.fails('a retraction names the action that made it', '23502', $q$
+    INSERT INTO conversation_message_retraction (message_id, course_id, retracted_by_member_id)
+    VALUES ('00000000-0000-0000-0000-000000000c12', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000000053') $q$);
+SELECT pg_temp.fails('a retraction''s reason is at most 500 characters', '23514', $q$
+    INSERT INTO conversation_message_retraction (message_id, course_id, retracted_by_member_id, created_by_action_id, reason)
+    VALUES ('00000000-0000-0000-0000-000000000c12', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000000053',
+            '00000000-0000-0000-0000-0000000000b1', repeat('x', 501)) $q$);
+SELECT pg_temp.fails('retractions are append-only: no edit', '23001', $q$
+    UPDATE conversation_message_retraction SET reason = 'Another' $q$);
 SELECT pg_temp.fails('retractions are append-only', '23001', $q$
     DELETE FROM conversation_message_retraction $q$);
 SELECT pg_temp.fails('retractions are not truncated', '23001', $q$

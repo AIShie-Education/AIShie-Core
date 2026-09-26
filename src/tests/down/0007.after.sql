@@ -1,8 +1,9 @@
 -- AIshiteru Core — after 0007_agent_ownership.down.sql, in `make db-test-sql`
 --
 -- The delegate seat is removed and its proposal cancelled as a removal
--- cancels one; the agent has lost its owner and nothing else; the built-in
--- presets 0007's seed brought stay, less the permissions that went.
+-- cancels one; the agent has lost its owner and the token its owner issued;
+-- the built-in presets 0007's seed brought stay, less the permissions that
+-- went.
 
 \set ON_ERROR_STOP 1
 \set QUIET 1
@@ -21,6 +22,9 @@ BEGIN
     END IF;
     IF NOT EXISTS (SELECT 1 FROM actor WHERE id = '00000000-0000-0000-0007-000000000038' AND kind = 'agent' AND status = 'active') THEN
         RAISE EXCEPTION 'FAIL  0007 down: the agent did not survive';
+    END IF;
+    IF EXISTS (SELECT 1 FROM credential WHERE id = '00000000-0000-0000-0007-0000000000c1' AND revoked_at IS NULL) THEN
+        RAISE EXCEPTION 'FAIL  0007 down: the agent kept a token its owner may hold';
     END IF;
     IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public'
                AND column_name IN ('owner_actor_id', 'suspended_by_actor_id', 'principal_member_id',

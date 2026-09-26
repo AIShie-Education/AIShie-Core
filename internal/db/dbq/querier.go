@@ -369,6 +369,14 @@ type Querier interface {
 	// with its principal (course_member_delegates_follow), so the first are
 	// rare: a principal's expiry the expiry sweep has not got to. authorize() refuses them already; removing
 	// them cancels what they proposed and clears the way for a fresh seat.
+	//
+	// The two kinds are found apart, each from an index of its own, so that the
+	// sweep, which runs every minute, looks at delegates' seats and owned
+	// agents' seats and not at every seat on the platform: a delegate's whose
+	// principal is gone or not its owner's seat, from course_member_principal_idx;
+	// an owned agent's with no principal, from actor_owner_idx. SeatOrphaned is
+	// the same rule for one seat, and the authorization queries' owner_matches
+	// its other half: a change to one is a change to all three.
 	ListOrphanedSeats(ctx context.Context, arg ListOrphanedSeatsParams) ([]ListOrphanedSeatsRow, error)
 	ListPendingReviewActions(ctx context.Context, arg ListPendingReviewActionsParams) ([]Action, error)
 	// Built-ins, plus one department's own when a department is named.

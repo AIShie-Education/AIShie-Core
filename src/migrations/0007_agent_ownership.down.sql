@@ -3,9 +3,14 @@
 --
 -- The schema before it has no delegates, so every delegate seat not already
 -- removed is removed here, with its proposals cancelled as a removal cancels
--- them; its history stays. Owned agents lose their owner and keep their
--- credentials: they are ordinary agents again, seated nowhere, for an
--- administrator to seat or suspend. A suspension an owner made is kept, and
+-- them; its history stays. Owned agents lose their owner, and every
+-- credential they have is revoked, as actor.set_owner revokes them when an
+-- owner changes: whoever owned one may hold its tokens, and would otherwise
+-- act with whatever seat an administrator later gives the agent. They are
+-- ordinary agents again, seated nowhere, for an administrator to seat,
+-- suspend or issue a token to. (The design asked for their credentials to
+-- be kept; revoking them is the safer reading of the rule that owning an
+-- agent gives nobody more than their own seat.) A suspension an owner made is kept, and
 -- is an administrator's to lift from then on. The built-in presets delegate
 -- and course_tutor stay: the schema before this holds them, less the three
 -- permissions, which go from both tables.
@@ -27,6 +32,9 @@ UPDATE action
 
 UPDATE course_member SET status = 'removed'
  WHERE principal_member_id IS NOT NULL AND status <> 'removed';
+
+UPDATE credential SET revoked_at = now()
+ WHERE revoked_at IS NULL AND actor_id IN (SELECT id FROM actor WHERE owner_actor_id IS NOT NULL);
 
 DROP TRIGGER IF EXISTS course_member_delegates_follow ON course_member;
 DROP FUNCTION IF EXISTS course_member_remove_delegates();

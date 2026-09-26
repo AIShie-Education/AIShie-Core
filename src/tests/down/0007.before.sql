@@ -2,7 +2,7 @@
 --
 -- What the down migration has to deal with: an agent a person owns, seated
 -- as their delegate with a proposal waiting, beside one of its seats already
--- removed. Committed, so that the down migration runs over it; the downs
+-- removed, and holding a token its owner issued. Committed, so that the down migration runs over it; the downs
 -- after it drop it with everything else.
 
 \set ON_ERROR_STOP 1
@@ -17,6 +17,9 @@ INSERT INTO actor (id, kind, display_name, platform_role, created_by_actor_id) V
     ('00000000-0000-0000-0007-000000000035', 'human', 'Yuki', NULL, '00000000-0000-0000-0007-000000000031');
 INSERT INTO actor (id, kind, display_name, owner_actor_id, created_by_actor_id) VALUES
     ('00000000-0000-0000-0007-000000000038', 'agent', 'Yuki''s agent', '00000000-0000-0000-0007-000000000035',
+     '00000000-0000-0000-0007-000000000035');
+INSERT INTO credential (id, actor_id, kind, secret_hash, token_prefix, issued_by_actor_id) VALUES
+    ('00000000-0000-0000-0007-0000000000c1', '00000000-0000-0000-0007-000000000038', 'api_token', 'h', 'down0007',
      '00000000-0000-0000-0007-000000000035');
 INSERT INTO course (id, dept_id, term_id, code, section, title, status, created_by_actor_id)
 VALUES ('00000000-0000-0000-0007-000000000041', '00000000-0000-0000-0007-000000000021', '00000000-0000-0000-0007-000000000011',

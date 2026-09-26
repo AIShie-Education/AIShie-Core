@@ -205,7 +205,10 @@ ALTER TABLE permission_preset
 
 -- The built-ins already seeded take the new levels. The two new built-ins,
 -- delegate and course_tutor, are inserted by src/seed/presets.sql alone,
--- which a deploy runs after this.
+-- which a deploy runs after this; they are listed here as well for a
+-- database this migration went down from and comes up on again, where the
+-- down left them standing without the columns, and the seed, which leaves
+-- a built-in that exists as it is, would leave them answering nothing.
 UPDATE permission_preset p
    SET perm_agent_delegate = v.agent_delegate, perm_conversation_ask = v.ask, perm_conversation_answer = v.answer
   FROM (VALUES
@@ -214,7 +217,9 @@ UPDATE permission_preset p
         ('ta',         'confirm_required',                 'autonomous',                 'denied'),
         ('instructor', 'autonomous',                       'autonomous',                 'autonomous'),
         ('tutor',      'denied',                           'denied',                     'autonomous'),
-        ('grader',     'denied',                           'denied',                     'denied')
+        ('grader',     'denied',                           'denied',                     'denied'),
+        ('delegate',     'denied',                         'denied',                     'autonomous'),
+        ('course_tutor', 'denied',                         'denied',                     'autonomous')
        ) AS v (name, agent_delegate, ask, answer)
  WHERE p.dept_id IS NULL AND p.name = v.name;
 

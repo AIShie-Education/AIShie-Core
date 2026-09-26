@@ -258,7 +258,10 @@ decision recorded here and in the migration: instructors, who seat nearly everyo
 most, and everyone else at most what instructors hold, so that the rule below went on holding
 for the seats as they stood. Role was read as a fact of the roster, by a migration, never by
 authorization. A seat the release before it added while the migration was going in has
-`denied`.
+`denied`. A seat that manages members under another role than instructor — an assistant or an
+observer given `member_manage`, a TA given it — got its role's levels as well, and from then on
+grants no preset that carries more (`student` carries `agent_delegate` and `conversation_ask`;
+`tutor`, `conversation_answer`) until an instructor raises its own.
 
 **Scope is explicit and fails closed.** `student_scope = 'listed'` with no rows in
 `member_student_scope` means *no* students, so forgetting the rows cannot grant the class.

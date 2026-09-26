@@ -217,7 +217,15 @@ Run all of these as root on the server.
   the two new built-in presets, `delegate` and `course_tutor`, come with the
   `seed` a deploy runs after it. A seat the old version added while the
   migration was going in has the new permissions denied: raise them with
-  `member.update_perms_bulk` if it matters.
+  `member.update_perms_bulk` if it matters. A seat that manages members
+  without being an instructor's — an `assistant` or `observer` given
+  `member_manage`, or a TA given it — got its role's levels too, which are
+  `denied` for an assistant or observer, and `conversation_answer` denied
+  for a TA. Nobody hands out more than they hold, so such a seat can no
+  longer add a student (whose preset carries `agent_delegate` and
+  `conversation_ask`), nor, for a TA, a tutor, until an instructor raises
+  its levels with `member.update_perms`. A roster-sync agent seated as an
+  assistant is the likely case.
 - **Updating the scripts:** when `deploy/` changes, copy it to the server
   again and run `setup-server.sh` as in step 1. It installs the new scripts
   and leaves the rest.

@@ -37,7 +37,7 @@ test: ## Go tests, against TEST_DATABASE_URL
 	go test -race -shuffle=on -coverprofile=cover.out ./...
 
 .PHONY: db-test-sql
-db-test-sql: ## psql suite: migrations up, seed, constraint tests, down (over the fixtures in src/tests/down), up again
+db-test-sql: ## psql suite: migrations up, seed, constraint tests, the newest two down and up again over the seed, down (over the fixtures in src/tests/down), up again
 	@createdb $(SQLTEST_DB)
 	@trap 'dropdb --if-exists $(SQLTEST_DB)' EXIT; \
 	ups=$$(ls src/migrations/*.up.sql | sort); \
@@ -47,6 +47,10 @@ db-test-sql: ## psql suite: migrations up, seed, constraint tests, down (over th
 	out=$$(psql -X -d $(SQLTEST_DB) -f src/tests/constraints_test.sql 2>&1) || { echo "$$out" | grep -E 'FAIL|ERROR' ; exit 1; }; \
 	echo "$$out" | grep -q 'All checks passed.' || { echo "$$out" | tail -5; exit 1; }; \
 	echo "tests $$(echo "$$out" | grep -c 'NOTICE:  PASS') checks passed"; \
+	$(PSQL) -d $(SQLTEST_DB) -c "CREATE TABLE redo_builtins AS SELECT * FROM permission_preset WHERE dept_id IS NULL"; \
+	for f in $$(echo "$$downs" | head -2); do echo "redo  $$f"; $(PSQL) -d $(SQLTEST_DB) -f $$f; done; \
+	for f in $$(echo "$$ups" | tail -2); do echo "redo  $$f"; $(PSQL) -d $(SQLTEST_DB) -f $$f; done; \
+	$(PSQL) -d $(SQLTEST_DB) -f src/tests/redo_builtins.sql; \
 	for f in $$downs; do \
 		n=$$(basename $$f | cut -c1-4); \
 		if [ -f src/tests/down/$$n.before.sql ]; then echo "fixt  src/tests/down/$$n.before.sql"; $(PSQL) -d $(SQLTEST_DB) -f src/tests/down/$$n.before.sql; fi; \
