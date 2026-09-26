@@ -69,7 +69,7 @@ func serve(t *testing.T, students int) *fixture {
 
 func (f *fixture) token(t *testing.T, actor uuid.UUID) string {
 	t.Helper()
-	tok, _, err := auth.IssueToken(context.Background(), dbq.New(f.c.Pool), actor, "mcp", nil, time.Now())
+	tok, _, err := auth.IssueToken(context.Background(), dbq.New(f.c.Pool), actor, nil, "mcp", nil, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -103,6 +103,80 @@ func (q *Queries) InsertSubmission(ctx context.Context, arg InsertSubmissionPara
 	return err
 }
 
+const listAssignmentRoster = `-- name: ListAssignmentRoster :many
+SELECT m.id AS student_member_id, a.display_name, m.status AS member_status,
+       s.id AS submission_id, s.attempt, s.state, s.submitted_at
+FROM course_member m
+JOIN actor a ON a.id = m.actor_id
+LEFT JOIN submission s ON s.assignment_id = $1 AND s.student_member_id = m.id
+    AND s.attempt = (SELECT max(z.attempt) FROM submission z
+                     WHERE z.assignment_id = $1 AND z.student_member_id = m.id)
+WHERE m.course_id = $2 AND m.role = 'student' AND m.status <> 'removed'
+  AND m.id > $3
+  AND ($4::bool OR EXISTS (
+        SELECT 1 FROM member_student_scope y WHERE y.member_id = $5 AND y.student_member_id = m.id))
+ORDER BY m.id
+LIMIT $6
+`
+
+type ListAssignmentRosterParams struct {
+	AssignmentID uuid.UUID
+	CourseID     uuid.UUID
+	After        uuid.UUID
+	StudentAll   bool
+	MemberID     uuid.UUID
+	MaxRows      int32
+}
+
+type ListAssignmentRosterRow struct {
+	StudentMemberID uuid.UUID
+	DisplayName     string
+	MemberStatus    string
+	SubmissionID    *uuid.UUID
+	Attempt         *int32
+	State           *string
+	SubmittedAt     *time.Time
+}
+
+// Every current student of the course whom the caller's student scope
+// reaches, with their latest attempt at one assignment, if any: the students
+// who have not started are rows too, with no submission. The caller's
+// assignment scope is checked on the target, before this runs.
+func (q *Queries) ListAssignmentRoster(ctx context.Context, arg ListAssignmentRosterParams) ([]ListAssignmentRosterRow, error) {
+	rows, err := q.db.Query(ctx, listAssignmentRoster,
+		arg.AssignmentID,
+		arg.CourseID,
+		arg.After,
+		arg.StudentAll,
+		arg.MemberID,
+		arg.MaxRows,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListAssignmentRosterRow
+	for rows.Next() {
+		var i ListAssignmentRosterRow
+		if err := rows.Scan(
+			&i.StudentMemberID,
+			&i.DisplayName,
+			&i.MemberStatus,
+			&i.SubmissionID,
+			&i.Attempt,
+			&i.State,
+			&i.SubmittedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listSubmissions = `-- name: ListSubmissions :many
 SELECT s.id, s.assignment_id, s.course_id, s.student_member_id, s.attempt, s.state, s.submitted_at, s.created_at
 FROM submission s

@@ -53,7 +53,7 @@ func newAPI(t *testing.T, students int) *api {
 // tokenFor issues an API token the way the operator's command line does.
 func (a *api) tokenFor(actor uuid.UUID) string {
 	a.t.Helper()
-	tok, _, err := auth.IssueToken(context.Background(), dbq.New(a.c.Pool), actor, "test", nil, time.Now())
+	tok, _, err := auth.IssueToken(context.Background(), dbq.New(a.c.Pool), actor, nil, "test", nil, time.Now())
 	if err != nil {
 		a.t.Fatal(err)
 	}

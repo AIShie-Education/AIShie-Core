@@ -28,6 +28,34 @@ WHERE id = $1;
 -- name: PublishAssignment :execrows
 UPDATE assignment SET published_at = $2 WHERE id = $1 AND published_at IS NULL;
 
+-- name: LockAssignmentForUnpublish :one
+-- FOR UPDATE, not the NO KEY UPDATE of an ordinary update: it conflicts with
+-- the KEY SHARE that inserting a submission takes, and that
+-- GetAssignmentForSubmission takes before it checks that the assignment is
+-- published. So a submission being made waits for an unpublish and then sees
+-- the assignment unpublished, or is made first and is seen by it.
+SELECT id, published_at
+FROM assignment
+WHERE id = $1 AND course_id = $2
+FOR UPDATE;
+
+-- name: AssignmentHasSubmissions :one
+-- Any row at all: a draft, a hand-in, a 'missing' placeholder.
+SELECT EXISTS (SELECT 1 FROM submission WHERE assignment_id = $1);
+
+-- name: UnpublishAssignment :execrows
+UPDATE assignment SET published_at = NULL WHERE id = $1 AND published_at IS NOT NULL;
+
+-- name: GetAssignmentForSubmission :one
+-- GetAssignmentInCourse for a tool about to add a submission to it. KEY SHARE
+-- holds up nothing but LockAssignmentForUnpublish, which it waits for; then
+-- the assignment is read as that left it.
+SELECT id, course_id, component_id, title, instructions_document_id, rubric_document_id,
+       points_possible, due_at, published_at
+FROM assignment
+WHERE id = $1 AND course_id = $2
+FOR KEY SHARE;
+
 -- name: GetDocumentInCourse :one
 SELECT id, course_id, kind, title, status, published_version_id
 FROM document WHERE id = $1 AND course_id = $2;

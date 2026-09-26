@@ -26,7 +26,7 @@ import (
 func platformTools() []tool.Tool {
 	return []tool.Tool{
 		actorRegister(), actorGet(), actorList(), actorUpdate(), actorSuspend(), actorReactivate(),
-		actorIssueToken(), actorInvite(), actorLinkSSO(),
+		actorIssueToken(), actorListCredentials(), actorRevokeCredential(), actorInvite(), actorLinkSSO(),
 		termCreate(), termList(), departmentCreate(), departmentList(),
 		presetList(), presetCreate(), presetUpdate(),
 	}
@@ -38,11 +38,12 @@ func platformTools() []tool.Tool {
 var admins = tool.Gate{Platform: []string{domain.PlatformRoot, domain.PlatformAdmin}}
 
 const (
-	EventActorRegistered  = "actor.registered"
-	EventActorUpdated     = "actor.updated"
-	EventActorInvited     = "actor.invited"
-	EventActorSuspended   = "actor.suspended"
-	EventActorReactivated = "actor.reactivated"
+	EventActorRegistered        = "actor.registered"
+	EventActorUpdated           = "actor.updated"
+	EventActorInvited           = "actor.invited"
+	EventActorSuspended         = "actor.suspended"
+	EventActorReactivated       = "actor.reactivated"
+	EventActorCredentialRevoked = "actor.credential_revoked" //nolint:gosec // an event name, not a credential
 )
 
 // ---------------------------------------------------------------------------
@@ -357,11 +358,64 @@ func actorIssueToken() tool.Tool {
 			if err != nil {
 				return IssueTokenOut{}, err
 			}
-			tok, id, err := auth.IssueToken(ctx, ec.Q, in.ActorID, in.Label, expires, ec.Now)
+			tok, id, err := auth.IssueToken(ctx, ec.Q, in.ActorID, &ec.Actor.ID, in.Label, expires, ec.Now)
 			if err != nil {
 				return IssueTokenOut{}, err
 			}
 			return IssueTokenOut{CredentialID: id, Token: tok.Full, TokenPrefix: tok.Prefix, ExpiresAt: expires}, nil
+		},
+	})
+}
+
+func actorListCredentials() tool.Tool {
+	return tool.Define(tool.Spec[ActorIDIn, CredentialListOut]{
+		Name: "actor.list_credentials",
+		Description: "An actor's credentials, newest first: tokens with their label, prefix, issuer, expiry and last use, " +
+			"sessions, password and linked identities, revoked ones included. Secrets are never shown. Revoke one with " +
+			"actor.revoke_credential.",
+		Kind: tool.Read, Gate: admins,
+		HTTP:    tool.Route{Method: "GET", Pattern: "/v1/actors/{actor_id}/credentials"},
+		Resolve: resolveActor,
+		Query: func(ctx context.Context, rc *tool.ReadCtx, in ActorIDIn) (CredentialListOut, error) {
+			rows, err := rc.Q.ListCredentialsForActor(ctx, in.ActorID)
+			return viewCredentials(rows), err
+		},
+	})
+}
+
+type ActorRevokeCredentialIn struct {
+	ActorID      uuid.UUID `json:"actor_id"`
+	CredentialID uuid.UUID `json:"credential_id"`
+}
+
+func actorRevokeCredential() tool.Tool {
+	return tool.Define(tool.Spec[ActorRevokeCredentialIn, OK]{
+		Name: "actor.revoke_credential",
+		Description: "Revoke one of an actor's credentials — a token that has leaked, a session left signed in — without " +
+			"suspending the actor: everything else it holds keeps working. It takes effect on the credential's next use.",
+		Kind: tool.Write, Gate: admins,
+		HTTP: tool.Route{Method: "POST", Pattern: "/v1/actors/{actor_id}/credentials/{credential_id}/revoke"},
+		Resolve: func(ctx context.Context, q dbq.Querier, in ActorRevokeCredentialIn) (tool.Target, error) {
+			return resolveActor(ctx, q, ActorIDIn{ActorID: in.ActorID})
+		},
+		Execute: func(ctx context.Context, ec *tool.ExecCtx, in ActorRevokeCredentialIn) (OK, error) {
+			// Taking a credential away is held to the rule for issuing one; an
+			// administrator's own are theirs, as credential.revoke has them.
+			if in.ActorID != ec.Actor.ID {
+				if err := mayActOn(ctx, ec, in.ActorID); err != nil {
+					return OK{}, err
+				}
+			}
+			n, err := ec.Q.RevokeCredential(ctx, dbq.RevokeCredentialParams{ID: in.CredentialID, ActorID: in.ActorID, RevokedAt: &ec.Now})
+			if err != nil {
+				return OK{}, err
+			}
+			if n == 0 {
+				return OK{}, apperr.Missing("no such live credential on this actor")
+			}
+			ec.Emit(events.Event{Type: EventActorCredentialRevoked, SubjectType: "actor", SubjectID: &in.ActorID,
+				Payload: map[string]any{"credential_id": in.CredentialID}})
+			return OK{OK: true}, nil
 		},
 	})
 }

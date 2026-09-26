@@ -177,8 +177,9 @@ func (a *Authenticator) Logout(ctx context.Context, p Principal) error {
 // IssueToken creates an API token for an actor. It is used by the tools that
 // issue tokens, by bootstrap and by the operator's command line. The system
 // actor is never given one: a token of its would act as the sweeps do, and
-// could take their idempotency keys before them.
-func IssueToken(ctx context.Context, q *dbq.Queries, actorID uuid.UUID, label string, expiresAt *time.Time, now time.Time) (Token, uuid.UUID, error) {
+// could take their idempotency keys before them. issuedBy is the actor who
+// asked for it, nil when no actor did (bootstrap, the command line).
+func IssueToken(ctx context.Context, q *dbq.Queries, actorID uuid.UUID, issuedBy *uuid.UUID, label string, expiresAt *time.Time, now time.Time) (Token, uuid.UUID, error) {
 	actor, err := q.GetActor(ctx, actorID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Token{}, uuid.Nil, apperr.Missing("no such actor")
@@ -200,7 +201,7 @@ func IssueToken(ctx context.Context, q *dbq.Queries, actorID uuid.UUID, label st
 	}
 	if err := q.InsertCredential(ctx, dbq.InsertCredentialParams{
 		ID: id, ActorID: actorID, Kind: KindAPIToken, SecretHash: &tok.Hash,
-		TokenPrefix: &tok.Prefix, Label: l, ExpiresAt: expiresAt, CreatedAt: now,
+		TokenPrefix: &tok.Prefix, Label: l, ExpiresAt: expiresAt, CreatedAt: now, IssuedByActorID: issuedBy,
 	}); err != nil {
 		return Token{}, uuid.Nil, err
 	}
@@ -395,7 +396,7 @@ func Bootstrap(ctx context.Context, pool *pgxpool.Pool, in BootstrapInput) (Boot
 				return err
 			}
 		}
-		res.Token, _, err = IssueToken(ctx, q, res.RootID, "bootstrap", nil, now)
+		res.Token, _, err = IssueToken(ctx, q, res.RootID, nil, "bootstrap", nil, now)
 		return err
 	})
 	return res, err

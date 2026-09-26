@@ -46,7 +46,9 @@ var visibility = map[string][]domain.Perm{
 	EventAssignmentCreated:   {domain.PermAssignmentWrite},
 	EventAssignmentUpdated:   {domain.PermAssignmentWrite},
 	EventAssignmentPublished: {domain.PermDocumentRead},
-	EventAssignmentDuePassed: {domain.PermDocumentRead},
+	// Those who were told it was published are told it was taken back.
+	EventAssignmentUnpublished: {domain.PermDocumentRead},
+	EventAssignmentDuePassed:   {domain.PermDocumentRead},
 
 	EventComponentCreated: {domain.PermGradeRead}, EventComponentUpdated: {domain.PermGradeRead},
 	EventComponentMoved: {domain.PermGradeRead},
@@ -77,7 +79,7 @@ var visibility = map[string][]domain.Perm{
 
 	// Platform events belong to no course, so they are in no course's feed.
 	// They are listed so that leaving them out is visibly a decision.
-	EventActorRegistered: nil, EventActorUpdated: nil, EventActorInvited: nil,
+	EventActorRegistered: nil, EventActorUpdated: nil, EventActorInvited: nil, EventActorCredentialRevoked: nil,
 	EventActorSuspended: nil, EventActorReactivated: nil,
 }
 

@@ -17,6 +17,8 @@ type Querier interface {
 	// Entered and not replaced: a draft waiting to be posted counts, since what it
 	// was entered against would change under it just the same.
 	AssignmentHasLiveGrades(ctx context.Context, assignmentID uuid.UUID) (bool, error)
+	// Any row at all: a draft, a hand-in, a 'missing' placeholder.
+	AssignmentHasSubmissions(ctx context.Context, assignmentID uuid.UUID) (bool, error)
 	CancelProposal(ctx context.Context, arg CancelProposalParams) (int64, error)
 	ClearAssignmentScope(ctx context.Context, memberID uuid.UUID) error
 	ClearStudentScope(ctx context.Context, memberID uuid.UUID) error
@@ -74,6 +76,10 @@ type Querier interface {
 	// in. At most one invitation is live (credential_one_live_invite), so the
 	// join adds no row; it may have expired unused.
 	GetActorView(ctx context.Context, id uuid.UUID) (GetActorViewRow, error)
+	// GetAssignmentInCourse for a tool about to add a submission to it. KEY SHARE
+	// holds up nothing but LockAssignmentForUnpublish, which it waits for; then
+	// the assignment is read as that left it.
+	GetAssignmentForSubmission(ctx context.Context, arg GetAssignmentForSubmissionParams) (GetAssignmentForSubmissionRow, error)
 	GetAssignmentInCourse(ctx context.Context, arg GetAssignmentInCourseParams) (GetAssignmentInCourseRow, error)
 	// GetAssignmentInCourse, locked for the rest of the transaction:
 	// assignment.update and assignment.publish read the row, check it and write
@@ -172,6 +178,11 @@ type Querier interface {
 	// the name or of the email, in any case, taken as it is: strpos has no
 	// wildcards to escape.
 	ListActors(ctx context.Context, arg ListActorsParams) ([]ListActorsRow, error)
+	// Every current student of the course whom the caller's student scope
+	// reaches, with their latest attempt at one assignment, if any: the students
+	// who have not started are rows too, with no submission. The caller's
+	// assignment scope is checked on the target, before this runs.
+	ListAssignmentRoster(ctx context.Context, arg ListAssignmentRosterParams) ([]ListAssignmentRosterRow, error)
 	ListAssignmentScope(ctx context.Context, memberID uuid.UUID) ([]uuid.UUID, error)
 	// Scope is applied here, not afterwards. A member who may not write
 	// assignments sees only published ones.
@@ -190,7 +201,8 @@ type Querier interface {
 	// scope refers to them, or a student could read next week's exam by listing.
 	ListCourseDocuments(ctx context.Context, arg ListCourseDocumentsParams) ([]ListCourseDocumentsRow, error)
 	ListCourses(ctx context.Context, arg ListCoursesParams) ([]ListCoursesRow, error)
-	// Never the hash.
+	// Never the hash. The issuer's name comes with the row, for an administrator
+	// telling one token from another.
 	ListCredentialsForActor(ctx context.Context, actorID uuid.UUID) ([]ListCredentialsForActorRow, error)
 	ListDepartments(ctx context.Context) ([]Department, error)
 	// The live drafts waiting to be posted for one assignment.
@@ -265,6 +277,12 @@ type Querier interface {
 	ListVersions(ctx context.Context, documentID uuid.UUID) ([]ListVersionsRow, error)
 	LiveComponentGradeExists(ctx context.Context, arg LiveComponentGradeExistsParams) (bool, error)
 	LiveSubmissionGradeExists(ctx context.Context, submissionID *uuid.UUID) (bool, error)
+	// FOR UPDATE, not the NO KEY UPDATE of an ordinary update: it conflicts with
+	// the KEY SHARE that inserting a submission takes, and that
+	// GetAssignmentForSubmission takes before it checks that the assignment is
+	// published. So a submission being made waits for an unpublish and then sees
+	// the assignment unpublished, or is made first and is seen by it.
+	LockAssignmentForUnpublish(ctx context.Context, arg LockAssignmentForUnpublishParams) (LockAssignmentForUnpublishRow, error)
 	LockComponentGradeTarget(ctx context.Context, arg LockComponentGradeTargetParams) error
 	// Taken before changing the tree's shape, so that two moves cannot each
 	// check for a cycle and then create one between them.
@@ -298,6 +316,10 @@ type Querier interface {
 	LockSubmissionForGrading(ctx context.Context, id uuid.UUID) (string, error)
 	// All of one student's attempts at one assignment, locked, newest first.
 	LockSubmissionsOf(ctx context.Context, arg LockSubmissionsOfParams) ([]LockSubmissionsOfRow, error)
+	// The actor an email belongs to, for someone seating them, with their seat
+	// in this course if they have a live one. The email must match whole, in any
+	// case: this finds a person whose address one already has, and lists nobody.
+	LookupActorByEmail(ctx context.Context, arg LookupActorByEmailParams) (LookupActorByEmailRow, error)
 	MarkActionExecuted(ctx context.Context, arg MarkActionExecutedParams) error
 	MarkActionFailed(ctx context.Context, arg MarkActionFailedParams) error
 	MaxVersionSeq(ctx context.Context, documentID uuid.UUID) (int32, error)
@@ -354,6 +376,7 @@ type Querier interface {
 	// and every call fails.
 	TouchCredential(ctx context.Context, arg TouchCredentialParams) error
 	TryJobLock(ctx context.Context, key int64) (bool, error)
+	UnpublishAssignment(ctx context.Context, id uuid.UUID) (int64, error)
 	// A null leaves the value as it is.
 	UpdateActor(ctx context.Context, arg UpdateActorParams) error
 	UpdateAssignment(ctx context.Context, arg UpdateAssignmentParams) error

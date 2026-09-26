@@ -113,6 +113,20 @@ type CredentialView struct {
 	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
 	RevokedAt   *time.Time `json:"revoked_at,omitempty"`
 	CreatedAt   time.Time  `json:"created_at"`
+	IssuedByID  *uuid.UUID `json:"issued_by_actor_id,omitempty" jsonschema:"who issued a token: the actor themself or an administrator; absent for other kinds and for older tokens"`
+	IssuedBy    *string    `json:"issued_by_name,omitempty" jsonschema:"the issuer's display name"`
+}
+
+func viewCredentials(rows []dbq.ListCredentialsForActorRow) CredentialListOut {
+	out := CredentialListOut{Credentials: make([]CredentialView, 0, len(rows))}
+	for _, r := range rows {
+		out.Credentials = append(out.Credentials, CredentialView{
+			ID: r.ID, Kind: r.Kind, Provider: r.Provider, Subject: r.Subject, TokenPrefix: r.TokenPrefix,
+			Label: r.Label, LastUsedAt: r.LastUsedAt, ExpiresAt: r.ExpiresAt, RevokedAt: r.RevokedAt, CreatedAt: r.CreatedAt,
+			IssuedByID: r.IssuedByActorID, IssuedBy: r.IssuedByName,
+		})
+	}
+	return out
 }
 
 type CredentialListOut struct {
@@ -128,17 +142,7 @@ func credentialList() tool.Tool {
 		Resolve: noTarget[Empty]("credential"),
 		Query: func(ctx context.Context, rc *tool.ReadCtx, _ Empty) (CredentialListOut, error) {
 			rows, err := rc.Q.ListCredentialsForActor(ctx, rc.Actor.ID)
-			if err != nil {
-				return CredentialListOut{}, err
-			}
-			out := CredentialListOut{Credentials: make([]CredentialView, 0, len(rows))}
-			for _, r := range rows {
-				out.Credentials = append(out.Credentials, CredentialView{
-					ID: r.ID, Kind: r.Kind, Provider: r.Provider, Subject: r.Subject, TokenPrefix: r.TokenPrefix,
-					Label: r.Label, LastUsedAt: r.LastUsedAt, ExpiresAt: r.ExpiresAt, RevokedAt: r.RevokedAt, CreatedAt: r.CreatedAt,
-				})
-			}
-			return out, nil
+			return viewCredentials(rows), err
 		},
 	})
 }
@@ -169,7 +173,7 @@ func credentialIssueToken() tool.Tool {
 			if err != nil {
 				return IssueTokenOut{}, err
 			}
-			tok, id, err := auth.IssueToken(ctx, ec.Q, ec.Actor.ID, in.Label, expires, ec.Now)
+			tok, id, err := auth.IssueToken(ctx, ec.Q, ec.Actor.ID, &ec.Actor.ID, in.Label, expires, ec.Now)
 			if err != nil {
 				return IssueTokenOut{}, err
 			}

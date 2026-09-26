@@ -154,7 +154,7 @@ func submissionMarkMissing() tool.Tool {
 			return tool.Target{CourseID: in.CourseID, Type: "assignment", ID: &in.AssignmentID}, nil
 		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in MarkMissingIn) (MarkMissingOut, error) {
-			a, err := ec.Q.GetAssignmentInCourse(ctx, dbq.GetAssignmentInCourseParams{ID: in.AssignmentID, CourseID: in.CourseID})
+			a, err := ec.Q.GetAssignmentForSubmission(ctx, dbq.GetAssignmentForSubmissionParams{ID: in.AssignmentID, CourseID: in.CourseID})
 			if errors.Is(err, pgx.ErrNoRows) {
 				return MarkMissingOut{}, apperr.Missing("no such assignment")
 			}

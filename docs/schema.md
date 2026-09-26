@@ -61,6 +61,7 @@ actor(id, kind [human|agent|system], display_name, email null,
 credential(id, actor_id→actor, kind [password|sso|api_token|session|invite],
            secret_hash null, provider null, subject null, token_prefix null,
            label null, last_used_at null, expires_at null, revoked_at null, created_at,
+           issued_by_actor_id null→actor,
            unique(provider, subject), unique(token_prefix))
 
 course(id, dept_id→department, term_id→term, code, section = '', title, description null,
@@ -97,6 +98,12 @@ there is one verification path and no session table; unlike an API token it must
 (`aisinv_`) and never looked up as a bearer token. It is taken for setting the password, once,
 and revoked as it is; an actor has one live invitation at most. Setting a password some other
 way revokes it too, and so does a change of email: it went to the old one.
+
+`issued_by_actor_id` says who issued an API token: the actor themself (`credential.issue_token`)
+or an administrator (`actor.issue_token`). It is null for the other kinds, for a token from
+`aishiterud token issue`, and for tokens older than migration 0006. An administrator lists an
+actor's credentials with `actor.list_credentials` and revokes one with `actor.revoke_credential`,
+so that a token that leaks is revoked alone rather than by suspending its agent.
 
 `course.status = 'archived'` refuses every write, from agents included.
 
@@ -166,6 +173,10 @@ the nearest one, and the choice is recorded here so that it is a decision and no
 | Reading assignments, the course, the event feed | `perm_document_read` | the most basic permission a seated member holds; what the feed *shows* is decided per event |
 | Reading the grading scheme | `perm_grade_read` | |
 | Correcting lateness (`submission.set_lateness`) | `perm_grade_submit` | not `perm_submission_write`, or a student could un-late themselves |
+| Recording a student as having handed in nothing (`submission.record_missing`) | `perm_grade_submit` | the same: what a student handed in is not theirs to declare |
+| Where every student stands on an assignment (`submission.roster`) | `perm_submission_read` | it is the submission list with the students who have not started |
+| Finding whom to seat by their whole email (`member.lookup_actor`) | `perm_member_manage` | whoever seats members has to name them; it lists nobody |
+| Unpublishing an assignment nobody has started (`assignment.unpublish`) | `perm_assignment_write` | the undo of publishing it |
 | Regrading | the lower of `perm_grade_submit` and `perm_grade_post` | it writes a grade and makes it visible in one step |
 | Course settings, status, first instructor | `platform_role` | outside the course by definition |
 
@@ -426,6 +437,8 @@ work takes that row over, unless a grade has been entered or proposed for it: a 
 handing in nothing is a grade of that nothing, and the late work is then a new attempt. An
 archived course is left as archived, by the sweeps as by everyone: its expired seats, stale
 proposals and past due dates are swept once it is activated again.
+A grader need not wait for a due date, or have one: `submission.record_missing` gives one
+student with no submission row at all the same `missing` row, by hand.
 
 **`event` is something that happened, written after it did**, in the same transaction as the
 state change. Not every event has an action behind it (a due date passing); one action may

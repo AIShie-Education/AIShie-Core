@@ -524,6 +524,42 @@ func (q *Queries) ListStudentScope(ctx context.Context, memberID uuid.UUID) ([]u
 	return items, nil
 }
 
+const lookupActorByEmail = `-- name: LookupActorByEmail :one
+SELECT a.id, a.kind, a.display_name, a.status, m.id AS member_id
+FROM actor a
+LEFT JOIN course_member m ON m.actor_id = a.id AND m.course_id = $1 AND m.status <> 'removed'
+WHERE lower(a.email) = lower($2) AND a.kind <> 'system'
+`
+
+type LookupActorByEmailParams struct {
+	CourseID uuid.UUID
+	Email    string
+}
+
+type LookupActorByEmailRow struct {
+	ID          uuid.UUID
+	Kind        string
+	DisplayName string
+	Status      string
+	MemberID    *uuid.UUID
+}
+
+// The actor an email belongs to, for someone seating them, with their seat
+// in this course if they have a live one. The email must match whole, in any
+// case: this finds a person whose address one already has, and lists nobody.
+func (q *Queries) LookupActorByEmail(ctx context.Context, arg LookupActorByEmailParams) (LookupActorByEmailRow, error) {
+	row := q.db.QueryRow(ctx, lookupActorByEmail, arg.CourseID, arg.Email)
+	var i LookupActorByEmailRow
+	err := row.Scan(
+		&i.ID,
+		&i.Kind,
+		&i.DisplayName,
+		&i.Status,
+		&i.MemberID,
+	)
+	return i, err
+}
+
 const setMemberExpiry = `-- name: SetMemberExpiry :exec
 UPDATE course_member SET expires_at = $2 WHERE id = $1
 `
