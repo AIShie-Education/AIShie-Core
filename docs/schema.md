@@ -446,9 +446,10 @@ handing in nothing is a grade of that nothing, and the late work is then a new a
 archived course is left as archived, by the sweeps as by everyone: its expired seats, stale
 proposals and past due dates are swept once it is activated again.
 A grader need not wait for a due date, or have one: `submission.record_missing` gives one
-student with no submission row at all the same `missing` row, by hand. An assignment unpublished
-between the sweep's listing it and its step reaching it is not recorded under the step's key
-(`ErrSweepMoot`): published again with the same due date, it is swept then.
+student with no submission row at all the same `missing` row, by hand. An assignment unpublished,
+or whose due date moved or was cleared, between the sweep's listing it and its step reaching it
+is not recorded under the step's key (`ErrSweepMoot`): published again, or given back the same
+due date, it is swept then.
 
 **`event` is something that happened, written after it did**, in the same transaction as the
 state change. Not every event has an action behind it (a due date passing); one action may

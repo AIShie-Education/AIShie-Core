@@ -130,12 +130,13 @@ func memberExpire() tool.Tool {
 	})
 }
 
-// ErrSweepMoot is what submission.mark_missing returns for an assignment
-// unpublished since the sweep listed it. It is not an apperr, so the pipeline
-// keeps nothing of the call: the sweep's key names the due date and not the
-// publication, and a no-op stored under it would pass the assignment over for
-// good once it is published again with the same due date.
-var ErrSweepMoot = errors.New("the assignment was unpublished after the sweep listed it")
+// ErrSweepMoot is what submission.mark_missing returns for an assignment that
+// is no longer published and due as the sweep listed it: unpublished, or its
+// due date moved or cleared, since. It is not an apperr, so the pipeline keeps
+// nothing of the call: the sweep's key names the due date, and a no-op stored
+// under it would pass the assignment over for good once it is published again,
+// or given back the same due date.
+var ErrSweepMoot = errors.New("the assignment is no longer published and due as the sweep listed it")
 
 type MarkMissingIn struct {
 	CourseID     uuid.UUID `json:"course_id"`
@@ -168,11 +169,8 @@ func submissionMarkMissing() tool.Tool {
 			if err != nil {
 				return MarkMissingOut{}, err
 			}
-			if a.PublishedAt == nil {
+			if a.PublishedAt == nil || a.DueAt == nil || !a.DueAt.Equal(in.DueAt) || a.DueAt.After(ec.Now) {
 				return MarkMissingOut{}, ErrSweepMoot
-			}
-			if a.DueAt == nil || !a.DueAt.Equal(in.DueAt) || a.DueAt.After(ec.Now) {
-				return MarkMissingOut{}, nil // the due date has moved: the next one is another key
 			}
 			ec.Emit(events.Event{Type: EventAssignmentDuePassed, CourseID: &in.CourseID, SubjectType: "assignment",
 				SubjectID: &a.ID, AssignmentID: &a.ID})

@@ -941,3 +941,29 @@ func TestAnAssignmentUnpublishedUnderTheSweepIsSweptWhenRepublished(t *testing.T
 		t.Fatalf("swept twice: %+v", rep)
 	}
 }
+
+// So is one whose due date moved, or was cleared, in the same moment: given
+// back the due date the sweep listed it under, it is swept then.
+func TestAnAssignmentWhoseDueDateMovedUnderTheSweepIsSweptWhenItComesBack(t *testing.T) {
+	for name, move := range map[string]string{
+		"moved":   `UPDATE assignment SET due_at = now() + interval '1 day' WHERE id = $1`,
+		"cleared": `UPDATE assignment SET due_at = NULL WHERE id = $1`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := setup(t, 2)
+			due := f.now.Add(-time.Minute)
+			f.Exec(`UPDATE assignment SET due_at = $2 WHERE id = $1`, f.HW4, due)
+			f.Exec(move, f.HW4)
+			key := "job:submission.mark_missing:" + f.HW4.String() + ":" + fmt.Sprint(due.Unix())
+			_, err := f.P.InvokeSystem(context.Background(), f.system, tools.ToolSubmissionMarkMissing,
+				tools.MarkMissingIn{CourseID: f.Course, AssignmentID: f.HW4, DueAt: due}, key)
+			if !errors.Is(err, tools.ErrSweepMoot) {
+				t.Fatalf("%v, want ErrSweepMoot", err)
+			}
+			f.Exec(`UPDATE assignment SET due_at = $2 WHERE id = $1`, f.HW4, due)
+			if rep := f.sweep(t); rep.AssignmentsClosed != 1 || rep.SubmissionsMissing != 2 {
+				t.Fatalf("%+v, want HW4 closed and both students missing", rep)
+			}
+		})
+	}
+}

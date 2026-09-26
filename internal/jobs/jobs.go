@@ -415,7 +415,7 @@ func (r *Runner) removeIfOrphan(ctx context.Context, u upload) (bool, error) {
 func (r *Runner) did(out pipeline.Outcome, err error, what string, id uuid.UUID) bool {
 	switch {
 	case errors.Is(err, tools.ErrSweepMoot):
-		return false // unpublished meanwhile; swept once it is published again
+		return false // unpublished, or its due date moved, meanwhile; swept once it is due again
 	case err != nil:
 		r.log.Error("sweep step failed", "step", what, "id", id, "err", err)
 		return false
