@@ -71,6 +71,14 @@ type Config struct {
 
 	// OIDC is single sign-on. It is off unless OIDC_ISSUER is set.
 	OIDC OIDC
+
+	// AgentSelfService lets people register agents of their own
+	// (agent.create). Off, only administrators register agents; agents
+	// already registered, and what their owners do with them, are left as
+	// they are. AgentMaxPerOwner bounds the agents one person may have that
+	// are not suspended.
+	AgentSelfService bool
+	AgentMaxPerOwner int
 }
 
 // OIDC describes the identity provider. The defaults are PolyU's ADFS, which
@@ -168,6 +176,21 @@ func FromEnv() (Config, error) {
 			}
 			*dst = b
 		}
+	}
+	c.AgentSelfService, c.AgentMaxPerOwner = true, 5
+	switch v := os.Getenv("AGENT_SELF_SERVICE"); v {
+	case "", "on":
+	case "off":
+		c.AgentSelfService = false
+	default:
+		return Config{}, fmt.Errorf("AGENT_SELF_SERVICE: %q is not on or off", v)
+	}
+	if v := os.Getenv("AGENT_MAX_PER_OWNER"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			return Config{}, fmt.Errorf("AGENT_MAX_PER_OWNER: %q is not a number, one or more", v)
+		}
+		c.AgentMaxPerOwner = n
 	}
 	c.OIDC = OIDC{ProviderName: env("OIDC_PROVIDER_NAME", "polyu-adfs"), Issuer: os.Getenv("OIDC_ISSUER"),
 		ClientID: os.Getenv("OIDC_CLIENT_ID"), ClientSecret: os.Getenv("OIDC_CLIENT_SECRET"),

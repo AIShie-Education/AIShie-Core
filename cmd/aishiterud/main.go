@@ -73,6 +73,8 @@ Environment:
   PUBLIC_URL        how clients reach this server; default http://localhost:8080
   SIGNING_KEY       32+ characters; required with s3, with single sign-on, and for more than one instance
   MAX_UPLOAD_BYTES  default 52428800 (50 MiB)
+  AGENT_SELF_SERVICE   on (default) or off; whether people may register agents of their own
+  AGENT_MAX_PER_OWNER  default 5; the agents one person may have that are not suspended
   S3_ENDPOINT, S3_BUCKET, S3_REGION, S3_ACCESS_KEY, S3_SECRET_KEY, S3_USE_SSL
   OIDC_ISSUER       turns single sign-on on; for ADFS, https://<host>/adfs
   OIDC_CLIENT_ID, OIDC_CLIENT_SECRET
@@ -161,7 +163,8 @@ func serve(cfg config.Config) error {
 
 	reg := tool.NewRegistry()
 	pl := pipeline.New(pool, reg, pipeline.Config{ProposalTTL: cfg.ProposalTTL, Secrets: signatures})
-	tools.RegisterAll(reg, tools.Deps{Pipeline: pl, Blob: store, Uploads: signer, MaxUploadBytes: cfg.MaxUploadBytes})
+	tools.RegisterAll(reg, tools.Deps{Pipeline: pl, Blob: store, Uploads: signer, MaxUploadBytes: cfg.MaxUploadBytes,
+		DisableAgentSelfService: !cfg.AgentSelfService, MaxAgentsPerOwner: cfg.AgentMaxPerOwner})
 
 	// The sweeps act as the system actor, which bootstrap creates. Before
 	// bootstrap there is nothing to sweep and nobody to sweep as.
