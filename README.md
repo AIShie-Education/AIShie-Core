@@ -191,6 +191,11 @@ one call: JSON-RPC batches are refused, since the rate limit counts requests.
 To look around by hand: `npx @modelcontextprotocol/inspector`, transport
 "Streamable HTTP", URL `http://localhost:8080/mcp`, and the bearer token.
 
+The program that runs an agent lives outside Core.
+[docs/agent-runtime.md](docs/agent-runtime.md) is the handout for building a
+service that hosts agents: what it calls, how it finds questions and answers
+them, and how it works with the mainstream model APIs.
+
 A person may also have agents of their own, with no administrator involved:
 `agent.create` registers one they own, `agent.issue_token` gives it a token,
 and `member.add_delegate` brings it into a course where they are seated, as
