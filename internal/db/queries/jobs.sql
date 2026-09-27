@@ -27,6 +27,42 @@ WHERE m.status <> 'removed' AND m.expires_at IS NOT NULL AND m.expires_at <= sql
 ORDER BY m.expires_at
 LIMIT sqlc.arg(max_rows);
 
+-- name: ListOrphanedSeats :many
+-- Seats that count for nothing for good (SeatOrphaned), not yet removed: a
+-- delegate's whose principal is removed or past its expiry, and seats that
+-- do not match their actor's ownership. The database removes a delegate
+-- with its principal (course_member_delegates_follow), so the first are
+-- rare: a principal's expiry the expiry sweep has not got to. authorize() refuses them already; removing
+-- them cancels what they proposed and clears the way for a fresh seat.
+--
+-- The two kinds are found apart, each from an index of its own, so that the
+-- sweep, which runs every minute, looks at delegates' seats and owned
+-- agents' seats and not at every seat on the platform: a delegate's whose
+-- principal is gone or not its owner's seat, from course_member_principal_idx;
+-- an owned agent's with no principal, from actor_owner_idx. SeatOrphaned is
+-- the same rule for one seat, and the authorization queries' owner_matches
+-- its other half: a change to one is a change to all three.
+SELECT o.id, o.course_id
+FROM (
+    SELECT m.id, m.course_id
+    FROM course_member m
+    JOIN course_member p ON p.id = m.principal_member_id
+    JOIN actor a ON a.id = m.actor_id
+    JOIN course c ON c.id = m.course_id
+    WHERE m.principal_member_id IS NOT NULL AND m.status <> 'removed' AND c.status <> 'archived'
+      AND (p.status = 'removed' OR (p.expires_at IS NOT NULL AND p.expires_at <= sqlc.arg(now))
+           OR a.owner_actor_id IS DISTINCT FROM p.actor_id)
+  UNION ALL
+    SELECT m.id, m.course_id
+    FROM actor a
+    JOIN course_member m ON m.actor_id = a.id
+    JOIN course c ON c.id = m.course_id
+    WHERE a.owner_actor_id IS NOT NULL AND m.principal_member_id IS NULL
+      AND m.status <> 'removed' AND c.status <> 'archived'
+) o
+ORDER BY o.id
+LIMIT sqlc.arg(max_rows);
+
 -- name: ListAssignmentsNewlyPastDue :many
 -- Published assignments of open courses whose due date has passed and which
 -- have not been swept for that due date yet. The sweep's own action row is

@@ -291,6 +291,11 @@ type seating struct {
 	listedStudents                []uuid.UUID
 	listedAssignments             []uuid.UUID
 	expiresAt                     *time.Time
+	// principal is set for a delegate's seat: the seat, in this course, of
+	// the person who owns the actor (member.add_delegate); answersCourse
+	// says it answers the course, not its principal alone.
+	principal     *uuid.UUID
+	answersCourse bool
 }
 
 // listsItself reports whether the seat's student list will be the seat
@@ -307,7 +312,10 @@ var errSeated = apperr.Conflicts("the actor already has a seat in this course; c
 // preset_id is kept as provenance only — nothing reads it afterwards, so
 // editing the preset later changes nobody already seated.
 func seat(ctx context.Context, ec *tool.ExecCtx, s seating) (uuid.UUID, error) {
-	a, err := ec.Q.GetActor(ctx, s.actorID)
+	// FOR SHARE: whether the actor is someone's, and whose, holds until the
+	// seat is made, or waits for an owner's change under way to finish
+	// (actor.set_owner, which counts the agent's seats once it has the row).
+	a, err := ec.Q.GetActorForShare(ctx, s.actorID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return uuid.Nil, apperr.Missing("no such actor")
 	}
@@ -320,33 +328,56 @@ func seat(ctx context.Context, ec *tool.ExecCtx, s seating) (uuid.UUID, error) {
 	if a.Kind == "system" {
 		return uuid.Nil, apperr.Precondition("the system actor is not seated in courses")
 	}
+	// An agent someone owns acts only as its owner's delegate, and only its
+	// owner seats it so. The database refuses it too.
+	if s.principal == nil && a.OwnerActorID != nil {
+		return uuid.Nil, apperr.Precondition("the agent belongs to someone: its owner brings it in, with member.add_delegate")
+	}
 	// A seat whose expiry has passed is removed now rather than by the next
-	// sweep: it is in the way of the fresh one, and it was over anyway.
+	// sweep: it is in the way of the fresh one, and it was over anyway. So is
+	// an orphaned delegate's, whose principal has gone, and a seat that no
+	// longer matches its actor's owner: neither counts for anything again.
 	switch live, err := ec.Q.GetLiveMembership(ctx, dbq.GetLiveMembershipParams{CourseID: s.courseID, ActorID: s.actorID}); {
 	case errors.Is(err, pgx.ErrNoRows):
 	case err != nil:
 		return uuid.Nil, err
-	case live.ExpiresAt != nil && !live.ExpiresAt.After(ec.Now):
+	default:
+		expired := live.ExpiresAt != nil && !live.ExpiresAt.After(ec.Now)
+		orphaned, err := ec.Q.SeatOrphaned(ctx, dbq.SeatOrphanedParams{MemberID: live.ID, Now: &ec.Now})
+		if err != nil {
+			return uuid.Nil, err
+		}
+		if !expired && !orphaned {
+			return uuid.Nil, errSeated
+		}
 		// Only now is the seat locked, as every removal locks the seat it
 		// removes: the removal then waits for its member's calls in flight,
 		// and cancels what they proposed. Then it is looked at again: the
 		// sweep may have removed it meanwhile, and nothing is in the way, or
-		// it may have been given longer, and it is as live as any other.
+		// it may have been given longer, and it is as live as any other. A
+		// delegate's principal is held first, as whatever locks a
+		// delegate's seat takes them (holdPrincipalOf).
+		if err := holdPrincipalOf(ctx, ec.Q, live.ID); err != nil {
+			return uuid.Nil, err
+		}
 		locked, err := ec.Q.GetMemberForSweep(ctx, live.ID)
 		if err != nil {
 			return uuid.Nil, err
 		}
-		switch {
-		case locked.Status == domain.MemberRemoved:
-		case locked.ExpiresAt == nil || locked.ExpiresAt.After(ec.Now):
-			return uuid.Nil, errSeated
-		default:
-			if _, err := members.Remove(ctx, ec.Q, ec.Emit, s.courseID, live.ID, members.ReasonExpired); err != nil {
+		if locked.Status != domain.MemberRemoved {
+			reason := members.ReasonExpired
+			if locked.ExpiresAt == nil || locked.ExpiresAt.After(ec.Now) {
+				// Given longer meanwhile: in the way, unless it is orphaned,
+				// which nothing undoes (SeatOrphaned).
+				if !orphaned {
+					return uuid.Nil, errSeated
+				}
+				reason = members.ReasonOrphaned
+			}
+			if _, err := members.Remove(ctx, ec.Q, ec.Emit, s.courseID, live.ID, reason); err != nil {
 				return uuid.Nil, err
 			}
 		}
-	default:
-		return uuid.Nil, errSeated
 	}
 	if s.expiresAt != nil && !s.expiresAt.After(ec.Now) {
 		return uuid.Nil, apperr.Invalid("expires_at is in the past")
@@ -362,7 +393,9 @@ func seat(ctx context.Context, ec *tool.ExecCtx, s seating) (uuid.UUID, error) {
 		PermSubmissionWrite: s.perms.col(domain.PermSubmissionWrite), PermGradeRead: s.perms.col(domain.PermGradeRead),
 		PermGradeSubmit: s.perms.col(domain.PermGradeSubmit), PermGradePost: s.perms.col(domain.PermGradePost),
 		PermMemberRead: s.perms.col(domain.PermMemberRead), PermMemberManage: s.perms.col(domain.PermMemberManage),
-		PermActionDecide: s.perms.col(domain.PermActionDecide), CreatedAt: ec.Now,
+		PermActionDecide: s.perms.col(domain.PermActionDecide), PermAgentDelegate: s.perms.col(domain.PermAgentDelegate),
+		PermConversationAsk: s.perms.col(domain.PermConversationAsk), PermConversationAnswer: s.perms.col(domain.PermConversationAnswer),
+		CreatedAt: ec.Now, PrincipalMemberID: s.principal, AnswersCourse: s.answersCourse,
 	}
 	if s.preset != nil {
 		row.PresetID = &s.preset.ID
@@ -381,9 +414,12 @@ func seat(ctx context.Context, ec *tool.ExecCtx, s seating) (uuid.UUID, error) {
 	if err := writeScope(ctx, ec.Q, s.courseID, id, s.studentScope, students, s.assignmentScope, s.listedAssignments); err != nil {
 		return uuid.Nil, err
 	}
+	payload := map[string]any{"actor_id": s.actorID, "role": s.role}
+	if s.principal != nil {
+		payload["delegate"], payload["principal_member_id"], payload["answers_course"] = true, *s.principal, s.answersCourse
+	}
 	ec.Emit(events.Event{
-		Type: members.EventAdded, CourseID: &s.courseID, SubjectType: "course_member", SubjectID: &id,
-		Payload: map[string]any{"actor_id": s.actorID, "role": s.role},
+		Type: members.EventAdded, CourseID: &s.courseID, SubjectType: "course_member", SubjectID: &id, Payload: payload,
 	})
 	return id, nil
 }

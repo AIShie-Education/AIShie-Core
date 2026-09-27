@@ -8,7 +8,7 @@ import (
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/domain"
 )
 
-// permSet is a full set of the thirteen permissions, as a preset or a member
+// permSet is a full set of the permissions, as a preset or a member
 // row holds them.
 type permSet map[domain.Perm]domain.Level
 
@@ -60,7 +60,8 @@ func presetPerms(p dbq.PermissionPreset) permSet {
 		domain.PermSubmissionWrite: level(p.PermSubmissionWrite), domain.PermGradeRead: level(p.PermGradeRead),
 		domain.PermGradeSubmit: level(p.PermGradeSubmit), domain.PermGradePost: level(p.PermGradePost),
 		domain.PermMemberRead: level(p.PermMemberRead), domain.PermMemberManage: level(p.PermMemberManage),
-		domain.PermActionDecide: level(p.PermActionDecide),
+		domain.PermActionDecide: level(p.PermActionDecide), domain.PermAgentDelegate: level(p.PermAgentDelegate),
+		domain.PermConversationAsk: level(p.PermConversationAsk), domain.PermConversationAnswer: level(p.PermConversationAnswer),
 	}
 }
 
@@ -72,7 +73,8 @@ func memberPerms(m dbq.GetMemberInCourseRow) permSet {
 		domain.PermSubmissionWrite: level(m.PermSubmissionWrite), domain.PermGradeRead: level(m.PermGradeRead),
 		domain.PermGradeSubmit: level(m.PermGradeSubmit), domain.PermGradePost: level(m.PermGradePost),
 		domain.PermMemberRead: level(m.PermMemberRead), domain.PermMemberManage: level(m.PermMemberManage),
-		domain.PermActionDecide: level(m.PermActionDecide),
+		domain.PermActionDecide: level(m.PermActionDecide), domain.PermAgentDelegate: level(m.PermAgentDelegate),
+		domain.PermConversationAsk: level(m.PermConversationAsk), domain.PermConversationAnswer: level(m.PermConversationAnswer),
 	}
 }
 

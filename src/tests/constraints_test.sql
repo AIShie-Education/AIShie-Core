@@ -49,7 +49,7 @@ END $$;
 -- Fixtures ------------------------------------------------------------------
 -- ids: 11 term · 21 dept · 3x actors · 4x courses · 5x members · 6x components
 --      7x assignments · ex documents · fx versions · ax submissions
---      bx actions · dx grades
+--      bx actions · dx grades · cx conversations · cxx their messages
 INSERT INTO term (id, name, starts_on, ends_on)
 VALUES ('00000000-0000-0000-0000-000000000011', '2026 Autumn', '2026-09-01', '2026-12-20');
 INSERT INTO department (id, name) VALUES ('00000000-0000-0000-0000-000000000021', 'Computing');
@@ -230,6 +230,110 @@ SELECT pg_temp.fails('preset_id must name an existing preset', '23503', $q$
     INSERT INTO course_member (course_id, actor_id, added_by_actor_id, preset_id, role, student_scope, assignment_scope)
     VALUES ('00000000-0000-0000-0000-000000000042', '00000000-0000-0000-0000-000000000032',
             '00000000-0000-0000-0000-000000000034', '00000000-0000-0000-0000-000000000099', 'student', 'listed', 'all') $q$);
+
+-- Agents a person owns, and their delegate seats ------------------------------
+-- 38 Yuki's agent · 5a its seat in A, as Yuki's (52) delegate
+SELECT pg_temp.ok('a person owns an agent', $q$
+    INSERT INTO actor (id, kind, display_name, owner_actor_id, created_by_actor_id)
+    VALUES ('00000000-0000-0000-0000-000000000038', 'agent', 'Yuki''s agent', '00000000-0000-0000-0000-000000000035', '00000000-0000-0000-0000-000000000035') $q$);
+SELECT pg_temp.fails('an agent owns no agent', '23514', $q$
+    INSERT INTO actor (kind, display_name, owner_actor_id, created_by_actor_id)
+    VALUES ('agent', 'x', '00000000-0000-0000-0000-000000000036', '00000000-0000-0000-0000-000000000031') $q$);
+SELECT pg_temp.fails('the system actor owns nothing', '23514', $q$
+    INSERT INTO actor (kind, display_name, owner_actor_id, created_by_actor_id)
+    VALUES ('agent', 'x', '00000000-0000-0000-0000-000000000033', '00000000-0000-0000-0000-000000000031') $q$);
+SELECT pg_temp.fails('only an agent has an owner', '23514', $q$
+    INSERT INTO actor (kind, display_name, owner_actor_id, created_by_actor_id)
+    VALUES ('human', 'x', '00000000-0000-0000-0000-000000000035', '00000000-0000-0000-0000-000000000031') $q$);
+SELECT pg_temp.fails('an owner is an actor that exists', '23514', $q$
+    INSERT INTO actor (kind, display_name, owner_actor_id, created_by_actor_id)
+    VALUES ('agent', 'x', '00000000-0000-0000-0000-0000000000ff', '00000000-0000-0000-0000-000000000031') $q$);
+SELECT pg_temp.fails('an agent is not moved under another agent', '23514', $q$
+    UPDATE actor SET owner_actor_id = '00000000-0000-0000-0000-000000000036' WHERE id = '00000000-0000-0000-0000-000000000038' $q$);
+SELECT pg_temp.fails('an agent someone owns holds no platform role', '23514', $q$
+    UPDATE actor SET platform_role = 'admin' WHERE id = '00000000-0000-0000-0000-000000000038' $q$);
+SELECT pg_temp.fails('nor is an agent that holds one given an owner', '23514', $q$
+    INSERT INTO actor (kind, display_name, platform_role, owner_actor_id, created_by_actor_id)
+    VALUES ('agent', 'x', 'admin', '00000000-0000-0000-0000-000000000035', '00000000-0000-0000-0000-000000000031') $q$);
+SELECT pg_temp.fails('nothing owns itself', '23514', $q$
+    UPDATE actor SET owner_actor_id = id WHERE id = '00000000-0000-0000-0000-000000000038' $q$);
+SELECT pg_temp.fails('who suspended an actor is an actor', '23503', $q$
+    UPDATE actor SET suspended_by_actor_id = '00000000-0000-0000-0000-0000000000ff' WHERE id = '00000000-0000-0000-0000-000000000038' $q$);
+SELECT pg_temp.ok('making an actor active again forgets who suspended it', $q$
+    UPDATE actor SET status = 'suspended', suspended_by_actor_id = '00000000-0000-0000-0000-000000000035' WHERE id = '00000000-0000-0000-0000-000000000038';
+    UPDATE actor SET status = 'active' WHERE id = '00000000-0000-0000-0000-000000000038';
+    DO $chk$
+    BEGIN
+        IF EXISTS (SELECT 1 FROM actor WHERE id = '00000000-0000-0000-0000-000000000038' AND suspended_by_actor_id IS NOT NULL) THEN
+            RAISE EXCEPTION 'suspended_by_actor_id outlived the suspension';
+        END IF;
+    END $chk$ $q$);
+SELECT pg_temp.ok('an owned agent is seated as its owner''s delegate', $q$
+    INSERT INTO course_member (id, course_id, actor_id, role, added_by_actor_id, student_scope, assignment_scope, principal_member_id)
+    VALUES ('00000000-0000-0000-0000-00000000005a', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000000038', 'assistant', '00000000-0000-0000-0000-000000000035', 'listed', 'all', '00000000-0000-0000-0000-000000000052') $q$);
+SELECT pg_temp.fails('an owned agent is not seated without a principal', '23514', $q$
+    INSERT INTO course_member (course_id, actor_id, role, added_by_actor_id, student_scope, assignment_scope)
+    VALUES ('00000000-0000-0000-0000-000000000042', '00000000-0000-0000-0000-000000000038', 'assistant', '00000000-0000-0000-0000-000000000034', 'all', 'all') $q$);
+SELECT pg_temp.fails('nor as the delegate of someone other than its owner', '23514', $q$
+    INSERT INTO course_member (course_id, actor_id, role, added_by_actor_id, student_scope, assignment_scope, principal_member_id)
+    VALUES ('00000000-0000-0000-0000-000000000042', '00000000-0000-0000-0000-000000000038', 'assistant', '00000000-0000-0000-0000-000000000035', 'listed', 'all', '00000000-0000-0000-0000-000000000055') $q$);
+SELECT pg_temp.fails('a principal is a seat in the same course', '23503', $q$
+    INSERT INTO course_member (course_id, actor_id, role, added_by_actor_id, student_scope, assignment_scope, principal_member_id)
+    VALUES ('00000000-0000-0000-0000-000000000042', '00000000-0000-0000-0000-000000000038', 'assistant', '00000000-0000-0000-0000-000000000035', 'listed', 'all', '00000000-0000-0000-0000-000000000052') $q$);
+SELECT pg_temp.fails('an actor nobody owns is nobody''s delegate', '23514', $q$
+    INSERT INTO course_member (course_id, actor_id, role, added_by_actor_id, student_scope, assignment_scope, principal_member_id)
+    VALUES ('00000000-0000-0000-0000-000000000042', '00000000-0000-0000-0000-000000000036', 'assistant', '00000000-0000-0000-0000-000000000034', 'all', 'all', '00000000-0000-0000-0000-000000000055') $q$);
+SELECT pg_temp.fails('a seat is not its own principal', '23514', $q$
+    UPDATE course_member SET principal_member_id = id WHERE id = '00000000-0000-0000-0000-00000000005a' $q$);
+SELECT pg_temp.fails('a delegate''s principal is nobody''s delegate', '23514', $q$
+    -- A removed seat is history and is not checked, so it can name a
+    -- principal it should not; a delegate cannot then name it.
+    INSERT INTO course_member (id, course_id, actor_id, role, status, added_by_actor_id, student_scope, assignment_scope, principal_member_id)
+    VALUES ('00000000-0000-0000-0000-00000000005b', '00000000-0000-0000-0000-000000000042', '00000000-0000-0000-0000-000000000035', 'student', 'removed', '00000000-0000-0000-0000-000000000034', 'listed', 'all', '00000000-0000-0000-0000-000000000055');
+    INSERT INTO course_member (course_id, actor_id, role, added_by_actor_id, student_scope, assignment_scope, principal_member_id)
+    VALUES ('00000000-0000-0000-0000-000000000042', '00000000-0000-0000-0000-000000000038', 'assistant', '00000000-0000-0000-0000-000000000035', 'listed', 'all', '00000000-0000-0000-0000-00000000005b') $q$);
+SELECT pg_temp.ok('a delegate''s seat is removed with its principal''s', $q$
+    -- Mei (3a) seated in A (5d), her agent (39) as her delegate there (5c),
+    -- paused; Mei's seat is then removed, and both are history afterwards.
+    INSERT INTO actor (id, kind, display_name, created_by_actor_id)
+    VALUES ('00000000-0000-0000-0000-00000000003a', 'human', 'Mei', '00000000-0000-0000-0000-000000000031');
+    INSERT INTO actor (id, kind, display_name, owner_actor_id, created_by_actor_id)
+    VALUES ('00000000-0000-0000-0000-000000000039', 'agent', 'Mei''s agent', '00000000-0000-0000-0000-00000000003a', '00000000-0000-0000-0000-00000000003a');
+    INSERT INTO course_member (id, course_id, actor_id, role, added_by_actor_id, student_scope, assignment_scope)
+    VALUES ('00000000-0000-0000-0000-00000000005d', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-00000000003a', 'student', '00000000-0000-0000-0000-000000000034', 'listed', 'all');
+    INSERT INTO course_member (id, course_id, actor_id, role, status, added_by_actor_id, student_scope, assignment_scope, principal_member_id)
+    VALUES ('00000000-0000-0000-0000-00000000005c', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000000039', 'assistant', 'paused', '00000000-0000-0000-0000-00000000003a', 'listed', 'all', '00000000-0000-0000-0000-00000000005d');
+    UPDATE course_member SET status = 'removed' WHERE id = '00000000-0000-0000-0000-00000000005d';
+    DO $chk$
+    BEGIN
+        IF NOT EXISTS (SELECT 1 FROM course_member WHERE id = '00000000-0000-0000-0000-00000000005c' AND status = 'removed') THEN
+            RAISE EXCEPTION 'the delegate outlived its principal''s removal';
+        END IF;
+    END $chk$ $q$);
+SELECT pg_temp.fails('a delegate seat is not resumed once its actor has another owner', '23514', $q$
+    UPDATE course_member SET status = 'paused' WHERE id = '00000000-0000-0000-0000-00000000005a';
+    UPDATE actor SET owner_actor_id = '00000000-0000-0000-0000-000000000037' WHERE id = '00000000-0000-0000-0000-000000000038';
+    UPDATE course_member SET status = 'active' WHERE id = '00000000-0000-0000-0000-00000000005a' $q$);
+SELECT pg_temp.ok('a removed delegate seat is history: its actor''s owner may change', $q$
+    UPDATE course_member SET status = 'removed' WHERE id = '00000000-0000-0000-0000-00000000005a';
+    UPDATE actor SET owner_actor_id = '00000000-0000-0000-0000-000000000037' WHERE id = '00000000-0000-0000-0000-000000000038';
+    UPDATE actor SET owner_actor_id = NULL WHERE id = '00000000-0000-0000-0000-000000000038';
+    INSERT INTO course_member (course_id, actor_id, role, added_by_actor_id, student_scope, assignment_scope)
+    VALUES ('00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000000038', 'assistant', '00000000-0000-0000-0000-000000000034', 'all', 'all') $q$);
+SELECT pg_temp.ok('the new permissions default to denied on both tables', $q$
+    DO $chk$
+    BEGIN
+        IF EXISTS (SELECT 1 FROM course_member WHERE id = '00000000-0000-0000-0000-00000000005a'
+                   AND (perm_agent_delegate, perm_conversation_ask, perm_conversation_answer)
+                       <> ('denied', 'denied', 'denied'))
+           OR EXISTS (SELECT 1 FROM permission_preset WHERE id = '00000000-0000-0000-0000-000000000091'
+                   AND (perm_agent_delegate, perm_conversation_ask, perm_conversation_answer)
+                       <> ('denied', 'denied', 'denied')) THEN
+            RAISE EXCEPTION 'a new permission does not default to denied';
+        END IF;
+    END $chk$ $q$);
+SELECT pg_temp.fails('only a delegate''s seat answers the course', '23514', $q$
+    UPDATE course_member SET answers_course = true WHERE id = '00000000-0000-0000-0000-000000000051' $q$);
 
 -- Grading scheme -------------------------------------------------------------
 SELECT pg_temp.fails('one root component per course', '23505', $q$
@@ -487,6 +591,145 @@ SELECT pg_temp.fails('event scope columns are frozen with the rest of the row', 
     UPDATE event SET student_member_id = NULL $q$);
 SELECT pg_temp.fails('events are append-only', '23001', $q$
     DELETE FROM event $q$);
+
+-- Conversations ----------------------------------------------------------------
+-- c1 Yuki (52) asks the grader (53) in A · c11, c12 its messages · c2 Yuki asks the grader again
+SELECT pg_temp.ok('a member opens a conversation with another', $q$
+    INSERT INTO conversation (id, course_id, opener_member_id, respondent_member_id, title)
+    VALUES ('00000000-0000-0000-0000-0000000000c1', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000000052',
+            '00000000-0000-0000-0000-000000000053', 'HW1') $q$);
+SELECT pg_temp.fails('nobody opens a conversation with themselves', '23514', $q$
+    INSERT INTO conversation (course_id, opener_member_id, respondent_member_id)
+    VALUES ('00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000000052', '00000000-0000-0000-0000-000000000052') $q$);
+SELECT pg_temp.fails('both participants are seats of the conversation''s course', '23503', $q$
+    INSERT INTO conversation (course_id, opener_member_id, respondent_member_id)
+    VALUES ('00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000000052', '00000000-0000-0000-0000-000000000054') $q$);
+SELECT pg_temp.fails('conversation status must be open or closed', '23514', $q$
+    INSERT INTO conversation (course_id, opener_member_id, respondent_member_id, status)
+    VALUES ('00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000000052', '00000000-0000-0000-0000-000000000053', 'paused') $q$);
+SELECT pg_temp.fails('a title is at most 200 characters', '23514', $q$
+    INSERT INTO conversation (course_id, opener_member_id, respondent_member_id, title)
+    VALUES ('00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000000052', '00000000-0000-0000-0000-000000000053', repeat('x', 201)) $q$);
+SELECT pg_temp.fails('a title says something', '23514', $q$
+    INSERT INTO conversation (course_id, opener_member_id, respondent_member_id, title)
+    VALUES ('00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000000052', '00000000-0000-0000-0000-000000000053', '') $q$);
+SELECT pg_temp.fails('a closed reason is at most 500 characters', '23514', $q$
+    INSERT INTO conversation (course_id, opener_member_id, respondent_member_id, status, closed_reason)
+    VALUES ('00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000000052', '00000000-0000-0000-0000-000000000053', 'closed', repeat('x', 501)) $q$);
+SELECT pg_temp.fails('when the last message came and who wrote it are set together', '23514', $q$
+    UPDATE conversation SET last_message_at = now() WHERE id = '00000000-0000-0000-0000-0000000000c1' $q$);
+SELECT pg_temp.fails('a conversation''s title never changes', '23001', $q$
+    UPDATE conversation SET title = 'HW2' WHERE id = '00000000-0000-0000-0000-0000000000c1' $q$);
+SELECT pg_temp.fails('nor when it began', '23001', $q$
+    UPDATE conversation SET created_at = now() - interval '1 day' WHERE id = '00000000-0000-0000-0000-0000000000c1' $q$);
+SELECT pg_temp.fails('an open conversation has no closed reason', '23514', $q$
+    INSERT INTO conversation (course_id, opener_member_id, respondent_member_id, closed_reason)
+    VALUES ('00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000000052', '00000000-0000-0000-0000-000000000053', 'why') $q$);
+SELECT pg_temp.fails('who spoke last is a participant', '23514', $q$
+    UPDATE conversation SET last_message_at = now(), last_author_member_id = '00000000-0000-0000-0000-000000000051'
+    WHERE id = '00000000-0000-0000-0000-0000000000c1' $q$);
+SELECT pg_temp.ok('the opener writes', $q$
+    INSERT INTO conversation_message (id, conversation_id, course_id, seq, author_member_id, body, created_by_action_id)
+    VALUES ('00000000-0000-0000-0000-000000000c11', '00000000-0000-0000-0000-0000000000c1', '00000000-0000-0000-0000-000000000041', 1,
+            '00000000-0000-0000-0000-000000000052', 'Why 8/10?', '00000000-0000-0000-0000-0000000000b1') $q$);
+SELECT pg_temp.fails('only the two participants write', '23514', $q$
+    INSERT INTO conversation_message (conversation_id, course_id, seq, author_member_id, body, created_by_action_id)
+    VALUES ('00000000-0000-0000-0000-0000000000c1', '00000000-0000-0000-0000-000000000041', 2,
+            '00000000-0000-0000-0000-000000000051', 'Because.', '00000000-0000-0000-0000-0000000000b1') $q$);
+SELECT pg_temp.fails('a conversation has one message at each seq', '23505', $q$
+    INSERT INTO conversation_message (conversation_id, course_id, seq, author_member_id, body, created_by_action_id)
+    VALUES ('00000000-0000-0000-0000-0000000000c1', '00000000-0000-0000-0000-000000000041', 1,
+            '00000000-0000-0000-0000-000000000052', 'Again', '00000000-0000-0000-0000-0000000000b1') $q$);
+SELECT pg_temp.fails('a message''s seq counts from 1', '23514', $q$
+    INSERT INTO conversation_message (conversation_id, course_id, seq, author_member_id, body, created_by_action_id)
+    VALUES ('00000000-0000-0000-0000-0000000000c1', '00000000-0000-0000-0000-000000000041', 0,
+            '00000000-0000-0000-0000-000000000052', 'Before the first', '00000000-0000-0000-0000-0000000000b1') $q$);
+SELECT pg_temp.fails('a message says something', '23514', $q$
+    INSERT INTO conversation_message (conversation_id, course_id, seq, author_member_id, body, created_by_action_id)
+    VALUES ('00000000-0000-0000-0000-0000000000c1', '00000000-0000-0000-0000-000000000041', 2,
+            '00000000-0000-0000-0000-000000000052', '', '00000000-0000-0000-0000-0000000000b1') $q$);
+SELECT pg_temp.fails('a message is at most 20000 characters', '23514', $q$
+    INSERT INTO conversation_message (conversation_id, course_id, seq, author_member_id, body, created_by_action_id)
+    VALUES ('00000000-0000-0000-0000-0000000000c1', '00000000-0000-0000-0000-000000000041', 2,
+            '00000000-0000-0000-0000-000000000052', repeat('x', 20001), '00000000-0000-0000-0000-0000000000b1') $q$);
+SELECT pg_temp.fails('a message names the action that wrote it', '23502', $q$
+    INSERT INTO conversation_message (conversation_id, course_id, seq, author_member_id, body)
+    VALUES ('00000000-0000-0000-0000-0000000000c1', '00000000-0000-0000-0000-000000000041', 2,
+            '00000000-0000-0000-0000-000000000052', 'Hello') $q$);
+SELECT pg_temp.fails('a message is in its conversation''s course', '23503', $q$
+    INSERT INTO conversation_message (conversation_id, course_id, seq, author_member_id, body, created_by_action_id)
+    VALUES ('00000000-0000-0000-0000-0000000000c1', '00000000-0000-0000-0000-000000000042', 2,
+            '00000000-0000-0000-0000-000000000052', 'Hello', '00000000-0000-0000-0000-0000000000b1') $q$);
+SELECT pg_temp.ok('the respondent answers the opener''s message', $q$
+    INSERT INTO conversation_message (id, conversation_id, course_id, seq, author_member_id, in_reply_to_message_id, body, created_by_action_id)
+    VALUES ('00000000-0000-0000-0000-000000000c12', '00000000-0000-0000-0000-0000000000c1', '00000000-0000-0000-0000-000000000041', 2,
+            '00000000-0000-0000-0000-000000000053', '00000000-0000-0000-0000-000000000c11', 'The evidence is thin.',
+            '00000000-0000-0000-0000-0000000000b1') $q$);
+SELECT pg_temp.fails('an answer is the respondent''s', '23514', $q$
+    INSERT INTO conversation_message (conversation_id, course_id, seq, author_member_id, in_reply_to_message_id, body, created_by_action_id)
+    VALUES ('00000000-0000-0000-0000-0000000000c1', '00000000-0000-0000-0000-000000000041', 3,
+            '00000000-0000-0000-0000-000000000052', '00000000-0000-0000-0000-000000000c11', 'I answer myself',
+            '00000000-0000-0000-0000-0000000000b1') $q$);
+SELECT pg_temp.fails('an answer answers a message of the opener''s', '23514', $q$
+    INSERT INTO conversation_message (conversation_id, course_id, seq, author_member_id, in_reply_to_message_id, body, created_by_action_id)
+    VALUES ('00000000-0000-0000-0000-0000000000c1', '00000000-0000-0000-0000-000000000041', 3,
+            '00000000-0000-0000-0000-000000000053', '00000000-0000-0000-0000-000000000c12', 'And another thing',
+            '00000000-0000-0000-0000-0000000000b1') $q$);
+SELECT pg_temp.fails('an answer answers a message of its own conversation', '23503', $q$
+    INSERT INTO conversation (id, course_id, opener_member_id, respondent_member_id)
+    VALUES ('00000000-0000-0000-0000-0000000000c2', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000000052',
+            '00000000-0000-0000-0000-000000000053');
+    INSERT INTO conversation_message (conversation_id, course_id, seq, author_member_id, in_reply_to_message_id, body, created_by_action_id)
+    VALUES ('00000000-0000-0000-0000-0000000000c2', '00000000-0000-0000-0000-000000000041', 1,
+            '00000000-0000-0000-0000-000000000053', '00000000-0000-0000-0000-000000000c11', 'Not yours to answer',
+            '00000000-0000-0000-0000-0000000000b1') $q$);
+SELECT pg_temp.fails('messages are append-only: no edit', '23001', $q$
+    UPDATE conversation_message SET body = 'Why 9/10?' WHERE id = '00000000-0000-0000-0000-000000000c11' $q$);
+SELECT pg_temp.fails('messages are append-only: no delete', '23001', $q$
+    DELETE FROM conversation_message WHERE id = '00000000-0000-0000-0000-000000000c12' $q$);
+SELECT pg_temp.fails('messages are not truncated', '23001', $q$
+    TRUNCATE conversation_message CASCADE $q$);
+SELECT pg_temp.fails('a conversation''s participants never change', '23001', $q$
+    UPDATE conversation SET respondent_member_id = '00000000-0000-0000-0000-000000000051' WHERE id = '00000000-0000-0000-0000-0000000000c1' $q$);
+SELECT pg_temp.fails('a conversation is kept, not deleted', '23001', $q$
+    DELETE FROM conversation WHERE id = '00000000-0000-0000-0000-0000000000c1' $q$);
+SELECT pg_temp.ok('the author retracts a message', $q$
+    INSERT INTO conversation_message_retraction (message_id, course_id, retracted_by_member_id, created_by_action_id, reason)
+    VALUES ('00000000-0000-0000-0000-000000000c11', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000000052',
+            '00000000-0000-0000-0000-0000000000b1', 'Wrong assignment') $q$);
+SELECT pg_temp.fails('a message is retracted once', '23505', $q$
+    INSERT INTO conversation_message_retraction (message_id, course_id, retracted_by_member_id, created_by_action_id)
+    VALUES ('00000000-0000-0000-0000-000000000c11', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000000051',
+            '00000000-0000-0000-0000-0000000000b1') $q$);
+SELECT pg_temp.fails('a retraction is in its message''s course', '23503', $q$
+    INSERT INTO conversation_message_retraction (message_id, course_id, retracted_by_member_id, created_by_action_id)
+    VALUES ('00000000-0000-0000-0000-000000000c12', '00000000-0000-0000-0000-000000000042', '00000000-0000-0000-0000-000000000055',
+            '00000000-0000-0000-0000-0000000000b1') $q$);
+SELECT pg_temp.fails('whoever retracts is a seat of the message''s course', '23503', $q$
+    INSERT INTO conversation_message_retraction (message_id, course_id, retracted_by_member_id, created_by_action_id)
+    VALUES ('00000000-0000-0000-0000-000000000c12', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000000055',
+            '00000000-0000-0000-0000-0000000000b1') $q$);
+SELECT pg_temp.fails('a retraction names the action that made it', '23502', $q$
+    INSERT INTO conversation_message_retraction (message_id, course_id, retracted_by_member_id)
+    VALUES ('00000000-0000-0000-0000-000000000c12', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000000053') $q$);
+SELECT pg_temp.fails('a retraction''s reason is at most 500 characters', '23514', $q$
+    INSERT INTO conversation_message_retraction (message_id, course_id, retracted_by_member_id, created_by_action_id, reason)
+    VALUES ('00000000-0000-0000-0000-000000000c12', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000000053',
+            '00000000-0000-0000-0000-0000000000b1', repeat('x', 501)) $q$);
+SELECT pg_temp.fails('retractions are append-only: no edit', '23001', $q$
+    UPDATE conversation_message_retraction SET reason = 'Another' $q$);
+SELECT pg_temp.fails('retractions are append-only', '23001', $q$
+    DELETE FROM conversation_message_retraction $q$);
+SELECT pg_temp.fails('retractions are not truncated', '23001', $q$
+    TRUNCATE conversation_message_retraction $q$);
+SELECT pg_temp.ok('a participant closes the conversation', $q$
+    UPDATE conversation SET status = 'closed', closed_reason = 'Answered' WHERE id = '00000000-0000-0000-0000-0000000000c1' $q$);
+SELECT pg_temp.fails('nobody writes in a closed conversation', '23514', $q$
+    INSERT INTO conversation_message (conversation_id, course_id, seq, author_member_id, body, created_by_action_id)
+    VALUES ('00000000-0000-0000-0000-0000000000c1', '00000000-0000-0000-0000-000000000041', 3,
+            '00000000-0000-0000-0000-000000000052', 'One more thing', '00000000-0000-0000-0000-0000000000b1') $q$);
+SELECT pg_temp.fails('a closed conversation stays closed', '23001', $q$
+    UPDATE conversation SET status = 'open', closed_reason = NULL WHERE id = '00000000-0000-0000-0000-0000000000c1' $q$);
 
 \o
 ROLLBACK;

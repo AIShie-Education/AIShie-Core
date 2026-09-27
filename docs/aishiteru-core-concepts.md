@@ -26,7 +26,9 @@ Differentiation happens entirely through **course membership**, not actor-type b
 
 **Consequence:** "UI is just a client of the tool layer" falls out for free — it doesn't need to be separately engineered.
 
-**Where agents live:** Agents are *registered* here — actor record, credentials, course memberships — but they run entirely outside. Core never dials out to an agent; agents connect *in* and make tool calls, exactly as a browser session does for a human. No endpoint, model, or prompt is stored anywhere. Two consequences worth stating plainly: core can only govern what crosses its own boundary, and work discovery is pull-based — agents come looking for work rather than being dispatched to it.
+**Agents people own:** a person may register agents of their own and bring them into a course where they are seated. Such an agent acts only as its owner's *delegate*: its seat's principal is the owner's seat, and it can never do, reach or outlast more than that seat. Owning an agent is a way to do what one may already do, by a program running elsewhere — never a way to more. It is still membership that decides, not actor type: the cap is the principal's seat, read on every call.
+
+**Where agents live:** Agents are *registered* here — actor record, credentials, course memberships — but they run entirely outside. Core never dials out to an agent; agents connect *in* and make tool calls, exactly as a browser session does for a human. No endpoint, model, or prompt is stored anywhere. Two consequences worth stating plainly: core can only govern what crosses its own boundary, and work discovery is pull-based — agents come looking for work rather than being dispatched to it. [agent-runtime.md](agent-runtime.md) is the handout for a service that runs them.
 
 ## 4. Autonomy: Explicit per Action-Type
 
@@ -41,7 +43,7 @@ These form one ordered ladder, `denied < confirm_required < pending_review < aut
 
 Note that `pending_review` and `confirm_required` both involve a human, at opposite ends: one reviews after the fact, the other gates beforehand.
 
-**Presets** (student, tutor, grader, ...) pre-populate common action-type × autonomy-level combinations. They live in a `permission_preset` table — six built-ins seeded at install, plus any a department defines for itself — and are copied onto the membership row when a member is added; the row is the only thing the permission check reads, so a preset is a convenience, not a source of truth, and any single value can be overridden afterwards.
+**Presets** (student, tutor, grader, ...) pre-populate common action-type × autonomy-level combinations. They live in a `permission_preset` table — eight built-ins seeded at install, plus any a department defines for itself — and are copied onto the membership row when a member is added; the row is the only thing the permission check reads, so a preset is a convenience, not a source of truth, and any single value can be overridden afterwards.
 
 **Scope** narrows a membership further: to listed students, to listed assignments, or both. Scope is explicit and fails closed — a member limited to a list with nothing on it can touch nobody.
 

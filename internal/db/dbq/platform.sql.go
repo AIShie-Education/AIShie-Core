@@ -54,24 +54,28 @@ const getActorView = `-- name: GetActorView :one
 SELECT a.id, a.kind, a.display_name, a.email, a.status, a.platform_role, a.created_by_actor_id, a.created_at,
        EXISTS (SELECT 1 FROM credential p WHERE p.actor_id = a.id AND p.kind = 'password' AND p.revoked_at IS NULL) AS has_password,
        EXISTS (SELECT 1 FROM credential s WHERE s.actor_id = a.id AND s.kind = 'sso' AND s.revoked_at IS NULL) AS has_sso,
-       i.expires_at AS invite_expires_at
+       i.expires_at AS invite_expires_at, a.owner_actor_id, o.display_name AS owner_name, a.suspended_by_actor_id
 FROM actor a
 LEFT JOIN credential i ON i.actor_id = a.id AND i.kind = 'invite' AND i.revoked_at IS NULL
+LEFT JOIN actor o ON o.id = a.owner_actor_id
 WHERE a.id = $1
 `
 
 type GetActorViewRow struct {
-	ID               uuid.UUID
-	Kind             string
-	DisplayName      string
-	Email            *string
-	Status           string
-	PlatformRole     *string
-	CreatedByActorID *uuid.UUID
-	CreatedAt        time.Time
-	HasPassword      bool
-	HasSso           bool
-	InviteExpiresAt  *time.Time
+	ID                 uuid.UUID
+	Kind               string
+	DisplayName        string
+	Email              *string
+	Status             string
+	PlatformRole       *string
+	CreatedByActorID   *uuid.UUID
+	CreatedAt          time.Time
+	HasPassword        bool
+	HasSso             bool
+	InviteExpiresAt    *time.Time
+	OwnerActorID       *uuid.UUID
+	OwnerName          *string
+	SuspendedByActorID *uuid.UUID
 }
 
 // One actor as an administrator sees it: the row, and whether they can sign
@@ -92,12 +96,15 @@ func (q *Queries) GetActorView(ctx context.Context, id uuid.UUID) (GetActorViewR
 		&i.HasPassword,
 		&i.HasSso,
 		&i.InviteExpiresAt,
+		&i.OwnerActorID,
+		&i.OwnerName,
+		&i.SuspendedByActorID,
 	)
 	return i, err
 }
 
 const getBuiltinPresetByName = `-- name: GetBuiltinPresetByName :one
-SELECT id, dept_id, name, description, role, student_scope, assignment_scope, perm_document_read, perm_document_read_draft, perm_document_write, perm_rubric_read, perm_assignment_write, perm_submission_read, perm_submission_write, perm_grade_read, perm_grade_submit, perm_grade_post, perm_member_read, perm_member_manage, perm_action_decide, created_by_actor_id, created_at FROM permission_preset WHERE name = $1 AND dept_id IS NULL
+SELECT id, dept_id, name, description, role, student_scope, assignment_scope, perm_document_read, perm_document_read_draft, perm_document_write, perm_rubric_read, perm_assignment_write, perm_submission_read, perm_submission_write, perm_grade_read, perm_grade_submit, perm_grade_post, perm_member_read, perm_member_manage, perm_action_decide, created_by_actor_id, created_at, perm_agent_delegate, perm_conversation_ask, perm_conversation_answer FROM permission_preset WHERE name = $1 AND dept_id IS NULL
 `
 
 func (q *Queries) GetBuiltinPresetByName(ctx context.Context, name string) (PermissionPreset, error) {
@@ -126,12 +133,15 @@ func (q *Queries) GetBuiltinPresetByName(ctx context.Context, name string) (Perm
 		&i.PermActionDecide,
 		&i.CreatedByActorID,
 		&i.CreatedAt,
+		&i.PermAgentDelegate,
+		&i.PermConversationAsk,
+		&i.PermConversationAnswer,
 	)
 	return i, err
 }
 
 const getDeptPresetByName = `-- name: GetDeptPresetByName :one
-SELECT id, dept_id, name, description, role, student_scope, assignment_scope, perm_document_read, perm_document_read_draft, perm_document_write, perm_rubric_read, perm_assignment_write, perm_submission_read, perm_submission_write, perm_grade_read, perm_grade_submit, perm_grade_post, perm_member_read, perm_member_manage, perm_action_decide, created_by_actor_id, created_at FROM permission_preset WHERE name = $1 AND dept_id = $2
+SELECT id, dept_id, name, description, role, student_scope, assignment_scope, perm_document_read, perm_document_read_draft, perm_document_write, perm_rubric_read, perm_assignment_write, perm_submission_read, perm_submission_write, perm_grade_read, perm_grade_submit, perm_grade_post, perm_member_read, perm_member_manage, perm_action_decide, created_by_actor_id, created_at, perm_agent_delegate, perm_conversation_ask, perm_conversation_answer FROM permission_preset WHERE name = $1 AND dept_id = $2
 `
 
 type GetDeptPresetByNameParams struct {
@@ -165,12 +175,15 @@ func (q *Queries) GetDeptPresetByName(ctx context.Context, arg GetDeptPresetByNa
 		&i.PermActionDecide,
 		&i.CreatedByActorID,
 		&i.CreatedAt,
+		&i.PermAgentDelegate,
+		&i.PermConversationAsk,
+		&i.PermConversationAnswer,
 	)
 	return i, err
 }
 
 const getPreset = `-- name: GetPreset :one
-SELECT id, dept_id, name, description, role, student_scope, assignment_scope, perm_document_read, perm_document_read_draft, perm_document_write, perm_rubric_read, perm_assignment_write, perm_submission_read, perm_submission_write, perm_grade_read, perm_grade_submit, perm_grade_post, perm_member_read, perm_member_manage, perm_action_decide, created_by_actor_id, created_at FROM permission_preset WHERE id = $1
+SELECT id, dept_id, name, description, role, student_scope, assignment_scope, perm_document_read, perm_document_read_draft, perm_document_write, perm_rubric_read, perm_assignment_write, perm_submission_read, perm_submission_write, perm_grade_read, perm_grade_submit, perm_grade_post, perm_member_read, perm_member_manage, perm_action_decide, created_by_actor_id, created_at, perm_agent_delegate, perm_conversation_ask, perm_conversation_answer FROM permission_preset WHERE id = $1
 `
 
 func (q *Queries) GetPreset(ctx context.Context, id uuid.UUID) (PermissionPreset, error) {
@@ -199,6 +212,9 @@ func (q *Queries) GetPreset(ctx context.Context, id uuid.UUID) (PermissionPreset
 		&i.PermActionDecide,
 		&i.CreatedByActorID,
 		&i.CreatedAt,
+		&i.PermAgentDelegate,
+		&i.PermConversationAsk,
+		&i.PermConversationAnswer,
 	)
 	return i, err
 }
@@ -224,33 +240,37 @@ INSERT INTO permission_preset (
     perm_document_read, perm_document_read_draft, perm_document_write, perm_rubric_read,
     perm_assignment_write, perm_submission_read, perm_submission_write, perm_grade_read,
     perm_grade_submit, perm_grade_post, perm_member_read, perm_member_manage, perm_action_decide,
+    perm_agent_delegate, perm_conversation_ask, perm_conversation_answer,
     created_by_actor_id, created_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25)
 `
 
 type InsertPresetParams struct {
-	ID                    uuid.UUID
-	DeptID                *uuid.UUID
-	Name                  string
-	Description           *string
-	Role                  string
-	StudentScope          string
-	AssignmentScope       string
-	PermDocumentRead      AutonomyLevel
-	PermDocumentReadDraft AutonomyLevel
-	PermDocumentWrite     AutonomyLevel
-	PermRubricRead        AutonomyLevel
-	PermAssignmentWrite   AutonomyLevel
-	PermSubmissionRead    AutonomyLevel
-	PermSubmissionWrite   AutonomyLevel
-	PermGradeRead         AutonomyLevel
-	PermGradeSubmit       AutonomyLevel
-	PermGradePost         AutonomyLevel
-	PermMemberRead        AutonomyLevel
-	PermMemberManage      AutonomyLevel
-	PermActionDecide      AutonomyLevel
-	CreatedByActorID      *uuid.UUID
-	CreatedAt             time.Time
+	ID                     uuid.UUID
+	DeptID                 *uuid.UUID
+	Name                   string
+	Description            *string
+	Role                   string
+	StudentScope           string
+	AssignmentScope        string
+	PermDocumentRead       AutonomyLevel
+	PermDocumentReadDraft  AutonomyLevel
+	PermDocumentWrite      AutonomyLevel
+	PermRubricRead         AutonomyLevel
+	PermAssignmentWrite    AutonomyLevel
+	PermSubmissionRead     AutonomyLevel
+	PermSubmissionWrite    AutonomyLevel
+	PermGradeRead          AutonomyLevel
+	PermGradeSubmit        AutonomyLevel
+	PermGradePost          AutonomyLevel
+	PermMemberRead         AutonomyLevel
+	PermMemberManage       AutonomyLevel
+	PermActionDecide       AutonomyLevel
+	PermAgentDelegate      AutonomyLevel
+	PermConversationAsk    AutonomyLevel
+	PermConversationAnswer AutonomyLevel
+	CreatedByActorID       *uuid.UUID
+	CreatedAt              time.Time
 }
 
 func (q *Queries) InsertPreset(ctx context.Context, arg InsertPresetParams) error {
@@ -275,6 +295,9 @@ func (q *Queries) InsertPreset(ctx context.Context, arg InsertPresetParams) erro
 		arg.PermMemberRead,
 		arg.PermMemberManage,
 		arg.PermActionDecide,
+		arg.PermAgentDelegate,
+		arg.PermConversationAsk,
+		arg.PermConversationAnswer,
 		arg.CreatedByActorID,
 		arg.CreatedAt,
 	)
@@ -306,39 +329,45 @@ const listActors = `-- name: ListActors :many
 SELECT a.id, a.kind, a.display_name, a.email, a.status, a.platform_role, a.created_by_actor_id, a.created_at,
        EXISTS (SELECT 1 FROM credential p WHERE p.actor_id = a.id AND p.kind = 'password' AND p.revoked_at IS NULL) AS has_password,
        EXISTS (SELECT 1 FROM credential s WHERE s.actor_id = a.id AND s.kind = 'sso' AND s.revoked_at IS NULL) AS has_sso,
-       i.expires_at AS invite_expires_at
+       i.expires_at AS invite_expires_at, a.owner_actor_id, o.display_name AS owner_name, a.suspended_by_actor_id
 FROM actor a
 LEFT JOIN credential i ON i.actor_id = a.id AND i.kind = 'invite' AND i.revoked_at IS NULL
+LEFT JOIN actor o ON o.id = a.owner_actor_id
 WHERE a.id > $1 AND a.kind <> 'system'
   AND ($2::text IS NULL OR a.kind = $2)
   AND ($3::text IS NULL OR a.status = $3)
-  AND ($4::text IS NULL
-       OR strpos(lower(a.display_name), lower($4)) > 0
-       OR strpos(lower(coalesce(a.email, '')), lower($4)) > 0)
+  AND ($4::uuid IS NULL OR a.owner_actor_id = $4)
+  AND ($5::text IS NULL
+       OR strpos(lower(a.display_name), lower($5)) > 0
+       OR strpos(lower(coalesce(a.email, '')), lower($5)) > 0)
 ORDER BY a.id
-LIMIT $5
+LIMIT $6
 `
 
 type ListActorsParams struct {
-	After   uuid.UUID
-	Kind    *string
-	Status  *string
-	Search  *string
-	MaxRows int32
+	After        uuid.UUID
+	Kind         *string
+	Status       *string
+	OwnerActorID *uuid.UUID
+	Search       *string
+	MaxRows      int32
 }
 
 type ListActorsRow struct {
-	ID               uuid.UUID
-	Kind             string
-	DisplayName      string
-	Email            *string
-	Status           string
-	PlatformRole     *string
-	CreatedByActorID *uuid.UUID
-	CreatedAt        time.Time
-	HasPassword      bool
-	HasSso           bool
-	InviteExpiresAt  *time.Time
+	ID                 uuid.UUID
+	Kind               string
+	DisplayName        string
+	Email              *string
+	Status             string
+	PlatformRole       *string
+	CreatedByActorID   *uuid.UUID
+	CreatedAt          time.Time
+	HasPassword        bool
+	HasSso             bool
+	InviteExpiresAt    *time.Time
+	OwnerActorID       *uuid.UUID
+	OwnerName          *string
+	SuspendedByActorID *uuid.UUID
 }
 
 // Everyone registered, as GetActorView sees them: people and agents, not the
@@ -350,6 +379,7 @@ func (q *Queries) ListActors(ctx context.Context, arg ListActorsParams) ([]ListA
 		arg.After,
 		arg.Kind,
 		arg.Status,
+		arg.OwnerActorID,
 		arg.Search,
 		arg.MaxRows,
 	)
@@ -372,6 +402,9 @@ func (q *Queries) ListActors(ctx context.Context, arg ListActorsParams) ([]ListA
 			&i.HasPassword,
 			&i.HasSso,
 			&i.InviteExpiresAt,
+			&i.OwnerActorID,
+			&i.OwnerName,
+			&i.SuspendedByActorID,
 		); err != nil {
 			return nil, err
 		}
@@ -408,7 +441,7 @@ func (q *Queries) ListDepartments(ctx context.Context) ([]Department, error) {
 }
 
 const listPresets = `-- name: ListPresets :many
-SELECT id, dept_id, name, description, role, student_scope, assignment_scope, perm_document_read, perm_document_read_draft, perm_document_write, perm_rubric_read, perm_assignment_write, perm_submission_read, perm_submission_write, perm_grade_read, perm_grade_submit, perm_grade_post, perm_member_read, perm_member_manage, perm_action_decide, created_by_actor_id, created_at FROM permission_preset
+SELECT id, dept_id, name, description, role, student_scope, assignment_scope, perm_document_read, perm_document_read_draft, perm_document_write, perm_rubric_read, perm_assignment_write, perm_submission_read, perm_submission_write, perm_grade_read, perm_grade_submit, perm_grade_post, perm_member_read, perm_member_manage, perm_action_decide, created_by_actor_id, created_at, perm_agent_delegate, perm_conversation_ask, perm_conversation_answer FROM permission_preset
 WHERE dept_id IS NULL OR dept_id = $1
 ORDER BY dept_id NULLS FIRST, name
 `
@@ -446,6 +479,9 @@ func (q *Queries) ListPresets(ctx context.Context, deptID *uuid.UUID) ([]Permiss
 			&i.PermActionDecide,
 			&i.CreatedByActorID,
 			&i.CreatedAt,
+			&i.PermAgentDelegate,
+			&i.PermConversationAsk,
+			&i.PermConversationAnswer,
 		); err != nil {
 			return nil, err
 		}
@@ -486,17 +522,35 @@ func (q *Queries) ListTerms(ctx context.Context) ([]Term, error) {
 	return items, nil
 }
 
-const setActorStatus = `-- name: SetActorStatus :execrows
-UPDATE actor SET status = $2 WHERE id = $1 AND status <> $2
+const reactivateActor = `-- name: ReactivateActor :execrows
+UPDATE actor SET status = 'active', suspended_by_actor_id = NULL WHERE id = $1 AND status = 'suspended'
 `
 
-type SetActorStatusParams struct {
-	ID     uuid.UUID
-	Status string
+func (q *Queries) ReactivateActor(ctx context.Context, id uuid.UUID) (int64, error) {
+	result, err := q.db.Exec(ctx, reactivateActor, id)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
-func (q *Queries) SetActorStatus(ctx context.Context, arg SetActorStatusParams) (int64, error) {
-	result, err := q.db.Exec(ctx, setActorStatus, arg.ID, arg.Status)
+const suspendActor = `-- name: SuspendActor :execrows
+UPDATE actor SET status = 'suspended', suspended_by_actor_id = $1
+WHERE id = $2
+  AND (status = 'active'
+       OR (status = 'suspended' AND suspended_by_actor_id IS NOT NULL AND suspended_by_actor_id = owner_actor_id))
+`
+
+type SuspendActorParams struct {
+	SuspendedByActorID *uuid.UUID
+	ID                 uuid.UUID
+}
+
+// An administrator's suspension. It is made over an active actor, or over
+// one its owner has suspended, which it then takes over: from then on it is
+// the administrator's to lift, not the owner's.
+func (q *Queries) SuspendActor(ctx context.Context, arg SuspendActorParams) (int64, error) {
+	result, err := q.db.Exec(ctx, suspendActor, arg.SuspendedByActorID, arg.ID)
 	if err != nil {
 		return 0, err
 	}
@@ -539,29 +593,32 @@ UPDATE permission_preset SET
     perm_document_read = $6, perm_document_read_draft = $7, perm_document_write = $8, perm_rubric_read = $9,
     perm_assignment_write = $10, perm_submission_read = $11, perm_submission_write = $12, perm_grade_read = $13,
     perm_grade_submit = $14, perm_grade_post = $15, perm_member_read = $16, perm_member_manage = $17,
-    perm_action_decide = $18
+    perm_action_decide = $18, perm_agent_delegate = $19, perm_conversation_ask = $20, perm_conversation_answer = $21
 WHERE id = $1 AND dept_id IS NOT NULL
 `
 
 type UpdatePresetParams struct {
-	ID                    uuid.UUID
-	Description           *string
-	Role                  string
-	StudentScope          string
-	AssignmentScope       string
-	PermDocumentRead      AutonomyLevel
-	PermDocumentReadDraft AutonomyLevel
-	PermDocumentWrite     AutonomyLevel
-	PermRubricRead        AutonomyLevel
-	PermAssignmentWrite   AutonomyLevel
-	PermSubmissionRead    AutonomyLevel
-	PermSubmissionWrite   AutonomyLevel
-	PermGradeRead         AutonomyLevel
-	PermGradeSubmit       AutonomyLevel
-	PermGradePost         AutonomyLevel
-	PermMemberRead        AutonomyLevel
-	PermMemberManage      AutonomyLevel
-	PermActionDecide      AutonomyLevel
+	ID                     uuid.UUID
+	Description            *string
+	Role                   string
+	StudentScope           string
+	AssignmentScope        string
+	PermDocumentRead       AutonomyLevel
+	PermDocumentReadDraft  AutonomyLevel
+	PermDocumentWrite      AutonomyLevel
+	PermRubricRead         AutonomyLevel
+	PermAssignmentWrite    AutonomyLevel
+	PermSubmissionRead     AutonomyLevel
+	PermSubmissionWrite    AutonomyLevel
+	PermGradeRead          AutonomyLevel
+	PermGradeSubmit        AutonomyLevel
+	PermGradePost          AutonomyLevel
+	PermMemberRead         AutonomyLevel
+	PermMemberManage       AutonomyLevel
+	PermActionDecide       AutonomyLevel
+	PermAgentDelegate      AutonomyLevel
+	PermConversationAsk    AutonomyLevel
+	PermConversationAnswer AutonomyLevel
 }
 
 // Built-ins (dept_id null) are policy shipped with the system; only a
@@ -586,6 +643,9 @@ func (q *Queries) UpdatePreset(ctx context.Context, arg UpdatePresetParams) (int
 		arg.PermMemberRead,
 		arg.PermMemberManage,
 		arg.PermActionDecide,
+		arg.PermAgentDelegate,
+		arg.PermConversationAsk,
+		arg.PermConversationAnswer,
 	)
 	if err != nil {
 		return 0, err

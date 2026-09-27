@@ -78,6 +78,7 @@ func submissionList() tool.Tool {
 				CourseID: in.CourseID, After: in.after(), MaxRows: in.limit(),
 				AssignmentID: in.AssignmentID, StudentMemberID: in.StudentMemberID,
 				StudentAll: rc.Scope.StudentAll, AssignmentAll: rc.Scope.AssignmentAll, MemberID: rc.Scope.MemberID,
+				PrincipalID: rc.Scope.PrincipalID, PrincipalStudentAll: rc.Scope.PrincipalStudentAll, PrincipalAssignmentAll: rc.Scope.PrincipalAssignmentAll,
 			})
 			out := SubmissionListOut{Submissions: make([]SubmissionView, 0, len(rows))}
 			for _, r := range rows {
@@ -142,6 +143,7 @@ func submissionRoster() tool.Tool {
 			rows, err := rc.Q.ListAssignmentRoster(ctx, dbq.ListAssignmentRosterParams{
 				CourseID: in.CourseID, AssignmentID: in.AssignmentID, After: in.after(), MaxRows: in.limit(),
 				StudentAll: rc.Scope.StudentAll, MemberID: rc.Scope.MemberID,
+				PrincipalID: rc.Scope.PrincipalID, PrincipalStudentAll: rc.Scope.PrincipalStudentAll,
 			})
 			out := SubmissionRosterOut{Students: make([]RosterEntry, 0, len(rows))}
 			// Names and seat status are the member list's: submission_read
@@ -453,7 +455,7 @@ func submissionSubmit() tool.Tool {
 		// The student asks to hand in now, under the instructions they are
 		// reading now. Approved on Thursday, it was still handed in on
 		// Tuesday, so it must still be what it was on Tuesday.
-		Pin: func(ctx context.Context, q dbq.Querier, _ time.Time, in SubmissionSubmitIn) (SubmissionSubmitIn, error) {
+		Pin: func(ctx context.Context, q dbq.Querier, _ *domain.Member, _ time.Time, in SubmissionSubmitIn) (SubmissionSubmitIn, error) {
 			s, err := q.GetSubmissionFull(ctx, dbq.GetSubmissionFullParams{ID: in.SubmissionID, CourseID: in.CourseID})
 			if err != nil {
 				return in, err

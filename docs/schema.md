@@ -34,12 +34,14 @@ course
  ├ assignment ── submission
  ├ action
  ├ grade
+ ├ conversation ── conversation_message ── conversation_message_retraction
  └ event
 ```
 
 Humans and agents alike join a course as a `course_member`. That one row is the roster entry,
 the role, the permissions and the scope. There is no separate grant table and no scope chain:
-authorization is one lookup on `(course_id, actor_id)`.
+authorization is one lookup on `(course_id, actor_id)`, which for an agent a person owns
+brings its owner's seat with it, and no further (§2.2, Delegates).
 
 Outside the course: `term`, `department`, `actor`, `credential`, `permission_preset`. The platform level has only
 two roles (`root`, `admin`) and a handful of operations — creating courses, registering actors,
@@ -56,7 +58,10 @@ department(id, name, created_at)                       -- groups courses; no par
 
 actor(id, kind [human|agent|system], display_name, email null,
       status [active|suspended], platform_role null [root|admin],
-      created_by_actor_id null→actor, created_at)
+      created_by_actor_id null→actor, created_at,
+      owner_actor_id null→actor, suspended_by_actor_id null→actor)
+    check: owner_actor_id ≠ id;  owner_actor_id set ⇒ kind = 'agent' and no platform_role
+    trigger: the owner is a person (kind = 'human')
 
 credential(id, actor_id→actor, kind [password|sso|api_token|session|invite],
            secret_hash null, provider null, subject null, token_prefix null,
@@ -76,7 +81,35 @@ course. The one exception is `kind = 'system'`, the actor the background sweeps 
 never seated in a course, and no token is issued for it and no identity linked to it, so that
 its authority cannot be borrowed. The database takes no credential for it, and a token it was
 given before migration 0004 authenticates nobody. Those refusals read `kind`; nothing that
-grants does.
+grants does. So do the refusals of ownership below: only a person owns, only an agent is owned.
+
+**An agent a person owns acts only as that person's delegate.** `owner_actor_id` names the
+person. Every seat of the agent that is not removed is a *delegate seat*, whose principal is the
+owner's own seat in the same course (§2.2, Delegates), and it never holds more than that seat
+does. So owning an agent, and holding its tokens, gives nobody more than their own seat: it is
+a way to do what one may already do, by a program one runs elsewhere. A person registers agents
+of their own (`agent.create`, unless `AGENT_SELF_SERVICE=off`), up to `AGENT_MAX_PER_OWNER` that
+are not suspended, and looks after them with the `agent.*` tools: names them, issues and revokes
+their tokens, suspends them, takes them out of a course (`agent.withdraw`). Each of those answers
+"no such agent of yours" for an actor the caller does not own, whether it exists or not. An
+administrator may register an agent with an owner (`actor.register`), and give one an owner,
+change it or take it away (`actor.set_owner`): only while it is seated in no course that is not
+archived, revoking every credential it has — tokens, sessions, password, invitation, linked
+identity — which whoever owned it may hold, and cancelling the requests the owner before made to
+seat it. The change holds the agent's row first, and every write that acts on who owns it — a
+token issued, a seat taken or given up — reads it `FOR SHARE`, so neither passes the other. A seat
+it keeps in an archived course stops counting, since it no longer matches the owner, and is
+removed by the sweep once the course is opened again. An agent does not own agents; the system
+actor owns nothing; an agent someone owns holds no platform role, since owning it and holding its
+tokens would then be more than a seat; an administrator does not give root or another
+administrator an agent to answer for.
+
+`suspended_by_actor_id` says who made the suspension in force, and is read only while `status =
+'suspended'`. An owner lifts only a suspension of their own. An administrator lifts any, and may
+suspend an agent its owner has suspended, which takes the suspension over. Null means "not the
+owner's": a suspension made before migration 0007, or by the release before it, is an
+administrator's to lift. Making an actor active clears it, whichever release does it, so that a
+later suspension is never taken for the owner's.
 
 `created_by_actor_id` is the delegation chain: root (seeded at install, the only null) creates
 admins, an admin creates a course and seats its first instructor, the instructor adds everyone
@@ -99,14 +132,16 @@ there is one verification path and no session table; unlike an API token it must
 and revoked as it is; an actor has one live invitation at most. Setting a password some other
 way revokes it too, and so does a change of email: it went to the old one.
 
-`issued_by_actor_id` says who issued an API token: the actor themself (`credential.issue_token`)
-or an administrator (`actor.issue_token`). It is null for the other kinds, for a token made on the
-command line (`aishiterud bootstrap`, `aishiterud token issue`), and for a token issued by a
-release older than migration 0006, including one that release issues while it still runs after
-the migration. An administrator lists an actor's credentials with `actor.list_credentials` and
-revokes one with `actor.revoke_credential`, so that a token that leaks is revoked alone rather
-than by suspending its agent. Both are held to the rule for acting on an actor: only root reaches
-the credentials of another holder of a platform role, and nobody the system actor's.
+`issued_by_actor_id` says who issued an API token: the actor themself
+(`credential.issue_token`), an administrator (`actor.issue_token`), or an agent's owner
+(`agent.issue_token`). It is null for the other kinds, for a token made on the command line
+(`aishiterud bootstrap`, `aishiterud token issue`), and for a token issued by a release older
+than migration 0006, including one that release issues while it still runs after the migration.
+An administrator lists an actor's credentials with `actor.list_credentials` and revokes one with
+`actor.revoke_credential`, so that a token that leaks is revoked alone rather than by suspending
+its agent. Both are held to the rule for acting on an actor: only root reaches the credentials
+of another holder of a platform role, and nobody the system actor's. An agent's owner lists and
+revokes its tokens the same way (`agent.list_credentials`, `agent.revoke_credential`).
 
 `course.status = 'archived'` refuses every write, from agents included.
 
@@ -116,7 +151,7 @@ the credentials of another holder of a platform role, and nobody the system acto
 permission_preset(id, dept_id null→department, name, description null,
                   role [student|instructor|ta|observer|assistant],
                   student_scope [all|listed], assignment_scope [all|listed],
-                  perm_<action> autonomy_level = 'denied'   ×13, identical to course_member
+                  perm_<action> autonomy_level = 'denied'   ×16, identical to course_member
                   created_by_actor_id null→actor, created_at)
 
     unique(name) where dept_id is null;  unique(dept_id, name) where dept_id is not null
@@ -126,11 +161,15 @@ course_member(id, course_id→course, actor_id→actor,
               status [active|paused|removed], preset_id null→permission_preset,
               added_by_actor_id→actor, expires_at null,
               student_scope [all|listed], assignment_scope [all|listed],
-              perm_<action> autonomy_level = 'denied'   ×13, see below
-              created_at,
+              perm_<action> autonomy_level = 'denied'   ×16, see below
+              created_at, principal_member_id null, answers_course = false,
               unique(course_id, id))
 
     unique(course_id, actor_id) where status <> 'removed'
+    composite FK (course_id, principal_member_id) → course_member(course_id, id)
+    check: principal_member_id ≠ id;  answers_course ⇒ principal_member_id set
+    trigger, for a row not removed: principal set ⇔ the actor has an owner; the principal is
+             the owner's seat; a principal has no principal
 
 member_student_scope(member_id→course_member, student_member_id→course_member,
                      pk(member_id, student_member_id))
@@ -163,11 +202,14 @@ teaching assistant. Role is not read by authorization.
 | `perm_member_read` | the member list | |
 | `perm_member_manage` | adding, removing, re-scoping members | |
 | `perm_action_decide` | approving proposals, reviewing after the fact | |
+| `perm_agent_delegate` | bringing an agent one owns into the course as one's delegate: `confirm_required` is a request an instructor approves | |
+| `perm_conversation_ask` | opening conversations, and writing in those one opened | |
+| `perm_conversation_answer` | being addressed, and answering; the level is the autonomy of the answers | |
 
 Columns rather than rows because the action-type list lives in code anyway: adding one is a
 deploy, and a migration alongside it is no extra ceremony. The column list is the catalogue.
 
-Thirteen columns do not name every operation. Where a tool has no column of its own it borrows
+Sixteen columns do not name every operation. Where a tool has no column of its own it borrows
 the nearest one, and the choice is recorded here so that it is a decision and not an accident:
 
 | Operation | Gated by | Why |
@@ -180,6 +222,8 @@ the nearest one, and the choice is recorded here so that it is a decision and no
 | Where every student stands on an assignment (`submission.roster`) | `perm_submission_read` | it is the submission list with the students who have not started; names and seat status only with `perm_member_read`, as the member list gives them |
 | Finding whom to seat by their whole email, or whom an actor id names (`member.lookup_actor`) | `perm_member_manage` | whoever seats members has to name them; it lists nobody |
 | Unpublishing an assignment nobody has started (`assignment.unpublish`) | `perm_assignment_write` | the undo of publishing it |
+| Taking back one's own proposal while nobody has decided it (`action.withdraw`) | `perm_document_read` | the most basic permission a seated member holds; that the proposal is the caller's own is what decides, as `action.list_mine` shows only the caller's own |
+| Closing a conversation (`conversation.close`), retracting a message (`conversation.retract`), listing and reading conversations (`conversation.list`, `.get`, `.messages`) | `perm_document_read` | the most basic permission a seated member holds; the conversation decides who may: its two participants, and whoever decides actions for its opener (§2.8) |
 | Regrading | the lower of `perm_grade_submit` and `perm_grade_post` | it writes a grade and makes it visible in one step |
 | Course settings, status, first instructor | `platform_role` | outside the course by definition |
 
@@ -192,12 +236,32 @@ them, and the gradebook, which counts only published assignments. Feedback on a 
 is a release: adding to it or withdrawing it needs `perm_grade_post` as well.
 
 **Presets are rows of `permission_preset`**, with the same `perm_*` columns plus a default role
-and scope. Six built-ins (`student`, `observer`, `ta`, `instructor`, `tutor`, `grader`) are
-seeded from `src/seed/presets.sql` with `dept_id` null; a department may add its own under any
-name. Adding a member copies the preset onto the `course_member` row and records `preset_id` as
-provenance. The permission check never reads the preset, so editing one changes nobody already
-seated, and any single value on a member can be overridden. A test asserts that the two tables'
-`perm_*` columns stay identical.
+and scope. Eight built-ins (`student`, `observer`, `ta`, `instructor`, `tutor`, `grader`,
+`delegate`, `course_tutor`) are seeded from `src/seed/presets.sql` with `dept_id` null; a
+department may add its own under any name. Adding a member copies the preset onto the
+`course_member` row and records `preset_id` as provenance. The permission check never reads the
+preset, so editing one changes nobody already seated, and any single value on a member can be
+overridden. A test asserts that the two tables' `perm_*` columns stay identical.
+
+The two agent presets are for delegates. `delegate` is a person's own assistant: it reads the
+material and, being listed for its principal's own students — for a student, the student — their
+work and grades, and answers its principal alone. `course_tutor` is a course's question-answering
+agent: it reads the material and, listed for nobody, nobody's work, which is what puts it within
+every student's seat, and, brought in by someone who manages the course's members, it answers the
+course (`answers_course`, below). Of the three permissions migration 0007 added, students and TAs get
+`agent_delegate` at `confirm_required` (a student's agent comes in with an instructor's approval)
+and `conversation_ask` autonomous; instructors all three autonomous; `tutor`, `delegate` and
+`course_tutor` answer; observers and graders none. The migration gave every seat that was not
+removed, and every department's own preset, the three levels of the built-in preset of the same
+roster role — `student`, `ta`, `instructor`, `observer`; an `assistant` kept `denied` — a one-time
+decision recorded here and in the migration: instructors, who seat nearly everyone, got the
+most, and everyone else at most what instructors hold, so that the rule below went on holding
+for the seats as they stood. Role was read as a fact of the roster, by a migration, never by
+authorization. A seat the release before it added while the migration was going in has
+`denied`. A seat that manages members under another role than instructor — an assistant or an
+observer given `member_manage`, a TA given it — got its role's levels as well, and from then on
+grants no preset that carries more (`student` carries `agent_delegate` and `conversation_ask`;
+`tutor`, `conversation_answer`) until an instructor raises its own.
 
 **Scope is explicit and fails closed.** `student_scope = 'listed'` with no rows in
 `member_student_scope` means *no* students, so forgetting the rows cannot grant the class.
@@ -214,15 +278,67 @@ granter's own: no level above the granter's on any column, no reach beyond a lis
 granter's own list, no life past the granter's own `expires_at`. A student's seat reaches that
 student, as any seat reaches whoever is on its list, so a list-scoped granter raises nothing on
 a seat that reaches a student outside the list, and seats no new student whose list is
-themselves: nobody can have listed them yet. Narrowing is always allowed, whatever the granter
-holds. Nobody manages their own seat, and a seat whose `expires_at` has
+themselves: nobody can have listed them yet. A change that widens a delegate's seat is held to
+its principal's seat as well, the same three ways, and never gives `member_manage` or
+`agent_delegate`. Narrowing is always allowed, whatever the granter holds. Nobody manages their
+own seat, nor the seat they are a delegate of, and a seat whose `expires_at` has
 passed is as good as removed whether or not the sweep has got to it: it is not revived, and
 seating the actor again is a fresh row.
+
+**Delegates.** A delegate's seat is an owned agent's (§2.1), and its principal is its owner's
+seat. A delegate never holds more than its principal, and `authorize()` makes it so on every
+call (§3) rather than trusting the row, which the release before 0007 could leave wider — it
+narrows a principal without touching its delegates — and which a manager may have changed:
+
+- its level for each permission is the lower of its own and its principal's, except that
+  `conversation_answer` is capped by the principal's `conversation_ask` (your agent answering
+  you is you asking, at one remove), and `member_manage` and `agent_delegate` are denied to it
+  whatever its row says: it does not manage the course or bring agents of its own;
+- it reaches only what its own scope and its principal's both reach, in `authorize()` and in
+  every list, which filters by both in SQL;
+- it counts only while its principal's seat is live, its owner active, and its principal still
+  its owner's seat: paused with its principal, gone with it, and nothing once the agent changes
+  hands. An owned agent's seat with no principal counts for nothing either.
+
+The owner brings the agent in with `member.add_delegate`, gated by `perm_agent_delegate`, so
+that a student's request waits for an instructor. The seat is worked out from the owner's own:
+the preset's levels (`delegate` unless another is named) are each cut down to what the owner
+holds, `member_manage` and `agent_delegate` denied; a level named in the call above the owner's
+is refused, not cut down. Without `member_manage`, the seat holds no more than the built-in
+`delegate` preset gives: a student's agent reads, and an instructor may widen it later within its
+principal. A listed scope defaults to the owner's own list, or to nobody when the owner reaches
+the whole class; a list named must be within the owner's; a preset that reaches everything is
+narrowed to the owner's list when the owner has one. It ends when the owner's seat does, or
+earlier if asked. It answers its owner alone unless its seat *answers the course*
+(`answers_course`): chosen when it is brought in, only by someone who effectively holds
+`member_manage`, and so by default for the `course_tutor` preset and for no other. The students
+it is within may then ask it too (§2.8), for as long as its principal manages the members. Nothing
+else marks a seat as a course's agent — not its preset, not its role, which authorization never
+reads — so an instructor's own assistant, which reads no more than a student may, still answers
+the instructor alone. To change it, the agent is withdrawn and brought in again. A proposal stores the seat worked out in full, with the agent's and the
+owner's names for whoever decides it; approving it works the seat out again from those and
+refuses anything the owner no longer holds. `member.delegate_defaults` shows what the call would
+seat. `member.add` and `course.seat_instructor` refuse an owned agent: only its owner seats it,
+and only as their delegate.
 
 **Lifecycle**: add (new row, preset copied), pause (`status = 'paused'`, same id survives),
 remove (`status = 'removed'`, pending proposals cancelled, history kept), re-add (new row, new
 id). `expires_at` is an automatic remove. Every one of these is itself an action
-(`member.add`, `member.remove`, ...) and lands in the log.
+(`member.add`, `member.remove`, ...) and lands in the log. Removing a seat removes its delegates'
+seats with it, whatever their status, and cancels their proposals too; pausing, narrowing or
+changing a principal changes nothing on its delegates' rows, since `authorize()` caps them by
+the principal anyway. The database removes a delegate's seat with its principal's, so that the
+release before 0007, which knows no delegates, does not leave one behind; that release does not
+cancel its proposals, which approval refuses and the expiry sweep cancels. An owner takes their
+agent out of a course with `agent.withdraw`. A delegate's seat left behind — its agent changed
+hands, or its principal's seat past its expiry — is removed by a sweep (`member.remove_orphan`),
+and by seating the agent again. `member.update_perms_bulk` changes a permission on every live seat of
+one roster role at once, other than the caller's — "students may bring agents only with
+approval" — each change held to the rules of a change to one seat, all or none. It changes the
+seats there are; a seat added later takes its preset's levels, so it is not a standing setting
+of the course: repeat it, give the levels to `member.add`, or use a department preset. Choosing seats
+by role is what the manager asked for, as `member.list` filters by it; it is not
+authorization.
 
 ### 2.3 Grading scheme
 
@@ -388,7 +504,9 @@ event(seq, type, course_id null→course, action_id null→action,
 
 **`action` is an attempt, written before anything happens**, including attempts that were
 denied. `confirm_required` needs no approval table — the queue is `WHERE status = 'proposed'`,
-and the proposal itself lives in `payload`; nothing else is written until a human approves.
+and the proposal itself lives in `payload`; nothing else is written until a human approves. A
+proposer may take their proposal back while nobody has decided it (`action.withdraw`): it is
+cancelled, as `withdrawn`.
 `pending_review` needs no review table — the queue is `WHERE review_state IN ('pending', 'escalated')`,
 an escalated action still waiting for its second reviewer: someone other than whoever escalated it
 or approved its escalation.
@@ -434,12 +552,13 @@ when the sweep last ran.
 **The sweeps are actions too.** Proposals past their TTL, memberships past `expires_at` and
 assignments past `due_at` are acted on by the `kind = 'system'` actor through the same
 pipeline, as internal tools no adapter exposes (`action.expire`, `member.expire`,
-`submission.mark_missing`): a row with no member, `authz_result = 'autonomous'`, and an
+`member.remove_orphan`, `submission.mark_missing`): a row with no member, `authz_result = 'autonomous'`, and an
 idempotency key that names the thing swept, so that two instances sweeping at once act once.
 Nobody is authorized because nobody is calling. None of it is what makes the system correct —
 `authorize()` ignores an expired member from the instant of expiry, and approval checks a
 proposal's age itself — it makes those facts visible, and keeps the queues free of entries
-nobody could approve. When a due date passes, every current student with no submission row
+nobody could approve. A delegate's seat whose principal is removed or expired, or that no longer
+matches its agent's owner, counts for nothing from that instant, and the sweep removes it. When a due date passes, every current student with no submission row
 gets one in state `missing`, so that the gap is something a grader can see and grade; late
 work takes that row over, unless a grade has been entered or proposed for it: a zero for
 handing in nothing is a grade of that nothing, and the late work is then a new attempt. An
@@ -465,7 +584,8 @@ a member's *own* actions are always visible to it: `action.approved`, `action.re
 `action.cancelled` are filed under the proposal's id, which is how a pull-based agent learns
 what became of what it proposed. `action.approved` carries an `outcome` — `executed`, or
 `failed` when the approved call was refused by the domain — so that the two are never taken
-for one another. Then scope, per row, as below.
+for one another. News of a conversation is the exception both ways: its two participants see
+it, and nobody else (§2.8). Then scope, per row, as below.
 
 `student_member_id` and `assignment_id` say whose the event is, so that the feed is
 scope-filtered in SQL exactly as `authorize()` filters a target: null means the event belongs
@@ -485,7 +605,13 @@ course.
 
 Nobody approves or reviews their own action. The CHECKs compare seats; the application compares
 actors as well, so the rule holds across every seat one actor has held: someone removed and
-seated again has a new seat, and is still who made the action. The database cannot go further
+seated again has a new seat, and is still who made the action. It compares parties, in fact: an
+actor, an agent it owns or its owner, and another agent of the same owner are one party, since an
+agent someone owns acts only as their delegate. An owner does not approve or review what their
+agent did, nor an agent what its owner or a sibling did, nor does any of them close an escalation
+another of them raised. The approval and review queues list such actions all the same — they are
+the course's queues — and mark each with whether it is the caller's to decide
+(`yours_to_decide`). The database cannot go further
 and require the decider to be human, because nothing reads `actor.kind`. Nor can it see past one
 row: a decision is an action like any other, so it may itself wait for a decision or be under
 review — a triage agent whose approvals a human confirms. Confirming it carries out what it
@@ -529,6 +655,141 @@ serves HW3, the midterm, the assignments bucket and the course total.
 - **Every grade names the action that created it.** When a student disputes an agent's mark,
   `created_by_action_id` is the whole query: which agent, which membership, who approved.
 
+### 2.8 Conversations
+
+```
+conversation(id, course_id→course, opener_member_id, respondent_member_id, title null,
+             status [open|closed], closed_reason null, created_at,
+             last_message_at null, last_author_member_id null,
+             unique(id, course_id))
+    composite FKs (course_id, opener_member_id | respondent_member_id | last_author_member_id)
+                  → course_member(course_id, id)
+    check: opener ≠ respondent;  title 1..200 characters;  closed_reason only once closed;
+           the last author is a participant, and set with last_message_at
+    trigger: the participants and the course never change; a closed conversation stays as
+             it is; none is deleted
+
+conversation_message(id, conversation_id, course_id, seq, author_member_id,
+                     in_reply_to_message_id null, body, created_by_action_id→action, created_at,
+                     unique(conversation_id, seq), unique(id, conversation_id), unique(id, course_id))
+    composite FK (conversation_id, course_id) → conversation(id, course_id)
+    composite FK (course_id, author_member_id) → course_member(course_id, id)
+    composite FK (in_reply_to_message_id, conversation_id) → conversation_message(id, conversation_id)
+    check: body 1..20000 characters
+    trigger: only the two participants write, only while the conversation is open; a reply
+             is the respondent's, to a message of the opener's
+    append-only
+
+conversation_message_retraction(message_id, course_id, retracted_by_member_id,
+                                created_by_action_id→action, reason null, created_at)
+    composite FKs (message_id, course_id) → conversation_message,
+                  (course_id, retracted_by_member_id) → course_member
+    append-only
+```
+
+A conversation is one member asking one other member questions, and that member answering
+them: a student and the course's tutor agent, a person and their own agent. It is not a
+discussion (§6): it has two participants, the one who opened it and its respondent, fixed
+for good, and each message is an action — `conversation.open`, `conversation.ask`,
+`conversation.answer` — recorded, authorized and, for an answer, governed by the
+respondent's level of `perm_conversation_answer`: posted at once, posted and reviewed after,
+or waiting for a person's approval.
+
+**Nobody gains through a conversation more than they hold.** A member may address a
+respondent only if the respondent can see and do nothing the member cannot — the
+respondent's seat is within the member's — or the respondent is the member's own delegate.
+So a question cannot make an agent a confused deputy over what its seat reads: whatever that
+seat can read, the one who asked could have read for themselves. Addressability bounds the
+seat, and only the seat. A respondent that answers several people — the course's tutor, a
+tutor listed for several students, a member of staff — also holds what each of them wrote to
+it, and an agent can be asked to repeat it: nothing written to such a respondent is private
+from the others who may ask it, and `visible_to` says so. Core cannot keep one asker's words
+from another inside an agent — one token serves every conversation the agent is in, and it may
+read each of them — so the agent is told to (the MCP instructions): answer each conversation
+from that conversation alone, and never repeat to one person what another wrote. Precisely, O
+may address R when:
+
+- they are two seats, both live, a delegate's principal included (§2.2), held by active
+  actors;
+- R answers: its `conversation_answer`, as `authorize()` caps it, is allowed;
+- R is O's own delegate, which answers its principal whatever it holds; or R is within O:
+  for every permission but `conversation_answer`, which is what being addressed is, R's
+  level (capped, for a delegate) is no higher than O's, and R reaches no student and no
+  assignment O does not (O `all` reaches everything; a list must lie within O's list; a
+  delegate's reach is its own and its principal's both);
+- a delegate answers only its principal, unless its seat answers the course
+  (`answers_course`, §2.2), which only someone who manages the course's members chooses, and
+  which counts only while its principal still manages them: such a delegate is the course's
+  own agent, a `course_tutor` an instructor brought in, and answers whomever it is within. So
+  a student may ask the course's tutor, which reads the material and nobody's work; nobody —
+  not another student, not an instructor — asks a student's own agent anything; and a student
+  does not ask an instructor's own assistant, whatever it reads.
+
+The rule is one function, which every conversation tool goes by, and it is measured now, on
+every call, not when the conversation began: seats are narrowed, widened, paused and
+removed. `conversation.respondents` lists those the caller may address, each with how its
+answers arrive and, for an agent, when it last used a token. `conversation.ask` is refused
+once the respondent may no longer be addressed ("start a new conversation"), and
+`conversation.answer` once its opener may no longer address the one answering. The
+respondent reads the conversation (`conversation.get`, `.messages`) only while its opener
+may still address it; the opener always; and so does whoever oversees the opener: holds
+`perm_action_decide` and reaches the opener in its student scope, as staff see what is said
+by and to the students they answer for. To anyone else a conversation does not exist.
+`conversation.list` lists, in SQL, the caller's own conversations and those it oversees,
+without what was written; `conversation.inbox` those addressed to the caller that wait for
+it: open, the opener spoke last and has not retracted what it last wrote, the opener still
+live and still able to address the caller, and no answer of the caller's to that message
+waiting for approval. What can never count again — an opener removed, paused, suspended, or
+whose principal is — is left out in SQL, and the rest is read a batch at a time, oldest
+first, until enough are found, so that conversations whose openers may no longer ask do not
+stand for good in front of those that may.
+
+**An answer answers the latest question, once.** It names the opener's message it answers
+(`in_reply_to_message_id`), and is refused as a conflict if the opener has written since
+(`moved_on`): a reply a slow model wrote, or one that waited for approval, is not posted under a
+question it never saw. It is refused as well once that message is answered
+(`already_answered`), and a second proposal to one message is refused while the first waits
+for a decision (`answer_pending`): so an answer that failed, or was rejected, is written again
+under a new idempotency key without any risk of two answers to one question. An answer waiting
+for approval to a message since overtaken holds nothing up: the conversation is back in the
+inbox, and approving the answer can only fail. Writing a message first updates who spoke last, `WHERE status = 'open'`, which
+takes the conversation's row lock; the check for a newer question and the insert come under
+it. So a close and a message never pass each other, and messages in one conversation are
+written one at a time: `seq` is their order, 1, 2, 3, as the lock gave it, not as any
+instance's clock would. A call writing in a conversation takes its caller's seat first, the
+other participant's next, KEY SHARE (its principal's after it), and the conversation last.
+An answer that waits for approval is a proposal; approving it runs every check again. Four
+eyes count parties (§2.6), so the answers of a course tutor an instructor owns, when they
+wait for approval or review, are decided by someone other than that instructor. Where that
+instructor is the only one who decides actions, nobody can: such a tutor's answers stay
+autonomous there, or someone else is seated to decide them.
+
+Either participant closes a conversation (`conversation.close`), with a reason if they like,
+which may not be `seat_removed`; nothing more is written in it, and it stays readable. A message is withdrawn (`conversation.retract`) by its author, or
+by whoever oversees the opener, with a row beside it: the read tools then show it retracted,
+by whom and why, without its text, and the conversation says when a message in it was last
+retracted (`last_retracted_at`), since a retraction adds no message for a reader to poll. Removing a seat closes every open conversation it takes
+part in (`closed_reason = 'seat_removed'`), a delegate's with its principal's. A seat the
+release before 0008 removes leaves its conversations open, where nobody can write any more,
+since both participants must be live to.
+
+**The action log holds what was written.** Each message is an action whose payload holds its
+body, so it is readable, in the action views, by anyone who holds `perm_action_decide` in the
+course, unscoped (§7), and a retraction does not take it back from there. That is said
+plainly to whoever reads a conversation, in `visible_to`, as codes for the reader to put in
+its own words: its `participants`, course staff who decide actions for its opener
+(`overseers`), anyone who decides actions in the course, through the log (`action_record`),
+and, unless the respondent is the opener's own delegate, whomever else the respondent answers
+(`respondent_answers_others`). There is no privacy promised beyond that. `action.list_mine` takes `exclude_types`, so
+that a list of what one has done need not be a transcript.
+
+**Its news is its participants'.** `conversation.opened`, `.message_posted`, `.closed` and
+`.message_retracted` are filed under the conversation (`subject_type = 'conversation'`), name
+no student and no assignment, and carry ids only, never a body. They are shown to the two
+participants and to nobody else, whatever they hold: not by permission (the visibility table
+lists none for them), and not by the rule that shows a member the events of its own actions,
+so a manager whose removal of a seat closed a conversation is not told of it.
+
 ## 3. Authorization
 
 ```
@@ -537,9 +798,14 @@ authorize(actor, course, action_type, target) → autonomy_level
 1. actor.status = 'active' and course.status ≠ 'archived' (for writes), else denied
 2. member = the actor's course_member in this course with status = 'active'
    and (expires_at null or in the future); none → denied
+   if member has a principal: the principal is the same, the owner behind it active and
+   still the actor's owner; else denied (an owned actor's seat with no principal: denied)
 3. level = member.perm_<action_type>; 'denied' → denied
+   a delegate: the lower of its level and its principal's (conversation_answer: the
+   principal's conversation_ask); member_manage and agent_delegate: denied
 4. if the target belongs to a student:
       member.student_scope = 'all', or that student ∈ member_student_scope; else denied
+      a delegate: its principal's likewise
 5. if the target belongs to an assignment: same with assignment_scope
 6. return level
 ```
@@ -555,8 +821,16 @@ Steps 1–3 run before the target is looked up, and the lookup happens only for 
 passed them. A non-member probing ids gets the same recorded denial whether or not the id
 exists.
 
-One indexed lookup plus at most two existence checks. There is no walk, no most-specific-wins
-rule and no cache to invalidate: removing an agent takes effect on its next call.
+One indexed lookup plus at most two existence checks, twice that for a delegate, whose
+principal comes in the same lookup. There is no walk, no most-specific-wins rule and no cache to
+invalidate: removing an agent, or its owner, takes effect on its next call. A delegate goes one
+step and no further, since a principal is nobody's delegate. A write takes its caller's seat
+first and, for a delegate, its principal's second, KEY SHARE, and reads the principal again as it
+then stands; whatever else takes both KEY SHARE (`action.decide`, a write in a conversation)
+takes them in that order. What takes a delegate's seat FOR UPDATE, to change or remove it, takes
+its principal's KEY SHARE before it; and removing a principal holds it FOR UPDATE and then
+removes its delegates. Every path that takes both therefore meets the other at the principal
+first.
 
 Platform-level operations (`course.create`, `actor.register`, seating the first instructor)
 check `actor.platform_role` instead. That is the only place it is read.
@@ -588,6 +862,17 @@ check `actor.platform_role` instead. That is the only place it is read.
 | A submitted submission never changes | trigger |
 | Owner columns match `document.kind`; a version has content; SSO rows carry an identity | CHECKs |
 | Emails are unique regardless of case | unique index on `lower(email)` |
+| Only an agent has an owner, and its owner is a person: not an agent, not the system actor, not itself | CHECKs on `actor`, trigger `actor_owner_valid` |
+| An agent someone owns holds no platform role | CHECK `actor_owned_holds_no_platform_role` |
+| Making an actor active forgets who suspended it | trigger `actor_suspension_cleared` |
+| A seat that is not removed has a principal exactly when its actor has an owner; the principal is the owner's seat, in the same course, and nobody's delegate | composite FK and trigger `course_member_principal_valid` on `course_member` |
+| A delegate's seat is removed with its principal's, whichever release removes it | trigger `course_member_delegates_follow` |
+| Only a delegate's seat answers the course | CHECK `course_member_answers_course_is_delegate` |
+| A conversation's two participants are two seats of its course, and never change; a closed conversation stays closed; none is deleted | composite FKs, CHECKs and trigger `conversation_guarded` on `conversation` |
+| Only a conversation's participants write in it, only while it is open; a reply is the respondent's, to a message of the opener's in the same conversation | trigger `conversation_message_author_valid`, composite FKs on `conversation_message` |
+| A message and its retraction are in their conversation's course; one message at each `seq`; a message is retracted once | composite FKs, `unique(conversation_id, seq)`, primary key on `conversation_message_retraction` |
+| Every message and retraction names its action | `created_by_action_id NOT NULL` |
+| `conversation_message` and `conversation_message_retraction` are append-only | triggers |
 
 **Enforced by the application.** Each is a place a bug can hide, and each needs a test.
 
@@ -661,11 +946,73 @@ check `actor.platform_role` instead. That is the only place it is read.
   otherwise, a new email), and for someone suspended since or with no email. Whoever holds one
   can sign in as its actor, once; it is no bearer token: it is never taken as one, nor a token
   as an invitation.
-- A call that loses a deadlock — two managers changing each other's seats at once — is made
-  again, once, in a fresh transaction, and is recorded as failed ("try again") only if it loses
-  again. A sweep's call that loses twice is not recorded at all: its key names what it sweeps,
+- A call that loses a deadlock — two managers changing each other's seats at once, or
+  `member.update_perms_bulk`, which locks every seat of a role in id order, against a write that
+  holds one seat of that role and then takes another's KEY SHARE (a message between two seats of
+  the role, `action.decide` between them, a delegate's own call whose principal has the role) —
+  is made again, once, in a fresh transaction, and is recorded as failed ("try again") only if
+  it loses again. A sweep's call that loses twice is not recorded at all: its key names what it sweeps,
   and a failure stored under it would stand for the sweep: every sweep after would replay that
   failure or pass the thing over, and never sweep it.
+- A delegate holds no more than its principal (§2.2, Delegates): its levels capped by the
+  principal's (`conversation_answer` by its `conversation_ask`), never `member_manage` or
+  `agent_delegate`; its reach its own and its principal's both, in `authorize()` and in every list,
+  in SQL; live only while its principal is live, its owner active and still its owner. The rows
+  are not trusted to say so: the release before 0007 narrows a principal without touching its
+  delegates.
+- Seating a delegate (`member.add_delegate`): the seat worked out from the owner's own, levels
+  cut down to it, a level or reach named beyond it refused, no more than the `delegate` preset
+  without `member_manage`, no life past the owner's; the same worked out again on approval, and
+  refused if the owner no longer holds it. Only the owner seats their agent, and only as their
+  delegate: `member.add` and `course.seat_instructor` refuse an owned agent.
+- A change that widens a delegate's seat is within its principal's as well as the granter's.
+  Nobody manages the seat they are a delegate of: a delegate never holds `member_manage`
+  (`domain.Member.Perm`).
+- Removing a seat cancels its delegates' proposals and closes their conversations with its own;
+  the database removes the delegates' seats with it (trigger `course_member_delegates_follow`).
+  The order is the principal FOR UPDATE, then its delegates' rows, only updated, then the
+  conversations, all in one statement, in id order. A delegate's own call takes its seat KEY
+  SHARE and then its principal's, which it then waits for; whatever takes a delegate's seat FOR
+  UPDATE — `member.*` on it, `agent.withdraw`, the sweeps, seating over it — takes its principal's
+  KEY SHARE first. The sweep removes a delegate seat left orphaned, and so does seating the agent
+  again.
+- Four eyes counts parties (§2.6): an actor, the agents it owns or its owner, and the owner's
+  other agents are one, in `action.decide`, `action.review`, at any remove and for escalations.
+- Only an agent's owner acts on it through `agent.*`, and to anyone else it does not exist.
+  What an owner does for themselves is capped: `agent.create`, and `agent.reactivate` of one they
+  suspended, are refused once they have `AGENT_MAX_PER_OWNER` agents that are not suspended,
+  counted under a lock on the owner, so two at once are counted one after the other. An
+  administrator's `actor.register` with an owner, `actor.set_owner` and `actor.reactivate` are
+  not counted: an administrator may give someone more. An owner lifts only a suspension of their
+  own; an administrator's, or one from before it was recorded, is not theirs.
+- An agent changes owner only while seated in no course that is not archived, and every
+  credential it has is revoked, and every request to seat it cancelled, as it does. The change
+  holds the agent's row, `FOR NO KEY UPDATE`, before it looks at anything; issuing it a token
+  and seating it or taking it out read the row `FOR SHARE`, so that a token or a seat made by
+  the owner before is revoked or counted, never left behind.
+- `member.update_perms_bulk` changes every seat of the role but the caller's, each through the
+  rule for one seat, all or none.
+- A proposal is withdrawn only by its proposer, and only while nobody has decided it.
+- Nobody gains through a conversation more than they hold (§2.8): a member addresses only a
+  respondent within their own seat, or their own delegate; a delegate answers only its
+  principal unless its seat answers the course, which only someone who manages the course's
+  members chooses (`member.add_delegate`), and only while its principal still manages them.
+  One function decides it for
+  every conversation tool, measured on every call: whom one is offered, whom one may ask,
+  who may answer, and whether a respondent may still read what it was asked.
+- A conversation is read by its opener, by its respondent only while the opener may still
+  address it, and by whoever decides actions for the opener; to anyone else it does not
+  exist. Lists take the caller's own and those it oversees, in SQL.
+- An answer answers the opener's latest message, and only while nothing answers it yet,
+  checked under the conversation's row lock, which writing a message takes first (`WHERE
+  status = 'open'`), so that a close and a message never pass each other; a proposed answer is
+  checked again when approved, and one proposal to a message waits at a time.
+- A call writing in a conversation takes its caller's seat, then the other participant's
+  and its principal's, then the conversation: a removal, which holds the seat and then
+  closes its conversations, waits for it or is waited for.
+- Removing a seat closes its open conversations, a delegate's with its principal's.
+- A message is retracted by its author, or by whoever decides actions for the opener.
+- News of a conversation reaches its two participants and nobody else (`event.list`).
 - `actor.kind` and `course_member.role` are never read by authorization.
 
 ## 5. Worked example: an agent grades an essay
@@ -692,6 +1039,7 @@ garbage in the grades, full record in the log.
 
 - **Discussion.** Course-wide threads and posts (`discussion_thread`, `discussion_post`),
   with agent posts governed like any other action. Attachments via `document.post_id`.
+  Conversations (§2.8) are one member and one respondent, not a forum.
 - **Runs and budgets.** Call and wall-clock budgets per membership. `expires_at`, pause and
   remove are the v1 controls.
 - **Redis.** The event feed is read from Postgres; `event.seq` is already the cursor a stream
@@ -703,8 +1051,22 @@ garbage in the grades, full record in the log.
 - **Organisation hierarchy** above `department`; cross-course administrative roles beyond
   `platform_role`.
 - **Agent memory.** Agents key their own stores on `course_member.id`, which is the durable
-  handle for "this agent in this course".
+  handle for "this agent in this course", and keep what people wrote to them per
+  conversation: an agent that answers several people shares none of it between them (§2.8).
 - **The concept graph**, quizzes, retention policy.
+- **Waiting for news.** `event.list` and `conversation.inbox` are polled. A long poll, or
+  `LISTEN`/`NOTIFY` behind one, would let an agent answer as soon as it is asked without
+  polling hard; `event.seq` and `last_message_at` are the cursors it would use.
+- **One inbox for every course.** `conversation.inbox` is per course; an agent seated in
+  several polls each (from `me.memberships`).
+- **A course tutor reaching the asker's own work.** The course's tutor reads nobody's work,
+  which is what puts it within every student's seat. Widening its reach for one conversation
+  to the asker's own submissions and grades, and no one else's, is deferred.
+- **Token streaming.** An answer arrives whole, as one message; nothing is streamed while it
+  is written.
+- **Agents that belong to no one person.** An agent is owned by a person or by nobody; a course's
+  or a department's own agent is seated as an ordinary member, or as its instructor's delegate
+  (`course_tutor`). Agents do not own agents, and a delegate brings in no delegate of its own.
 
 ## 7. Open questions
 
@@ -713,6 +1075,17 @@ garbage in the grades, full record in the log.
 - **Scope on `perm_action_decide`.** The permission is unscoped, so a member who may decide
   sees every proposal's payload in the course, including for students outside their own
   scope. Narrowing it needs scope columns on `action`.
+- **What the action log shows of a conversation.** Every message is an action whose payload
+  holds its body, so whoever holds `perm_action_decide` reads every conversation in the
+  course through the action views — beyond the opener-within-scope rule that governs reading
+  the conversation itself (§2.8), and after a message is retracted. Narrowing that needs the
+  scope columns above, or keeping message bodies out of `payload`, from which an answer
+  that waited for approval is carried out.
+- **A delegate's row and what it may do.** A delegate's row may say more than it may do —
+  its principal narrowed since, or the row written by the release before 0007 — and
+  `authorize()` goes by the lower. `me.memberships` and `agent.get` say what a seat may do;
+  `member.get` says what its row holds. Whether narrowing a principal should rewrite its
+  delegates' rows as well is open.
 
 Settled, and recorded in §2.6 (migration 0002):
 

@@ -30,10 +30,31 @@ src/
                          the invite credential kind: a prefix and an expiry,
                          and one live invitation per actor
     0005_invitations.down.sql
+    0006_credential_issuer.up.sql
+                         who issued an API token
+    0006_credential_issuer.down.sql
+    0007_agent_ownership.up.sql
+                         agents a person owns and the delegate seats they act
+                         from; who suspended an actor; the permissions
+                         agent_delegate, conversation_ask and
+                         conversation_answer, backfilled by roster role
+    0007_agent_ownership.down.sql
+                         removes the delegate seats, cancelling their
+                         proposals, before it drops what 0007 added
+    0008_conversations.up.sql
+                         conversations between two members, their messages
+                         and retractions: append-only, only the participants
+                         write, a closed conversation stays closed
+    0008_conversations.down.sql
+                         cancels answers waiting for approval, then drops the
+                         three tables; the actions that wrote them stay
   seed/
-    presets.sql          the six built-in permission presets; safe to re-run
+    presets.sql          the eight built-in permission presets; safe to re-run
   tests/
     constraints_test.sql checks the database-enforced rules; rolls back
+    down/NNNN.before.sql, NNNN.after.sql
+                         data for a down migration to go over, and what must
+                         hold once it has, run around NNNN's down
   embed.go               compiles migrations/ and seed/ into the server binary
 ```
 
@@ -106,9 +127,14 @@ Each check prints `PASS`. The first failure stops the run with `FAIL` and the
 SQLSTATE it expected versus what it got.
 
 `make db-test-sql` at the repository root does all of this against a scratch
-database — every migration up, the seed, the checks, every migration down, a
-check that nothing was left behind, and up again — and is what CI runs on
-PostgreSQL 13 and 18.
+database — every migration up, the seed, the checks, the newest two down and
+up again over the seeded built-in presets (`tests/redo_builtins.sql` checks
+they come through unchanged), every migration down, a check that nothing was
+left behind, and up again — and is what CI runs on PostgreSQL 13 and 18. On
+the way down, a migration with files in `tests/down/` goes down over the data
+its `.before.sql` commits, and its `.after.sql` checks what became of it:
+0007 over a delegate with a proposal waiting and a token, 0008 over a
+conversation with an answer waiting.
 
 ## What the database enforces
 
@@ -140,6 +166,16 @@ MCP, these are the invariants that survive a bug in the tool layer.
 | No credential is written for the system actor, nor moved to it | `credential_not_for_system_actor` trigger |
 | Status, role, kind and scope columns hold only listed values | `*_valid` CHECKs |
 | Emails are unique regardless of case | unique index on `lower(email)` |
+| Only an agent has an owner; its owner is a person, not an agent, the system actor or itself; an agent someone owns holds no platform role | `actor_not_own_owner`, `actor_owned_is_agent`, `actor_owned_holds_no_platform_role`, trigger `actor_owner_valid` |
+| Making an actor active forgets who suspended it | trigger `actor_suspension_cleared` |
+| A seat that is not removed has a principal exactly when its actor has an owner; the principal is the owner's seat, in the same course, and nobody's delegate | composite FK `course_member_principal_fk`, trigger `course_member_principal_valid` |
+| A delegate's seat is removed with its principal's, whichever release removes it | trigger `course_member_delegates_follow` |
+| Only a delegate's seat answers the course | `course_member_answers_course_is_delegate` |
+| A conversation's two participants are seats of its course and never change; a closed conversation stays closed; none is deleted | composite FKs, `conversation_*` CHECKs, trigger `conversation_guarded` |
+| Only a conversation's two participants write in it, only while it is open; a reply is the respondent's, to a message of the opener's in the same conversation | trigger `conversation_message_author_valid`, composite FKs on `conversation_message` |
+| A message and its retraction are in their conversation's course; one message at each `seq`, from 1; a message is retracted once | composite FKs, `unique(conversation_id, seq)`, `conversation_message_seq_positive`, primary key of `conversation_message_retraction` |
+| Every message and retraction names its action | `created_by_action_id NOT NULL` |
+| `conversation_message` and `conversation_message_retraction` are append-only | `reject_mutation()` triggers on UPDATE, DELETE, TRUNCATE |
 | Domain rows are never silently cascade-deleted | FKs default to NO ACTION |
 
 ## What the application must enforce
@@ -165,7 +201,15 @@ The database cannot express these. Each one is a place a bug can hide.
 - **Grade computation**, and writing an `origin = 'computed'` snapshot only
   when a rolled-up component or the course total is posted.
 - **Component tree acyclicity**: the CHECK blocks only a self-loop.
-- **Cancelling pending proposals** when a member is removed or expires.
+- **Cancelling pending proposals** when a member is removed or expires, and
+  removing a member's delegates with them.
+- **A delegate holds no more than its principal**: levels, reach and life,
+  read with the principal on every call and in every list.
+- **Who may address whom** in a conversation (`tools.addressing`): the
+  respondent within the asker's seat, or the asker's own delegate; a delegate
+  answers others only if its seat answers the course.
+- **Closing a removed seat's conversations**, a delegate's with its
+  principal's, and cancelling its proposals.
 - **A token of the system actor's** written before migration 0004 refused
   them authenticates nobody.
 - **`actor.kind` and `course_member.role` are never read by authorization.**
@@ -184,7 +228,8 @@ unique index.
 ## Verification status
 
 Executed against PostgreSQL 18.6: up, down and up again apply cleanly, and
-`tests/constraints_test.sql` passes (93 checks). **Not yet run on PostgreSQL
+`tests/constraints_test.sql` passes (93 checks; 162 since migrations 0007
+and 0008, which have been run on PostgreSQL 16). **Not yet run on PostgreSQL
 13**, the stated minimum: CI runs this suite and the Go tests on both 13 and
 18, so the first pipeline run settles it — update this paragraph with the
 result.

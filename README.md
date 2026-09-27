@@ -22,6 +22,11 @@ In place so far:
 - the tool catalogue: actors, terms, departments, presets, courses, members,
   the grading scheme, assignments, submissions, grades, documents, the
   approval and review queues, and the event feed — all scope-filtered in SQL;
+- agents people own: registered by the person, brought into a course as their
+  delegate, and never able to do more there than the person's own seat;
+- conversations: a member asks one other member — the course's tutor agent,
+  their own agent — questions, and it answers them, each message an action;
+  nobody may ask anyone who can see or do more than they can;
 - files: versioned documents with publish-by-pointer, uploads and downloads
   by short-lived URL (this server's disk, or any S3-compatible store), and
   feedback files that travel with a grade through a proposal.
@@ -29,7 +34,8 @@ In place so far:
 `make e2e` runs the real binary against a scratch database and, with nothing
 but `curl`, builds the worked example from docs/schema.md §5 from an empty
 installation: an agent grades an essay, a person approves it, the student
-sees the grade.
+sees the grade; then the student asks the instructor's tutor agent a question,
+and it answers.
 
 - MCP: agents connect at `/mcp` (stateless streamable HTTP, bearer token) and
   get the same catalogue as REST, tool for tool, through the same pipeline.
@@ -184,6 +190,37 @@ one call: JSON-RPC batches are refused, since the rate limit counts requests.
 
 To look around by hand: `npx @modelcontextprotocol/inspector`, transport
 "Streamable HTTP", URL `http://localhost:8080/mcp`, and the bearer token.
+
+The program that runs an agent lives outside Core.
+[docs/agent-runtime.md](docs/agent-runtime.md) is the handout for building a
+service that hosts agents: what it calls, how it finds questions and answers
+them, and how it works with the mainstream model APIs.
+
+A person may also have agents of their own, with no administrator involved:
+`agent.create` registers one they own, `agent.issue_token` gives it a token,
+and `member.add_delegate` brings it into a course where they are seated, as
+their delegate (a student's request waits for an instructor's approval by
+default). There it can do nothing the person cannot, reach no one the person
+cannot, and last no longer than the person's seat. `AGENT_SELF_SERVICE=off`
+leaves agents to administrators, and `AGENT_MAX_PER_OWNER` (5) bounds how many
+agents that are not suspended one person may create or reactivate for
+themselves; an administrator registering or reassigning one is not counted.
+`agent.list` returns both settings, as `self_service` and `limit`.
+
+An agent that answers questions polls `conversation_inbox` in each course
+where it may (its `conversation_answer` in `me_memberships`), reads each
+waiting conversation with `conversation_messages`, and answers with
+`conversation_answer`, naming the question it answers
+(`in_reply_to_message_id`, the conversation's `latest_opener_message_id`). An
+answer to anything but the latest question is refused as a conflict, so a
+reply that took a while is never posted under a newer question, and so is a
+second answer to one question, so an answer that failed or was rejected is
+written again safely. People find whom they may ask with
+`conversation.respondents` and start with `conversation.open`. What is
+written is readable by the two participants, by course staff who decide
+actions for the one who asked, and, in the action log, by anyone who decides
+actions in the course; and a respondent that answers others too, such as a
+course's tutor agent, may repeat it to them (docs/schema.md §2.8).
 
 ### The API in one paragraph
 

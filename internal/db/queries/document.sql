@@ -62,19 +62,24 @@ WHERE d.course_id = $1 AND d.id > sqlc.arg(after)
         SELECT 1 FROM assignment a
         WHERE (a.instructions_document_id = d.id OR a.rubric_document_id = d.id) AND a.published_at IS NOT NULL
           AND (sqlc.arg(assignment_all)::bool OR EXISTS (
-                SELECT 1 FROM member_assignment_scope y WHERE y.member_id = sqlc.arg(member_id) AND y.assignment_id = a.id))))
+                SELECT 1 FROM member_assignment_scope y WHERE y.member_id = sqlc.arg(member_id) AND y.assignment_id = a.id))
+          AND (sqlc.arg(principal_assignment_all)::bool OR EXISTS (
+                SELECT 1 FROM member_assignment_scope py WHERE py.member_id = sqlc.arg(principal_id) AND py.assignment_id = a.id))))
 ORDER BY d.id
 LIMIT sqlc.arg(max_rows);
 
 -- name: DocumentInUseByPublishedAssignment :one
 -- Whether a published assignment within the member's scope refers to the
--- document as its instructions or rubric.
+-- document as its instructions or rubric. A delegate's scope is its
+-- principal's too.
 SELECT EXISTS (
     SELECT 1 FROM assignment a
     WHERE (a.instructions_document_id = sqlc.arg(document_id) OR a.rubric_document_id = sqlc.arg(document_id))
       AND a.published_at IS NOT NULL
       AND (sqlc.arg(assignment_all)::bool OR EXISTS (
             SELECT 1 FROM member_assignment_scope y WHERE y.member_id = sqlc.arg(member_id) AND y.assignment_id = a.id))
+      AND (sqlc.arg(principal_assignment_all)::bool OR EXISTS (
+            SELECT 1 FROM member_assignment_scope py WHERE py.member_id = sqlc.arg(principal_id) AND py.assignment_id = a.id))
 );
 
 -- name: ListPublishedAssignmentsUsingDocument :many
@@ -106,6 +111,10 @@ SELECT EXISTS (
             SELECT 1 FROM member_student_scope x WHERE x.member_id = sqlc.arg(member_id) AND x.student_member_id = s.student_member_id))
       AND (sqlc.arg(assignment_all)::bool OR EXISTS (
             SELECT 1 FROM member_assignment_scope y WHERE y.member_id = sqlc.arg(member_id) AND y.assignment_id = s.assignment_id))
+      AND (sqlc.arg(principal_student_all)::bool OR EXISTS (
+            SELECT 1 FROM member_student_scope px WHERE px.member_id = sqlc.arg(principal_id) AND px.student_member_id = s.student_member_id))
+      AND (sqlc.arg(principal_assignment_all)::bool OR EXISTS (
+            SELECT 1 FROM member_assignment_scope py WHERE py.member_id = sqlc.arg(principal_id) AND py.assignment_id = s.assignment_id))
 );
 
 -- name: StorageKeyInUse :one

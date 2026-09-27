@@ -30,7 +30,10 @@ SELECT EXISTS (
     SELECT 1
     FROM hand h
     JOIN course_member m ON m.id = h.member_id
-    WHERE m.actor_id = $1::uuid
+    JOIN actor x ON x.id = m.actor_id
+    JOIN actor me ON me.id = $1::uuid
+    WHERE x.id = me.id OR x.owner_actor_id = me.id OR me.owner_actor_id = x.id
+       OR x.owner_actor_id = me.owner_actor_id
 )
 `
 
@@ -39,12 +42,13 @@ type EscalatedByParams struct {
 	ActionID uuid.UUID
 }
 
-// Whether the actor had a hand in escalating the action, from any seat: made
-// the review that escalated it, or approved that review, or confirmed that
-// approval, and so on up. An approved review is carried out as its proposer,
-// so the seat the escalation is recorded against is only the first of these;
-// each approval is an executed action.decide about the one before, made from
-// the seat that approved it.
+// Whether the actor, or anyone of the same party (SameParty), had a hand in
+// escalating the action, from any seat: made the review that escalated it,
+// or approved that review, or confirmed that approval, and so on up. An
+// approved review is carried out as its proposer, so the seat the escalation
+// is recorded against is only the first of these; each approval is an
+// executed action.decide about the one before, made from the seat that
+// approved it.
 func (q *Queries) EscalatedBy(ctx context.Context, arg EscalatedByParams) (bool, error) {
 	row := q.db.QueryRow(ctx, escalatedBy, arg.ActorID, arg.ActionID)
 	var exists bool
@@ -248,22 +252,27 @@ func (q *Queries) InsertAction(ctx context.Context, arg InsertActionParams) (int
 const listActionsByMember = `-- name: ListActionsByMember :many
 SELECT id, actor_id, course_id, member_id, action_type, target_type, target_id, payload, idempotency_key, authz_result, status, decided_by_member_id, decided_at, review_state, reviewed_by_member_id, reviewed_at, executed_at, created_at, payload_hash, result FROM action
 WHERE course_id = $1 AND member_id = $2 AND id > $3
+  AND NOT (action_type = ANY($4::text[]))
 ORDER BY id
-LIMIT $4
+LIMIT $5
 `
 
 type ListActionsByMemberParams struct {
-	CourseID *uuid.UUID
-	MemberID *uuid.UUID
-	After    uuid.UUID
-	MaxRows  int32
+	CourseID     *uuid.UUID
+	MemberID     *uuid.UUID
+	After        uuid.UUID
+	ExcludeTypes []string
+	MaxRows      int32
 }
 
+// exclude_types leaves out whole action types: a chat's messages from a
+// list of what one has done, say.
 func (q *Queries) ListActionsByMember(ctx context.Context, arg ListActionsByMemberParams) ([]Action, error) {
 	rows, err := q.db.Query(ctx, listActionsByMember,
 		arg.CourseID,
 		arg.MemberID,
 		arg.After,
+		arg.ExcludeTypes,
 		arg.MaxRows,
 	)
 	if err != nil {
@@ -469,6 +478,64 @@ type MarkActionFailedParams struct {
 func (q *Queries) MarkActionFailed(ctx context.Context, arg MarkActionFailedParams) error {
 	_, err := q.db.Exec(ctx, markActionFailed, arg.ID, arg.Result)
 	return err
+}
+
+const sameParty = `-- name: SameParty :one
+SELECT ((a.id = b.id OR a.owner_actor_id = b.id OR b.owner_actor_id = a.id
+        OR a.owner_actor_id = b.owner_actor_id) IS TRUE)::bool AS same
+FROM actor a, actor b
+WHERE a.id = $1::uuid AND b.id = $2::uuid
+`
+
+type SamePartyParams struct {
+	A uuid.UUID
+	B uuid.UUID
+}
+
+// Whether two actors are one party, for four eyes: the same actor, one the
+// other's owner, or two agents of one owner. An agent acts only as its
+// owner's delegate, so neither of them checks the other's work, and nor does
+// another of the owner's agents. Null owners compare as nothing.
+func (q *Queries) SameParty(ctx context.Context, arg SamePartyParams) (bool, error) {
+	row := q.db.QueryRow(ctx, sameParty, arg.A, arg.B)
+	var same bool
+	err := row.Scan(&same)
+	return same, err
+}
+
+const samePartyAmong = `-- name: SamePartyAmong :many
+SELECT x.id
+FROM actor x, actor me
+WHERE me.id = $1::uuid AND x.id = ANY($2::uuid[])
+  AND ((x.id = me.id OR x.owner_actor_id = me.id OR me.owner_actor_id = x.id
+       OR x.owner_actor_id = me.owner_actor_id) IS TRUE)
+`
+
+type SamePartyAmongParams struct {
+	ActorID uuid.UUID
+	Ids     []uuid.UUID
+}
+
+// Which of the given actors are of one party with the actor (SameParty):
+// whose actions it neither decides nor reviews.
+func (q *Queries) SamePartyAmong(ctx context.Context, arg SamePartyAmongParams) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, samePartyAmong, arg.ActorID, arg.Ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const setActionReview = `-- name: SetActionReview :execrows

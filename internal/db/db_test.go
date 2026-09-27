@@ -3,6 +3,7 @@ package db_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"strings"
 	"testing"
@@ -236,8 +237,8 @@ func TestSeedIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if before != 6 {
-		t.Fatalf("built-in presets = %d, want 6", before)
+	if before != 8 {
+		t.Fatalf("built-in presets = %d, want 8", before)
 	}
 	if err := db.Seed(ctx, pool); err != nil {
 		t.Fatalf("re-seed: %v", err)
@@ -303,3 +304,104 @@ func TestInTx(t *testing.T) {
 		t.Fatalf("after panic: %d rows, want 1", n)
 	}
 }
+
+// Migration 0007 gives every seat that is not removed, and every
+// department's own preset, the new permissions of the built-in preset of the
+// same roster role; an assistant keeps 'denied', and a removed seat is
+// history. Going down with a delegate seat present removes it and cancels its
+// proposal, as a removal would.
+func TestAgentOwnershipBackfillsAndComesOffCleanly(t *testing.T) {
+	pool, url := testdb.NewEmpty(t)
+	ctx := context.Background()
+	m, err := db.NewMigrator(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	if err := m.Steps(6); err != nil {
+		t.Fatalf("up to 0006: %v", err)
+	}
+	exec := func(sql string, args ...any) {
+		t.Helper()
+		if _, err := pool.Exec(ctx, sql, args...); err != nil {
+			t.Fatalf("%v\n%s", err, sql)
+		}
+	}
+	exec(`INSERT INTO actor (id, kind, display_name, platform_role) VALUES ('00000000-0000-0000-0000-000000000001', 'human', 'root', 'root')`)
+	exec(`INSERT INTO term (id, name, starts_on, ends_on) VALUES ('00000000-0000-0000-0000-000000000002', 'T', '2026-09-01', '2026-12-20')`)
+	exec(`INSERT INTO department (id, name) VALUES ('00000000-0000-0000-0000-000000000003', 'D')`)
+	exec(`INSERT INTO course (id, dept_id, term_id, code, title, created_by_actor_id) VALUES
+		('00000000-0000-0000-0000-000000000004', '00000000-0000-0000-0000-000000000003', '00000000-0000-0000-0000-000000000002', 'C', 'C',
+		 '00000000-0000-0000-0000-000000000001')`)
+	roles := []string{"student", "ta", "instructor", "observer", "assistant"}
+	for i, role := range roles {
+		exec(`INSERT INTO actor (id, kind, display_name) VALUES ($1, 'human', $2)`, seatID(10+i), role)
+		exec(`INSERT INTO course_member (id, course_id, actor_id, role, added_by_actor_id, student_scope, assignment_scope)
+			VALUES ($1, '00000000-0000-0000-0000-000000000004', $1, $2, '00000000-0000-0000-0000-000000000001', 'all', 'all')`, seatID(10+i), role)
+		exec(`INSERT INTO permission_preset (dept_id, name, role, student_scope, assignment_scope)
+			VALUES ('00000000-0000-0000-0000-000000000003', $1, $1, 'all', 'all')`, role)
+	}
+	exec(`INSERT INTO actor (id, kind, display_name) VALUES ($1, 'human', 'gone')`, seatID(20))
+	exec(`INSERT INTO course_member (id, course_id, actor_id, role, status, added_by_actor_id, student_scope, assignment_scope)
+		VALUES ($1, '00000000-0000-0000-0000-000000000004', $1, 'instructor', 'removed', '00000000-0000-0000-0000-000000000001', 'all', 'all')`, seatID(20))
+	if err := m.Steps(1); err != nil {
+		t.Fatalf("up to 0007: %v", err)
+	}
+
+	want := map[string][3]string{
+		"student":    {"confirm_required", "autonomous", "denied"},
+		"ta":         {"confirm_required", "autonomous", "denied"},
+		"instructor": {"autonomous", "autonomous", "autonomous"},
+		"observer":   {"denied", "denied", "denied"},
+		"assistant":  {"denied", "denied", "denied"},
+	}
+	levels := func(sql string, args ...any) [3]string {
+		t.Helper()
+		var l [3]string
+		if err := pool.QueryRow(ctx, sql, args...).Scan(&l[0], &l[1], &l[2]); err != nil {
+			t.Fatal(err)
+		}
+		return l
+	}
+	for i, role := range roles {
+		if got := levels(`SELECT perm_agent_delegate::text, perm_conversation_ask::text, perm_conversation_answer::text
+			FROM course_member WHERE id = $1`, seatID(10+i)); got != want[role] {
+			t.Errorf("a %s's seat: %v, want %v", role, got, want[role])
+		}
+		if got := levels(`SELECT perm_agent_delegate::text, perm_conversation_ask::text, perm_conversation_answer::text
+			FROM permission_preset WHERE dept_id IS NOT NULL AND name = $1`, role); got != want[role] {
+			t.Errorf("a department's %s preset: %v, want %v", role, got, want[role])
+		}
+	}
+	if got := levels(`SELECT perm_agent_delegate::text, perm_conversation_ask::text, perm_conversation_answer::text
+		FROM course_member WHERE id = $1`, seatID(20)); got != want["observer"] {
+		t.Errorf("a removed instructor's seat was given %v", got)
+	}
+
+	// Down, over a delegate with a proposal waiting.
+	student := seatID(10)
+	exec(`INSERT INTO actor (id, kind, display_name, owner_actor_id) VALUES ($1, 'agent', 'bot', $2)`, seatID(30), student)
+	exec(`INSERT INTO course_member (id, course_id, actor_id, role, added_by_actor_id, student_scope, assignment_scope, principal_member_id)
+		VALUES ($1, '00000000-0000-0000-0000-000000000004', $1, 'assistant', $2, 'listed', 'all', $2)`, seatID(30), student)
+	exec(`INSERT INTO action (id, actor_id, course_id, member_id, action_type, target_type, payload_hash, idempotency_key, authz_result, status)
+		VALUES ($1, $2, '00000000-0000-0000-0000-000000000004', $2, 'document.create', 'document', repeat('0', 64), 'k', 'confirm_required', 'proposed')`,
+		seatID(40), seatID(30))
+	if err := m.Steps(-1); err != nil {
+		t.Fatalf("down from 0007 with a delegate seated: %v", err)
+	}
+	var status, result string
+	if err := pool.QueryRow(ctx, `SELECT status, result->'error'->'details'->>'reason' FROM action WHERE id = $1`, seatID(40)).Scan(&status, &result); err != nil {
+		t.Fatal(err)
+	}
+	if status != "cancelled" || result != "member_removed" {
+		t.Fatalf("the delegate's proposal after going down: %s, %s", status, result)
+	}
+	if err := pool.QueryRow(ctx, `SELECT status FROM course_member WHERE id = $1`, seatID(30)).Scan(&status); err != nil || status != "removed" {
+		t.Fatalf("the delegate's seat after going down: %s %v", status, err)
+	}
+	if err := m.Up(); err != nil {
+		t.Fatalf("up again: %v", err)
+	}
+}
+
+func seatID(n int) string { return fmt.Sprintf("00000000-0000-0000-0000-%012d", n) }

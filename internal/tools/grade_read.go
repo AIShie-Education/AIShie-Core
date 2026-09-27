@@ -97,6 +97,7 @@ func gradeList() tool.Tool {
 				CourseID: in.CourseID, After: in.after(), MaxRows: in.limit(),
 				StudentMemberID: in.StudentMemberID, AssignmentID: in.AssignmentID, IncludeDrafts: seesDrafts(rc.Member),
 				StudentAll: rc.Scope.StudentAll, AssignmentAll: rc.Scope.AssignmentAll, MemberID: rc.Scope.MemberID,
+				PrincipalID: rc.Scope.PrincipalID, PrincipalStudentAll: rc.Scope.PrincipalStudentAll, PrincipalAssignmentAll: rc.Scope.PrincipalAssignmentAll,
 			})
 			out := GradeListOut{Grades: make([]GradeView, 0, len(rows))}
 			for _, r := range rows {

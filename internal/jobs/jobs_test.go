@@ -186,6 +186,80 @@ func TestExpiredMembersAreRemoved(t *testing.T) {
 	}
 }
 
+// A delegate lives no longer than its principal. Removing a principal takes
+// its delegates with it, the previous release's removal included, which the
+// database follows; what the sweep finds is what is left behind — a seat
+// whose agent changed hands — and it removes that too, cancelling what it
+// proposed.
+func TestOrphanedDelegatesAreRemoved(t *testing.T) {
+	f := setup(t, 2)
+	yuki, ken := f.Students[0], f.Students[1]
+	delegate := func(owner uuid.UUID, principal uuid.UUID, student uuid.UUID) (agent, seat uuid.UUID) {
+		agent = f.OwnedAgent(owner, "agent")
+		seat = f.Delegate(f.Course, agent, principal, "delegate", testkit.ListedStudents(student),
+			testkit.WithPerm(domain.PermSubmissionWrite, domain.ConfirmRequired))
+		return agent, seat
+	}
+	yukiBot, yukiSeat := delegate(yuki.Actor, yuki.Member, yuki.Member)
+	kenBot, kenSeat := delegate(ken.Actor, ken.Member, ken.Member)
+	draft := func(bot, student uuid.UUID, key string) uuid.UUID {
+		out := f.MustCall(bot, "submission.create", m{"course_id": f.Course, "assignment_id": f.HW4, "student_member_id": student, "body": "x"}, key)
+		if out.Status != domain.StatusProposed {
+			t.Fatalf("the delegate's draft: %+v", out)
+		}
+		return *out.ActionID
+	}
+	yukiDraft, kenDraft := draft(yukiBot, yuki.Member, "yd"), draft(kenBot, ken.Member, "kd")
+
+	// Yuki's seat expires, and the expiry sweep takes her delegate with it.
+	f.Exec(`UPDATE course_member SET expires_at = $2 WHERE id = $1`, yuki.Member, f.now.Add(time.Hour))
+	// Ken's agent changes hands under its seat.
+	f.Exec(`UPDATE actor SET owner_actor_id = $2 WHERE id = $1`, kenBot, yuki.Actor)
+	f.now = f.now.Add(2 * time.Hour)
+	if rep := f.sweep(t); rep.MembersExpired != 1 || rep.OrphansRemoved != 1 {
+		t.Fatalf("%+v, want Yuki expired with her delegate, and Ken's delegate removed as an orphan", rep)
+	}
+	for seat, why := range map[uuid.UUID]string{yukiSeat: "principal_removed", kenSeat: "orphaned"} {
+		if n := f.Count(`SELECT count(*) FROM event WHERE type = 'member.removed' AND subject_id = $1 AND payload->>'reason' = $2`, seat, why); n != 1 {
+			t.Fatalf("seat %s was not removed as %s", seat, why)
+		}
+	}
+	if n := f.Count(`SELECT count(*) FROM action WHERE id = ANY($1) AND status = 'cancelled'`, []uuid.UUID{yukiDraft, kenDraft}); n != 2 {
+		t.Fatal("an orphaned delegate's proposal was not cancelled")
+	}
+	// The previous release removes a principal knowing nothing of its
+	// delegates; the database removes them with it, and there is nothing
+	// for the sweep to find.
+	f.Exec(`UPDATE actor SET owner_actor_id = $2 WHERE id = $1`, kenBot, ken.Actor)
+	_, left := delegate(ken.Actor, ken.Member, ken.Member)
+	f.Exec(`UPDATE course_member SET status = 'removed' WHERE id = $1`, ken.Member)
+	if n := f.Count(`SELECT count(*) FROM course_member WHERE id = $1 AND status = 'removed'`, left); n != 1 {
+		t.Fatal("a delegate outlived the previous release's removal of its principal")
+	}
+	if rep := f.sweep(t); rep.OrphansRemoved != 0 {
+		t.Fatalf("removed twice: %+v", rep)
+	}
+
+	// A seat whose agent changed hands while its course was archived counts
+	// for nothing, and is removed once the course is open again.
+	satoBot, satoSeat := delegate(f.Sato, f.SatoM, yuki.Member)
+	f.Exec(`UPDATE course SET status = 'archived' WHERE id = $1`, f.Course)
+	f.Exec(`UPDATE actor SET owner_actor_id = $2 WHERE id = $1`, satoBot, ken.Actor)
+	if rep := f.sweep(t); rep.OrphansRemoved != 0 {
+		t.Fatalf("an archived course was swept: %+v", rep)
+	}
+	f.Exec(`UPDATE course SET status = 'active' WHERE id = $1`, f.Course)
+	if rep := f.sweep(t); rep.OrphansRemoved != 1 {
+		t.Fatalf("%+v, want the seat of the agent that changed hands removed", rep)
+	}
+	if n := f.Count(`SELECT count(*) FROM course_member WHERE id = $1 AND status = 'removed'`, satoSeat); n != 1 {
+		t.Fatal("the seat of an agent that changed hands was left")
+	}
+	if n := f.Count(`SELECT count(*) FROM course_member WHERE id = $1 AND status = 'active'`, f.SatoM); n != 1 {
+		t.Fatal("its principal was touched")
+	}
+}
+
 func TestPastDueAssignments(t *testing.T) {
 	f := setup(t, 3)
 	yuki := f.Students[0]

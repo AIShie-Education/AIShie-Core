@@ -78,6 +78,7 @@ func assignmentList() tool.Tool {
 				CourseID: in.CourseID, After: in.after(), MaxRows: in.limit(),
 				IncludeUnpublished: canSeeUnpublished(rc.Member),
 				AssignmentAll:      rc.Scope.AssignmentAll, MemberID: rc.Scope.MemberID,
+				PrincipalID: rc.Scope.PrincipalID, PrincipalAssignmentAll: rc.Scope.PrincipalAssignmentAll,
 			})
 			out := AssignmentListOut{Assignments: make([]AssignmentView, 0, len(rows))}
 			for _, r := range rows {

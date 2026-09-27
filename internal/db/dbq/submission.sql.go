@@ -115,17 +115,21 @@ WHERE m.course_id = $2 AND m.role = 'student' AND m.status <> 'removed'
   AND m.id > $3
   AND ($4::bool OR EXISTS (
         SELECT 1 FROM member_student_scope y WHERE y.member_id = $5 AND y.student_member_id = m.id))
+  AND ($6::bool OR EXISTS (
+        SELECT 1 FROM member_student_scope py WHERE py.member_id = $7 AND py.student_member_id = m.id))
 ORDER BY m.id
-LIMIT $6
+LIMIT $8
 `
 
 type ListAssignmentRosterParams struct {
-	AssignmentID uuid.UUID
-	CourseID     uuid.UUID
-	After        uuid.UUID
-	StudentAll   bool
-	MemberID     uuid.UUID
-	MaxRows      int32
+	AssignmentID        uuid.UUID
+	CourseID            uuid.UUID
+	After               uuid.UUID
+	StudentAll          bool
+	MemberID            uuid.UUID
+	PrincipalStudentAll bool
+	PrincipalID         uuid.UUID
+	MaxRows             int32
 }
 
 type ListAssignmentRosterRow struct {
@@ -141,7 +145,8 @@ type ListAssignmentRosterRow struct {
 // Every current student of the course whom the caller's student scope
 // reaches, with their latest attempt at one assignment, if any: the students
 // who have not started are rows too, with no submission. The caller's
-// assignment scope is checked on the target, before this runs.
+// assignment scope is checked on the target, before this runs. A delegate
+// reaches only the students its principal reaches too.
 func (q *Queries) ListAssignmentRoster(ctx context.Context, arg ListAssignmentRosterParams) ([]ListAssignmentRosterRow, error) {
 	rows, err := q.db.Query(ctx, listAssignmentRoster,
 		arg.AssignmentID,
@@ -149,6 +154,8 @@ func (q *Queries) ListAssignmentRoster(ctx context.Context, arg ListAssignmentRo
 		arg.After,
 		arg.StudentAll,
 		arg.MemberID,
+		arg.PrincipalStudentAll,
+		arg.PrincipalID,
 		arg.MaxRows,
 	)
 	if err != nil {
@@ -187,19 +194,27 @@ WHERE s.course_id = $1 AND s.id > $2
         SELECT 1 FROM member_student_scope x WHERE x.member_id = $6 AND x.student_member_id = s.student_member_id))
   AND ($7::bool OR EXISTS (
         SELECT 1 FROM member_assignment_scope y WHERE y.member_id = $6 AND y.assignment_id = s.assignment_id))
+  -- A delegate's principal's scope, the same way; "all" for any other seat.
+  AND ($8::bool OR EXISTS (
+        SELECT 1 FROM member_student_scope px WHERE px.member_id = $9 AND px.student_member_id = s.student_member_id))
+  AND ($10::bool OR EXISTS (
+        SELECT 1 FROM member_assignment_scope py WHERE py.member_id = $9 AND py.assignment_id = s.assignment_id))
 ORDER BY s.id
-LIMIT $8
+LIMIT $11
 `
 
 type ListSubmissionsParams struct {
-	CourseID        uuid.UUID
-	After           uuid.UUID
-	AssignmentID    *uuid.UUID
-	StudentMemberID *uuid.UUID
-	StudentAll      bool
-	MemberID        uuid.UUID
-	AssignmentAll   bool
-	MaxRows         int32
+	CourseID               uuid.UUID
+	After                  uuid.UUID
+	AssignmentID           *uuid.UUID
+	StudentMemberID        *uuid.UUID
+	StudentAll             bool
+	MemberID               uuid.UUID
+	AssignmentAll          bool
+	PrincipalStudentAll    bool
+	PrincipalID            uuid.UUID
+	PrincipalAssignmentAll bool
+	MaxRows                int32
 }
 
 type ListSubmissionsRow struct {
@@ -222,6 +237,9 @@ func (q *Queries) ListSubmissions(ctx context.Context, arg ListSubmissionsParams
 		arg.StudentAll,
 		arg.MemberID,
 		arg.AssignmentAll,
+		arg.PrincipalStudentAll,
+		arg.PrincipalID,
+		arg.PrincipalAssignmentAll,
 		arg.MaxRows,
 	)
 	if err != nil {

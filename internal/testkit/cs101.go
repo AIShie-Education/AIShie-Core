@@ -167,7 +167,14 @@ func NewPlatformWithConfig(t testing.TB, cfg pipeline.Config) *Platform {
 	return newPlatform(t, func(fs *blob.FSStore) blob.Store { return fs }, cfg)
 }
 
-func newPlatform(t testing.TB, wrap func(*blob.FSStore) blob.Store, cfg pipeline.Config) *Platform {
+// NewPlatformWithDeps is NewPlatform with the tools' settings adjusted as
+// adjust says: agent self-service turned off, say.
+func NewPlatformWithDeps(t testing.TB, adjust func(*tools.Deps)) *Platform {
+	t.Helper()
+	return newPlatform(t, func(fs *blob.FSStore) blob.Store { return fs }, pipeline.Config{ProposalTTL: pipeline.DefaultProposalTTL}, adjust)
+}
+
+func newPlatform(t testing.TB, wrap func(*blob.FSStore) blob.Store, cfg pipeline.Config, adjust ...func(*tools.Deps)) *Platform {
 	t.Helper()
 	w := NewWorld(t)
 	signer, err := blob.NewSigner("")
@@ -180,7 +187,11 @@ func newPlatform(t testing.TB, wrap func(*blob.FSStore) blob.Store, cfg pipeline
 	}
 	reg := tool.NewRegistry()
 	p := &Platform{World: w, Blob: store, Uploads: signer, P: pipeline.New(w.Pool, reg, cfg)}
-	tools.RegisterAll(reg, tools.Deps{Pipeline: p.P, Blob: wrap(store), Uploads: signer, MaxUploadBytes: MaxUploadBytes})
+	deps := tools.Deps{Pipeline: p.P, Blob: wrap(store), Uploads: signer, MaxUploadBytes: MaxUploadBytes}
+	for _, a := range adjust {
+		a(&deps)
+	}
+	tools.RegisterAll(reg, deps)
 	return p
 }
 

@@ -19,7 +19,7 @@ func TestEvaluate(t *testing.T) {
 
 	member := func(mod func(*domain.Member)) *domain.Member {
 		m := &domain.Member{
-			ID: uuid.New(), Status: domain.MemberActive,
+			ID: uuid.New(), Status: domain.MemberActive, SeatValid: true,
 			StudentScope: domain.ScopeAll, AssignmentScope: domain.ScopeAll,
 			Perms: map[domain.Perm]domain.Level{
 				domain.PermDocumentRead: domain.Autonomous,
@@ -123,5 +123,105 @@ func TestLevelOrder(t *testing.T) {
 	}
 	if _, err := domain.ParseLevel("maybe"); err == nil {
 		t.Fatal("ParseLevel accepted an unknown level")
+	}
+}
+
+// A delegate's seat, as a decision table: steps 1–3 with its principal.
+func TestEvaluateDelegate(t *testing.T) {
+	now := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+	past := now.Add(-time.Hour)
+	active := domain.Actor{ID: uuid.New(), Status: domain.ActorActive}
+
+	principal := func(mod func(*domain.Member)) *domain.Member {
+		p := &domain.Member{
+			ID: uuid.New(), Status: domain.MemberActive, SeatValid: true,
+			StudentScope: domain.ScopeListed, AssignmentScope: domain.ScopeAll,
+			Perms: map[domain.Perm]domain.Level{
+				domain.PermDocumentRead:       domain.Autonomous,
+				domain.PermSubmissionRead:     domain.PendingReview,
+				domain.PermGradeRead:          domain.Autonomous,
+				domain.PermMemberManage:       domain.Autonomous,
+				domain.PermAgentDelegate:      domain.Autonomous,
+				domain.PermConversationAsk:    domain.ConfirmRequired,
+				domain.PermConversationAnswer: domain.Denied,
+			},
+		}
+		if mod != nil {
+			mod(p)
+		}
+		return p
+	}
+	delegate := func(p *domain.Member, mod func(*domain.Member)) *domain.Member {
+		d := &domain.Member{
+			ID: uuid.New(), Status: domain.MemberActive, SeatValid: true,
+			StudentScope: domain.ScopeListed, AssignmentScope: domain.ScopeAll,
+			Perms: map[domain.Perm]domain.Level{
+				domain.PermDocumentRead:       domain.Autonomous,
+				domain.PermSubmissionRead:     domain.Autonomous,
+				domain.PermGradeRead:          domain.ConfirmRequired,
+				domain.PermGradeSubmit:        domain.Autonomous,
+				domain.PermMemberManage:       domain.Autonomous,
+				domain.PermAgentDelegate:      domain.Autonomous,
+				domain.PermConversationAnswer: domain.Autonomous,
+			},
+			Principal: p,
+		}
+		if p != nil {
+			d.PrincipalID = &p.ID
+		}
+		if mod != nil {
+			mod(d)
+		}
+		return d
+	}
+	one := func(p domain.Perm) []domain.Perm { return []domain.Perm{p} }
+	cases := []struct {
+		name   string
+		member *domain.Member
+		perms  []domain.Perm
+		want   domain.Level
+		reason Reason
+	}{
+		{"the lower of its own and its principal's", delegate(principal(nil), nil), one(domain.PermSubmissionRead), domain.PendingReview, ReasonNone},
+		{"its own when that is lower", delegate(principal(nil), nil), one(domain.PermGradeRead), domain.ConfirmRequired, ReasonNone},
+		{"nothing its principal does not hold", delegate(principal(nil), nil), one(domain.PermGradeSubmit), domain.Denied, ReasonPermDenied},
+		{"never member_manage, whatever both hold", delegate(principal(nil), nil), one(domain.PermMemberManage), domain.Denied, ReasonPermDenied},
+		{"never agent_delegate, whatever both hold", delegate(principal(nil), nil), one(domain.PermAgentDelegate), domain.Denied, ReasonPermDenied},
+		{"answering is capped by the principal's asking", delegate(principal(nil), nil), one(domain.PermConversationAnswer), domain.ConfirmRequired, ReasonNone},
+		{"so a principal who may not ask gets no answers", delegate(principal(func(p *domain.Member) { p.Perms[domain.PermConversationAsk] = domain.Denied }), nil),
+			one(domain.PermConversationAnswer), domain.Denied, ReasonPermDenied},
+		{"paused principal", delegate(principal(func(p *domain.Member) { p.Status = domain.MemberPaused }), nil), one(domain.PermDocumentRead), domain.Denied, ReasonPrincipalNotActive},
+		{"removed principal", delegate(principal(func(p *domain.Member) { p.Status = domain.MemberRemoved }), nil), one(domain.PermDocumentRead), domain.Denied, ReasonPrincipalNotActive},
+		{"expired principal, before any sweep", delegate(principal(func(p *domain.Member) { p.ExpiresAt = &past }), nil), one(domain.PermDocumentRead), domain.Denied, ReasonPrincipalNotActive},
+		{"a seat that does not match its actor's owner", delegate(principal(nil), func(d *domain.Member) { d.SeatValid = false }), one(domain.PermDocumentRead), domain.Denied, ReasonPrincipalNotActive},
+		{"a principal that was not loaded", delegate(nil, func(d *domain.Member) { id := uuid.New(); d.PrincipalID = &id }), one(domain.PermDocumentRead), domain.Denied, ReasonPrincipalNotActive},
+		{"its own seat paused comes first", delegate(principal(nil), func(d *domain.Member) { d.Status = domain.MemberPaused }), one(domain.PermDocumentRead), domain.Denied, ReasonMemberNotLive},
+		{"an owned agent's seat with no principal", &domain.Member{ID: uuid.New(), Status: domain.MemberActive,
+			Perms: map[domain.Perm]domain.Level{domain.PermDocumentRead: domain.Autonomous}}, one(domain.PermDocumentRead), domain.Denied, ReasonPrincipalNotActive},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := Evaluate(active, domain.CourseActive, c.member, c.perms, true, now)
+			if got.Level != c.want || got.Reason != c.reason {
+				t.Fatalf("got %s (%q), want %s (%q)", got.Level, got.Reason, c.want, c.reason)
+			}
+		})
+	}
+}
+
+// A delegate's list queries take its principal's reach as well as its own;
+// any other seat's principal pair reaches everything and adds nothing.
+func TestScopeFilterForADelegate(t *testing.T) {
+	p := &domain.Member{ID: uuid.New(), StudentScope: domain.ScopeListed, AssignmentScope: domain.ScopeAll}
+	d := &domain.Member{ID: uuid.New(), StudentScope: domain.ScopeAll, AssignmentScope: domain.ScopeListed, PrincipalID: &p.ID, Principal: p}
+	if f := FilterFor(d); f.MemberID != d.ID || !f.StudentAll || f.AssignmentAll || f.PrincipalID != p.ID || f.PrincipalStudentAll || !f.PrincipalAssignmentAll {
+		t.Fatalf("a delegate's filter: %+v", f)
+	}
+	if f := FilterFor(p); !f.PrincipalStudentAll || !f.PrincipalAssignmentAll {
+		t.Fatalf("an ordinary seat's filter narrows by a principal it has not got: %+v", f)
+	}
+	lost := &domain.Member{ID: uuid.New(), StudentScope: domain.ScopeAll, AssignmentScope: domain.ScopeAll, PrincipalID: &p.ID}
+	if f := FilterFor(lost); f.PrincipalStudentAll || f.PrincipalAssignmentAll {
+		t.Fatalf("a delegate whose principal was not loaded reaches everything: %+v", f)
 	}
 }

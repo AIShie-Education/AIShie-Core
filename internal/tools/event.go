@@ -22,7 +22,8 @@ func eventTools() []tool.Tool { return []tool.Tool{eventList()} }
 // row, in SQL.
 //
 // A type that is not in this table is visible to nobody but the member whose
-// action caused it. A new event type is therefore private until someone
+// action caused it. News of a conversation is the exception both ways: it is
+// its participants', and only theirs (ListEvents). A new event type is therefore private until someone
 // decides otherwise here, which is the safe way round; a test checks that
 // every type the tools emit has made that decision.
 var visibility = map[string][]domain.Perm{
@@ -77,10 +78,18 @@ var visibility = map[string][]domain.Perm{
 	EventDocumentPublishedUnreleased: {domain.PermAssignmentWrite}, EventRubricPublishedUnreleased: {domain.PermAssignmentWrite},
 	EventDocumentArchivedUnreleased: {domain.PermAssignmentWrite},
 
+	// A conversation's news is for its two participants and nobody else,
+	// whoever holds what: event.list shows it by the participant rule
+	// (queries ListEvents), not by permission, and not even to whoever
+	// caused it without taking part — a manager whose removal of a seat
+	// closed it. So no permission is listed for it here.
+	events.ConversationOpened: nil, events.ConversationMessagePosted: nil,
+	events.ConversationClosed: nil, events.ConversationMessageRetracted: nil,
+
 	// Platform events belong to no course, so they are in no course's feed.
 	// They are listed so that leaving them out is visibly a decision.
 	EventActorRegistered: nil, EventActorUpdated: nil, EventActorInvited: nil, EventActorCredentialRevoked: nil,
-	EventActorSuspended: nil, EventActorReactivated: nil,
+	EventActorSuspended: nil, EventActorReactivated: nil, EventAgentCreated: nil,
 }
 
 // KnownEventTypes lists every event type that has a visibility rule.
@@ -170,6 +179,7 @@ func eventList() tool.Tool {
 			rows, err := rc.Q.ListEvents(ctx, dbq.ListEventsParams{
 				CourseID: &in.CourseID, SinceSeq: in.SinceSeq, MaxRows: limit, VisibleTypes: visibleTypes(rc.Member),
 				MemberID: &rc.Scope.MemberID, StudentAll: rc.Scope.StudentAll, AssignmentAll: rc.Scope.AssignmentAll,
+				PrincipalID: rc.Scope.PrincipalID, PrincipalStudentAll: rc.Scope.PrincipalStudentAll, PrincipalAssignmentAll: rc.Scope.PrincipalAssignmentAll,
 			})
 			out := EventListOut{Events: make([]EventView, 0, len(rows)), NextSeq: in.SinceSeq, More: len(rows) == int(limit)}
 			for _, r := range rows {

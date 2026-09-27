@@ -96,12 +96,29 @@ func (q *Queries) GetCourseForAuthz(ctx context.Context, id uuid.UUID) (GetCours
 }
 
 const getLiveMemberForAuthz = `-- name: GetLiveMemberForAuthz :one
-SELECT id, course_id, actor_id, status, expires_at, student_scope, assignment_scope,
-       perm_document_read, perm_document_read_draft, perm_document_write, perm_rubric_read,
-       perm_assignment_write, perm_submission_read, perm_submission_write, perm_grade_read,
-       perm_grade_submit, perm_grade_post, perm_member_read, perm_member_manage, perm_action_decide
-FROM course_member
-WHERE course_id = $1 AND actor_id = $2 AND status <> 'removed'
+
+SELECT m.id, m.course_id, m.actor_id, m.status, m.expires_at, m.student_scope, m.assignment_scope,
+       m.perm_document_read, m.perm_document_read_draft, m.perm_document_write, m.perm_rubric_read,
+       m.perm_assignment_write, m.perm_submission_read, m.perm_submission_write, m.perm_grade_read,
+       m.perm_grade_submit, m.perm_grade_post, m.perm_member_read, m.perm_member_manage,
+       m.perm_action_decide, m.perm_agent_delegate, m.perm_conversation_ask, m.perm_conversation_answer,
+       m.principal_member_id, m.answers_course,
+       (CASE WHEN m.principal_member_id IS NULL THEN a.owner_actor_id IS NULL
+             ELSE a.owner_actor_id IS NOT DISTINCT FROM p.actor_id END)::bool AS owner_matches,
+       p.actor_id AS principal_actor_id, p.status AS principal_status, p.expires_at AS principal_expires_at,
+       p.student_scope AS principal_student_scope, p.assignment_scope AS principal_assignment_scope,
+       p.perm_document_read AS principal_perm_document_read, p.perm_document_read_draft AS principal_perm_document_read_draft, p.perm_document_write AS principal_perm_document_write,
+       p.perm_rubric_read AS principal_perm_rubric_read, p.perm_assignment_write AS principal_perm_assignment_write, p.perm_submission_read AS principal_perm_submission_read,
+       p.perm_submission_write AS principal_perm_submission_write, p.perm_grade_read AS principal_perm_grade_read, p.perm_grade_submit AS principal_perm_grade_submit,
+       p.perm_grade_post AS principal_perm_grade_post, p.perm_member_read AS principal_perm_member_read, p.perm_member_manage AS principal_perm_member_manage,
+       p.perm_action_decide AS principal_perm_action_decide, p.perm_agent_delegate AS principal_perm_agent_delegate, p.perm_conversation_ask AS principal_perm_conversation_ask,
+       p.perm_conversation_answer AS principal_perm_conversation_answer,
+       pa.status AS principal_actor_status
+FROM course_member m
+JOIN actor a ON a.id = m.actor_id
+LEFT JOIN course_member p ON p.id = m.principal_member_id
+LEFT JOIN actor pa ON pa.id = p.actor_id
+WHERE m.course_id = $1 AND m.actor_id = $2 AND m.status <> 'removed'
 `
 
 type GetLiveMemberForAuthzParams struct {
@@ -110,28 +127,62 @@ type GetLiveMemberForAuthzParams struct {
 }
 
 type GetLiveMemberForAuthzRow struct {
-	ID                    uuid.UUID
-	CourseID              uuid.UUID
-	ActorID               uuid.UUID
-	Status                string
-	ExpiresAt             *time.Time
-	StudentScope          string
-	AssignmentScope       string
-	PermDocumentRead      AutonomyLevel
-	PermDocumentReadDraft AutonomyLevel
-	PermDocumentWrite     AutonomyLevel
-	PermRubricRead        AutonomyLevel
-	PermAssignmentWrite   AutonomyLevel
-	PermSubmissionRead    AutonomyLevel
-	PermSubmissionWrite   AutonomyLevel
-	PermGradeRead         AutonomyLevel
-	PermGradeSubmit       AutonomyLevel
-	PermGradePost         AutonomyLevel
-	PermMemberRead        AutonomyLevel
-	PermMemberManage      AutonomyLevel
-	PermActionDecide      AutonomyLevel
+	ID                              uuid.UUID
+	CourseID                        uuid.UUID
+	ActorID                         uuid.UUID
+	Status                          string
+	ExpiresAt                       *time.Time
+	StudentScope                    string
+	AssignmentScope                 string
+	PermDocumentRead                AutonomyLevel
+	PermDocumentReadDraft           AutonomyLevel
+	PermDocumentWrite               AutonomyLevel
+	PermRubricRead                  AutonomyLevel
+	PermAssignmentWrite             AutonomyLevel
+	PermSubmissionRead              AutonomyLevel
+	PermSubmissionWrite             AutonomyLevel
+	PermGradeRead                   AutonomyLevel
+	PermGradeSubmit                 AutonomyLevel
+	PermGradePost                   AutonomyLevel
+	PermMemberRead                  AutonomyLevel
+	PermMemberManage                AutonomyLevel
+	PermActionDecide                AutonomyLevel
+	PermAgentDelegate               AutonomyLevel
+	PermConversationAsk             AutonomyLevel
+	PermConversationAnswer          AutonomyLevel
+	PrincipalMemberID               *uuid.UUID
+	AnswersCourse                   bool
+	OwnerMatches                    bool
+	PrincipalActorID                *uuid.UUID
+	PrincipalStatus                 *string
+	PrincipalExpiresAt              *time.Time
+	PrincipalStudentScope           *string
+	PrincipalAssignmentScope        *string
+	PrincipalPermDocumentRead       *AutonomyLevel
+	PrincipalPermDocumentReadDraft  *AutonomyLevel
+	PrincipalPermDocumentWrite      *AutonomyLevel
+	PrincipalPermRubricRead         *AutonomyLevel
+	PrincipalPermAssignmentWrite    *AutonomyLevel
+	PrincipalPermSubmissionRead     *AutonomyLevel
+	PrincipalPermSubmissionWrite    *AutonomyLevel
+	PrincipalPermGradeRead          *AutonomyLevel
+	PrincipalPermGradeSubmit        *AutonomyLevel
+	PrincipalPermGradePost          *AutonomyLevel
+	PrincipalPermMemberRead         *AutonomyLevel
+	PrincipalPermMemberManage       *AutonomyLevel
+	PrincipalPermActionDecide       *AutonomyLevel
+	PrincipalPermAgentDelegate      *AutonomyLevel
+	PrincipalPermConversationAsk    *AutonomyLevel
+	PrincipalPermConversationAnswer *AutonomyLevel
+	PrincipalActorStatus            *string
 }
 
+// A seat comes with its principal, when it is a delegate's: the principal's
+// standing, scope and levels cap the delegate's (domain.Member). The three
+// queries below select the same columns, in the same order. owner_matches
+// says the seat is what its actor's ownership says it must be: no principal
+// for an actor nobody owns, the owner's seat for one somebody does. An owner
+// can change after a seat was taken, and the seat then stops counting.
 // The partial unique index allows at most one row per (course, actor) that is
 // not removed. A paused row is returned so the caller can say why it denied.
 func (q *Queries) GetLiveMemberForAuthz(ctx context.Context, arg GetLiveMemberForAuthzParams) (GetLiveMemberForAuthzRow, error) {
@@ -158,40 +209,112 @@ func (q *Queries) GetLiveMemberForAuthz(ctx context.Context, arg GetLiveMemberFo
 		&i.PermMemberRead,
 		&i.PermMemberManage,
 		&i.PermActionDecide,
+		&i.PermAgentDelegate,
+		&i.PermConversationAsk,
+		&i.PermConversationAnswer,
+		&i.PrincipalMemberID,
+		&i.AnswersCourse,
+		&i.OwnerMatches,
+		&i.PrincipalActorID,
+		&i.PrincipalStatus,
+		&i.PrincipalExpiresAt,
+		&i.PrincipalStudentScope,
+		&i.PrincipalAssignmentScope,
+		&i.PrincipalPermDocumentRead,
+		&i.PrincipalPermDocumentReadDraft,
+		&i.PrincipalPermDocumentWrite,
+		&i.PrincipalPermRubricRead,
+		&i.PrincipalPermAssignmentWrite,
+		&i.PrincipalPermSubmissionRead,
+		&i.PrincipalPermSubmissionWrite,
+		&i.PrincipalPermGradeRead,
+		&i.PrincipalPermGradeSubmit,
+		&i.PrincipalPermGradePost,
+		&i.PrincipalPermMemberRead,
+		&i.PrincipalPermMemberManage,
+		&i.PrincipalPermActionDecide,
+		&i.PrincipalPermAgentDelegate,
+		&i.PrincipalPermConversationAsk,
+		&i.PrincipalPermConversationAnswer,
+		&i.PrincipalActorStatus,
 	)
 	return i, err
 }
 
 const getMemberForAuthz = `-- name: GetMemberForAuthz :one
-SELECT id, course_id, actor_id, status, expires_at, student_scope, assignment_scope,
-       perm_document_read, perm_document_read_draft, perm_document_write, perm_rubric_read,
-       perm_assignment_write, perm_submission_read, perm_submission_write, perm_grade_read,
-       perm_grade_submit, perm_grade_post, perm_member_read, perm_member_manage, perm_action_decide
-FROM course_member
-WHERE id = $1
+SELECT m.id, m.course_id, m.actor_id, m.status, m.expires_at, m.student_scope, m.assignment_scope,
+       m.perm_document_read, m.perm_document_read_draft, m.perm_document_write, m.perm_rubric_read,
+       m.perm_assignment_write, m.perm_submission_read, m.perm_submission_write, m.perm_grade_read,
+       m.perm_grade_submit, m.perm_grade_post, m.perm_member_read, m.perm_member_manage,
+       m.perm_action_decide, m.perm_agent_delegate, m.perm_conversation_ask, m.perm_conversation_answer,
+       m.principal_member_id, m.answers_course,
+       (CASE WHEN m.principal_member_id IS NULL THEN a.owner_actor_id IS NULL
+             ELSE a.owner_actor_id IS NOT DISTINCT FROM p.actor_id END)::bool AS owner_matches,
+       p.actor_id AS principal_actor_id, p.status AS principal_status, p.expires_at AS principal_expires_at,
+       p.student_scope AS principal_student_scope, p.assignment_scope AS principal_assignment_scope,
+       p.perm_document_read AS principal_perm_document_read, p.perm_document_read_draft AS principal_perm_document_read_draft, p.perm_document_write AS principal_perm_document_write,
+       p.perm_rubric_read AS principal_perm_rubric_read, p.perm_assignment_write AS principal_perm_assignment_write, p.perm_submission_read AS principal_perm_submission_read,
+       p.perm_submission_write AS principal_perm_submission_write, p.perm_grade_read AS principal_perm_grade_read, p.perm_grade_submit AS principal_perm_grade_submit,
+       p.perm_grade_post AS principal_perm_grade_post, p.perm_member_read AS principal_perm_member_read, p.perm_member_manage AS principal_perm_member_manage,
+       p.perm_action_decide AS principal_perm_action_decide, p.perm_agent_delegate AS principal_perm_agent_delegate, p.perm_conversation_ask AS principal_perm_conversation_ask,
+       p.perm_conversation_answer AS principal_perm_conversation_answer,
+       pa.status AS principal_actor_status
+FROM course_member m
+JOIN actor a ON a.id = m.actor_id
+LEFT JOIN course_member p ON p.id = m.principal_member_id
+LEFT JOIN actor pa ON pa.id = p.actor_id
+WHERE m.id = $1
 `
 
 type GetMemberForAuthzRow struct {
-	ID                    uuid.UUID
-	CourseID              uuid.UUID
-	ActorID               uuid.UUID
-	Status                string
-	ExpiresAt             *time.Time
-	StudentScope          string
-	AssignmentScope       string
-	PermDocumentRead      AutonomyLevel
-	PermDocumentReadDraft AutonomyLevel
-	PermDocumentWrite     AutonomyLevel
-	PermRubricRead        AutonomyLevel
-	PermAssignmentWrite   AutonomyLevel
-	PermSubmissionRead    AutonomyLevel
-	PermSubmissionWrite   AutonomyLevel
-	PermGradeRead         AutonomyLevel
-	PermGradeSubmit       AutonomyLevel
-	PermGradePost         AutonomyLevel
-	PermMemberRead        AutonomyLevel
-	PermMemberManage      AutonomyLevel
-	PermActionDecide      AutonomyLevel
+	ID                              uuid.UUID
+	CourseID                        uuid.UUID
+	ActorID                         uuid.UUID
+	Status                          string
+	ExpiresAt                       *time.Time
+	StudentScope                    string
+	AssignmentScope                 string
+	PermDocumentRead                AutonomyLevel
+	PermDocumentReadDraft           AutonomyLevel
+	PermDocumentWrite               AutonomyLevel
+	PermRubricRead                  AutonomyLevel
+	PermAssignmentWrite             AutonomyLevel
+	PermSubmissionRead              AutonomyLevel
+	PermSubmissionWrite             AutonomyLevel
+	PermGradeRead                   AutonomyLevel
+	PermGradeSubmit                 AutonomyLevel
+	PermGradePost                   AutonomyLevel
+	PermMemberRead                  AutonomyLevel
+	PermMemberManage                AutonomyLevel
+	PermActionDecide                AutonomyLevel
+	PermAgentDelegate               AutonomyLevel
+	PermConversationAsk             AutonomyLevel
+	PermConversationAnswer          AutonomyLevel
+	PrincipalMemberID               *uuid.UUID
+	AnswersCourse                   bool
+	OwnerMatches                    bool
+	PrincipalActorID                *uuid.UUID
+	PrincipalStatus                 *string
+	PrincipalExpiresAt              *time.Time
+	PrincipalStudentScope           *string
+	PrincipalAssignmentScope        *string
+	PrincipalPermDocumentRead       *AutonomyLevel
+	PrincipalPermDocumentReadDraft  *AutonomyLevel
+	PrincipalPermDocumentWrite      *AutonomyLevel
+	PrincipalPermRubricRead         *AutonomyLevel
+	PrincipalPermAssignmentWrite    *AutonomyLevel
+	PrincipalPermSubmissionRead     *AutonomyLevel
+	PrincipalPermSubmissionWrite    *AutonomyLevel
+	PrincipalPermGradeRead          *AutonomyLevel
+	PrincipalPermGradeSubmit        *AutonomyLevel
+	PrincipalPermGradePost          *AutonomyLevel
+	PrincipalPermMemberRead         *AutonomyLevel
+	PrincipalPermMemberManage       *AutonomyLevel
+	PrincipalPermActionDecide       *AutonomyLevel
+	PrincipalPermAgentDelegate      *AutonomyLevel
+	PrincipalPermConversationAsk    *AutonomyLevel
+	PrincipalPermConversationAnswer *AutonomyLevel
+	PrincipalActorStatus            *string
 }
 
 // By id, removed rows included: re-authorizing a proposal checks the very
@@ -220,18 +343,210 @@ func (q *Queries) GetMemberForAuthz(ctx context.Context, id uuid.UUID) (GetMembe
 		&i.PermMemberRead,
 		&i.PermMemberManage,
 		&i.PermActionDecide,
+		&i.PermAgentDelegate,
+		&i.PermConversationAsk,
+		&i.PermConversationAnswer,
+		&i.PrincipalMemberID,
+		&i.AnswersCourse,
+		&i.OwnerMatches,
+		&i.PrincipalActorID,
+		&i.PrincipalStatus,
+		&i.PrincipalExpiresAt,
+		&i.PrincipalStudentScope,
+		&i.PrincipalAssignmentScope,
+		&i.PrincipalPermDocumentRead,
+		&i.PrincipalPermDocumentReadDraft,
+		&i.PrincipalPermDocumentWrite,
+		&i.PrincipalPermRubricRead,
+		&i.PrincipalPermAssignmentWrite,
+		&i.PrincipalPermSubmissionRead,
+		&i.PrincipalPermSubmissionWrite,
+		&i.PrincipalPermGradeRead,
+		&i.PrincipalPermGradeSubmit,
+		&i.PrincipalPermGradePost,
+		&i.PrincipalPermMemberRead,
+		&i.PrincipalPermMemberManage,
+		&i.PrincipalPermActionDecide,
+		&i.PrincipalPermAgentDelegate,
+		&i.PrincipalPermConversationAsk,
+		&i.PrincipalPermConversationAnswer,
+		&i.PrincipalActorStatus,
 	)
 	return i, err
 }
 
+const getMembersForAuthz = `-- name: GetMembersForAuthz :many
+SELECT m.id, m.course_id, m.actor_id, m.status, m.expires_at, m.student_scope, m.assignment_scope,
+       m.perm_document_read, m.perm_document_read_draft, m.perm_document_write, m.perm_rubric_read,
+       m.perm_assignment_write, m.perm_submission_read, m.perm_submission_write, m.perm_grade_read,
+       m.perm_grade_submit, m.perm_grade_post, m.perm_member_read, m.perm_member_manage,
+       m.perm_action_decide, m.perm_agent_delegate, m.perm_conversation_ask, m.perm_conversation_answer,
+       m.principal_member_id, m.answers_course,
+       (CASE WHEN m.principal_member_id IS NULL THEN a.owner_actor_id IS NULL
+             ELSE a.owner_actor_id IS NOT DISTINCT FROM p.actor_id END)::bool AS owner_matches,
+       p.actor_id AS principal_actor_id, p.status AS principal_status, p.expires_at AS principal_expires_at,
+       p.student_scope AS principal_student_scope, p.assignment_scope AS principal_assignment_scope,
+       p.perm_document_read AS principal_perm_document_read, p.perm_document_read_draft AS principal_perm_document_read_draft, p.perm_document_write AS principal_perm_document_write,
+       p.perm_rubric_read AS principal_perm_rubric_read, p.perm_assignment_write AS principal_perm_assignment_write, p.perm_submission_read AS principal_perm_submission_read,
+       p.perm_submission_write AS principal_perm_submission_write, p.perm_grade_read AS principal_perm_grade_read, p.perm_grade_submit AS principal_perm_grade_submit,
+       p.perm_grade_post AS principal_perm_grade_post, p.perm_member_read AS principal_perm_member_read, p.perm_member_manage AS principal_perm_member_manage,
+       p.perm_action_decide AS principal_perm_action_decide, p.perm_agent_delegate AS principal_perm_agent_delegate, p.perm_conversation_ask AS principal_perm_conversation_ask,
+       p.perm_conversation_answer AS principal_perm_conversation_answer,
+       pa.status AS principal_actor_status
+FROM course_member m
+JOIN actor a ON a.id = m.actor_id
+LEFT JOIN course_member p ON p.id = m.principal_member_id
+LEFT JOIN actor pa ON pa.id = p.actor_id
+WHERE m.id = ANY($1::uuid[])
+`
+
+type GetMembersForAuthzRow struct {
+	ID                              uuid.UUID
+	CourseID                        uuid.UUID
+	ActorID                         uuid.UUID
+	Status                          string
+	ExpiresAt                       *time.Time
+	StudentScope                    string
+	AssignmentScope                 string
+	PermDocumentRead                AutonomyLevel
+	PermDocumentReadDraft           AutonomyLevel
+	PermDocumentWrite               AutonomyLevel
+	PermRubricRead                  AutonomyLevel
+	PermAssignmentWrite             AutonomyLevel
+	PermSubmissionRead              AutonomyLevel
+	PermSubmissionWrite             AutonomyLevel
+	PermGradeRead                   AutonomyLevel
+	PermGradeSubmit                 AutonomyLevel
+	PermGradePost                   AutonomyLevel
+	PermMemberRead                  AutonomyLevel
+	PermMemberManage                AutonomyLevel
+	PermActionDecide                AutonomyLevel
+	PermAgentDelegate               AutonomyLevel
+	PermConversationAsk             AutonomyLevel
+	PermConversationAnswer          AutonomyLevel
+	PrincipalMemberID               *uuid.UUID
+	AnswersCourse                   bool
+	OwnerMatches                    bool
+	PrincipalActorID                *uuid.UUID
+	PrincipalStatus                 *string
+	PrincipalExpiresAt              *time.Time
+	PrincipalStudentScope           *string
+	PrincipalAssignmentScope        *string
+	PrincipalPermDocumentRead       *AutonomyLevel
+	PrincipalPermDocumentReadDraft  *AutonomyLevel
+	PrincipalPermDocumentWrite      *AutonomyLevel
+	PrincipalPermRubricRead         *AutonomyLevel
+	PrincipalPermAssignmentWrite    *AutonomyLevel
+	PrincipalPermSubmissionRead     *AutonomyLevel
+	PrincipalPermSubmissionWrite    *AutonomyLevel
+	PrincipalPermGradeRead          *AutonomyLevel
+	PrincipalPermGradeSubmit        *AutonomyLevel
+	PrincipalPermGradePost          *AutonomyLevel
+	PrincipalPermMemberRead         *AutonomyLevel
+	PrincipalPermMemberManage       *AutonomyLevel
+	PrincipalPermActionDecide       *AutonomyLevel
+	PrincipalPermAgentDelegate      *AutonomyLevel
+	PrincipalPermConversationAsk    *AutonomyLevel
+	PrincipalPermConversationAnswer *AutonomyLevel
+	PrincipalActorStatus            *string
+}
+
+// The same for several seats at once, by id: what a list shows of what each
+// of its seats may do (a conversation's respondent), for a list's worth of
+// seats in one statement. Locks nothing.
+func (q *Queries) GetMembersForAuthz(ctx context.Context, ids []uuid.UUID) ([]GetMembersForAuthzRow, error) {
+	rows, err := q.db.Query(ctx, getMembersForAuthz, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []GetMembersForAuthzRow
+	for rows.Next() {
+		var i GetMembersForAuthzRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.CourseID,
+			&i.ActorID,
+			&i.Status,
+			&i.ExpiresAt,
+			&i.StudentScope,
+			&i.AssignmentScope,
+			&i.PermDocumentRead,
+			&i.PermDocumentReadDraft,
+			&i.PermDocumentWrite,
+			&i.PermRubricRead,
+			&i.PermAssignmentWrite,
+			&i.PermSubmissionRead,
+			&i.PermSubmissionWrite,
+			&i.PermGradeRead,
+			&i.PermGradeSubmit,
+			&i.PermGradePost,
+			&i.PermMemberRead,
+			&i.PermMemberManage,
+			&i.PermActionDecide,
+			&i.PermAgentDelegate,
+			&i.PermConversationAsk,
+			&i.PermConversationAnswer,
+			&i.PrincipalMemberID,
+			&i.AnswersCourse,
+			&i.OwnerMatches,
+			&i.PrincipalActorID,
+			&i.PrincipalStatus,
+			&i.PrincipalExpiresAt,
+			&i.PrincipalStudentScope,
+			&i.PrincipalAssignmentScope,
+			&i.PrincipalPermDocumentRead,
+			&i.PrincipalPermDocumentReadDraft,
+			&i.PrincipalPermDocumentWrite,
+			&i.PrincipalPermRubricRead,
+			&i.PrincipalPermAssignmentWrite,
+			&i.PrincipalPermSubmissionRead,
+			&i.PrincipalPermSubmissionWrite,
+			&i.PrincipalPermGradeRead,
+			&i.PrincipalPermGradeSubmit,
+			&i.PrincipalPermGradePost,
+			&i.PrincipalPermMemberRead,
+			&i.PrincipalPermMemberManage,
+			&i.PrincipalPermActionDecide,
+			&i.PrincipalPermAgentDelegate,
+			&i.PrincipalPermConversationAsk,
+			&i.PrincipalPermConversationAnswer,
+			&i.PrincipalActorStatus,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const lockLiveMemberForAuthz = `-- name: LockLiveMemberForAuthz :one
-SELECT id, course_id, actor_id, status, expires_at, student_scope, assignment_scope,
-       perm_document_read, perm_document_read_draft, perm_document_write, perm_rubric_read,
-       perm_assignment_write, perm_submission_read, perm_submission_write, perm_grade_read,
-       perm_grade_submit, perm_grade_post, perm_member_read, perm_member_manage, perm_action_decide
-FROM course_member
-WHERE course_id = $1 AND actor_id = $2 AND status <> 'removed'
-FOR KEY SHARE
+SELECT m.id, m.course_id, m.actor_id, m.status, m.expires_at, m.student_scope, m.assignment_scope,
+       m.perm_document_read, m.perm_document_read_draft, m.perm_document_write, m.perm_rubric_read,
+       m.perm_assignment_write, m.perm_submission_read, m.perm_submission_write, m.perm_grade_read,
+       m.perm_grade_submit, m.perm_grade_post, m.perm_member_read, m.perm_member_manage,
+       m.perm_action_decide, m.perm_agent_delegate, m.perm_conversation_ask, m.perm_conversation_answer,
+       m.principal_member_id, m.answers_course,
+       (CASE WHEN m.principal_member_id IS NULL THEN a.owner_actor_id IS NULL
+             ELSE a.owner_actor_id IS NOT DISTINCT FROM p.actor_id END)::bool AS owner_matches,
+       p.actor_id AS principal_actor_id, p.status AS principal_status, p.expires_at AS principal_expires_at,
+       p.student_scope AS principal_student_scope, p.assignment_scope AS principal_assignment_scope,
+       p.perm_document_read AS principal_perm_document_read, p.perm_document_read_draft AS principal_perm_document_read_draft, p.perm_document_write AS principal_perm_document_write,
+       p.perm_rubric_read AS principal_perm_rubric_read, p.perm_assignment_write AS principal_perm_assignment_write, p.perm_submission_read AS principal_perm_submission_read,
+       p.perm_submission_write AS principal_perm_submission_write, p.perm_grade_read AS principal_perm_grade_read, p.perm_grade_submit AS principal_perm_grade_submit,
+       p.perm_grade_post AS principal_perm_grade_post, p.perm_member_read AS principal_perm_member_read, p.perm_member_manage AS principal_perm_member_manage,
+       p.perm_action_decide AS principal_perm_action_decide, p.perm_agent_delegate AS principal_perm_agent_delegate, p.perm_conversation_ask AS principal_perm_conversation_ask,
+       p.perm_conversation_answer AS principal_perm_conversation_answer,
+       pa.status AS principal_actor_status
+FROM course_member m
+JOIN actor a ON a.id = m.actor_id
+LEFT JOIN course_member p ON p.id = m.principal_member_id
+LEFT JOIN actor pa ON pa.id = p.actor_id
+WHERE m.course_id = $1 AND m.actor_id = $2 AND m.status <> 'removed'
+FOR KEY SHARE OF m
 `
 
 type LockLiveMemberForAuthzParams struct {
@@ -240,26 +555,54 @@ type LockLiveMemberForAuthzParams struct {
 }
 
 type LockLiveMemberForAuthzRow struct {
-	ID                    uuid.UUID
-	CourseID              uuid.UUID
-	ActorID               uuid.UUID
-	Status                string
-	ExpiresAt             *time.Time
-	StudentScope          string
-	AssignmentScope       string
-	PermDocumentRead      AutonomyLevel
-	PermDocumentReadDraft AutonomyLevel
-	PermDocumentWrite     AutonomyLevel
-	PermRubricRead        AutonomyLevel
-	PermAssignmentWrite   AutonomyLevel
-	PermSubmissionRead    AutonomyLevel
-	PermSubmissionWrite   AutonomyLevel
-	PermGradeRead         AutonomyLevel
-	PermGradeSubmit       AutonomyLevel
-	PermGradePost         AutonomyLevel
-	PermMemberRead        AutonomyLevel
-	PermMemberManage      AutonomyLevel
-	PermActionDecide      AutonomyLevel
+	ID                              uuid.UUID
+	CourseID                        uuid.UUID
+	ActorID                         uuid.UUID
+	Status                          string
+	ExpiresAt                       *time.Time
+	StudentScope                    string
+	AssignmentScope                 string
+	PermDocumentRead                AutonomyLevel
+	PermDocumentReadDraft           AutonomyLevel
+	PermDocumentWrite               AutonomyLevel
+	PermRubricRead                  AutonomyLevel
+	PermAssignmentWrite             AutonomyLevel
+	PermSubmissionRead              AutonomyLevel
+	PermSubmissionWrite             AutonomyLevel
+	PermGradeRead                   AutonomyLevel
+	PermGradeSubmit                 AutonomyLevel
+	PermGradePost                   AutonomyLevel
+	PermMemberRead                  AutonomyLevel
+	PermMemberManage                AutonomyLevel
+	PermActionDecide                AutonomyLevel
+	PermAgentDelegate               AutonomyLevel
+	PermConversationAsk             AutonomyLevel
+	PermConversationAnswer          AutonomyLevel
+	PrincipalMemberID               *uuid.UUID
+	AnswersCourse                   bool
+	OwnerMatches                    bool
+	PrincipalActorID                *uuid.UUID
+	PrincipalStatus                 *string
+	PrincipalExpiresAt              *time.Time
+	PrincipalStudentScope           *string
+	PrincipalAssignmentScope        *string
+	PrincipalPermDocumentRead       *AutonomyLevel
+	PrincipalPermDocumentReadDraft  *AutonomyLevel
+	PrincipalPermDocumentWrite      *AutonomyLevel
+	PrincipalPermRubricRead         *AutonomyLevel
+	PrincipalPermAssignmentWrite    *AutonomyLevel
+	PrincipalPermSubmissionRead     *AutonomyLevel
+	PrincipalPermSubmissionWrite    *AutonomyLevel
+	PrincipalPermGradeRead          *AutonomyLevel
+	PrincipalPermGradeSubmit        *AutonomyLevel
+	PrincipalPermGradePost          *AutonomyLevel
+	PrincipalPermMemberRead         *AutonomyLevel
+	PrincipalPermMemberManage       *AutonomyLevel
+	PrincipalPermActionDecide       *AutonomyLevel
+	PrincipalPermAgentDelegate      *AutonomyLevel
+	PrincipalPermConversationAsk    *AutonomyLevel
+	PrincipalPermConversationAnswer *AutonomyLevel
+	PrincipalActorStatus            *string
 }
 
 // The same, for a call that writes, and the first row that call locks: the
@@ -268,6 +611,15 @@ type LockLiveMemberForAuthzRow struct {
 // which then waits for the call, or the call waits for it and sees what it
 // did. Taking the seat before anything else keeps one order for every write,
 // the seat first: the order the action row's foreign key to it always had.
+//
+// Only the caller's own seat is locked here. A delegate's principal is
+// locked next, by LockPrincipalForAuthz, and read again as it then stands:
+// a delegate's seat, then its principal's, is the order whatever takes both
+// KEY SHARE takes them in (pipeline.Decide included). What takes a
+// delegate's seat FOR UPDATE takes its principal's KEY SHARE before it
+// (tools.holdPrincipalOf), and a principal's removal holds it FOR UPDATE and
+// then only updates its delegates' rows, so each meets the others at the
+// principal.
 func (q *Queries) LockLiveMemberForAuthz(ctx context.Context, arg LockLiveMemberForAuthzParams) (LockLiveMemberForAuthzRow, error) {
 	row := q.db.QueryRow(ctx, lockLiveMemberForAuthz, arg.CourseID, arg.ActorID)
 	var i LockLiveMemberForAuthzRow
@@ -292,6 +644,108 @@ func (q *Queries) LockLiveMemberForAuthz(ctx context.Context, arg LockLiveMember
 		&i.PermMemberRead,
 		&i.PermMemberManage,
 		&i.PermActionDecide,
+		&i.PermAgentDelegate,
+		&i.PermConversationAsk,
+		&i.PermConversationAnswer,
+		&i.PrincipalMemberID,
+		&i.AnswersCourse,
+		&i.OwnerMatches,
+		&i.PrincipalActorID,
+		&i.PrincipalStatus,
+		&i.PrincipalExpiresAt,
+		&i.PrincipalStudentScope,
+		&i.PrincipalAssignmentScope,
+		&i.PrincipalPermDocumentRead,
+		&i.PrincipalPermDocumentReadDraft,
+		&i.PrincipalPermDocumentWrite,
+		&i.PrincipalPermRubricRead,
+		&i.PrincipalPermAssignmentWrite,
+		&i.PrincipalPermSubmissionRead,
+		&i.PrincipalPermSubmissionWrite,
+		&i.PrincipalPermGradeRead,
+		&i.PrincipalPermGradeSubmit,
+		&i.PrincipalPermGradePost,
+		&i.PrincipalPermMemberRead,
+		&i.PrincipalPermMemberManage,
+		&i.PrincipalPermActionDecide,
+		&i.PrincipalPermAgentDelegate,
+		&i.PrincipalPermConversationAsk,
+		&i.PrincipalPermConversationAnswer,
+		&i.PrincipalActorStatus,
+	)
+	return i, err
+}
+
+const lockPrincipalForAuthz = `-- name: LockPrincipalForAuthz :one
+SELECT p.id, p.actor_id, p.status, p.expires_at, p.student_scope, p.assignment_scope,
+       p.perm_document_read, p.perm_document_read_draft, p.perm_document_write, p.perm_rubric_read,
+       p.perm_assignment_write, p.perm_submission_read, p.perm_submission_write, p.perm_grade_read,
+       p.perm_grade_submit, p.perm_grade_post, p.perm_member_read, p.perm_member_manage,
+       p.perm_action_decide, p.perm_agent_delegate, p.perm_conversation_ask, p.perm_conversation_answer,
+       pa.status AS actor_status
+FROM course_member p
+JOIN actor pa ON pa.id = p.actor_id
+WHERE p.id = $1
+FOR KEY SHARE OF p
+`
+
+type LockPrincipalForAuthzRow struct {
+	ID                     uuid.UUID
+	ActorID                uuid.UUID
+	Status                 string
+	ExpiresAt              *time.Time
+	StudentScope           string
+	AssignmentScope        string
+	PermDocumentRead       AutonomyLevel
+	PermDocumentReadDraft  AutonomyLevel
+	PermDocumentWrite      AutonomyLevel
+	PermRubricRead         AutonomyLevel
+	PermAssignmentWrite    AutonomyLevel
+	PermSubmissionRead     AutonomyLevel
+	PermSubmissionWrite    AutonomyLevel
+	PermGradeRead          AutonomyLevel
+	PermGradeSubmit        AutonomyLevel
+	PermGradePost          AutonomyLevel
+	PermMemberRead         AutonomyLevel
+	PermMemberManage       AutonomyLevel
+	PermActionDecide       AutonomyLevel
+	PermAgentDelegate      AutonomyLevel
+	PermConversationAsk    AutonomyLevel
+	PermConversationAnswer AutonomyLevel
+	ActorStatus            string
+}
+
+// A delegate's principal, KEY SHARE, to the end of a call the delegate
+// writes: removing, pausing or narrowing the principal waits for the call,
+// or the call waits for it and, reading the row again here, sees what it
+// did.
+func (q *Queries) LockPrincipalForAuthz(ctx context.Context, id uuid.UUID) (LockPrincipalForAuthzRow, error) {
+	row := q.db.QueryRow(ctx, lockPrincipalForAuthz, id)
+	var i LockPrincipalForAuthzRow
+	err := row.Scan(
+		&i.ID,
+		&i.ActorID,
+		&i.Status,
+		&i.ExpiresAt,
+		&i.StudentScope,
+		&i.AssignmentScope,
+		&i.PermDocumentRead,
+		&i.PermDocumentReadDraft,
+		&i.PermDocumentWrite,
+		&i.PermRubricRead,
+		&i.PermAssignmentWrite,
+		&i.PermSubmissionRead,
+		&i.PermSubmissionWrite,
+		&i.PermGradeRead,
+		&i.PermGradeSubmit,
+		&i.PermGradePost,
+		&i.PermMemberRead,
+		&i.PermMemberManage,
+		&i.PermActionDecide,
+		&i.PermAgentDelegate,
+		&i.PermConversationAsk,
+		&i.PermConversationAnswer,
+		&i.ActorStatus,
 	)
 	return i, err
 }

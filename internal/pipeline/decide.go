@@ -60,6 +60,8 @@ const (
 	CancelTargetGone       = "target_gone"
 	CancelMemberRemoved    = "member_removed"
 	CancelToolNoLongerHere = "tool_removed"
+	// The proposer took it back (action.withdraw).
+	CancelWithdrawn = "withdrawn"
 )
 
 // Decide approves or rejects a proposal. It runs as the Execute of
@@ -72,11 +74,23 @@ func (p *Pipeline) Decide(ctx context.Context, ec *tool.ExecCtx, in DecideIn) (D
 	// that seat takes them in (the seat, then its proposals) and the order
 	// every write takes its caller's seat in. A pause, narrowing or removal
 	// of the proposer then waits for the decision, or the decision waits
-	// for it and sees what it did. Whose proposal it is never changes, so
-	// it is read before anything is locked.
+	// for it and sees what it did. For a delegate's proposal its principal's
+	// seat comes second, as a delegate's own calls take the two: whatever
+	// the principal loses then applies to the approval too. Whose proposal
+	// it is, and whose delegate that seat is, never change, so they are read
+	// before anything is locked.
 	if ahead, err := ec.Q.GetActionInCourse(ctx, dbq.GetActionInCourseParams{ID: in.ActionID, CourseID: &in.CourseID}); err == nil && ahead.MemberID != nil {
 		if err := ec.Q.ShareSeats(ctx, []uuid.UUID{*ahead.MemberID}); err != nil {
 			return DecideOut{}, err
+		}
+		principal, err := ec.Q.GetSeatPrincipal(ctx, *ahead.MemberID)
+		if err != nil {
+			return DecideOut{}, err
+		}
+		if principal != nil {
+			if err := ec.Q.ShareSeats(ctx, []uuid.UUID{*principal}); err != nil {
+				return DecideOut{}, err
+			}
 		}
 	}
 	prop, err := ec.Q.GetActionInCourseForUpdate(ctx, dbq.GetActionInCourseForUpdateParams{ID: in.ActionID, CourseID: &in.CourseID})
@@ -92,11 +106,15 @@ func (p *Pipeline) Decide(ctx context.Context, ec *tool.ExecCtx, in DecideIn) (D
 	if ec.Member == nil || prop.MemberID == nil {
 		return DecideOut{}, apperr.Forbid("only a course member decides a member's proposal")
 	}
-	if *prop.MemberID == ec.Member.ID || prop.ActorID == ec.Actor.ID {
+	if same, err := sameParty(ctx, ec.Q, prop.ActorID, ec.Actor.ID); err != nil {
+		return DecideOut{}, err
+	} else if *prop.MemberID == ec.Member.ID || same {
 		// The database refuses the same seat too; saying so here is kinder.
 		// The actor is compared here as well: someone removed and seated
-		// again has a new seat, and is still who made the proposal.
-		return DecideOut{}, apperr.Forbid("nobody decides their own proposal")
+		// again has a new seat, and is still who made the proposal. So is
+		// the party: an agent decides nothing its owner proposed, nor its
+		// owner anything it did, nor another of the owner's agents.
+		return DecideOut{}, apperr.Forbid("nobody decides their own proposal, nor their agent's, nor their owner's")
 	}
 	if own, err := judgesOwn(ctx, ec.Q, prop, ec.Member.ID, ec.Actor.ID); err != nil {
 		return DecideOut{}, err
@@ -216,8 +234,18 @@ func (p *Pipeline) Decide(ctx context.Context, ec *tool.ExecCtx, in DecideIn) (D
 	return out, nil
 }
 
+// sameParty reports whether two actors are one party for four eyes: the same
+// actor, one of them the other's owner, or two agents of one owner. An agent
+// someone owns acts only as their delegate, so it is them, at one remove.
+func sameParty(ctx context.Context, q *dbq.Queries, a, b uuid.UUID) (bool, error) {
+	if a == b {
+		return true, nil
+	}
+	return q.SameParty(ctx, dbq.SamePartyParams{A: a, B: b})
+}
+
 // judgesOwn reports whether a is a decision or a review about an action of
-// member's, or of actor's in any seat, at any remove. The CHECKs on action
+// member's, or of actor's party (sameParty) in any seat, at any remove. The CHECKs on action
 // compare a row with its own decider only, and a decision can itself wait
 // for a decision, or be under review: a triage agent whose approvals a human
 // confirms. Confirming that approval is what carries out the proposal
@@ -234,8 +262,11 @@ func judgesOwn(ctx context.Context, q *dbq.Queries, a dbq.Action, member, actor 
 		if err != nil {
 			return false, err
 		}
-		if (about.MemberID != nil && *about.MemberID == member) || about.ActorID == actor {
+		if about.MemberID != nil && *about.MemberID == member {
 			return true, nil
+		}
+		if same, err := sameParty(ctx, q, about.ActorID, actor); err != nil || same {
+			return same, err
 		}
 		a = about
 	}
@@ -243,7 +274,7 @@ func judgesOwn(ctx context.Context, q *dbq.Queries, a dbq.Action, member, actor 
 }
 
 // closesOwnEscalation reports whether carrying out a would close an
-// escalation that actor had a hand in: a is a review of an action actor
+// escalation that actor, or its party, had a hand in: a is a review of an action actor
 // escalated, or the approval of one, at any remove. Once escalated, the
 // action can only be marked reviewed, so carrying such a review out closes
 // the escalation or fails. The review is carried out as its proposer, and
@@ -371,10 +402,13 @@ func (p *Pipeline) Review(ctx context.Context, ec *tool.ExecCtx, in ReviewIn) (R
 	if ec.Member == nil {
 		return ReviewOut{}, apperr.Forbid("only a course member reviews")
 	}
-	if (row.MemberID != nil && *row.MemberID == ec.Member.ID) || row.ActorID == ec.Actor.ID {
+	if same, err := sameParty(ctx, ec.Q, row.ActorID, ec.Actor.ID); err != nil {
+		return ReviewOut{}, err
+	} else if (row.MemberID != nil && *row.MemberID == ec.Member.ID) || same {
 		// The database refuses only the same seat; the actor is compared
-		// here, so a seat taken since is refused too.
-		return ReviewOut{}, apperr.Forbid("nobody reviews their own action")
+		// here, so a seat taken since is refused too, and so is its party:
+		// an agent and its owner do not review each other.
+		return ReviewOut{}, apperr.Forbid("nobody reviews their own action, nor their agent's, nor their owner's")
 	}
 	if own, err := judgesOwn(ctx, ec.Q, row, ec.Member.ID, ec.Actor.ID); err != nil {
 		return ReviewOut{}, err

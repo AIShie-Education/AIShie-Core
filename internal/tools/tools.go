@@ -25,6 +25,14 @@ type Deps struct {
 	Uploads *blob.Signer
 	// MaxUploadBytes bounds one file.
 	MaxUploadBytes int64
+	// DisableAgentSelfService stops people registering agents of their own
+	// (agent.create): administrators still do, with actor.register. What is
+	// already registered is left as it is. The zero value, self-service on,
+	// is the default.
+	DisableAgentSelfService bool
+	// MaxAgentsPerOwner bounds the agents one person may have that are not
+	// suspended; zero means DefaultMaxAgentsPerOwner.
+	MaxAgentsPerOwner int
 }
 
 // DefaultMaxUploadBytes is 50 MiB: a scanned exam script, not a video.
@@ -35,11 +43,15 @@ func RegisterAll(reg *tool.Registry, d Deps) {
 	if d.MaxUploadBytes <= 0 {
 		d.MaxUploadBytes = DefaultMaxUploadBytes
 	}
+	if d.MaxAgentsPerOwner <= 0 {
+		d.MaxAgentsPerOwner = DefaultMaxAgentsPerOwner
+	}
 	if d.Uploads == nil {
 		// A random key: fine for one process, until it restarts.
 		d.Uploads, _ = blob.NewSigner("")
 	}
 	reg.Register(meTools()...)
+	reg.Register(agentTools(d)...)
 	reg.Register(platformTools()...)
 	reg.Register(courseTools()...)
 	reg.Register(memberTools()...)
@@ -50,6 +62,7 @@ func RegisterAll(reg *tool.Registry, d Deps) {
 	reg.Register(gradeTools(d)...)
 	reg.Register(gradeReadTools()...)
 	reg.Register(actionTools(d)...)
+	reg.Register(conversationTools()...)
 	reg.Register(eventTools()...)
 	reg.Register(systemTools()...)
 }

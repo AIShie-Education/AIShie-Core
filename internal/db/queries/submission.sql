@@ -50,6 +50,11 @@ WHERE s.course_id = $1 AND s.id > sqlc.arg(after)
         SELECT 1 FROM member_student_scope x WHERE x.member_id = sqlc.arg(member_id) AND x.student_member_id = s.student_member_id))
   AND (sqlc.arg(assignment_all)::bool OR EXISTS (
         SELECT 1 FROM member_assignment_scope y WHERE y.member_id = sqlc.arg(member_id) AND y.assignment_id = s.assignment_id))
+  -- A delegate's principal's scope, the same way; "all" for any other seat.
+  AND (sqlc.arg(principal_student_all)::bool OR EXISTS (
+        SELECT 1 FROM member_student_scope px WHERE px.member_id = sqlc.arg(principal_id) AND px.student_member_id = s.student_member_id))
+  AND (sqlc.arg(principal_assignment_all)::bool OR EXISTS (
+        SELECT 1 FROM member_assignment_scope py WHERE py.member_id = sqlc.arg(principal_id) AND py.assignment_id = s.assignment_id))
 ORDER BY s.id
 LIMIT sqlc.arg(max_rows);
 
@@ -57,7 +62,8 @@ LIMIT sqlc.arg(max_rows);
 -- Every current student of the course whom the caller's student scope
 -- reaches, with their latest attempt at one assignment, if any: the students
 -- who have not started are rows too, with no submission. The caller's
--- assignment scope is checked on the target, before this runs.
+-- assignment scope is checked on the target, before this runs. A delegate
+-- reaches only the students its principal reaches too.
 SELECT m.id AS student_member_id, a.display_name, m.status AS member_status,
        s.id AS submission_id, s.attempt, s.state, s.submitted_at
 FROM course_member m
@@ -69,5 +75,7 @@ WHERE m.course_id = sqlc.arg(course_id) AND m.role = 'student' AND m.status <> '
   AND m.id > sqlc.arg(after)
   AND (sqlc.arg(student_all)::bool OR EXISTS (
         SELECT 1 FROM member_student_scope y WHERE y.member_id = sqlc.arg(member_id) AND y.student_member_id = m.id))
+  AND (sqlc.arg(principal_student_all)::bool OR EXISTS (
+        SELECT 1 FROM member_student_scope py WHERE py.member_id = sqlc.arg(principal_id) AND py.student_member_id = m.id))
 ORDER BY m.id
 LIMIT sqlc.arg(max_rows);

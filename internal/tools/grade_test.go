@@ -1088,7 +1088,7 @@ func TestAPostProposalAboutNothingIsRefused(t *testing.T) {
 	b.do(t, b.sato, "grade.post", m{"course_id": b.course, "grade_ids": []uuid.UUID{draft}})
 
 	post, _ := b.P.Registry().Get("grade.post")
-	pinned, err := post.Pin(context.Background(), b.Q, time.Now(), tools.GradePostIn{InCourse: tool.InCourse{CourseID: b.course}, AssignmentID: &b.hw3})
+	pinned, err := post.Pin(context.Background(), b.Q, nil, time.Now(), tools.GradePostIn{InCourse: tool.InCourse{CourseID: b.course}, AssignmentID: &b.hw3})
 	if !apperr.Is(err, apperr.FailedPrecondition) {
 		t.Fatalf("pinning a proposal to post HW3 with nothing waiting: %+v, %v", pinned, err)
 	}

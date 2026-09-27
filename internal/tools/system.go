@@ -28,13 +28,14 @@ import (
 // that race quietly.
 
 func systemTools() []tool.Tool {
-	return []tool.Tool{actionExpire(), memberExpire(), submissionMarkMissing()}
+	return []tool.Tool{actionExpire(), memberExpire(), memberRemoveOrphan(), submissionMarkMissing()}
 }
 
 // Names of the internal tools, for the sweeps.
 const (
 	ToolActionExpire          = "action.expire"
 	ToolMemberExpire          = "member.expire"
+	ToolMemberRemoveOrphan    = "member.remove_orphan"
 	ToolSubmissionMarkMissing = "submission.mark_missing"
 )
 
@@ -112,6 +113,9 @@ func memberExpire() tool.Tool {
 			return tool.Target{CourseID: in.CourseID, Type: "course_member", ID: &in.MemberID}, nil
 		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in MemberExpireIn) (MemberExpireOut, error) {
+			if err := holdPrincipalOf(ctx, ec.Q, in.MemberID); err != nil {
+				return MemberExpireOut{}, err
+			}
 			m, err := ec.Q.GetMemberForSweep(ctx, in.MemberID)
 			if errors.Is(err, pgx.ErrNoRows) {
 				return MemberExpireOut{}, apperr.Missing("no such member")
@@ -125,6 +129,59 @@ func memberExpire() tool.Tool {
 				return MemberExpireOut{}, nil
 			}
 			n, err := members.Remove(ctx, ec.Q, ec.Emit, m.CourseID, m.ID, members.ReasonExpired)
+			return MemberExpireOut{Done: err == nil, CancelledProposals: n}, err
+		},
+	})
+}
+
+// ErrNotOrphaned is what member.remove_orphan returns for a seat that turned
+// out not to be orphaned, or to be removed already, once it was locked. Like
+// ErrSweepMoot it is not an apperr, so nothing is kept of the call: its key
+// names the seat, and a no-op stored under it would pass the seat over for
+// good.
+var ErrNotOrphaned = errors.New("the seat is not an orphan to remove")
+
+type MemberRemoveOrphanIn struct {
+	CourseID uuid.UUID `json:"course_id"`
+	MemberID uuid.UUID `json:"member_id"`
+}
+
+func memberRemoveOrphan() tool.Tool {
+	return tool.Define(tool.Spec[MemberRemoveOrphanIn, MemberExpireOut]{
+		Name: ToolMemberRemoveOrphan,
+		Description: "Remove a seat that counts for nothing for good: a delegate's whose principal is removed or past its " +
+			"expiry, or one that no longer matches its actor's owner. authorize() has refused it since; this makes the " +
+			"removal visible and cancels what it had proposed.",
+		Kind: tool.Write, Internal: true,
+		Resolve: func(_ context.Context, _ dbq.Querier, in MemberRemoveOrphanIn) (tool.Target, error) {
+			return tool.Target{CourseID: in.CourseID, Type: "course_member", ID: &in.MemberID}, nil
+		},
+		Execute: func(ctx context.Context, ec *tool.ExecCtx, in MemberRemoveOrphanIn) (MemberExpireOut, error) {
+			// The delegate's seat is locked, as the expiry sweep locks the
+			// seat it removes, after its principal's KEY SHARE, as whatever
+			// locks a delegate's seat takes them (holdPrincipalOf). Nothing
+			// the principal can come to undoes an orphan (SeatOrphaned).
+			if err := holdPrincipalOf(ctx, ec.Q, in.MemberID); err != nil {
+				return MemberExpireOut{}, err
+			}
+			m, err := ec.Q.GetMemberForSweep(ctx, in.MemberID)
+			if errors.Is(err, pgx.ErrNoRows) {
+				return MemberExpireOut{}, apperr.Missing("no such member")
+			}
+			if err != nil {
+				return MemberExpireOut{}, err
+			}
+			if m.CourseID != in.CourseID || m.Status == domain.MemberRemoved {
+				return MemberExpireOut{}, ErrNotOrphaned
+			}
+			orphaned, err := ec.Q.SeatOrphaned(ctx, dbq.SeatOrphanedParams{MemberID: m.ID, Now: &ec.Now})
+			if err != nil {
+				return MemberExpireOut{}, err
+			}
+			if !orphaned {
+				return MemberExpireOut{}, ErrNotOrphaned
+			}
+			n, err := members.Remove(ctx, ec.Q, ec.Emit, m.CourseID, m.ID, members.ReasonOrphaned)
 			return MemberExpireOut{Done: err == nil, CancelledProposals: n}, err
 		},
 	})

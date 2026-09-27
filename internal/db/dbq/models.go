@@ -81,14 +81,16 @@ type Action struct {
 }
 
 type Actor struct {
-	ID               uuid.UUID
-	Kind             string
-	DisplayName      string
-	Email            *string
-	Status           string
-	PlatformRole     *string
-	CreatedByActorID *uuid.UUID
-	CreatedAt        time.Time
+	ID                 uuid.UUID
+	Kind               string
+	DisplayName        string
+	Email              *string
+	Status             string
+	PlatformRole       *string
+	CreatedByActorID   *uuid.UUID
+	CreatedAt          time.Time
+	OwnerActorID       *uuid.UUID
+	SuspendedByActorID *uuid.UUID
 }
 
 type Assignment struct {
@@ -102,6 +104,40 @@ type Assignment struct {
 	DueAt                  *time.Time
 	PublishedAt            *time.Time
 	CreatedAt              time.Time
+}
+
+type Conversation struct {
+	ID                 uuid.UUID
+	CourseID           uuid.UUID
+	OpenerMemberID     uuid.UUID
+	RespondentMemberID uuid.UUID
+	Title              *string
+	Status             string
+	ClosedReason       *string
+	CreatedAt          time.Time
+	LastMessageAt      *time.Time
+	LastAuthorMemberID *uuid.UUID
+}
+
+type ConversationMessage struct {
+	ID                 uuid.UUID
+	ConversationID     uuid.UUID
+	CourseID           uuid.UUID
+	Seq                int32
+	AuthorMemberID     uuid.UUID
+	InReplyToMessageID *uuid.UUID
+	Body               string
+	CreatedByActionID  uuid.UUID
+	CreatedAt          time.Time
+}
+
+type ConversationMessageRetraction struct {
+	MessageID           uuid.UUID
+	CourseID            uuid.UUID
+	RetractedByMemberID uuid.UUID
+	CreatedByActionID   uuid.UUID
+	Reason              *string
+	CreatedAt           time.Time
 }
 
 type Course struct {
@@ -119,30 +155,35 @@ type Course struct {
 }
 
 type CourseMember struct {
-	ID                    uuid.UUID
-	CourseID              uuid.UUID
-	ActorID               uuid.UUID
-	Role                  string
-	Status                string
-	PresetID              *uuid.UUID
-	AddedByActorID        uuid.UUID
-	ExpiresAt             *time.Time
-	StudentScope          string
-	AssignmentScope       string
-	PermDocumentRead      AutonomyLevel
-	PermDocumentReadDraft AutonomyLevel
-	PermDocumentWrite     AutonomyLevel
-	PermRubricRead        AutonomyLevel
-	PermAssignmentWrite   AutonomyLevel
-	PermSubmissionRead    AutonomyLevel
-	PermSubmissionWrite   AutonomyLevel
-	PermGradeRead         AutonomyLevel
-	PermGradeSubmit       AutonomyLevel
-	PermGradePost         AutonomyLevel
-	PermMemberRead        AutonomyLevel
-	PermMemberManage      AutonomyLevel
-	PermActionDecide      AutonomyLevel
-	CreatedAt             time.Time
+	ID                     uuid.UUID
+	CourseID               uuid.UUID
+	ActorID                uuid.UUID
+	Role                   string
+	Status                 string
+	PresetID               *uuid.UUID
+	AddedByActorID         uuid.UUID
+	ExpiresAt              *time.Time
+	StudentScope           string
+	AssignmentScope        string
+	PermDocumentRead       AutonomyLevel
+	PermDocumentReadDraft  AutonomyLevel
+	PermDocumentWrite      AutonomyLevel
+	PermRubricRead         AutonomyLevel
+	PermAssignmentWrite    AutonomyLevel
+	PermSubmissionRead     AutonomyLevel
+	PermSubmissionWrite    AutonomyLevel
+	PermGradeRead          AutonomyLevel
+	PermGradeSubmit        AutonomyLevel
+	PermGradePost          AutonomyLevel
+	PermMemberRead         AutonomyLevel
+	PermMemberManage       AutonomyLevel
+	PermActionDecide       AutonomyLevel
+	CreatedAt              time.Time
+	PrincipalMemberID      *uuid.UUID
+	AnswersCourse          bool
+	PermAgentDelegate      AutonomyLevel
+	PermConversationAsk    AutonomyLevel
+	PermConversationAnswer AutonomyLevel
 }
 
 type Credential struct {
@@ -247,28 +288,31 @@ type MemberStudentScope struct {
 }
 
 type PermissionPreset struct {
-	ID                    uuid.UUID
-	DeptID                *uuid.UUID
-	Name                  string
-	Description           *string
-	Role                  string
-	StudentScope          string
-	AssignmentScope       string
-	PermDocumentRead      AutonomyLevel
-	PermDocumentReadDraft AutonomyLevel
-	PermDocumentWrite     AutonomyLevel
-	PermRubricRead        AutonomyLevel
-	PermAssignmentWrite   AutonomyLevel
-	PermSubmissionRead    AutonomyLevel
-	PermSubmissionWrite   AutonomyLevel
-	PermGradeRead         AutonomyLevel
-	PermGradeSubmit       AutonomyLevel
-	PermGradePost         AutonomyLevel
-	PermMemberRead        AutonomyLevel
-	PermMemberManage      AutonomyLevel
-	PermActionDecide      AutonomyLevel
-	CreatedByActorID      *uuid.UUID
-	CreatedAt             time.Time
+	ID                     uuid.UUID
+	DeptID                 *uuid.UUID
+	Name                   string
+	Description            *string
+	Role                   string
+	StudentScope           string
+	AssignmentScope        string
+	PermDocumentRead       AutonomyLevel
+	PermDocumentReadDraft  AutonomyLevel
+	PermDocumentWrite      AutonomyLevel
+	PermRubricRead         AutonomyLevel
+	PermAssignmentWrite    AutonomyLevel
+	PermSubmissionRead     AutonomyLevel
+	PermSubmissionWrite    AutonomyLevel
+	PermGradeRead          AutonomyLevel
+	PermGradeSubmit        AutonomyLevel
+	PermGradePost          AutonomyLevel
+	PermMemberRead         AutonomyLevel
+	PermMemberManage       AutonomyLevel
+	PermActionDecide       AutonomyLevel
+	CreatedByActorID       *uuid.UUID
+	CreatedAt              time.Time
+	PermAgentDelegate      AutonomyLevel
+	PermConversationAsk    AutonomyLevel
+	PermConversationAnswer AutonomyLevel
 }
 
 type Submission struct {

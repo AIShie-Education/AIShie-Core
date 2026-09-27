@@ -15,6 +15,7 @@ import (
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/domain"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/events"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/ids"
+	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/pipeline"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/tool"
 )
 
@@ -25,7 +26,7 @@ import (
 
 func platformTools() []tool.Tool {
 	return []tool.Tool{
-		actorRegister(), actorGet(), actorList(), actorUpdate(), actorSuspend(), actorReactivate(),
+		actorRegister(), actorGet(), actorList(), actorUpdate(), actorSuspend(), actorReactivate(), actorSetOwner(),
 		actorIssueToken(), actorListCredentials(), actorRevokeCredential(), actorInvite(), actorLinkSSO(),
 		termCreate(), termList(), departmentCreate(), departmentList(),
 		presetList(), presetCreate(), presetUpdate(),
@@ -51,10 +52,11 @@ const (
 // ---------------------------------------------------------------------------
 
 type ActorRegisterIn struct {
-	Kind         string  `json:"kind" jsonschema:"human or agent; recorded for display and audit, and read by nothing else"`
-	DisplayName  string  `json:"display_name"`
-	Email        *string `json:"email,omitempty" jsonschema:"needed for a person to sign in with a password"`
-	PlatformRole *string `json:"platform_role,omitempty" jsonschema:"admin; only root may grant it"`
+	Kind         string     `json:"kind" jsonschema:"human or agent; recorded for display and audit, and read by nothing else"`
+	DisplayName  string     `json:"display_name"`
+	Email        *string    `json:"email,omitempty" jsonschema:"needed for a person to sign in with a password"`
+	PlatformRole *string    `json:"platform_role,omitempty" jsonschema:"admin; only root may grant it"`
+	OwnerActorID *uuid.UUID `json:"owner_actor_id,omitempty" jsonschema:"for an agent only: the active person who owns it, and whose delegate alone it will be"`
 }
 
 type ActorOut struct {
@@ -68,7 +70,8 @@ func actorRegister() tool.Tool {
 			"A person signs in once they have a password, which they choose through actor.invite, or through " +
 			"single sign-on (actor.link_sso). " +
 			"An agent is registered here and runs elsewhere: no endpoint, model or prompt is stored. " +
-			"Give it a token with actor.issue_token.",
+			"Give it a token with actor.issue_token. An agent may be given an owner, a person: it then acts only as " +
+			"that person's delegate, seated by them (member.add_delegate), never with more than their own seat.",
 		Kind: tool.Write, Gate: admins,
 		HTTP:    tool.Route{Method: "POST", Pattern: "/v1/actors"},
 		Resolve: noTarget[ActorRegisterIn]("actor"),
@@ -94,10 +97,24 @@ func actorRegister() tool.Tool {
 					return ActorOut{}, apperr.Conflicts("that email already belongs to an actor")
 				}
 			}
+			if in.OwnerActorID != nil {
+				if in.Kind != "agent" {
+					return ActorOut{}, apperr.Invalid("only an agent has an owner")
+				}
+				// Owning an agent, and holding its tokens, gives nobody more
+				// than their own seat; a platform role is not a seat.
+				if in.PlatformRole != nil {
+					return ActorOut{}, apperr.Invalid("an agent someone owns holds no platform role")
+				}
+				if err := mayOwn(ctx, ec, *in.OwnerActorID); err != nil {
+					return ActorOut{}, err
+				}
+			}
 			id := ids.New()
 			if err := ec.Q.InsertActor(ctx, dbq.InsertActorParams{
 				ID: id, Kind: in.Kind, DisplayName: in.DisplayName, Email: in.Email,
 				PlatformRole: in.PlatformRole, CreatedByActorID: &ec.Actor.ID, CreatedAt: ec.Now,
+				OwnerActorID: in.OwnerActorID,
 			}); err != nil {
 				return ActorOut{}, err
 			}
@@ -125,12 +142,24 @@ type ActorView struct {
 	HasPassword     bool       `json:"has_password"`
 	HasSSO          bool       `json:"has_sso" jsonschema:"an identity at the identity provider is linked (actor.link_sso)"`
 	InviteExpiresAt *time.Time `json:"invite_expires_at,omitempty" jsonschema:"when the invitation not yet taken up expires, which may have passed; absent when there is none"`
+	// An agent someone owns acts only as their delegate.
+	OwnerActorID *uuid.UUID `json:"owner_actor_id,omitempty" jsonschema:"for an agent a person owns, that person"`
+	OwnerName    *string    `json:"owner_name,omitempty"`
+	// Who made the suspension in force; absent for one made before this was
+	// recorded, which is an administrator's.
+	SuspendedByActorID *uuid.UUID `json:"suspended_by_actor_id,omitempty" jsonschema:"while suspended: who suspended them; an agent's owner may lift only a suspension of their own"`
 }
 
 func viewActor(a dbq.GetActorViewRow) ActorView {
-	return ActorView{ID: a.ID, Kind: a.Kind, DisplayName: a.DisplayName, Email: a.Email, Status: a.Status,
+	v := ActorView{ID: a.ID, Kind: a.Kind, DisplayName: a.DisplayName, Email: a.Email, Status: a.Status,
 		PlatformRole: a.PlatformRole, CreatedByActorID: a.CreatedByActorID, CreatedAt: a.CreatedAt,
-		HasPassword: a.HasPassword, HasSSO: a.HasSso, InviteExpiresAt: a.InviteExpiresAt}
+		HasPassword: a.HasPassword, HasSSO: a.HasSso, InviteExpiresAt: a.InviteExpiresAt,
+		OwnerActorID: a.OwnerActorID, OwnerName: a.OwnerName}
+	if a.Status == domain.ActorSuspended {
+		// Read only while suspended: what it says otherwise is nothing.
+		v.SuspendedByActorID = a.SuspendedByActorID
+	}
+	return v
 }
 
 func resolveActor(ctx context.Context, q dbq.Querier, in ActorIDIn) (tool.Target, error) {
@@ -160,9 +189,10 @@ func actorGet() tool.Tool {
 }
 
 type ActorListIn struct {
-	Kind   *string `json:"kind,omitempty" jsonschema:"human or agent"`
-	Status *string `json:"status,omitempty" jsonschema:"active or suspended"`
-	Search *string `json:"search,omitempty" jsonschema:"a piece of the name or of the email, in any case"`
+	Kind         *string    `json:"kind,omitempty" jsonschema:"human or agent"`
+	Status       *string    `json:"status,omitempty" jsonschema:"active or suspended"`
+	Search       *string    `json:"search,omitempty" jsonschema:"a piece of the name or of the email, in any case"`
+	OwnerActorID *uuid.UUID `json:"owner_actor_id,omitempty" jsonschema:"only the agents this person owns"`
 	Page
 }
 
@@ -194,7 +224,7 @@ func actorList() tool.Tool {
 				}
 			}
 			rows, err := rc.Q.ListActors(ctx, dbq.ListActorsParams{After: in.after(), Kind: in.Kind, Status: in.Status,
-				Search: in.Search, MaxRows: in.limit()})
+				Search: in.Search, OwnerActorID: in.OwnerActorID, MaxRows: in.limit()})
 			out := ActorListOut{Actors: make([]ActorView, 0, len(rows))}
 			for _, r := range rows {
 				out.Actors = append(out.Actors, viewActor(dbq.GetActorViewRow(r)))
@@ -303,39 +333,173 @@ func mayReach(ctx context.Context, q *dbq.Queries, caller domain.Actor, target u
 	return nil
 }
 
-func actorSetStatus(name, desc, path, status, event string) tool.Tool {
+// mayOwn: an agent's owner is an active person, whom the administrator may
+// act on. Owning an agent is holding what it does, as its delegate, and an
+// administrator does not hand root or another administrator an agent to
+// answer for.
+func mayOwn(ctx context.Context, ec *tool.ExecCtx, owner uuid.UUID) error {
+	o, err := ec.Q.GetActor(ctx, owner)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return apperr.Missing("no such actor to be the owner")
+	}
+	if err != nil {
+		return err
+	}
+	if o.Kind != "human" {
+		return apperr.Precondition("an owner is a person: agents do not own agents")
+	}
+	if o.Status != domain.ActorActive {
+		return apperr.Precondition("the owner is suspended")
+	}
+	if owner == ec.Actor.ID {
+		return nil
+	}
+	return mayReach(ctx, ec.Q, ec.Actor, owner)
+}
+
+func actorSuspend() tool.Tool {
 	return tool.Define(tool.Spec[ActorIDIn, OK]{
-		Name: name, Description: desc, Kind: tool.Write, Gate: admins,
-		HTTP:    tool.Route{Method: "POST", Pattern: path},
+		Name: "actor.suspend",
+		Description: "Suspend an actor everywhere at once: every call it makes from now on is denied, in every course, " +
+			"and it cannot sign in. Its memberships, history and credentials are kept. An agent its owner has " +
+			"suspended may be suspended here as well: the suspension is then yours, and its owner can no longer lift it.",
+		Kind: tool.Write, Gate: admins,
+		HTTP:    tool.Route{Method: "POST", Pattern: "/v1/actors/{actor_id}/suspend"},
 		Resolve: resolveActor,
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in ActorIDIn) (OK, error) {
 			if err := mayActOn(ctx, ec, in.ActorID); err != nil {
 				return OK{}, err
 			}
-			n, err := ec.Q.SetActorStatus(ctx, dbq.SetActorStatusParams{ID: in.ActorID, Status: status})
+			n, err := ec.Q.SuspendActor(ctx, dbq.SuspendActorParams{ID: in.ActorID, SuspendedByActorID: &ec.Actor.ID})
 			if err != nil {
 				return OK{}, err
 			}
 			if n == 0 {
-				return OK{}, apperr.Conflicts("the actor is already %s", status)
+				return OK{}, apperr.Conflicts("the actor is already suspended")
 			}
-			ec.Emit(events.Event{Type: event, SubjectType: "actor", SubjectID: &in.ActorID})
+			ec.Emit(events.Event{Type: EventActorSuspended, SubjectType: "actor", SubjectID: &in.ActorID})
 			return OK{OK: true}, nil
 		},
 	})
 }
 
-func actorSuspend() tool.Tool {
-	return actorSetStatus("actor.suspend",
-		"Suspend an actor everywhere at once: every call it makes from now on is denied, in every course, "+
-			"and it cannot sign in. Its memberships, history and credentials are kept.",
-		"/v1/actors/{actor_id}/suspend", domain.ActorSuspended, EventActorSuspended)
+func actorReactivate() tool.Tool {
+	return tool.Define(tool.Spec[ActorIDIn, OK]{
+		Name: "actor.reactivate",
+		Description: "Lift a suspension, whoever made it: an administrator, or an agent's owner. " +
+			"The actor's memberships and credentials work again as they were.",
+		Kind: tool.Write, Gate: admins,
+		HTTP:    tool.Route{Method: "POST", Pattern: "/v1/actors/{actor_id}/reactivate"},
+		Resolve: resolveActor,
+		Execute: func(ctx context.Context, ec *tool.ExecCtx, in ActorIDIn) (OK, error) {
+			if err := mayActOn(ctx, ec, in.ActorID); err != nil {
+				return OK{}, err
+			}
+			n, err := ec.Q.ReactivateActor(ctx, in.ActorID)
+			if err != nil {
+				return OK{}, err
+			}
+			if n == 0 {
+				return OK{}, apperr.Conflicts("the actor is already active")
+			}
+			ec.Emit(events.Event{Type: EventActorReactivated, SubjectType: "actor", SubjectID: &in.ActorID})
+			return OK{OK: true}, nil
+		},
+	})
 }
 
-func actorReactivate() tool.Tool {
-	return actorSetStatus("actor.reactivate",
-		"Lift a suspension. The actor's memberships and credentials work again as they were.",
-		"/v1/actors/{actor_id}/reactivate", domain.ActorActive, EventActorReactivated)
+type ActorSetOwnerIn struct {
+	ActorID      uuid.UUID  `json:"actor_id"`
+	OwnerActorID *uuid.UUID `json:"owner_actor_id" jsonschema:"the person who is to own the agent; null for nobody"`
+}
+
+func actorSetOwner() tool.Tool {
+	return tool.Define(tool.Spec[ActorSetOwnerIn, OK]{
+		Name: "actor.set_owner",
+		Description: "Give an agent an owner, change it, or take it away (owner_actor_id null). An agent someone owns " +
+			"acts only as their delegate. Refused while the agent is seated in a course that is not archived: take it out " +
+			"first (agent.withdraw by its owner, or member.remove), and for an agent that holds a platform role, which an " +
+			"agent someone owns does not. Every credential the agent has — tokens, sessions, password, invitation, linked " +
+			"identity — is revoked, since whoever owned it before may hold them, and the old owner's requests to seat it " +
+			"that wait for a decision are cancelled; issue it a new token. A seat it keeps in an archived course counts " +
+			"for nothing from then on.",
+		Kind: tool.Write, Gate: admins,
+		HTTP: tool.Route{Method: "POST", Pattern: "/v1/actors/{actor_id}/owner"},
+		Resolve: func(ctx context.Context, q dbq.Querier, in ActorSetOwnerIn) (tool.Target, error) {
+			return resolveActor(ctx, q, ActorIDIn{ActorID: in.ActorID})
+		},
+		Execute: func(ctx context.Context, ec *tool.ExecCtx, in ActorSetOwnerIn) (OK, error) {
+			// The agent is held first, and everything about it read after:
+			// a token issued or a seat taken meanwhile, which read who owns
+			// it FOR SHARE, has finished, and is revoked or counted below,
+			// or waits for this and finds the new owner.
+			if err := ec.Q.LockAgentForOwnerChange(ctx, in.ActorID); err != nil {
+				return OK{}, err
+			}
+			if err := mayActOn(ctx, ec, in.ActorID); err != nil {
+				return OK{}, err
+			}
+			a, err := ec.Q.GetActor(ctx, in.ActorID)
+			if err != nil {
+				return OK{}, err
+			}
+			switch {
+			case in.OwnerActorID != nil && a.Kind != "agent":
+				return OK{}, apperr.Precondition("only an agent has an owner")
+			case in.OwnerActorID != nil && a.PlatformRole != nil:
+				return OK{}, apperr.Precondition("the agent holds a platform role, and an agent someone owns holds none")
+			case (a.OwnerActorID == nil && in.OwnerActorID == nil) ||
+				(a.OwnerActorID != nil && in.OwnerActorID != nil && *a.OwnerActorID == *in.OwnerActorID):
+				return OK{}, apperr.Conflicts("the agent already has that owner")
+			}
+			if in.OwnerActorID != nil {
+				if err := mayOwn(ctx, ec, *in.OwnerActorID); err != nil {
+					return OK{}, err
+				}
+			}
+			// A seat's principal is its actor's owner's seat. Changing the
+			// owner under a seat would leave it pointing at someone else's,
+			// or at none: it is taken out of its courses first, where it
+			// can be. An archived course takes no writes, its withdrawal
+			// included; a seat there stops counting instead, and is removed
+			// by the sweep once the course is opened again.
+			if n, err := ec.Q.CountSeatsInOpenCourses(ctx, in.ActorID); err != nil {
+				return OK{}, err
+			} else if n > 0 {
+				return OK{}, apperr.Precondition("the agent is seated in %d course(s): withdraw it from its courses first", n)
+			}
+			if err := ec.Q.SetActorOwner(ctx, dbq.SetActorOwnerParams{ID: in.ActorID, OwnerActorID: in.OwnerActorID}); err != nil {
+				return OK{}, err
+			}
+			if err := ec.Q.RevokeAllCredentials(ctx, dbq.RevokeAllCredentialsParams{ActorID: in.ActorID, RevokedAt: &ec.Now}); err != nil {
+				return OK{}, err
+			}
+			// Whoever owned it before may have asked to seat it somewhere.
+			// Those requests are theirs, name a seat of theirs as principal,
+			// and could only fail if approved: they go, and the new owner is
+			// not shown them.
+			requests, err := ec.Q.LockDelegateRequestsFor(ctx, &in.ActorID)
+			if err != nil {
+				return OK{}, err
+			}
+			_, stored := pipeline.Cancellation(pipeline.CancelTargetGone, map[string]any{"why": "owner_changed"})
+			for _, r := range requests {
+				n, err := ec.Q.CancelProposal(ctx, dbq.CancelProposalParams{ID: r.ID, Result: stored})
+				if err != nil {
+					return OK{}, err
+				}
+				if n == 0 {
+					continue
+				}
+				proposal := r.ID
+				ec.Emit(events.Event{Type: events.ActionCancelled, CourseID: r.CourseID, ActionID: &proposal,
+					SubjectType: "action", SubjectID: &proposal, Payload: map[string]any{"reason": pipeline.CancelTargetGone}})
+			}
+			ec.Emit(events.Event{Type: EventActorUpdated, SubjectType: "actor", SubjectID: &in.ActorID,
+				Payload: map[string]any{"owner_actor_id": in.OwnerActorID}})
+			return OK{OK: true}, nil
+		},
+	})
 }
 
 type ActorIssueTokenIn struct {
@@ -723,7 +887,7 @@ type PresetListOut struct {
 func presetList() tool.Tool {
 	return tool.Define(tool.Spec[PresetListIn, PresetListOut]{
 		Name: "preset.list",
-		Description: "Permission presets: the six built-ins, and a department's own when dept_id is given. " +
+		Description: "Permission presets: the eight built-ins, and a department's own when dept_id is given. " +
 			"A preset is a starting point copied onto a member when they are added; editing one changes nobody already seated.",
 		Kind: tool.Read, Gate: self,
 		HTTP:    tool.Route{Method: "GET", Pattern: "/v1/presets"},
@@ -799,7 +963,8 @@ func presetCreate() tool.Tool {
 				PermSubmissionWrite: ps.col(domain.PermSubmissionWrite), PermGradeRead: ps.col(domain.PermGradeRead),
 				PermGradeSubmit: ps.col(domain.PermGradeSubmit), PermGradePost: ps.col(domain.PermGradePost),
 				PermMemberRead: ps.col(domain.PermMemberRead), PermMemberManage: ps.col(domain.PermMemberManage),
-				PermActionDecide: ps.col(domain.PermActionDecide),
+				PermActionDecide: ps.col(domain.PermActionDecide), PermAgentDelegate: ps.col(domain.PermAgentDelegate),
+				PermConversationAsk: ps.col(domain.PermConversationAsk), PermConversationAnswer: ps.col(domain.PermConversationAnswer),
 				CreatedByActorID: &ec.Actor.ID, CreatedAt: ec.Now,
 			})
 		},
@@ -840,7 +1005,8 @@ func presetUpdate() tool.Tool {
 				PermSubmissionWrite: ps.col(domain.PermSubmissionWrite), PermGradeRead: ps.col(domain.PermGradeRead),
 				PermGradeSubmit: ps.col(domain.PermGradeSubmit), PermGradePost: ps.col(domain.PermGradePost),
 				PermMemberRead: ps.col(domain.PermMemberRead), PermMemberManage: ps.col(domain.PermMemberManage),
-				PermActionDecide: ps.col(domain.PermActionDecide),
+				PermActionDecide: ps.col(domain.PermActionDecide), PermAgentDelegate: ps.col(domain.PermAgentDelegate),
+				PermConversationAsk: ps.col(domain.PermConversationAsk), PermConversationAnswer: ps.col(domain.PermConversationAnswer),
 			})
 			if err != nil {
 				return OK{}, err

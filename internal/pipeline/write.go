@@ -120,7 +120,7 @@ func (p *Pipeline) write(ctx context.Context, tx pgx.Tx, caller Caller, t tool.T
 	// the stored payload; the hash stays that of the call as it was made,
 	// which is what a retry of it presents.
 	if status == domain.StatusProposed && t.Pin != nil {
-		pinned, err := t.Pin(ctx, q, now, in)
+		pinned, err := t.Pin(ctx, q, a.decision.Member, now, in)
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) {
 			// Pin runs in the transaction itself, not in a savepoint, so an
