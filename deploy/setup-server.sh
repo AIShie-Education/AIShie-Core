@@ -174,7 +174,7 @@ cat <<DONE
      docker login ghcr.io -u <GitHub user name>
 2. Start it, with the image of the latest green push to main (the CI run's
    publish / image job, or the package's page, names it), or of a release:
-     aishiteru-deploy ghcr.io/aishiteru-lms/aishiteru-core:sha-<commit>
+     aishiteru-deploy ghcr.io/aishie-education/aishie-core:sha-<commit>
 3. Create the first administrator, then restart so the background jobs start:
      read -rsp 'Password (10 characters or more): ' PW; echo
      printf '%s\n' "\$PW" | aishiterud bootstrap --name "Your Name" --email you@example.edu --password-stdin; unset PW

@@ -79,12 +79,12 @@ The scripts in [`deploy/`](../deploy) do the work:
    ```
 
 3. Start it. Every green push to `main` publishes
-   `ghcr.io/aishiteru-lms/aishiteru-core:sha-<commit>`: the CI run's
+   `ghcr.io/aishie-education/aishie-core:sha-<commit>`: the CI run's
    `publish / image` job names it, and so does the package's page. A release
    publishes `:X.Y.Z`. Production takes only releases.
 
    ```
-   aishiteru-deploy ghcr.io/aishiteru-lms/aishiteru-core:sha-de4f548
+   aishiteru-deploy ghcr.io/aishie-education/aishie-core:sha-de4f548
    ```
 
 4. Create the first administrator. `bootstrap` prints the administrator's API
@@ -123,7 +123,7 @@ the host key line.
 From then on, every green push to `main` deploys to staging, and a
 pre-release tag (`v1.2.3-rc.1`) does too. To try the connection without a
 push, go to Actions → Deploy → Run workflow, from `main`, with environment
-`staging` and image `ghcr.io/aishiteru-lms/aishiteru-core:edge`. That is also
+`staging` and image `ghcr.io/aishie-education/aishie-core:edge`. That is also
 the way to deploy staging again: re-running the deploy of an older push to
 `main` fails once `main` has moved on. (Re-running a pre-release's deploy, or
 a Deploy run by hand, still deploys the image it had.) Production is deployed only by running
@@ -265,7 +265,7 @@ Run all of these as root on the server.
   restoring a backup.
 
   ```
-  aishiteru-deploy ghcr.io/aishiteru-lms/aishiteru-core:1.2.2
+  aishiteru-deploy ghcr.io/aishie-education/aishie-core:1.2.2
   ```
 
   Rolled back past migration 0007, the release before knows nothing of the

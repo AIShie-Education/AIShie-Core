@@ -30,7 +30,7 @@ defaults:
     shell: bash
 
 env:
-  IMAGE: ghcr.io/aishiteru-lms/aishiteru-core
+  IMAGE: ghcr.io/aishie-education/aishie-core
   GOLANGCI_LINT_VERSION: v2.13.2
   SQLC_VERSION: 1.31.1
   GORELEASER_VERSION: v2.18.2

@@ -794,7 +794,7 @@ limit, and put answers before polling, and polling before events.
 2. **Fixtures recorded from a real Core** for every row of §2.4 and the pinned
    revision, which the fake must match; recorded again per Core release, with
    the hash of `GET /v1/tools` to show drift.
-3. **CI** against `ghcr.io/aishiteru-lms/aishiteru-core:<pinned>` and
+3. **CI** against `ghcr.io/aishie-education/aishie-core:<pinned>` and
    Postgres, as Core's `make e2e`: seat an agent over REST, run the runtime
    with a scripted fake model, and see the answer appear under its key.
 4. **Provider contract tests**: golden translations both ways (parallel

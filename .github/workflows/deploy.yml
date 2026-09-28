@@ -68,7 +68,7 @@ on:
         options: [staging, production]
         required: true
       image:
-        description: "ghcr.io/aishiteru-lms/aishiteru-core:TAG or @sha256:DIGEST; production takes a release's tag, e.g. :1.2.3"
+        description: "ghcr.io/aishie-education/aishie-core:TAG or @sha256:DIGEST; production takes a release's tag, e.g. :1.2.3"
         type: string
         required: true
 
@@ -82,7 +82,7 @@ defaults:
     shell: bash
 
 env:
-  IMAGE: ghcr.io/aishiteru-lms/aishiteru-core
+  IMAGE: ghcr.io/aishie-education/aishie-core
 
 jobs:
   # What is about to be deployed, said before any approval the environment

@@ -47,7 +47,7 @@ release:
   prerelease: auto
   header: |
     Binaries for Linux and macOS, and a multi-architecture image at
-    `ghcr.io/aishiteru-lms/aishiteru-core:{{ .Version }}`.
+    `ghcr.io/aishie-education/aishie-core:{{ .Version }}`.
 
     `serve` never migrates on its own. If this version carries new migrations
     (the release workflow lists them below when it does), run

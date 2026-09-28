@@ -69,7 +69,7 @@ git push origin v0.1.0
 
 `release.yml` re-runs the whole of CI on the tagged commit, then publishes
 binaries (Linux and macOS, amd64 and arm64) with checksums to the release
-page, and a multi-architecture image to `ghcr.io/aishiteru-lms/aishiteru-core`.
+page, and a multi-architecture image to `ghcr.io/aishie-education/aishie-core`.
 The release notes list the migrations new in the release; for a stable
 release, new since the last stable one, pre-releases included. A tag with a
 hyphen (`v0.1.0-rc.1`) is a pre-release: it leaves `:latest` alone and is
@@ -78,7 +78,7 @@ deployed to staging.
 A stable release goes to production when somebody runs **Deploy** for it:
 Actions → Deploy → Run workflow, use the workflow from the release's tag, and
 give the environment `production` and the image the release run's summary
-names (`ghcr.io/aishiteru-lms/aishiteru-core:1.2.3`). That run is the decision
+names (`ghcr.io/aishie-education/aishie-core:1.2.3`). That run is the decision
 to deploy and to migrate. For production, Deploy takes nothing else: run from
 a branch or a pre-release's tag, or given an image that is not a stable
 release's, it stops before it deploys. To roll back, run Deploy from the

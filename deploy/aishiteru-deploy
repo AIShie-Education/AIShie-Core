@@ -3,7 +3,7 @@
 # upgrade and a rollback alike. Run as root, by hand or by the Deploy workflow
 # over SSH (docs/deploying.md):
 #
-#   aishiteru-deploy ghcr.io/aishiteru-lms/aishiteru-core:0.2.0
+#   aishiteru-deploy ghcr.io/aishie-education/aishie-core:0.2.0
 #
 # In order: back up the database, `migrate up` and `seed` with the new image,
 # replace the container, and wait until /healthz reports the new version and
@@ -23,7 +23,7 @@ BACKUP_DIR=${AISHITERU_BACKUP_DIR:-/var/backups/aishiteru}
 LOG_FILE=${AISHITERU_LOG_FILE:-/var/log/aishiteru-deploy.log}
 LOCK_FILE=${AISHITERU_LOCK_FILE:-/run/aishiteru-deploy.lock}
 HEALTH_TRIES=${AISHITERU_HEALTH_TRIES:-30}
-REPO=ghcr.io/aishiteru-lms/aishiteru-core
+REPO=ghcr.io/aishie-education/aishie-core
 KEEP_BACKUPS=10
 
 die() { echo "aishiteru-deploy: $*" >&2; exit 1; }
@@ -125,4 +125,4 @@ echo "deployed: $want (before: ${prev:-none})"
 
 # The images of this project that no container uses, the one before included:
 # a rollback pulls its image again.
-docker image prune -af --filter "label=org.opencontainers.image.source=https://github.com/AIShiteru-LMS/AIShiteru-Core" >/dev/null 2>&1 || true
+docker image prune -af --filter "label=org.opencontainers.image.source=https://github.com/AIShie-Education/AIShie-Core" >/dev/null 2>&1 || true
