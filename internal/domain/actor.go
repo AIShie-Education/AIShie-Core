@@ -79,9 +79,10 @@ const (
 // can do nothing you cannot. Two exceptions. conversation_answer is capped
 // by the principal's conversation_ask: your agent answering you is you
 // asking, at one remove, so a principal need not be able to answer for its
-// agent to. And a delegate never manages the course or brings agents of its
-// own: member_manage and agent_delegate are denied to it whatever its row
-// says.
+// agent to. And a delegate never brings agents of its own: agent_delegate is
+// denied to it whatever its row says. It may manage the course's members,
+// as far as its row and its principal's both allow, but never its
+// principal's seat nor its principal's other agents' (tools.loadOther).
 func (m *Member) Perm(p Perm) Level {
 	own := m.Perms[p]
 	if m.PrincipalID == nil {
@@ -95,12 +96,12 @@ func (m *Member) Perm(p Perm) Level {
 
 // DelegateCap is the most a delegate of principal may hold of p: the
 // principal's own level, but conversation_answer capped by the principal's
-// conversation_ask, and member_manage and agent_delegate never. Perm applies
-// it on every call; seating and changing a delegate's seat hold the row to
-// it, so that the row says what the delegate can do.
+// conversation_ask, and agent_delegate never. Perm applies it on every
+// call; seating and changing a delegate's seat hold the row to it, so that
+// the row says what the delegate can do.
 func DelegateCap(principal *Member, p Perm) Level {
 	switch p {
-	case PermMemberManage, PermAgentDelegate:
+	case PermAgentDelegate:
 		return Denied
 	case PermConversationAnswer:
 		return principal.Perm(PermConversationAsk)

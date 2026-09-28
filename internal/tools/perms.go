@@ -81,15 +81,33 @@ func memberPerms(m dbq.GetMemberInCourseRow) permSet {
 }
 
 // exceeds names the first permission in want that is above what the granter
-// holds. Nobody hands out more than they have: otherwise perm_member_manage
-// alone would be every permission, one member.add away.
+// may hand out. Nobody hands out more than they have: otherwise
+// perm_member_manage alone would be every permission, one member.add away.
 func (ps permSet) exceeds(granter *domain.Member) (domain.Perm, bool) {
 	for _, p := range domain.AllPerms {
-		if ps[p] > granter.Perm(p) {
+		if ps[p] > grantable(granter, p) {
 			return p, true
 		}
 	}
 	return "", false
+}
+
+// grantable is the most of p a granter may hand out: what it holds
+// (domain.Member.Perm), with one exception. A delegate never brings agents
+// of its own, and so holds no agent_delegate; but a student it seats may
+// still ask to bring theirs, as the student preset says, with an
+// instructor's approval. That is the principal's to give, and so the
+// delegate's to give for it, no higher than the principal holds it: a
+// delegate that manages members, or hands out join links, seats students as
+// its principal would.
+func grantable(g *domain.Member, p domain.Perm) domain.Level {
+	if p == domain.PermAgentDelegate && g.PrincipalID != nil {
+		if g.Principal == nil {
+			return domain.Denied
+		}
+		return g.Principal.Perm(p)
+	}
+	return g.Perm(p)
 }
 
 func validScope(s string) bool { return s == domain.ScopeAll || s == domain.ScopeListed }

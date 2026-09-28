@@ -335,31 +335,50 @@ func findPreset(ctx context.Context, q dbq.Querier, courseID uuid.UUID, name *st
 // could give Ken grade_post, over Ken, by raising it on Ken's own seat.
 // listsItself says the list is about to gain the new seat's own id, which no
 // granter can have listed yet.
+//
+// A granter who is a delegate holds its levels capped by its principal's
+// (domain.Member.Perm, and grantable), and reaches only what its own scope
+// and its principal's both reach (authz.CheckScope): its principal's list
+// binds it as its own does, even where its own row, which nothing narrows
+// with its principal's, says the whole class.
 func withinGranter(ctx context.Context, q dbq.Querier, g *domain.Member, perms permSet, listsItself bool, studentScope string, students []uuid.UUID, assignmentScope string, assignments []uuid.UUID) error {
 	if p, over := perms.exceeds(g); over {
-		return apperr.Forbid("you hold %s at %s and cannot grant it at %s", p, g.Perm(p), perms[p]).With("permission", string(p))
+		return apperr.Forbid("you hold %s at %s and cannot grant it at %s", p, grantable(g, p), perms[p]).With("permission", string(p))
 	}
-	if g.StudentScope == domain.ScopeListed {
-		if studentScope != domain.ScopeListed {
-			return apperr.Forbid("your own student scope is a list; you cannot grant the whole class")
-		}
-		if listsItself {
-			return apperr.Forbid("your own student scope is a list; a new student's seat reaches that student, who is not on it")
-		}
-		if reason, err := authz.CheckScope(ctx, q, g, authz.Target{StudentMemberIDs: students}); err != nil {
-			return err
-		} else if reason != authz.ReasonNone {
-			return apperr.Forbid("you can only give a seat that reaches students who are in your own scope")
-		}
+	reaches := []*domain.Member{g}
+	if g.PrincipalID != nil {
+		reaches = append(reaches, g.Principal)
 	}
-	if g.AssignmentScope == domain.ScopeListed {
-		if assignmentScope != domain.ScopeListed {
-			return apperr.Forbid("your own assignment scope is a list; you cannot grant every assignment")
+	for _, r := range reaches {
+		whose := "your own"
+		if r != g {
+			whose = "your principal's"
+			if r == nil {
+				return apperr.Forbid("your principal's seat could not be read; you grant nothing")
+			}
 		}
-		if reason, err := authz.CheckScope(ctx, q, g, authz.Target{AssignmentIDs: assignments}); err != nil {
-			return err
-		} else if reason != authz.ReasonNone {
-			return apperr.Forbid("you can only list assignments that are in your own scope")
+		if r.StudentScope == domain.ScopeListed {
+			if studentScope != domain.ScopeListed {
+				return apperr.Forbid("%s student scope is a list; you cannot grant the whole class", whose)
+			}
+			if listsItself {
+				return apperr.Forbid("%s student scope is a list; a new student's seat reaches that student, who is not on it", whose)
+			}
+			if reason, err := authz.CheckScope(ctx, q, g, authz.Target{StudentMemberIDs: students}); err != nil {
+				return err
+			} else if reason != authz.ReasonNone {
+				return apperr.Forbid("you can only give a seat that reaches students who are in your own scope")
+			}
+		}
+		if r.AssignmentScope == domain.ScopeListed {
+			if assignmentScope != domain.ScopeListed {
+				return apperr.Forbid("%s assignment scope is a list; you cannot grant every assignment", whose)
+			}
+			if reason, err := authz.CheckScope(ctx, q, g, authz.Target{AssignmentIDs: assignments}); err != nil {
+				return err
+			} else if reason != authz.ReasonNone {
+				return apperr.Forbid("you can only list assignments that are in your own scope")
+			}
 		}
 	}
 	return nil
@@ -367,12 +386,26 @@ func withinGranter(ctx context.Context, q dbq.Querier, g *domain.Member, perms p
 
 // outlastsGranter refuses a seat that would still be there after the
 // granter's own has ended: a manager seated until the end of term hands out
-// nothing that lasts longer.
+// nothing that lasts longer. A delegate's seat ends with its principal's.
 func outlastsGranter(granter *domain.Member, expiresAt *time.Time) error {
-	if g := granter.ExpiresAt; g != nil && (expiresAt == nil || expiresAt.After(*g)) {
-		return apperr.Forbid("your own membership ends at %s; you cannot give one that lasts longer", g.UTC().Format(time.RFC3339))
+	if g := seatEnds(granter); g != nil && (expiresAt == nil || expiresAt.After(*g)) {
+		return apperr.Forbid("your membership ends at %s; you cannot give one that lasts longer", g.UTC().Format(time.RFC3339))
 	}
 	return nil
+}
+
+// seatEnds is when a seat stops counting of itself: its expires_at, or, for
+// a delegate, its principal's when that is sooner. Nil is never.
+func seatEnds(m *domain.Member) *time.Time {
+	end := m.ExpiresAt
+	if p := m.Principal; p != nil && p.ExpiresAt != nil && (end == nil || p.ExpiresAt.Before(*end)) {
+		end = p.ExpiresAt
+	}
+	if end == nil {
+		return nil
+	}
+	e := *end
+	return &e
 }
 
 // asStored drops what a timestamptz cannot hold. An expiry the caller gives
@@ -409,6 +442,9 @@ func loadOther(ctx context.Context, ec *tool.ExecCtx, courseID, memberID uuid.UU
 	if memberID == ec.Member.ID {
 		return dbq.GetMemberInCourseRow{}, apperr.Forbid("not on your own membership")
 	}
+	if err := notYourPrincipals(ctx, ec.Q, ec.Member, memberID); err != nil {
+		return dbq.GetMemberInCourseRow{}, err
+	}
 	if err := holdPrincipalOf(ctx, ec.Q, memberID); err != nil {
 		return dbq.GetMemberInCourseRow{}, err
 	}
@@ -424,6 +460,42 @@ func loadOther(ctx context.Context, ec *tool.ExecCtx, courseID, memberID uuid.UU
 		return m, apperr.Conflicts("the member has been removed; seat the actor again for a fresh start")
 	}
 	return m, nil
+}
+
+// notYourPrincipals refuses a delegate acting on its principal's seat, or on
+// the seat of another delegate of the same principal. An agent given
+// member_manage manages the course's other members for its principal, never
+// the person it acts for — whose seat caps its own, so that pausing,
+// narrowing or removing it would unmake the authority it acts with — nor
+// that person's other agents, which only their owner brings in and answers
+// for: an agent must not reshape its owner's other agents. Nothing else
+// would stop it: neither seat is its own, and an agent calling over MCP has
+// no runtime between it and Core to hold it back. Whose delegate a seat is
+// never changes, so it is read before anything is locked, and the call is
+// refused before either seat is taken FOR UPDATE.
+func notYourPrincipals(ctx context.Context, q *dbq.Queries, caller *domain.Member, memberID uuid.UUID) error {
+	principal := caller.PrincipalID
+	if principal == nil {
+		return nil
+	}
+	if memberID == *principal {
+		return errNotYourPrincipal("that is your principal's own seat")
+	}
+	of, err := q.GetSeatPrincipal(ctx, memberID)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return nil // no such seat, which the caller is told next
+	case err != nil:
+		return err
+	case of != nil && *of == *principal:
+		return errNotYourPrincipal("that seat is another agent of your principal's")
+	}
+	return nil
+}
+
+func errNotYourPrincipal(why string) *apperr.Error {
+	return apperr.Forbid("a delegate manages neither its principal's seat nor its principal's other agents: %s", why).
+		With("reason", "not_your_principal")
 }
 
 // holdPrincipalOf takes the KEY SHARE of a delegate's principal's seat, for
@@ -529,7 +601,7 @@ func grant(ctx context.Context, ec *tool.ExecCtx, before, after shape) error {
 // principal's: what the delegate may hold at most is what the principal
 // holds, as domain.Member.Perm measures it, over no more than the
 // principal's reach, for no longer than the principal's seat lasts; and never
-// member_manage or agent_delegate. Authorization caps a delegate by its
+// agent_delegate. Authorization caps a delegate by its
 // principal on every call regardless, so this keeps the row saying what the
 // delegate can actually do. A change to one seat holds the principal's KEY
 // SHARE, taken before the delegate's was locked (holdPrincipalOf), so it is
@@ -810,7 +882,9 @@ func memberUpdatePermsBulk() tool.Tool {
 			"your own, removed and expired seats left out. Each change is held to the rules of member.update_perms: " +
 			"raising a level is a grant that must be within what you hold yourself, over that member's whole scope. " +
 			"If any one seat cannot be changed, none is. It changes the seats there are now: a seat added later takes its " +
-			"preset's levels, so repeat the call, give the levels to member.add, or use a department preset.",
+			"preset's levels, so repeat the call, give the levels to member.add, or use a department preset. " +
+			"A delegate's call is refused whole (not_your_principal) when the role takes in its principal's seat or " +
+			"another agent of its principal's.",
 		Kind: tool.Write, Gate: manageMembers,
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/members/bulk-perms"},
 		Resolve: func(_ context.Context, _ dbq.Querier, in MemberUpdatePermsBulkIn) (tool.Target, error) {
@@ -826,6 +900,22 @@ func memberUpdatePermsBulk() tool.Tool {
 			if err := (permSet{}).apply(in.Perms); err != nil {
 				return MemberUpdatePermsBulkOut{}, err
 			}
+			// A delegate's call that would reach its principal's seat, or
+			// another of its principal's agents' (notYourPrincipals), is
+			// refused whole, before any seat is locked: all of them change,
+			// or none.
+			principal := ec.Member.PrincipalID
+			if principal != nil {
+				reaches, err := ec.Q.PrincipalsSeatsHaveRole(ctx, dbq.PrincipalsSeatsHaveRoleParams{CourseID: in.CourseID,
+					Role: in.Role, Now: &ec.Now, ExceptMemberID: ec.Member.ID, PrincipalMemberID: *principal})
+				if err != nil {
+					return MemberUpdatePermsBulkOut{}, err
+				}
+				if reaches {
+					return MemberUpdatePermsBulkOut{}, errNotYourPrincipal("every seat with the role " + in.Role +
+						" includes your principal's, or another agent of your principal's; change the others one by one")
+				}
+			}
 			// In id order, so that two of these at once take the seats in the
 			// same order and one waits for the other.
 			seats, err := ec.Q.LockLiveSeatsByRole(ctx, dbq.LockLiveSeatsByRoleParams{
@@ -838,6 +928,12 @@ func memberUpdatePermsBulk() tool.Tool {
 				m, err := ec.Q.GetMemberInCourse(ctx, dbq.GetMemberInCourseParams{ID: id, CourseID: in.CourseID})
 				if err != nil {
 					return MemberUpdatePermsBulkOut{}, err
+				}
+				// Asked above; asked again of the seats as they are locked, in
+				// case one was seated meanwhile.
+				if principal != nil && (m.ID == *principal || (m.PrincipalMemberID != nil && *m.PrincipalMemberID == *principal)) {
+					return MemberUpdatePermsBulkOut{}, errNotYourPrincipal("every seat with the role "+in.Role+
+						" includes your principal's, or another agent of your principal's").With("member_id", m.ID)
 				}
 				before, err := shapeOf(ctx, ec.Q, m)
 				if err != nil {

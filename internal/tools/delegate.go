@@ -34,10 +34,10 @@ const CourseTutorPreset = "course_tutor"
 var bringsAgents = tool.Gate{Perms: []domain.Perm{domain.PermAgentDelegate}}
 
 // namedOnly are what a delegate holds only when the call that seats it names
-// them, whatever its preset carries: an agent hands out the course's join
-// links because someone decided it should, never because a preset came with
-// it (docs/schema.md §2.2).
-var namedOnly = []domain.Perm{domain.PermMemberInvite}
+// them, whatever its preset carries: an agent manages the course's members,
+// or hands out its join links, because someone decided it should, never
+// because a preset came with it (docs/schema.md §2.2).
+var namedOnly = []domain.Perm{domain.PermMemberManage, domain.PermMemberInvite}
 
 type MemberAddDelegateIn struct {
 	tool.InCourse
@@ -61,9 +61,9 @@ type MemberAddDelegateIn struct {
 // resolveDelegateSeat works out the seat member m's agent would be given:
 //
 //   - levels: the preset's, each clipped to what m holds (for
-//     conversation_answer, to m's conversation_ask), with member_manage and
-//     agent_delegate denied, and member_invite too unless it is named; a
-//     level named in the call replaces the preset's, and one above what m
+//     conversation_answer, to m's conversation_ask), with agent_delegate
+//     denied, and member_manage and member_invite too unless they are named;
+//     a level named in the call replaces the preset's, and one above what m
 //     holds is refused rather than clipped: the caller asked for it by name;
 //   - for someone who does not manage the course's members, no more than
 //     the built-in delegate preset gives: a student's agent reads; an
@@ -111,8 +111,8 @@ func resolveDelegateSeat(ctx context.Context, q dbq.Querier, m *domain.Member, i
 			continue
 		}
 		if limit := domain.DelegateCap(m, p); l > limit {
-			if p == domain.PermMemberManage || p == domain.PermAgentDelegate {
-				return seating{}, apperr.Forbid("a delegate never holds %s", p).With("permission", string(p))
+			if p == domain.PermAgentDelegate {
+				return seating{}, apperr.Forbid("a delegate never holds %s: it brings no agents of its own", p).With("permission", string(p))
 			}
 			return seating{}, apperr.Forbid("you hold %s at %s and cannot give your agent %s", p, limit, l).With("permission", string(p))
 		}
@@ -250,7 +250,10 @@ func memberAddDelegate() tool.Tool {
 			"members may choose, and which course_tutor chooses for them: then the students it can see and do no more than " +
 			"may ask it too, and whatever anyone tells it, it may repeat to the others it answers. " +
 			"Your level of agent_delegate decides whether this needs an instructor's approval first. " +
-			"Unless you manage the course's members, your agent holds no more than the delegate preset gives.",
+			"Unless you manage the course's members, your agent holds no more than the delegate preset gives. " +
+			"It holds member_manage or member_invite only when you name them in perms, whatever the preset carries; " +
+			"then it manages the course's members, or hands out its join links, for you, and never acts on your own " +
+			"seat nor on your other agents' (not_your_principal).",
 		Kind: tool.Write, Gate: bringsAgents,
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/delegates"},
 		Resolve: func(_ context.Context, _ dbq.Querier, in MemberAddDelegateIn) (tool.Target, error) {

@@ -644,6 +644,11 @@ type Querier interface {
 	NewestComponentDraftAt(ctx context.Context, arg NewestComponentDraftAtParams) (time.Time, error)
 	NewestSubmissionDraftAt(ctx context.Context, submissionID *uuid.UUID) (time.Time, error)
 	PostGrade(ctx context.Context, arg PostGradeParams) (int64, error)
+	// Whether a principal's own seat, or the seat of another of its delegates
+	// than except, is among the seats of one roster role that are not removed or
+	// past their expiry: what a delegate's member.update_perms_bulk would reach,
+	// and must not (tools.notYourPrincipals). Asked before anything is locked.
+	PrincipalsSeatsHaveRole(ctx context.Context, arg PrincipalsSeatsHaveRoleParams) (bool, error)
 	PublishAssignment(ctx context.Context, arg PublishAssignmentParams) (int64, error)
 	ReactivateActor(ctx context.Context, id uuid.UUID) (int64, error)
 	// Only a suspension the owner made: one an administrator made, or one made

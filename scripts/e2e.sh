@@ -6,7 +6,8 @@
 # publish an assignment, hand in work, have an agent grade it, approve, post;
 # and have the instructor's own tutor agent answer the student's question,
 # once its runtime says it answers in the site, and be asked nothing more once
-# he switches that off.
+# he switches that off; and have another agent of his, given member_manage,
+# seat a student with its own token, and be refused on his seat.
 # Then a department's administrator, invited and appointed by root, makes a
 # course beneath her appointment and seats its instructor, found by their
 # email. Then Core vouches for the instructor to an agent runtime, and the key it
@@ -111,6 +112,7 @@ register() { # KIND NAME → sets ACTOR_ID and TOKEN
 }
 register human Sato;      SATO_ID=$ACTOR_ID;   SATO=$TOKEN
 register human Yuki;      YUKI_ID=$ACTOR_ID;   YUKI=$TOKEN
+register human Ken;       KEN_ID=$ACTOR_ID
 register agent grader-v2; GRADER_ID=$ACTOR_ID; GRADER=$TOKEN
 
 step "The admin creates CS101, opens it, and seats Sato; from here it is Sato's course"
@@ -124,6 +126,7 @@ TOTAL=$(json "$WORK/body" 'd["result"]["root_component_id"]')
 C="/v1/courses/$COURSE"
 call 200 POST "$C/activate" "$ADMIN"
 call 200 POST "$C/instructors" "$ADMIN" "{\"actor_id\":\"$SATO_ID\"}"
+SATO_M=$(json "$WORK/body" 'd["result"]["member_id"]')
 call 403 GET "$C/members" "$ADMIN" # an admin is nobody inside a course
 
 step "Sato sets up grading, publishes HW3, and adds a student and a grading agent"
@@ -225,6 +228,25 @@ call 422 POST "$C/conversations/$CONV/ask" "$YUKI" '{"body":"And how long should
 call 200 GET "$C/conversations/$CONV/messages" "$YUKI"
 [ "$(json "$WORK/body" 'len(d["result"]["messages"])')" = 2 ] || fail "Yuki no longer reads the conversation"
 call 400 POST "/v1/me/agents/$TUTOR_ID" "$SATO" '{"site_chat":true}'
+
+step "Sato gives an agent of his own member_manage: with its own token it seats a student, and is refused on Sato's seat"
+call 200 POST /v1/me/agents "$SATO" '{"display_name":"Enrolment helper"}'
+HELPER_ID=$(json "$WORK/body" 'd["result"]["actor_id"]')
+call 200 POST "/v1/me/agents/$HELPER_ID/tokens" "$SATO" '{"label":"runtime"}'
+HELPER=$(json "$WORK/body" 'd["result"]["token"]')
+call 200 POST "$C/delegates" "$SATO" "{\"actor_id\":\"$HELPER_ID\",\"preset\":\"instructor\",\"perms\":{\"member_manage\":\"autonomous\"}}"
+HELPER_M=$(json "$WORK/body" 'd["result"]["member_id"]')
+call 200 GET "$C/members/$HELPER_M" "$SATO"
+[ "$(json "$WORK/body" 'd["result"]["perms"]["member_manage"], d["result"]["perms"]["agent_delegate"]')" = "autonomous denied" ] ||
+  fail "the helper's seat: $(cat "$WORK/body")"
+call 200 POST "$C/members" "$HELPER" "{\"actor_id\":\"$KEN_ID\",\"preset\":\"student\"}"
+KEN_M=$(json "$WORK/body" 'd["result"]["member_id"]')
+call 200 GET "$C/members/$KEN_M" "$SATO"
+[ "$(json "$WORK/body" 'd["result"]["role"]')" = student ] || fail "the helper seated Ken otherwise than as a student: $(cat "$WORK/body")"
+call 403 POST "$C/members/$SATO_M/pause" "$HELPER"
+[ "$(json "$WORK/body" 'd["error"]["details"]["reason"]')" = not_your_principal ] || fail "refused, but not as its principal's seat: $(cat "$WORK/body")"
+call 403 POST "$C/members/$TUTOR_M/remove" "$HELPER"
+[ "$(json "$WORK/body" 'd["error"]["details"]["reason"]')" = not_your_principal ] || fail "refused, but not as its principal's other agent: $(cat "$WORK/body")"
 
 step "The same server over MCP: an agent's own door, with the same token"
 mcp() { # JSON-RPC body → $WORK/body

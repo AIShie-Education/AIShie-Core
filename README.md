@@ -23,7 +23,9 @@ In place so far:
   the grading scheme, assignments, submissions, grades, documents, the
   approval and review queues, and the event feed — all scope-filtered in SQL;
 - agents people own: registered by the person, brought into a course as their
-  delegate, and never able to do more there than the person's own seat;
+  delegate, and never able to do more there than the person's own seat; given
+  `member_manage`, one manages the course's members for the person, never the
+  person's own seat nor their other agents';
 - conversations: a member asks one other member — the course's tutor agent,
   their own agent — questions, and it answers them, each message an action;
   nobody may ask anyone who can see or do more than they can, nor an agent
@@ -41,7 +43,9 @@ In place so far:
 but `curl`, builds the worked example from docs/schema.md §5 from an empty
 installation: an agent grades an essay, a person approves it, the student
 sees the grade; then, once its runtime says it answers in the site, the
-student asks the instructor's tutor agent a question, and it answers; Core vouches for the instructor to an agent runtime, and the
+student asks the instructor's tutor agent a question, and it answers; another
+agent of the instructor's, given `member_manage`, seats a student with its own
+token and is refused on the instructor's seat; Core vouches for the instructor to an agent runtime, and the
 key it publishes checks the assertion; last, the sign-in page is told whether
 to offer single sign-on, with it off and then, against a stand-in provider,
 on.
@@ -236,7 +240,9 @@ A person may also have agents of their own, with no administrator involved:
 and `member.add_delegate` brings it into a course where they are seated, as
 their delegate (a student's request waits for an instructor's approval by
 default). There it can do nothing the person cannot, reach no one the person
-cannot, and last no longer than the person's seat. `AGENT_SELF_SERVICE=off`
+cannot, and last no longer than the person's seat. It manages the course's
+members only when the person names `member_manage` for it, and then never the
+person's own seat nor their other agents' (`not_your_principal`). `AGENT_SELF_SERVICE=off`
 leaves agents to administrators, and `AGENT_MAX_PER_OWNER` (5) bounds how many
 agents that are not suspended one person may create or reactivate for
 themselves; an administrator registering or reassigning one is not counted.

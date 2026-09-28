@@ -157,6 +157,18 @@ ORDER BY id;
 -- changes, so it may be read before anything is locked.
 SELECT principal_member_id FROM course_member WHERE id = $1;
 
+-- name: PrincipalsSeatsHaveRole :one
+-- Whether a principal's own seat, or the seat of another of its delegates
+-- than except, is among the seats of one roster role that are not removed or
+-- past their expiry: what a delegate's member.update_perms_bulk would reach,
+-- and must not (tools.notYourPrincipals). Asked before anything is locked.
+SELECT EXISTS (
+    SELECT 1 FROM course_member
+    WHERE course_id = $1 AND role = sqlc.arg(role) AND status <> 'removed'
+      AND (expires_at IS NULL OR expires_at > sqlc.arg(now)) AND id <> sqlc.arg(except_member_id)
+      AND (id = sqlc.arg(principal_member_id) OR principal_member_id = sqlc.arg(principal_member_id))
+)::bool;
+
 -- name: LockLiveSeatsByRole :many
 -- Every seat of one roster role that is not removed or past its expiry,
 -- except one, locked in id order: member.update_perms_bulk changes them all

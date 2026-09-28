@@ -736,6 +736,40 @@ func (q *Queries) LookupActorForSeating(ctx context.Context, arg LookupActorForS
 	return i, err
 }
 
+const principalsSeatsHaveRole = `-- name: PrincipalsSeatsHaveRole :one
+SELECT EXISTS (
+    SELECT 1 FROM course_member
+    WHERE course_id = $1 AND role = $2 AND status <> 'removed'
+      AND (expires_at IS NULL OR expires_at > $3) AND id <> $4
+      AND (id = $5 OR principal_member_id = $5)
+)::bool
+`
+
+type PrincipalsSeatsHaveRoleParams struct {
+	CourseID          uuid.UUID
+	Role              string
+	Now               *time.Time
+	ExceptMemberID    uuid.UUID
+	PrincipalMemberID uuid.UUID
+}
+
+// Whether a principal's own seat, or the seat of another of its delegates
+// than except, is among the seats of one roster role that are not removed or
+// past their expiry: what a delegate's member.update_perms_bulk would reach,
+// and must not (tools.notYourPrincipals). Asked before anything is locked.
+func (q *Queries) PrincipalsSeatsHaveRole(ctx context.Context, arg PrincipalsSeatsHaveRoleParams) (bool, error) {
+	row := q.db.QueryRow(ctx, principalsSeatsHaveRole,
+		arg.CourseID,
+		arg.Role,
+		arg.Now,
+		arg.ExceptMemberID,
+		arg.PrincipalMemberID,
+	)
+	var column_1 bool
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
 const seatOrphaned = `-- name: SeatOrphaned :one
 SELECT (CASE WHEN m.principal_member_id IS NULL THEN a.owner_actor_id IS NOT NULL
              ELSE p.status = 'removed' OR coalesce(p.expires_at <= $1, false)

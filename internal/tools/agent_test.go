@@ -917,7 +917,7 @@ func TestAMembershipSaysWhatTheSeatMayDo(t *testing.T) {
 	bot := b.agent(t, b.yuki, "Yuki's helper")
 	seat := b.delegate(t, b.yuki, bot, m{})
 	// Whatever its row says, a delegate is capped by its principal, answers
-	// no more than she asks, and never manages the course.
+	// no more than she asks, and manages the course no more than she does.
 	b.Exec(`UPDATE course_member SET perm_member_manage = 'autonomous', perm_grade_post = 'autonomous' WHERE id = $1`, seat)
 	b.do(t, b.sato, "member.update_perms", m{"course_id": b.course, "member_id": b.yukiM, "perms": m{"conversation_ask": "confirm_required"}})
 	if me := b.membership(t, bot); me.Perms["member_manage"] != "denied" || me.Perms["grade_post"] != "denied" ||

@@ -349,11 +349,17 @@ granter's own list, no life past the granter's own `expires_at`. A student's sea
 student, as any seat reaches whoever is on its list, so a list-scoped granter raises nothing on
 a seat that reaches a student outside the list, and seats no new student whose list is
 themselves: nobody can have listed them yet. A change that widens a delegate's seat is held to
-its principal's seat as well, the same three ways, and never gives `member_manage` or
-`agent_delegate`. Narrowing is always allowed, whatever the granter holds. Nobody manages their
-own seat, nor the seat they are a delegate of, and a seat whose `expires_at` has
-passed is as good as removed whether or not the sweep has got to it: it is not revived, and
-seating the actor again is a fresh row.
+its principal's seat as well, the same three ways, and never gives `agent_delegate`. A granter
+who is a delegate grants within what it holds, which is within its principal's: its levels as
+`authorize()` caps them, its principal's list as well as its own — its row, which nothing
+narrows with its principal's, may say the whole class — and its principal's `expires_at` as well
+as its own. One exception: it holds no `agent_delegate`, never bringing agents of its own, but a
+student it seats may still ask to bring theirs, as the `student` preset says, which is its
+principal's to give, and so it gives `agent_delegate` up to its principal's level. Narrowing is
+always allowed, whatever the granter holds. Nobody manages their own seat; a delegate manages
+neither its principal's seat nor its principal's other agents' (`not_your_principal`, below); and
+a seat whose `expires_at` has passed is as good as removed whether or not the sweep has got to
+it: it is not revived, and seating the actor again is a fresh row.
 
 **Delegates.** A delegate's seat is an owned agent's (§2.1), and its principal is its owner's
 seat. A delegate never holds more than its principal, and `authorize()` makes it so on every
@@ -362,20 +368,34 @@ narrows a principal without touching its delegates — and which a manager may h
 
 - its level for each permission is the lower of its own and its principal's, except that
   `conversation_answer` is capped by the principal's `conversation_ask` (your agent answering
-  you is you asking, at one remove), and `member_manage` and `agent_delegate` are denied to it
-  whatever its row says: it does not manage the course or bring agents of its own;
+  you is you asking, at one remove), and `agent_delegate` is denied to it whatever its row
+  says: it brings no agents of its own;
 - it reaches only what its own scope and its principal's both reach, in `authorize()` and in
   every list, which filters by both in SQL;
 - it counts only while its principal's seat is live, its owner active, and its principal still
   its owner's seat: paused with its principal, gone with it, and nothing once the agent changes
   hands. An owned agent's seat with no principal counts for nothing either.
 
+A delegate may be given `member_manage` — seat, change, pause, resume, rescope and remove
+members — and `member_invite`, as far as its principal holds them, by its owner when it is
+brought in or by anyone who manages the members afterwards: an instructor's agent can then
+enrol the class. It manages the members for its principal, and so never its principal's own
+seat — which caps its own, so that pausing, narrowing or removing it would unmake the authority
+it acts with — nor the seat of another delegate of the same principal: an agent does not
+reshape its owner's other agents, which only the owner brings in and answers for. Every tool
+that acts on one seat refuses those two (`failed`, `forbidden`, reason `not_your_principal`),
+before either is locked; `member.update_perms_bulk` refuses whole when the role asked for takes
+in either. Core holds this itself, since an agent calling over MCP has no runtime of ours between
+it and the tools. A principal who holds less `member_manage` narrows the delegate's at once, as
+any level. Whether a delegate answers the course (`answers_course`, below) still follows its
+principal's `member_manage`, never its own.
+
 The owner brings the agent in with `member.add_delegate`, gated by `perm_agent_delegate`, so
 that a student's request waits for an instructor. The seat is worked out from the owner's own:
 the preset's levels (`delegate` unless another is named) are each cut down to what the owner
-holds, `member_manage` and `agent_delegate` denied, and `member_invite` denied whatever the preset
-carries: an agent hands out join links only when the call names it; a level named in the call
-above the owner's is refused, not cut down. Without `member_manage`, the seat holds no more than the built-in
+holds, `agent_delegate` denied, and `member_manage` and `member_invite` denied whatever the preset
+carries: an agent manages members or hands out join links only when the call names it; a level
+named in the call above the owner's is refused, not cut down. Without `member_manage`, the seat holds no more than the built-in
 `delegate` preset gives: a student's agent reads, and an instructor may widen it later within its
 principal. A listed scope defaults to the owner's own list, or to nobody when the owner reaches
 the whole class; a list named must be within the owner's; a preset that reaches everything is
@@ -1145,7 +1165,7 @@ authorize(actor, course, action_type, target) → autonomy_level
    still the actor's owner; else denied (an owned actor's seat with no principal: denied)
 3. level = member.perm_<action_type>; 'denied' → denied
    a delegate: the lower of its level and its principal's (conversation_answer: the
-   principal's conversation_ask); member_manage and agent_delegate: denied
+   principal's conversation_ask); agent_delegate: denied
 4. if the target belongs to a student:
       member.student_scope = 'all', or that student ∈ member_student_scope; else denied
       a delegate: its principal's likewise
@@ -1322,8 +1342,8 @@ that reads which credential the call came with.
   and a failure stored under it would stand for the sweep: every sweep after would replay that
   failure or pass the thing over, and never sweep it.
 - A delegate holds no more than its principal (§2.2, Delegates): its levels capped by the
-  principal's (`conversation_answer` by its `conversation_ask`), never `member_manage` or
-  `agent_delegate`; its reach its own and its principal's both, in `authorize()` and in every list,
+  principal's (`conversation_answer` by its `conversation_ask`), never `agent_delegate`; its
+  reach its own and its principal's both, in `authorize()` and in every list,
   in SQL; live only while its principal is live, its owner active and still its owner. The rows
   are not trusted to say so: the release before 0007 narrows a principal without touching its
   delegates.
@@ -1333,8 +1353,14 @@ that reads which credential the call came with.
   refused if the owner no longer holds it. Only the owner seats their agent, and only as their
   delegate: `member.add` and `course.seat_instructor` refuse an owned agent.
 - A change that widens a delegate's seat is within its principal's as well as the granter's.
-  Nobody manages the seat they are a delegate of: a delegate never holds `member_manage`
-  (`domain.Member.Perm`).
+  A granter who is a delegate grants within its principal's reach and life as well as its own
+  (`withinGranter`, `outlastsGranter`), and `agent_delegate` up to its principal's level
+  (`grantable`).
+- A delegate that manages members acts on neither its principal's seat nor another delegate of
+  the same principal (`tools.notYourPrincipals`, reason `not_your_principal`), in every tool that
+  acts on one seat and in `member.update_perms_bulk`, which refuses whole; and holds
+  `member_manage` and `member_invite` only when the call that seats it, or a change afterwards,
+  names them, never from its preset.
 - Removing a seat cancels its delegates' proposals and closes their conversations with its own;
   the database removes the delegates' seats with it (trigger `course_member_delegates_follow`).
   The order is the principal FOR UPDATE, then its delegates' rows, only updated, then the
