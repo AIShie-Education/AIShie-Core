@@ -206,6 +206,7 @@ type CourseMember struct {
 	PermConversationAsk    AutonomyLevel
 	PermConversationAnswer AutonomyLevel
 	JoinLinkID             *uuid.UUID
+	PermMemberInvite       AutonomyLevel
 }
 
 type Credential struct {
@@ -391,6 +392,7 @@ type PermissionPreset struct {
 	PermAgentDelegate      AutonomyLevel
 	PermConversationAsk    AutonomyLevel
 	PermConversationAnswer AutonomyLevel
+	PermMemberInvite       AutonomyLevel
 }
 
 type Submission struct {

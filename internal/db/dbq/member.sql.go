@@ -136,7 +136,7 @@ func (q *Queries) GetLiveMembership(ctx context.Context, arg GetLiveMembershipPa
 }
 
 const getMemberInCourse = `-- name: GetMemberInCourse :one
-SELECT m.id, m.course_id, m.actor_id, m.role, m.status, m.preset_id, m.added_by_actor_id, m.expires_at, m.student_scope, m.assignment_scope, m.perm_document_read, m.perm_document_read_draft, m.perm_document_write, m.perm_rubric_read, m.perm_assignment_write, m.perm_submission_read, m.perm_submission_write, m.perm_grade_read, m.perm_grade_submit, m.perm_grade_post, m.perm_member_read, m.perm_member_manage, m.perm_action_decide, m.created_at, m.principal_member_id, m.answers_course, m.perm_agent_delegate, m.perm_conversation_ask, m.perm_conversation_answer, m.join_link_id, a.display_name, a.kind AS actor_kind, a.owner_actor_id, o.display_name AS owner_name
+SELECT m.id, m.course_id, m.actor_id, m.role, m.status, m.preset_id, m.added_by_actor_id, m.expires_at, m.student_scope, m.assignment_scope, m.perm_document_read, m.perm_document_read_draft, m.perm_document_write, m.perm_rubric_read, m.perm_assignment_write, m.perm_submission_read, m.perm_submission_write, m.perm_grade_read, m.perm_grade_submit, m.perm_grade_post, m.perm_member_read, m.perm_member_manage, m.perm_action_decide, m.created_at, m.principal_member_id, m.answers_course, m.perm_agent_delegate, m.perm_conversation_ask, m.perm_conversation_answer, m.join_link_id, m.perm_member_invite, a.display_name, a.kind AS actor_kind, a.owner_actor_id, o.display_name AS owner_name
 FROM course_member m
 JOIN actor a ON a.id = m.actor_id
 LEFT JOIN actor o ON o.id = a.owner_actor_id
@@ -179,6 +179,7 @@ type GetMemberInCourseRow struct {
 	PermConversationAsk    AutonomyLevel
 	PermConversationAnswer AutonomyLevel
 	JoinLinkID             *uuid.UUID
+	PermMemberInvite       AutonomyLevel
 	DisplayName            string
 	ActorKind              string
 	OwnerActorID           *uuid.UUID
@@ -220,6 +221,7 @@ func (q *Queries) GetMemberInCourse(ctx context.Context, arg GetMemberInCoursePa
 		&i.PermConversationAsk,
 		&i.PermConversationAnswer,
 		&i.JoinLinkID,
+		&i.PermMemberInvite,
 		&i.DisplayName,
 		&i.ActorKind,
 		&i.OwnerActorID,
@@ -229,7 +231,7 @@ func (q *Queries) GetMemberInCourse(ctx context.Context, arg GetMemberInCoursePa
 }
 
 const getMemberInCourseForUpdate = `-- name: GetMemberInCourseForUpdate :one
-SELECT m.id, m.course_id, m.actor_id, m.role, m.status, m.preset_id, m.added_by_actor_id, m.expires_at, m.student_scope, m.assignment_scope, m.perm_document_read, m.perm_document_read_draft, m.perm_document_write, m.perm_rubric_read, m.perm_assignment_write, m.perm_submission_read, m.perm_submission_write, m.perm_grade_read, m.perm_grade_submit, m.perm_grade_post, m.perm_member_read, m.perm_member_manage, m.perm_action_decide, m.created_at, m.principal_member_id, m.answers_course, m.perm_agent_delegate, m.perm_conversation_ask, m.perm_conversation_answer, m.join_link_id, a.display_name, a.kind AS actor_kind, a.owner_actor_id, o.display_name AS owner_name
+SELECT m.id, m.course_id, m.actor_id, m.role, m.status, m.preset_id, m.added_by_actor_id, m.expires_at, m.student_scope, m.assignment_scope, m.perm_document_read, m.perm_document_read_draft, m.perm_document_write, m.perm_rubric_read, m.perm_assignment_write, m.perm_submission_read, m.perm_submission_write, m.perm_grade_read, m.perm_grade_submit, m.perm_grade_post, m.perm_member_read, m.perm_member_manage, m.perm_action_decide, m.created_at, m.principal_member_id, m.answers_course, m.perm_agent_delegate, m.perm_conversation_ask, m.perm_conversation_answer, m.join_link_id, m.perm_member_invite, a.display_name, a.kind AS actor_kind, a.owner_actor_id, o.display_name AS owner_name
 FROM course_member m
 JOIN actor a ON a.id = m.actor_id
 LEFT JOIN actor o ON o.id = a.owner_actor_id
@@ -273,6 +275,7 @@ type GetMemberInCourseForUpdateRow struct {
 	PermConversationAsk    AutonomyLevel
 	PermConversationAnswer AutonomyLevel
 	JoinLinkID             *uuid.UUID
+	PermMemberInvite       AutonomyLevel
 	DisplayName            string
 	ActorKind              string
 	OwnerActorID           *uuid.UUID
@@ -315,6 +318,7 @@ func (q *Queries) GetMemberInCourseForUpdate(ctx context.Context, arg GetMemberI
 		&i.PermConversationAsk,
 		&i.PermConversationAnswer,
 		&i.JoinLinkID,
+		&i.PermMemberInvite,
 		&i.DisplayName,
 		&i.ActorKind,
 		&i.OwnerActorID,
@@ -342,9 +346,10 @@ INSERT INTO course_member (
     perm_document_read, perm_document_read_draft, perm_document_write, perm_rubric_read,
     perm_assignment_write, perm_submission_read, perm_submission_write, perm_grade_read,
     perm_grade_submit, perm_grade_post, perm_member_read, perm_member_manage, perm_action_decide,
-    perm_agent_delegate, perm_conversation_ask, perm_conversation_answer, created_at, principal_member_id, answers_course)
+    perm_agent_delegate, perm_conversation_ask, perm_conversation_answer, perm_member_invite,
+    created_at, principal_member_id, answers_course)
 VALUES ($1, $2, $3, $4, 'active', $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22,
-        $23, $24, $25, $26, $27, $28)
+        $23, $24, $25, $26, $27, $28, $29)
 `
 
 type InsertMemberParams struct {
@@ -373,6 +378,7 @@ type InsertMemberParams struct {
 	PermAgentDelegate      AutonomyLevel
 	PermConversationAsk    AutonomyLevel
 	PermConversationAnswer AutonomyLevel
+	PermMemberInvite       AutonomyLevel
 	CreatedAt              time.Time
 	PrincipalMemberID      *uuid.UUID
 	AnswersCourse          bool
@@ -405,6 +411,7 @@ func (q *Queries) InsertMember(ctx context.Context, arg InsertMemberParams) erro
 		arg.PermAgentDelegate,
 		arg.PermConversationAsk,
 		arg.PermConversationAnswer,
+		arg.PermMemberInvite,
 		arg.CreatedAt,
 		arg.PrincipalMemberID,
 		arg.AnswersCourse,
@@ -473,7 +480,7 @@ func (q *Queries) ListLiveDelegatesOf(ctx context.Context, principalMemberID *uu
 }
 
 const listMembers = `-- name: ListMembers :many
-SELECT m.id, m.course_id, m.actor_id, m.role, m.status, m.preset_id, m.added_by_actor_id, m.expires_at, m.student_scope, m.assignment_scope, m.perm_document_read, m.perm_document_read_draft, m.perm_document_write, m.perm_rubric_read, m.perm_assignment_write, m.perm_submission_read, m.perm_submission_write, m.perm_grade_read, m.perm_grade_submit, m.perm_grade_post, m.perm_member_read, m.perm_member_manage, m.perm_action_decide, m.created_at, m.principal_member_id, m.answers_course, m.perm_agent_delegate, m.perm_conversation_ask, m.perm_conversation_answer, m.join_link_id, a.display_name, a.kind AS actor_kind, a.owner_actor_id, o.display_name AS owner_name
+SELECT m.id, m.course_id, m.actor_id, m.role, m.status, m.preset_id, m.added_by_actor_id, m.expires_at, m.student_scope, m.assignment_scope, m.perm_document_read, m.perm_document_read_draft, m.perm_document_write, m.perm_rubric_read, m.perm_assignment_write, m.perm_submission_read, m.perm_submission_write, m.perm_grade_read, m.perm_grade_submit, m.perm_grade_post, m.perm_member_read, m.perm_member_manage, m.perm_action_decide, m.created_at, m.principal_member_id, m.answers_course, m.perm_agent_delegate, m.perm_conversation_ask, m.perm_conversation_answer, m.join_link_id, m.perm_member_invite, a.display_name, a.kind AS actor_kind, a.owner_actor_id, o.display_name AS owner_name
 FROM course_member m
 JOIN actor a ON a.id = m.actor_id
 LEFT JOIN actor o ON o.id = a.owner_actor_id
@@ -523,6 +530,7 @@ type ListMembersRow struct {
 	PermConversationAsk    AutonomyLevel
 	PermConversationAnswer AutonomyLevel
 	JoinLinkID             *uuid.UUID
+	PermMemberInvite       AutonomyLevel
 	DisplayName            string
 	ActorKind              string
 	OwnerActorID           *uuid.UUID
@@ -575,6 +583,7 @@ func (q *Queries) ListMembers(ctx context.Context, arg ListMembersParams) ([]Lis
 			&i.PermConversationAsk,
 			&i.PermConversationAnswer,
 			&i.JoinLinkID,
+			&i.PermMemberInvite,
 			&i.DisplayName,
 			&i.ActorKind,
 			&i.OwnerActorID,
@@ -778,7 +787,8 @@ UPDATE course_member SET
     perm_document_read = $2, perm_document_read_draft = $3, perm_document_write = $4, perm_rubric_read = $5,
     perm_assignment_write = $6, perm_submission_read = $7, perm_submission_write = $8, perm_grade_read = $9,
     perm_grade_submit = $10, perm_grade_post = $11, perm_member_read = $12, perm_member_manage = $13,
-    perm_action_decide = $14, perm_agent_delegate = $15, perm_conversation_ask = $16, perm_conversation_answer = $17
+    perm_action_decide = $14, perm_agent_delegate = $15, perm_conversation_ask = $16, perm_conversation_answer = $17,
+    perm_member_invite = $18
 WHERE id = $1
 `
 
@@ -800,6 +810,7 @@ type SetMemberPermsParams struct {
 	PermAgentDelegate      AutonomyLevel
 	PermConversationAsk    AutonomyLevel
 	PermConversationAnswer AutonomyLevel
+	PermMemberInvite       AutonomyLevel
 }
 
 func (q *Queries) SetMemberPerms(ctx context.Context, arg SetMemberPermsParams) error {
@@ -821,6 +832,7 @@ func (q *Queries) SetMemberPerms(ctx context.Context, arg SetMemberPermsParams) 
 		arg.PermAgentDelegate,
 		arg.PermConversationAsk,
 		arg.PermConversationAnswer,
+		arg.PermMemberInvite,
 	)
 	return err
 }

@@ -1105,7 +1105,7 @@ func presetCreate() tool.Tool {
 				PermMemberRead: ps.col(domain.PermMemberRead), PermMemberManage: ps.col(domain.PermMemberManage),
 				PermActionDecide: ps.col(domain.PermActionDecide), PermAgentDelegate: ps.col(domain.PermAgentDelegate),
 				PermConversationAsk: ps.col(domain.PermConversationAsk), PermConversationAnswer: ps.col(domain.PermConversationAnswer),
-				CreatedByActorID: &ec.Actor.ID, CreatedAt: ec.Now,
+				PermMemberInvite: ps.col(domain.PermMemberInvite), CreatedByActorID: &ec.Actor.ID, CreatedAt: ec.Now,
 			})
 		},
 	})
@@ -1147,6 +1147,7 @@ func presetUpdate() tool.Tool {
 				PermMemberRead: ps.col(domain.PermMemberRead), PermMemberManage: ps.col(domain.PermMemberManage),
 				PermActionDecide: ps.col(domain.PermActionDecide), PermAgentDelegate: ps.col(domain.PermAgentDelegate),
 				PermConversationAsk: ps.col(domain.PermConversationAsk), PermConversationAnswer: ps.col(domain.PermConversationAnswer),
+				PermMemberInvite: ps.col(domain.PermMemberInvite),
 			})
 			if err != nil {
 				return OK{}, err

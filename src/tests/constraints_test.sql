@@ -455,6 +455,15 @@ SELECT pg_temp.fails('who revoked it is a seat of its course', '23503', $q$
 SELECT pg_temp.ok('a link is revoked, saying by whom', $q$
     UPDATE course_join_link SET revoked_at = now(), revoked_by_member_id = '00000000-0000-0000-0000-000000000051'
     WHERE id = '00000000-0000-0000-0000-0000000001a1' $q$);
+SELECT pg_temp.ok('member_invite, which makes links, defaults to denied on both tables', $q$
+    DO $chk$
+    BEGIN
+        IF EXISTS (SELECT 1 FROM course_member WHERE id = '00000000-0000-0000-0000-00000000005f' AND perm_member_invite <> 'denied')
+           OR EXISTS (SELECT 1 FROM permission_preset WHERE id = '00000000-0000-0000-0000-000000000091'
+                      AND perm_member_invite <> 'denied') THEN
+            RAISE EXCEPTION 'member_invite does not default to denied';
+        END IF;
+    END $chk$ $q$);
 
 -- Departments: a tree, and its administrators --------------------------------
 -- 2a1 … 2a8 a chain, 2a1 at the top · 2b1 > 2b2 > 2b3 a department and what is

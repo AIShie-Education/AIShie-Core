@@ -33,6 +33,12 @@ const CourseTutorPreset = "course_tutor"
 
 var bringsAgents = tool.Gate{Perms: []domain.Perm{domain.PermAgentDelegate}}
 
+// namedOnly are what a delegate holds only when the call that seats it names
+// them, whatever its preset carries: an agent hands out the course's join
+// links because someone decided it should, never because a preset came with
+// it (docs/schema.md §2.2).
+var namedOnly = []domain.Perm{domain.PermMemberInvite}
+
 type MemberAddDelegateIn struct {
 	tool.InCourse
 	ActorID  uuid.UUID  `json:"actor_id" jsonschema:"the agent you own to bring in"`
@@ -56,9 +62,9 @@ type MemberAddDelegateIn struct {
 //
 //   - levels: the preset's, each clipped to what m holds (for
 //     conversation_answer, to m's conversation_ask), with member_manage and
-//     agent_delegate denied; a level named in the call replaces the
-//     preset's, and one above what m holds is refused rather than clipped:
-//     the caller asked for it by name;
+//     agent_delegate denied, and member_invite too unless it is named; a
+//     level named in the call replaces the preset's, and one above what m
+//     holds is refused rather than clipped: the caller asked for it by name;
 //   - for someone who does not manage the course's members, no more than
 //     the built-in delegate preset gives: a student's agent reads; an
 //     instructor may widen it later, within its principal;
@@ -91,6 +97,9 @@ func resolveDelegateSeat(ctx context.Context, q dbq.Querier, m *domain.Member, i
 	perms := presetPerms(preset)
 	for _, p := range domain.AllPerms {
 		perms[p] = min(perms[p], domain.DelegateCap(m, p))
+	}
+	for _, p := range namedOnly {
+		perms[p] = domain.Denied
 	}
 	named := permSet{}
 	if err := named.apply(in.Perms); err != nil {

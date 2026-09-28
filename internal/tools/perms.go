@@ -62,6 +62,7 @@ func presetPerms(p dbq.PermissionPreset) permSet {
 		domain.PermMemberRead: level(p.PermMemberRead), domain.PermMemberManage: level(p.PermMemberManage),
 		domain.PermActionDecide: level(p.PermActionDecide), domain.PermAgentDelegate: level(p.PermAgentDelegate),
 		domain.PermConversationAsk: level(p.PermConversationAsk), domain.PermConversationAnswer: level(p.PermConversationAnswer),
+		domain.PermMemberInvite: level(p.PermMemberInvite),
 	}
 }
 
@@ -75,6 +76,7 @@ func memberPerms(m dbq.GetMemberInCourseRow) permSet {
 		domain.PermMemberRead: level(m.PermMemberRead), domain.PermMemberManage: level(m.PermMemberManage),
 		domain.PermActionDecide: level(m.PermActionDecide), domain.PermAgentDelegate: level(m.PermAgentDelegate),
 		domain.PermConversationAsk: level(m.PermConversationAsk), domain.PermConversationAnswer: level(m.PermConversationAnswer),
+		domain.PermMemberInvite: level(m.PermMemberInvite),
 	}
 }
 

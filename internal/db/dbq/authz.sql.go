@@ -107,6 +107,7 @@ SELECT m.id, m.course_id, m.actor_id, m.status, m.expires_at, m.student_scope, m
        m.perm_assignment_write, m.perm_submission_read, m.perm_submission_write, m.perm_grade_read,
        m.perm_grade_submit, m.perm_grade_post, m.perm_member_read, m.perm_member_manage,
        m.perm_action_decide, m.perm_agent_delegate, m.perm_conversation_ask, m.perm_conversation_answer,
+       m.perm_member_invite,
        m.principal_member_id, m.answers_course,
        (CASE WHEN m.principal_member_id IS NULL THEN a.owner_actor_id IS NULL
              ELSE a.owner_actor_id IS NOT DISTINCT FROM p.actor_id END)::bool AS owner_matches,
@@ -117,7 +118,7 @@ SELECT m.id, m.course_id, m.actor_id, m.status, m.expires_at, m.student_scope, m
        p.perm_submission_write AS principal_perm_submission_write, p.perm_grade_read AS principal_perm_grade_read, p.perm_grade_submit AS principal_perm_grade_submit,
        p.perm_grade_post AS principal_perm_grade_post, p.perm_member_read AS principal_perm_member_read, p.perm_member_manage AS principal_perm_member_manage,
        p.perm_action_decide AS principal_perm_action_decide, p.perm_agent_delegate AS principal_perm_agent_delegate, p.perm_conversation_ask AS principal_perm_conversation_ask,
-       p.perm_conversation_answer AS principal_perm_conversation_answer,
+       p.perm_conversation_answer AS principal_perm_conversation_answer, p.perm_member_invite AS principal_perm_member_invite,
        pa.status AS principal_actor_status
 FROM course_member m
 JOIN actor a ON a.id = m.actor_id
@@ -155,6 +156,7 @@ type GetLiveMemberForAuthzRow struct {
 	PermAgentDelegate               AutonomyLevel
 	PermConversationAsk             AutonomyLevel
 	PermConversationAnswer          AutonomyLevel
+	PermMemberInvite                AutonomyLevel
 	PrincipalMemberID               *uuid.UUID
 	AnswersCourse                   bool
 	OwnerMatches                    bool
@@ -179,6 +181,7 @@ type GetLiveMemberForAuthzRow struct {
 	PrincipalPermAgentDelegate      *AutonomyLevel
 	PrincipalPermConversationAsk    *AutonomyLevel
 	PrincipalPermConversationAnswer *AutonomyLevel
+	PrincipalPermMemberInvite       *AutonomyLevel
 	PrincipalActorStatus            *string
 }
 
@@ -217,6 +220,7 @@ func (q *Queries) GetLiveMemberForAuthz(ctx context.Context, arg GetLiveMemberFo
 		&i.PermAgentDelegate,
 		&i.PermConversationAsk,
 		&i.PermConversationAnswer,
+		&i.PermMemberInvite,
 		&i.PrincipalMemberID,
 		&i.AnswersCourse,
 		&i.OwnerMatches,
@@ -241,6 +245,7 @@ func (q *Queries) GetLiveMemberForAuthz(ctx context.Context, arg GetLiveMemberFo
 		&i.PrincipalPermAgentDelegate,
 		&i.PrincipalPermConversationAsk,
 		&i.PrincipalPermConversationAnswer,
+		&i.PrincipalPermMemberInvite,
 		&i.PrincipalActorStatus,
 	)
 	return i, err
@@ -252,6 +257,7 @@ SELECT m.id, m.course_id, m.actor_id, m.status, m.expires_at, m.student_scope, m
        m.perm_assignment_write, m.perm_submission_read, m.perm_submission_write, m.perm_grade_read,
        m.perm_grade_submit, m.perm_grade_post, m.perm_member_read, m.perm_member_manage,
        m.perm_action_decide, m.perm_agent_delegate, m.perm_conversation_ask, m.perm_conversation_answer,
+       m.perm_member_invite,
        m.principal_member_id, m.answers_course,
        (CASE WHEN m.principal_member_id IS NULL THEN a.owner_actor_id IS NULL
              ELSE a.owner_actor_id IS NOT DISTINCT FROM p.actor_id END)::bool AS owner_matches,
@@ -262,7 +268,7 @@ SELECT m.id, m.course_id, m.actor_id, m.status, m.expires_at, m.student_scope, m
        p.perm_submission_write AS principal_perm_submission_write, p.perm_grade_read AS principal_perm_grade_read, p.perm_grade_submit AS principal_perm_grade_submit,
        p.perm_grade_post AS principal_perm_grade_post, p.perm_member_read AS principal_perm_member_read, p.perm_member_manage AS principal_perm_member_manage,
        p.perm_action_decide AS principal_perm_action_decide, p.perm_agent_delegate AS principal_perm_agent_delegate, p.perm_conversation_ask AS principal_perm_conversation_ask,
-       p.perm_conversation_answer AS principal_perm_conversation_answer,
+       p.perm_conversation_answer AS principal_perm_conversation_answer, p.perm_member_invite AS principal_perm_member_invite,
        pa.status AS principal_actor_status
 FROM course_member m
 JOIN actor a ON a.id = m.actor_id
@@ -295,6 +301,7 @@ type GetMemberForAuthzRow struct {
 	PermAgentDelegate               AutonomyLevel
 	PermConversationAsk             AutonomyLevel
 	PermConversationAnswer          AutonomyLevel
+	PermMemberInvite                AutonomyLevel
 	PrincipalMemberID               *uuid.UUID
 	AnswersCourse                   bool
 	OwnerMatches                    bool
@@ -319,6 +326,7 @@ type GetMemberForAuthzRow struct {
 	PrincipalPermAgentDelegate      *AutonomyLevel
 	PrincipalPermConversationAsk    *AutonomyLevel
 	PrincipalPermConversationAnswer *AutonomyLevel
+	PrincipalPermMemberInvite       *AutonomyLevel
 	PrincipalActorStatus            *string
 }
 
@@ -351,6 +359,7 @@ func (q *Queries) GetMemberForAuthz(ctx context.Context, id uuid.UUID) (GetMembe
 		&i.PermAgentDelegate,
 		&i.PermConversationAsk,
 		&i.PermConversationAnswer,
+		&i.PermMemberInvite,
 		&i.PrincipalMemberID,
 		&i.AnswersCourse,
 		&i.OwnerMatches,
@@ -375,6 +384,7 @@ func (q *Queries) GetMemberForAuthz(ctx context.Context, id uuid.UUID) (GetMembe
 		&i.PrincipalPermAgentDelegate,
 		&i.PrincipalPermConversationAsk,
 		&i.PrincipalPermConversationAnswer,
+		&i.PrincipalPermMemberInvite,
 		&i.PrincipalActorStatus,
 	)
 	return i, err
@@ -386,6 +396,7 @@ SELECT m.id, m.course_id, m.actor_id, m.status, m.expires_at, m.student_scope, m
        m.perm_assignment_write, m.perm_submission_read, m.perm_submission_write, m.perm_grade_read,
        m.perm_grade_submit, m.perm_grade_post, m.perm_member_read, m.perm_member_manage,
        m.perm_action_decide, m.perm_agent_delegate, m.perm_conversation_ask, m.perm_conversation_answer,
+       m.perm_member_invite,
        m.principal_member_id, m.answers_course,
        (CASE WHEN m.principal_member_id IS NULL THEN a.owner_actor_id IS NULL
              ELSE a.owner_actor_id IS NOT DISTINCT FROM p.actor_id END)::bool AS owner_matches,
@@ -396,7 +407,7 @@ SELECT m.id, m.course_id, m.actor_id, m.status, m.expires_at, m.student_scope, m
        p.perm_submission_write AS principal_perm_submission_write, p.perm_grade_read AS principal_perm_grade_read, p.perm_grade_submit AS principal_perm_grade_submit,
        p.perm_grade_post AS principal_perm_grade_post, p.perm_member_read AS principal_perm_member_read, p.perm_member_manage AS principal_perm_member_manage,
        p.perm_action_decide AS principal_perm_action_decide, p.perm_agent_delegate AS principal_perm_agent_delegate, p.perm_conversation_ask AS principal_perm_conversation_ask,
-       p.perm_conversation_answer AS principal_perm_conversation_answer,
+       p.perm_conversation_answer AS principal_perm_conversation_answer, p.perm_member_invite AS principal_perm_member_invite,
        pa.status AS principal_actor_status
 FROM course_member m
 JOIN actor a ON a.id = m.actor_id
@@ -429,6 +440,7 @@ type GetMembersForAuthzRow struct {
 	PermAgentDelegate               AutonomyLevel
 	PermConversationAsk             AutonomyLevel
 	PermConversationAnswer          AutonomyLevel
+	PermMemberInvite                AutonomyLevel
 	PrincipalMemberID               *uuid.UUID
 	AnswersCourse                   bool
 	OwnerMatches                    bool
@@ -453,6 +465,7 @@ type GetMembersForAuthzRow struct {
 	PrincipalPermAgentDelegate      *AutonomyLevel
 	PrincipalPermConversationAsk    *AutonomyLevel
 	PrincipalPermConversationAnswer *AutonomyLevel
+	PrincipalPermMemberInvite       *AutonomyLevel
 	PrincipalActorStatus            *string
 }
 
@@ -492,6 +505,7 @@ func (q *Queries) GetMembersForAuthz(ctx context.Context, ids []uuid.UUID) ([]Ge
 			&i.PermAgentDelegate,
 			&i.PermConversationAsk,
 			&i.PermConversationAnswer,
+			&i.PermMemberInvite,
 			&i.PrincipalMemberID,
 			&i.AnswersCourse,
 			&i.OwnerMatches,
@@ -516,6 +530,7 @@ func (q *Queries) GetMembersForAuthz(ctx context.Context, ids []uuid.UUID) ([]Ge
 			&i.PrincipalPermAgentDelegate,
 			&i.PrincipalPermConversationAsk,
 			&i.PrincipalPermConversationAnswer,
+			&i.PrincipalPermMemberInvite,
 			&i.PrincipalActorStatus,
 		); err != nil {
 			return nil, err
@@ -534,6 +549,7 @@ SELECT m.id, m.course_id, m.actor_id, m.status, m.expires_at, m.student_scope, m
        m.perm_assignment_write, m.perm_submission_read, m.perm_submission_write, m.perm_grade_read,
        m.perm_grade_submit, m.perm_grade_post, m.perm_member_read, m.perm_member_manage,
        m.perm_action_decide, m.perm_agent_delegate, m.perm_conversation_ask, m.perm_conversation_answer,
+       m.perm_member_invite,
        m.principal_member_id, m.answers_course,
        (CASE WHEN m.principal_member_id IS NULL THEN a.owner_actor_id IS NULL
              ELSE a.owner_actor_id IS NOT DISTINCT FROM p.actor_id END)::bool AS owner_matches,
@@ -544,7 +560,7 @@ SELECT m.id, m.course_id, m.actor_id, m.status, m.expires_at, m.student_scope, m
        p.perm_submission_write AS principal_perm_submission_write, p.perm_grade_read AS principal_perm_grade_read, p.perm_grade_submit AS principal_perm_grade_submit,
        p.perm_grade_post AS principal_perm_grade_post, p.perm_member_read AS principal_perm_member_read, p.perm_member_manage AS principal_perm_member_manage,
        p.perm_action_decide AS principal_perm_action_decide, p.perm_agent_delegate AS principal_perm_agent_delegate, p.perm_conversation_ask AS principal_perm_conversation_ask,
-       p.perm_conversation_answer AS principal_perm_conversation_answer,
+       p.perm_conversation_answer AS principal_perm_conversation_answer, p.perm_member_invite AS principal_perm_member_invite,
        pa.status AS principal_actor_status
 FROM course_member m
 JOIN actor a ON a.id = m.actor_id
@@ -583,6 +599,7 @@ type LockLiveMemberForAuthzRow struct {
 	PermAgentDelegate               AutonomyLevel
 	PermConversationAsk             AutonomyLevel
 	PermConversationAnswer          AutonomyLevel
+	PermMemberInvite                AutonomyLevel
 	PrincipalMemberID               *uuid.UUID
 	AnswersCourse                   bool
 	OwnerMatches                    bool
@@ -607,6 +624,7 @@ type LockLiveMemberForAuthzRow struct {
 	PrincipalPermAgentDelegate      *AutonomyLevel
 	PrincipalPermConversationAsk    *AutonomyLevel
 	PrincipalPermConversationAnswer *AutonomyLevel
+	PrincipalPermMemberInvite       *AutonomyLevel
 	PrincipalActorStatus            *string
 }
 
@@ -652,6 +670,7 @@ func (q *Queries) LockLiveMemberForAuthz(ctx context.Context, arg LockLiveMember
 		&i.PermAgentDelegate,
 		&i.PermConversationAsk,
 		&i.PermConversationAnswer,
+		&i.PermMemberInvite,
 		&i.PrincipalMemberID,
 		&i.AnswersCourse,
 		&i.OwnerMatches,
@@ -676,6 +695,7 @@ func (q *Queries) LockLiveMemberForAuthz(ctx context.Context, arg LockLiveMember
 		&i.PrincipalPermAgentDelegate,
 		&i.PrincipalPermConversationAsk,
 		&i.PrincipalPermConversationAnswer,
+		&i.PrincipalPermMemberInvite,
 		&i.PrincipalActorStatus,
 	)
 	return i, err
@@ -687,6 +707,7 @@ SELECT p.id, p.actor_id, p.status, p.expires_at, p.student_scope, p.assignment_s
        p.perm_assignment_write, p.perm_submission_read, p.perm_submission_write, p.perm_grade_read,
        p.perm_grade_submit, p.perm_grade_post, p.perm_member_read, p.perm_member_manage,
        p.perm_action_decide, p.perm_agent_delegate, p.perm_conversation_ask, p.perm_conversation_answer,
+       p.perm_member_invite,
        pa.status AS actor_status
 FROM course_member p
 JOIN actor pa ON pa.id = p.actor_id
@@ -717,6 +738,7 @@ type LockPrincipalForAuthzRow struct {
 	PermAgentDelegate      AutonomyLevel
 	PermConversationAsk    AutonomyLevel
 	PermConversationAnswer AutonomyLevel
+	PermMemberInvite       AutonomyLevel
 	ActorStatus            string
 }
 
@@ -750,6 +772,7 @@ func (q *Queries) LockPrincipalForAuthz(ctx context.Context, id uuid.UUID) (Lock
 		&i.PermAgentDelegate,
 		&i.PermConversationAsk,
 		&i.PermConversationAnswer,
+		&i.PermMemberInvite,
 		&i.ActorStatus,
 	)
 	return i, err

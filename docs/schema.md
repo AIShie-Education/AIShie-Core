@@ -191,7 +191,7 @@ revokes its tokens the same way (`agent.list_credentials`, `agent.revoke_credent
 permission_preset(id, dept_id null→department, name, description null,
                   role [student|instructor|ta|observer|assistant],
                   student_scope [all|listed], assignment_scope [all|listed],
-                  perm_<action> autonomy_level = 'denied'   ×16, identical to course_member
+                  perm_<action> autonomy_level = 'denied'   ×17, identical to course_member
                   created_by_actor_id null→actor, created_at)
 
     unique(name) where dept_id is null;  unique(dept_id, name) where dept_id is not null
@@ -201,7 +201,7 @@ course_member(id, course_id→course, actor_id→actor,
               status [active|paused|removed], preset_id null→permission_preset,
               added_by_actor_id→actor, expires_at null,
               student_scope [all|listed], assignment_scope [all|listed],
-              perm_<action> autonomy_level = 'denied'   ×16, see below
+              perm_<action> autonomy_level = 'denied'   ×17, see below
               created_at, principal_member_id null, answers_course = false,
               join_link_id null,
               unique(course_id, id))
@@ -259,11 +259,12 @@ teaching assistant. Role is not read by authorization.
 | `perm_agent_delegate` | bringing an agent one owns into the course as one's delegate: `confirm_required` is a request an instructor approves | |
 | `perm_conversation_ask` | opening conversations, and writing in those one opened | |
 | `perm_conversation_answer` | being addressed, and answering; the level is the autonomy of the answers | |
+| `perm_member_invite` | making the course's join links, which seat whoever holds one as a student (§2.2, Join links), and listing and revoking them | |
 
 Columns rather than rows because the action-type list lives in code anyway: adding one is a
 deploy, and a migration alongside it is no extra ceremony. The column list is the catalogue.
 
-Sixteen columns do not name every operation. Where a tool has no column of its own it borrows
+Seventeen columns do not name every operation. Where a tool has no column of its own it borrows
 the nearest one, and the choice is recorded here so that it is a decision and not an accident:
 
 | Operation | Gated by | Why |
@@ -317,6 +318,21 @@ observer given `member_manage`, a TA given it — got its role's levels as well,
 grants no preset that carries more (`student` carries `agent_delegate` and `conversation_ask`;
 `tutor`, `conversation_answer`) until an instructor raises its own.
 
+`member_invite` (migration 0013) is not `member_manage`: a manager seats whoever they name, and a
+join link seats whoever holds it, unseen — a room scanning a QR code — which is a decision of its
+own. The migration gave it, once, to every seat held by a person, not removed, at that seat's
+level of `member_manage`: whoever seated students one by one may seat them by a link, as freely,
+and nobody gained a way into a course or lost one. A seat held by an agent, delegate or not,
+got `denied` whatever it manages: an agent hands out links only once someone who manages the
+members gives it `member_invite`, and a delegate's is capped by its principal's as every level
+is. That read `actor.kind`, once, in a migration; authorization never does. Presets are
+decided by their role, since they carry no actor: `student` and `assistant` presets — every
+built-in an agent is seated with (`tutor`, `grader`, `delegate`, `course_tutor`), and a
+department's own for agents — `denied`; any other its `member_manage` level, which for the
+built-ins leaves `instructor` autonomous and the rest `denied`, as the seed makes them. An agent
+that manages members and seats others with a preset that now carries `member_invite` (the
+built-in `instructor`) names `member_invite` denied when it does, or is given it first.
+
 **Scope is explicit and fails closed.** `student_scope = 'listed'` with no rows in
 `member_student_scope` means *no* students, so forgetting the rows cannot grant the class.
 A student is `listed` with a single row pointing at itself; there is no self-access special
@@ -357,8 +373,9 @@ narrows a principal without touching its delegates — and which a manager may h
 The owner brings the agent in with `member.add_delegate`, gated by `perm_agent_delegate`, so
 that a student's request waits for an instructor. The seat is worked out from the owner's own:
 the preset's levels (`delegate` unless another is named) are each cut down to what the owner
-holds, `member_manage` and `agent_delegate` denied; a level named in the call above the owner's
-is refused, not cut down. Without `member_manage`, the seat holds no more than the built-in
+holds, `member_manage` and `agent_delegate` denied, and `member_invite` denied whatever the preset
+carries: an agent hands out join links only when the call names it; a level named in the call
+above the owner's is refused, not cut down. Without `member_manage`, the seat holds no more than the built-in
 `delegate` preset gives: a student's agent reads, and an instructor may widen it later within its
 principal. A listed scope defaults to the owner's own list, or to nobody when the owner reaches
 the whole class; a list named must be within the owner's; a preset that reaches everything is

@@ -484,7 +484,8 @@ func seat(ctx context.Context, ec *tool.ExecCtx, s seating) (uuid.UUID, error) {
 		PermMemberRead: s.perms.col(domain.PermMemberRead), PermMemberManage: s.perms.col(domain.PermMemberManage),
 		PermActionDecide: s.perms.col(domain.PermActionDecide), PermAgentDelegate: s.perms.col(domain.PermAgentDelegate),
 		PermConversationAsk: s.perms.col(domain.PermConversationAsk), PermConversationAnswer: s.perms.col(domain.PermConversationAnswer),
-		CreatedAt: ec.Now, PrincipalMemberID: s.principal, AnswersCourse: s.answersCourse,
+		PermMemberInvite: s.perms.col(domain.PermMemberInvite), CreatedAt: ec.Now, PrincipalMemberID: s.principal,
+		AnswersCourse: s.answersCourse,
 	}
 	if s.preset != nil {
 		row.PresetID = &s.preset.ID

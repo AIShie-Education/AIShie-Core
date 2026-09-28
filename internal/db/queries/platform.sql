@@ -99,9 +99,9 @@ INSERT INTO permission_preset (
     perm_document_read, perm_document_read_draft, perm_document_write, perm_rubric_read,
     perm_assignment_write, perm_submission_read, perm_submission_write, perm_grade_read,
     perm_grade_submit, perm_grade_post, perm_member_read, perm_member_manage, perm_action_decide,
-    perm_agent_delegate, perm_conversation_ask, perm_conversation_answer,
+    perm_agent_delegate, perm_conversation_ask, perm_conversation_answer, perm_member_invite,
     created_by_actor_id, created_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25);
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26);
 
 -- name: UpdatePreset :execrows
 -- Built-ins (dept_id null) are policy shipped with the system; only a
@@ -111,5 +111,6 @@ UPDATE permission_preset SET
     perm_document_read = $6, perm_document_read_draft = $7, perm_document_write = $8, perm_rubric_read = $9,
     perm_assignment_write = $10, perm_submission_read = $11, perm_submission_write = $12, perm_grade_read = $13,
     perm_grade_submit = $14, perm_grade_post = $15, perm_member_read = $16, perm_member_manage = $17,
-    perm_action_decide = $18, perm_agent_delegate = $19, perm_conversation_ask = $20, perm_conversation_answer = $21
+    perm_action_decide = $18, perm_agent_delegate = $19, perm_conversation_ask = $20, perm_conversation_answer = $21,
+    perm_member_invite = $22
 WHERE id = $1 AND dept_id IS NOT NULL;

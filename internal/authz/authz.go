@@ -457,7 +457,7 @@ func memberFromRow(r dbq.GetMemberForAuthzRow) *domain.Member {
 		Perms: levels(r.PermDocumentRead, r.PermDocumentReadDraft, r.PermDocumentWrite, r.PermRubricRead,
 			r.PermAssignmentWrite, r.PermSubmissionRead, r.PermSubmissionWrite, r.PermGradeRead,
 			r.PermGradeSubmit, r.PermGradePost, r.PermMemberRead, r.PermMemberManage, r.PermActionDecide,
-			r.PermAgentDelegate, r.PermConversationAsk, r.PermConversationAnswer),
+			r.PermAgentDelegate, r.PermConversationAsk, r.PermConversationAnswer, r.PermMemberInvite),
 		PrincipalID:   r.PrincipalMemberID,
 		AnswersCourse: r.AnswersCourse,
 		SeatValid:     r.OwnerMatches,
@@ -485,7 +485,7 @@ func memberFromRow(r dbq.GetMemberForAuthzRow) *domain.Member {
 			orDenied(r.PrincipalPermSubmissionWrite), orDenied(r.PrincipalPermGradeRead), orDenied(r.PrincipalPermGradeSubmit),
 			orDenied(r.PrincipalPermGradePost), orDenied(r.PrincipalPermMemberRead), orDenied(r.PrincipalPermMemberManage),
 			orDenied(r.PrincipalPermActionDecide), orDenied(r.PrincipalPermAgentDelegate), orDenied(r.PrincipalPermConversationAsk),
-			orDenied(r.PrincipalPermConversationAnswer)),
+			orDenied(r.PrincipalPermConversationAnswer), orDenied(r.PrincipalPermMemberInvite)),
 		// A principal is nobody's delegate (course_member_principal_valid),
 		// and its actor is a person, whom nobody owns.
 		SeatValid: true,
@@ -507,6 +507,7 @@ func withPrincipal(row *dbq.GetLiveMemberForAuthzRow, p dbq.LockPrincipalForAuth
 	row.PrincipalPermMemberRead, row.PrincipalPermMemberManage = &p.PermMemberRead, &p.PermMemberManage
 	row.PrincipalPermActionDecide, row.PrincipalPermAgentDelegate = &p.PermActionDecide, &p.PermAgentDelegate
 	row.PrincipalPermConversationAsk, row.PrincipalPermConversationAnswer = &p.PermConversationAsk, &p.PermConversationAnswer
+	row.PrincipalPermMemberInvite = &p.PermMemberInvite
 }
 
 // levels maps column values, given in domain.AllPerms order, to the ladder.

@@ -783,6 +783,7 @@ func setPerms(ctx context.Context, q *dbq.Queries, id uuid.UUID, ps permSet) err
 		PermMemberRead: ps.col(domain.PermMemberRead), PermMemberManage: ps.col(domain.PermMemberManage),
 		PermActionDecide: ps.col(domain.PermActionDecide), PermAgentDelegate: ps.col(domain.PermAgentDelegate),
 		PermConversationAsk: ps.col(domain.PermConversationAsk), PermConversationAnswer: ps.col(domain.PermConversationAnswer),
+		PermMemberInvite: ps.col(domain.PermMemberInvite),
 	})
 }
 

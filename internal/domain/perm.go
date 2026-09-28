@@ -26,6 +26,9 @@ const (
 	PermConversationAsk Perm = "conversation_ask"
 	// Being addressed, and answering; the level is the autonomy of the answers.
 	PermConversationAnswer Perm = "conversation_answer"
+	// Making the course's join links, which seat whoever holds one as a
+	// student, and listing and revoking them.
+	PermMemberInvite Perm = "member_invite"
 )
 
 // AllPerms is in the column order used by the schema and the seed.
@@ -33,7 +36,7 @@ var AllPerms = []Perm{
 	PermDocumentRead, PermDocumentReadDraft, PermDocumentWrite, PermRubricRead,
 	PermAssignmentWrite, PermSubmissionRead, PermSubmissionWrite, PermGradeRead,
 	PermGradeSubmit, PermGradePost, PermMemberRead, PermMemberManage, PermActionDecide,
-	PermAgentDelegate, PermConversationAsk, PermConversationAnswer,
+	PermAgentDelegate, PermConversationAsk, PermConversationAnswer, PermMemberInvite,
 }
 
 // Column is the database column holding this permission's level.

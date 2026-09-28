@@ -279,6 +279,14 @@ Run all of these as root on the server.
   `conversation_ask`), nor, for a TA, a tutor, until an instructor raises
   its levels with `member.update_perms`. A roster-sync agent seated as an
   assistant is the likely case.
+- **Migration 0013, `member_invite`:** the permission that makes a course's
+  join links. Every seat a person holds got it at its level of
+  `member_manage`, and every seat an agent holds got it `denied`, whatever it
+  manages. Nobody hands out more than they hold, so an agent seated to manage
+  members — a roster-sync agent — no longer seats anyone with the built-in
+  `instructor` preset, which carries `member_invite`, until it names
+  `"member_invite": "denied"` in `perms`, or an instructor gives it
+  `member_invite` with `member.update_perms`.
 - **Updating the scripts:** when `deploy/` changes, copy it to the server
   again and run `setup-server.sh` as in step 1. It installs the new scripts
   and leaves the rest.

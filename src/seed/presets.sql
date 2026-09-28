@@ -5,13 +5,14 @@
 -- may do by default. Apply after the migrations. Safe to re-run: existing
 -- built-ins are left as they are, so local edits survive. (Migration 0007
 -- gave the built-ins already seeded their levels of the three permissions it
--- added; delegate and course_tutor are inserted here alone.)
+-- added; delegate and course_tutor are inserted here alone. Migration 0013
+-- gave those seeded their level of member_invite, as it is here.)
 --
 -- Columns, in order:
 --   document_read, document_read_draft, document_write, rubric_read,
 --   assignment_write, submission_read, submission_write, grade_read,
 --   grade_submit, grade_post, member_read, member_manage, action_decide,
---   agent_delegate, conversation_ask, conversation_answer
+--   agent_delegate, conversation_ask, conversation_answer, member_invite
 
 BEGIN;
 
@@ -20,7 +21,7 @@ INSERT INTO permission_preset (
     perm_document_read, perm_document_read_draft, perm_document_write, perm_rubric_read,
     perm_assignment_write, perm_submission_read, perm_submission_write, perm_grade_read,
     perm_grade_submit, perm_grade_post, perm_member_read, perm_member_manage, perm_action_decide,
-    perm_agent_delegate, perm_conversation_ask, perm_conversation_answer
+    perm_agent_delegate, perm_conversation_ask, perm_conversation_answer, perm_member_invite
 ) VALUES
     -- A student sees published material and their own work. The application
     -- adds the member_student_scope row pointing at the member itself.
@@ -30,14 +31,16 @@ INSERT INTO permission_preset (
      'denied',     'autonomous', 'autonomous', 'autonomous',
      'denied',     'denied',     'denied',     'denied',     'denied',
      -- Brings an agent of their own with an instructor's approval; asks.
-     'confirm_required', 'autonomous', 'denied'),
+     'confirm_required', 'autonomous', 'denied',
+     'denied'),
 
     ('observer', 'Reads published material and the member list; changes nothing',
      'observer', 'all', 'all',
      'autonomous', 'denied',     'denied',     'denied',
      'denied',     'denied',     'denied',     'denied',
      'denied',     'denied',     'autonomous', 'denied',     'denied',
-     'denied',     'denied',     'denied'),
+     'denied',     'denied',     'denied',
+     'denied'),
 
     -- Grades but does not post: the instructor releases.
     ('ta', 'Reads everything, grades; instructor posts and approves',
@@ -45,14 +48,17 @@ INSERT INTO permission_preset (
      'autonomous', 'autonomous', 'denied',     'autonomous',
      'denied',     'autonomous', 'denied',     'autonomous',
      'autonomous', 'denied',     'autonomous', 'denied',     'denied',
-     'confirm_required', 'autonomous', 'denied'),
+     'confirm_required', 'autonomous', 'denied',
+     'denied'),
 
     ('instructor', 'Everything, unsupervised',
      'instructor', 'all', 'all',
      'autonomous', 'autonomous', 'autonomous', 'autonomous',
      'autonomous', 'autonomous', 'autonomous', 'autonomous',
      'autonomous', 'autonomous', 'autonomous', 'autonomous', 'autonomous',
-     'autonomous', 'autonomous', 'autonomous'),
+     'autonomous', 'autonomous', 'autonomous',
+     -- Hands out join links: a seat for whoever scans one.
+     'autonomous'),
 
     -- Agent bound to listed students. Sees their work and grades, all
     -- material; writes nothing but its answers to whoever may address it.
@@ -61,7 +67,8 @@ INSERT INTO permission_preset (
      'autonomous', 'denied',     'denied',     'denied',
      'denied',     'autonomous', 'denied',     'autonomous',
      'denied',     'denied',     'denied',     'denied',     'denied',
-     'denied',     'denied',     'autonomous'),
+     'denied',     'denied',     'autonomous',
+     'denied'),
 
     -- Agent bound to listed assignments. Proposes grades; a human approves.
     ('grader', 'Agent: reads material and rubric, proposes grades for the listed assignments',
@@ -69,19 +76,22 @@ INSERT INTO permission_preset (
      'autonomous', 'denied',     'denied',     'autonomous',
      'denied',     'autonomous', 'denied',     'denied',
      'confirm_required', 'denied', 'denied',   'denied',     'denied',
-     'denied',     'denied',     'denied'),
+     'denied',     'denied',     'denied',
+     'denied'),
 
     -- A person's own agent, seated as their delegate (member.add_delegate).
     -- Reads what its principal may read of the principal's own work: the
     -- application lists the principal's students on it, which for a student
     -- is the student. Answers its principal. Never more than its principal
-    -- holds, whatever is set here.
+    -- holds, whatever is set here. No agent preset seats members or hands
+    -- out join links: someone who manages members gives an agent that.
     ('delegate', 'Agent: a person''s own assistant; reads material and its principal''s work and grades, answers its principal',
      'assistant', 'listed', 'all',
      'autonomous', 'denied',     'denied',     'denied',
      'denied',     'autonomous', 'denied',     'autonomous',
      'denied',     'denied',     'denied',     'denied',     'denied',
-     'denied',     'denied',     'autonomous'),
+     'denied',     'denied',     'autonomous',
+     'denied'),
 
     -- A course's question-answering agent. Listed for nobody, so it reads
     -- the material and nobody's work: that is what puts it within every
@@ -93,7 +103,8 @@ INSERT INTO permission_preset (
      'autonomous', 'denied',     'denied',     'denied',
      'denied',     'denied',     'denied',     'denied',
      'denied',     'denied',     'denied',     'denied',     'denied',
-     'denied',     'denied',     'autonomous')
+     'denied',     'denied',     'autonomous',
+     'denied')
 ON CONFLICT (name) WHERE dept_id IS NULL DO NOTHING;
 
 COMMIT;

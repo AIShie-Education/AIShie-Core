@@ -104,7 +104,7 @@ func (q *Queries) GetActorView(ctx context.Context, id uuid.UUID) (GetActorViewR
 }
 
 const getBuiltinPresetByName = `-- name: GetBuiltinPresetByName :one
-SELECT id, dept_id, name, description, role, student_scope, assignment_scope, perm_document_read, perm_document_read_draft, perm_document_write, perm_rubric_read, perm_assignment_write, perm_submission_read, perm_submission_write, perm_grade_read, perm_grade_submit, perm_grade_post, perm_member_read, perm_member_manage, perm_action_decide, created_by_actor_id, created_at, perm_agent_delegate, perm_conversation_ask, perm_conversation_answer FROM permission_preset WHERE name = $1 AND dept_id IS NULL
+SELECT id, dept_id, name, description, role, student_scope, assignment_scope, perm_document_read, perm_document_read_draft, perm_document_write, perm_rubric_read, perm_assignment_write, perm_submission_read, perm_submission_write, perm_grade_read, perm_grade_submit, perm_grade_post, perm_member_read, perm_member_manage, perm_action_decide, created_by_actor_id, created_at, perm_agent_delegate, perm_conversation_ask, perm_conversation_answer, perm_member_invite FROM permission_preset WHERE name = $1 AND dept_id IS NULL
 `
 
 func (q *Queries) GetBuiltinPresetByName(ctx context.Context, name string) (PermissionPreset, error) {
@@ -136,12 +136,13 @@ func (q *Queries) GetBuiltinPresetByName(ctx context.Context, name string) (Perm
 		&i.PermAgentDelegate,
 		&i.PermConversationAsk,
 		&i.PermConversationAnswer,
+		&i.PermMemberInvite,
 	)
 	return i, err
 }
 
 const getDeptPresetByName = `-- name: GetDeptPresetByName :one
-SELECT id, dept_id, name, description, role, student_scope, assignment_scope, perm_document_read, perm_document_read_draft, perm_document_write, perm_rubric_read, perm_assignment_write, perm_submission_read, perm_submission_write, perm_grade_read, perm_grade_submit, perm_grade_post, perm_member_read, perm_member_manage, perm_action_decide, created_by_actor_id, created_at, perm_agent_delegate, perm_conversation_ask, perm_conversation_answer FROM permission_preset WHERE name = $1 AND dept_id = $2
+SELECT id, dept_id, name, description, role, student_scope, assignment_scope, perm_document_read, perm_document_read_draft, perm_document_write, perm_rubric_read, perm_assignment_write, perm_submission_read, perm_submission_write, perm_grade_read, perm_grade_submit, perm_grade_post, perm_member_read, perm_member_manage, perm_action_decide, created_by_actor_id, created_at, perm_agent_delegate, perm_conversation_ask, perm_conversation_answer, perm_member_invite FROM permission_preset WHERE name = $1 AND dept_id = $2
 `
 
 type GetDeptPresetByNameParams struct {
@@ -178,12 +179,13 @@ func (q *Queries) GetDeptPresetByName(ctx context.Context, arg GetDeptPresetByNa
 		&i.PermAgentDelegate,
 		&i.PermConversationAsk,
 		&i.PermConversationAnswer,
+		&i.PermMemberInvite,
 	)
 	return i, err
 }
 
 const getPreset = `-- name: GetPreset :one
-SELECT id, dept_id, name, description, role, student_scope, assignment_scope, perm_document_read, perm_document_read_draft, perm_document_write, perm_rubric_read, perm_assignment_write, perm_submission_read, perm_submission_write, perm_grade_read, perm_grade_submit, perm_grade_post, perm_member_read, perm_member_manage, perm_action_decide, created_by_actor_id, created_at, perm_agent_delegate, perm_conversation_ask, perm_conversation_answer FROM permission_preset WHERE id = $1
+SELECT id, dept_id, name, description, role, student_scope, assignment_scope, perm_document_read, perm_document_read_draft, perm_document_write, perm_rubric_read, perm_assignment_write, perm_submission_read, perm_submission_write, perm_grade_read, perm_grade_submit, perm_grade_post, perm_member_read, perm_member_manage, perm_action_decide, created_by_actor_id, created_at, perm_agent_delegate, perm_conversation_ask, perm_conversation_answer, perm_member_invite FROM permission_preset WHERE id = $1
 `
 
 func (q *Queries) GetPreset(ctx context.Context, id uuid.UUID) (PermissionPreset, error) {
@@ -215,6 +217,7 @@ func (q *Queries) GetPreset(ctx context.Context, id uuid.UUID) (PermissionPreset
 		&i.PermAgentDelegate,
 		&i.PermConversationAsk,
 		&i.PermConversationAnswer,
+		&i.PermMemberInvite,
 	)
 	return i, err
 }
@@ -248,9 +251,9 @@ INSERT INTO permission_preset (
     perm_document_read, perm_document_read_draft, perm_document_write, perm_rubric_read,
     perm_assignment_write, perm_submission_read, perm_submission_write, perm_grade_read,
     perm_grade_submit, perm_grade_post, perm_member_read, perm_member_manage, perm_action_decide,
-    perm_agent_delegate, perm_conversation_ask, perm_conversation_answer,
+    perm_agent_delegate, perm_conversation_ask, perm_conversation_answer, perm_member_invite,
     created_by_actor_id, created_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26)
 `
 
 type InsertPresetParams struct {
@@ -277,6 +280,7 @@ type InsertPresetParams struct {
 	PermAgentDelegate      AutonomyLevel
 	PermConversationAsk    AutonomyLevel
 	PermConversationAnswer AutonomyLevel
+	PermMemberInvite       AutonomyLevel
 	CreatedByActorID       *uuid.UUID
 	CreatedAt              time.Time
 }
@@ -306,6 +310,7 @@ func (q *Queries) InsertPreset(ctx context.Context, arg InsertPresetParams) erro
 		arg.PermAgentDelegate,
 		arg.PermConversationAsk,
 		arg.PermConversationAnswer,
+		arg.PermMemberInvite,
 		arg.CreatedByActorID,
 		arg.CreatedAt,
 	)
@@ -461,7 +466,7 @@ func (q *Queries) ListDepartments(ctx context.Context) ([]ListDepartmentsRow, er
 }
 
 const listPresets = `-- name: ListPresets :many
-SELECT id, dept_id, name, description, role, student_scope, assignment_scope, perm_document_read, perm_document_read_draft, perm_document_write, perm_rubric_read, perm_assignment_write, perm_submission_read, perm_submission_write, perm_grade_read, perm_grade_submit, perm_grade_post, perm_member_read, perm_member_manage, perm_action_decide, created_by_actor_id, created_at, perm_agent_delegate, perm_conversation_ask, perm_conversation_answer FROM permission_preset
+SELECT id, dept_id, name, description, role, student_scope, assignment_scope, perm_document_read, perm_document_read_draft, perm_document_write, perm_rubric_read, perm_assignment_write, perm_submission_read, perm_submission_write, perm_grade_read, perm_grade_submit, perm_grade_post, perm_member_read, perm_member_manage, perm_action_decide, created_by_actor_id, created_at, perm_agent_delegate, perm_conversation_ask, perm_conversation_answer, perm_member_invite FROM permission_preset
 WHERE dept_id IS NULL OR dept_id = $1
 ORDER BY dept_id NULLS FIRST, name
 `
@@ -502,6 +507,7 @@ func (q *Queries) ListPresets(ctx context.Context, deptID *uuid.UUID) ([]Permiss
 			&i.PermAgentDelegate,
 			&i.PermConversationAsk,
 			&i.PermConversationAnswer,
+			&i.PermMemberInvite,
 		); err != nil {
 			return nil, err
 		}
@@ -613,7 +619,8 @@ UPDATE permission_preset SET
     perm_document_read = $6, perm_document_read_draft = $7, perm_document_write = $8, perm_rubric_read = $9,
     perm_assignment_write = $10, perm_submission_read = $11, perm_submission_write = $12, perm_grade_read = $13,
     perm_grade_submit = $14, perm_grade_post = $15, perm_member_read = $16, perm_member_manage = $17,
-    perm_action_decide = $18, perm_agent_delegate = $19, perm_conversation_ask = $20, perm_conversation_answer = $21
+    perm_action_decide = $18, perm_agent_delegate = $19, perm_conversation_ask = $20, perm_conversation_answer = $21,
+    perm_member_invite = $22
 WHERE id = $1 AND dept_id IS NOT NULL
 `
 
@@ -639,6 +646,7 @@ type UpdatePresetParams struct {
 	PermAgentDelegate      AutonomyLevel
 	PermConversationAsk    AutonomyLevel
 	PermConversationAnswer AutonomyLevel
+	PermMemberInvite       AutonomyLevel
 }
 
 // Built-ins (dept_id null) are policy shipped with the system; only a
@@ -666,6 +674,7 @@ func (q *Queries) UpdatePreset(ctx context.Context, arg UpdatePresetParams) (int
 		arg.PermAgentDelegate,
 		arg.PermConversationAsk,
 		arg.PermConversationAnswer,
+		arg.PermMemberInvite,
 	)
 	if err != nil {
 		return 0, err
