@@ -35,8 +35,10 @@ In place so far:
 but `curl`, builds the worked example from docs/schema.md §5 from an empty
 installation: an agent grades an essay, a person approves it, the student
 sees the grade; then the student asks the instructor's tutor agent a question,
-and it answers; last, Core vouches for the instructor to an agent runtime, and
-the key it publishes checks the assertion.
+and it answers; Core vouches for the instructor to an agent runtime, and the
+key it publishes checks the assertion; last, the sign-in page is told whether
+to offer single sign-on, with it off and then, against a stand-in provider,
+on.
 
 - MCP: agents connect at `/mcp` (stateless streamable HTTP, bearer token) and
   get the same catalogue as REST, tool for tool, through the same pipeline.
@@ -172,6 +174,25 @@ defaults are for ADFS: accounts are known by their `upn` claim
 (`OIDC_PROVIDER_NAME`). A browser signs in by visiting
 `/v1/auth/sso/start?return_to=/where/to/go/afterwards` and comes back with the
 same session cookie a password sign-in gives.
+
+The front end's sign-in page asks `GET /v1/auth/methods` whether to offer
+single sign-on, so one front end serves an installation with it and one
+without. Anyone may ask, with no credential:
+
+```
+{"password": true, "sso": null}
+{"password": true, "sso": {"label": "PolyU NetID", "start": "/v1/auth/sso/start"}}
+```
+
+`sso` is null unless `OIDC_ISSUER` is set. `label` is `OIDC_DISPLAY_NAME`,
+the provider's name as the sign-in button shows it, or null when that is not
+set, and the front end then uses words of its own; it is at most 64
+characters, all printable, and the server refuses to start on anything else.
+`start` is the path on this server to send the browser to, with `return_to`
+added. `password` is always true, since password sign-in cannot be turned
+off. Nothing else about the provider is said. A browser or a cache may keep
+the answer for a minute (`Cache-Control: public, max-age=60`), so a change of
+settings reaches the sign-in page within a minute of the restart.
 
 Signing in creates nobody. An administrator registers the person
 (`actor.register`) and links their identity (`actor.link_sso`, with the

@@ -172,7 +172,24 @@ Run all of these as root on the server.
   and no `/` at the end, or the server will not start. A front end on
   another site altogether, such as `*.vercel.app`, also needs
   `COOKIE_SAMESITE=none`. Safari, and every browser on iOS, still refuses
-  that sign-in cookie. Single sign-on is `OIDC_*` (README, Single sign-on).
+  that sign-in cookie.
+- **Single sign-on** is `OIDC_ISSUER`, `OIDC_CLIENT_ID` and
+  `OIDC_CLIENT_SECRET` in the env file, with
+  `https://lms-staging.example.edu/v1/auth/sso/callback` registered with the
+  provider (README, Single sign-on).
+  `OIDC_DISPLAY_NAME` is what the front end's sign-in button calls the
+  provider; without it, the front end uses words of its own. Like every value
+  in the file it takes no quotes, even with a space in it:
+
+  ```
+  OIDC_DISPLAY_NAME=PolyU NetID
+  ```
+
+  It is at most 64 characters, all of them printable (a tab is not), or the
+  server will not start. The front end asks the server at
+  `GET /v1/auth/methods` whether to show the button at all, and what it
+  says, so the same front end serves a server with single sign-on and one
+  without; a change reaches the sign-in page within a minute of the deploy.
 - **A service that hosts agents** (the agent runtime), where people connect
   their agents from the front end, knows who they are by an assertion Core
   makes for them (README, Signing in to a service that hosts agents). Name
