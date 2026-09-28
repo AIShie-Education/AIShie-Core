@@ -141,21 +141,16 @@ type memAccess struct {
 //  6. Whether its owner lets it keep memory: a write refuses when not
 //     (memory_off), a read finds nothing, and forgetting goes ahead.
 //
-// A write reads the agent's row FOR SHARE, as whatever acts on who owns an
-// agent does: a change of owner, which deletes all it remembers, waits for
-// the write, or the write waits for it and finds the new owner.
+// Who owns the agent is read as it is, for a write too: it never changes
+// (docs/schema.md §2.1), so what the agent keeps about its owner is about the
+// same person for as long as it is kept.
 func memoryAccess(ctx context.Context, q dbq.Querier, cfg memory.Config, caller uuid.UUID, now time.Time, where memWhere, write bool) (memAccess, error) {
 	var acc memAccess
 	if !cfg.Enabled {
 		return acc, errMemoryUnavailable
 	}
 	var err error
-	if write {
-		acc.Holder, err = q.GetActorForShare(ctx, caller)
-	} else {
-		acc.Holder, err = q.GetActor(ctx, caller)
-	}
-	if err != nil {
+	if acc.Holder, err = q.GetActor(ctx, caller); err != nil {
 		return acc, err
 	}
 	if acc.Holder.Kind != "agent" {

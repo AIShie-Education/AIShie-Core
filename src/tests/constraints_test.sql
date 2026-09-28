@@ -250,15 +250,26 @@ SELECT pg_temp.fails('only an agent has an owner', '23514', $q$
 SELECT pg_temp.fails('an owner is an actor that exists', '23514', $q$
     INSERT INTO actor (kind, display_name, owner_actor_id, created_by_actor_id)
     VALUES ('agent', 'x', '00000000-0000-0000-0000-0000000000ff', '00000000-0000-0000-0000-000000000031') $q$);
-SELECT pg_temp.fails('an agent is not moved under another agent', '23514', $q$
+SELECT pg_temp.fails('an agent''s owner never changes: not to another person', '23001', $q$
+    UPDATE actor SET owner_actor_id = '00000000-0000-0000-0000-000000000037' WHERE id = '00000000-0000-0000-0000-000000000038' $q$);
+SELECT pg_temp.fails('nor to an agent', '23001', $q$
     UPDATE actor SET owner_actor_id = '00000000-0000-0000-0000-000000000036' WHERE id = '00000000-0000-0000-0000-000000000038' $q$);
+SELECT pg_temp.fails('nor to nobody', '23001', $q$
+    UPDATE actor SET owner_actor_id = NULL WHERE id = '00000000-0000-0000-0000-000000000038' $q$);
+SELECT pg_temp.fails('and an agent registered with no owner is given none', '23001', $q$
+    UPDATE actor SET owner_actor_id = '00000000-0000-0000-0000-000000000034' WHERE id = '00000000-0000-0000-0000-000000000036' $q$);
+SELECT pg_temp.ok('the rest of an owned agent''s row changes, its owner named as it is', $q$
+    UPDATE actor SET display_name = 'Yuki''s helper', owner_actor_id = '00000000-0000-0000-0000-000000000035'
+     WHERE id = '00000000-0000-0000-0000-000000000038';
+    UPDATE actor SET display_name = 'grader', owner_actor_id = NULL WHERE id = '00000000-0000-0000-0000-000000000036' $q$);
 SELECT pg_temp.fails('an agent someone owns holds no platform role', '23514', $q$
     UPDATE actor SET platform_role = 'admin' WHERE id = '00000000-0000-0000-0000-000000000038' $q$);
 SELECT pg_temp.fails('nor is an agent that holds one given an owner', '23514', $q$
     INSERT INTO actor (kind, display_name, platform_role, owner_actor_id, created_by_actor_id)
     VALUES ('agent', 'x', 'admin', '00000000-0000-0000-0000-000000000035', '00000000-0000-0000-0000-000000000031') $q$);
 SELECT pg_temp.fails('nothing owns itself', '23514', $q$
-    UPDATE actor SET owner_actor_id = id WHERE id = '00000000-0000-0000-0000-000000000038' $q$);
+    INSERT INTO actor (id, kind, display_name, owner_actor_id, created_by_actor_id)
+    VALUES ('00000000-0000-0000-0000-0000000000fe', 'agent', 'x', '00000000-0000-0000-0000-0000000000fe', '00000000-0000-0000-0000-000000000031') $q$);
 SELECT pg_temp.fails('who suspended an actor is an actor', '23503', $q$
     UPDATE actor SET suspended_by_actor_id = '00000000-0000-0000-0000-0000000000ff' WHERE id = '00000000-0000-0000-0000-000000000038' $q$);
 SELECT pg_temp.ok('making an actor active again forgets who suspended it', $q$
@@ -312,14 +323,21 @@ SELECT pg_temp.ok('a delegate''s seat is removed with its principal''s', $q$
             RAISE EXCEPTION 'the delegate outlived its principal''s removal';
         END IF;
     END $chk$ $q$);
+-- Owners changed before migration 0014, which the checks below stand in for
+-- with its trigger switched off, left delegate seats behind in archived
+-- courses that no longer match their agents' owners.
 SELECT pg_temp.fails('a delegate seat is not resumed once its actor has another owner', '23514', $q$
     UPDATE course_member SET status = 'paused' WHERE id = '00000000-0000-0000-0000-00000000005a';
+    ALTER TABLE actor DISABLE TRIGGER actor_owner_fixed;
     UPDATE actor SET owner_actor_id = '00000000-0000-0000-0000-000000000037' WHERE id = '00000000-0000-0000-0000-000000000038';
+    ALTER TABLE actor ENABLE TRIGGER actor_owner_fixed;
     UPDATE course_member SET status = 'active' WHERE id = '00000000-0000-0000-0000-00000000005a' $q$);
-SELECT pg_temp.ok('a removed delegate seat is history: its actor''s owner may change', $q$
+SELECT pg_temp.ok('a removed delegate seat is history: it names the principal its agent''s owner had', $q$
     UPDATE course_member SET status = 'removed' WHERE id = '00000000-0000-0000-0000-00000000005a';
+    ALTER TABLE actor DISABLE TRIGGER actor_owner_fixed;
     UPDATE actor SET owner_actor_id = '00000000-0000-0000-0000-000000000037' WHERE id = '00000000-0000-0000-0000-000000000038';
     UPDATE actor SET owner_actor_id = NULL WHERE id = '00000000-0000-0000-0000-000000000038';
+    ALTER TABLE actor ENABLE TRIGGER actor_owner_fixed;
     INSERT INTO course_member (course_id, actor_id, role, added_by_actor_id, student_scope, assignment_scope)
     VALUES ('00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000000038', 'assistant', '00000000-0000-0000-0000-000000000034', 'all', 'all') $q$);
 SELECT pg_temp.ok('the new permissions default to denied on both tables', $q$

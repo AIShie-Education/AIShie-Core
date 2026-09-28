@@ -119,21 +119,6 @@ func (q *Queries) DeleteMemory(ctx context.Context, arg DeleteMemoryParams) (int
 	return result.RowsAffected(), nil
 }
 
-const deleteMemoryOfHolder = `-- name: DeleteMemoryOfHolder :execrows
-WITH setting AS (DELETE FROM memory_setting s WHERE s.holder_actor_id = $1)
-DELETE FROM memory_entry e WHERE e.holder_actor_id = $1
-`
-
-// Everything an agent holds, and its owner's switch with it: what a change
-// of owner leaves of its memory, which is nothing.
-func (q *Queries) DeleteMemoryOfHolder(ctx context.Context, holderActorID uuid.UUID) (int64, error) {
-	result, err := q.db.Exec(ctx, deleteMemoryOfHolder, holderActorID)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected(), nil
-}
-
 const getMemory = `-- name: GetMemory :one
 SELECT id, holder_actor_id, scope, course_id, holder_member_id, subject_actor_id, subject_member_id, bucket, status,
        body, tags, pinned, source, version, replaces_id, created_at, updated_at, decided_at, decision_reason, purge_after

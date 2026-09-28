@@ -75,12 +75,6 @@ RETURNING version;
 -- name: DeleteMemory :execrows
 DELETE FROM memory_entry WHERE id = $1 AND holder_actor_id = $2;
 
--- name: DeleteMemoryOfHolder :execrows
--- Everything an agent holds, and its owner's switch with it: what a change
--- of owner leaves of its memory, which is nothing.
-WITH setting AS (DELETE FROM memory_setting s WHERE s.holder_actor_id = sqlc.arg(holder_actor_id))
-DELETE FROM memory_entry e WHERE e.holder_actor_id = sqlc.arg(holder_actor_id);
-
 -- name: SearchMemory :many
 -- An agent's entries in force in the given buckets, pinned first, then by
 -- how well they match query (a to_tsquery argument, memory.QueryTerms) with

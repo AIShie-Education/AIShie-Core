@@ -184,3 +184,13 @@ func (w *World) Delegate(course, agent, principal uuid.UUID, preset string, opts
 	}
 	return id
 }
+
+// ChangeOwnerAsBefore0014 changes an agent's owner, or takes it away, as the
+// release before migration 0014 could (actor.set_owner), with the database's
+// refusal switched off for it: what that left behind is still to be handled.
+func (w *World) ChangeOwnerAsBefore0014(agent uuid.UUID, owner *uuid.UUID) {
+	w.T.Helper()
+	w.Exec(`ALTER TABLE actor DISABLE TRIGGER actor_owner_fixed`)
+	w.Exec(`UPDATE actor SET owner_actor_id = $2 WHERE id = $1`, agent, owner)
+	w.Exec(`ALTER TABLE actor ENABLE TRIGGER actor_owner_fixed`)
+}

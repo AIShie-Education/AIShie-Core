@@ -42,7 +42,8 @@ type MeOut struct {
 	PlatformRole  *string `json:"platform_role,omitempty"`
 	// An agent may always know who answers for it. A service that hosts the
 	// agent compares this with the person who hands it the agent's token.
-	OwnerActorID *uuid.UUID `json:"owner_actor_id,omitempty" jsonschema:"for an agent a person owns, that person's actor id; absent for a person, and for an agent nobody owns"`
+	// It never changes (docs/schema.md §2.1).
+	OwnerActorID *uuid.UUID `json:"owner_actor_id,omitempty" jsonschema:"for an agent a person owns, that person's actor id, the same for as long as the agent exists; absent for a person, and for an agent nobody owns"`
 	// Absent for everyone who administers nothing, agents always among them,
 	// so that their answer is what it was before there were departments'
 	// administrators.

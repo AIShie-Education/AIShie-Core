@@ -56,8 +56,9 @@ type Member struct {
 	AnswersCourse bool
 	// SeatValid says the seat is what its actor's ownership says it must
 	// be: a seat with no principal for an actor nobody owns, or the owner's
-	// own seat as principal, held by an active owner. An owner can change
-	// after a seat was taken, and the seat then stops counting. The zero
+	// own seat as principal, held by an active owner. An owner no longer
+	// changes, but one changed before migration 0014 left seats in archived
+	// courses that stop counting once the course is open again. The zero
 	// value is false, so a seat loaded without this check counts for
 	// nothing.
 	SeatValid bool

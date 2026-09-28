@@ -190,16 +190,15 @@ func delegateReach(callerKind string, callerList func() ([]uuid.UUID, error),
 }
 
 // agentOf checks that actor is an agent the caller owns, active, and not
-// seated here already, and returns it, holding its row FOR SHARE
-// (holdOwnAgent). Someone else's agent, or anyone who is not an agent of
-// the caller's, is not found: the caller learns nothing about actors that
-// are not theirs.
+// seated here already, and returns it (ownAgent). Someone else's agent, or
+// anyone who is not an agent of the caller's, is not found: the caller
+// learns nothing about actors that are not theirs.
 //
 // now is the pipeline's clock when there is one. Validate has none, and
 // passes nil: a seat that has an expiry is then left for seat() to judge
 // when the call runs, rather than judged by another clock.
 func agentOf(ctx context.Context, q dbq.Querier, owner, actor, courseID uuid.UUID, now *time.Time) (dbq.Actor, error) {
-	a, err := holdOwnAgent(ctx, q, owner, actor)
+	a, err := ownAgent(ctx, q, owner, actor)
 	if err != nil {
 		return a, err
 	}

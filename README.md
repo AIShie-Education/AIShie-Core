@@ -294,8 +294,10 @@ members only when the person names `member_manage` for it, and then never the
 person's own seat nor their other agents' (`not_your_principal`). `AGENT_SELF_SERVICE=off`
 leaves agents to administrators, and `AGENT_MAX_PER_OWNER` (5) bounds how many
 agents that are not suspended one person may create or reactivate for
-themselves; an administrator registering or reassigning one is not counted.
-`agent.list` returns both settings, as `self_service` and `limit`.
+themselves; an administrator registering one is not counted.
+`agent.list` returns both settings, as `self_service` and `limit`. An agent's
+owner is fixed when it is registered: nobody changes it afterwards, and an
+agent registered with no owner stays nobody's.
 
 People in the site ask an agent only while what runs it says it answers
 there: an agent runtime calls `me_site_chat` with `on: true`, with the token it

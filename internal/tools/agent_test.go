@@ -2,6 +2,7 @@ package tools_test
 
 import (
 	"encoding/json"
+	"errors"
 	"reflect"
 	"slices"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/apperr"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/auth"
@@ -265,10 +267,12 @@ func TestAnOwnersSuspensionIsTheirsAndAnAdministratorsIsNot(t *testing.T) {
 	b.try(t, b.yuki, "agent.reactivate", m{"actor_id": bot}, apperr.Forbidden)
 }
 
-// An administrator may give an agent an owner, change it or take it away,
-// only while it is seated in no course that takes changes, and every token
-// it had is revoked: whoever owned it may hold them.
-func TestAnAgentChangesHandsOnlyOutOfItsCourses(t *testing.T) {
+// An agent's owner is fixed when it is registered: an administrator's
+// registration refuses an owner who is not an active person they may give
+// one to, and afterwards nothing changes the owner, takes it away or gives
+// one to an agent registered without, whoever asks. No tool offers it, and
+// the database refuses it.
+func TestAnAgentsOwnerNeverChanges(t *testing.T) {
 	b := build(t)
 	register := func(args m) pipeline.Outcome {
 		b.key++
@@ -284,87 +288,62 @@ func TestAnAgentChangesHandsOnlyOutOfItsCourses(t *testing.T) {
 	failed("an agent owned by an agent", register(m{"kind": "agent", "display_name": "x", "owner_actor_id": b.grader}), apperr.FailedPrecondition)
 	failed("an agent owned by root, by an admin", register(m{"kind": "agent", "display_name": "x", "owner_actor_id": b.Root}), apperr.Forbidden)
 	bot := testkit.Result[tools.ActorOut](t, register(m{"kind": "agent", "display_name": "Lab bot", "owner_actor_id": b.yuki})).ActorID
+	own := b.agent(t, b.ken, "Ken's helper")
 
-	adminTok := testkit.Result[tools.IssueTokenOut](t, b.do(t, b.admin, "actor.issue_token", m{"actor_id": bot, "label": "server"}))
-	yukiTok := testkit.Result[tools.IssueTokenOut](t, b.do(t, b.yuki, "agent.issue_token", m{"actor_id": bot, "label": "laptop"}))
-	b.delegate(t, b.yuki, bot, m{})
-	b.try(t, b.admin, "actor.set_owner", m{"actor_id": bot, "owner_actor_id": b.ken}, apperr.FailedPrecondition)
-	b.do(t, b.yuki, "agent.withdraw", m{"actor_id": bot, "course_id": b.course})
-	b.do(t, b.admin, "actor.set_owner", m{"actor_id": bot, "owner_actor_id": b.ken})
-	if n := b.Count(`SELECT count(*) FROM credential WHERE id = ANY($1) AND revoked_at IS NOT NULL`,
-		[]uuid.UUID{adminTok.CredentialID, yukiTok.CredentialID}); n != 2 {
-		t.Fatalf("%d of the agent's two tokens were revoked", n)
+	if _, ok := b.P.Registry().Get("actor.set_owner"); ok {
+		t.Fatal("a tool still changes an agent's owner")
 	}
-	b.try(t, b.yuki, "agent.get", m{"actor_id": bot}, apperr.NotFound)
-	b.do(t, b.ken, "agent.get", m{"actor_id": bot})
-	v := testkit.Result[tools.ActorView](t, b.do(t, b.admin, "actor.get", m{"actor_id": bot}))
-	if v.OwnerActorID == nil || *v.OwnerActorID != b.ken || v.OwnerName == nil || *v.OwnerName != "Ken" {
-		t.Fatalf("the agent as an administrator sees it: %+v", v)
+	b.try(t, b.Root, "actor.set_owner", m{"actor_id": bot, "owner_actor_id": b.ken}, apperr.NotFound)
+	for _, tc := range []struct {
+		what  string
+		agent uuid.UUID
+		owner *uuid.UUID
+	}{
+		{"to another person", bot, &b.ken},
+		{"to nobody", bot, nil},
+		{"one its owner made, to another person", own, &b.yuki},
+		{"to a person, for an agent registered with none", b.grader, &b.sato},
+	} {
+		_, err := b.Pool.Exec(t.Context(), `UPDATE actor SET owner_actor_id = $2 WHERE id = $1`, tc.agent, tc.owner)
+		if pgErr := (*pgconn.PgError)(nil); !errors.As(err, &pgErr) || pgErr.Code != "23001" {
+			t.Fatalf("the database, asked to change an agent's owner %s: %v", tc.what, err)
+		}
 	}
-	listed := testkit.Result[tools.ActorListOut](t, b.do(t, b.admin, "actor.list", m{"owner_actor_id": b.ken})).Actors
-	if len(listed) != 1 || listed[0].ID != bot {
-		t.Fatalf("Ken's agents, listed: %+v", listed)
+	for agent, owner := range map[uuid.UUID]uuid.UUID{bot: b.yuki, own: b.ken} {
+		v := testkit.Result[tools.ActorView](t, b.do(t, b.admin, "actor.get", m{"actor_id": agent}))
+		if v.OwnerActorID == nil || *v.OwnerActorID != owner {
+			t.Fatalf("the agent as an administrator sees it: %+v", v)
+		}
 	}
-	b.try(t, b.admin, "actor.set_owner", m{"actor_id": bot, "owner_actor_id": b.ken}, apperr.Conflict)
-	b.try(t, b.admin, "actor.set_owner", m{"actor_id": b.sato, "owner_actor_id": b.ken}, apperr.FailedPrecondition)
-	b.try(t, b.admin, "actor.set_owner", m{"actor_id": bot, "owner_actor_id": b.tutor}, apperr.FailedPrecondition)
+	if v := testkit.Result[tools.ActorView](t, b.do(t, b.admin, "actor.get", m{"actor_id": b.grader})); v.OwnerActorID != nil {
+		t.Fatalf("the agent registered with no owner: %+v", v)
+	}
+}
 
-	// Owned by nobody, it is an ordinary agent again, and seated as one.
-	b.do(t, b.admin, "actor.set_owner", m{"actor_id": bot, "owner_actor_id": nil})
+// An owner changed before migration 0014 could leave a seat behind in an
+// archived course, which the change could not reach. Once the course is
+// opened again it counts for nothing, not being its owner's delegate, and
+// its owner brings the agent in afresh over it.
+func TestASeatLeftByAnOwnerChangedBefore0014CountsForNothing(t *testing.T) {
+	b := build(t)
+	bot := testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", m{"kind": "agent", "display_name": "Lab bot"})).ActorID
 	seat := testkit.Result[tools.MemberIDOut](t, b.do(t, b.sato, "member.add", m{"course_id": b.course, "actor_id": bot, "preset": "tutor"})).MemberID
-	// In an archived course a seat stays, and stops counting once the agent
-	// has an owner: it is not its owner's delegate.
 	b.do(t, b.admin, "course.archive", m{"course_id": b.course})
-	b.do(t, b.admin, "actor.set_owner", m{"actor_id": bot, "owner_actor_id": b.yuki})
+	b.ChangeOwnerAsBefore0014(bot, &b.yuki)
 	b.do(t, b.admin, "course.activate", m{"course_id": b.course})
 	if out := b.MustCall(bot, "course.get", m{"course_id": b.course}, ""); out.Status != domain.StatusDenied || reason(out) != "principal_not_active" {
 		t.Fatalf("the agent's old seat after it changed hands: %+v", out)
 	}
-	// Its owner brings it in afresh, over the seat that counts for nothing.
 	fresh := b.delegate(t, b.yuki, bot, m{})
 	if fresh == seat || b.Count(`SELECT count(*) FROM course_member WHERE id = $1 AND status = 'removed'`, seat) != 1 {
 		t.Fatal("the old seat was not removed for the fresh one")
 	}
 }
 
-// When an agent changes hands, nothing its owner before held of it survives:
-// no credential of any kind — a password set through a token included — and
-// no request of theirs to seat it.
-func TestAnAgentChangesHandsWithNothingLeftBehind(t *testing.T) {
-	b := build(t)
-	bot := testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register",
-		m{"kind": "agent", "display_name": "Lab bot", "email": "labbot@example.edu", "owner_actor_id": b.yuki})).ActorID
-	b.do(t, b.yuki, "agent.issue_token", m{"actor_id": bot, "label": "laptop"})
-	b.do(t, bot, "credential.set_password", m{"password": "a long enough password"})
-	b.do(t, b.admin, "actor.invite", m{"actor_id": bot})
-	asked := b.MustCall(b.yuki, "member.add_delegate", m{"course_id": b.course, "actor_id": bot}, "ask")
-	if asked.Status != domain.StatusProposed {
-		t.Fatalf("Yuki's request: %+v", asked)
-	}
-
-	b.do(t, b.admin, "actor.set_owner", m{"actor_id": bot, "owner_actor_id": b.ken})
-	if n := b.Count(`SELECT count(*) FROM credential WHERE actor_id = $1 AND revoked_at IS NULL`, bot); n != 0 {
-		t.Fatalf("%d of the agent's credentials outlived the change of owner", n)
-	}
-	if _, err := auth.NewAuthenticator(b.Pool, 0).Login(t.Context(), "labbot@example.edu", "a long enough password"); !apperr.Is(err, apperr.Unauthenticated) {
-		t.Fatalf("signing in as the agent with the password set while it was Yuki's: %v", err)
-	}
-	if n := b.Count(`SELECT count(*) FROM action WHERE id = $1 AND status = 'cancelled' AND result->'error'->'details'->>'why' = 'owner_changed'`,
-		asked.ActionID); n != 1 {
-		t.Fatal("Yuki's request to seat the agent was not cancelled")
-	}
-	if got := testkit.Result[tools.AgentGetOut](t, b.do(t, b.ken, "agent.get", m{"actor_id": bot})); len(got.Requests) != 0 {
-		t.Fatalf("Ken is shown Yuki's requests: %+v", got.Requests)
-	}
-	if got := testkit.Result[tools.AgentListOut](t, b.do(t, b.ken, "agent.list", m{})); len(got.Agents) != 1 || got.Agents[0].PendingRequests != 0 {
-		t.Fatalf("Ken's agents: %+v", got.Agents)
-	}
-}
-
 // An agent knows who owns it, as me.get says: a service that hosts it checks
 // that the person handing it the agent's token is that owner. A person, and
-// an agent nobody owns, name nobody; an agent that changes hands names its
-// new owner, and the tokens its owner before held no longer work.
+// an agent nobody owns, name nobody; every token of an agent names the same
+// owner, which never changes.
 func TestAnAgentKnowsWhoOwnsIt(t *testing.T) {
 	b := build(t)
 	authn := auth.NewAuthenticator(b.Pool, 0)
@@ -410,18 +389,9 @@ func TestAnAgentKnowsWhoOwnsIt(t *testing.T) {
 	got, raw = me(kens)
 	names("an agent an administrator registered for Ken", got, raw, &b.ken)
 
-	// It changes hands: Yuki's token stops working, and a token Ken issues
-	// names Ken.
-	b.do(t, b.admin, "actor.set_owner", m{"actor_id": bot, "owner_actor_id": b.ken})
-	if _, err := authn.Authenticate(t.Context(), yukis); !apperr.Is(err, apperr.Unauthenticated) {
-		t.Fatalf("the token Yuki held, after the agent changed hands: %v", err)
-	}
-	got, raw = me(token(b.ken, "agent.issue_token", bot))
-	names("the agent, now Ken's", got, raw, &b.ken)
-	// Owned by nobody, it names nobody.
-	b.do(t, b.admin, "actor.set_owner", m{"actor_id": bot, "owner_actor_id": nil})
+	// A token issued later names the same owner: it never changes.
 	got, raw = me(token(b.admin, "actor.issue_token", bot))
-	names("the agent, owned by nobody", got, raw, nil)
+	names("Yuki's own agent, by an administrator's token", got, raw, &b.yuki)
 
 	// Its owner suspended, an agent still names him, since he still owns it;
 	// Core vouches for no suspended person to a runtime, so he cannot
@@ -454,38 +424,9 @@ func TestAnOwnedAgentHoldsNoPlatformRole(t *testing.T) {
 	if out.Status != domain.StatusFailed || out.Error.Code != apperr.InvalidArgument {
 		t.Fatalf("an owned agent with a platform role: %+v", out)
 	}
-	bot := testkit.Result[tools.ActorOut](t, b.do(t, b.Root, "actor.register", m{"kind": "agent", "display_name": "Admin bot", "platform_role": "admin"})).ActorID
-	b.try(t, b.Root, "actor.set_owner", m{"actor_id": bot, "owner_actor_id": b.yuki}, apperr.FailedPrecondition)
-}
-
-// A change of owner and a write that acts on who owns the agent do not pass
-// each other: while the change is under way, a token its owner before asks
-// for, or a seat, waits for it, and is then refused.
-func TestAChangeOfOwnerIsNotPassedByItsOwnerBefore(t *testing.T) {
-	b := build(t)
-	bot := b.agent(t, b.yuki, "Yuki's helper")
-	for _, tc := range []struct {
-		name string
-		args m
-	}{
-		{"agent.issue_token", m{"actor_id": bot, "label": "late"}},
-		{"member.add_delegate", m{"course_id": b.course, "actor_id": bot}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			release := b.hold(t, `UPDATE actor SET owner_actor_id = $2 WHERE id = $1`, bot, b.ken)
-			done := make(chan pipeline.Outcome, 1)
-			b.start(t, done, b.yuki, tc.name, tc.args)
-			b.blocked(t, 1, done)
-			release()
-			if out := <-done; out.Status != domain.StatusFailed || out.Error.Code != apperr.NotFound {
-				t.Fatalf("%s racing a change of owner: %+v", tc.name, out)
-			}
-			b.hold(t, `UPDATE actor SET owner_actor_id = $2 WHERE id = $1`, bot, b.yuki)()
-		})
-	}
-	if n := b.Count(`SELECT count(*) FROM credential WHERE actor_id = $1`, bot); n != 0 {
-		t.Fatalf("the owner before was issued %d tokens during the change", n)
-	}
+	// Registered with a platform role and no owner, it is given none later
+	// either (TestAnAgentsOwnerNeverChanges).
+	b.do(t, b.Root, "actor.register", m{"kind": "agent", "display_name": "Admin bot", "platform_role": "admin"})
 }
 
 // A student asks to bring her agent in; an instructor approves; the agent is

@@ -80,6 +80,11 @@ src/
                          an agent's denied; presets by role
     0013_member_invite.down.sql
                          drops it from both tables
+    0014_agent_owner_fixed.up.sql
+                         an agent's owner never changes: a trigger refuses
+                         any change to it, taking it away or giving one
+    0014_agent_owner_fixed.down.sql
+                         drops the refusal; every agent keeps its owner
   seed/
     presets.sql          the eight built-in permission presets; safe to re-run
   tests/
@@ -170,7 +175,9 @@ conversation with an answer waiting, 0009 over a tutor's memory of a student
 and a proposal to the course's shared memory, 0010 over a tree with an
 appointment in force and one ended, 0011 over an agent's site chat declared,
 0012 over join links, a person registered through one and seats taken
-through it, and 0013 over a seat and a preset that hand out links.
+through it, 0013 over a seat and a preset that hand out links, and 0014
+over an owned agent and one nobody owns, whose owners may change again once
+it is down.
 
 ## What the database enforces
 
@@ -203,6 +210,7 @@ MCP, these are the invariants that survive a bug in the tool layer.
 | Status, role, kind and scope columns hold only listed values | `*_valid` CHECKs |
 | Emails are unique regardless of case | unique index on `lower(email)` |
 | Only an agent has an owner; its owner is a person, not an agent, the system actor or itself; an agent someone owns holds no platform role | `actor_not_own_owner`, `actor_owned_is_agent`, `actor_owned_holds_no_platform_role`, trigger `actor_owner_valid` |
+| An agent's owner is fixed when it is registered: never changed, taken away or given later | trigger `actor_owner_fixed` |
 | Making an actor active forgets who suspended it | trigger `actor_suspension_cleared` |
 | A seat that is not removed has a principal exactly when its actor has an owner; the principal is the owner's seat, in the same course, and nobody's delegate | composite FK `course_member_principal_fk`, trigger `course_member_principal_valid` |
 | A delegate's seat is removed with its principal's, whichever release removes it | trigger `course_member_delegates_follow` |

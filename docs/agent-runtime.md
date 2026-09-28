@@ -144,7 +144,7 @@ rejected, cancelled). That is safe: Core refuses a second answer to a message
 
 | Tool | Use |
 |---|---|
-| `me_get` | Checks the token and returns the agent's actor: `id`, `kind`, `display_name`, `status`, and `owner_actor_id`, the person who owns it. `owner_actor_id` is absent for an agent nobody owns (one an administrator registered without an owner), and for a person, whose own token the runtime refuses anyway (`kind` is not `agent`). It names the owner while the owner is suspended too; Core gives a suspended person no assertion (§5.1), so they cannot connect the agent meanwhile. When the agent changes hands (`actor.set_owner`), every token it had is revoked, so a stored token answers 401 before it could name the new owner. |
+| `me_get` | Checks the token and returns the agent's actor: `id`, `kind`, `display_name`, `status`, and `owner_actor_id`, the person who owns it. `owner_actor_id` is absent for an agent nobody owns (one an administrator registered without an owner), and for a person, whose own token the runtime refuses anyway (`kind` is not `agent`). It names the owner while the owner is suspended too; Core gives a suspended person no assertion (§5.1), so they cannot connect the agent meanwhile. An agent's owner is fixed when it is registered and never changes (schema.md §2.1), so the owner a stored token's agent names is the one it named when the token was taken. |
 | `me_memberships` | Every seat: `member_id`, `course_id`, `code`, `section`, `title`, `course_status`, `role`, `status`, `expires_at`, `student_scope`, `assignment_scope`, `principal_member_id`, `perms` (permission to level, a delegate's capped by its principal's, all `denied` while the seat does not count) and `answers_course`. Work only in active seats of courses not archived whose `perms.conversation_answer` is not denied. |
 | `me_site_chat` | `{on: true}` when the runtime starts the agent, with the token it runs it with, and `{on: false}` when it stops: until then people in the site are not offered the agent, and `conversation.open` and `conversation.ask` addressed to it are refused `failed_precondition`, `agent_answers_elsewhere`. Returns `site_chat`, whether it holds now (false while the owner is suspended). It holds only while that token works: revoked or expired, it ends by itself, and a new token must declare it again. The owner may end it (`agent.update` with `site_chat: false`), never start it; the runtime starts it again on its next start. A person's token is refused, `not_an_agent`. Conversations already open are unaffected: the agent answers them, and they stay readable. |
 
@@ -691,9 +691,9 @@ with a one-token call), the runtime says the agent answers in the site
 (`me_site_chat`, §2.3), and polling starts. The runtime takes the token only
 from the agent's owner: `me_get`'s `owner_actor_id` must be the person signed
 in. It refuses a token whose `kind` is not `agent` (never a person's own), and
-leaves an agent nobody owns to the runtime's administrators. It checks the
-owner again whenever the agent starts, and stops an agent whose owner has
-changed; the change of owner has revoked its token in Core anyway.
+leaves an agent nobody owns to the runtime's administrators. An agent's owner
+never changes in Core, so the owner checked when the token was taken stays
+its owner for as long as the token works.
 
 ### 5.2 Whose key
 

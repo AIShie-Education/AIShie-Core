@@ -73,7 +73,7 @@ actor(id, kind [human|agent|system], display_name, email null,
            site_chat_credential_id set ⇒ kind = 'agent';
            not email_verified ⇒ kind = 'human' and email set
     composite FK (site_chat_credential_id, id) → credential(id, actor_id)
-    trigger: the owner is a person (kind = 'human')
+    trigger: the owner is a person (kind = 'human'), and never changes
 
 credential(id, actor_id→actor, kind [password|sso|api_token|session|invite],
            secret_hash null, provider null, subject null, token_prefix null,
@@ -109,17 +109,22 @@ of their own (`agent.create`, unless `AGENT_SELF_SERVICE=off`), up to `AGENT_MAX
 are not suspended, and looks after them with the `agent.*` tools: names them, issues and revokes
 their tokens, suspends them, takes them out of a course (`agent.withdraw`). Each of those answers
 "no such agent of yours" for an actor the caller does not own, whether it exists or not. An
-administrator may register an agent with an owner (`actor.register`), and give one an owner,
-change it or take it away (`actor.set_owner`): only while it is seated in no course that is not
-archived, revoking every credential it has — tokens, sessions, password, invitation, linked
-identity — which whoever owned it may hold, cancelling the requests the owner before made to
-seat it, and deleting everything the agent remembers (§2.9). The change holds the agent's row first, and every write that acts on who owns it — a
-token issued, a seat taken or given up — reads it `FOR SHARE`, so neither passes the other. A seat
-it keeps in an archived course stops counting, since it no longer matches the owner, and is
-removed by the sweep once the course is opened again. An agent does not own agents; the system
-actor owns nothing; an agent someone owns holds no platform role, since owning it and holding its
-tokens would then be more than a seat; an administrator does not give root or another
-administrator an agent to answer for.
+administrator may register an agent with an owner (`actor.register`).
+
+**An agent's owner never changes.** It is fixed when the agent is registered — by `agent.create`,
+whose caller owns it, or by an administrator's `actor.register` — and nobody sets, changes or
+takes it away afterwards, a platform administrator included; an agent registered with no owner
+stays nobody's. The database holds it (trigger `actor_owner_fixed`, migration 0014). So a
+delegate seat always matches its agent's owner, what an agent keeps about its owner (§2.9) is
+about the same person for as long as it is kept, and a token issued for an agent is never in the
+hands of someone it no longer answers to: nothing is revoked, cancelled or forgotten for a change
+of hands, and nothing that reads who owns an agent holds its row to keep it so. Before 0014 an
+administrator could change an owner (`actor.set_owner`) while the agent sat in no course that was
+not archived; a seat it kept in an archived course then stopped counting, since it no longer
+matched the owner, and is removed by the sweep once the course is opened again (§2.2). An agent
+does not own agents; the system actor owns nothing; an agent someone owns holds no platform role,
+since owning it and holding its tokens would then be more than a seat; an administrator does not
+give root or another administrator an agent to answer for.
 
 `suspended_by_actor_id` says who made the suspension in force, and is read only while `status =
 'suspended'`. An owner lifts only a suspension of their own. An administrator lifts any, and may
@@ -381,8 +386,9 @@ narrows a principal without touching its delegates — and which a manager may h
 - it reaches only what its own scope and its principal's both reach, in `authorize()` and in
   every list, which filters by both in SQL;
 - it counts only while its principal's seat is live, its owner active, and its principal still
-  its owner's seat: paused with its principal, gone with it, and nothing once the agent changes
-  hands. An owned agent's seat with no principal counts for nothing either.
+  its owner's seat: paused with its principal, gone with it, and nothing if the agent changed
+  hands before owners were fixed (§2.1). An owned agent's seat with no principal counts for
+  nothing either.
 
 A delegate may be given `member_manage` — seat, change, pause, resume, rescope and remove
 members — and `member_invite`, as far as its principal holds them, by its owner when it is
@@ -431,7 +437,7 @@ the principal anyway. The database removes a delegate's seat with its principal'
 release before 0007, which knows no delegates, does not leave one behind; that release does not
 cancel its proposals, which approval refuses and the expiry sweep cancels. An owner takes their
 agent out of a course with `agent.withdraw`. A delegate's seat left behind — its agent changed
-hands, or its principal's seat past its expiry — is removed by a sweep (`member.remove_orphan`),
+hands before 0014, or its principal's seat past its expiry — is removed by a sweep (`member.remove_orphan`),
 and by seating the agent again. `member.update_perms_bulk` changes a permission on every live seat of
 one roster role at once, other than the caller's — "students may bring agents only with
 approval" — each change held to the rules of a change to one seat, all or none. It changes the
@@ -916,8 +922,7 @@ call came with (`actor.site_chat_credential_id`, §2.1); `on: false` clears it. 
 while that credential is live, neither revoked nor expired, the agent is active, and its owner,
 if it has one, is active. That is worked out in SQL whenever it is needed and never kept as a
 flag, so revoking the runtime's token, as ending its hosting does, ends it with nothing left
-behind to say otherwise, and so does a change of owner, which revokes every credential the agent
-has. Its owner switches it off (`agent.update` with `site_chat: false`) and never on: only what
+behind to say otherwise. Its owner switches it off (`agent.update` with `site_chat: false`) and never on: only what
 runs the agent knows that it answers, and says so again whenever it starts. Only an agent
 declares it; a person is refused (`not_an_agent`), a refusal that reads `kind` as those of
 ownership do (§2.1). `agent.get` and `agent.list` say `site_chat` of each agent, and
@@ -1117,10 +1122,10 @@ and a proposal is corrected in place. A version given with a correction changes 
 (`version_mismatch`). Every read says that memory is data, never instructions. Nothing about
 memory reaches the event feed.
 
-**A change of owner** (`actor.set_owner`) deletes everything the agent holds, in every scope and
-course, with its owner's switch: the new owner may read nothing the agent kept about its old
-owner, nor about the people it answered for them. A write to memory holds the agent's row `FOR
-SHARE`, as issuing it a token does, so none lands after the change.
+**An agent's owner never changes** (§2.1), so there is no new owner to keep its memory from:
+what it keeps about its owner is about the one person for as long as it is kept. Before
+migration 0014 a change of owner (`actor.set_owner`) deleted everything the agent held, with its
+owner's switch.
 
 ### 2.10 Departments and their administrators
 
@@ -1302,6 +1307,7 @@ that reads which credential the call came with.
 | Owner columns match `document.kind`; a version has content; SSO rows carry an identity | CHECKs |
 | Emails are unique regardless of case | unique index on `lower(email)` |
 | Only an agent has an owner, and its owner is a person: not an agent, not the system actor, not itself | CHECKs on `actor`, trigger `actor_owner_valid` |
+| An agent's owner is fixed when it is registered: never changed, taken away, or given to one registered without | trigger `actor_owner_fixed` |
 | An agent someone owns holds no platform role | CHECK `actor_owned_holds_no_platform_role` |
 | Making an actor active forgets who suspended it | trigger `actor_suspension_cleared` |
 | Only an agent declares that it takes conversations in the site, and only with a credential of its own | CHECK `actor_site_chat_is_agent`, composite FK `actor_site_chat_credential_fk` |
@@ -1447,15 +1453,9 @@ that reads which credential the call came with.
   What an owner does for themselves is capped: `agent.create`, and `agent.reactivate` of one they
   suspended, are refused once they have `AGENT_MAX_PER_OWNER` agents that are not suspended,
   counted under a lock on the owner, so two at once are counted one after the other. An
-  administrator's `actor.register` with an owner, `actor.set_owner` and `actor.reactivate` are
+  administrator's `actor.register` with an owner and `actor.reactivate` are
   not counted: an administrator may give someone more. An owner lifts only a suspension of their
   own; an administrator's, or one from before it was recorded, is not theirs.
-- An agent changes owner only while seated in no course that is not archived, and every
-  credential it has is revoked, every request to seat it cancelled, and everything it remembers
-  deleted, as it does. The change
-  holds the agent's row, `FOR NO KEY UPDATE`, before it looks at anything; issuing it a token
-  and seating it or taking it out read the row `FOR SHARE`, so that a token or a seat made by
-  the owner before is revoked or counted, never left behind.
 - An agent takes conversations in the site (§2.8) only while the credential that declared it
   (`me.site_chat`, with the credential of the call) is live, the agent active and its owner, if
   any, active: worked out in SQL on every read that needs it, never stored as a flag. Only an

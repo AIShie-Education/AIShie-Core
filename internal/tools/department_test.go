@@ -186,7 +186,6 @@ func TestADepartmentAdministratorManagesNoAccountAndNothingPlatformWide(t *testi
 		"actor.suspend":           {"actor_id": w.Dan},
 		"actor.reactivate":        {"actor_id": w.Dan},
 		"actor.update":            {"actor_id": w.Dan, "display_name": "Daniel"},
-		"actor.set_owner":         {"actor_id": w.Robo, "owner_actor_id": w.Dan},
 		"actor.issue_token":       {"actor_id": w.Dan, "label": "mine now"},
 		"actor.link_sso":          {"actor_id": w.Dan, "provider": "polyu-adfs", "subject": "dan@example.edu"},
 		"actor.list":              {},
