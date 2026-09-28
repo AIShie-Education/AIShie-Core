@@ -182,7 +182,8 @@ func (w *statusRecorder) Unwrap() http.ResponseWriter { return w.ResponseWriter 
 
 // logged writes one line per request. It never logs a header, a body or a
 // query string — that is where credentials and students' work travel — and
-// it cuts the token out of a blob URL, which is a credential in a path.
+// it cuts the token out of a blob URL and a join link, each a credential in
+// a path.
 func (s *server) logged(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
@@ -220,6 +221,9 @@ func (s *server) logged(next http.Handler) http.Handler {
 func safePath(p string) string {
 	if strings.HasPrefix(p, blob.BlobPath) {
 		return blob.BlobPath + "…"
+	}
+	if safe, ok := joinSafePath(p); ok {
+		return safe
 	}
 	return p
 }

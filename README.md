@@ -61,6 +61,10 @@ on.
 
 - single sign-on over OpenID Connect (written against ADFS), which signs in
   people who are already registered and creates nobody;
+- join links: a course's link, shown in class as a QR code and working for ten
+  minutes, seats whoever opens it as a student, signed in or registering
+  through it, which is the one way a person registers themselves; made by
+  whoever holds `member_invite`, with their authority;
 - assertions: a short-lived, signed statement of who is signed in, which a
   service that hosts agents checks against the key Core publishes, so that
   it needs no sign-in of its own;
@@ -213,6 +217,46 @@ Signing in creates nobody. An administrator registers the person
 provider's name and the person's UPN) first; until then the provider vouching
 for someone makes them nobody here. An identity that has opened one account is
 never reassigned to another.
+
+### Join links
+
+Students come into a course by a link, typically a QR code shown in class.
+Whoever holds `member_invite` makes one with `course.join_link_create`
+(`{course_id, max_uses?, allowed_email_domains?}`), and is given its token
+once, with `link_id` and `expires_at`: every link works for ten minutes from
+when it is made, and then never again. `course.join_link_list` shows the
+course's links, newest first, with their `status` (`live`, `expired`,
+`used_up`, `revoked`), whether each seats anyone now and why not, and never a
+token; `course.join_link_revoke` stops one. The front end puts the token in
+its own join page's URL, and that page calls, with no tool in between:
+
+```
+GET  /v1/join/{token}            anyone; no credential
+     200 {"course": {"code", "section", "title"}, "joinable": true|false,
+          "reason": "expired|used_up|revoked|course_archived|creator_lost_authority",
+          "expires_at", "registration": true|false, "allowed_email_domains": [...]}
+     404 for every token that is not one, whatever is wrong with it
+POST /v1/join/{token}            signed in, however: password, single sign-on, a token
+     Idempotency-Key as every write; the answer is a tool call's, with
+     result {course_id, member_id, status, already_member, join_link_id}
+POST /v1/join/{token}/register   {"display_name", "email", "password"}; no credential
+     200 {actor_id, expires_at, course_id, member_id, action_id}, signed in
+     with the session cookie a password sign-in gives
+```
+
+A person signed in is seated as a student at once, or answered with the seat
+they have (`already_member`, no use counted). A refusal says why in
+`error.details.reason`: the link's own reason, `people_only` for an agent,
+`email_domain_not_allowed`, `actor_not_active`; registering, `email_taken`
+(sign in, then open the link again; the account that has the email is not
+touched) or a field's rule. Registering is the one way a person registers
+themselves, and only through a live link: their email is recorded as
+unchecked (`email_verified` false) until an administrator sets it. It is
+limited per address together with sign-in attempts
+(`SIGN_IN_ATTEMPTS_PER_MINUTE`) and per link (`JOIN_REGISTRATIONS_PER_MINUTE`,
+60). `JOIN_LINK_REGISTRATION=off` turns registering off, as when single
+sign-on covers everyone: the preview says `registration: false`, the endpoint
+refuses (`registration_disabled`), and people sign in and then join.
 
 ### Connecting an agent
 

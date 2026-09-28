@@ -96,10 +96,17 @@ type Deps struct {
 	Assertions *auth.Asserter
 
 	// Calls bounds how fast one actor may call; SignIns bounds sign-in
-	// attempts per email, and per address those that fail. Nil means no
-	// limit.
-	Calls   *ratelimit.Limiter
-	SignIns *ratelimit.Limiter
+	// attempts per email, and per address those that fail, and counts
+	// registrations through a join link from an address with them;
+	// Registrations bounds registrations through one join link. Nil means
+	// no limit.
+	Calls         *ratelimit.Limiter
+	SignIns       *ratelimit.Limiter
+	Registrations *ratelimit.Limiter
+	// NoJoinRegistration turns off registering through a join link
+	// (JOIN_LINK_REGISTRATION=off): people sign in, by single sign-on say,
+	// and then join. The zero value takes registrations.
+	NoJoinRegistration bool
 
 	// MCP is the agents' door, mounted at /mcp beside the REST routes and
 	// behind notRebound, but not behind their cross-origin guard (below). It
@@ -147,6 +154,9 @@ func NewHandler(d Deps) http.Handler {
 			mux.HandleFunc("GET "+ssoReturnPath, s.ssoCallback)
 		}
 		mux.Handle("POST /v1/auth/logout", s.authenticated(s.logout))
+		mux.HandleFunc("GET "+JoinPath+"{token}", s.joinPreview)
+		mux.Handle("POST "+JoinPath+"{token}", s.authenticated(s.joinWithLink))
+		mux.HandleFunc("POST "+JoinPath+"{token}/register", s.joinRegister)
 		mux.Handle("POST "+AssertionPath, s.assertions(s.authenticated(s.assert)))
 		mux.HandleFunc("GET "+KeysPath, s.keys)
 		mux.HandleFunc("GET /v1/tools", s.listTools)

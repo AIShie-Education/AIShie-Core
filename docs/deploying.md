@@ -287,6 +287,13 @@ Run all of these as root on the server.
   `instructor` preset, which carries `member_invite`, until it names
   `"member_invite": "denied"` in `perms`, or an instructor gives it
   `member_invite` with `member.update_perms`.
+- **Join links and registering:** someone with no account may register
+  through a live join link, the one way anyone registers themselves; every
+  link works for ten minutes. `JOIN_LINK_REGISTRATION=off` in the env file
+  stops that, as once single sign-on covers everyone: people sign in and then
+  join. Registrations count against the address's sign-in attempts
+  (`SIGN_IN_ATTEMPTS_PER_MINUTE`, so name the proxy in `TRUSTED_PROXIES`) and
+  are limited per link (`JOIN_REGISTRATIONS_PER_MINUTE`, default 60).
 - **Updating the scripts:** when `deploy/` changes, copy it to the server
   again and run `setup-server.sh` as in step 1. It installs the new scripts
   and leaves the rest.

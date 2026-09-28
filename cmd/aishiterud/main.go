@@ -60,7 +60,9 @@ Environment:
   RATE_LIMIT_PER_MINUTE        default 600 calls per actor per instance; 0 for no limit
   RATE_LIMIT_BURST             default 100
   SIGN_IN_ATTEMPTS_PER_MINUTE  default 10, per address (an IPv6 /64 counts as one) and per email;
-                               a sign-in that succeeds is not counted against its address
+                               a sign-in that succeeds is not counted against its address;
+                               registrations through a join link count with an address's sign-ins
+  JOIN_REGISTRATIONS_PER_MINUTE  default 60, per join link; 0 for no limit
   JOBS              default true; background sweeps (only one instance sweeps at a time)
   JOBS_INTERVAL     default 1m
   SESSION_TTL       default 12h
@@ -87,6 +89,9 @@ Environment:
                        uses words of its own. GET /v1/auth/methods tells the front end this,
                        and whether single sign-on is on.
                        Register <PUBLIC_URL>/v1/auth/sso/callback with the provider.
+  JOIN_LINK_REGISTRATION  on (default) or off; whether someone with no account may register
+                       through a course's join link. Off, people sign in (by single sign-on,
+                       say) and then join; GET /v1/join/{token} says registration is false
   RUNTIME_AUDIENCES    the services that host agents a signed-in person may be vouched for to,
                        comma separated absolute URLs such as https://lms.example.edu/runtime;
                        POST /v1/auth/assertion makes the assertion, GET /v1/auth/keys checks it;
@@ -218,6 +223,7 @@ func serve(cfg config.Config) error {
 			Pool: pool, LatestSchema: latest, Pipeline: pl, Log: log,
 			Auth: authn, MCP: mcpapi.NewHandler(mcpapi.Deps{Pipeline: pl, Auth: authn, Log: log, Calls: calls, Memory: cfg.Memory.Enabled}),
 			Calls: calls, SignIns: ratelimit.New(cfg.SignInsPerMinute, cfg.SignInsPerMinute),
+			Registrations: ratelimit.New(cfg.JoinRegistrationsPerMinute, cfg.JoinRegistrationsPerMinute), NoJoinRegistration: !cfg.JoinLinkRegistration,
 			TrustedOrigins: cfg.TrustedOrigins, TrustedProxies: cfg.TrustedProxies,
 			InsecureCookies: cfg.InsecureCookies, CookieSameSite: sameSite(cfg.CookieSameSite),
 			Blob: store, MaxUploadBytes: cfg.MaxUploadBytes,
