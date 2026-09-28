@@ -2,6 +2,7 @@ package tools_test
 
 import (
 	"encoding/json"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -405,7 +406,8 @@ func TestAnAgentKnowsWhoOwnsIt(t *testing.T) {
 	names("an agent registered with no owner", got, raw, nil)
 	registered := testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register",
 		m{"kind": "agent", "display_name": "Ken's lab bot", "owner_actor_id": b.ken})).ActorID
-	got, raw = me(token(b.admin, "actor.issue_token", registered))
+	kens := token(b.admin, "actor.issue_token", registered)
+	got, raw = me(kens)
 	names("an agent an administrator registered for Ken", got, raw, &b.ken)
 
 	// It changes hands: Yuki's token stops working, and a token Ken issues
@@ -420,6 +422,22 @@ func TestAnAgentKnowsWhoOwnsIt(t *testing.T) {
 	b.do(t, b.admin, "actor.set_owner", m{"actor_id": bot, "owner_actor_id": nil})
 	got, raw = me(token(b.admin, "actor.issue_token", bot))
 	names("the agent, owned by nobody", got, raw, nil)
+
+	// Its owner suspended, an agent still names him, since he still owns it;
+	// Core vouches for no suspended person to a runtime, so he cannot
+	// connect it there. Nothing else of his is shown: me.get is the agent's
+	// own row, and his id is all it says of him.
+	b.do(t, b.admin, "actor.suspend", m{"actor_id": b.ken})
+	got, raw = me(kens)
+	names("an agent whose owner is suspended", got, raw, &b.ken)
+	var fields map[string]any
+	if err := json.Unmarshal([]byte(raw), &fields); err != nil {
+		t.Fatal(err)
+	}
+	delete(fields, "owner_actor_id")
+	if want := (map[string]any{"id": registered.String(), "kind": "agent", "display_name": "Ken's lab bot", "status": "active"}); !reflect.DeepEqual(fields, want) {
+		t.Fatalf("me.get says more than the agent's own row: %s", raw)
+	}
 
 	// The catalogue says so, as a field that may be absent.
 	tl, _ := b.P.Registry().Get("me.get")
