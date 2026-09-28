@@ -82,6 +82,10 @@ Environment:
   OIDC_PROVIDER_NAME   default polyu-adfs; what actor.link_sso calls the provider
   OIDC_SUBJECT_CLAIM   default upn; the claim an account is known by
   OIDC_SCOPES          default "openid profile email"
+  OIDC_DISPLAY_NAME    the provider's name on the front end's sign-in button, such as
+                       "PolyU NetID", at most 64 printable characters; unset, the front end
+                       uses words of its own. GET /v1/auth/methods tells the front end this,
+                       and whether single sign-on is on.
                        Register <PUBLIC_URL>/v1/auth/sso/callback with the provider.
   RUNTIME_AUDIENCES    the services that host agents a signed-in person may be vouched for to,
                        comma separated absolute URLs such as https://lms.example.edu/runtime;
@@ -217,7 +221,7 @@ func serve(cfg config.Config) error {
 			TrustedOrigins: cfg.TrustedOrigins, TrustedProxies: cfg.TrustedProxies,
 			InsecureCookies: cfg.InsecureCookies, CookieSameSite: sameSite(cfg.CookieSameSite),
 			Blob: store, MaxUploadBytes: cfg.MaxUploadBytes,
-			SSO: sso, Signer: signatures, Assertions: asserter,
+			SSO: sso, Signer: signatures, SSOLabel: cfg.OIDC.DisplayName, Assertions: asserter,
 		}),
 		// Headers within ten seconds, an idle keep-alive for two minutes; the
 		// body and the response are bounded per request by the handler.

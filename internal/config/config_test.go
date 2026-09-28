@@ -3,6 +3,7 @@ package config
 import (
 	"bytes"
 	"encoding/base64"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -45,6 +46,58 @@ func TestFromEnv(t *testing.T) {
 				t.Fatal("accepted")
 			}
 		})
+	}
+}
+
+// OIDC_DISPLAY_NAME is shown on the front end's sign-in button as it is, so
+// it is taken only if it is short and every character of it is drawn. A bad
+// one is refused whether single sign-on is on or not.
+func TestOIDCDisplayName(t *testing.T) {
+	onOff := map[bool]string{false: "off", true: "on"}
+	sso := func(t *testing.T, on bool) {
+		if on {
+			t.Setenv("OIDC_ISSUER", "https://adfs.example.edu/adfs")
+			t.Setenv("OIDC_CLIENT_ID", "aishiteru")
+			t.Setenv("SIGNING_KEY", "an installation's signing key, 32+ characters long")
+		}
+	}
+	for _, on := range []bool{false, true} {
+		for _, tc := range []struct{ name, value, want string }{
+			{"no name", "", ""},
+			{"a name", "PolyU NetID", "PolyU NetID"},
+			{"a name in any script", "理大 NetID", "理大 NetID"},
+			{"a name without the white space around it", "  PolyU NetID \t", "PolyU NetID"},
+			{"white space alone as no name", "   ", ""},
+			{"64 characters", strings.Repeat("理", 64), strings.Repeat("理", 64)},
+		} {
+			t.Run(fmt.Sprintf("takes %s, single sign-on %s", tc.name, onOff[on]), func(t *testing.T) {
+				sso(t, on)
+				t.Setenv("OIDC_DISPLAY_NAME", tc.value)
+				c, err := FromEnv()
+				if err != nil || c.OIDC.DisplayName != tc.want || c.OIDC.Enabled() != on {
+					t.Fatalf("%v %q", err, c.OIDC.DisplayName)
+				}
+			})
+		}
+		for _, tc := range []struct{ name, value, why string }{
+			{"65 characters", strings.Repeat("a", 65), "65 characters long; at most 64"},
+			{"a newline", "PolyU\nNetID", "U+000A"},
+			{"a tab", "PolyU\tNetID", "U+0009"},
+			{"a terminal escape", "PolyU \x1b[31mNetID", "U+001B"},
+			{"a delete", "PolyU\x7fNetID", "U+007F"},
+			{"a zero-width space", "Poly\u200bU NetID", "U+200B"},
+			{"a right-to-left override", "\u202eDIteN UyloP", "U+202E"},
+			{"a non-breaking space", "PolyU\u00a0NetID", "U+00A0"},
+			{"bytes that are not UTF-8", "PolyU \xff", "not UTF-8"},
+		} {
+			t.Run(fmt.Sprintf("refuses %s, single sign-on %s", tc.name, onOff[on]), func(t *testing.T) {
+				sso(t, on)
+				t.Setenv("OIDC_DISPLAY_NAME", tc.value)
+				if _, err := FromEnv(); err == nil || !strings.Contains(err.Error(), "OIDC_DISPLAY_NAME") || !strings.Contains(err.Error(), tc.why) {
+					t.Fatalf("accepted, or refused for another reason: %v", err)
+				}
+			})
+		}
 	}
 }
 

@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 type Config struct {
@@ -106,6 +108,10 @@ type Config struct {
 type OIDC struct {
 	ProviderName, Issuer, ClientID, ClientSecret, SubjectClaim string
 	Scopes                                                     []string
+	// DisplayName is the provider's name as the front end's sign-in button
+	// shows it, such as "PolyU NetID" (OIDC_DISPLAY_NAME). Empty leaves the
+	// button to the front end's own words.
+	DisplayName string
 }
 
 func (o OIDC) Enabled() bool { return o.Issuer != "" }
@@ -223,6 +229,11 @@ func FromEnv() (Config, error) {
 	c.OIDC = OIDC{ProviderName: env("OIDC_PROVIDER_NAME", "polyu-adfs"), Issuer: os.Getenv("OIDC_ISSUER"),
 		ClientID: os.Getenv("OIDC_CLIENT_ID"), ClientSecret: os.Getenv("OIDC_CLIENT_SECRET"),
 		SubjectClaim: env("OIDC_SUBJECT_CLAIM", "upn"), Scopes: strings.Fields(env("OIDC_SCOPES", "openid profile email"))}
+	name, err := displayName(os.Getenv("OIDC_DISPLAY_NAME"))
+	if err != nil {
+		return Config{}, fmt.Errorf("OIDC_DISPLAY_NAME: %w", err)
+	}
+	c.OIDC.DisplayName = name
 	if c.OIDC.Enabled() {
 		if c.OIDC.ClientID == "" {
 			return Config{}, fmt.Errorf("OIDC_ISSUER is set, so OIDC_CLIENT_ID is needed too")
@@ -249,6 +260,35 @@ func FromEnv() (Config, error) {
 		return Config{}, fmt.Errorf("JOBS_INTERVAL: %s is too often; at least 1s", c.JobsInterval)
 	}
 	return c, nil
+}
+
+// MaxDisplayName is the most characters OIDC_DISPLAY_NAME may have: it is a
+// button's label, not a sentence.
+const MaxDisplayName = 64
+
+// displayName checks OIDC_DISPLAY_NAME, which the front end shows on its
+// sign-in button as it is. White space around it is dropped, and a name
+// that is nothing else is none. The rest must be UTF-8, at most
+// MaxDisplayName characters, and printable to the last one: a control
+// character, or one that draws nothing or turns what follows around, such
+// as a zero-width space or a right-to-left override, would have the button
+// say something other than what the operator reads in the env file. It is
+// checked whether single sign-on is on or not, so that a bad name is found
+// when it is set and not only once OIDC_ISSUER is.
+func displayName(v string) (string, error) {
+	v = strings.TrimSpace(v)
+	if !utf8.ValidString(v) {
+		return "", errors.New("is not UTF-8")
+	}
+	if n := utf8.RuneCountInString(v); n > MaxDisplayName {
+		return "", fmt.Errorf("is %d characters long; at most %d", n, MaxDisplayName)
+	}
+	for _, r := range v {
+		if !unicode.IsPrint(r) {
+			return "", fmt.Errorf("has %U in it, which is not a printable character", r)
+		}
+	}
+	return v, nil
 }
 
 // readAssertions reads RUNTIME_AUDIENCES, ASSERTION_KEY and ASSERTION_TTL.

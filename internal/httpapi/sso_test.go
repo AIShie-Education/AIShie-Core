@@ -127,10 +127,11 @@ type ssoAPI struct {
 
 func newSSO(t *testing.T) *ssoAPI {
 	t.Helper()
-	return newSSOWith(t, ratelimit.New(0, 0))
+	return newSSOWith(t, ratelimit.New(0, 0), nil)
 }
 
-func newSSOWith(t *testing.T, signIns *ratelimit.Limiter) *ssoAPI {
+// newSSOWith is newSSO with a sign-in limit, and the Deps adjusted first.
+func newSSOWith(t *testing.T, signIns *ratelimit.Limiter, adjust func(*httpapi.Deps)) *ssoAPI {
 	t.Helper()
 	idp := newFakeIdP(t)
 	c := testkit.NewCS101(t, 0)
@@ -151,11 +152,15 @@ func newSSOWith(t *testing.T, signIns *ratelimit.Limiter) *ssoAPI {
 	if err != nil {
 		t.Fatalf("discovery: %v", err)
 	}
-	mux.Handle("/", httpapi.NewHandler(httpapi.Deps{
+	deps := httpapi.Deps{
 		Pool: c.Pool, LatestSchema: latest, Pipeline: c.P, Auth: auth.NewAuthenticator(c.Pool, time.Hour),
 		TrustedOrigins: []string{frontEnd}, InsecureCookies: true, SSO: provider, Signer: signer,
 		SignIns: signIns,
-	}))
+	}
+	if adjust != nil {
+		adjust(&deps)
+	}
+	mux.Handle("/", httpapi.NewHandler(deps))
 	return &ssoAPI{api: &api{t: t, c: c, srv: srv}, idp: idp}
 }
 
@@ -405,7 +410,7 @@ func TestSingleSignOnIsOffByDefault(t *testing.T) {
 // code, not by a per-address limit that would turn the hall into a queue of
 // burnt sign-ins.
 func TestALectureHallSignsInAtOnce(t *testing.T) {
-	a := newSSOWith(t, ratelimit.New(10, 10)) // as serve builds it
+	a := newSSOWith(t, ratelimit.New(10, 10), nil) // as serve builds it
 	a.link(a.c.Sato, "sato@polyu.edu.hk")
 	for i := range 40 {
 		b := browser()

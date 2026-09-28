@@ -5,8 +5,10 @@
 # actors, create and open the course, seat the instructor, set up grading,
 # publish an assignment, hand in work, have an agent grade it, approve, post;
 # and have the instructor's own tutor agent answer the student's question.
-# Last, Core vouches for the instructor to an agent runtime, and the key it
-# publishes checks what it says, before and after a restart.
+# Then Core vouches for the instructor to an agent runtime, and the key it
+# publishes checks what it says, before and after a restart. Last, the sign-in
+# page is told how a person signs in: by password alone, and then, restarted
+# with single sign-on against a stand-in provider, by that too, under its name.
 #
 #   make e2e            (builds first)
 #   scripts/e2e.sh      (expects bin/aishiterud)
@@ -16,13 +18,16 @@ set -euo pipefail
 
 BIN=${BIN:-bin/aishiterud}
 PORT=${PORT:-18099}
+IDP_PORT=${IDP_PORT:-18098}
 DB="aishiteru_e2e_$$"
 BASE="http://127.0.0.1:$PORT"
 WORK=$(mktemp -d)
 SERVER_PID=""
+IDP_PID=""
 
 cleanup() {
   [ -n "$SERVER_PID" ] && kill "$SERVER_PID" 2>/dev/null && wait "$SERVER_PID" 2>/dev/null || true
+  [ -n "$IDP_PID" ] && kill "$IDP_PID" 2>/dev/null && wait "$IDP_PID" 2>/dev/null || true
   dropdb --if-exists "$DB" 2>/dev/null || true
   rm -rf "$WORK"
 }
@@ -260,5 +265,36 @@ start
 call 200 GET /v1/auth/keys ""
 cmp -s "$WORK/body" "$WORK/keys.json" || fail "the key changed across a restart: $(cat "$WORK/body")"
 echo "  a server restarted with the same SIGNING_KEY publishes the same key"
+
+step "The sign-in page is told how a person signs in here: by password, and no single sign-on"
+call 200 GET /v1/auth/methods ""
+[ "$(json "$WORK/body" 'd == {"password": True, "sso": None}')" = True ] || fail "the sign-in methods: $(cat "$WORK/body")"
+curl -s -o /dev/null -D "$WORK/headers" "$BASE/v1/auth/methods"
+grep -qi '^cache-control: public, max-age=60' "$WORK/headers" || fail "the sign-in methods may not be kept for a minute: $(cat "$WORK/headers")"
+
+step "Restarted with single sign-on against a stand-in provider, the sign-in page is told to offer it too, by name"
+# The stand-in provider is its discovery document, which is all the server
+# reads of a provider before anyone signs in.
+ISSUER="http://127.0.0.1:$IDP_PORT/adfs"
+mkdir -p "$WORK/idp/adfs/.well-known"
+printf '{"issuer":"%s","authorization_endpoint":"%s/oauth2/authorize","token_endpoint":"%s/oauth2/token","jwks_uri":"%s/discovery/keys"}\n' \
+  "$ISSUER" "$ISSUER" "$ISSUER" "$ISSUER" >"$WORK/idp/adfs/.well-known/openid-configuration"
+python3 -m http.server "$IDP_PORT" --bind 127.0.0.1 --directory "$WORK/idp" >"$WORK/idp.log" 2>&1 &
+IDP_PID=$!
+for _ in $(seq 1 50); do curl -sf "$ISSUER/.well-known/openid-configuration" >/dev/null 2>&1 && break; sleep 0.1; done
+curl -sf "$ISSUER/.well-known/openid-configuration" >/dev/null || fail "the stand-in provider did not come up: $(cat "$WORK/idp.log")"
+export OIDC_ISSUER="$ISSUER" OIDC_CLIENT_ID=aishiteru-e2e OIDC_DISPLAY_NAME="PolyU NetID"
+# A name the button cannot show as it is, and the server does not start.
+OIDC_DISPLAY_NAME=$'PolyU\tNetID' "$BIN" serve 2>"$WORK/refused.log" && fail "a server with a tab in OIDC_DISPLAY_NAME started"
+grep -q 'OIDC_DISPLAY_NAME' "$WORK/refused.log" || fail "refused, but not for the name: $(cat "$WORK/refused.log")"
+kill "$SERVER_PID"
+wait "$SERVER_PID" 2>/dev/null || true
+start
+call 200 GET /v1/auth/methods ""
+[ "$(json "$WORK/body" 'd == {"password": True, "sso": {"label": "PolyU NetID", "start": "/v1/auth/sso/start"}}')" = True ] ||
+  fail "the sign-in methods with single sign-on: $(cat "$WORK/body")"
+[[ "$(curl -s -o /dev/null -w '%{http_code} %{redirect_url}' "$BASE/v1/auth/sso/start?return_to=/courses")" == "302 $ISSUER/oauth2/authorize?"* ]] ||
+  fail "where the answer says to start does not send the browser to the provider"
+echo "  the answer names the button, says where to start, and says nothing else of the provider"
 
 printf '\n\033[32mPASS\033[0m %d requests\n' "$N"

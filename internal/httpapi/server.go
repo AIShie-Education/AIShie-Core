@@ -82,9 +82,12 @@ type Deps struct {
 	MaxUploadBytes int64
 
 	// SSO is the identity provider, when single sign-on is configured; Signer
-	// signs the short-lived state cookie a sign-in carries.
-	SSO    auth.IdentityProvider
-	Signer *signing.Signer
+	// signs the short-lived state cookie a sign-in carries. SSOLabel is the
+	// provider's name as the front end's sign-in button shows it
+	// (OIDC_DISPLAY_NAME); empty leaves the button to the front end's words.
+	SSO      auth.IdentityProvider
+	Signer   *signing.Signer
+	SSOLabel string
 
 	// Assertions vouch for the person signed in here to a service that
 	// hosts agents, and publish the key that checks them. Nil means this
@@ -132,6 +135,7 @@ func NewHandler(d Deps) http.Handler {
 	mux.HandleFunc("GET /healthz", s.healthz)
 
 	if d.Pipeline != nil {
+		mux.HandleFunc("GET "+MethodsPath, s.methods)
 		mux.HandleFunc("POST /v1/auth/login", s.login)
 		mux.HandleFunc("POST /v1/auth/invite", s.acceptInvite)
 		if d.SSO != nil {
