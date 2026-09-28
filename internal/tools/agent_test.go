@@ -2,6 +2,8 @@ package tools_test
 
 import (
 	"encoding/json"
+	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -355,6 +357,74 @@ func TestAnAgentChangesHandsWithNothingLeftBehind(t *testing.T) {
 	}
 	if got := testkit.Result[tools.AgentListOut](t, b.do(t, b.ken, "agent.list", m{})); len(got.Agents) != 1 || got.Agents[0].PendingRequests != 0 {
 		t.Fatalf("Ken's agents: %+v", got.Agents)
+	}
+}
+
+// An agent knows who owns it, as me.get says: a service that hosts it checks
+// that the person handing it the agent's token is that owner. A person, and
+// an agent nobody owns, name nobody; an agent that changes hands names its
+// new owner, and the tokens its owner before held no longer work.
+func TestAnAgentKnowsWhoOwnsIt(t *testing.T) {
+	b := build(t)
+	authn := auth.NewAuthenticator(b.Pool, 0)
+	// me is me.get as the actor a token belongs to, as a hosting service
+	// calls it: the token first, then the tool as whoever it names.
+	me := func(token string) (tools.MeOut, string) {
+		t.Helper()
+		p, err := authn.Authenticate(t.Context(), token)
+		if err != nil {
+			t.Fatalf("the token does not authenticate: %v", err)
+		}
+		out := b.do(t, p.ActorID, "me.get", m{})
+		return testkit.Result[tools.MeOut](t, out), string(out.Result)
+	}
+	token := func(issuer uuid.UUID, tool string, agent uuid.UUID) string {
+		t.Helper()
+		return testkit.Result[tools.IssueTokenOut](t, b.do(t, issuer, tool, m{"actor_id": agent, "label": "runtime"})).Token
+	}
+	names := func(who string, got tools.MeOut, raw string, want *uuid.UUID) {
+		t.Helper()
+		switch {
+		case want == nil && (got.OwnerActorID != nil || strings.Contains(raw, "owner_actor_id")):
+			t.Errorf("%s names an owner: %s", who, raw)
+		case want != nil && (got.OwnerActorID == nil || *got.OwnerActorID != *want):
+			t.Errorf("%s: owner %v, want %s", who, got.OwnerActorID, *want)
+		}
+	}
+
+	bot := b.agent(t, b.yuki, "Yuki's helper")
+	yukis := token(b.yuki, "agent.issue_token", bot)
+	got, raw := me(yukis)
+	names("Yuki's own agent", got, raw, &b.yuki)
+	if got.ID != bot || got.Kind != "agent" || got.Status != "active" {
+		t.Fatalf("the agent's me.get: %s", raw)
+	}
+	got, raw = me(testkit.Result[tools.IssueTokenOut](t, b.do(t, b.yuki, "credential.issue_token", m{"label": "laptop"})).Token)
+	names("a person", got, raw, nil)
+	got, raw = me(token(b.admin, "actor.issue_token", b.grader))
+	names("an agent registered with no owner", got, raw, nil)
+	registered := testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register",
+		m{"kind": "agent", "display_name": "Ken's lab bot", "owner_actor_id": b.ken})).ActorID
+	got, raw = me(token(b.admin, "actor.issue_token", registered))
+	names("an agent an administrator registered for Ken", got, raw, &b.ken)
+
+	// It changes hands: Yuki's token stops working, and a token Ken issues
+	// names Ken.
+	b.do(t, b.admin, "actor.set_owner", m{"actor_id": bot, "owner_actor_id": b.ken})
+	if _, err := authn.Authenticate(t.Context(), yukis); !apperr.Is(err, apperr.Unauthenticated) {
+		t.Fatalf("the token Yuki held, after the agent changed hands: %v", err)
+	}
+	got, raw = me(token(b.ken, "agent.issue_token", bot))
+	names("the agent, now Ken's", got, raw, &b.ken)
+	// Owned by nobody, it names nobody.
+	b.do(t, b.admin, "actor.set_owner", m{"actor_id": bot, "owner_actor_id": nil})
+	got, raw = me(token(b.admin, "actor.issue_token", bot))
+	names("the agent, owned by nobody", got, raw, nil)
+
+	// The catalogue says so, as a field that may be absent.
+	tl, _ := b.P.Registry().Get("me.get")
+	if prop, ok := tl.OutputSchema.Properties["owner_actor_id"]; !ok || prop.Description == "" || slices.Contains(tl.OutputSchema.Required, "owner_actor_id") {
+		t.Fatalf("me.get's output schema: %+v", tl.OutputSchema)
 	}
 }
 

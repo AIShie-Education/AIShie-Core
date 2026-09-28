@@ -169,6 +169,11 @@ call 200 POST /v1/me/agents "$SATO" '{"display_name":"Course tutor"}'
 TUTOR_ID=$(json "$WORK/body" 'd["result"]["actor_id"]')
 call 200 POST "/v1/me/agents/$TUTOR_ID/tokens" "$SATO" '{"label":"runtime"}'
 TUTOR=$(json "$WORK/body" 'd["result"]["token"]')
+# What a service hosting it checks before it takes the token: whose agent it is.
+call 200 GET /v1/me "$TUTOR"
+[ "$(json "$WORK/body" 'd["result"].get("owner_actor_id")')" = "$SATO_ID" ] || fail "the tutor agent does not name Sato as its owner"
+call 200 GET /v1/me "$GRADER"
+[ "$(json "$WORK/body" 'd["result"].get("owner_actor_id")')" = None ] || fail "an agent nobody owns names an owner"
 call 200 POST "$C/delegates" "$SATO" "{\"actor_id\":\"$TUTOR_ID\",\"preset\":\"course_tutor\"}"
 TUTOR_M=$(json "$WORK/body" 'd["result"]["member_id"]')
 call 200 GET "$C/conversations/respondents" "$YUKI"

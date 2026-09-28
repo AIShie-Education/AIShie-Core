@@ -137,7 +137,7 @@ rejected, cancelled). That is safe: Core refuses a second answer to a message
 
 | Tool | Use |
 |---|---|
-| `me_get` | Checks the token and returns the agent's actor: `id`, `kind`, `display_name`, `status`. It does not say who owns the agent (§10). |
+| `me_get` | Checks the token and returns the agent's actor: `id`, `kind`, `display_name`, `status`, and `owner_actor_id`, the person who owns it. `owner_actor_id` is absent for an agent nobody owns (one an administrator registered without an owner), and for a person, whose own token the runtime refuses anyway (`kind` is not `agent`). When the agent changes hands (`actor.set_owner`), every token it had is revoked, so a stored token answers 401 before it could name the new owner. |
 | `me_memberships` | Every seat: `member_id`, `course_id`, `code`, `section`, `title`, `course_status`, `role`, `status`, `expires_at`, `student_scope`, `assignment_scope`, `principal_member_id`, `perms` (permission to level, a delegate's capped by its principal's, all `denied` while the seat does not count) and `answers_course`. Work only in active seats of courses not archived whose `perms.conversation_answer` is not denied. |
 
 **Finding work**
@@ -617,9 +617,12 @@ The owner issues a token in Core (My agents) and pastes it into the runtime,
 which calls `me_get` and `me_memberships`, shows the seats ("Delegate of Yuki
 in CS101: reads your work, answers only you"), and stores the token encrypted,
 never to show it again. The owner picks a model and key (an own key is tested
-with a one-token call), and polling starts. Until Core names an agent's owner
-(§10), holding the token is the proof, which is acceptable: the token already
-controls the agent in Core.
+with a one-token call), and polling starts. The runtime takes the token only
+from the agent's owner: `me_get`'s `owner_actor_id` must be the person signed
+in. It refuses a token whose `kind` is not `agent` (never a person's own), and
+leaves an agent nobody owns to the runtime's administrators. It checks the
+owner again whenever the agent starts, and stops an agent whose owner has
+changed; the change of owner has revoked its token in Core anyway.
 
 ### 5.2 Whose key
 
@@ -841,12 +844,12 @@ one static binary. TypeScript (`@modelcontextprotocol/client` 2.1.0) or Python
 Settled, and written into §1 and §2: the protocol revisions Core takes, the
 refusals' `details.reason`, where a rejection's reason is kept, and, in the
 frontend, the two-minute presence window and how replies render links and
-images. Still open, none blocking M1:
+images. Settled since: who owns the agent (1 below). Still open, none
+blocking M1: 2 to 4.
 
-1. **Who owns the agent.** `me_get` names no owner, so the runtime cannot
-   check that the person signed in owns the token they paste. Proposed:
-   `owner_actor_id` in `me_get`, compared with the Core actor behind the
-   person's SSO subject.
+1. **Who owns the agent.** Settled. `me_get` names the agent's owner in
+   `owner_actor_id` (§2.3), and the runtime compares it with the person
+   signed in to it (§5.1) before it takes a token.
 2. **Which permission gates each tool.** The catalogue has no gates, so §4
    keeps them by hand. Proposed: a `gate` field in `GET /v1/tools`.
 3. **A rejection's reason.** `action.rejected` carries none and `action_get`
