@@ -370,6 +370,14 @@ narrows a principal without touching its delegates — and which a manager may h
   `conversation_answer` is capped by the principal's `conversation_ask` (your agent answering
   you is you asking, at one remove), and `agent_delegate` is denied to it whatever its row
   says: it brings no agents of its own;
+- the agent of someone who does not manage the course's members — a student's — does only by
+  proposal what the built-in `delegate` preset does not give: for each permission that preset
+  gives at a lower level than the principal holds, its level is `confirm_required` at most
+  (`domain.DelegateCap`, which knows the preset's levels as the seed makes them, and a test holds
+  the two together). A student's agent reads her work and the material, and may be given her
+  own writes — drafting her submission, asking questions for her — each of which then waits for
+  confirmation before it is carried out. `member_manage` and `member_invite` keep the rules
+  above: such a principal has no `member_manage`, and a join link is made by no proposal;
 - it reaches only what its own scope and its principal's both reach, in `authorize()` and in
   every list, which filters by both in SQL;
 - it counts only while its principal's seat is live, its owner active, and its principal still
@@ -395,9 +403,10 @@ that a student's request waits for an instructor. The seat is worked out from th
 the preset's levels (`delegate` unless another is named) are each cut down to what the owner
 holds, `agent_delegate` denied, and `member_manage` and `member_invite` denied whatever the preset
 carries: an agent manages members or hands out join links only when the call names it; a level
-named in the call above the owner's is refused, not cut down. Without `member_manage`, the seat holds no more than the built-in
-`delegate` preset gives: a student's agent reads, and an instructor may widen it later within its
-principal. A listed scope defaults to the owner's own list, or to nobody when the owner reaches
+named in the call above the owner's is refused, not cut down, and so, for an owner without
+`member_manage`, is a level above `confirm_required` where the built-in `delegate` preset gives
+less: a student seating her agent with the `student` preset gives it her writes at
+`confirm_required`, and nobody raises them further, whoever grants. A listed scope defaults to the owner's own list, or to nobody when the owner reaches
 the whole class; a list named must be within the owner's; a preset that reaches everything is
 narrowed to the owner's list when the owner has one. It ends when the owner's seat does, or
 earlier if asked. It answers its owner alone unless its seat *answers the course*
@@ -1348,8 +1357,9 @@ that reads which credential the call came with.
   are not trusted to say so: the release before 0007 narrows a principal without touching its
   delegates.
 - Seating a delegate (`member.add_delegate`): the seat worked out from the owner's own, levels
-  cut down to it, a level or reach named beyond it refused, no more than the `delegate` preset
-  without `member_manage`, no life past the owner's; the same worked out again on approval, and
+  cut down to it, a level or reach named beyond it refused, beyond the `delegate` preset nothing
+  above `confirm_required` without `member_manage`, no life past the owner's; the same worked out
+  again on approval, and
   refused if the owner no longer holds it. Only the owner seats their agent, and only as their
   delegate: `member.add` and `course.seat_instructor` refuse an owned agent.
 - A change that widens a delegate's seat is within its principal's as well as the granter's.

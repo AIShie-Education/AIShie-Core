@@ -236,6 +236,13 @@ func TestEvaluateDelegate(t *testing.T) {
 			one(domain.PermMemberManage), domain.ConfirmRequired, ReasonNone},
 		{"nor than its own row", delegate(principal(nil), func(d *domain.Member) { d.Perms[domain.PermMemberManage] = domain.Denied }),
 			one(domain.PermMemberManage), domain.Denied, ReasonPermDenied},
+		{"a principal who manages no members: beyond the delegate preset, only by proposal",
+			delegate(principal(func(p *domain.Member) {
+				p.Perms[domain.PermMemberManage], p.Perms[domain.PermGradeSubmit] = domain.Denied, domain.Autonomous
+			}), nil), one(domain.PermGradeSubmit), domain.ConfirmRequired, ReasonNone},
+		{"and what the delegate preset gives, as the principal holds it",
+			delegate(principal(func(p *domain.Member) { p.Perms[domain.PermMemberManage] = domain.Denied }), nil),
+			one(domain.PermDocumentRead), domain.Autonomous, ReasonNone},
 		{"never agent_delegate, whatever both hold", delegate(principal(nil), nil), one(domain.PermAgentDelegate), domain.Denied, ReasonPermDenied},
 		{"answering is capped by the principal's asking", delegate(principal(nil), nil), one(domain.PermConversationAnswer), domain.ConfirmRequired, ReasonNone},
 		{"so a principal who may not ask gets no answers", delegate(principal(func(p *domain.Member) { p.Perms[domain.PermConversationAsk] = domain.Denied }), nil),

@@ -240,7 +240,10 @@ A person may also have agents of their own, with no administrator involved:
 and `member.add_delegate` brings it into a course where they are seated, as
 their delegate (a student's request waits for an instructor's approval by
 default). There it can do nothing the person cannot, reach no one the person
-cannot, and last no longer than the person's seat. It manages the course's
+cannot, and last no longer than the person's seat. The agent of someone who
+does not manage the course's members, a student's, may be given their own
+writes — drafting their submission, say — but does each only by proposal,
+confirmed before it is carried out. It manages the course's
 members only when the person names `member_manage` for it, and then never the
 person's own seat nor their other agents' (`not_your_principal`). `AGENT_SELF_SERVICE=off`
 leaves agents to administrators, and `AGENT_MAX_PER_OWNER` (5) bounds how many
