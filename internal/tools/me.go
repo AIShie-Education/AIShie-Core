@@ -36,12 +36,15 @@ type MeOut struct {
 	Email        *string   `json:"email,omitempty"`
 	Status       string    `json:"status"`
 	PlatformRole *string   `json:"platform_role,omitempty"`
+	// An agent may always know who answers for it. A service that hosts the
+	// agent compares this with the person who hands it the agent's token.
+	OwnerActorID *uuid.UUID `json:"owner_actor_id,omitempty" jsonschema:"for an agent a person owns, that person's actor id; absent for a person, and for an agent nobody owns"`
 }
 
 func meGet() tool.Tool {
 	return tool.Define(tool.Spec[Empty, MeOut]{
 		Name:        "me.get",
-		Description: "Who the caller is: the actor this credential belongs to.",
+		Description: "Who the caller is: the actor this credential belongs to, and for an agent a person owns, who owns it.",
 		Kind:        tool.Read, Gate: self,
 		HTTP:    tool.Route{Method: "GET", Pattern: "/v1/me"},
 		Resolve: noTarget[Empty]("actor"),
@@ -50,7 +53,8 @@ func meGet() tool.Tool {
 			if err != nil {
 				return MeOut{}, err
 			}
-			return MeOut{ID: a.ID, Kind: a.Kind, DisplayName: a.DisplayName, Email: a.Email, Status: a.Status, PlatformRole: a.PlatformRole}, nil
+			return MeOut{ID: a.ID, Kind: a.Kind, DisplayName: a.DisplayName, Email: a.Email, Status: a.Status,
+				PlatformRole: a.PlatformRole, OwnerActorID: a.OwnerActorID}, nil
 		},
 	})
 }

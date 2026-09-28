@@ -5,6 +5,8 @@
 # actors, create and open the course, seat the instructor, set up grading,
 # publish an assignment, hand in work, have an agent grade it, approve, post;
 # and have the instructor's own tutor agent answer the student's question.
+# Last, Core vouches for the instructor to an agent runtime, and the key it
+# publishes checks what it says, before and after a restart.
 #
 #   make e2e            (builds first)
 #   scripts/e2e.sh      (expects bin/aishiterud)
@@ -58,6 +60,11 @@ else
 fi
 export HTTP_ADDR="127.0.0.1:$PORT"
 export BLOB_FS_ROOT="$WORK/blobs" PUBLIC_URL="$BASE"
+# The agent runtime Core vouches for people to; its key is derived from
+# SIGNING_KEY, the same across the restart below.
+RUNTIME="$BASE/runtime"
+SIGNING_KEY=$(python3 -c 'import secrets; print(secrets.token_hex(32))')
+export RUNTIME_AUDIENCES="$RUNTIME" SIGNING_KEY
 "$BIN" migrate up
 "$BIN" seed
 
@@ -71,10 +78,13 @@ ROOT=$("$BIN" bootstrap --name Root 2>/dev/null)
 "$BIN" bootstrap --name Usurper >/dev/null 2>&1 && fail "bootstrap ran twice"
 echo "  root token ${ROOT:0:16}…; an empty password and a second bootstrap are refused"
 
-"$BIN" serve 2>"$WORK/server.log" &
-SERVER_PID=$!
-for _ in $(seq 1 50); do curl -sf "$BASE/healthz" >/dev/null 2>&1 && break; sleep 0.1; done
-curl -sf "$BASE/healthz" >/dev/null || fail "the server did not come up"
+start() {
+  "$BIN" serve 2>>"$WORK/server.log" &
+  SERVER_PID=$!
+  for _ in $(seq 1 50); do curl -sf "$BASE/healthz" >/dev/null 2>&1 && break; sleep 0.1; done
+  curl -sf "$BASE/healthz" >/dev/null || fail "the server did not come up"
+}
+start
 
 # ---------------------------------------------------------------------------
 step "Root makes an admin; the admin registers everyone and gives each a token"
@@ -169,6 +179,11 @@ call 200 POST /v1/me/agents "$SATO" '{"display_name":"Course tutor"}'
 TUTOR_ID=$(json "$WORK/body" 'd["result"]["actor_id"]')
 call 200 POST "/v1/me/agents/$TUTOR_ID/tokens" "$SATO" '{"label":"runtime"}'
 TUTOR=$(json "$WORK/body" 'd["result"]["token"]')
+# What a service hosting it checks before it takes the token: whose agent it is.
+call 200 GET /v1/me "$TUTOR"
+[ "$(json "$WORK/body" 'd["result"].get("owner_actor_id")')" = "$SATO_ID" ] || fail "the tutor agent does not name Sato as its owner"
+call 200 GET /v1/me "$GRADER"
+[ "$(json "$WORK/body" 'd["result"].get("owner_actor_id")')" = None ] || fail "an agent nobody owns names an owner"
 call 200 POST "$C/delegates" "$SATO" "{\"actor_id\":\"$TUTOR_ID\",\"preset\":\"course_tutor\"}"
 TUTOR_M=$(json "$WORK/body" 'd["result"]["member_id"]')
 call 200 GET "$C/conversations/respondents" "$YUKI"
@@ -198,5 +213,52 @@ CALL="{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name
 [ "$(json "$WORK/body" 'd["result"]["structuredContent"]["replayed"]')" = True ] || fail "not a replay"
 echo "  grade_submit over MCP with REST's idempotency key replays REST's action: one tool layer"
 N=$((N + 3))
+
+step "Core vouches for Sato to the agent runtime; the key it publishes checks what it says"
+# jwt PART EXPR — evaluate EXPR against the decoded header (0) or claims (1) of $ASSERTION as d.
+jwt() { python3 -c "import base64,json,sys; p=sys.argv[1].split('.')[int(sys.argv[2])]; d=json.loads(base64.urlsafe_b64decode(p+'='*(-len(p)%4))); print($2)" "$ASSERTION" "$1"; }
+call 200 GET /v1/auth/keys ""
+cp "$WORK/body" "$WORK/keys.json"
+[ "$(json "$WORK/keys.json" 'len(d["keys"]), d["keys"][0]["kty"], d["keys"][0]["crv"], d["keys"][0]["alg"]')" = "1 OKP Ed25519 EdDSA" ] ||
+  fail "the key set: $(cat "$WORK/keys.json")"
+call 200 POST /v1/auth/assertion "$SATO" "{\"audience\":\"$RUNTIME\"}"
+ASSERTION=$(json "$WORK/body" 'd["assertion"]')
+# Compact JWS: three parts of base64url with no padding, the last a 64-byte signature.
+[[ "$ASSERTION" =~ ^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{86}$ ]] || fail "the assertion is not a compact JWS in unpadded base64url"
+[ "$(jwt 0 'd["alg"], d["kid"]')" = "$(json "$WORK/keys.json" '"EdDSA", d["keys"][0]["kid"]')" ] || fail "the header does not name the published key"
+[ "$(jwt 1 'd["iss"], d["aud"], d["sub"], d["kind"], d["name"], d["exp"] - d["iat"]')" = "$BASE $RUNTIME $SATO_ID human Sato 300" ] ||
+  fail "the claims: $(jwt 1 d)"
+# Checked by OpenSSL, where it is version 3 (LibreSSL cannot); the Go tests
+# check it with go-jose and go-oidc either way.
+if openssl version 2>/dev/null | grep -q '^OpenSSL [3-9]'; then
+  python3 - "$ASSERTION" "$WORK" <<'PY'
+import base64, json, sys
+tok, work = sys.argv[1:]
+b = lambda s: base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
+head, claims, sig = tok.split(".")
+x = b(json.load(open(work + "/keys.json"))["keys"][0]["x"])
+open(work + "/key.der", "wb").write(bytes.fromhex("302a300506032b6570032100") + x)  # SubjectPublicKeyInfo, Ed25519
+open(work + "/signed", "wb").write((head + "." + claims).encode())
+open(work + "/sig", "wb").write(b(sig))
+PY
+  openssl pkeyutl -verify -pubin -inkey "$WORK/key.der" -keyform DER -rawin -in "$WORK/signed" -sigfile "$WORK/sig" >/dev/null ||
+    fail "OpenSSL finds the signature bad"
+  echo "  OpenSSL checks the signature against the published key"
+else
+  echo "  (the signature is not checked here: that needs OpenSSL 3)"
+fi
+call 400 POST /v1/auth/assertion "$SATO" '{"audience":"https://evil.example/runtime"}' # not one of RUNTIME_AUDIENCES
+call 403 POST /v1/auth/assertion "$GRADER" "{\"audience\":\"$RUNTIME\"}"          # an agent is vouched for to nobody
+call 401 GET /v1/me "$ASSERTION"                                                    # and it is no credential here
+# With audiences and no key to sign for them, the server does not start.
+SIGNING_KEY='' "$BIN" serve 2>"$WORK/refused.log" && fail "a server with RUNTIME_AUDIENCES and no key started"
+grep -q 'RUNTIME_AUDIENCES needs ASSERTION_KEY or SIGNING_KEY' "$WORK/refused.log" || fail "refused, but not for want of a key: $(cat "$WORK/refused.log")"
+# Restarted with the same SIGNING_KEY, the server publishes the same key.
+kill "$SERVER_PID"
+wait "$SERVER_PID" 2>/dev/null || true
+start
+call 200 GET /v1/auth/keys ""
+cmp -s "$WORK/body" "$WORK/keys.json" || fail "the key changed across a restart: $(cat "$WORK/body")"
+echo "  a server restarted with the same SIGNING_KEY publishes the same key"
 
 printf '\n\033[32mPASS\033[0m %d requests\n' "$N"

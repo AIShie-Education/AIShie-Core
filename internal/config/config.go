@@ -4,8 +4,12 @@
 package config
 
 import (
+	"crypto/ed25519"
+	"encoding/base64"
+	"errors"
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -72,6 +76,21 @@ type Config struct {
 	// OIDC is single sign-on. It is off unless OIDC_ISSUER is set.
 	OIDC OIDC
 
+	// RuntimeAudiences are the services that host agents (runtimes) this
+	// server vouches for its signed-in people to, each named by the absolute
+	// URL it knows itself by: https://lms.example.edu/runtime. A person asks
+	// for an assertion for one of them at POST /v1/auth/assertion. Empty
+	// means no assertion is made.
+	RuntimeAudiences []string
+	// AssertionKey is the Ed25519 seed assertions are signed with
+	// (ASSERTION_KEY, 32 bytes in base64). Empty means a key derived from
+	// SigningKey, which then must be set if RuntimeAudiences is.
+	AssertionKey []byte
+	// AssertionTTL is how long an assertion lasts at most, from
+	// MinAssertionTTL to MaxAssertionTTL: a sign-out or a suspension reaches
+	// a runtime no later than that.
+	AssertionTTL time.Duration
+
 	// AgentSelfService lets people register agents of their own
 	// (agent.create). Off, only administrators register agents; agents
 	// already registered, and what their owners do with them, are left as
@@ -95,6 +114,15 @@ type S3 struct {
 	Endpoint, Bucket, Region, AccessKey, SecretKey string
 	UseSSL                                         bool
 }
+
+// The bounds of ASSERTION_TTL, and its default. Shorter than a minute, a
+// front end would spend its calls asking again; longer than a quarter of an
+// hour, a sign-out would take too long to reach a runtime.
+const (
+	MinAssertionTTL     = time.Minute
+	MaxAssertionTTL     = 15 * time.Minute
+	DefaultAssertionTTL = 5 * time.Minute
+)
 
 func FromEnv() (Config, error) {
 	c := Config{
@@ -205,6 +233,9 @@ func FromEnv() (Config, error) {
 			return Config{}, fmt.Errorf("single sign-on needs SIGNING_KEY: the sign-in state must verify on every instance")
 		}
 	}
+	if err := c.readAssertions(); err != nil {
+		return Config{}, err
+	}
 	switch c.CookieSameSite {
 	case "lax":
 	case "none":
@@ -218,6 +249,139 @@ func FromEnv() (Config, error) {
 		return Config{}, fmt.Errorf("JOBS_INTERVAL: %s is too often; at least 1s", c.JobsInterval)
 	}
 	return c, nil
+}
+
+// readAssertions reads RUNTIME_AUDIENCES, ASSERTION_KEY and ASSERTION_TTL.
+// An audience is refused unless it is an absolute http or https URL with
+// nothing in it but a host, a port and a path, since a runtime compares it
+// exactly and a mistyped one would make assertions nobody takes. Audiences
+// with no key to sign for them are refused, as single sign-on is without
+// SIGNING_KEY: with a key made up at each start, what one instance signs
+// would not check against what another publishes, nor survive a restart.
+// So are audiences without PUBLIC_URL, which is the assertions' issuer: the
+// default, a localhost URL, would be refused by every runtime, and only then.
+func (c *Config) readAssertions() error {
+	for _, a := range strings.Split(os.Getenv("RUNTIME_AUDIENCES"), ",") {
+		if a = strings.TrimSpace(a); a == "" {
+			continue
+		}
+		if err := checkAudience(a); err != nil {
+			return fmt.Errorf("RUNTIME_AUDIENCES: %q %w", a, err)
+		}
+		c.RuntimeAudiences = append(c.RuntimeAudiences, a)
+	}
+	if v := os.Getenv("ASSERTION_KEY"); v != "" {
+		seed, err := decodeSeed(v)
+		if err != nil {
+			return fmt.Errorf("ASSERTION_KEY %w", err)
+		}
+		c.AssertionKey = seed
+	}
+	c.AssertionTTL = DefaultAssertionTTL
+	if v := os.Getenv("ASSERTION_TTL"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d < MinAssertionTTL || d > MaxAssertionTTL {
+			return fmt.Errorf("ASSERTION_TTL: %q is not a duration from %s to %s", v, MinAssertionTTL, MaxAssertionTTL)
+		}
+		c.AssertionTTL = d
+	}
+	if len(c.RuntimeAudiences) > 0 && c.AssertionKey == nil && c.SigningKey == "" {
+		return fmt.Errorf("RUNTIME_AUDIENCES needs ASSERTION_KEY or SIGNING_KEY: assertions must check against the same key on every instance and after a restart")
+	}
+	if len(c.RuntimeAudiences) > 0 && os.Getenv("PUBLIC_URL") == "" {
+		return fmt.Errorf("RUNTIME_AUDIENCES needs PUBLIC_URL: it is the issuer a runtime takes assertions from, and the default, %s, is none a runtime would name", c.PublicURL)
+	}
+	return nil
+}
+
+// checkAudience says what is wrong with an audience, if anything.
+//
+// A runtime compares the audience byte for byte, so it must be written the
+// one way a URL is written: a lower-case scheme and host, no port that is
+// the scheme's own or not a plain number, and a path escaped as Go escapes
+// it, with nothing percent-encoded that need not be and none of ! ' ( ) *,
+// which URLs write both ways. Its path has no "." or ".." segment and no
+// empty one but a final "/": such a URL names the same place as another
+// written differently, or, after a proxy tidies it, a place outside the
+// runtime's path altogether.
+func checkAudience(a string) error {
+	u, err := url.Parse(a)
+	switch {
+	case err != nil:
+		return errors.New("is not a URL")
+	case u.Scheme != "https" && u.Scheme != "http":
+		return errors.New("is not an absolute http or https URL, such as https://lms.example.edu/runtime")
+	case u.Opaque != "" || u.Hostname() == "":
+		return errors.New("names no host")
+	case u.User != nil:
+		return errors.New("carries a user name or password")
+	case u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || strings.Contains(a, "#"):
+		return errors.New("has a query or a fragment")
+	case u.Host != strings.ToLower(u.Host):
+		return errors.New("has upper case in its host; a host is written in lower case")
+	case !canonicalPort(u):
+		return errors.New("names a port that is empty, not a plain number from 1 to 65535, or the scheme's own")
+	case strings.ContainsAny(u.Path, "!'()*"):
+		return errors.New("has one of ! ' ( ) * in its path, which URLs write both escaped and not")
+	case u.RawPath != "":
+		return errors.New("escapes its path otherwise than plainly: an escape that is not needed or not in upper case, or an escaped /")
+	case !plainPath(u.Path):
+		return errors.New(`has a ".", ".." or empty segment in its path`)
+	case u.String() != a:
+		return errors.New("is not written the way a URL is, lower-case scheme and path escaped")
+	}
+	return nil
+}
+
+// canonicalPort reports whether a URL's port, if it names one, is written as
+// a URL's port is: a number with no leading zero, from 1 to 65535, and not
+// the one its scheme implies.
+func canonicalPort(u *url.URL) bool {
+	i := strings.LastIndex(u.Host, ":")
+	if i < 0 || strings.HasSuffix(u.Host, "]") {
+		return true // no port at all: a name, or an IPv6 address in brackets
+	}
+	p := u.Host[i+1:]
+	n, err := strconv.Atoi(p)
+	switch {
+	case err != nil || strconv.Itoa(n) != p || n < 1 || n > 65535:
+		return false
+	case u.Scheme == "https" && n == 443, u.Scheme == "http" && n == 80:
+		return false
+	}
+	return true
+}
+
+// plainPath reports whether a URL path has no "." or ".." segment and no
+// empty segment but the last, which a final "/" leaves.
+func plainPath(p string) bool {
+	if p == "" {
+		return true
+	}
+	segs := strings.Split(strings.TrimPrefix(p, "/"), "/")
+	for i, s := range segs {
+		if s == "." || s == ".." || (s == "" && i < len(segs)-1) {
+			return false
+		}
+	}
+	return true
+}
+
+// decodeSeed takes an Ed25519 seed in base64, padded or not, standard or
+// URL-safe.
+func decodeSeed(v string) ([]byte, error) {
+	v = strings.TrimRight(strings.TrimSpace(v), "=")
+	seed, err := base64.RawStdEncoding.DecodeString(v)
+	if err != nil {
+		seed, err = base64.RawURLEncoding.DecodeString(v)
+	}
+	if err != nil {
+		return nil, errors.New("is not base64")
+	}
+	if len(seed) != ed25519.SeedSize {
+		return nil, fmt.Errorf("is %d bytes, not the %d of an Ed25519 seed (openssl rand -base64 32 makes one)", len(seed), ed25519.SeedSize)
+	}
+	return seed, nil
 }
 
 func env(key, def string) string {

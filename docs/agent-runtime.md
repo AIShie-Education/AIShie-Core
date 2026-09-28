@@ -137,7 +137,7 @@ rejected, cancelled). That is safe: Core refuses a second answer to a message
 
 | Tool | Use |
 |---|---|
-| `me_get` | Checks the token and returns the agent's actor: `id`, `kind`, `display_name`, `status`. It does not say who owns the agent (§10). |
+| `me_get` | Checks the token and returns the agent's actor: `id`, `kind`, `display_name`, `status`, and `owner_actor_id`, the person who owns it. `owner_actor_id` is absent for an agent nobody owns (one an administrator registered without an owner), and for a person, whose own token the runtime refuses anyway (`kind` is not `agent`). It names the owner while the owner is suspended too; Core gives a suspended person no assertion (§5.1), so they cannot connect the agent meanwhile. When the agent changes hands (`actor.set_owner`), every token it had is revoked, so a stored token answers 401 before it could name the new owner. |
 | `me_memberships` | Every seat: `member_id`, `course_id`, `code`, `section`, `title`, `course_status`, `role`, `status`, `expires_at`, `student_scope`, `assignment_scope`, `principal_member_id`, `perms` (permission to level, a delegate's capped by its principal's, all `denied` while the seat does not count) and `answers_course`. Work only in active seats of courses not archived whose `perms.conversation_answer` is not denied. |
 
 **Finding work**
@@ -609,17 +609,64 @@ toolset is fine: the agent answers from the conversation alone.
 
 | Tenant | Signs in with | May |
 |---|---|---|
-| Student | the institution's SSO (OIDC, a client registration of its own, the same identity provider as Core) | connect their own agents, choose a model from the school's list or bring a key, see usage, pause, delete |
-| Instructor | SSO | all that, and register course tutors, with a budget, prompt and style per course |
-| School administrator | SSO and the runtime's administrator role | school keys, the model list and prices, global quotas, audit |
+| Student | Core's assertion | connect their own agents, choose a model from the school's list or bring a key, see usage, pause, delete |
+| Instructor | Core's assertion | all that, and register course tutors, with a budget, prompt and style per course |
+| School administrator | Core's assertion with `platform_role` `root` or `admin` | school keys, the model list and prices, global quotas, audit |
 
-The owner issues a token in Core (My agents) and pastes it into the runtime,
-which calls `me_get` and `me_memberships`, shows the seats ("Delegate of Yuki
+People sign in to Core, however Core lets them (password, invitation, single
+sign-on, a pasted token), and Core vouches for them to the runtime. The
+runtime is no identity provider's client and never sees Core's session
+cookie: the proxy in front of it strips `Cookie`.
+
+- **Asking.** The web front end, signed in to Core, calls
+  `POST <core>/v1/auth/assertion` with `{"audience": "<the runtime's
+  audience>"}` and its session cookie or bearer token. The audience is an
+  absolute URL, such as `https://lms.example.edu/runtime`, and must be one of
+  Core's `RUNTIME_AUDIENCES`. The answer is `{"assertion": "eyJ…",
+  "expires_at": "…"}`, with `Cache-Control: no-store`. The front end sends
+  `Authorization: Bearer <assertion>` on each call to the runtime, and asks
+  for a new one shortly before `expires_at` and once more on a 401.
+- **Refused.** `400 invalid_argument` for an audience not listed, or for a
+  body that is anything but that one object (another member, a key in
+  another case or given twice, anything after it); `403` for a
+  suspended account or for anyone but a person (an agent's token gets none);
+  `401` with no valid credential; `404` when Core lists no audience; `429`
+  under the caller's rate limit; `403` for a browser's `POST` from an origin
+  Core does not trust.
+- **The assertion** is a JWT (compact JWS), header `{"alg": "EdDSA", "typ":
+  "JWT", "kid": …}`, signed with Ed25519. Claims: `iss` (Core's `PUBLIC_URL`,
+  no `/` at the end), `aud` (the audience asked for, a string), `sub` (the
+  person's actor id), `iat`, `nbf`, `exp`, `jti` (random), `kind` (`human`),
+  `name` (the display name), `email` and `platform_role` when there are any,
+  and `sid` (the id of the Core credential it was asked with). It lasts
+  `ASSERTION_TTL` (5 minutes by default, at most 15), and never past the
+  session or token it was asked with.
+- **Checking.** The runtime accepts `alg` `EdDSA` and nothing else, against
+  the JSON Web Key Set at `GET <core>/v1/auth/keys` (public; cache it for the
+  five minutes its `Cache-Control` says, and fetch it again on a `kid` it does
+  not know), or against a key pinned in its configuration. It checks that
+  `iss` is Core's `PUBLIC_URL`, the base URL it reaches Core at, `aud` its
+  own audience, `exp` and `nbf` hold
+  (with a few seconds' leeway at most), and `kind` is `human`. It never
+  forwards an assertion, and Core takes none as a credential of its own.
+- **Roles.** The person is `sub`, and nothing else: `name` and `email` are
+  for display. `platform_role` `root` or `admin` is a school administrator.
+  Owning an agent is `me_get`'s `owner_actor_id` equal to `sub`. Tutor
+  settings for a course need no role of the person's: the owner of an agent
+  that holds a seat with `answers_course` there may change them.
+- **What it costs.** A sign-out, a suspension or a change of role reaches the
+  runtime when the assertion ends, within `ASSERTION_TTL`.
+
+The owner issues a token in Core (My agents), or the front end issues one
+for them, and hands it to the runtime, which calls `me_get` and `me_memberships`, shows the seats ("Delegate of Yuki
 in CS101: reads your work, answers only you"), and stores the token encrypted,
 never to show it again. The owner picks a model and key (an own key is tested
-with a one-token call), and polling starts. Until Core names an agent's owner
-(§10), holding the token is the proof, which is acceptable: the token already
-controls the agent in Core.
+with a one-token call), and polling starts. The runtime takes the token only
+from the agent's owner: `me_get`'s `owner_actor_id` must be the person signed
+in. It refuses a token whose `kind` is not `agent` (never a person's own), and
+leaves an agent nobody owns to the runtime's administrators. It checks the
+owner again whenever the agent starts, and stops an agent whose owner has
+changed; the change of owner has revoked its token in Core anyway.
 
 ### 5.2 Whose key
 
@@ -811,7 +858,7 @@ limit, and put answers before polling, and polling before events.
 ### 8.3 Deployment and language
 
 ```
-runtime-web     the UI and the configuration API (SSO)    stateless, N replicas
+runtime-api     the configuration API, JSON only           stateless, N replicas
 runtime-worker  pollers and answer loops                  N replicas; leases in Postgres
 postgres        configuration, leases, cursors, memory, ledger (its own; never Core's)
 secret store    Vault or a cloud KMS, for data keys
@@ -819,9 +866,15 @@ egress proxy    allows Core's host, the host of download_url (Core's own, or its
 ```
 
 Core needs no way in. Workers scale out, sharing agents by lease; a dead
-worker's leases lapse, and duplicates are safe (§7.4). Settings: `DATABASE_URL`, `KMS_KEY_ID`, `OIDC_*`, `CORE_BASE_URL_ALLOWLIST`
-(which Core installations a token may point at), `EGRESS_PROXY`,
-`LOG_REDACT_EXTRA`. Releases are versioned images; migrations are additive.
+worker's leases lapse, and duplicates are safe (§7.4). The UI is in the web
+front end, which calls the runtime's API with Core's assertion (§5.1); the
+API sits behind the proxy on a path of Core's own origin, with `Cookie`
+stripped. Settings: `DATABASE_URL`, `KMS_KEY_ID`, the runtime's audience (the
+URL listed in Core's `RUNTIME_AUDIENCES`) and Core's base URL, whose
+`/v1/auth/keys` checks the assertions, `CORE_BASE_URL_ALLOWLIST` (which Core
+installations a token may point at), `EGRESS_PROXY`, `LOG_REDACT_EXTRA`. The
+runtime needs no `OIDC_*`. Releases are versioned images; migrations are
+additive.
 
 Go is recommended: Core's team knows it, Core runs the same MCP SDK (v1.8.0),
 the providers publish Go SDKs (package names **[UNVERIFIED]**), and it builds
@@ -833,7 +886,7 @@ one static binary. TypeScript (`@modelcontextprotocol/client` 2.1.0) or Python
 | Milestone | Scope | Done when |
 |---|---|---|
 | **M1: one adapter, a person's own agent** | A Go service, one worker, agents configured from YAML and environment secrets. `openai_chat` (so OpenAI, DeepSeek, Qwen, Kimi, GLM, Ollama, vLLM, LM Studio, OpenRouter and Gemini's compatible endpoint). The MCP client, `me_memberships`, jittered inbox polling, a leased worker per conversation, the read-only toolset through the sanitiser, the answer written ahead, every row of §2.4 but proposals' follow-up. Budgets per answer, redaction, the fake Core, fixtures, CI against Core's image. | A student's own agent answers them end to end in CI and on staging; the moved-on, duplicate and denied paths are tested; no token in any log. |
-| **M2: every provider, course tutors, several tenants** | `anthropic`, `gemini`, `openai_responses`, `bedrock_converse`, with reasoning passthrough and contract and nightly tests. The hosted UI: SSO, connecting by token, both kinds of key, the secret store, quotas, ledger and cost, the owner's page. Course tutors with per-asker quotas. Proposals, reviews, rejections, retractions and closures followed through `event_list`. Cluster-wide poller leases, the rate-limit budget, metrics, traces. | Every provider in §3.9 passes its contract tests or is marked unsupported; a 500-student course stays under 30 % of the rate limit; cost is known per asker; the safety evaluations pass review. |
+| **M2: every provider, course tutors, several tenants** | `anthropic`, `gemini`, `openai_responses`, `bedrock_converse`, with reasoning passthrough and contract and nightly tests. The hosted UI, in the web front end, signing in with Core's assertion (§5.1); connecting by token, both kinds of key, the secret store, quotas, ledger and cost, the owner's page. Course tutors with per-asker quotas. Proposals, reviews, rejections, retractions and closures followed through `event_list`. Cluster-wide poller leases, the rate-limit budget, metrics, traces. | Every provider in §3.9 passes its contract tests or is marked unsupported; a 500-student course stays under 30 % of the rate limit; cost is known per asker; the safety evaluations pass review. |
 | **M3: grading and other work** | Work started by events: grading agents (rubric reads, `grade_submit` proposals, writes opened per workflow and keyed `tool:{member_id}:{hash}`), feedback and announcement drafts. `gemini_interactions`. What Core adds (§10). | Grading proposals go through Core's approval queue; the same budgets and ledger hold. |
 
 ## 10. Open questions for Core
@@ -841,12 +894,12 @@ one static binary. TypeScript (`@modelcontextprotocol/client` 2.1.0) or Python
 Settled, and written into §1 and §2: the protocol revisions Core takes, the
 refusals' `details.reason`, where a rejection's reason is kept, and, in the
 frontend, the two-minute presence window and how replies render links and
-images. Still open, none blocking M1:
+images. Settled since: who owns the agent (1 below). Still open, none
+blocking M1: 2 to 4.
 
-1. **Who owns the agent.** `me_get` names no owner, so the runtime cannot
-   check that the person signed in owns the token they paste. Proposed:
-   `owner_actor_id` in `me_get`, compared with the Core actor behind the
-   person's SSO subject.
+1. **Who owns the agent.** Settled. `me_get` names the agent's owner in
+   `owner_actor_id` (§2.3), and the runtime compares it with the person
+   signed in to it (§5.1) before it takes a token.
 2. **Which permission gates each tool.** The catalogue has no gates, so §4
    keeps them by hand. Proposed: a `gate` field in `GET /v1/tools`.
 3. **A rejection's reason.** `action.rejected` carries none and `action_get`

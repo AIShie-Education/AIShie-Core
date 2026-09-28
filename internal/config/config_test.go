@@ -1,6 +1,10 @@
 package config
 
 import (
+	"bytes"
+	"encoding/base64"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 )
@@ -41,5 +45,131 @@ func TestFromEnv(t *testing.T) {
 				t.Fatal("accepted")
 			}
 		})
+	}
+}
+
+func TestAssertionSettings(t *testing.T) {
+	const signingKey = "an installation's signing key, 32+ characters long"
+	seed := bytes.Repeat([]byte{7}, 32)
+	t.Setenv("PUBLIC_URL", "https://test.aishie.app")
+	t.Run("off by default, with a five-minute lifetime", func(t *testing.T) {
+		c, err := FromEnv()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.RuntimeAudiences != nil || c.AssertionKey != nil || c.AssertionTTL != 5*time.Minute {
+			t.Fatalf("%+v", c)
+		}
+	})
+	t.Run("everything can be set", func(t *testing.T) {
+		t.Setenv("RUNTIME_AUDIENCES", " https://test.aishie.app/runtime, http://localhost:9091/runtime ,")
+		t.Setenv("ASSERTION_KEY", base64.StdEncoding.EncodeToString(seed))
+		t.Setenv("ASSERTION_TTL", "15m")
+		c, err := FromEnv()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !slices.Equal(c.RuntimeAudiences, []string{"https://test.aishie.app/runtime", "http://localhost:9091/runtime"}) ||
+			!bytes.Equal(c.AssertionKey, seed) || c.AssertionTTL != 15*time.Minute {
+			t.Fatalf("%+v", c)
+		}
+	})
+	t.Run("a key in base64 of any common kind", func(t *testing.T) {
+		for _, enc := range []*base64.Encoding{base64.StdEncoding, base64.RawStdEncoding, base64.URLEncoding, base64.RawURLEncoding} {
+			t.Setenv("ASSERTION_KEY", enc.EncodeToString(bytes.Repeat([]byte{0xfb}, 32)))
+			if c, err := FromEnv(); err != nil || !bytes.Equal(c.AssertionKey, bytes.Repeat([]byte{0xfb}, 32)) {
+				t.Fatalf("%v %x", err, c.AssertionKey)
+			}
+		}
+	})
+	// Audiences need a key that is the same on every instance and after a
+	// restart: either will do.
+	t.Run("audiences need a key", func(t *testing.T) {
+		t.Setenv("RUNTIME_AUDIENCES", "https://test.aishie.app/runtime")
+		if _, err := FromEnv(); err == nil || !strings.Contains(err.Error(), "ASSERTION_KEY or SIGNING_KEY") {
+			t.Fatalf("with neither key: %v", err)
+		}
+		t.Setenv("SIGNING_KEY", signingKey)
+		if _, err := FromEnv(); err != nil {
+			t.Fatalf("with SIGNING_KEY: %v", err)
+		}
+		t.Setenv("SIGNING_KEY", "")
+		t.Setenv("ASSERTION_KEY", base64.StdEncoding.EncodeToString(seed))
+		if _, err := FromEnv(); err != nil {
+			t.Fatalf("with ASSERTION_KEY: %v", err)
+		}
+	})
+	// The issuer is PUBLIC_URL; its localhost default is no runtime's.
+	t.Run("audiences need PUBLIC_URL", func(t *testing.T) {
+		t.Setenv("SIGNING_KEY", signingKey)
+		t.Setenv("RUNTIME_AUDIENCES", "https://test.aishie.app/runtime")
+		t.Setenv("PUBLIC_URL", "")
+		if _, err := FromEnv(); err == nil || !strings.Contains(err.Error(), "RUNTIME_AUDIENCES needs PUBLIC_URL") {
+			t.Fatalf("without PUBLIC_URL: %v", err)
+		}
+		t.Setenv("RUNTIME_AUDIENCES", "")
+		if _, err := FromEnv(); err != nil {
+			t.Fatalf("without audiences, PUBLIC_URL may be left to its default: %v", err)
+		}
+	})
+	for _, bad := range []string{"test.aishie.app/runtime", "/runtime", "ftp://test.aishie.app/runtime", "mailto:ops@aishie.app",
+		"https://", "https:///runtime", "https://:443/runtime", "https://ops:secret@test.aishie.app/runtime",
+		"https://test.aishie.app/runtime?tenant=1", "https://test.aishie.app/runtime?", "https://test.aishie.app/runtime#top",
+		"https://test.aishie.app/runtime#", "HTTPS://test.aishie.app/runtime", "https://test.aishie.app/run time", "https://test.aishie.app/%zz",
+		// The same place written another way, or a way out of the path.
+		"https://Test.aishie.app/runtime", "https://[FE80::1]/runtime", "https://test.aishie.app:443/runtime", "http://test.aishie.app:80/runtime",
+		"https://test.aishie.app:/runtime", "https://test.aishie.app:0443/runtime", "https://test.aishie.app:99999/runtime",
+		"https://test.aishie.app:0/runtime", "https://[::1]:/runtime",
+		"https://test.aishie.app/%72untime", "https://test.aishie.app/a%2Fb", "https://test.aishie.app/a%2fb", "https://test.aishie.app/%2E%2E/admin",
+		"https://test.aishie.app/runtime/../admin", "https://test.aishie.app/runtime/..", "https://test.aishie.app/./runtime",
+		"https://test.aishie.app/runtime/.", "https://test.aishie.app//runtime", "https://test.aishie.app/runtime//api",
+		"https://test.aishie.app/runtime\\..\\admin", "https://тест.example/runtime", "https://test.aishie.app/run!time", "https://test.aishie.app/run%21time",
+		"https://test.aishie.app/(runtime)", "https://test.aishie.app/runtime*"} {
+		t.Run("rejects the audience "+bad, func(t *testing.T) {
+			t.Setenv("SIGNING_KEY", signingKey)
+			t.Setenv("RUNTIME_AUDIENCES", "https://test.aishie.app/runtime,"+bad)
+			if _, err := FromEnv(); err == nil || !strings.Contains(err.Error(), "RUNTIME_AUDIENCES") {
+				t.Fatalf("accepted, or refused for another reason: %v", err)
+			}
+		})
+	}
+	// Written the one way, each is taken as it is.
+	for _, good := range []string{"https://test.aishie.app/runtime", "https://test.aishie.app/runtime/", "https://test.aishie.app",
+		"https://test.aishie.app/", "http://localhost:9091/runtime", "https://[::1]:9091/runtime", "https://[::1]/runtime",
+		"https://test.aishie.app:8443/runtime", "http://test.aishie.app:443/runtime", "https://test.aishie.app/run%20time/v1"} {
+		t.Run("takes the audience "+good, func(t *testing.T) {
+			t.Setenv("SIGNING_KEY", signingKey)
+			t.Setenv("RUNTIME_AUDIENCES", good)
+			if c, err := FromEnv(); err != nil || !slices.Equal(c.RuntimeAudiences, []string{good}) {
+				t.Fatalf("%v %q", err, c.RuntimeAudiences)
+			}
+		})
+	}
+	for _, bad := range []string{"not base64!", base64.StdEncoding.EncodeToString(seed[:16]), base64.StdEncoding.EncodeToString(append(seed, 1))} {
+		t.Run("rejects the key "+bad, func(t *testing.T) {
+			t.Setenv("ASSERTION_KEY", bad)
+			_, err := FromEnv()
+			if err == nil || !strings.Contains(err.Error(), "ASSERTION_KEY") {
+				t.Fatalf("accepted, or refused for another reason: %v", err)
+			}
+			// The key is a secret: a refusal names the setting, not its value.
+			if strings.Contains(err.Error(), bad) {
+				t.Fatalf("the refusal repeats the key: %v", err)
+			}
+		})
+	}
+	for _, bad := range []string{"59s", "15m1s", "1h", "0", "-5m", "five minutes"} {
+		t.Run("rejects ASSERTION_TTL="+bad, func(t *testing.T) {
+			t.Setenv("ASSERTION_TTL", bad)
+			if _, err := FromEnv(); err == nil || !strings.Contains(err.Error(), "ASSERTION_TTL") {
+				t.Fatalf("accepted, or refused for another reason: %v", err)
+			}
+		})
+	}
+	for _, good := range []string{"1m", "15m", "90s"} {
+		t.Setenv("ASSERTION_TTL", good)
+		if _, err := FromEnv(); err != nil {
+			t.Errorf("ASSERTION_TTL=%s: %v", good, err)
+		}
 	}
 }
