@@ -282,6 +282,9 @@ The database cannot express these. Each one is a place a bug can hide.
   principal's, and cancelling its proposals.
 - **A token of the system actor's** written before migration 0004 refused
   them authenticates nobody.
+- **A temporary password** (`credential.must_change`) refuses its person every
+  call but setting their own; who may set one for whom is the tool's
+  (`member.reset_password`).
 - **`actor.kind` and `course_member.role` are never read by authorization.**
 
 ## Regrading

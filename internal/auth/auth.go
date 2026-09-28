@@ -100,23 +100,42 @@ type Session struct {
 	Token     string
 	ActorID   uuid.UUID
 	ExpiresAt time.Time
+	// PasswordChangeRequired says the password signed in with is one someone
+	// else set (member.reset_password): the person must set one of their own
+	// (credential.set_password) before anything else, and every other call
+	// is refused until they do.
+	PasswordChangeRequired bool
 }
 
-// errBadLogin does not say which of the two was wrong.
-var errBadLogin = apperr.New(apperr.Unauthenticated, "the email or the password is wrong")
+// errBadLogin does not say which of the two was wrong, nor whether what was
+// given for an account was an email or a login ID: one message for all.
+var errBadLogin = apperr.New(apperr.Unauthenticated, "the login ID or email, or the password, is wrong")
 
-// Login checks an email and password and mints a session.
-func (a *Authenticator) Login(ctx context.Context, email, password string) (Session, error) {
+// Login checks a sign-in name and a password and mints a session. The name
+// is an email when it holds an @, and a login ID otherwise; either is
+// matched in any case, and trimmed. Both are answered alike, wrong or
+// right: the same lookup of one indexed row, the same hash, the same
+// refusal.
+func (a *Authenticator) Login(ctx context.Context, name, password string) (Session, error) {
 	q := dbq.New(a.pool)
+	name = strings.TrimSpace(name)
 
 	var stored string
-	// An email the database cannot hold is one no account has. The database
-	// is not asked, since it would answer with a fault of ours, and the
-	// guess is answered, and costs the hash, like any other wrong one.
+	var mustChange bool
+	// A name the database cannot hold, or that is no login ID, is one no
+	// account has. The database is not asked, since it would answer with a
+	// fault of ours, and the guess is answered, and costs the hash, like any
+	// other wrong one.
 	var actor dbq.GetActorByEmailRow
 	err := pgx.ErrNoRows
-	if utf8.ValidString(email) && !strings.ContainsRune(email, 0) {
-		actor, err = q.GetActorByEmail(ctx, email)
+	switch {
+	case !utf8.ValidString(name) || strings.ContainsRune(name, 0):
+	case IsEmail(name):
+		actor, err = q.GetActorByEmail(ctx, name)
+	case IsLoginID(name):
+		var row dbq.GetActorByLoginIDRow
+		row, err = q.GetActorByLoginID(ctx, name)
+		actor = dbq.GetActorByEmailRow(row)
 	}
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
@@ -128,7 +147,7 @@ func (a *Authenticator) Login(ctx context.Context, email, password string) (Sess
 			return Session{}, fmt.Errorf("password lookup: %w", err)
 		}
 		if err == nil && cred.SecretHash != nil {
-			stored = *cred.SecretHash
+			stored, mustChange = *cred.SecretHash, cred.MustChange
 		}
 	}
 	// Always do the expensive comparison, so that timing does not reveal
@@ -144,7 +163,13 @@ func (a *Authenticator) Login(ctx context.Context, email, password string) (Sess
 	if !ok || !known || actor.Status != domain.ActorActive {
 		return Session{}, errBadLogin
 	}
-	return a.StartSession(ctx, actor.ID, "password login")
+	label := "password login"
+	if mustChange {
+		label = "password login, with a temporary password"
+	}
+	sess, err := a.StartSession(ctx, actor.ID, label)
+	sess.PasswordChangeRequired = mustChange
+	return sess, err
 }
 
 // StartSession mints a session credential for an actor whose identity has
@@ -260,10 +285,13 @@ func setPasswordHash(ctx context.Context, q *dbq.Queries, actorID uuid.UUID, has
 }
 
 // NewPerson is someone who registers themselves. A join link is the one way
-// a person does (docs/schema.md §2.2): there is no open sign-up.
+// a person does (docs/schema.md §2.2): there is no open sign-up. They give an
+// email, a login ID or both, which they will sign in with; one left empty is
+// none.
 type NewPerson struct {
 	DisplayName string
 	Email       string
+	LoginID     string
 	// PasswordHash is HashNewPassword's, made before the transaction that
 	// registers them, so that the hash holds no lock.
 	PasswordHash string
@@ -280,21 +308,35 @@ func EmailTaken() *apperr.Error {
 		With("reason", "email_taken")
 }
 
-// RegisterPerson makes a person, their email recorded as vouched for by
-// nobody but them (email_verified false: Core sends no email), and sets
-// their password. It runs in the transaction that seats them, so that an
-// account that joins nothing is never left behind. An email registered
-// already is refused (EmailTaken), and nothing of the account that has it is
-// read or touched: two at once for one address meet at actor_email_key, and
+// RegisterPerson makes a person, their email and login ID, whichever they
+// gave, recorded as vouched for by nobody but them (email_verified,
+// login_id_verified false: Core sends no email, and checks no number), and
+// sets their password. It runs in the transaction that seats them, so that
+// an account that joins nothing is never left behind. An email or a login
+// ID registered already is refused (EmailTaken, LoginIDTaken), and nothing
+// of the account that has it is read or touched: two at once for one
+// address or one number meet at actor_email_key or actor_login_id_key, and
 // the second is refused the same way. The transaction is then over; the
-// caller starts again, and finds the email taken before it gets here.
+// caller starts again, and finds it taken before it gets here.
 func RegisterPerson(ctx context.Context, q *dbq.Queries, p NewPerson, now time.Time) (uuid.UUID, error) {
 	id := ids.New()
+	var email, loginID *string
+	if p.Email != "" {
+		email = &p.Email
+	}
+	if p.LoginID != "" {
+		loginID = &p.LoginID
+	}
 	err := q.InsertRegisteredPerson(ctx, dbq.InsertRegisteredPersonParams{
-		ID: id, DisplayName: p.DisplayName, Email: &p.Email, CreatedByActorID: &p.CreatedBy, CreatedAt: now})
+		ID: id, DisplayName: p.DisplayName, Email: email, LoginID: loginID, CreatedByActorID: &p.CreatedBy, CreatedAt: now})
 	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == "actor_email_key" {
-		return uuid.Nil, EmailTaken()
+	if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+		switch pgErr.ConstraintName {
+		case "actor_email_key":
+			return uuid.Nil, EmailTaken()
+		case "actor_login_id_key":
+			return uuid.Nil, LoginIDTaken()
+		}
 	}
 	if err != nil {
 		return uuid.Nil, err
@@ -408,10 +450,12 @@ var errBadInvite = apperr.New(apperr.Unauthenticated,
 	"the invitation is not valid: it may have expired, been used, or been replaced by a newer one")
 
 // Accepted is what taking up an invitation hands back: the session it signs
-// the person in with, and the email they will sign in with from now on.
+// the person in with, and what they will sign in with from now on: their
+// email, their login ID, or both, whichever they have.
 type Accepted struct {
 	Session
-	Email string
+	Email   *string
+	LoginID *string
 }
 
 // AcceptInvite sets the password of the person an invitation was made for,
@@ -439,10 +483,11 @@ func (a *Authenticator) AcceptInvite(ctx context.Context, presented, password st
 		case inv.SecretHash == nil || !tokenMatches(presented, *inv.SecretHash),
 			inv.RevokedAt != nil,
 			inv.ExpiresAt == nil || !inv.ExpiresAt.After(a.now()),
-			// Only an actor with an email is invited (actor.invite), and a
-			// suspension since then holds. The system actor is refused as
-			// Authenticate refuses it, though it holds no credential.
-			inv.ActorKind == "system", inv.ActorStatus != domain.ActorActive, inv.ActorEmail == nil:
+			// Only an actor with a sign-in name, an email or a login ID, is
+			// invited (actor.invite), and a suspension since then holds. The
+			// system actor is refused as Authenticate refuses it, though it
+			// holds no credential.
+			inv.ActorKind == "system", inv.ActorStatus != domain.ActorActive, inv.ActorEmail == nil && inv.ActorLoginID == nil:
 			return inv, errBadInvite
 		}
 		// Asked again in the transaction that takes it up, under the
@@ -473,7 +518,7 @@ func (a *Authenticator) AcceptInvite(ctx context.Context, presented, password st
 		if err := setPasswordHash(ctx, q, inv.ActorID, hash, a.now()); err != nil {
 			return err
 		}
-		acc.Email = *inv.ActorEmail
+		acc.Email, acc.LoginID = inv.ActorEmail, inv.ActorLoginID
 		acc.Session, err = a.startSession(ctx, q, inv.ActorID, "invitation accepted")
 		return err
 	})

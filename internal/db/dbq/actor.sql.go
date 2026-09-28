@@ -131,6 +131,24 @@ func (q *Queries) GetActorByEmail(ctx context.Context, lower string) (GetActorBy
 	return i, err
 }
 
+const getActorByLoginID = `-- name: GetActorByLoginID :one
+SELECT id, status FROM actor WHERE lower(login_id) = lower($1)
+`
+
+type GetActorByLoginIDRow struct {
+	ID     uuid.UUID
+	Status string
+}
+
+// A person by their login ID, in any case, as GetActorByEmail finds one by
+// their email.
+func (q *Queries) GetActorByLoginID(ctx context.Context, lower string) (GetActorByLoginIDRow, error) {
+	row := q.db.QueryRow(ctx, getActorByLoginID, lower)
+	var i GetActorByLoginIDRow
+	err := row.Scan(&i.ID, &i.Status)
+	return i, err
+}
+
 const getActorForShare = `-- name: GetActorForShare :one
 SELECT id, kind, display_name, email, status, platform_role, created_by_actor_id, created_at,
        owner_actor_id, suspended_by_actor_id, site_chat_credential_id, email_verified, login_id, login_id_verified
@@ -178,8 +196,9 @@ func (q *Queries) GetSystemActor(ctx context.Context) (uuid.UUID, error) {
 }
 
 const insertActor = `-- name: InsertActor :exec
-INSERT INTO actor (id, kind, display_name, email, status, platform_role, created_by_actor_id, created_at, owner_actor_id)
-VALUES ($1, $2, $3, $4, 'active', $5, $6, $7, $8)
+INSERT INTO actor (id, kind, display_name, email, status, platform_role, created_by_actor_id, created_at, owner_actor_id,
+                   login_id)
+VALUES ($1, $2, $3, $4, 'active', $5, $6, $7, $8, $9)
 `
 
 type InsertActorParams struct {
@@ -191,8 +210,11 @@ type InsertActorParams struct {
 	CreatedByActorID *uuid.UUID
 	CreatedAt        time.Time
 	OwnerActorID     *uuid.UUID
+	LoginID          *string
 }
 
+// A login ID an administrator gives is one they vouch for (login_id_verified,
+// by its default).
 func (q *Queries) InsertActor(ctx context.Context, arg InsertActorParams) error {
 	_, err := q.db.Exec(ctx, insertActor,
 		arg.ID,
@@ -203,6 +225,7 @@ func (q *Queries) InsertActor(ctx context.Context, arg InsertActorParams) error 
 		arg.CreatedByActorID,
 		arg.CreatedAt,
 		arg.OwnerActorID,
+		arg.LoginID,
 	)
 	return err
 }
@@ -508,6 +531,21 @@ func (q *Queries) ListSeatsOfActor(ctx context.Context, actorID uuid.UUID) ([]Li
 	return items, nil
 }
 
+const lockActorForPasswordReset = `-- name: LockActorForPasswordReset :exec
+SELECT 1 FROM actor WHERE id = $1 FOR NO KEY UPDATE
+`
+
+// The person whose password is being reset, for the rest of the reset,
+// before anything about them is looked at. NO KEY UPDATE, as
+// LockOwnerForAgents, not UPDATE: every action row naming them holds KEY
+// SHARE on the row through its foreign key. Seating them anywhere reads the
+// row FOR SHARE (GetActorForShare), and waits for the reset, or the reset
+// for it and then counts the seat.
+func (q *Queries) LockActorForPasswordReset(ctx context.Context, id uuid.UUID) error {
+	_, err := q.db.Exec(ctx, lockActorForPasswordReset, id)
+	return err
+}
+
 const lockOwnerForAgents = `-- name: LockOwnerForAgents :exec
 SELECT 1 FROM actor WHERE id = $1 FOR NO KEY UPDATE
 `
@@ -522,17 +560,23 @@ func (q *Queries) LockOwnerForAgents(ctx context.Context, id uuid.UUID) error {
 	return err
 }
 
-const lookupActorByEmail = `-- name: LookupActorByEmail :one
+const lookupActorBySignInName = `-- name: LookupActorBySignInName :one
 SELECT a.id, a.kind, a.display_name, a.status,
        EXISTS (SELECT 1 FROM credential p WHERE p.actor_id = a.id AND p.kind = 'password' AND p.revoked_at IS NULL) AS has_password,
        EXISTS (SELECT 1 FROM credential s WHERE s.actor_id = a.id AND s.kind = 'sso' AND s.revoked_at IS NULL) AS has_sso,
        i.expires_at AS invite_expires_at
 FROM actor a
 LEFT JOIN credential i ON i.actor_id = a.id AND i.kind = 'invite' AND i.revoked_at IS NULL
-WHERE a.kind <> 'system' AND lower(a.email) = lower($1)
+WHERE a.kind <> 'system'
+  AND (lower(a.email) = lower($1) OR lower(a.login_id) = lower($2))
 `
 
-type LookupActorByEmailRow struct {
+type LookupActorBySignInNameParams struct {
+	Email   *string
+	LoginID *string
+}
+
+type LookupActorBySignInNameRow struct {
 	ID              uuid.UUID
 	Kind            string
 	DisplayName     string
@@ -542,13 +586,14 @@ type LookupActorByEmailRow struct {
 	InviteExpiresAt *time.Time
 }
 
-// The one person or agent a whole email address belongs to, in any case,
-// and whether they can sign in, as GetActorView says it. Never the system
-// actor. There is no partial match: this finds someone whose address the
-// caller already has, and lists nobody.
-func (q *Queries) LookupActorByEmail(ctx context.Context, email string) (LookupActorByEmailRow, error) {
-	row := q.db.QueryRow(ctx, lookupActorByEmail, email)
-	var i LookupActorByEmailRow
+// The one person or agent a whole email address belongs to, or the one
+// person a whole login ID does, in any case, and whether they can sign in,
+// as GetActorView says it. Never the system actor. There is no partial
+// match: this finds someone whose sign-in name the caller already has, and
+// lists nobody.
+func (q *Queries) LookupActorBySignInName(ctx context.Context, arg LookupActorBySignInNameParams) (LookupActorBySignInNameRow, error) {
+	row := q.db.QueryRow(ctx, lookupActorBySignInName, arg.Email, arg.LoginID)
+	var i LookupActorBySignInNameRow
 	err := row.Scan(
 		&i.ID,
 		&i.Kind,
@@ -557,6 +602,49 @@ func (q *Queries) LookupActorByEmail(ctx context.Context, email string) (LookupA
 		&i.HasPassword,
 		&i.HasSso,
 		&i.InviteExpiresAt,
+	)
+	return i, err
+}
+
+const passwordResetFacts = `-- name: PasswordResetFacts :one
+SELECT a.kind = 'human' AS is_person,
+       (a.platform_role IS NOT NULL)::bool AS holds_role,
+       EXISTS (SELECT 1 FROM department_admin x WHERE x.actor_id = a.id AND x.removed_at IS NULL) AS administers,
+       EXISTS (SELECT 1 FROM credential s WHERE s.actor_id = a.id AND s.kind = 'sso' AND s.revoked_at IS NULL) AS has_sso,
+       EXISTS (SELECT 1 FROM course_member m WHERE m.actor_id = a.id AND m.status <> 'removed' AND m.role <> 'student') AS seated_otherwise,
+       (a.login_id IS NOT NULL OR a.email IS NOT NULL)::bool AS has_sign_in_name,
+       a.display_name, a.login_id
+FROM actor a
+WHERE a.id = $1
+`
+
+type PasswordResetFactsRow struct {
+	IsPerson        bool
+	HoldsRole       bool
+	Administers     bool
+	HasSso          bool
+	SeatedOtherwise bool
+	HasSignInName   bool
+	DisplayName     string
+	LoginID         *string
+}
+
+// What decides whether whoever manages a course's members may reset a
+// person's password (member.reset_password): one row of facts, the rule the
+// caller's. seated_otherwise: a seat, not removed, in any course, under any
+// roster role but student.
+func (q *Queries) PasswordResetFacts(ctx context.Context, id uuid.UUID) (PasswordResetFactsRow, error) {
+	row := q.db.QueryRow(ctx, passwordResetFacts, id)
+	var i PasswordResetFactsRow
+	err := row.Scan(
+		&i.IsPerson,
+		&i.HoldsRole,
+		&i.Administers,
+		&i.HasSso,
+		&i.SeatedOtherwise,
+		&i.HasSignInName,
+		&i.DisplayName,
+		&i.LoginID,
 	)
 	return i, err
 }

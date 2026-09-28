@@ -72,7 +72,7 @@ func (q *Queries) GetCredentialForActor(ctx context.Context, arg GetCredentialFo
 
 const getInviteByPrefix = `-- name: GetInviteByPrefix :one
 SELECT c.id, c.actor_id, c.secret_hash, c.expires_at, c.revoked_at, c.issued_by_actor_id,
-       a.kind AS actor_kind, a.status AS actor_status, a.email AS actor_email
+       a.kind AS actor_kind, a.status AS actor_status, a.email AS actor_email, a.login_id AS actor_login_id
 FROM credential c
 JOIN actor a ON a.id = c.actor_id
 WHERE c.token_prefix = $1 AND c.kind = 'invite'
@@ -89,6 +89,7 @@ type GetInviteByPrefixRow struct {
 	ActorKind       string
 	ActorStatus     string
 	ActorEmail      *string
+	ActorLoginID    *string
 }
 
 // An invitation, found by its prefix before its hash is checked, and locked:
@@ -108,12 +109,13 @@ func (q *Queries) GetInviteByPrefix(ctx context.Context, tokenPrefix *string) (G
 		&i.ActorKind,
 		&i.ActorStatus,
 		&i.ActorEmail,
+		&i.ActorLoginID,
 	)
 	return i, err
 }
 
 const getPasswordCredential = `-- name: GetPasswordCredential :one
-SELECT id, secret_hash
+SELECT id, secret_hash, must_change
 FROM credential
 WHERE actor_id = $1 AND kind = 'password' AND revoked_at IS NULL
 ORDER BY created_at DESC
@@ -123,12 +125,15 @@ LIMIT 1
 type GetPasswordCredentialRow struct {
 	ID         uuid.UUID
 	SecretHash *string
+	MustChange bool
 }
 
+// The actor's live password, and whether someone else set it for them to
+// change (must_change).
 func (q *Queries) GetPasswordCredential(ctx context.Context, actorID uuid.UUID) (GetPasswordCredentialRow, error) {
 	row := q.db.QueryRow(ctx, getPasswordCredential, actorID)
 	var i GetPasswordCredentialRow
-	err := row.Scan(&i.ID, &i.SecretHash)
+	err := row.Scan(&i.ID, &i.SecretHash, &i.MustChange)
 	return i, err
 }
 
@@ -201,9 +206,39 @@ func (q *Queries) InsertCredential(ctx context.Context, arg InsertCredentialPara
 	return err
 }
 
+const insertTemporaryPassword = `-- name: InsertTemporaryPassword :exec
+INSERT INTO credential (id, actor_id, kind, secret_hash, label, created_at, issued_by_actor_id, must_change)
+VALUES ($1, $2, 'password', $3, $4, $5,
+        $6, true)
+`
+
+type InsertTemporaryPasswordParams struct {
+	ID              uuid.UUID
+	ActorID         uuid.UUID
+	SecretHash      *string
+	Label           *string
+	CreatedAt       time.Time
+	IssuedByActorID *uuid.UUID
+}
+
+// A password someone else set for its person, who must change it before
+// anything else (member.reset_password): marked must_change, saying who set
+// it, as the CHECK credential_must_change_is_an_issued_password holds.
+func (q *Queries) InsertTemporaryPassword(ctx context.Context, arg InsertTemporaryPasswordParams) error {
+	_, err := q.db.Exec(ctx, insertTemporaryPassword,
+		arg.ID,
+		arg.ActorID,
+		arg.SecretHash,
+		arg.Label,
+		arg.CreatedAt,
+		arg.IssuedByActorID,
+	)
+	return err
+}
+
 const listCredentialsForActor = `-- name: ListCredentialsForActor :many
 SELECT c.id, c.kind, c.provider, c.subject, c.token_prefix, c.label, c.last_used_at, c.expires_at, c.revoked_at,
-       c.created_at, c.issued_by_actor_id, i.display_name AS issued_by_name
+       c.created_at, c.issued_by_actor_id, i.display_name AS issued_by_name, c.must_change
 FROM credential c
 LEFT JOIN actor i ON i.id = c.issued_by_actor_id
 WHERE c.actor_id = $1
@@ -223,6 +258,7 @@ type ListCredentialsForActorRow struct {
 	CreatedAt       time.Time
 	IssuedByActorID *uuid.UUID
 	IssuedByName    *string
+	MustChange      bool
 }
 
 // Never the hash. The issuer's name comes with the row, for an administrator
@@ -249,6 +285,7 @@ func (q *Queries) ListCredentialsForActor(ctx context.Context, actorID uuid.UUID
 			&i.CreatedAt,
 			&i.IssuedByActorID,
 			&i.IssuedByName,
+			&i.MustChange,
 		); err != nil {
 			return nil, err
 		}
@@ -258,6 +295,20 @@ func (q *Queries) ListCredentialsForActor(ctx context.Context, actorID uuid.UUID
 		return nil, err
 	}
 	return items, nil
+}
+
+const passwordChangeRequired = `-- name: PasswordChangeRequired :one
+SELECT EXISTS (SELECT 1 FROM credential
+               WHERE actor_id = $1 AND kind = 'password' AND revoked_at IS NULL AND must_change)::bool
+`
+
+// Whether an actor's live password is one someone else set, which they must
+// change before anything else.
+func (q *Queries) PasswordChangeRequired(ctx context.Context, actorID uuid.UUID) (bool, error) {
+	row := q.db.QueryRow(ctx, passwordChangeRequired, actorID)
+	var column_1 bool
+	err := row.Scan(&column_1)
+	return column_1, err
 }
 
 const reviveSSOCredential = `-- name: ReviveSSOCredential :exec
@@ -335,6 +386,26 @@ type RevokePasswordCredentialsParams struct {
 func (q *Queries) RevokePasswordCredentials(ctx context.Context, arg RevokePasswordCredentialsParams) error {
 	_, err := q.db.Exec(ctx, revokePasswordCredentials, arg.ActorID, arg.RevokedAt)
 	return err
+}
+
+const revokeSessions = `-- name: RevokeSessions :execrows
+UPDATE credential SET revoked_at = $2
+WHERE actor_id = $1 AND kind = 'session' AND revoked_at IS NULL
+`
+
+type RevokeSessionsParams struct {
+	ActorID   uuid.UUID
+	RevokedAt *time.Time
+}
+
+// Signs an actor out everywhere: every browser session they have. Their API
+// tokens are left as they are.
+func (q *Queries) RevokeSessions(ctx context.Context, arg RevokeSessionsParams) (int64, error) {
+	result, err := q.db.Exec(ctx, revokeSessions, arg.ActorID, arg.RevokedAt)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const touchCredential = `-- name: TouchCredential :exec

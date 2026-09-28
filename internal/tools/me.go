@@ -2,9 +2,11 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/apperr"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/auth"
@@ -37,9 +39,12 @@ type MeOut struct {
 	DisplayName string    `json:"display_name"`
 	Email       *string   `json:"email,omitempty"`
 	// Absent with no email, as it was before anyone's went unchecked.
-	EmailVerified *bool   `json:"email_verified,omitempty" jsonschema:"with an email: false when you gave it registering through a join link, and nobody has checked it since; Core sends no email"`
-	Status        string  `json:"status"`
-	PlatformRole  *string `json:"platform_role,omitempty"`
+	EmailVerified *bool `json:"email_verified,omitempty" jsonschema:"with an email: false when you gave it registering through a join link, and nobody has checked it since; Core sends no email"`
+	// A person's other sign-in name: their student or staff number.
+	LoginID         *string `json:"login_id,omitempty" jsonschema:"what you sign in with besides your email, if you have one: your student or staff number; only an administrator changes it"`
+	LoginIDVerified *bool   `json:"login_id_verified,omitempty" jsonschema:"with a login ID: false when you gave it registering through a join link, and no administrator has set it since"`
+	Status          string  `json:"status"`
+	PlatformRole    *string `json:"platform_role,omitempty"`
 	// An agent may always know who answers for it. A service that hosts the
 	// agent compares this with the person who hands it the agent's token.
 	// It never changes (docs/schema.md §2.1).
@@ -60,8 +65,9 @@ type Administered struct {
 func meGet() tool.Tool {
 	return tool.Define(tool.Spec[Empty, MeOut]{
 		Name: "me.get",
-		Description: "Who the caller is: the actor this credential belongs to, for an agent a person owns, who owns it, " +
-			"and for a department's administrator, the departments they are appointed to administer.",
+		Description: "Who the caller is: the actor this credential belongs to, with the email and the login ID (a student " +
+			"or staff number) a person signs in with, for an agent a person owns, who owns it, and for a department's " +
+			"administrator, the departments they are appointed to administer.",
 		Kind: tool.Read, Gate: self,
 		HTTP:    tool.Route{Method: "GET", Pattern: "/v1/me"},
 		Resolve: noTarget[Empty]("actor"),
@@ -70,10 +76,13 @@ func meGet() tool.Tool {
 			if err != nil {
 				return MeOut{}, err
 			}
-			out := MeOut{ID: a.ID, Kind: a.Kind, DisplayName: a.DisplayName, Email: a.Email, Status: a.Status,
+			out := MeOut{ID: a.ID, Kind: a.Kind, DisplayName: a.DisplayName, Email: a.Email, LoginID: a.LoginID, Status: a.Status,
 				PlatformRole: a.PlatformRole, OwnerActorID: a.OwnerActorID}
 			if a.Email != nil {
 				out.EmailVerified = &a.EmailVerified
+			}
+			if a.LoginID != nil {
+				out.LoginIDVerified = &a.LoginIDVerified
 			}
 			if rc.Actor.Administers {
 				rows, err := rc.Q.MyAppointments(ctx, rc.Actor.ID)
@@ -255,8 +264,9 @@ type CredentialView struct {
 	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
 	RevokedAt   *time.Time `json:"revoked_at,omitempty"`
 	CreatedAt   time.Time  `json:"created_at"`
-	IssuedByID  *uuid.UUID `json:"issued_by_actor_id,omitempty" jsonschema:"who issued a token: the actor themself or an administrator; absent for other kinds, for tokens made on the command line, and for tokens issued by a release before this field"`
+	IssuedByID  *uuid.UUID `json:"issued_by_actor_id,omitempty" jsonschema:"who issued a token: the actor themself or an administrator; who set a temporary password (member.reset_password); absent for other kinds, for tokens made on the command line, and for tokens issued by a release before this field"`
 	IssuedBy    *string    `json:"issued_by_name,omitempty" jsonschema:"the issuer's display name"`
+	MustChange  bool       `json:"must_change,omitempty" jsonschema:"a password someone else set (member.reset_password): until its person sets their own with credential.set_password, every other call of theirs is refused (password_change_required)"`
 }
 
 func viewCredentials(rows []dbq.ListCredentialsForActorRow) CredentialListOut {
@@ -265,7 +275,7 @@ func viewCredentials(rows []dbq.ListCredentialsForActorRow) CredentialListOut {
 		out.Credentials = append(out.Credentials, CredentialView{
 			ID: r.ID, Kind: r.Kind, Provider: r.Provider, Subject: r.Subject, TokenPrefix: r.TokenPrefix,
 			Label: r.Label, LastUsedAt: r.LastUsedAt, ExpiresAt: r.ExpiresAt, RevokedAt: r.RevokedAt, CreatedAt: r.CreatedAt,
-			IssuedByID: r.IssuedByActorID, IssuedBy: r.IssuedByName,
+			IssuedByID: r.IssuedByActorID, IssuedBy: r.IssuedByName, MustChange: r.MustChange,
 		})
 	}
 	return out
@@ -332,15 +342,40 @@ type OK struct {
 	OK bool `json:"ok"`
 }
 
+// errSamePassword refuses, as the password someone chooses for themselves,
+// the temporary one someone else set and so knows.
+var errSamePassword = apperr.Invalid("choose a password of your own: that is the temporary one you were given").
+	With("reason", "password_unchanged")
+
 func credentialSetPassword() tool.Tool {
 	return tool.Define(tool.Spec[SetPasswordIn, OK]{
-		Name:        "credential.set_password",
-		Description: "Set or replace the caller's own password. The previous password stops working at once.",
-		Kind:        tool.Write, Gate: self,
+		Name: "credential.set_password",
+		Description: "Set or replace the caller's own password. The previous password stops working at once. It is the one " +
+			"call a person whose password someone else set (member.reset_password) may make: every other is refused " +
+			"(password_change_required) until they have set their own here, which may not be the one they were given " +
+			"(password_unchanged).",
+		Kind: tool.Write, Gate: self, SetsOwnPassword: true,
 		HTTP:     tool.Route{Method: "POST", Pattern: "/v1/me/password"},
 		SecretIn: []string{"password"},
 		Resolve:  noTarget[SetPasswordIn]("credential"),
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in SetPasswordIn) (OK, error) {
+			if ec.Actor.PasswordChangeRequired {
+				// Only then is the hash worth its cost: whoever set the
+				// temporary one knows it, and it must not become theirs.
+				switch cur, err := ec.Q.GetPasswordCredential(ctx, ec.Actor.ID); {
+				case errors.Is(err, pgx.ErrNoRows):
+				case err != nil:
+					return OK{}, err
+				case cur.MustChange && cur.SecretHash != nil:
+					same, err := auth.VerifyPassword(in.Password, *cur.SecretHash)
+					if err != nil {
+						return OK{}, err
+					}
+					if same {
+						return OK{}, errSamePassword
+					}
+				}
+			}
 			if err := auth.SetPassword(ctx, ec.Q, ec.Actor.ID, in.Password, ec.Now); err != nil {
 				return OK{}, err
 			}

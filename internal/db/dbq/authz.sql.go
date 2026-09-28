@@ -51,17 +51,20 @@ func (q *Queries) CountStudentsInScope(ctx context.Context, arg CountStudentsInS
 const getActorForAuthz = `-- name: GetActorForAuthz :one
 
 SELECT a.id, a.display_name, a.status, a.platform_role,
-       EXISTS (SELECT 1 FROM department_admin da WHERE da.actor_id = a.id AND da.removed_at IS NULL) AS administers
+       EXISTS (SELECT 1 FROM department_admin da WHERE da.actor_id = a.id AND da.removed_at IS NULL) AS administers,
+       EXISTS (SELECT 1 FROM credential c
+               WHERE c.actor_id = a.id AND c.must_change AND c.revoked_at IS NULL) AS password_change_required
 FROM actor a
 WHERE a.id = $1
 `
 
 type GetActorForAuthzRow struct {
-	ID           uuid.UUID
-	DisplayName  string
-	Status       string
-	PlatformRole *string
-	Administers  bool
+	ID                     uuid.UUID
+	DisplayName            string
+	Status                 string
+	PlatformRole           *string
+	Administers            bool
+	PasswordChangeRequired bool
 }
 
 // Everything authorize() reads. Two columns are deliberately never selected
@@ -69,6 +72,10 @@ type GetActorForAuthzRow struct {
 // branch on either, and a test fails if this file ever names them.
 // administers: whether the actor holds any live appointment, so that only a
 // department administrator's calls go on to look for the one they rely on.
+// password_change_required: whether their live password is one someone else
+// set (member.reset_password), which they must change before anything else.
+// Only a password is marked so (credential_must_change_is_an_issued_password),
+// so the mark alone finds it.
 func (q *Queries) GetActorForAuthz(ctx context.Context, id uuid.UUID) (GetActorForAuthzRow, error) {
 	row := q.db.QueryRow(ctx, getActorForAuthz, id)
 	var i GetActorForAuthzRow
@@ -78,6 +85,7 @@ func (q *Queries) GetActorForAuthz(ctx context.Context, id uuid.UUID) (GetActorF
 		&i.Status,
 		&i.PlatformRole,
 		&i.Administers,
+		&i.PasswordChangeRequired,
 	)
 	return i, err
 }

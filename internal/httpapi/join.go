@@ -32,7 +32,8 @@ const JoinPath = "/v1/join/"
 
 // joinPreview answers the page that opens a link: the course's code,
 // section and title, whether the link seats anyone now and why not, until
-// when, and whether it takes a registration, for which domains. No
+// when, and whether it takes a registration, for which domains, and whether
+// that asks for an email (email_required) or takes a login ID alone. No
 // credential is asked for, and nothing else about the course or its members
 // is said. A token that finds no link is one 404, however it is wrong.
 func (s *server) joinPreview(w http.ResponseWriter, r *http.Request) {
@@ -84,15 +85,17 @@ type joinRegisteredOut struct {
 
 // joinRegister registers someone with no account through a link, seats them
 // and signs them in, as a sign-in does: the session cookie, and who they
-// are. It is the one way a person registers on their own. The name, email
-// and password are held to their rules first, looking nothing up; then, as
+// are. It is the one way a person registers on their own. The name, the
+// login ID or email or both, and the password are held to their rules
+// first, looking nothing up; then, as
 // at sign-in, the address's allowance is taken, which a registration that
 // succeeds has back; then the link is found, and the link's own allowance
 // taken, which nothing gives back, so that a link that leaks makes accounts
 // no faster than it allows. What would be refused is refused before the
 // password is hashed: the link seating nobody, an email at a domain it does
-// not take, and then one registered already (email_taken: sign in, and open
-// the link again). The person is made, their password set, the join made as
+// not take or none for a link kept to domains, and then an email or a login
+// ID registered already (email_taken, login_id_taken: sign in, and open the
+// link again). The person is made, their password set, the join made as
 // theirs and the session started in one transaction, or none of it is: the
 // join asks everything again under the link's lock, and a refusal there
 // leaves no account behind, and nothing recorded.
@@ -109,7 +112,7 @@ func (s *server) joinRegister(w http.ResponseWriter, r *http.Request) {
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&in); err != nil {
-		s.writeError(w, r, apperr.Invalid("the body must be JSON with display_name, email and password"))
+		s.writeError(w, r, apperr.Invalid("the body must be JSON with display_name, login_id or email or both, and password"))
 		return
 	}
 	if err := in.Check(); err != nil {
@@ -133,7 +136,7 @@ func (s *server) joinRegister(w http.ResponseWriter, r *http.Request) {
 		s.tooMany(w, r, wait)
 		return
 	}
-	if err := tools.JoinRegistrationRefusal(ctx, q, preview, in.Email); err != nil {
+	if err := tools.JoinRegistrationRefusal(ctx, q, preview, in); err != nil {
 		s.writeError(w, r, err)
 		return
 	}
@@ -149,8 +152,9 @@ func (s *server) joinRegister(w http.ResponseWriter, r *http.Request) {
 	}
 	var sess auth.Session
 	// The person's first action, and their only one yet: no key of theirs
-	// can be taken already. A retry finds the email registered, and is told
-	// to sign in; joining again once signed in is the seat they have.
+	// can be taken already. A retry finds the email or the login ID
+	// registered, and is told to sign in; joining again once signed in is the
+	// seat they have.
 	out, err := s.Pipeline.InvokeAsNew(ctx, tools.ToolCourseJoin, args, "register:"+preview.LinkID().String(), pipeline.NewActor{
 		Make: func(ctx context.Context, q *dbq.Queries, now time.Time) (uuid.UUID, error) {
 			return auth.RegisterPerson(ctx, q, preview.RegisteringPerson(in, hash), now)

@@ -68,18 +68,23 @@ actor(id, kind [human|agent|system], display_name, email null,
       status [active|suspended], platform_role null [root|admin],
       created_by_actor_id null→actor, created_at,
       owner_actor_id null→actor, suspended_by_actor_id null→actor,
-      site_chat_credential_id null, email_verified = true)
+      site_chat_credential_id null, email_verified = true,
+      login_id null, login_id_verified = true)
+    unique(lower(email)), unique(lower(login_id))
     check: owner_actor_id ≠ id;  owner_actor_id set ⇒ kind = 'agent' and no platform_role;
            site_chat_credential_id set ⇒ kind = 'agent';
-           not email_verified ⇒ kind = 'human' and email set
+           not email_verified ⇒ kind = 'human' and email set;
+           login_id is 1..64 of [0-9A-Za-z._-];  login_id set ⇒ kind = 'human';
+           not login_id_verified ⇒ kind = 'human' and login_id set
     composite FK (site_chat_credential_id, id) → credential(id, actor_id)
     trigger: the owner is a person (kind = 'human'), and never changes
 
 credential(id, actor_id→actor, kind [password|sso|api_token|session|invite],
            secret_hash null, provider null, subject null, token_prefix null,
            label null, last_used_at null, expires_at null, revoked_at null, created_at,
-           issued_by_actor_id null→actor,
+           issued_by_actor_id null→actor, must_change = false,
            unique(provider, subject), unique(token_prefix), unique(id, actor_id))
+    check: must_change ⇒ kind = 'password' and issued_by_actor_id set
 
 course(id, dept_id→department, term_id→term, code, section = '', title, description null,
        status [draft|active|archived], copied_from_course_id null→course,
@@ -151,6 +156,36 @@ true from then on. Nothing grants on it; it is there to be shown (`actor.get`, `
 `me.get`), so that an administrator knows an account whose email may be anyone's. The release
 before 0012 neither reads nor writes it, and a person it registers takes the default.
 
+**A person signs in with an email or a login ID.** `login_id` is a person's sign-in name other
+than an email: the student or staff number their school gives them (學號, 工號), which is what
+every student and teacher has and remembers where most students have no mailbox. It is 1 to 64
+letters and digits of ASCII, dots, hyphens and underscores (`actor_login_id_valid`), so that it
+never holds an `@` and is never taken for an email, nor an email for it, and never a space, so
+that what is kept is trimmed; unique in any case, as an email is (`actor_login_id_key`). Only a
+person has one (`actor_login_id_is_a_persons`, a CHECK that reads `kind` to refuse, as the
+refusals of ownership do): an agent signs in with a token, and the system actor never signs in.
+The name is neutral on purpose: a student's number and a teacher's are the same kind of thing,
+and neither is chosen by the person, as a user name would be. An administrator gives it and
+corrects it (`actor.register`, `actor.update`), and it can be changed, not removed, as an email;
+nobody changes their own, since it is what they are known by to their instructors, and there is
+no tool on one's own account that takes one. A person who registers through a join link (§2.2)
+types their own, and it is recorded unchecked: `login_id_verified` is `email_verified` for the
+login ID, false for one the person typed, true for one an administrator gave or set since, or
+for none (`actor_unverified_login_id_is_a_persons`). A school's sign-on, if one is ever
+connected, knows its people by these numbers, and matching them to ours takes only a vouched-for
+one at its word. It is shown wherever a person's email is to an administrator (`actor.get`,
+`actor.list`, which searches it too), to the person (`me.get`), and on their seat to whoever
+reads the course's members (`member.get`, `member.list`), which shows no email; whoever seats
+members finds a person by the whole of it (`member.lookup_actor`), as administrators do
+(`actor.lookup_by_email`). Migration 0016 adds both columns; the release before neither reads
+nor writes them, and a person it registers has none.
+
+Signing in (`POST /v1/auth/login`) takes one name, `login` (or `email`, as clients before login
+IDs send it): with an `@` it is an email, without one a login ID; either is matched in any case
+and trimmed. The two are answered alike, wrong or right: one indexed lookup, one hash, one
+refusal ("the login ID or email, or the password, is wrong"), and each name is its own key to
+the limit on sign-in attempts, found or not, so that neither says which accounts there are.
+
 `created_by_actor_id` is the delegation chain: root (seeded at install, the only null) creates
 admins, an admin creates a course and seats its first instructor, the instructor adds everyone
 else. A department's administrator may stand where the admin does, for the courses of their
@@ -172,12 +207,25 @@ there is one verification path and no session table; unlike an API token it must
 (`actor.invite`): stored like a session, with an `expires_at`, but under a scheme of its own
 (`aisinv_`) and never looked up as a bearer token. It is taken for setting the password, once,
 and revoked as it is; an actor has one live invitation at most. Setting a password some other
-way revokes it too, and so does a change of email: it went to the old one.
+way revokes it too, and so does a change of email: it went to the old one. A person is invited
+who has an email or a login ID to sign in with.
+
+`must_change` marks a password someone else set: an instructor's reset of a student's
+(`member.reset_password`, §2.2), who issued it (`issued_by_actor_id`, which a password otherwise
+leaves null; the CHECK `credential_must_change_is_an_issued_password` holds both). The sign-in
+with it says `password_change_required`, and until the person has set a password of their own
+(`credential.set_password`, which may not be the one they were given: `password_unchanged`),
+every other call of theirs is refused, whatever credential it comes with (§3); so is an
+assertion for them (`POST /v1/auth/assertion`). Setting any password revokes it, as it revokes
+every password before. Migration 0016 adds the column, and its CHECK `NOT VALID`: every row
+before it holds false. The release before neither reads nor writes it, and takes a temporary
+password as it takes any.
 
 `issued_by_actor_id` says who issued an API token: the actor themself
 (`credential.issue_token`), an administrator (`actor.issue_token`), or an agent's owner
-(`agent.issue_token`); and who issued an invitation (`actor.invite`, `actor.invite_new`), which
-is asked again when it is taken up (§2.10). It is null for the other kinds, for a token made on
+(`agent.issue_token`); who issued an invitation (`actor.invite`, `actor.invite_new`), which
+is asked again when it is taken up (§2.10); and who set a temporary password
+(`member.reset_password`). It is null for the other kinds, for a token made on
 the command line (`aishiterud bootstrap`, `aishiterud token issue`), for a token issued by a
 release older than migration 0006, including one that release issues while it still runs after
 the migration, and for an invitation made before its issuer was recorded, which is taken for a
@@ -295,7 +343,8 @@ the nearest one, and the choice is recorded here so that it is a decision and no
 | Correcting lateness (`submission.set_lateness`) | `perm_grade_submit` | not `perm_submission_write`, or a student could un-late themselves |
 | Recording a student as having handed in nothing (`submission.record_missing`) | `perm_grade_submit` | the same: what a student handed in is not theirs to declare |
 | Where every student stands on an assignment (`submission.roster`) | `perm_submission_read` | it is the submission list with the students who have not started; names and seat status only with `perm_member_read`, as the member list gives them |
-| Finding whom to seat by their whole email, or whom an actor id names (`member.lookup_actor`) | `perm_member_manage` | whoever seats members has to name them; it lists nobody |
+| Finding whom to seat by their whole email or login ID, or whom an actor id names (`member.lookup_actor`) | `perm_member_manage` | whoever seats members has to name them; it lists nobody |
+| Giving a student a temporary password (`member.reset_password`) | `perm_member_manage` at `autonomous`, and by a person | whoever seats the students gives one back the account they seated; never by proposal or under review, since the password is shown to whoever the call returns to, and never to an agent (§2.2, Resetting a student's password) |
 | Unpublishing an assignment nobody has started (`assignment.unpublish`) | `perm_assignment_write` | the undo of publishing it |
 | Deciding, reviewing and reading one's own agent's actions (`action.decide`, `.review`, `.get`), and the queues of them (`action.list_proposed`, `.list_pending_review`) | `perm_action_decide`, or owning the agent | an owner decides and reviews their agent's action where they could have done it themselves (§2.6), which needs no `perm_action_decide`; without it they reach their own agents' actions alone, and anything else is denied as it is to anyone without it |
 | Taking back one's own proposal, or one's own agent's, while nobody has decided it (`action.withdraw`) | `perm_document_read` | the most basic permission a seated member holds; that the proposal is the caller's own, or their own agent's, is what decides, as `action.list_mine` shows only the caller's own |
@@ -549,18 +598,61 @@ is in no action, result, event or log line. The front end puts it in its own joi
   endpoints call it, for a person signed in) is a write like any other, made
   as the person joining, recorded, replayed by its key, and refused on an archived course. It
   seats people only: an agent is refused (`people_only`), as is a suspended person
-  (`actor_not_active`), and an email at no domain the link takes (`email_domain_not_allowed`).
+  (`actor_not_active`), and an email at no domain the link takes, or none
+  (`email_domain_not_allowed`).
   Someone with a live seat already is answered with that seat as it is (`already_member`), paused
   or not: no use is counted, nothing resumed. A removed or expired seat is as if there were none,
   and the join is a fresh seat. It emits `member.added`, its payload saying `via: join_link` and
   the link's id; `course.join_link_created` and `course.join_link_revoked` are for whoever holds
   `member_invite` or `member_manage`.
 - Someone with no account registers through a live link, and only so: there is no open sign-up.
-  They give a display name, an email and a password (the rules for any password); the person is
+  They give a display name, a login ID (their student number, §2.1) or an email or both, and a
+  password (the rules for any password); a link kept to email domains asks for an email, at one
+  of them, and the page that opens it is told so (`email_required`). The person is
   made, their password set, the join made as theirs and a session started, in one transaction,
-  or none of it is. Their email is recorded unverified (`email_verified`, §2.1), and the person is
-  created by the link's maker. An email registered already is refused (`email_taken`), telling
-  them to sign in and open the link again; nothing of the account that has it is read or touched.
+  or none of it is. Their email and login ID are recorded unverified (`email_verified`,
+  `login_id_verified`, §2.1), and the person is created by the link's maker. An email or a login
+  ID registered already is refused (`email_taken`, `login_id_taken`), telling them to sign in and
+  open the link again; nothing of the account that has it is read or touched.
+
+**Resetting a student's password.** A student with no email cannot reset their own password:
+Core sends nothing, and there is nowhere to send a link. Whoever seats the students gives one a
+temporary password instead (`member.reset_password {course_id, member_id}`), which the call
+returns once, to be handed on; the student signs in with it and must set their own before
+anything else (§2.1, `must_change`; §3). Whoever holds the temporary password can sign in as the
+student, so it is given only for an account that reaches nothing a student of the course does
+not, and only by a person. Each refusal says which rule, in `error.details.reason`:
+
+- the caller: a person (`people_only`: an agent is never handed a password, whoever's delegate
+  it is and whatever it holds, as a join link seats people only; this reads `kind` to refuse, as
+  the ceilings read it to limit); holding `member_manage` at `autonomous` (`not_autonomous`:
+  under review, a rejection would take back nothing); not by proposal (`not_by_proposal`: the
+  password would be shown to whoever approved it, and would wait in the proposal); not on their
+  own seat (`own_seat`);
+- the seat: in this course (another is not found), a person's (`not_a_person`: a delegate's seat
+  is an agent's), a student's (`not_a_student`), and active (`seat_not_active`: paused, removed
+  or past its expiry); within the caller's reach, as any target belonging to a student is
+  (`student_out_of_scope`, §3); and within what the caller holds, as resuming it would be: a
+  grant of the whole of it, held to the rule that nobody hands out more than they hold, and to
+  its ceilings (`beyond_your_seat`, naming the permission);
+- the person: seated as a student and nothing else in every course, whatever their status there
+  but removed (`seated_other_than_student`: a TA or an instructor elsewhere is an
+  administrator's); holding no platform role (`platform_role`); administering no department
+  (`administers`); signing in by no identity provider (`sso_linked`: a live linked identity); and
+  with a login ID or an email to sign in with (`no_sign_in_name`).
+
+It takes the person's row, then the seat, as every tool that changes a seat does (the seat
+`FOR UPDATE`, after its principal's KEY SHARE, though a person's seat has none), so that seating
+them elsewhere meanwhile waits for it, or it for that, and counts the seat. It revokes their
+passwords and any invitation, as setting a password does, sets the temporary one, marked
+(`must_change`, `issued_by_actor_id` the caller), and signs them out of every session; their API
+tokens stay, and do nothing until they have set their own. The password is made by Core — four
+groups of four characters from an alphabet with nothing that reads as something else, about 79
+bits — and is never stored but as its argon2 hash: the tool names it a secret of its result
+(`SecretOut`), so the action's recorded result leaves it out, a replay comes back without it, and
+the event, `member.password_reset` (subject the student's seat, payload `reset_by_member_id` and
+`sessions_ended`), never carries it; nor does the request log, which writes no body. The event is
+for whoever holds `member_manage`.
 
 ### 2.3 Grading scheme
 
@@ -1390,9 +1482,9 @@ The course's title and description are also its instructors' to change from insi
 not.
 
 **People, for a department administrator, are found by their whole email and invited new.**
-`actor.lookup_by_email` answers an exact address, in any case, with who the person is, whether
-they can sign in, and whether the caller may invite them: never their email, role, seats,
-credentials or owner, and there is no partial search. `actor.invite_new` registers a person and
+`actor.lookup_by_email` answers an exact address, or an exact login ID (§2.1), in any case, with
+who the person is, whether they can sign in, and whether the caller may invite them: never their
+email, login ID, role, seats, credentials or owner, and there is no partial search. `actor.invite_new` registers a person and
 invites them in one step. Since whoever holds an invitation can sign in as the person it is for,
 a department administrator invites again (`actor.invite`) only a person whose account reaches
 nothing beyond what they administer: who has never been able to sign in, holds no platform role
@@ -1422,6 +1514,14 @@ authorize(actor, course, action_type, target) → autonomy_level
 5. if the target belongs to an assignment: same with assignment_scope
 6. return level
 ```
+
+Before any of it, a caller whose live password is one someone else set (`must_change`, §2.1) is
+refused every call but setting their own (`credential.set_password`), denied with reason
+`password_change_required`, whatever credential the call comes with and whatever the caller
+holds; a write so refused is recorded, as a suspended actor's is. It is read with the actor
+(`GetActorForAuthz`), and only ever takes away. It is the caller's own call that is refused:
+approving a proposal the person made before is someone else's call, re-authorized against their
+seat as any is.
 
 Step 5 has one more case. A target that belongs to a student but to no single assignment — a
 grade on a component, a course total, a whole gradebook — is within scope only for
@@ -1491,6 +1591,9 @@ that reads which credential the call came with.
 | A submitted submission never changes | trigger |
 | Owner columns match `document.kind`; a version has content; SSO rows carry an identity | CHECKs |
 | Emails are unique regardless of case | unique index on `lower(email)` |
+| Login IDs are unique regardless of case; 1..64 of `[0-9A-Za-z._-]`, so never an `@` or a space; only a person has one | unique index `actor_login_id_key` on `lower(login_id)`, CHECKs `actor_login_id_valid`, `actor_login_id_is_a_persons` |
+| Only a person's login ID goes unverified, and only a login ID there is | CHECK `actor_unverified_login_id_is_a_persons` |
+| Only a password is marked to be changed, and it says who set it | CHECK `credential_must_change_is_an_issued_password` (`NOT VALID`: every row before it holds false) |
 | Only an agent has an owner, and its owner is a person: not an agent, not the system actor, not itself | CHECKs on `actor`, trigger `actor_owner_valid` |
 | An agent's owner is fixed when it is registered: never changed, taken away, or given to one registered without | trigger `actor_owner_fixed` |
 | An agent's seat that is not removed holds `action_decide` at `confirm_required` at most: more is written as that | trigger `course_member_agent_ceiling` |
@@ -1595,9 +1698,20 @@ that reads which credential the call came with.
   started in one transaction, under the invitation's row lock, so of two tries at once one sets
   the password and the other finds it used, and a try that fails half way leaves the invitation
   as it was. It is refused once it has expired, been replaced or been withdrawn (a password set
-  otherwise, a new email), and for someone suspended since or with no email. Whoever holds one
-  can sign in as its actor, once; it is no bearer token: it is never taken as one, nor a token
-  as an invitation.
+  otherwise, a new email), and for someone suspended since or with neither an email nor a login
+  ID. Whoever holds one can sign in as its actor, once; it is no bearer token: it is never taken
+  as one, nor a token as an invitation.
+- A sign-in name with an `@` is an email and one without a login ID; both are looked up, hashed
+  against and refused alike, and each is its own key to the limit on sign-in attempts.
+- A person whose password someone else set does nothing but set their own until they have
+  (`password_change_required`, §3), and not to the one they were given (`password_unchanged`).
+- A temporary password (`member.reset_password`) is given only by a person holding
+  `member_manage` at `autonomous`, never by proposal, only for a person's active student seat
+  within the caller's reach and holdings, whose account reaches nothing more: no seat but a
+  student's anywhere, no platform role, no appointment, no linked identity (§2.2). It is kept
+  only as a hash: out of the action's result, its replay and its event.
+- Nobody sets their own login ID: only `actor.register` and `actor.update`, a platform
+  administrator's, take one to set.
 - A call that loses a deadlock — two managers changing each other's seats at once, or
   `member.update_perms_bulk`, which locks every seat of a role in id order, against a write that
   holds one seat of that role and then takes another's KEY SHARE (a message between two seats of

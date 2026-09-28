@@ -48,7 +48,7 @@ Usage:
   aishiterud seed                    insert the built-in permission presets
   aishiterud bootstrap --name N [--email E] [--password-stdin]
                                      create the root actor, once; prints its API token
-  aishiterud token issue --actor ID|EMAIL --label L [--days N]
+  aishiterud token issue --actor ID|EMAIL|LOGIN_ID --label L [--days N]
                                      issue an API token, e.g. for a newly registered agent
   aishiterud version                 print build information
 
@@ -59,7 +59,7 @@ Environment:
   PROPOSAL_TTL      default 336h (14 days); 0 disables expiry
   RATE_LIMIT_PER_MINUTE        default 600 calls per actor per instance; 0 for no limit
   RATE_LIMIT_BURST             default 100
-  SIGN_IN_ATTEMPTS_PER_MINUTE  default 10, per address (an IPv6 /64 counts as one) and per email;
+  SIGN_IN_ATTEMPTS_PER_MINUTE  default 10, per address (an IPv6 /64 counts as one) and per email or login ID;
                                a sign-in that succeeds is not counted against its address;
                                registrations through a join link count with an address's sign-ins
   JOIN_REGISTRATIONS_PER_MINUTE  default 60, per join link; 0 for no limit
@@ -450,10 +450,10 @@ func bootstrap(cfg config.Config, args []string) error {
 // action row; whoever can run it can already write to the database.
 func token(cfg config.Config, args []string) error {
 	if len(args) == 0 || args[0] != "issue" {
-		return errors.New("token: want `token issue --actor ID|EMAIL --label L`")
+		return errors.New("token: want `token issue --actor ID|EMAIL|LOGIN_ID --label L`")
 	}
 	fs := flag.NewFlagSet("token issue", flag.ContinueOnError)
-	who := fs.String("actor", "", "actor id or email (required)")
+	who := fs.String("actor", "", "actor id, email or login ID (required)")
 	label := fs.String("label", "", "what the token is for (required)")
 	days := fs.Int("days", 0, "expire after this many days; 0 means never")
 	if err := fs.Parse(args[1:]); err != nil {
@@ -474,11 +474,22 @@ func token(cfg config.Config, args []string) error {
 
 	actorID, err := uuid.Parse(*who)
 	if err != nil {
-		a, err := q.GetActorByEmail(ctx, *who)
-		if err != nil {
-			return fmt.Errorf("token issue: no actor with id or email %q", *who)
+		// An email has an @, and a login ID none, as a sign-in tells them
+		// apart.
+		var found uuid.UUID
+		if auth.IsEmail(*who) {
+			var a dbq.GetActorByEmailRow
+			a, err = q.GetActorByEmail(ctx, *who)
+			found = a.ID
+		} else {
+			var a dbq.GetActorByLoginIDRow
+			a, err = q.GetActorByLoginID(ctx, *who)
+			found = a.ID
 		}
-		actorID = a.ID
+		if err != nil {
+			return fmt.Errorf("token issue: no actor with id, email or login ID %q", *who)
+		}
+		actorID = found
 	} else if _, err := q.GetActor(ctx, actorID); err != nil {
 		return fmt.Errorf("token issue: no actor %s", actorID)
 	}

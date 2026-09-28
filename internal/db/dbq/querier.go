@@ -128,11 +128,18 @@ type Querier interface {
 	// which leaves kind out on purpose.
 	GetActor(ctx context.Context, id uuid.UUID) (Actor, error)
 	GetActorByEmail(ctx context.Context, lower string) (GetActorByEmailRow, error)
+	// A person by their login ID, in any case, as GetActorByEmail finds one by
+	// their email.
+	GetActorByLoginID(ctx context.Context, lower string) (GetActorByLoginIDRow, error)
 	// Everything authorize() reads. Two columns are deliberately never selected
 	// here: the actor's type and the member's roster role. Authorization does not
 	// branch on either, and a test fails if this file ever names them.
 	// administers: whether the actor holds any live appointment, so that only a
 	// department administrator's calls go on to look for the one they rely on.
+	// password_change_required: whether their live password is one someone else
+	// set (member.reset_password), which they must change before anything else.
+	// Only a password is marked so (credential_must_change_is_an_issued_password),
+	// so the mark alone finds it.
 	GetActorForAuthz(ctx context.Context, id uuid.UUID) (GetActorForAuthzRow, error)
 	// The same, FOR SHARE, for a write that acts on whether the actor is active
 	// and does not change the row: seating it, appointing it. A suspension then
@@ -234,6 +241,8 @@ type Querier interface {
 	GetMemoryByHash(ctx context.Context, arg GetMemoryByHashParams) (GetMemoryByHashRow, error)
 	// The same, locked, by a change to it, which takes its bucket's lock first.
 	GetMemoryForUpdate(ctx context.Context, id uuid.UUID) (GetMemoryForUpdateRow, error)
+	// The actor's live password, and whether someone else set it for them to
+	// change (must_change).
 	GetPasswordCredential(ctx context.Context, actorID uuid.UUID) (GetPasswordCredentialRow, error)
 	GetPreset(ctx context.Context, id uuid.UUID) (PermissionPreset, error)
 	// Roster facts about a member. This is not authorization: that a grade can
@@ -262,6 +271,8 @@ type Querier interface {
 	// authority and authority_dept_id are the capacity a call outside any course
 	// was allowed in; null for a seat's call, one's own account's, and a denial.
 	InsertAction(ctx context.Context, arg InsertActionParams) (int64, error)
+	// A login ID an administrator gives is one they vouch for (login_id_verified,
+	// by its default).
 	InsertActor(ctx context.Context, arg InsertActorParams) error
 	// The partial unique index department_admin_one_live refuses a second live
 	// appointment of one person at one department, two made at once included.
@@ -293,12 +304,18 @@ type Querier interface {
 	InsertMemory(ctx context.Context, arg InsertMemoryParams) (uuid.UUID, error)
 	InsertMissingSubmission(ctx context.Context, arg InsertMissingSubmissionParams) (int64, error)
 	InsertPreset(ctx context.Context, arg InsertPresetParams) error
-	// A person who registers through a join link: their email is theirs to vouch
-	// for alone (email_verified false), and whoever made the link, on whose
-	// authority they are let in, is who created them.
+	// A person who registers through a join link: their email and their login
+	// ID, whichever they give, are theirs to vouch for alone (email_verified,
+	// login_id_verified false), and whoever made the link, on whose authority
+	// they are let in, is who created them. One they do not give is null, and
+	// vouched for, as there is nothing to doubt.
 	InsertRegisteredPerson(ctx context.Context, arg InsertRegisteredPersonParams) error
 	InsertRetraction(ctx context.Context, arg InsertRetractionParams) (int64, error)
 	InsertSubmission(ctx context.Context, arg InsertSubmissionParams) error
+	// A password someone else set for its person, who must change it before
+	// anything else (member.reset_password): marked must_change, saying who set
+	// it, as the CHECK credential_must_change_is_an_issued_password holds.
+	InsertTemporaryPassword(ctx context.Context, arg InsertTemporaryPasswordParams) error
 	InsertTerm(ctx context.Context, arg InsertTermParams) error
 	// What decides whether a department administrator (issuer) may invite a
 	// person (actor), and whether that invitation may still be taken up: an
@@ -315,8 +332,8 @@ type Querier interface {
 	ListActionsByMember(ctx context.Context, arg ListActionsByMemberParams) ([]Action, error)
 	// Everyone registered, as GetActorView sees them: people and agents, not the
 	// system actor, which nobody registers or manages. The search is a piece of
-	// the name or of the email, in any case, taken as it is: strpos has no
-	// wildcards to escape.
+	// the name, of the email or of the login ID, in any case, taken as it is:
+	// strpos has no wildcards to escape.
 	ListActors(ctx context.Context, arg ListActorsParams) ([]ListActorsRow, error)
 	// A person's agents, oldest first, with what their owner needs to see at a
 	// glance: when one last used a token that still works, how many seats it
@@ -535,6 +552,13 @@ type Querier interface {
 	LiveAppointment(ctx context.Context, arg LiveAppointmentParams) (DepartmentAdmin, error)
 	LiveComponentGradeExists(ctx context.Context, arg LiveComponentGradeExistsParams) (bool, error)
 	LiveSubmissionGradeExists(ctx context.Context, submissionID *uuid.UUID) (bool, error)
+	// The person whose password is being reset, for the rest of the reset,
+	// before anything about them is looked at. NO KEY UPDATE, as
+	// LockOwnerForAgents, not UPDATE: every action row naming them holds KEY
+	// SHARE on the row through its foreign key. Seating them anywhere reads the
+	// row FOR SHARE (GetActorForShare), and waits for the reset, or the reset
+	// for it and then counts the seat.
+	LockActorForPasswordReset(ctx context.Context, id uuid.UUID) error
 	// FOR UPDATE, not the NO KEY UPDATE of an ordinary update: it conflicts with
 	// the KEY SHARE that inserting a submission takes, and that
 	// GetAssignmentForSubmission takes before it checks that the assignment is
@@ -651,16 +675,19 @@ type Querier interface {
 	LockSubmissionForGrading(ctx context.Context, id uuid.UUID) (string, error)
 	// All of one student's attempts at one assignment, locked, newest first.
 	LockSubmissionsOf(ctx context.Context, arg LockSubmissionsOfParams) ([]LockSubmissionsOfRow, error)
-	// The one person or agent a whole email address belongs to, in any case,
-	// and whether they can sign in, as GetActorView says it. Never the system
-	// actor. There is no partial match: this finds someone whose address the
-	// caller already has, and lists nobody.
-	LookupActorByEmail(ctx context.Context, email string) (LookupActorByEmailRow, error)
-	// The actor a whole email address, or an id, belongs to, for someone seating
-	// them, with their seat in this course if they have a live one, and their
-	// owner if they are an agent someone owns. The email must match whole, in
-	// any case: this finds a person whose address one already has, and lists
-	// nobody.
+	LoginIDTaken(ctx context.Context, lower string) (bool, error)
+	LoginIDTakenByAnother(ctx context.Context, arg LoginIDTakenByAnotherParams) (bool, error)
+	// The one person or agent a whole email address belongs to, or the one
+	// person a whole login ID does, in any case, and whether they can sign in,
+	// as GetActorView says it. Never the system actor. There is no partial
+	// match: this finds someone whose sign-in name the caller already has, and
+	// lists nobody.
+	LookupActorBySignInName(ctx context.Context, arg LookupActorBySignInNameParams) (LookupActorBySignInNameRow, error)
+	// The actor a whole email address, a whole login ID, or an id, belongs to,
+	// for someone seating them, with their seat in this course if they have a
+	// live one, and their owner if they are an agent someone owns. The email or
+	// the login ID must match whole, in any case: this finds a person whose
+	// address or number one already has, and lists nobody.
 	LookupActorForSeating(ctx context.Context, arg LookupActorForSeatingParams) (LookupActorForSeatingRow, error)
 	MarkActionExecuted(ctx context.Context, arg MarkActionExecutedParams) error
 	MarkActionFailed(ctx context.Context, arg MarkActionFailedParams) error
@@ -677,6 +704,14 @@ type Querier interface {
 	// Whether the actor owns an agent that holds, or held, a seat in the
 	// course: whose queues of their own agents' actions they may read there.
 	OwnsAgentSeatedIn(ctx context.Context, arg OwnsAgentSeatedInParams) (bool, error)
+	// Whether an actor's live password is one someone else set, which they must
+	// change before anything else.
+	PasswordChangeRequired(ctx context.Context, actorID uuid.UUID) (bool, error)
+	// What decides whether whoever manages a course's members may reset a
+	// person's password (member.reset_password): one row of facts, the rule the
+	// caller's. seated_otherwise: a seat, not removed, in any course, under any
+	// roster role but student.
+	PasswordResetFacts(ctx context.Context, id uuid.UUID) (PasswordResetFactsRow, error)
 	PostGrade(ctx context.Context, arg PostGradeParams) (int64, error)
 	// Whether a principal's own seat, or the seat of another of its delegates
 	// than except, is among the seats of one roster role that are not removed or
@@ -708,6 +743,9 @@ type Querier interface {
 	RevokeInvites(ctx context.Context, arg RevokeInvitesParams) error
 	RevokeJoinLink(ctx context.Context, arg RevokeJoinLinkParams) (int64, error)
 	RevokePasswordCredentials(ctx context.Context, arg RevokePasswordCredentialsParams) error
+	// Signs an actor out everywhere: every browser session they have. Their API
+	// tokens are left as they are.
+	RevokeSessions(ctx context.Context, arg RevokeSessionsParams) (int64, error)
 	// Whether two actors are one party, for four eyes: the same actor, one the
 	// other's owner, or two agents of one owner. An agent acts only as its
 	// owner's delegate, so neither of them checks the other's work, and nor does
@@ -816,7 +854,8 @@ type Querier interface {
 	UnpublishAssignment(ctx context.Context, id uuid.UUID) (int64, error)
 	// A null leaves the value as it is. An email an administrator gives is one
 	// they vouch for, as every email was before join links: one a person typed
-	// registering through a link (email_verified false) is theirs no longer.
+	// registering through a link (email_verified false) is theirs no longer. So
+	// is a login ID.
 	UpdateActor(ctx context.Context, arg UpdateActorParams) error
 	UpdateAssignment(ctx context.Context, arg UpdateAssignmentParams) error
 	UpdateComponent(ctx context.Context, arg UpdateComponentParams) error

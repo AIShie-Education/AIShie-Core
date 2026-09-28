@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/apperr"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/auth"
@@ -62,7 +63,8 @@ const (
 type ActorRegisterIn struct {
 	Kind         string     `json:"kind" jsonschema:"human or agent; recorded for display and audit, and read by nothing else"`
 	DisplayName  string     `json:"display_name"`
-	Email        *string    `json:"email,omitempty" jsonschema:"needed for a person to sign in with a password"`
+	Email        *string    `json:"email,omitempty" jsonschema:"what a person signs in with, with a password; they need this or a login_id"`
+	LoginID      *string    `json:"login_id,omitempty" jsonschema:"for a person only: their student or staff number, which they sign in with as with an email; 1 to 64 letters, digits, dots, hyphens and underscores, and never an @; unique in any case"`
 	PlatformRole *string    `json:"platform_role,omitempty" jsonschema:"admin; only root may grant it"`
 	OwnerActorID *uuid.UUID `json:"owner_actor_id,omitempty" jsonschema:"for an agent only: the active person who owns it, and whose delegate alone it will be, for good"`
 }
@@ -75,8 +77,9 @@ func actorRegister() tool.Tool {
 	return tool.Define(tool.Spec[ActorRegisterIn, ActorOut]{
 		Name: "actor.register",
 		Description: "Register a person or an agent. An actor can do nothing until it is seated in a course. " +
-			"A person signs in once they have a password, which they choose through actor.invite, or through " +
-			"single sign-on (actor.link_sso). " +
+			"A person signs in with their email or their login ID (a student or staff number), either or both of which " +
+			"you give here, once they have a password, which they choose through actor.invite, or through " +
+			"single sign-on (actor.link_sso). A login ID taken already is refused (login_id_taken). " +
 			"An agent is registered here and runs elsewhere: no endpoint, model or prompt is stored. " +
 			"Give it a token with actor.issue_token. An agent may be given an owner, a person: it then acts only as " +
 			"that person's delegate, seated by them (member.add_delegate), never with more than their own seat. " +
@@ -107,6 +110,13 @@ func actorRegister() tool.Tool {
 					return ActorOut{}, apperr.Conflicts("that email already belongs to an actor")
 				}
 			}
+			if in.LoginID != nil {
+				id, err := givenLoginID(ctx, ec.Q, in.Kind, *in.LoginID, uuid.Nil)
+				if err != nil {
+					return ActorOut{}, err
+				}
+				in.LoginID = &id
+			}
 			if in.OwnerActorID != nil {
 				if in.Kind != "agent" {
 					return ActorOut{}, apperr.Invalid("only an agent has an owner")
@@ -124,14 +134,65 @@ func actorRegister() tool.Tool {
 			if err := ec.Q.InsertActor(ctx, dbq.InsertActorParams{
 				ID: id, Kind: in.Kind, DisplayName: in.DisplayName, Email: in.Email,
 				PlatformRole: in.PlatformRole, CreatedByActorID: &ec.Actor.ID, CreatedAt: ec.Now,
-				OwnerActorID: in.OwnerActorID,
+				OwnerActorID: in.OwnerActorID, LoginID: in.LoginID,
 			}); err != nil {
-				return ActorOut{}, err
+				return ActorOut{}, loginIDConflict(err)
 			}
 			ec.Emit(events.Event{Type: EventActorRegistered, SubjectType: "actor", SubjectID: &id})
 			return ActorOut{ActorID: id}, nil
 		},
 	})
+}
+
+// givenLoginID holds a login ID an administrator gives to its rules: a
+// person's, of the shape of one (auth.LoginID), and nobody else's (actor,
+// uuid.Nil for a new actor, may already have it). It reads kind to refuse,
+// as the database does (actor_login_id_is_a_persons); nothing that grants
+// reads it.
+func givenLoginID(ctx context.Context, q *dbq.Queries, kind, given string, actor uuid.UUID) (string, error) {
+	if kind != "human" {
+		return "", apperr.Invalid("only a person has a login ID: an agent signs in with a token")
+	}
+	id, err := auth.LoginID("login_id", given)
+	if err != nil {
+		return "", err
+	}
+	var taken bool
+	if actor == uuid.Nil {
+		taken, err = q.LoginIDTaken(ctx, id)
+	} else {
+		taken, err = q.LoginIDTakenByAnother(ctx, dbq.LoginIDTakenByAnotherParams{LoginID: id, ID: actor})
+	}
+	if err != nil {
+		return "", err
+	}
+	if taken {
+		return "", errLoginIDTaken()
+	}
+	return id, nil
+}
+
+// optional is a string someone may leave out, trimmed: nil when it is
+// empty.
+func optional(s string) *string {
+	if s = strings.TrimSpace(s); s == "" {
+		return nil
+	}
+	return &s
+}
+
+func errLoginIDTaken() *apperr.Error {
+	return apperr.Conflicts("that login ID already belongs to someone").With("reason", "login_id_taken")
+}
+
+// loginIDConflict says so when two at once give one login ID, and meet at
+// actor_login_id_key.
+func loginIDConflict(err error) error {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == "actor_login_id_key" {
+		return errLoginIDTaken()
+	}
+	return err
 }
 
 type ActorIDIn struct {
@@ -144,6 +205,8 @@ type ActorView struct {
 	DisplayName      string     `json:"display_name"`
 	Email            *string    `json:"email,omitempty"`
 	EmailVerified    bool       `json:"email_verified" jsonschema:"false for a person who registered through a join link, whose email nobody has checked: Core sends no email; setting it with actor.update vouches for it"`
+	LoginID          *string    `json:"login_id,omitempty" jsonschema:"a person's student or staff number, which they sign in with as with an email"`
+	LoginIDVerified  bool       `json:"login_id_verified" jsonschema:"false for a person who typed their own login ID registering through a join link, which nobody has checked; setting it with actor.update vouches for it"`
 	Status           string     `json:"status"`
 	PlatformRole     *string    `json:"platform_role,omitempty"`
 	CreatedByActorID *uuid.UUID `json:"created_by_actor_id,omitempty"`
@@ -162,7 +225,8 @@ type ActorView struct {
 }
 
 func viewActor(a dbq.GetActorViewRow) ActorView {
-	v := ActorView{ID: a.ID, Kind: a.Kind, DisplayName: a.DisplayName, Email: a.Email, EmailVerified: a.EmailVerified, Status: a.Status,
+	v := ActorView{ID: a.ID, Kind: a.Kind, DisplayName: a.DisplayName, Email: a.Email, EmailVerified: a.EmailVerified,
+		LoginID: a.LoginID, LoginIDVerified: a.LoginIDVerified, Status: a.Status,
 		PlatformRole: a.PlatformRole, CreatedByActorID: a.CreatedByActorID, CreatedAt: a.CreatedAt,
 		HasPassword: a.HasPassword, HasSSO: a.HasSso, InviteExpiresAt: a.InviteExpiresAt,
 		OwnerActorID: a.OwnerActorID, OwnerName: a.OwnerName}
@@ -202,7 +266,7 @@ func actorGet() tool.Tool {
 type ActorListIn struct {
 	Kind         *string    `json:"kind,omitempty" jsonschema:"human or agent"`
 	Status       *string    `json:"status,omitempty" jsonschema:"active or suspended"`
-	Search       *string    `json:"search,omitempty" jsonschema:"a piece of the name or of the email, in any case"`
+	Search       *string    `json:"search,omitempty" jsonschema:"a piece of the name, of the email or of the login ID, in any case"`
 	OwnerActorID *uuid.UUID `json:"owner_actor_id,omitempty" jsonschema:"only the agents this person owns"`
 	Page
 }
@@ -252,23 +316,27 @@ type ActorUpdateIn struct {
 	ActorID     uuid.UUID `json:"actor_id"`
 	DisplayName *string   `json:"display_name,omitempty"`
 	Email       *string   `json:"email,omitempty" jsonschema:"what a person signs in with; it can be changed, not removed"`
+	LoginID     *string   `json:"login_id,omitempty" jsonschema:"a person's student or staff number, which they sign in with as with an email; it can be given, corrected and changed, not removed, and only by an administrator"`
 }
 
 func actorUpdate() tool.Tool {
 	return tool.Define(tool.Spec[ActorUpdateIn, ActorView]{
 		Name: "actor.update",
-		Description: "Correct an actor's display name or email, or give an email to a person registered without one, " +
-			"so that they can sign in with a password. What is left out stays as it is. A change of email " +
-			"withdraws an invitation waiting (actor.invite): it went to the old one. An email you set is one you vouch " +
-			"for: a person who registered through a join link has email_verified false, until you do.",
+		Description: "Correct an actor's display name, email or login ID (a person's student or staff number), or give a " +
+			"person registered without one an email or a login ID, so that they can sign in with a password. What is left " +
+			"out stays as it is. A change of email withdraws an invitation waiting (actor.invite): it went to the old one. " +
+			"An email or a login ID you set is one you vouch for: a person who registered through a join link has " +
+			"email_verified or login_id_verified false, until you do. Nobody changes their own login ID but an " +
+			"administrator: it is what they are known by to their instructors. One someone else has is refused " +
+			"(login_id_taken).",
 		Kind: tool.Write, Gate: admins,
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/actors/{actor_id}"},
 		Resolve: func(ctx context.Context, q dbq.Querier, in ActorUpdateIn) (tool.Target, error) {
 			return resolveActor(ctx, q, ActorIDIn{ActorID: in.ActorID})
 		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in ActorUpdateIn) (ActorView, error) {
-			if in.DisplayName == nil && in.Email == nil {
-				return ActorView{}, apperr.Invalid("give display_name, email or both")
+			if in.DisplayName == nil && in.Email == nil && in.LoginID == nil {
+				return ActorView{}, apperr.Invalid("give display_name, email, login_id or more than one")
 			}
 			if in.DisplayName != nil && strings.TrimSpace(*in.DisplayName) == "" {
 				return ActorView{}, apperr.Invalid("display_name cannot be empty")
@@ -298,8 +366,16 @@ func actorUpdate() tool.Tool {
 					return ActorView{}, apperr.Conflicts("that email already belongs to an actor")
 				}
 			}
-			if err := ec.Q.UpdateActor(ctx, dbq.UpdateActorParams{ID: in.ActorID, DisplayName: in.DisplayName, Email: in.Email}); err != nil {
-				return ActorView{}, err
+			if in.LoginID != nil {
+				id, err := givenLoginID(ctx, ec.Q, before.Kind, *in.LoginID, in.ActorID)
+				if err != nil {
+					return ActorView{}, err
+				}
+				in.LoginID = &id
+			}
+			if err := ec.Q.UpdateActor(ctx, dbq.UpdateActorParams{ID: in.ActorID, DisplayName: in.DisplayName, Email: in.Email,
+				LoginID: in.LoginID}); err != nil {
+				return ActorView{}, loginIDConflict(err)
 			}
 			// An invitation waiting went to the email as it was. Once that
 			// changes, it may have gone to the wrong person: it is withdrawn,
@@ -309,7 +385,19 @@ func actorUpdate() tool.Tool {
 					return ActorView{}, err
 				}
 			}
-			ec.Emit(events.Event{Type: EventActorUpdated, SubjectType: "actor", SubjectID: &in.ActorID})
+			// Which fields were given, and nothing of what they say: an
+			// event carries ids and small facts, never a name or a number.
+			var fields []string
+			for _, f := range []struct {
+				name  string
+				given bool
+			}{{"display_name", in.DisplayName != nil}, {"email", in.Email != nil}, {"login_id", in.LoginID != nil}} {
+				if f.given {
+					fields = append(fields, f.name)
+				}
+			}
+			ec.Emit(events.Event{Type: EventActorUpdated, SubjectType: "actor", SubjectID: &in.ActorID,
+				Payload: map[string]any{"fields": fields}})
 			a, err := ec.Q.GetActorView(ctx, in.ActorID)
 			if err != nil {
 				return ActorView{}, err
@@ -524,7 +612,8 @@ type ActorInviteIn struct {
 
 type ActorInviteOut struct {
 	Token     string    `json:"token" jsonschema:"what the invitation link carries; shown once, and a replay of this call comes back without it"`
-	Email     string    `json:"email" jsonschema:"what the person will sign in with"`
+	Email     *string   `json:"email,omitempty" jsonschema:"what the person will sign in with, if they have an email"`
+	LoginID   *string   `json:"login_id,omitempty" jsonschema:"what the person will sign in with, if they have a login ID"`
 	ExpiresAt time.Time `json:"expires_at"`
 }
 
@@ -541,7 +630,7 @@ func actorInvite() tool.Tool {
 			"It works once, until it expires, and only the newest invitation works: inviting again replaces it. " +
 			"Taken up by someone who has a password already, it replaces that password. It is withdrawn when the " +
 			"person sets a password some other way, and when their email changes. " +
-			"The person needs an email, which is what they will sign in with (actor.update gives one). " +
+			"The person needs an email or a login ID, which is what they will sign in with (actor.update gives either). " +
 			"An agent is given a token instead (actor.issue_token). A department administrator invites only a person who " +
 			"has never been able to sign in and holds nothing beyond the departments they administer: no platform role, " +
 			"no appointment, no agent, and seats only in those departments' courses; otherwise invite_not_allowed says " +
@@ -568,10 +657,11 @@ func actorInvite() tool.Tool {
 			}
 			// An agent needs no password: it is given a token. That is the
 			// front end's to steer by, not a rule here, which reads the email
-			// the actor would sign in with, and not their kind.
+			// or the login ID the actor would sign in with, and not their kind.
 			switch {
-			case a.Email == nil:
-				return ActorInviteOut{}, apperr.Precondition("the actor has no email to sign in with: give them one with actor.update first")
+			case a.Email == nil && a.LoginID == nil:
+				return ActorInviteOut{}, apperr.Precondition("the actor has neither an email nor a login ID to sign in with: " +
+					"give them one with actor.update first")
 			case a.Status != domain.ActorActive:
 				return ActorInviteOut{}, apperr.Precondition("the actor is suspended: reactivate them first")
 			}
@@ -580,7 +670,7 @@ func actorInvite() tool.Tool {
 				return ActorInviteOut{}, err
 			}
 			ec.Emit(events.Event{Type: EventActorInvited, SubjectType: "actor", SubjectID: &in.ActorID})
-			return ActorInviteOut{Token: tok.Full, Email: *a.Email, ExpiresAt: expires}, nil
+			return ActorInviteOut{Token: tok.Full, Email: a.Email, LoginID: a.LoginID, ExpiresAt: expires}, nil
 		},
 	})
 }
@@ -624,12 +714,13 @@ func mayInvite(ctx context.Context, ec *tool.ExecCtx, target uuid.UUID) error {
 }
 
 type ActorLookupIn struct {
-	Email string `json:"email" jsonschema:"the whole address, in any case"`
+	Email   string `json:"email,omitempty" jsonschema:"the whole address, in any case"`
+	LoginID string `json:"login_id,omitempty" jsonschema:"or the whole login ID, a student or staff number, in any case"`
 }
 
 // ActorLookupOut is all an exact lookup says of a person: nothing of their
-// email, which the caller typed, their platform role, credentials, seats or
-// owner.
+// email or login ID, one of which the caller typed, their platform role,
+// credentials, seats or owner.
 type ActorLookupOut struct {
 	ActorID         uuid.UUID  `json:"actor_id"`
 	DisplayName     string     `json:"display_name"`
@@ -643,23 +734,24 @@ type ActorLookupOut struct {
 func actorLookupByEmail() tool.Tool {
 	return tool.Define(tool.Spec[ActorLookupIn, ActorLookupOut]{
 		Name: "actor.lookup_by_email",
-		Description: "Find the person a whole email address belongs to, to seat them as a course's instructor or appoint " +
-			"them a department's administrator. The whole address must match, in any case; there is no partial search, " +
-			"and nobody is listed. It says who they are, whether they can sign in yet, and whether you may invite them " +
-			"again. For platform and department administrators.",
+		Description: "Find the person a whole email address, or a whole login ID (a student or staff number), belongs to, to " +
+			"seat them as a course's instructor or appoint them a department's administrator. Give one of email and " +
+			"login_id; it must match whole, in any case; there is no partial search, and nobody is listed. It says who " +
+			"they are, whether they can sign in yet, and whether you may invite them again. For platform and department " +
+			"administrators.",
 		Kind: tool.Read, Gate: administrators,
 		HTTP: tool.Route{Method: "GET", Pattern: "/v1/actor-lookup"},
 		Resolve: func(context.Context, dbq.Querier, ActorLookupIn) (tool.Target, error) {
 			return tool.Target{Type: "actor", AnyDept: true}, nil
 		},
 		Query: func(ctx context.Context, rc *tool.ReadCtx, in ActorLookupIn) (ActorLookupOut, error) {
-			email := strings.TrimSpace(in.Email)
-			if email == "" {
-				return ActorLookupOut{}, apperr.Invalid("email is required")
+			email, loginID := optional(in.Email), optional(in.LoginID)
+			if (email == nil) == (loginID == nil) {
+				return ActorLookupOut{}, apperr.Invalid("give one of email and login_id")
 			}
-			a, err := rc.Q.LookupActorByEmail(ctx, email)
+			a, err := rc.Q.LookupActorBySignInName(ctx, dbq.LookupActorBySignInNameParams{Email: email, LoginID: loginID})
 			if errors.Is(err, pgx.ErrNoRows) {
-				return ActorLookupOut{}, apperr.Missing("nobody is registered with that email")
+				return ActorLookupOut{}, apperr.Missing("nobody is registered with that email or login ID")
 			} else if err != nil {
 				return ActorLookupOut{}, err
 			}

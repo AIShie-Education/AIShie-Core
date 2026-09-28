@@ -277,7 +277,7 @@ func joinDomains(in []string) ([]string, error) {
 type JoinLinkCreateIn struct {
 	tool.InCourse
 	MaxUses             *int     `json:"max_uses,omitempty" jsonschema:"how many people may join through it, from 1 to 10000; as many as like while it lives unless given"`
-	AllowedEmailDomains []string `json:"allowed_email_domains,omitempty" jsonschema:"only people whose email is at one of these domains, exactly: example.edu does not take mail.example.edu; at most 20. Anyone's unless given. Core cannot check an email, so this keeps out whoever gives another, not whoever claims one of these"`
+	AllowedEmailDomains []string `json:"allowed_email_domains,omitempty" jsonschema:"only people whose email is at one of these domains, exactly: example.edu does not take mail.example.edu; at most 20. Anyone's unless given. Given, someone registering through it must give an email, and someone with none is not let in. Core cannot check an email, so this keeps out whoever gives another, not whoever claims one of these"`
 }
 
 type JoinLinkCreateOut struct {
@@ -293,9 +293,10 @@ func joinLinkCreate() tool.Tool {
 		Name: "course.join_link_create",
 		Description: "Make a link that seats whoever opens it as a student of the course, at once and with no approval — " +
 			"typically shown as a QR code in class: a person signed in joins, and someone with no account registers through " +
-			"it (name, email, password) and joins. Nobody registers any other way. Every link works for ten minutes from " +
-			"now, and then never again; make another for the next class. It seats max_uses people at most if given, and " +
-			"only emails at allowed_email_domains if given. The seat is the course's student preset, as member.add gives " +
+			"it (name, login ID — their student number — or email or both, and password) and joins. Nobody registers any " +
+			"other way. Every link works for ten minutes from now, and then never again; make another for the next class. " +
+			"It seats max_uses people at most if given, and only emails at allowed_email_domains if given, which then asks " +
+			"everyone registering for an email. The seat is the course's student preset, as member.add gives " +
 			"it, and is yours to give: it must be within what you hold, now and at every join, so the link stops working " +
 			"(creator_lost_authority) once you are paused or removed, lose member_invite, or no longer hold what the preset " +
 			"gives; a seat taken through it ends when yours does. The token is returned once and only its hash is kept. " +
@@ -642,6 +643,10 @@ type JoinPreview struct {
 	// sign in — by single sign-on, say — and then join.
 	Registration        bool     `json:"registration"`
 	AllowedEmailDomains []string `json:"allowed_email_domains,omitempty"`
+	// EmailRequired says someone registering through it must give an email,
+	// at one of AllowedEmailDomains: a link kept to domains takes nobody
+	// without one. Otherwise they give a login ID or an email, or both.
+	EmailRequired bool `json:"email_required"`
 
 	// For the endpoint that registers through it; never shown.
 	linkID, makerActorID uuid.UUID
@@ -665,7 +670,7 @@ func PreviewJoinLink(ctx context.Context, q dbq.Querier, token string, now time.
 		return JoinPreview{}, err
 	}
 	p := JoinPreview{Course: JoinPreviewCourse{Code: r.Code, Section: r.Section, Title: r.Title}, ExpiresAt: r.ExpiresAt,
-		AllowedEmailDomains: r.AllowedEmailDomains, linkID: r.ID}
+		AllowedEmailDomains: r.AllowedEmailDomains, EmailRequired: r.AllowedEmailDomains != nil, linkID: r.ID}
 	grant, refusal, err := joinStanding(ctx, q, linkOf(r), r.CourseStatus, now, false)
 	if err != nil {
 		return JoinPreview{}, err
@@ -678,27 +683,39 @@ func PreviewJoinLink(ctx context.Context, q dbq.Querier, token string, now time.
 	return p, nil
 }
 
-// JoinRegistration is what someone gives to register through a join link.
+// JoinRegistration is what someone gives to register through a join link:
+// their name, what they will sign in with — a login ID, their student or
+// staff number, or an email, or both — and a password.
 type JoinRegistration struct {
 	DisplayName string `json:"display_name"`
-	Email       string `json:"email"`
+	LoginID     string `json:"login_id,omitempty"`
+	Email       string `json:"email,omitempty"`
 	Password    string `json:"password"`
 }
 
 const maxDisplayNameLen = 200
 
-// Check holds the fields to their rules, trimming the name and the email,
-// and looks nothing up: a name of 1 to 200 characters with no control
-// character, a plain email address, and a password within the rules for one
-// (auth.CheckNewPassword).
+// Check holds the fields to their rules, trimming the name, the login ID and
+// the email, and looks nothing up: a name of 1 to 200 characters with no
+// control character; a login ID (auth.LoginID) or a plain email address, or
+// both, and at least one; and a password within the rules for one
+// (auth.CheckNewPassword). Whether the link asks for an email is its own
+// (JoinRegistrationRefusal).
 func (r *JoinRegistration) Check() error {
-	r.DisplayName, r.Email = strings.TrimSpace(r.DisplayName), strings.TrimSpace(r.Email)
+	r.DisplayName, r.LoginID, r.Email = strings.TrimSpace(r.DisplayName), strings.TrimSpace(r.LoginID), strings.TrimSpace(r.Email)
 	switch n := utf8.RuneCountInString(r.DisplayName); {
 	case !utf8.ValidString(r.DisplayName) || n == 0 || n > maxDisplayNameLen ||
 		strings.IndexFunc(r.DisplayName, unicode.IsControl) >= 0:
 		return apperr.Invalid("display_name must be 1 to %d characters, none of them a control character", maxDisplayNameLen)
-	case !plainEmail(r.Email):
+	case r.LoginID == "" && r.Email == "":
+		return apperr.Invalid("give a login_id, your student or staff number, or an email, or both: it is what you will sign in with")
+	case r.Email != "" && !plainEmail(r.Email):
 		return apperr.Invalid("email must be an email address, such as yuki@example.edu")
+	}
+	if r.LoginID != "" {
+		if _, err := auth.LoginID("login_id", r.LoginID); err != nil {
+			return err
+		}
 	}
 	return auth.CheckNewPassword(r.Password)
 }
@@ -715,27 +732,42 @@ func plainEmail(s string) bool {
 
 // JoinRegistrationRefusal is what registering through a link, as its preview
 // found it, is refused for, found before anything is hashed or written: the
-// link seats nobody now (its reason), the email is at no domain the link
-// takes, or someone has it already, who is told to sign in and nothing else
-// (auth.EmailTaken). The domain is asked before the email, so that a link
-// for one domain tells nobody which addresses at another are registered.
-// Nil means it may go ahead as far as can be told without the link's lock:
-// the join itself asks everything again under it.
-func JoinRegistrationRefusal(ctx context.Context, q dbq.Querier, p JoinPreview, email string) error {
+// link seats nobody now (its reason); the link is kept to email domains and
+// the email is at none of them, or there is none; or someone has the email
+// or the login ID already, who is told to sign in and nothing else
+// (auth.EmailTaken, auth.LoginIDTaken). The domain is asked before the email,
+// so that a link for one domain tells nobody which addresses at another are
+// registered. Nil means it may go ahead as far as can be told without the
+// link's lock: the join itself asks everything again under it.
+func JoinRegistrationRefusal(ctx context.Context, q dbq.Querier, p JoinPreview, r JoinRegistration) error {
 	if !p.Joinable {
 		standing := map[string]string{JoinRevoked: "the join link has been revoked", JoinExpired: "the join link has expired",
 			JoinUsedUp: "the join link has been used as many times as it may be", JoinCourseArchived: "the course is archived",
 			JoinCreatorLostAuthority: "whoever made the join link can no longer invite students to the course"}
 		return joinRefused(p.Reason, "%s; ask for a new one", standing[p.Reason])
 	}
-	if !domainAllowed(p.AllowedEmailDomains, &email) {
+	var email *string
+	if r.Email != "" {
+		email = &r.Email
+	}
+	if !domainAllowed(p.AllowedEmailDomains, email) {
 		return domainRefused(p.AllowedEmailDomains)
 	}
-	switch _, err := q.GetActorByEmail(ctx, email); {
-	case err == nil:
-		return auth.EmailTaken()
-	case !errors.Is(err, pgx.ErrNoRows):
-		return err
+	if email != nil {
+		switch _, err := q.GetActorByEmail(ctx, *email); {
+		case err == nil:
+			return auth.EmailTaken()
+		case !errors.Is(err, pgx.ErrNoRows):
+			return err
+		}
+	}
+	if r.LoginID != "" {
+		switch _, err := q.GetActorByLoginID(ctx, r.LoginID); {
+		case err == nil:
+			return auth.LoginIDTaken()
+		case !errors.Is(err, pgx.ErrNoRows):
+			return err
+		}
 	}
 	return nil
 }
@@ -744,5 +776,6 @@ func JoinRegistrationRefusal(ctx context.Context, q dbq.Querier, p JoinPreview, 
 // auth.RegisterPerson: created by whoever made the link, whose authority lets
 // them in.
 func (p JoinPreview) RegisteringPerson(r JoinRegistration, passwordHash string) auth.NewPerson {
-	return auth.NewPerson{DisplayName: r.DisplayName, Email: r.Email, PasswordHash: passwordHash, CreatedBy: p.makerActorID}
+	return auth.NewPerson{DisplayName: r.DisplayName, Email: r.Email, LoginID: r.LoginID, PasswordHash: passwordHash,
+		CreatedBy: p.makerActorID}
 }

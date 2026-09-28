@@ -11,7 +11,7 @@ VALUES ($1, $2, $3, $4, 'active', $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $
 
 -- name: GetMemberInCourse :one
 -- The seat, with whom it is and, for an agent someone owns, whose.
-SELECT m.*, a.display_name, a.kind AS actor_kind, a.owner_actor_id, o.display_name AS owner_name
+SELECT m.*, a.display_name, a.kind AS actor_kind, a.owner_actor_id, o.display_name AS owner_name, a.login_id
 FROM course_member m
 JOIN actor a ON a.id = m.actor_id
 LEFT JOIN actor o ON o.id = a.owner_actor_id
@@ -20,7 +20,7 @@ WHERE m.id = $1 AND m.course_id = $2;
 -- name: GetMemberInCourseForUpdate :one
 -- The same row, locked for the rest of the transaction: the management tools
 -- read a seat and write it back, and two of them at once must take turns.
-SELECT m.*, a.display_name, a.kind AS actor_kind, a.owner_actor_id, o.display_name AS owner_name
+SELECT m.*, a.display_name, a.kind AS actor_kind, a.owner_actor_id, o.display_name AS owner_name, a.login_id
 FROM course_member m
 JOIN actor a ON a.id = m.actor_id
 LEFT JOIN actor o ON o.id = a.owner_actor_id
@@ -55,7 +55,7 @@ LEFT JOIN course_member p ON p.id = m.principal_member_id
 WHERE m.id = sqlc.arg(member_id);
 
 -- name: ListMembers :many
-SELECT m.*, a.display_name, a.kind AS actor_kind, a.owner_actor_id, o.display_name AS owner_name
+SELECT m.*, a.display_name, a.kind AS actor_kind, a.owner_actor_id, o.display_name AS owner_name, a.login_id
 FROM course_member m
 JOIN actor a ON a.id = m.actor_id
 LEFT JOIN actor o ON o.id = a.owner_actor_id
@@ -131,17 +131,18 @@ UPDATE action SET status = 'cancelled', result = $2 WHERE id = $1 AND status = '
 SELECT 1 FROM course_member WHERE id = ANY(sqlc.arg(ids)::uuid[]) ORDER BY id FOR KEY SHARE;
 
 -- name: LookupActorForSeating :one
--- The actor a whole email address, or an id, belongs to, for someone seating
--- them, with their seat in this course if they have a live one, and their
--- owner if they are an agent someone owns. The email must match whole, in
--- any case: this finds a person whose address one already has, and lists
--- nobody.
+-- The actor a whole email address, a whole login ID, or an id, belongs to,
+-- for someone seating them, with their seat in this course if they have a
+-- live one, and their owner if they are an agent someone owns. The email or
+-- the login ID must match whole, in any case: this finds a person whose
+-- address or number one already has, and lists nobody.
 SELECT a.id, a.kind, a.display_name, a.status, m.id AS member_id, a.owner_actor_id, o.display_name AS owner_name
 FROM actor a
 LEFT JOIN course_member m ON m.actor_id = a.id AND m.course_id = sqlc.arg(course_id) AND m.status <> 'removed'
 LEFT JOIN actor o ON o.id = a.owner_actor_id
 WHERE a.kind <> 'system'
-  AND (a.id = sqlc.narg(actor_id) OR lower(a.email) = lower(sqlc.narg(email)));
+  AND (a.id = sqlc.narg(actor_id) OR lower(a.email) = lower(sqlc.narg(email))
+       OR lower(a.login_id) = lower(sqlc.narg(login_id)));
 
 -- name: ListLiveDelegatesOf :many
 -- The seats of a principal's delegates that are not removed, whatever their

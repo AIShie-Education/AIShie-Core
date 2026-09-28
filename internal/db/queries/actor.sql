@@ -21,9 +21,17 @@ FOR SHARE;
 -- name: GetActorByEmail :one
 SELECT id, status FROM actor WHERE lower(email) = lower($1);
 
+-- name: GetActorByLoginID :one
+-- A person by their login ID, in any case, as GetActorByEmail finds one by
+-- their email.
+SELECT id, status FROM actor WHERE lower(login_id) = lower($1);
+
 -- name: InsertActor :exec
-INSERT INTO actor (id, kind, display_name, email, status, platform_role, created_by_actor_id, created_at, owner_actor_id)
-VALUES ($1, $2, $3, $4, 'active', $5, $6, $7, sqlc.narg(owner_actor_id));
+-- A login ID an administrator gives is one they vouch for (login_id_verified,
+-- by its default).
+INSERT INTO actor (id, kind, display_name, email, status, platform_role, created_by_actor_id, created_at, owner_actor_id,
+                   login_id)
+VALUES ($1, $2, $3, $4, 'active', $5, $6, $7, sqlc.narg(owner_actor_id), sqlc.narg(login_id));
 
 -- name: CountRootActors :one
 SELECT count(*) FROM actor WHERE platform_role = 'root';
@@ -119,18 +127,20 @@ UPDATE actor SET status = 'active', suspended_by_actor_id = NULL
 WHERE id = sqlc.arg(id) AND owner_actor_id = sqlc.arg(owner_actor_id) AND status = 'suspended'
   AND suspended_by_actor_id = sqlc.arg(owner_actor_id);
 
--- name: LookupActorByEmail :one
--- The one person or agent a whole email address belongs to, in any case,
--- and whether they can sign in, as GetActorView says it. Never the system
--- actor. There is no partial match: this finds someone whose address the
--- caller already has, and lists nobody.
+-- name: LookupActorBySignInName :one
+-- The one person or agent a whole email address belongs to, or the one
+-- person a whole login ID does, in any case, and whether they can sign in,
+-- as GetActorView says it. Never the system actor. There is no partial
+-- match: this finds someone whose sign-in name the caller already has, and
+-- lists nobody.
 SELECT a.id, a.kind, a.display_name, a.status,
        EXISTS (SELECT 1 FROM credential p WHERE p.actor_id = a.id AND p.kind = 'password' AND p.revoked_at IS NULL) AS has_password,
        EXISTS (SELECT 1 FROM credential s WHERE s.actor_id = a.id AND s.kind = 'sso' AND s.revoked_at IS NULL) AS has_sso,
        i.expires_at AS invite_expires_at
 FROM actor a
 LEFT JOIN credential i ON i.actor_id = a.id AND i.kind = 'invite' AND i.revoked_at IS NULL
-WHERE a.kind <> 'system' AND lower(a.email) = lower(sqlc.arg(email));
+WHERE a.kind <> 'system'
+  AND (lower(a.email) = lower(sqlc.narg(email)) OR lower(a.login_id) = lower(sqlc.narg(login_id)));
 
 -- name: InvitableBy :one
 -- What decides whether a department administrator (issuer) may invite a
@@ -185,3 +195,27 @@ UPDATE actor SET site_chat_credential_id = sqlc.narg(credential_id) WHERE id = s
 -- Its owner switches it off: only its owner, who is its owner for good.
 UPDATE actor SET site_chat_credential_id = NULL
 WHERE id = sqlc.arg(id) AND owner_actor_id = sqlc.arg(owner_actor_id);
+
+-- name: LockActorForPasswordReset :exec
+-- The person whose password is being reset, for the rest of the reset,
+-- before anything about them is looked at. NO KEY UPDATE, as
+-- LockOwnerForAgents, not UPDATE: every action row naming them holds KEY
+-- SHARE on the row through its foreign key. Seating them anywhere reads the
+-- row FOR SHARE (GetActorForShare), and waits for the reset, or the reset
+-- for it and then counts the seat.
+SELECT 1 FROM actor WHERE id = $1 FOR NO KEY UPDATE;
+
+-- name: PasswordResetFacts :one
+-- What decides whether whoever manages a course's members may reset a
+-- person's password (member.reset_password): one row of facts, the rule the
+-- caller's. seated_otherwise: a seat, not removed, in any course, under any
+-- roster role but student.
+SELECT a.kind = 'human' AS is_person,
+       (a.platform_role IS NOT NULL)::bool AS holds_role,
+       EXISTS (SELECT 1 FROM department_admin x WHERE x.actor_id = a.id AND x.removed_at IS NULL) AS administers,
+       EXISTS (SELECT 1 FROM credential s WHERE s.actor_id = a.id AND s.kind = 'sso' AND s.revoked_at IS NULL) AS has_sso,
+       EXISTS (SELECT 1 FROM course_member m WHERE m.actor_id = a.id AND m.status <> 'removed' AND m.role <> 'student') AS seated_otherwise,
+       (a.login_id IS NOT NULL OR a.email IS NOT NULL)::bool AS has_sign_in_name,
+       a.display_name, a.login_id
+FROM actor a
+WHERE a.id = $1;

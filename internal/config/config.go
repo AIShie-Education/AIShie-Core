@@ -52,7 +52,7 @@ type Config struct {
 	TrustedProxies []string
 
 	// CallsPerMinute and CallsBurst bound one actor's calls, per instance;
-	// SignInsPerMinute bounds sign-in attempts per email, and per address
+	// SignInsPerMinute bounds sign-in attempts per email or login ID, and per address
 	// those that fail, registrations through a join link among them;
 	// JoinRegistrationsPerMinute bounds registrations through one join link.
 	// Zero turns a limit off.

@@ -272,6 +272,19 @@ func TestAnAssertionSaysWhoIsSignedIn(t *testing.T) {
 	if _, ok := claims["email"]; ok {
 		t.Fatalf("an email for someone who has none: %v", claims)
 	}
+	if _, ok := claims["login_id"]; ok {
+		t.Fatalf("a login ID for someone who has none: %v", claims)
+	}
+	// A person's login ID, their staff or student number, as their email is.
+	if _, err := p.pool.Exec(ctx, `UPDATE actor SET login_id = 'T19880042' WHERE id = $1`, p.admin); err != nil {
+		t.Fatal(err)
+	}
+	if got, err = a.Assert(ctx, ap, runtimeAud); err != nil {
+		t.Fatal(err)
+	}
+	if _, claims = verified(t, a.KeySet(), got.Token, now); claims["login_id"] != "T19880042" {
+		t.Fatalf("the login ID: %v", claims)
+	}
 
 	// No longer than the credential, to the second, rounded down.
 	ends := now.Add(90*time.Second + 700*time.Millisecond)
@@ -308,6 +321,21 @@ func TestAnAssertionSaysWhoIsSignedIn(t *testing.T) {
 		if got, err := a.Assert(ctx, c.p, c.audience); !apperr.Is(err, c.want) || got.Token != "" {
 			t.Errorf("%s: %v, want %s", name, err, c.want)
 		}
+	}
+	// A person whose password someone else set gets none until they have
+	// set their own, whatever they come with.
+	if _, err := auth.SetTemporaryPassword(ctx, dbq.New(p.pool), p.admin, p.sato, "abcd-efgh-jkmn-pqrs", "set by Sato", now); err != nil {
+		t.Fatal(err)
+	}
+	_, err = a.Assert(ctx, ap, runtimeAud)
+	if e, ok := apperr.As(err); !ok || e.Code != apperr.Forbidden || e.Details["reason"] != "password_change_required" {
+		t.Fatalf("a temporary password: %v", err)
+	}
+	if err := auth.SetPassword(ctx, dbq.New(p.pool), p.admin, "adas own password", now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.Assert(ctx, ap, runtimeAud); err != nil {
+		t.Fatalf("once she has set her own: %v", err)
 	}
 	// Suspended after signing in: the session still authenticates, and gets
 	// no assertion.

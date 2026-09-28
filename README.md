@@ -178,24 +178,63 @@ than the binary (run `aishiterud migrate up` first), and `/healthz` reports
 
 ### A person's first sign-in
 
-An administrator registers the person with their email (`actor.register`)
-and invites them (`actor.invite`). The invitation is a token, `aisinv_…`, for
+A person signs in with their email or their login ID: the student or staff
+number their school gives them (學號, 工號), which is what they have where
+most students have no mailbox. It is 1 to 64 letters, digits, dots, hyphens
+and underscores, never an `@`, unique in any case, and only a person has one.
+An administrator gives it and corrects it (`actor.register`, `actor.update`
+with `login_id`); nobody changes their own. `POST /v1/auth/login` takes
+`{"login", "password"}`, where `login` is an email when it has an `@` and a
+login ID otherwise; `{"email", "password"}`, as clients sent before login IDs,
+still works and takes either the same way. Both are refused in one message
+and limited alike, per address and per name.
+
+An administrator registers the person with their email or login ID, or both
+(`actor.register`), and invites them (`actor.invite`). The invitation is a token, `aisinv_…`, for
 the web front end's page that takes invitations, which makes it a link. The
 person opens it, chooses a password (the page sends the token and the
 password to `POST /v1/auth/invite`) and is signed in, with the same session
-cookie a sign-in gives; from then on they sign in with their email and that
-password. An invitation works once, for seven days unless the administrator
+cookie a sign-in gives; from then on they sign in with their email or login
+ID and that password. An invitation works once, for seven days unless the administrator
 gives another number of days (at most thirty), and inviting again replaces
 it; a password set some other way, or a new email, withdraws it. Taken up by
 someone who has a password already, it replaces that password: it is also how
 a forgotten one is reset. An agent is given a token instead (below).
-`actor.list` finds anyone registered, with whether they have a password yet or
-an invitation waiting, and `actor.update` corrects a name or gives an email to
-someone registered without one. A department's administrator registers and
+`actor.list` finds anyone registered, by a piece of their name, email or login
+ID, with whether they have a password yet or an invitation waiting, and
+`actor.update` corrects a name, an email or a login ID, or gives one to
+someone registered without. A department's administrator registers and
 invites someone new in one step (`actor.invite_new`), finds someone registered
-by their whole email (`actor.lookup_by_email`), and invites again only a
+by their whole email or login ID (`actor.lookup_by_email`), and invites again only a
 person whose account reaches nothing beyond the departments they administer;
 that is asked again when the invitation is taken up.
+
+### A forgotten password
+
+A person with an email is invited again, which replaces their password. A
+student with none is given a temporary password by whoever seats the course's
+students: `member.reset_password` (`POST
+/v1/courses/{course_id}/members/{member_id}/reset-password`), for a person who
+holds `member_manage` at `autonomous`, returns it once in
+`result.temporary_password` (with the student's `login_id`, to tell them what
+to sign in with), signs the student out everywhere, and keeps it nowhere but
+as a hash: not in the action log, its replay or its event
+(`member.password_reset`). Their sign-in with it answers
+`"password_change_required": true`, and until they have set their own
+(`POST /v1/me/password`, which refuses the temporary one:
+`password_unchanged`) every other call is refused, `403` with reason
+`password_change_required`. It is only for an active student seat in the
+course, a person's, whose account reaches nothing more: refused, each with its
+reason, for an agent calling (`people_only`), by proposal (`not_by_proposal`)
+or under review (`not_autonomous`), for one's own seat (`own_seat`), an
+agent's (`not_a_person`), anyone but a student here (`not_a_student`), a seat
+not active (`seat_not_active`), someone seated otherwise anywhere
+(`seated_other_than_student`), with a platform role (`platform_role`), an
+appointment (`administers`) or a linked identity (`sso_linked`), with nothing to
+sign in with (`no_sign_in_name`), a student out of the caller's reach
+(`student_out_of_scope`), or a seat holding more than the caller does
+(`beyond_your_seat`). Anyone else's password is an administrator's
+(`actor.invite`).
 
 ### Single sign-on
 
@@ -212,8 +251,9 @@ single sign-on, so one front end serves an installation with it and one
 without. Anyone may ask, with no credential:
 
 ```
-{"password": true, "sso": null}
-{"password": true, "sso": {"label": "PolyU NetID", "start": "/v1/auth/sso/start"}}
+{"password": true, "password_accepts": ["login_id", "email"], "sso": null}
+{"password": true, "password_accepts": ["login_id", "email"],
+ "sso": {"label": "PolyU NetID", "start": "/v1/auth/sso/start"}}
 ```
 
 `sso` is null unless `OIDC_ISSUER` is set. `label` is `OIDC_DISPLAY_NAME`,
@@ -222,7 +262,9 @@ set, and the front end then uses words of its own; it is at most 64
 characters, all printable, and the server refuses to start on anything else.
 `start` is the path on this server to send the browser to, with `return_to`
 added. `password` is always true, since password sign-in cannot be turned
-off. Nothing else about the provider is said. A browser or a cache may keep
+off. `password_accepts` says what the password sign-in's name field takes, in
+the order its label should name them: a login ID (the student or staff
+number) and an email. Nothing else about the provider is said. A browser or a cache may keep
 the answer for a minute (`Cache-Control: public, max-age=60`), so a change of
 settings reaches the sign-in page within a minute of the restart.
 
@@ -248,12 +290,14 @@ its own join page's URL, and that page calls, with no tool in between:
 GET  /v1/join/{token}            anyone; no credential
      200 {"course": {"code", "section", "title"}, "joinable": true|false,
           "reason": "expired|used_up|revoked|course_archived|creator_lost_authority",
-          "expires_at", "registration": true|false, "allowed_email_domains": [...]}
+          "expires_at", "registration": true|false, "allowed_email_domains": [...],
+          "email_required": true|false}
      404 for every token that is not one, whatever is wrong with it
 POST /v1/join/{token}            signed in, however: password, single sign-on, a token
      Idempotency-Key as every write; the answer is a tool call's, with
      result {course_id, member_id, status, already_member, join_link_id}
-POST /v1/join/{token}/register   {"display_name", "email", "password"}; no credential
+POST /v1/join/{token}/register   {"display_name", "login_id"?, "email"?, "password"}, a login ID
+                                 or an email or both; an email when email_required; no credential
      200 {actor_id, expires_at, course_id, member_id, action_id}, signed in
      with the session cookie a password sign-in gives
 ```
@@ -261,11 +305,13 @@ POST /v1/join/{token}/register   {"display_name", "email", "password"}; no crede
 A person signed in is seated as a student at once, or answered with the seat
 they have (`already_member`, no use counted). A refusal says why in
 `error.details.reason`: the link's own reason, `people_only` for an agent,
-`email_domain_not_allowed`, `actor_not_active`; registering, `email_taken`
-(sign in, then open the link again; the account that has the email is not
-touched) or a field's rule. Registering is the one way a person registers
-themselves, and only through a live link: their email is recorded as
-unchecked (`email_verified` false) until an administrator sets it. It is
+`email_domain_not_allowed` (also for no email, through a link kept to
+domains), `actor_not_active`; registering, `email_taken` or `login_id_taken`
+(sign in, then open the link again; the account that has it is not touched)
+or a field's rule. Registering is the one way a person registers themselves,
+and only through a live link: their email and login ID are recorded as
+unchecked (`email_verified`, `login_id_verified` false) until an administrator
+sets them. It is
 limited per address together with sign-in attempts
 (`SIGN_IN_ATTEMPTS_PER_MINUTE`) and per link (`JOIN_REGISTRATIONS_PER_MINUTE`,
 60). `JOIN_LINK_REGISTRATION=off` turns registering off, as when single

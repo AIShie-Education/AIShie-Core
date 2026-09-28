@@ -18,6 +18,10 @@ type Actor struct {
 	// department's administrator. It is read to decide whether to look for
 	// the appointment a call relies on, and never grants anything by itself.
 	Administers bool
+	// PasswordChangeRequired says the actor's password is one someone else
+	// set (member.reset_password): until they set their own, every call but
+	// that one is refused. It only ever takes away.
+	PasswordChangeRequired bool
 }
 
 func (a Actor) Active() bool { return a.Status == ActorActive }

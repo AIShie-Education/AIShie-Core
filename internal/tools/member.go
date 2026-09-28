@@ -3,7 +3,6 @@ package tools
 import (
 	"context"
 	"errors"
-	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -21,7 +20,7 @@ import (
 func memberTools() []tool.Tool {
 	return []tool.Tool{memberList(), memberGet(), memberLookupActor(), memberAdd(), memberUpdatePerms(), memberRescope(),
 		memberPause(), memberResume(), memberRemove(), memberAddDelegate(), memberDelegateDefaults(), memberUpdatePermsBulk(),
-		memberSetRole()}
+		memberSetRole(), memberResetPassword()}
 }
 
 var (
@@ -35,6 +34,7 @@ type MemberView struct {
 	ID                uuid.UUID   `json:"id"`
 	ActorID           uuid.UUID   `json:"actor_id"`
 	DisplayName       string      `json:"display_name"`
+	LoginID           *string     `json:"login_id,omitempty" jsonschema:"for a person who has one, their login ID: the student or staff number they sign in with, and are known by to the course's staff"`
 	Kind              string      `json:"kind" jsonschema:"human or agent; for display only"`
 	Role              string      `json:"role" jsonschema:"roster fact; the gradebook is the members whose role is student"`
 	Status            string      `json:"status"`
@@ -101,7 +101,7 @@ func withSiteChat(ctx context.Context, rc *tool.ReadCtx, views []MemberView) err
 }
 
 func viewMember(m dbq.GetMemberInCourseRow) MemberView {
-	return MemberView{ID: m.ID, ActorID: m.ActorID, DisplayName: m.DisplayName, Kind: m.ActorKind, Role: m.Role,
+	return MemberView{ID: m.ID, ActorID: m.ActorID, DisplayName: m.DisplayName, LoginID: m.LoginID, Kind: m.ActorKind, Role: m.Role,
 		Status: m.Status, PresetID: m.PresetID, ExpiresAt: m.ExpiresAt, StudentScope: m.StudentScope,
 		AssignmentScope: m.AssignmentScope, Perms: memberPerms(m).view(), CreatedAt: m.CreatedAt,
 		PrincipalMemberID: m.PrincipalMemberID, OwnerActorID: m.OwnerActorID, OwnerName: m.OwnerName,
@@ -125,8 +125,9 @@ func memberList() tool.Tool {
 	return tool.Define(tool.Spec[MemberListIn, MemberListOut]{
 		Name: "member.list",
 		Description: "The members of a course — people and agents alike — with their roster role, status, permissions and scope, " +
-			"and for each seat the most it may be given of each permission (perm_ceilings), and why where that is below " +
-			"autonomous (perm_ceiling_reasons): offer nothing above it.",
+			"for a person who has one, the login ID (student or staff number) they sign in with, and for each seat the most it " +
+			"may be given of each permission (perm_ceilings), and why where that is below autonomous (perm_ceiling_reasons): " +
+			"offer nothing above it.",
 		Kind: tool.Read, Gate: readMembers,
 		HTTP: tool.Route{Method: "GET", Pattern: "/v1/courses/{course_id}/members"},
 		Resolve: func(_ context.Context, _ dbq.Querier, in MemberListIn) (tool.Target, error) {
@@ -170,8 +171,9 @@ func resolveMember(ctx context.Context, q dbq.Querier, courseID, memberID uuid.U
 func memberGet() tool.Tool {
 	return tool.Define(tool.Spec[MemberIDIn, MemberView]{
 		Name: "member.get",
-		Description: "One member in full, including exactly which students and assignments a 'listed' scope lists, and the " +
-			"most the seat may be given of each permission (perm_ceilings, with perm_ceiling_reasons where below autonomous).",
+		Description: "One member in full, including exactly which students and assignments a 'listed' scope lists, for a " +
+			"person who has one, the login ID (student or staff number) they sign in with, and the most the seat may be " +
+			"given of each permission (perm_ceilings, with perm_ceiling_reasons where below autonomous).",
 		Kind: tool.Read, Gate: readMembers,
 		HTTP: tool.Route{Method: "GET", Pattern: "/v1/courses/{course_id}/members/{member_id}"},
 		Resolve: func(ctx context.Context, q dbq.Querier, in MemberIDIn) (tool.Target, error) {
@@ -202,6 +204,7 @@ func memberGet() tool.Tool {
 type MemberLookupActorIn struct {
 	tool.InCourse
 	Email   *string    `json:"email,omitempty" jsonschema:"the person's whole email address, in any case"`
+	LoginID *string    `json:"login_id,omitempty" jsonschema:"or the person's whole login ID, their student or staff number, in any case"`
 	ActorID *uuid.UUID `json:"actor_id,omitempty" jsonschema:"or the actor id an administrator gave, to see whom it names"`
 }
 
@@ -219,32 +222,42 @@ type MemberLookupActorOut struct {
 
 // memberLookupActor lets whoever seats members find the actor to seat without
 // asking an administrator for an id, and see whom an id they were given
-// names. It lists nobody: the whole address or the whole id must be given, so
-// it tells the caller only about someone they could already name.
+// names. It lists nobody: the whole address, the whole login ID or the whole
+// id must be given, so it tells the caller only about someone they could
+// already name.
 func memberLookupActor() tool.Tool {
 	return tool.Define(tool.Spec[MemberLookupActorIn, MemberLookupActorOut]{
 		Name: "member.lookup_actor",
-		Description: "Find the registered person an email address belongs to, to seat them with member.add, or see whom " +
-			"an actor id names (an agent has no email: it is seated by the id an administrator gives). Give one of " +
-			"email or actor_id. The whole address must match, in any case; there is no partial search.",
+		Description: "Find the registered person an email address or a login ID (a student or staff number) belongs to, to " +
+			"seat them with member.add, or see whom an actor id names (an agent has neither: it is seated by the id an " +
+			"administrator gives). Give one of email, login_id and actor_id. The whole address or number must match, in " +
+			"any case; there is no partial search.",
 		Kind: tool.Read, Gate: manageMembers,
 		HTTP: tool.Route{Method: "GET", Pattern: "/v1/courses/{course_id}/actor-lookup"},
 		Resolve: func(_ context.Context, _ dbq.Querier, in MemberLookupActorIn) (tool.Target, error) {
 			return tool.Target{CourseID: in.CourseID, Type: "actor"}, nil
 		},
 		Query: func(ctx context.Context, rc *tool.ReadCtx, in MemberLookupActorIn) (MemberLookupActorOut, error) {
-			var email *string
+			var email, loginID *string
 			if in.Email != nil {
-				if e := strings.TrimSpace(*in.Email); e != "" {
-					email = &e
+				email = optional(*in.Email)
+			}
+			if in.LoginID != nil {
+				loginID = optional(*in.LoginID)
+			}
+			given := 0
+			for _, g := range []bool{email != nil, loginID != nil, in.ActorID != nil} {
+				if g {
+					given++
 				}
 			}
-			if (email == nil) == (in.ActorID == nil) {
-				return MemberLookupActorOut{}, apperr.Invalid("give one of email or actor_id")
+			if given != 1 {
+				return MemberLookupActorOut{}, apperr.Invalid("give one of email, login_id and actor_id")
 			}
-			a, err := rc.Q.LookupActorForSeating(ctx, dbq.LookupActorForSeatingParams{CourseID: in.CourseID, ActorID: in.ActorID, Email: email})
+			a, err := rc.Q.LookupActorForSeating(ctx, dbq.LookupActorForSeatingParams{CourseID: in.CourseID, ActorID: in.ActorID,
+				Email: email, LoginID: loginID})
 			if errors.Is(err, pgx.ErrNoRows) {
-				return MemberLookupActorOut{}, apperr.Missing("nobody is registered with that email or id")
+				return MemberLookupActorOut{}, apperr.Missing("nobody is registered with that email, login ID or id")
 			}
 			if err != nil {
 				return MemberLookupActorOut{}, err

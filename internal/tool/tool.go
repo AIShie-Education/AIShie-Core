@@ -193,6 +193,10 @@ type Spec[In, Out any] struct {
 	// OnArchived lets a Write act on an archived course. Nothing may, except
 	// what changes whether it is archived.
 	OnArchived bool
+	// SetsOwnPassword marks the one tool a person whose password someone
+	// else set may call before they have set their own: setting it. Every
+	// other call of theirs is refused (password_change_required).
+	SetsOwnPassword bool
 	// SecretIn and SecretOut name top-level fields that must never be
 	// stored: they are removed from the recorded payload and from the
 	// recorded result. A SecretIn field still counts in the payload hash, as
@@ -232,8 +236,10 @@ type Tool struct {
 	Internal    bool
 	Unlisted    bool
 	OnArchived  bool
-	SecretIn    []string
-	SecretOut   []string
+	// SetsOwnPassword is Spec.SetsOwnPassword.
+	SetsOwnPassword bool
+	SecretIn        []string
+	SecretOut       []string
 
 	InputSchema  *jsonschema.Schema
 	OutputSchema *jsonschema.Schema
@@ -359,7 +365,8 @@ func Define[In, Out any](s Spec[In, Out]) Tool {
 
 	t := Tool{
 		Name: s.Name, Description: s.Description, Kind: s.Kind, Gate: s.Gate, HTTP: s.HTTP,
-		Internal: s.Internal, Unlisted: s.Unlisted, OnArchived: s.OnArchived, SecretIn: s.SecretIn, SecretOut: s.SecretOut,
+		Internal: s.Internal, Unlisted: s.Unlisted, OnArchived: s.OnArchived, SetsOwnPassword: s.SetsOwnPassword,
+		SecretIn: s.SecretIn, SecretOut: s.SecretOut,
 		InputSchema: inSchema, OutputSchema: outSchema,
 	}
 	t.Decode = func(raw []byte) (any, error) {

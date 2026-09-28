@@ -44,9 +44,20 @@ type authorized struct {
 //
 // asMember, when set, checks that one membership row instead of looking the
 // actor's seat up: it is how a proposal is re-authorized on approval.
+//
+// Before any gate, a person whose password someone else set
+// (member.reset_password) is refused every call but setting their own
+// (password_change_required), whatever they hold: the sign-in with it must
+// set a new password before anything else. It is the caller's call alone
+// that is refused, as a suspended actor's is at step 1: approving a proposal
+// they made before is someone else's call, re-authorized against their seat.
 func (p *Pipeline) authorize(ctx context.Context, q dbq.Querier, t tool.Tool, in any, actor domain.Actor, asMember *uuid.UUID, now time.Time) (authorized, error) {
 	write := t.Kind == tool.Write
 	a := authorized{target: tool.Target{Type: noun(t.Name)}}
+	if asMember == nil && actor.PasswordChangeRequired && !t.SetsOwnPassword {
+		a.decision = authz.Decision{Level: domain.Denied, Reason: authz.ReasonPasswordChangeRequired}
+		return a, nil
+	}
 
 	switch {
 	case t.Gate.CourseScoped():

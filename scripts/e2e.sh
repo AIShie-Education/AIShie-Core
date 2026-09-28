@@ -470,7 +470,8 @@ echo "  a server restarted with the same SIGNING_KEY publishes the same key"
 
 step "The sign-in page is told how a person signs in here: by password, and no single sign-on"
 call 200 GET /v1/auth/methods ""
-[ "$(json "$WORK/body" 'd == {"password": True, "sso": None}')" = True ] || fail "the sign-in methods: $(cat "$WORK/body")"
+[ "$(json "$WORK/body" 'd == {"password": True, "password_accepts": ["login_id", "email"], "sso": None}')" = True ] ||
+  fail "the sign-in methods: $(cat "$WORK/body")"
 curl -s -o /dev/null -D "$WORK/headers" "$BASE/v1/auth/methods"
 grep -qi '^cache-control: public, max-age=60' "$WORK/headers" || fail "the sign-in methods may not be kept for a minute: $(cat "$WORK/headers")"
 
@@ -493,7 +494,7 @@ kill "$SERVER_PID"
 wait "$SERVER_PID" 2>/dev/null || true
 start
 call 200 GET /v1/auth/methods ""
-[ "$(json "$WORK/body" 'd == {"password": True, "sso": {"label": "PolyU NetID", "start": "/v1/auth/sso/start"}}')" = True ] ||
+[ "$(json "$WORK/body" 'd == {"password": True, "password_accepts": ["login_id", "email"], "sso": {"label": "PolyU NetID", "start": "/v1/auth/sso/start"}}')" = True ] ||
   fail "the sign-in methods with single sign-on: $(cat "$WORK/body")"
 [[ "$(curl -s -o /dev/null -w '%{http_code} %{redirect_url}' "$BASE/v1/auth/sso/start?return_to=/courses")" == "302 $ISSUER/oauth2/authorize?"* ]] ||
   fail "where the answer says to start does not send the browser to the provider"
