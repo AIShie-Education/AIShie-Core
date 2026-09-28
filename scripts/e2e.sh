@@ -7,7 +7,10 @@
 # and have the instructor's own tutor agent answer the student's question,
 # once its runtime says it answers in the site, and be asked nothing more once
 # he switches that off; and have another agent of his, given member_manage,
-# seat a student with its own token, and be refused on his seat.
+# seat a student with its own token, and be refused on his seat. Then he shows
+# a join link: a new student registers through it, a registered one joins,
+# and once he revokes it, it seats nobody; his agents, without
+# member_invite, make none.
 # Then a department's administrator, invited and appointed by root, makes a
 # course beneath her appointment and seats its instructor, found by their
 # email. Then Core vouches for the instructor to an agent runtime, and the key it
@@ -113,6 +116,8 @@ register() { # KIND NAME → sets ACTOR_ID and TOKEN
 register human Sato;      SATO_ID=$ACTOR_ID;   SATO=$TOKEN
 register human Yuki;      YUKI_ID=$ACTOR_ID;   YUKI=$TOKEN
 register human Ken;       KEN_ID=$ACTOR_ID
+register human Hana;      HANA=$TOKEN
+register human Ren;       REN=$TOKEN
 register agent grader-v2; GRADER_ID=$ACTOR_ID; GRADER=$TOKEN
 
 step "The admin creates CS101, opens it, and seats Sato; from here it is Sato's course"
@@ -247,6 +252,52 @@ call 403 POST "$C/members/$SATO_M/pause" "$HELPER"
 [ "$(json "$WORK/body" 'd["error"]["details"]["reason"]')" = not_your_principal ] || fail "refused, but not as its principal's seat: $(cat "$WORK/body")"
 call 403 POST "$C/members/$TUTOR_M/remove" "$HELPER"
 [ "$(json "$WORK/body" 'd["error"]["details"]["reason"]')" = not_your_principal ] || fail "refused, but not as its principal's other agent: $(cat "$WORK/body")"
+
+step "Sato shows a join link in class: a new student registers through it, a registered one joins; revoked, it seats nobody"
+call 200 POST "$C/join-links" "$SATO" '{"max_uses":40}'
+JOIN=$(json "$WORK/body" 'd["result"]["token"]')
+JOIN_LINK=$(json "$WORK/body" 'd["result"]["link_id"]')
+[[ $JOIN == aisjoin_* ]] || fail "no join token: $(cat "$WORK/body")"
+json "$WORK/body" '0 < (__import__("datetime").datetime.fromisoformat(d["result"]["expires_at"].replace("Z", "+00:00")) - __import__("datetime").datetime.now(__import__("datetime").timezone.utc)).total_seconds() <= 600 or sys.exit("the link does not end within ten minutes")' >/dev/null
+call 403 POST "$C/join-links" "$HELPER" # manages members, but was given no member_invite
+[ "$(json "$WORK/body" 'd["error"]["details"]["reason"]')" = permission_denied ] || fail "the helper refused, but not for want of member_invite: $(cat "$WORK/body")"
+call 403 POST "$C/join-links" "$GRADER"
+call 200 GET "/v1/join/$JOIN" ""
+[ "$(json "$WORK/body" 'd["joinable"], d["registration"], d["course"]["code"], d["expires_at"] != ""')" = "True True CS101 True" ] ||
+  fail "the page that opens the link: $(cat "$WORK/body")"
+call 404 GET "/v1/join/aisjoin_abcdefghijkl_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" ""
+# Aoi, with no account, registers as the join page does: a session comes back as a cookie.
+N=$((N + 1))
+[ "$(curl -s -o "$WORK/body" -D "$WORK/headers" -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
+  -d '{"display_name":"Aoi","email":"aoi@example.edu","password":"aois own password"}' "$BASE/v1/join/$JOIN/register")" = 200 ] ||
+  fail "Aoi could not register through the link: $(cat "$WORK/body")"
+AOI=$(sed -n 's/^[Ss]et-[Cc]ookie: ais_session=\([^;]*\).*/\1/p' "$WORK/headers" | tr -d '\r')
+[ -n "$AOI" ] || fail "registering set no session: $(cat "$WORK/headers")"
+AOI_M=$(json "$WORK/body" 'd["member_id"]')
+printf '  %-4s %-62s %s\n' POST "/v1/join/…/register" 200
+call 200 GET /v1/me "$AOI"
+[ "$(json "$WORK/body" 'd["result"]["email"], d["result"]["email_verified"]')" = "aoi@example.edu False" ] || fail "Aoi as registered: $(cat "$WORK/body")"
+call 200 GET "$C/members/$AOI_M" "$SATO"
+[ "$(json "$WORK/body" 'd["result"]["role"], d["result"]["join_link_id"]')" = "student $JOIN_LINK" ] || fail "Aoi's seat: $(cat "$WORK/body")"
+call 200 GET "$C/documents/$DOC" "$AOI" # she reads the course's material at once
+call 409 POST "/v1/join/$JOIN/register" "" '{"display_name":"Impostor","email":"AOI@example.edu","password":"another long password"}'
+[ "$(json "$WORK/body" 'd["error"]["details"]["reason"]')" = email_taken ] || fail "an email registered already: $(cat "$WORK/body")"
+# Hana, registered already, joins signed in; opening it again, she is told she is in.
+KEY=hana-joins call 200 POST "/v1/join/$JOIN" "$HANA"
+[ "$(json "$WORK/body" 'd["status"], d["result"]["already_member"]')" = "executed False" ] || fail "Hana joining: $(cat "$WORK/body")"
+KEY=hana-again call 200 POST "/v1/join/$JOIN" "$HANA"
+[ "$(json "$WORK/body" 'd["result"]["already_member"]')" = True ] || fail "Hana joining again: $(cat "$WORK/body")"
+call 200 GET "$C/join-links" "$SATO"
+[ "$(json "$WORK/body" 'd["result"]["links"][0]["status"], d["result"]["links"][0]["uses"], d["result"]["links"][0]["max_uses"]')" = "live 2 40" ] ||
+  fail "the course's links: $(cat "$WORK/body")"
+grep -q aisjoin_ "$WORK/body" && fail "the list shows a token"
+call 200 POST "$C/join-links/$JOIN_LINK/revoke" "$SATO"
+call 200 GET "/v1/join/$JOIN" ""
+[ "$(json "$WORK/body" 'd["joinable"], d["reason"], d["registration"]')" = "False revoked False" ] || fail "a revoked link's page: $(cat "$WORK/body")"
+call 422 POST "/v1/join/$JOIN/register" "" '{"display_name":"Rin","email":"rin@example.edu","password":"rins own password"}'
+[ "$(json "$WORK/body" 'd["error"]["details"]["reason"]')" = revoked ] || fail "registering through a revoked link: $(cat "$WORK/body")"
+KEY=ren-late call 422 POST "/v1/join/$JOIN" "$REN"
+[ "$(json "$WORK/body" 'd["error"]["details"]["reason"]')" = revoked ] || fail "joining through a revoked link: $(cat "$WORK/body")"
 
 step "The same server over MCP: an agent's own door, with the same token"
 mcp() { # JSON-RPC body → $WORK/body
