@@ -468,10 +468,15 @@ type Querier interface {
 	// its other half: a change to one is a change to all three.
 	ListOrphanedSeats(ctx context.Context, arg ListOrphanedSeatsParams) ([]ListOrphanedSeatsRow, error)
 	ListPendingReviewActions(ctx context.Context, arg ListPendingReviewActionsParams) ([]Action, error)
+	// The review queue likewise: their own agents' actions under review.
+	ListPendingReviewActionsOfAgentsOf(ctx context.Context, arg ListPendingReviewActionsOfAgentsOfParams) ([]Action, error)
 	// Built-ins, plus one department's own when a department is named.
 	ListPresets(ctx context.Context, deptID *uuid.UUID) ([]PermissionPreset, error)
 	ListProposedActionIDsByMember(ctx context.Context, memberID *uuid.UUID) ([]uuid.UUID, error)
 	ListProposedActions(ctx context.Context, arg ListProposedActionsParams) ([]Action, error)
+	// The approval queue as an agent's owner sees it who decides nothing else
+	// in the course: their own agents' proposals, and nobody else's.
+	ListProposedActionsOfAgentsOf(ctx context.Context, arg ListProposedActionsOfAgentsOfParams) ([]Action, error)
 	// The published assignments that refer to the document as their instructions
 	// or rubric: an event about the document is filed under each of them. KEY
 	// SHARE waits for an assignment.unpublish under way (LockAssignmentForUnpublish),
@@ -644,6 +649,9 @@ type Querier interface {
 	MyAppointments(ctx context.Context, actorID uuid.UUID) ([]MyAppointmentsRow, error)
 	NewestComponentDraftAt(ctx context.Context, arg NewestComponentDraftAtParams) (time.Time, error)
 	NewestSubmissionDraftAt(ctx context.Context, submissionID *uuid.UUID) (time.Time, error)
+	// Whether the actor owns an agent that holds, or held, a seat in the
+	// course: whose queues of their own agents' actions they may read there.
+	OwnsAgentSeatedIn(ctx context.Context, arg OwnsAgentSeatedInParams) (bool, error)
 	PostGrade(ctx context.Context, arg PostGradeParams) (int64, error)
 	// Whether a principal's own seat, or the seat of another of its delegates
 	// than except, is among the seats of one roster role that are not removed or

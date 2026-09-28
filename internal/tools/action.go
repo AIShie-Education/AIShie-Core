@@ -21,11 +21,73 @@ import (
 func actionTools(d Deps) []tool.Tool {
 	return []tool.Tool{
 		actionDecide(d), actionReview(d), actionWithdraw(),
-		actionListProposed(d), actionListPendingReview(d), actionListMine(), actionGet(),
+		actionListProposed(d), actionListPendingReview(d), actionListMine(), actionGet(d),
 	}
 }
 
 var decidePerm = tool.Gate{Perms: []domain.Perm{domain.PermActionDecide}}
+
+// ownAgentsGate is decidePerm for a tool about one action, which an agent's
+// owner may call about their own agent's actions whatever their own
+// action_decide (ownAgentsAction).
+func ownAgentsGate(d Deps, judge bool) tool.Gate {
+	return tool.Gate{Perms: decidePerm.Perms, OwnAgents: ownAgentsAction(d, judge)}
+}
+
+// ownAgentsAction is what an agent's owner may do about one action of their
+// own agent's, as Gate.OwnAgents: decide or review it (judge) at
+// autonomous, where they could have done it themselves just now without
+// anyone's confirmation (pipeline.OwnerMayJudge), as their own doing of it;
+// read it, whatever it is, as they read their own. Any other action is
+// nothing to them here, and whoever action_decide denies stays denied.
+func ownAgentsAction(d Deps, judge bool) tool.OwnAgentsFunc {
+	return func(ctx context.Context, q dbq.Querier, caller domain.Actor, seat *domain.Member, target tool.Target, now time.Time) (domain.Level, error) {
+		if target.ID == nil {
+			return domain.Denied, nil
+		}
+		a, err := q.GetActionInCourse(ctx, dbq.GetActionInCourseParams{ID: *target.ID, CourseID: &target.CourseID})
+		if errors.Is(err, pgx.ErrNoRows) {
+			return domain.Denied, nil
+		}
+		if err != nil {
+			return domain.Denied, err
+		}
+		if judge {
+			if may, err := d.Pipeline.OwnerMayJudge(ctx, q, caller, seat.ID, a, now); err != nil || !may {
+				return domain.Denied, err
+			}
+			return domain.Autonomous, nil
+		}
+		did, err := q.GetActor(ctx, a.ActorID)
+		if err != nil {
+			return domain.Denied, err
+		}
+		if did.OwnerActorID == nil || *did.OwnerActorID != caller.ID {
+			return domain.Denied, nil
+		}
+		return domain.Autonomous, nil
+	}
+}
+
+// ownAgentsQueue is decidePerm for a queue, which an agent's owner who
+// decides nothing else in the course may read for their own agents' actions
+// alone (queueOf): if they own an agent that holds or held a seat there.
+func ownAgentsQueue() tool.Gate {
+	return tool.Gate{Perms: decidePerm.Perms, OwnAgents: func(ctx context.Context, q dbq.Querier, caller domain.Actor, _ *domain.Member, target tool.Target, _ time.Time) (domain.Level, error) {
+		owns, err := q.OwnsAgentSeatedIn(ctx, dbq.OwnsAgentSeatedInParams{CourseID: target.CourseID, OwnerActorID: &caller.ID})
+		if err != nil || !owns {
+			return domain.Denied, err
+		}
+		return domain.Autonomous, nil
+	}}
+}
+
+// ownAgentsOnly says a queue's caller holds no action_decide of their own,
+// and is let read it as an agent's owner (ownAgentsQueue): they are shown
+// their own agents' actions and nobody else's.
+func ownAgentsOnly(rc *tool.ReadCtx) bool {
+	return rc.Member == nil || !rc.Member.Perm(domain.PermActionDecide).Allowed()
+}
 
 // actionTarget resolves "an action in this course". perm_action_decide is
 // not scoped (docs/schema.md §7), so no student or assignment is named.
@@ -49,9 +111,10 @@ func actionDecide(d Deps) tool.Tool {
 			"nor their owner's, nor another agent's of their owner, nor a decision someone else proposed about any of those, " +
 			"nor approves closing an escalation they raised or approved. An agent's owner decides its proposal only where " +
 			"they could do the same themselves without anyone's confirmation: their own level for it autonomous, and its " +
-			"target within their reach; by_owner then says so.",
+			"target within their reach; by_owner then says so. That needs no action_decide of their own, and is done at " +
+			"once, as their own doing of it: a student confirms her own agent's drafts of her work.",
 		Kind: tool.Write,
-		Gate: decidePerm,
+		Gate: ownAgentsGate(d, true),
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/actions/{action_id}/decide"},
 		Resolve: func(ctx context.Context, q dbq.Querier, in pipeline.DecideIn) (tool.Target, error) {
 			return actionTarget(ctx, q, in.CourseID, in.ActionID)
@@ -68,9 +131,10 @@ func actionReview(d Deps) tool.Tool {
 		Description: "Record that an action which executed pending review has been looked at: reviewed, or escalated " +
 			"for someone else to look at. Reviewing undoes nothing; putting something right is a separate action. Nobody " +
 			"reviews their own action, their owner's or another agent's of their owner; an agent's owner reviews what it " +
-			"did only where they could do the same themselves without anyone's confirmation.",
+			"did only where they could do the same themselves without anyone's confirmation, and then needs no " +
+			"action_decide of their own.",
 		Kind: tool.Write,
-		Gate: decidePerm,
+		Gate: ownAgentsGate(d, true),
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/actions/{action_id}/review"},
 		Resolve: func(ctx context.Context, q dbq.Querier, in pipeline.ReviewIn) (tool.Target, error) {
 			return actionTarget(ctx, q, in.CourseID, in.ActionID)
@@ -177,13 +241,21 @@ func actionListProposed(d Deps) tool.Tool {
 		Name: "action.list_proposed",
 		Description: "The approval queue: proposals in this course waiting for a decision, oldest first. yours_to_decide is " +
 			"false on those of your own party, which someone else decides — yours, your owner's, your owner's other " +
-			"agents', and your own agents' unless you could do the same yourself without anyone's confirmation.",
+			"agents', and your own agents' unless you could do the same yourself without anyone's confirmation. If you " +
+			"hold no action_decide here but own an agent seated here, it lists your own agents' proposals alone.",
 		Kind:    tool.Read,
-		Gate:    decidePerm,
+		Gate:    ownAgentsQueue(),
 		HTTP:    tool.Route{Method: "GET", Pattern: "/v1/courses/{course_id}/actions/proposed"},
 		Resolve: courseOnly,
 		Query: func(ctx context.Context, rc *tool.ReadCtx, in ActionListIn) (ActionListOut, error) {
-			rows, err := rc.Q.ListProposedActions(ctx, dbq.ListProposedActionsParams{CourseID: &in.CourseID, After: in.after(), MaxRows: in.limit()})
+			var rows []dbq.Action
+			var err error
+			if ownAgentsOnly(rc) {
+				rows, err = rc.Q.ListProposedActionsOfAgentsOf(ctx, dbq.ListProposedActionsOfAgentsOfParams{
+					CourseID: &in.CourseID, OwnerActorID: &rc.Actor.ID, After: in.after(), MaxRows: in.limit()})
+			} else {
+				rows, err = rc.Q.ListProposedActions(ctx, dbq.ListProposedActionsParams{CourseID: &in.CourseID, After: in.after(), MaxRows: in.limit()})
+			}
 			if err != nil {
 				return ActionListOut{}, err
 			}
@@ -197,13 +269,21 @@ func actionListPendingReview(d Deps) tool.Tool {
 		Name: "action.list_pending_review",
 		Description: "The review queue: actions that executed pending review and have not been reviewed, or were escalated. " +
 			"yours_to_decide is false on those of your own party, which someone else reviews — yours, your owner's, your " +
-			"owner's other agents', and your own agents' unless you could do the same yourself without anyone's confirmation.",
+			"owner's other agents', and your own agents' unless you could do the same yourself without anyone's confirmation. " +
+			"If you hold no action_decide here but own an agent seated here, it lists your own agents' actions alone.",
 		Kind:    tool.Read,
-		Gate:    decidePerm,
+		Gate:    ownAgentsQueue(),
 		HTTP:    tool.Route{Method: "GET", Pattern: "/v1/courses/{course_id}/actions/pending-review"},
 		Resolve: courseOnly,
 		Query: func(ctx context.Context, rc *tool.ReadCtx, in ActionListIn) (ActionListOut, error) {
-			rows, err := rc.Q.ListPendingReviewActions(ctx, dbq.ListPendingReviewActionsParams{CourseID: &in.CourseID, After: in.after(), MaxRows: in.limit()})
+			var rows []dbq.Action
+			var err error
+			if ownAgentsOnly(rc) {
+				rows, err = rc.Q.ListPendingReviewActionsOfAgentsOf(ctx, dbq.ListPendingReviewActionsOfAgentsOfParams{
+					CourseID: &in.CourseID, OwnerActorID: &rc.Actor.ID, After: in.after(), MaxRows: in.limit()})
+			} else {
+				rows, err = rc.Q.ListPendingReviewActions(ctx, dbq.ListPendingReviewActionsParams{CourseID: &in.CourseID, After: in.after(), MaxRows: in.limit()})
+			}
 			if err != nil {
 				return ActionListOut{}, err
 			}
@@ -253,13 +333,14 @@ type ActionGetIn struct {
 	ActionID uuid.UUID `json:"action_id"`
 }
 
-func actionGet() tool.Tool {
+func actionGet(d Deps) tool.Tool {
 	return tool.Define(tool.Spec[ActionGetIn, ActionView]{
-		Name:        "action.get",
-		Description: "One action in full: what was asked, how it was authorized, what became of it, who decided or reviewed it.",
-		Kind:        tool.Read,
-		Gate:        decidePerm,
-		HTTP:        tool.Route{Method: "GET", Pattern: "/v1/courses/{course_id}/actions/{action_id}"},
+		Name: "action.get",
+		Description: "One action in full: what was asked, how it was authorized, what became of it, who decided or reviewed it. " +
+			"An agent's owner reads any action of their own agent's, whatever they hold.",
+		Kind: tool.Read,
+		Gate: ownAgentsGate(d, false),
+		HTTP: tool.Route{Method: "GET", Pattern: "/v1/courses/{course_id}/actions/{action_id}"},
 		Resolve: func(ctx context.Context, q dbq.Querier, in ActionGetIn) (tool.Target, error) {
 			return actionTarget(ctx, q, in.CourseID, in.ActionID)
 		},

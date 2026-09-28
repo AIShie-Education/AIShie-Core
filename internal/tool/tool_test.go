@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/shopspring/decimal"
@@ -138,6 +139,11 @@ func TestDefineRefusesMalformedTools(t *testing.T) {
 		"platform gate, course input": func(s *tool.Spec[in, out]) { s.Gate = tool.Gate{Platform: []string{"admin"}} },
 		"admin gate, course input":    func(s *tool.Spec[in, out]) { s.Gate = tool.Gate{Admin: true} },
 		"read with execute":           func(s *tool.Spec[in, out]) { s.Kind = tool.Read },
+		"own agents with any": func(s *tool.Spec[in, out]) {
+			s.Gate.Any, s.Gate.OwnAgents = true, func(context.Context, dbq.Querier, domain.Actor, *domain.Member, tool.Target, time.Time) (domain.Level, error) {
+				return domain.Denied, nil
+			}
+		},
 	}
 	for name, breakIt := range cases {
 		t.Run(name, func(t *testing.T) {

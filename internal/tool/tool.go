@@ -74,7 +74,19 @@ type Gate struct {
 	Admin bool
 	// Self marks a tool where an actor acts on its own account.
 	Self bool
+	// OwnAgents, with Perms, is what an agent's owner may do about their own
+	// agents whatever Perms give them: once the target is resolved, the
+	// pipeline asks it, for a caller whose seat counts and whom Perms deny
+	// or hold below autonomous, and a level it returns above theirs is the
+	// call's. It never lowers a level. A caller it gives nothing keeps the
+	// denial Perms gave, recorded as ever, and a target that is not found
+	// for such a caller is that denial too: it learns nothing of ids.
+	OwnAgents OwnAgentsFunc
 }
+
+// OwnAgentsFunc says what caller, from seat, may do about target because it
+// concerns their own agents: domain.Denied for nothing.
+type OwnAgentsFunc func(ctx context.Context, q dbq.Querier, caller domain.Actor, seat *domain.Member, target Target, now time.Time) (domain.Level, error)
 
 func (g Gate) CourseScoped() bool { return len(g.Perms) > 0 }
 
@@ -303,6 +315,9 @@ func Define[In, Out any](s Spec[In, Out]) Tool {
 		if !p.Valid() {
 			fail("unknown permission %q", p)
 		}
+	}
+	if s.Gate.OwnAgents != nil && (!s.Gate.CourseScoped() || s.Gate.Any) {
+		fail("Gate.OwnAgents goes with Gate.Perms, and not with Gate.Any")
 	}
 	switch s.Kind {
 	case Write:

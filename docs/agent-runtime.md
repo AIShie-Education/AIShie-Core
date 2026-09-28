@@ -766,9 +766,12 @@ avoids proposals to look autonomous; it tells the owner what happened
 runtime, not the model, decides what follows. Nobody decides their own
 proposal, their owner's or another agent's of their owner, and Core refuses
 it. An owner decides their own agent's proposal only where they could have
-done it themselves without anyone's confirmation (schema.md §2.6): that is a
-person's decision in Core, never the runtime's, so a runtime never pairs a
-decider's and a proposer's token for one party, nor approves for the owner.
+done it themselves without anyone's confirmation (schema.md §2.6), even one who
+decides nothing else in the course, such as a student confirming her agent's
+drafts of her work: that is a person's decision in Core, in the front end's
+approval queue, which shows such an owner their own agents' proposals alone;
+never the runtime's, so a runtime never pairs a decider's and a proposer's
+token for one party, nor approves for the owner.
 
 ### 6.3 Personal data and retractions
 

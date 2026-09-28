@@ -74,22 +74,47 @@ func (p *Pipeline) authorize(ctx context.Context, q dbq.Querier, t tool.Tool, in
 		} else {
 			a.decision, err = check(t.Gate.Perms)
 		}
-		if err != nil || !a.decision.Level.Allowed() {
-			return a, err
-		}
-		target, err := t.Resolve(ctx, q, in)
 		if err != nil {
 			return a, err
 		}
-		if target.CourseID != cid {
+		// An agent's owner, whose seat counts, may go on to see whether the
+		// target concerns their own agents (Gate.OwnAgents), however little
+		// the permissions give them; anyone else denied stops here.
+		owner := t.Gate.OwnAgents != nil && a.decision.Member != nil && a.decision.Level < domain.Autonomous &&
+			(a.decision.Level.Allowed() || a.decision.Reason == authz.ReasonPermDenied)
+		if !a.decision.Level.Allowed() && !owner {
+			return a, nil
+		}
+		target, err := t.Resolve(ctx, q, in)
+		if err == nil && target.CourseID != cid {
 			// A tool resolves its target within the course it was given, so
 			// this cannot happen; if it does, the target is not in the course.
-			return a, apperr.Missing("not found in this course")
+			err = apperr.Missing("not found in this course")
+		}
+		if err != nil {
+			if _, ok := apperr.As(err); ok && !a.decision.Level.Allowed() {
+				// Denied, and let as far as the target only as an owner:
+				// whether it exists is none of their business.
+				return a, nil
+			}
+			return a, err
 		}
 		if target.Type == "" {
 			target.Type = a.target.Type
 		}
 		a.target = target
+		if owner {
+			level, err := t.Gate.OwnAgents(ctx, q, actor, a.decision.Member, target, now)
+			if err != nil {
+				return a, err
+			}
+			if level > a.decision.Level {
+				a.decision = authz.Decision{Level: level, Member: a.decision.Member}
+			}
+			if !a.decision.Level.Allowed() {
+				return a, nil
+			}
+		}
 		if t.Gate.Any && len(target.Perms) == 0 {
 			return a, fmt.Errorf("%s: its gate is Any, so its Resolve must name the governing permission", t.Name)
 		}

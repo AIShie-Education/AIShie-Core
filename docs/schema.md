@@ -282,6 +282,7 @@ the nearest one, and the choice is recorded here so that it is a decision and no
 | Where every student stands on an assignment (`submission.roster`) | `perm_submission_read` | it is the submission list with the students who have not started; names and seat status only with `perm_member_read`, as the member list gives them |
 | Finding whom to seat by their whole email, or whom an actor id names (`member.lookup_actor`) | `perm_member_manage` | whoever seats members has to name them; it lists nobody |
 | Unpublishing an assignment nobody has started (`assignment.unpublish`) | `perm_assignment_write` | the undo of publishing it |
+| Deciding, reviewing and reading one's own agent's actions (`action.decide`, `.review`, `.get`), and the queues of them (`action.list_proposed`, `.list_pending_review`) | `perm_action_decide`, or owning the agent | an owner decides and reviews their agent's action where they could have done it themselves (§2.6), which needs no `perm_action_decide`; without it they reach their own agents' actions alone, and anything else is denied as it is to anyone without it |
 | Taking back one's own proposal, or one's own agent's, while nobody has decided it (`action.withdraw`) | `perm_document_read` | the most basic permission a seated member holds; that the proposal is the caller's own, or their own agent's, is what decides, as `action.list_mine` shows only the caller's own |
 | Closing a conversation (`conversation.close`), retracting a message (`conversation.retract`), listing and reading conversations (`conversation.list`, `.get`, `.messages`) | `perm_document_read` | the most basic permission a seated member holds; the conversation decides who may: its two participants, and whoever decides actions for its opener (§2.8) |
 | Regrading | the lower of `perm_grade_submit` and `perm_grade_post` | it writes a grade and makes it visible in one step |
@@ -825,8 +826,14 @@ approve or reject its proposal, and review what it did under review, only if the
 they decide, holds every permission that gates the action at `autonomous` and reaches its target:
 the authorization they would face making the very same call themselves then (`authorize()`, §3,
 from their own seat). Their agent does nothing they could not do anyway, and they could have done
-this without anyone: a student whose agent drafts her work only by proposal (§2.2, Delegates)
-confirms those drafts herself, since she writes her work without anyone's confirmation. Where their own level is `confirm_required` or `pending_review`, the course
+this without anyone. So it needs no `perm_action_decide` of theirs, and whatever they hold of it,
+their decision is carried out at once, `autonomous`, as their own doing of it would be: a student,
+who decides nothing else, confirms her own agent's drafts of her work (§2.2, Delegates), since she
+writes her work without anyone's confirmation. The tools' gate says so (`tool.Gate.OwnAgents`):
+without `perm_action_decide` an owner reaches their own agents' actions and nothing else — deciding,
+reviewing and reading them (`action.get`, any of them), and the queues listing them alone — and
+anything else is denied as it is to anyone who does not hold it, an action id that does not exist
+included. Where their own level is `confirm_required` or `pending_review`, the course
 has someone check them too, and so their agent: someone outside the party decides it, as for the
 rest of the party; so it is where the target is beyond their reach, or gone. Rejecting is held to
 the same rule as approving, so that one mark says which proposals are the caller's; an owner who
@@ -841,7 +848,9 @@ CHECKs compare seats, and an owner's seat is not their agent's.
 
 The approval and review queues list the party's actions all the same — they are the course's
 queues — and mark each with whether it is the caller's to decide (`yours_to_decide`), an owner's
-own agent's by the rule above, measured as the decision would be. The database cannot go further
+own agent's by the rule above, measured as the decision would be. A caller without
+`perm_action_decide` who owns an agent that holds or held a seat in the course is shown their own
+agents' actions there, and nobody else's. The database cannot go further
 and require the decider to be human, because nothing that authorizes reads `actor.kind`; but an
 agent holds `action_decide` at `confirm_required` at most (§2.2, Ceilings), so whatever an agent
 decides or reviews waits for a member who is not one. Nor can the database see past one row: a
@@ -1524,7 +1533,10 @@ that reads which credential the call came with.
   One exception, at no remove: an owner approves, rejects or reviews their own agent's action
   where their own seat, as `authorize()` finds it for the same call when they decide, holds it at
   `autonomous` and reaches its target; `yours_to_decide` is worked out the same way, and the
-  decision and its event say `by_owner`.
+  decision and its event say `by_owner`. That takes no `perm_action_decide` and is `autonomous`
+  whatever the owner holds of it (`tool.Gate.OwnAgents`); without it, an owner reaches their own
+  agents' actions alone, in `action.decide`, `.review`, `.get` and the queues, and is denied the
+  rest as anyone without it is.
 - Only an agent's owner acts on it through `agent.*`, and to anyone else it does not exist.
   What an owner does for themselves is capped: `agent.create`, and `agent.reactivate` of one they
   suspended, are refused once they have `AGENT_MAX_PER_OWNER` agents that are not suspended,

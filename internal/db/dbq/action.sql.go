@@ -385,6 +385,70 @@ func (q *Queries) ListPendingReviewActions(ctx context.Context, arg ListPendingR
 	return items, nil
 }
 
+const listPendingReviewActionsOfAgentsOf = `-- name: ListPendingReviewActionsOfAgentsOf :many
+SELECT id, actor_id, course_id, member_id, action_type, target_type, target_id, payload, idempotency_key, authz_result, status, decided_by_member_id, decided_at, review_state, reviewed_by_member_id, reviewed_at, executed_at, created_at, payload_hash, result, authority, authority_dept_id FROM action x
+WHERE x.course_id = $1 AND x.review_state IN ('pending', 'escalated') AND x.id > $2
+  AND x.actor_id IN (SELECT a.id FROM actor a WHERE a.owner_actor_id = $3)
+ORDER BY x.id
+LIMIT $4
+`
+
+type ListPendingReviewActionsOfAgentsOfParams struct {
+	CourseID     *uuid.UUID
+	After        uuid.UUID
+	OwnerActorID *uuid.UUID
+	MaxRows      int32
+}
+
+// The review queue likewise: their own agents' actions under review.
+func (q *Queries) ListPendingReviewActionsOfAgentsOf(ctx context.Context, arg ListPendingReviewActionsOfAgentsOfParams) ([]Action, error) {
+	rows, err := q.db.Query(ctx, listPendingReviewActionsOfAgentsOf,
+		arg.CourseID,
+		arg.After,
+		arg.OwnerActorID,
+		arg.MaxRows,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Action
+	for rows.Next() {
+		var i Action
+		if err := rows.Scan(
+			&i.ID,
+			&i.ActorID,
+			&i.CourseID,
+			&i.MemberID,
+			&i.ActionType,
+			&i.TargetType,
+			&i.TargetID,
+			&i.Payload,
+			&i.IdempotencyKey,
+			&i.AuthzResult,
+			&i.Status,
+			&i.DecidedByMemberID,
+			&i.DecidedAt,
+			&i.ReviewState,
+			&i.ReviewedByMemberID,
+			&i.ReviewedAt,
+			&i.ExecutedAt,
+			&i.CreatedAt,
+			&i.PayloadHash,
+			&i.Result,
+			&i.Authority,
+			&i.AuthorityDeptID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listProposedActions = `-- name: ListProposedActions :many
 SELECT id, actor_id, course_id, member_id, action_type, target_type, target_id, payload, idempotency_key, authz_result, status, decided_by_member_id, decided_at, review_state, reviewed_by_member_id, reviewed_at, executed_at, created_at, payload_hash, result, authority, authority_dept_id FROM action
 WHERE course_id = $1 AND status = 'proposed' AND id > $2
@@ -400,6 +464,71 @@ type ListProposedActionsParams struct {
 
 func (q *Queries) ListProposedActions(ctx context.Context, arg ListProposedActionsParams) ([]Action, error) {
 	rows, err := q.db.Query(ctx, listProposedActions, arg.CourseID, arg.After, arg.MaxRows)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Action
+	for rows.Next() {
+		var i Action
+		if err := rows.Scan(
+			&i.ID,
+			&i.ActorID,
+			&i.CourseID,
+			&i.MemberID,
+			&i.ActionType,
+			&i.TargetType,
+			&i.TargetID,
+			&i.Payload,
+			&i.IdempotencyKey,
+			&i.AuthzResult,
+			&i.Status,
+			&i.DecidedByMemberID,
+			&i.DecidedAt,
+			&i.ReviewState,
+			&i.ReviewedByMemberID,
+			&i.ReviewedAt,
+			&i.ExecutedAt,
+			&i.CreatedAt,
+			&i.PayloadHash,
+			&i.Result,
+			&i.Authority,
+			&i.AuthorityDeptID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listProposedActionsOfAgentsOf = `-- name: ListProposedActionsOfAgentsOf :many
+SELECT id, actor_id, course_id, member_id, action_type, target_type, target_id, payload, idempotency_key, authz_result, status, decided_by_member_id, decided_at, review_state, reviewed_by_member_id, reviewed_at, executed_at, created_at, payload_hash, result, authority, authority_dept_id FROM action x
+WHERE x.course_id = $1 AND x.status = 'proposed' AND x.id > $2
+  AND x.actor_id IN (SELECT a.id FROM actor a WHERE a.owner_actor_id = $3)
+ORDER BY x.id
+LIMIT $4
+`
+
+type ListProposedActionsOfAgentsOfParams struct {
+	CourseID     *uuid.UUID
+	After        uuid.UUID
+	OwnerActorID *uuid.UUID
+	MaxRows      int32
+}
+
+// The approval queue as an agent's owner sees it who decides nothing else
+// in the course: their own agents' proposals, and nobody else's.
+func (q *Queries) ListProposedActionsOfAgentsOf(ctx context.Context, arg ListProposedActionsOfAgentsOfParams) ([]Action, error) {
+	rows, err := q.db.Query(ctx, listProposedActionsOfAgentsOf,
+		arg.CourseID,
+		arg.After,
+		arg.OwnerActorID,
+		arg.MaxRows,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -497,6 +626,27 @@ type MarkActionFailedParams struct {
 func (q *Queries) MarkActionFailed(ctx context.Context, arg MarkActionFailedParams) error {
 	_, err := q.db.Exec(ctx, markActionFailed, arg.ID, arg.Result)
 	return err
+}
+
+const ownsAgentSeatedIn = `-- name: OwnsAgentSeatedIn :one
+SELECT EXISTS (
+    SELECT 1 FROM course_member m JOIN actor a ON a.id = m.actor_id
+    WHERE m.course_id = $1 AND a.owner_actor_id = $2
+)::bool AS owns
+`
+
+type OwnsAgentSeatedInParams struct {
+	CourseID     uuid.UUID
+	OwnerActorID *uuid.UUID
+}
+
+// Whether the actor owns an agent that holds, or held, a seat in the
+// course: whose queues of their own agents' actions they may read there.
+func (q *Queries) OwnsAgentSeatedIn(ctx context.Context, arg OwnsAgentSeatedInParams) (bool, error) {
+	row := q.db.QueryRow(ctx, ownsAgentSeatedIn, arg.CourseID, arg.OwnerActorID)
+	var owns bool
+	err := row.Scan(&owns)
+	return owns, err
 }
 
 const sameParty = `-- name: SameParty :one
