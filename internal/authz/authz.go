@@ -57,6 +57,9 @@ const (
 	ReasonStudentScope       Reason = "student_out_of_scope"
 	ReasonAssignmentScope    Reason = "assignment_out_of_scope"
 	ReasonPlatformRole       Reason = "platform_role_required"
+	// A department administrator's Admin-gated call about a department they
+	// do not cover.
+	ReasonDepartmentScope Reason = "department_out_of_scope"
 )
 
 // Decision is the result of a check. Member is set whenever a membership row
@@ -326,6 +329,65 @@ func Platform(actor domain.Actor, roles ...string) Decision {
 	return deny(ReasonPlatformRole, nil)
 }
 
+// AdminScope is who makes an Admin-gated call, for the tool to limit itself
+// by: a platform administrator, who may act anywhere, or a department
+// administrator, who may act on what an appointment of theirs covers. The
+// zero value covers nothing.
+type AdminScope struct {
+	Platform bool // root or admin
+	ActorID  uuid.UUID
+	write    bool // Covers holds the appointment it finds
+}
+
+// Admin is the Admin gate's first steps, which come before the target is
+// looked up, so that someone who is neither kind of administrator learns
+// nothing from ids. A platform administrator is allowed, anywhere; someone
+// who holds an appointment is allowed to go on, to be held to what it covers
+// once the target names a department (Covers); anyone else is denied, as a
+// platform tool denies them. Platform, and so platform_role, decides the
+// first.
+func Admin(actor domain.Actor, write bool) (AdminScope, Decision) {
+	d := Platform(actor, domain.PlatformRoot, domain.PlatformAdmin)
+	switch {
+	case d.Level.Allowed():
+		return AdminScope{Platform: true, ActorID: actor.ID, write: write}, d
+	case !actor.Active() || !actor.Administers:
+		return AdminScope{}, d
+	}
+	return AdminScope{ActorID: actor.ID, write: write}, Decision{Level: domain.Autonomous}
+}
+
+// Covers reports whether the caller may act on dept: always, for a platform
+// administrator, who relies on no appointment; for a department
+// administrator, when an appointment of theirs is at dept or above it, and
+// then which, the nearest. A write holds that appointment FOR SHARE to its
+// end, so that ending the appointment waits for the call, or the call waits
+// for the ending and finds none. nil, false when there is none.
+func (s AdminScope) Covers(ctx context.Context, q dbq.Querier, dept uuid.UUID) (*domain.Authority, bool, error) {
+	switch {
+	case s.Platform:
+		return nil, true, nil
+	case s.ActorID == uuid.Nil:
+		return nil, false, nil
+	}
+	var r dbq.DepartmentAuthorityRow
+	var err error
+	if s.write {
+		var locked dbq.LockDepartmentAuthorityRow
+		locked, err = q.LockDepartmentAuthority(ctx, dbq.LockDepartmentAuthorityParams{ActorID: s.ActorID, DeptID: dept})
+		r = dbq.DepartmentAuthorityRow(locked)
+	} else {
+		r, err = q.DepartmentAuthority(ctx, dbq.DepartmentAuthorityParams{ActorID: s.ActorID, DeptID: dept})
+	}
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return nil, false, nil
+	case err != nil:
+		return nil, false, fmt.Errorf("department authority: %w", err)
+	}
+	return &domain.Authority{AppointmentID: r.AppointmentID, DeptID: r.DeptID}, true, nil
+}
+
 // LoadActor fetches what authorization may know about an actor.
 func LoadActor(ctx context.Context, q dbq.Querier, id uuid.UUID) (domain.Actor, error) {
 	row, err := q.GetActorForAuthz(ctx, id)
@@ -335,7 +397,7 @@ func LoadActor(ctx context.Context, q dbq.Querier, id uuid.UUID) (domain.Actor, 
 	if err != nil {
 		return domain.Actor{}, fmt.Errorf("load actor: %w", err)
 	}
-	a := domain.Actor{ID: row.ID, DisplayName: row.DisplayName, Status: row.Status}
+	a := domain.Actor{ID: row.ID, DisplayName: row.DisplayName, Status: row.Status, Administers: row.Administers}
 	if row.PlatformRole != nil {
 		a.PlatformRole = *row.PlatformRole
 	}

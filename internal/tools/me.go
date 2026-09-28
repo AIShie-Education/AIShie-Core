@@ -39,13 +39,25 @@ type MeOut struct {
 	// An agent may always know who answers for it. A service that hosts the
 	// agent compares this with the person who hands it the agent's token.
 	OwnerActorID *uuid.UUID `json:"owner_actor_id,omitempty" jsonschema:"for an agent a person owns, that person's actor id; absent for a person, and for an agent nobody owns"`
+	// Absent for everyone who administers nothing, agents always among them,
+	// so that their answer is what it was before there were departments'
+	// administrators.
+	Administers []Administered `json:"administers,omitempty" jsonschema:"the departments you are appointed to administer; you administer every department beneath them too (department.list_tree)"`
+}
+
+type Administered struct {
+	DeptID        uuid.UUID `json:"dept_id"`
+	Name          string    `json:"name"`
+	AppointmentID uuid.UUID `json:"appointment_id"`
+	AppointedAt   time.Time `json:"appointed_at"`
 }
 
 func meGet() tool.Tool {
 	return tool.Define(tool.Spec[Empty, MeOut]{
-		Name:        "me.get",
-		Description: "Who the caller is: the actor this credential belongs to, and for an agent a person owns, who owns it.",
-		Kind:        tool.Read, Gate: self,
+		Name: "me.get",
+		Description: "Who the caller is: the actor this credential belongs to, for an agent a person owns, who owns it, " +
+			"and for a department's administrator, the departments they are appointed to administer.",
+		Kind: tool.Read, Gate: self,
 		HTTP:    tool.Route{Method: "GET", Pattern: "/v1/me"},
 		Resolve: noTarget[Empty]("actor"),
 		Query: func(ctx context.Context, rc *tool.ReadCtx, _ Empty) (MeOut, error) {
@@ -53,8 +65,19 @@ func meGet() tool.Tool {
 			if err != nil {
 				return MeOut{}, err
 			}
-			return MeOut{ID: a.ID, Kind: a.Kind, DisplayName: a.DisplayName, Email: a.Email, Status: a.Status,
-				PlatformRole: a.PlatformRole, OwnerActorID: a.OwnerActorID}, nil
+			out := MeOut{ID: a.ID, Kind: a.Kind, DisplayName: a.DisplayName, Email: a.Email, Status: a.Status,
+				PlatformRole: a.PlatformRole, OwnerActorID: a.OwnerActorID}
+			if rc.Actor.Administers {
+				rows, err := rc.Q.MyAppointments(ctx, rc.Actor.ID)
+				if err != nil {
+					return MeOut{}, err
+				}
+				for _, r := range rows {
+					out.Administers = append(out.Administers, Administered{DeptID: r.DeptID, Name: r.Name,
+						AppointmentID: r.ID, AppointedAt: r.AppointedAt})
+				}
+			}
+			return out, nil
 		},
 	})
 }

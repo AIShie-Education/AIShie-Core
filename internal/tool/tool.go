@@ -50,7 +50,8 @@ const (
 	Write
 )
 
-// Gate says who may call a tool. Exactly one of the three is set.
+// Gate says who may call a tool. Exactly one of Perms, Platform, Admin and
+// Self is set.
 type Gate struct {
 	// Perms are course permissions; the call runs at the lowest of their
 	// levels on the caller's membership. The tool's input carries course_id.
@@ -65,6 +66,12 @@ type Gate struct {
 	// Platform lists platform roles, for the few operations outside any
 	// course. No ladder applies: allowed outright, or not at all.
 	Platform []string
+	// Admin is for operations outside any course that a platform
+	// administrator (root, admin) may make anywhere, and a department
+	// administrator only within what they cover. The tool's Resolve names
+	// the department the call is about (Target.DeptID). Like Platform, it is
+	// allowed outright or not at all.
+	Admin bool
 	// Self marks a tool where an actor acts on its own account.
 	Self bool
 }
@@ -87,6 +94,14 @@ type Target struct {
 	// Perms, when set, replaces Gate.Perms for this call. Reading a document
 	// is gated by a different permission depending on what kind it is.
 	Perms []domain.Perm
+	// DeptID and AnyDept are what an Admin-gated call is about, for a
+	// department administrator. DeptID set: they must cover it (an
+	// appointment at it or above). DeptID nil and AnyDept false: only a
+	// platform administrator may make the call (a department at the top of
+	// the tree). AnyDept: any department administrator may, and the tool
+	// limits what it reads or writes to ExecCtx.Admin / ReadCtx.Admin.
+	DeptID  *uuid.UUID
+	AnyDept bool
 }
 
 // Route places a tool in the REST API.
@@ -107,6 +122,9 @@ type ExecCtx struct {
 	Actor    domain.Actor
 	Member   *domain.Member
 	ActionID uuid.UUID
+	// Admin is who makes an Admin-gated call, for the tool to limit itself
+	// by. The zero value, which every other call has, covers nothing.
+	Admin authz.AdminScope
 	// Now is when this is being executed. ActionCreatedAt is when the call
 	// was made: the same moment for a direct call, and the moment of the
 	// proposal for an approval, which may be days later. A tool that must
@@ -132,6 +150,8 @@ type ReadCtx struct {
 	// Scope is the member's scope in the shape list queries take it, so that
 	// filtering happens in SQL.
 	Scope authz.ScopeFilter
+	// Admin is who makes an Admin-gated call, as in ExecCtx.
+	Admin authz.AdminScope
 	Now   time.Time
 }
 
@@ -254,11 +274,14 @@ func Define[In, Out any](s Spec[In, Out]) Tool {
 	if len(s.Gate.Platform) > 0 {
 		gates++
 	}
+	if s.Gate.Admin {
+		gates++
+	}
 	if s.Gate.Self {
 		gates++
 	}
 	if gates != 1 && !s.Internal {
-		fail("exactly one of Gate.Perms, Gate.Platform and Gate.Self must be set")
+		fail("exactly one of Gate.Perms, Gate.Platform, Gate.Admin and Gate.Self must be set")
 	}
 	for _, p := range s.Gate.Perms {
 		if !p.Valid() {

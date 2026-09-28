@@ -16,13 +16,32 @@ UPDATE course SET title = $2, description = $3 WHERE id = $1;
 UPDATE course SET status = $2 WHERE id = $1 AND status <> $2;
 
 -- name: ListCourses :many
-SELECT id, dept_id, term_id, code, section, title, description, status, created_at
-FROM course
-WHERE id > sqlc.arg(after)
-  AND (sqlc.narg(term_id)::uuid IS NULL OR term_id = sqlc.narg(term_id))
-  AND (sqlc.narg(dept_id)::uuid IS NULL OR dept_id = sqlc.narg(dept_id))
-ORDER BY id
+-- Courses as their administrators see them. platform lists every course;
+-- otherwise, those in the departments actor administers and beneath them.
+-- dept_id is one department; within_dept_id a department and everything
+-- beneath it.
+WITH RECURSIVE mine (id) AS (
+    SELECT da.dept_id FROM department_admin da
+    WHERE da.actor_id = sqlc.arg(actor_id)::uuid AND da.removed_at IS NULL AND NOT sqlc.arg(platform)::bool
+  UNION
+    SELECT d.id FROM department d JOIN mine ON d.parent_id = mine.id
+), within (id) AS (
+    SELECT sqlc.narg(within_dept_id)::uuid WHERE sqlc.narg(within_dept_id)::uuid IS NOT NULL
+  UNION
+    SELECT d.id FROM department d JOIN within ON d.parent_id = within.id
+)
+SELECT c.id, c.dept_id, c.term_id, c.code, c.section, c.title, c.description, c.status, c.created_at
+FROM course c
+WHERE c.id > sqlc.arg(after)
+  AND (sqlc.arg(platform)::bool OR c.dept_id IN (SELECT id FROM mine))
+  AND (sqlc.narg(term_id)::uuid IS NULL OR c.term_id = sqlc.narg(term_id))
+  AND (sqlc.narg(dept_id)::uuid IS NULL OR c.dept_id = sqlc.narg(dept_id))
+  AND (sqlc.narg(within_dept_id)::uuid IS NULL OR c.dept_id IN (SELECT id FROM within))
+ORDER BY c.id
 LIMIT sqlc.arg(max_rows);
+
+-- name: SetCourseDept :exec
+UPDATE course SET dept_id = $2 WHERE id = $1;
 
 -- name: InsertComponent :exec
 INSERT INTO grade_component (id, course_id, parent_id, name, weight, drop_lowest, points_possible, sort_order, created_at)

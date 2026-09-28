@@ -78,6 +78,8 @@ type Action struct {
 	CreatedAt          time.Time
 	PayloadHash        string
 	Result             []byte
+	Authority          *string
+	AuthorityDeptID    *uuid.UUID
 }
 
 type Actor struct {
@@ -206,6 +208,17 @@ type Department struct {
 	ID        uuid.UUID
 	Name      string
 	CreatedAt time.Time
+	ParentID  *uuid.UUID
+}
+
+type DepartmentAdmin struct {
+	ID                 uuid.UUID
+	DeptID             uuid.UUID
+	ActorID            uuid.UUID
+	AppointedByActorID uuid.UUID
+	AppointedAt        time.Time
+	RemovedByActorID   *uuid.UUID
+	RemovedAt          *time.Time
 }
 
 type Document struct {

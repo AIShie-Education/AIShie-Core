@@ -8,10 +8,12 @@ SELECT id, name, starts_on, ends_on FROM term ORDER BY starts_on DESC, id;
 SELECT EXISTS (SELECT 1 FROM term WHERE id = $1);
 
 -- name: InsertDepartment :exec
-INSERT INTO department (id, name, created_at) VALUES ($1, $2, $3);
+-- A null parent_id is a department at the top of the tree. The trigger
+-- department_tree_valid refuses one that would be too deep.
+INSERT INTO department (id, name, parent_id, created_at) VALUES ($1, $2, $3, $4);
 
 -- name: ListDepartments :many
-SELECT id, name, created_at FROM department ORDER BY name, id;
+SELECT id, name, parent_id, created_at FROM department ORDER BY name, id;
 
 -- name: DepartmentExists :one
 SELECT EXISTS (SELECT 1 FROM department WHERE id = $1);

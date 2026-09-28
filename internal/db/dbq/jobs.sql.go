@@ -39,7 +39,7 @@ func (q *Queries) GetActionCourse(ctx context.Context, id uuid.UUID) (*uuid.UUID
 }
 
 const getActionForUpdate = `-- name: GetActionForUpdate :one
-SELECT id, actor_id, course_id, member_id, action_type, target_type, target_id, payload, idempotency_key, authz_result, status, decided_by_member_id, decided_at, review_state, reviewed_by_member_id, reviewed_at, executed_at, created_at, payload_hash, result FROM action WHERE id = $1 FOR UPDATE
+SELECT id, actor_id, course_id, member_id, action_type, target_type, target_id, payload, idempotency_key, authz_result, status, decided_by_member_id, decided_at, review_state, reviewed_by_member_id, reviewed_at, executed_at, created_at, payload_hash, result, authority, authority_dept_id FROM action WHERE id = $1 FOR UPDATE
 `
 
 func (q *Queries) GetActionForUpdate(ctx context.Context, id uuid.UUID) (Action, error) {
@@ -66,6 +66,8 @@ func (q *Queries) GetActionForUpdate(ctx context.Context, id uuid.UUID) (Action,
 		&i.CreatedAt,
 		&i.PayloadHash,
 		&i.Result,
+		&i.Authority,
+		&i.AuthorityDeptID,
 	)
 	return i, err
 }

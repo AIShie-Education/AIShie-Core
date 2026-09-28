@@ -47,7 +47,8 @@ END $$;
 
 \o /dev/null
 -- Fixtures ------------------------------------------------------------------
--- ids: 11 term · 21 dept · 3x actors · 4x courses · 5x members · 6x components
+-- ids: 11 term · 21 dept · 2xx the department tree · dax appointments
+--      3x actors · 4x courses · 5x members · 6x components
 --      7x assignments · ex documents · fx versions · ax submissions
 --      bx actions · dx grades · cx conversations · cxx their messages
 INSERT INTO term (id, name, starts_on, ends_on)
@@ -335,6 +336,68 @@ SELECT pg_temp.ok('the new permissions default to denied on both tables', $q$
 SELECT pg_temp.fails('only a delegate''s seat answers the course', '23514', $q$
     UPDATE course_member SET answers_course = true WHERE id = '00000000-0000-0000-0000-000000000051' $q$);
 
+-- Departments: a tree, and its administrators --------------------------------
+-- 2a1 … 2a8 a chain, 2a1 at the top · 2b1 > 2b2 > 2b3 a department and what is
+-- beneath it · 2c1, 2c2 two that would loop · da1, da2 Sato's appointments at 21
+SELECT pg_temp.fails('a department is not its own parent', '23514', $q$
+    INSERT INTO department (id, name, parent_id) VALUES ('00000000-0000-0000-0000-0000000002d1', 'Itself', '00000000-0000-0000-0000-0000000002d1') $q$);
+SELECT pg_temp.fails('nor under a department beneath it', '23514', $q$
+    INSERT INTO department (id, name) VALUES ('00000000-0000-0000-0000-0000000002c1', 'A');
+    INSERT INTO department (id, name, parent_id) VALUES ('00000000-0000-0000-0000-0000000002c2', 'B', '00000000-0000-0000-0000-0000000002c1');
+    UPDATE department SET parent_id = '00000000-0000-0000-0000-0000000002c2' WHERE id = '00000000-0000-0000-0000-0000000002c1' $q$);
+SELECT pg_temp.fails('nor under itself, once it exists', '23514', $q$
+    UPDATE department SET parent_id = id WHERE id = '00000000-0000-0000-0000-000000000021' $q$);
+SELECT pg_temp.ok('a tree eight levels deep', $q$
+    INSERT INTO department (id, name) VALUES ('00000000-0000-0000-0000-0000000002a1', 'Level 1');
+    INSERT INTO department (id, name, parent_id) VALUES ('00000000-0000-0000-0000-0000000002a2', 'Level 2', '00000000-0000-0000-0000-0000000002a1');
+    INSERT INTO department (id, name, parent_id) VALUES ('00000000-0000-0000-0000-0000000002a3', 'Level 3', '00000000-0000-0000-0000-0000000002a2');
+    INSERT INTO department (id, name, parent_id) VALUES ('00000000-0000-0000-0000-0000000002a4', 'Level 4', '00000000-0000-0000-0000-0000000002a3');
+    INSERT INTO department (id, name, parent_id) VALUES ('00000000-0000-0000-0000-0000000002a5', 'Level 5', '00000000-0000-0000-0000-0000000002a4');
+    INSERT INTO department (id, name, parent_id) VALUES ('00000000-0000-0000-0000-0000000002a6', 'Level 6', '00000000-0000-0000-0000-0000000002a5');
+    INSERT INTO department (id, name, parent_id) VALUES ('00000000-0000-0000-0000-0000000002a7', 'Level 7', '00000000-0000-0000-0000-0000000002a6');
+    INSERT INTO department (id, name, parent_id) VALUES ('00000000-0000-0000-0000-0000000002a8', 'Level 8', '00000000-0000-0000-0000-0000000002a7'); $q$);
+SELECT pg_temp.fails('but not nine', '23514', $q$
+    INSERT INTO department (id, name, parent_id) VALUES ('00000000-0000-0000-0000-0000000002a9', 'Level 9', '00000000-0000-0000-0000-0000000002a8') $q$);
+SELECT pg_temp.ok('a department with two levels beneath it', $q$
+    INSERT INTO department (id, name) VALUES ('00000000-0000-0000-0000-0000000002b1', 'Faculty');
+    INSERT INTO department (id, name, parent_id) VALUES ('00000000-0000-0000-0000-0000000002b2', 'School', '00000000-0000-0000-0000-0000000002b1');
+    INSERT INTO department (id, name, parent_id) VALUES ('00000000-0000-0000-0000-0000000002b3', 'Department', '00000000-0000-0000-0000-0000000002b2') $q$);
+SELECT pg_temp.fails('moved under the sixth level, with what is beneath it, it would make nine', '23514', $q$
+    UPDATE department SET parent_id = '00000000-0000-0000-0000-0000000002a6' WHERE id = '00000000-0000-0000-0000-0000000002b1' $q$);
+SELECT pg_temp.ok('under the fifth it makes eight, and back at the top one again', $q$
+    UPDATE department SET parent_id = '00000000-0000-0000-0000-0000000002a5' WHERE id = '00000000-0000-0000-0000-0000000002b1';
+    UPDATE department SET parent_id = NULL WHERE id = '00000000-0000-0000-0000-0000000002b1' $q$);
+SELECT pg_temp.ok('a person administers a department, appointed by someone else', $q$
+    INSERT INTO department_admin (id, dept_id, actor_id, appointed_by_actor_id)
+    VALUES ('00000000-0000-0000-0000-000000000da1', '00000000-0000-0000-0000-000000000021', '00000000-0000-0000-0000-000000000034', '00000000-0000-0000-0000-000000000032') $q$);
+SELECT pg_temp.fails('an agent administers nothing', '23514', $q$
+    INSERT INTO department_admin (dept_id, actor_id, appointed_by_actor_id)
+    VALUES ('00000000-0000-0000-0000-000000000021', '00000000-0000-0000-0000-000000000036', '00000000-0000-0000-0000-000000000032') $q$);
+SELECT pg_temp.fails('nor does the system actor', '23514', $q$
+    INSERT INTO department_admin (dept_id, actor_id, appointed_by_actor_id)
+    VALUES ('00000000-0000-0000-0000-000000000021', '00000000-0000-0000-0000-000000000033', '00000000-0000-0000-0000-000000000032') $q$);
+SELECT pg_temp.fails('one live appointment per person and department', '23505', $q$
+    INSERT INTO department_admin (dept_id, actor_id, appointed_by_actor_id)
+    VALUES ('00000000-0000-0000-0000-000000000021', '00000000-0000-0000-0000-000000000034', '00000000-0000-0000-0000-000000000031') $q$);
+SELECT pg_temp.fails('nobody appoints themselves', '23514', $q$
+    INSERT INTO department_admin (dept_id, actor_id, appointed_by_actor_id)
+    VALUES ('00000000-0000-0000-0000-0000000002b1', '00000000-0000-0000-0000-000000000034', '00000000-0000-0000-0000-000000000034') $q$);
+SELECT pg_temp.fails('an ending says who ended it', '23514', $q$
+    UPDATE department_admin SET removed_at = now() WHERE id = '00000000-0000-0000-0000-000000000da1' $q$);
+SELECT pg_temp.fails('an appointment is kept: not deleted', '23001', $q$
+    DELETE FROM department_admin WHERE id = '00000000-0000-0000-0000-000000000da1' $q$);
+SELECT pg_temp.fails('nor moved to another department', '23001', $q$
+    UPDATE department_admin SET dept_id = '00000000-0000-0000-0000-0000000002b1' WHERE id = '00000000-0000-0000-0000-000000000da1' $q$);
+SELECT pg_temp.fails('nor said to be someone else''s doing', '23001', $q$
+    UPDATE department_admin SET appointed_by_actor_id = '00000000-0000-0000-0000-000000000031' WHERE id = '00000000-0000-0000-0000-000000000da1' $q$);
+SELECT pg_temp.ok('an appointment ends', $q$
+    UPDATE department_admin SET removed_at = now(), removed_by_actor_id = '00000000-0000-0000-0000-000000000032' WHERE id = '00000000-0000-0000-0000-000000000da1' $q$);
+SELECT pg_temp.fails('and stays ended', '23001', $q$
+    UPDATE department_admin SET removed_at = NULL, removed_by_actor_id = NULL WHERE id = '00000000-0000-0000-0000-000000000da1' $q$);
+SELECT pg_temp.ok('the same person is appointed again, in a new row', $q$
+    INSERT INTO department_admin (id, dept_id, actor_id, appointed_by_actor_id)
+    VALUES ('00000000-0000-0000-0000-000000000da2', '00000000-0000-0000-0000-000000000021', '00000000-0000-0000-0000-000000000034', '00000000-0000-0000-0000-000000000031') $q$);
+
 -- Grading scheme -------------------------------------------------------------
 SELECT pg_temp.fails('one root component per course', '23505', $q$
     INSERT INTO grade_component (course_id, name) VALUES ('00000000-0000-0000-0000-000000000041', 'Another total') $q$);
@@ -492,6 +555,30 @@ SELECT pg_temp.ok('same key is fine for a different actor', $q$
 SELECT pg_temp.fails('unknown status is rejected', '23514', $q$
     INSERT INTO action (actor_id, action_type, target_type, idempotency_key, authz_result, status)
     VALUES ('00000000-0000-0000-0000-000000000034', 'grade.submit', 'submission', 'k-2', 'autonomous', 'done') $q$);
+SELECT pg_temp.fails('an action is authorized by a platform role or a department''s appointment', '23514', $q$
+    INSERT INTO action (actor_id, action_type, target_type, idempotency_key, authz_result, status, executed_at, authority)
+    VALUES ('00000000-0000-0000-0000-000000000032', 'department.create', 'department', 'k-auth1', 'autonomous', 'executed', now(), 'course') $q$);
+SELECT pg_temp.fails('only a department''s appointment names a department', '23514', $q$
+    INSERT INTO action (actor_id, action_type, target_type, idempotency_key, authz_result, status, executed_at,
+                        authority, authority_dept_id)
+    VALUES ('00000000-0000-0000-0000-000000000032', 'department.create', 'department', 'k-auth2', 'autonomous', 'executed', now(),
+            'platform', '00000000-0000-0000-0000-000000000021') $q$);
+SELECT pg_temp.fails('the department it names exists', '23503', $q$
+    INSERT INTO action (actor_id, action_type, target_type, idempotency_key, authz_result, status, executed_at,
+                        authority, authority_dept_id)
+    VALUES ('00000000-0000-0000-0000-000000000034', 'department.create', 'department', 'k-auth3', 'autonomous', 'executed', now(),
+            'department', '00000000-0000-0000-0000-0000000000ff') $q$);
+SELECT pg_temp.ok('in a seat''s capacity, a platform role''s, or a department''s by its appointment', $q$
+    INSERT INTO action (actor_id, action_type, target_type, idempotency_key, authz_result, status, executed_at)
+    VALUES ('00000000-0000-0000-0000-000000000034', 'grade.submit', 'submission', 'k-auth4', 'autonomous', 'executed', now());
+    INSERT INTO action (actor_id, action_type, target_type, idempotency_key, authz_result, status, executed_at, authority)
+    VALUES ('00000000-0000-0000-0000-000000000032', 'department.create', 'department', 'k-auth5', 'autonomous', 'executed', now(), 'platform');
+    INSERT INTO action (actor_id, action_type, target_type, idempotency_key, authz_result, status, executed_at,
+                        authority, authority_dept_id)
+    VALUES ('00000000-0000-0000-0000-000000000034', 'department.create', 'department', 'k-auth6', 'autonomous', 'executed', now(),
+            'department', '00000000-0000-0000-0000-000000000021');
+    INSERT INTO action (actor_id, action_type, target_type, idempotency_key, authz_result, status, executed_at, authority)
+    VALUES ('00000000-0000-0000-0000-000000000034', 'actor.invite_new', 'actor', 'k-auth7', 'autonomous', 'executed', now(), 'department') $q$);
 
 -- Grades ---------------------------------------------------------------------
 SELECT pg_temp.fails('grade requires an action', '23502', $q$

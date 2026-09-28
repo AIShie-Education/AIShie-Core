@@ -136,6 +136,7 @@ func TestDefineRefusesMalformedTools(t *testing.T) {
 		"write without execute":       func(s *tool.Spec[in, out]) { s.Execute = nil },
 		"no resolve":                  func(s *tool.Spec[in, out]) { s.Resolve = nil },
 		"platform gate, course input": func(s *tool.Spec[in, out]) { s.Gate = tool.Gate{Platform: []string{"admin"}} },
+		"admin gate, course input":    func(s *tool.Spec[in, out]) { s.Gate = tool.Gate{Admin: true} },
 		"read with execute":           func(s *tool.Spec[in, out]) { s.Kind = tool.Read },
 	}
 	for name, breakIt := range cases {
@@ -146,6 +147,46 @@ func TestDefineRefusesMalformedTools(t *testing.T) {
 				}
 			}()
 			s := valid()
+			breakIt(&s)
+			tool.Define(s)
+		})
+	}
+}
+
+type outside struct {
+	DeptID uuid.UUID `json:"dept_id"`
+}
+
+// An operation outside any course that a department's administrators may
+// make as well as a platform administrator.
+func administered() tool.Spec[outside, out] {
+	return tool.Spec[outside, out]{
+		Name: "thing.manage", Kind: tool.Write, Gate: tool.Gate{Admin: true},
+		Resolve: func(_ context.Context, _ dbq.Querier, o outside) (tool.Target, error) {
+			return tool.Target{DeptID: &o.DeptID}, nil
+		},
+		Execute: func(context.Context, *tool.ExecCtx, outside) (out, error) { return out{}, nil },
+	}
+}
+
+// The Admin gate is a gate of its own: never beside course permissions,
+// platform roles or one's own account, which would each say something else
+// about who may call.
+func TestDefineTakesTheAdminGateAlone(t *testing.T) {
+	tool.Define(administered())
+	cases := map[string]func(*tool.Spec[outside, out]){
+		"with course permissions": func(s *tool.Spec[outside, out]) { s.Gate.Perms = []domain.Perm{domain.PermMemberManage} },
+		"with platform roles":     func(s *tool.Spec[outside, out]) { s.Gate.Platform = []string{"admin"} },
+		"with one's own account":  func(s *tool.Spec[outside, out]) { s.Gate.Self = true },
+	}
+	for name, breakIt := range cases {
+		t.Run(name, func(t *testing.T) {
+			defer func() {
+				if r := recover(); r == nil || !strings.Contains(r.(string), "exactly one of") {
+					t.Fatalf("Define: %v", r)
+				}
+			}()
+			s := administered()
 			breakIt(&s)
 			tool.Define(s)
 		})
