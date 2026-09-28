@@ -122,6 +122,11 @@ type ExecCtx struct {
 	Actor    domain.Actor
 	Member   *domain.Member
 	ActionID uuid.UUID
+	// CredentialID is the token or session the call was made with, for a
+	// tool that records which one (me.site_chat). uuid.Nil when there is
+	// none to speak of: a proposal carried out on approval, whose credential
+	// was the proposer's and is not kept, a sweep, a call made without one.
+	CredentialID uuid.UUID
 	// Admin is who makes an Admin-gated call, for the tool to limit itself
 	// by. The zero value, which every other call has, covers nothing.
 	Admin authz.AdminScope

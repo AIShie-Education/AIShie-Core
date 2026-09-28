@@ -82,9 +82,27 @@ func (q *Queries) CountSeatsInOpenCourses(ctx context.Context, actorID uuid.UUID
 	return count, err
 }
 
+const endSiteChatByOwner = `-- name: EndSiteChatByOwner :exec
+UPDATE actor SET site_chat_credential_id = NULL
+WHERE id = $1 AND owner_actor_id = $2
+`
+
+type EndSiteChatByOwnerParams struct {
+	ID           uuid.UUID
+	OwnerActorID *uuid.UUID
+}
+
+// Its owner switches it off: only while they are its owner, since an
+// owner's change (actor.set_owner) holds the row, and revokes every
+// credential it has, which ends it anyway.
+func (q *Queries) EndSiteChatByOwner(ctx context.Context, arg EndSiteChatByOwnerParams) error {
+	_, err := q.db.Exec(ctx, endSiteChatByOwner, arg.ID, arg.OwnerActorID)
+	return err
+}
+
 const getActor = `-- name: GetActor :one
 SELECT id, kind, display_name, email, status, platform_role, created_by_actor_id, created_at,
-       owner_actor_id, suspended_by_actor_id
+       owner_actor_id, suspended_by_actor_id, site_chat_credential_id
 FROM actor
 WHERE id = $1
 `
@@ -105,6 +123,7 @@ func (q *Queries) GetActor(ctx context.Context, id uuid.UUID) (Actor, error) {
 		&i.CreatedAt,
 		&i.OwnerActorID,
 		&i.SuspendedByActorID,
+		&i.SiteChatCredentialID,
 	)
 	return i, err
 }
@@ -127,7 +146,7 @@ func (q *Queries) GetActorByEmail(ctx context.Context, lower string) (GetActorBy
 
 const getActorForShare = `-- name: GetActorForShare :one
 SELECT id, kind, display_name, email, status, platform_role, created_by_actor_id, created_at,
-       owner_actor_id, suspended_by_actor_id
+       owner_actor_id, suspended_by_actor_id, site_chat_credential_id
 FROM actor
 WHERE id = $1
 FOR SHARE
@@ -155,6 +174,7 @@ func (q *Queries) GetActorForShare(ctx context.Context, id uuid.UUID) (Actor, er
 		&i.CreatedAt,
 		&i.OwnerActorID,
 		&i.SuspendedByActorID,
+		&i.SiteChatCredentialID,
 	)
 	return i, err
 }
@@ -258,6 +278,11 @@ func (q *Queries) InvitableBy(ctx context.Context, arg InvitableByParams) (Invit
 
 const listAgentsOf = `-- name: ListAgentsOf :many
 SELECT a.id, a.display_name, a.status, a.suspended_by_actor_id, a.created_at, seen.last_used_at AS last_seen_at,
+       (a.status = 'active'
+        AND (a.owner_actor_id IS NULL OR EXISTS (SELECT 1 FROM actor o WHERE o.id = a.owner_actor_id AND o.status = 'active'))
+        AND EXISTS (SELECT 1 FROM credential sc
+                     WHERE sc.id = a.site_chat_credential_id AND sc.actor_id = a.id AND sc.revoked_at IS NULL
+                       AND (sc.expires_at IS NULL OR sc.expires_at > $1)))::bool AS site_chat,
        (SELECT count(*) FROM course_member m
          WHERE m.actor_id = a.id AND m.status = 'active'
            AND (m.expires_at IS NULL OR m.expires_at > $1)) AS live_seats,
@@ -286,14 +311,16 @@ type ListAgentsOfRow struct {
 	SuspendedByActorID *uuid.UUID
 	CreatedAt          time.Time
 	LastSeenAt         *time.Time
+	SiteChat           bool
 	LiveSeats          int64
 	PendingRequests    int64
 }
 
 // A person's agents, oldest first, with what their owner needs to see at a
 // glance: when one last used a token that still works, how many seats it
-// holds that count now, and how many requests of the owner's to seat it
-// wait for a decision.
+// holds that count now, how many requests of the owner's to seat it wait
+// for a decision, and whether it takes conversations in the site now, by
+// the rule of SiteChatOf.
 func (q *Queries) ListAgentsOf(ctx context.Context, arg ListAgentsOfParams) ([]ListAgentsOfRow, error) {
 	rows, err := q.db.Query(ctx, listAgentsOf, arg.Now, arg.OwnerActorID)
 	if err != nil {
@@ -310,6 +337,7 @@ func (q *Queries) ListAgentsOf(ctx context.Context, arg ListAgentsOfParams) ([]L
 			&i.SuspendedByActorID,
 			&i.CreatedAt,
 			&i.LastSeenAt,
+			&i.SiteChat,
 			&i.LiveSeats,
 			&i.PendingRequests,
 		); err != nil {
@@ -650,6 +678,73 @@ type SetActorOwnerParams struct {
 func (q *Queries) SetActorOwner(ctx context.Context, arg SetActorOwnerParams) error {
 	_, err := q.db.Exec(ctx, setActorOwner, arg.OwnerActorID, arg.ID)
 	return err
+}
+
+const setSiteChat = `-- name: SetSiteChat :exec
+UPDATE actor SET site_chat_credential_id = $1 WHERE id = $2
+`
+
+type SetSiteChatParams struct {
+	CredentialID *uuid.UUID
+	ID           uuid.UUID
+}
+
+// The credential an agent calls with declares that it takes conversations
+// in the site, in place of any that did before; null, that it takes none.
+// The key holds a credential to the agent's own (actor_site_chat_credential_fk).
+func (q *Queries) SetSiteChat(ctx context.Context, arg SetSiteChatParams) error {
+	_, err := q.db.Exec(ctx, setSiteChat, arg.CredentialID, arg.ID)
+	return err
+}
+
+const siteChatOf = `-- name: SiteChatOf :many
+SELECT a.id, (a.kind = 'agent')::bool AS agent,
+       (a.status = 'active'
+        AND (a.owner_actor_id IS NULL OR EXISTS (SELECT 1 FROM actor o WHERE o.id = a.owner_actor_id AND o.status = 'active'))
+        AND EXISTS (SELECT 1 FROM credential sc
+                     WHERE sc.id = a.site_chat_credential_id AND sc.actor_id = a.id AND sc.revoked_at IS NULL
+                       AND (sc.expires_at IS NULL OR sc.expires_at > $1)))::bool AS site_chat
+FROM actor a
+WHERE a.id = ANY($2::uuid[])
+`
+
+type SiteChatOfParams struct {
+	Now      *time.Time
+	ActorIds []uuid.UUID
+}
+
+type SiteChatOfRow struct {
+	ID       uuid.UUID
+	Agent    bool
+	SiteChat bool
+}
+
+// Whether each of the given actors takes conversations in the site now
+// (docs/schema.md §2.8): an agent does while the credential with which a
+// program that runs it declared so (me.site_chat) is live, neither revoked
+// nor expired, the agent is active, and its owner, if it has one, is
+// active. A person or the system actor never does; agent says which is
+// which, so that a view can leave people out. ListAgentsOf and
+// ListRespondentCandidates hold the same rule: a change to one is a change
+// to all three.
+func (q *Queries) SiteChatOf(ctx context.Context, arg SiteChatOfParams) ([]SiteChatOfRow, error) {
+	rows, err := q.db.Query(ctx, siteChatOf, arg.Now, arg.ActorIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []SiteChatOfRow
+	for rows.Next() {
+		var i SiteChatOfRow
+		if err := rows.Scan(&i.ID, &i.Agent, &i.SiteChat); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const suspendAgentByOwner = `-- name: SuspendAgentByOwner :execrows

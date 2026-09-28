@@ -1001,6 +1001,7 @@ func TestADelegatesWriteWaitsForItsPrincipal(t *testing.T) {
 	b := build(t)
 	bot := b.agent(t, b.yuki, "Yuki's helper")
 	seat := b.delegate(t, b.yuki, bot, m{})
+	b.SiteChat(bot)
 	b.do(t, b.sato, "member.update_perms", m{"course_id": b.course, "member_id": seat, "perms": m{"submission_write": "confirm_required"}})
 	conv, _ := b.open(t, b.yuki, seat, "Hello, helper")
 	pause := `WITH held AS (SELECT id FROM course_member WHERE id = $1 FOR UPDATE)

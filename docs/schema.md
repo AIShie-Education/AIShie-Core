@@ -66,15 +66,18 @@ department(id, name, parent_id null→department, created_at)   -- a tree of the
 actor(id, kind [human|agent|system], display_name, email null,
       status [active|suspended], platform_role null [root|admin],
       created_by_actor_id null→actor, created_at,
-      owner_actor_id null→actor, suspended_by_actor_id null→actor)
-    check: owner_actor_id ≠ id;  owner_actor_id set ⇒ kind = 'agent' and no platform_role
+      owner_actor_id null→actor, suspended_by_actor_id null→actor,
+      site_chat_credential_id null)
+    check: owner_actor_id ≠ id;  owner_actor_id set ⇒ kind = 'agent' and no platform_role;
+           site_chat_credential_id set ⇒ kind = 'agent'
+    composite FK (site_chat_credential_id, id) → credential(id, actor_id)
     trigger: the owner is a person (kind = 'human')
 
 credential(id, actor_id→actor, kind [password|sso|api_token|session|invite],
            secret_hash null, provider null, subject null, token_prefix null,
            label null, last_used_at null, expires_at null, revoked_at null, created_at,
            issued_by_actor_id null→actor,
-           unique(provider, subject), unique(token_prefix))
+           unique(provider, subject), unique(token_prefix), unique(id, actor_id))
 
 course(id, dept_id→department, term_id→term, code, section = '', title, description null,
        status [draft|active|archived], copied_from_course_id null→course,
@@ -90,6 +93,8 @@ never seated in a course, and no token is issued for it and no identity linked t
 its authority cannot be borrowed. The database takes no credential for it, and a token it was
 given before migration 0004 authenticates nobody. Those refusals read `kind`; nothing that
 grants does. So do the refusals of ownership below: only a person owns, only an agent is owned.
+So do those of site chat (§2.8): only an agent declares it, and only an agent that has not is
+refused as a respondent in the site.
 So does one refusal outside the database: Core vouches for nobody but a person to a service
 that hosts agents (`POST /v1/auth/assertion`, README), and an agent's token asks in vain.
 
@@ -120,6 +125,13 @@ suspend an agent its owner has suspended, which takes the suspension over. Null 
 owner's": a suspension made before migration 0007, or by the release before it, is an
 administrator's to lift. Making an actor active clears it, whichever release does it, so that a
 later suspension is never taken for the owner's.
+
+`site_chat_credential_id` is the credential of an agent's with which a program that runs it
+declared that the agent takes conversations in the site (§2.8). Only an agent has one, and only
+a credential of its own: the CHECK reads `kind` to refuse, as the refusals of ownership do, and
+the composite key holds whose it is whichever row changes. Whether it is still live is read
+when it is needed and never kept here, so revoking the credential ends it with nothing to
+update. Migration 0011 adds it; the release before neither reads nor writes it.
 
 `created_by_actor_id` is the delegation chain: root (seeded at install, the only null) creates
 admins, an admin creates a course and seats its first instructor, the instructor adds everyone
@@ -748,9 +760,10 @@ may address R when:
 
 The rule is one function, which every conversation tool goes by, and it is measured now, on
 every call, not when the conversation began: seats are narrowed, widened, paused and
-removed. `conversation.respondents` lists those the caller may address, each with how its
-answers arrive and, for an agent, when it last used a token. `conversation.ask` is refused
-once the respondent may no longer be addressed ("start a new conversation"), and
+removed. `conversation.respondents` lists those the caller may address, an agent only while it
+takes site chat (below), each with how its answers arrive and, for an agent, when it last used a
+token. `conversation.ask` is refused once the respondent may no longer be addressed ("start a new
+conversation"), and
 `conversation.answer` once its opener may no longer address the one answering. The
 respondent reads the conversation (`conversation.get`, `.messages`) only while its opener
 may still address it; the opener always; and so does whoever oversees the opener: holds
@@ -764,6 +777,35 @@ waiting for approval. What can never count again — an opener removed, paused, 
 whose principal is — is left out in SQL, and the rest is read a batch at a time, oldest
 first, until enough are found, so that conversations whose openers may no longer ask do not
 stand for good in front of those that may.
+
+**Site chat: which agents answer in the site.** A person answers in the site as themselves. An
+agent answers only if something runs it that polls `conversation.inbox` and answers on its own:
+an agent runtime, AIShie's or a school's own. An assistant a person drives from a tool of their
+own — a chat app, an editor, a script, over MCP — acts only while that person uses it and never
+polls, so a question put to it in the site would wait for good. So the program that runs an
+agent says that it answers: `me.site_chat` with `on: true`, which records the credential the
+call came with (`actor.site_chat_credential_id`, §2.1); `on: false` clears it. It holds only
+while that credential is live, neither revoked nor expired, the agent is active, and its owner,
+if it has one, is active. That is worked out in SQL whenever it is needed and never kept as a
+flag, so revoking the runtime's token, as ending its hosting does, ends it with nothing left
+behind to say otherwise, and so does a change of owner, which revokes every credential the agent
+has. Its owner switches it off (`agent.update` with `site_chat: false`) and never on: only what
+runs the agent knows that it answers, and says so again whenever it starts. Only an agent
+declares it; a person is refused (`not_an_agent`), a refusal that reads `kind` as those of
+ownership do (§2.1). `agent.get` and `agent.list` say `site_chat` of each agent, and
+`member.get` and `member.list` of each agent's seat; a front end says of the rest that they are
+operated from an external tool.
+
+**An agent that takes no site chat is asked nothing in the site.** `conversation.respondents`
+leaves it out, in SQL, whomever else the caller may address; `conversation.open` addressed to it,
+and `conversation.ask` in a conversation with it, are refused `failed_precondition`, reason
+`agent_answers_elsewhere`, once the rule above has let the caller address it (a respondent the
+caller may not address is refused `not_addressable` first, as ever). A proposal to open or ask is
+refused when it is made and again when it is approved. Nothing already written changes: the
+conversation is read, closed and retracted as before, and the agent answers what it was asked
+(`conversation.answer`, `conversation.inbox`), since none of those is a new question. A person
+as a respondent is untouched. The refusal reads `kind`, to refuse and never to grant, as the
+refusals of ownership do: a person has no declaration and needs none.
 
 **An answer answers the latest question, once.** It names the opener's message it answers
 (`in_reply_to_message_id`), and is refused as a conflict if the opener has written since
@@ -1097,6 +1139,13 @@ call is about, looked up only for an actor who holds one, and only once the call
 department it is about. Both are recorded on the action (`authority`), and neither reaches inside a course. For
 a course, what the call is about is the course's department.
 
+Whether an agent takes conversations in the site (§2.8) is no part of `authorize()`. It grants
+nothing, and is asked of the respondent, not of the caller: once `authorize()` has let a member
+ask, and the rule of addressing has let them address the agent, a new question to an agent that
+takes no site chat is refused as a rule of the domain (`failed_precondition`), recorded like any
+other failure. `me.site_chat` is on the caller's own account (the Self gate), and is the one tool
+that reads which credential the call came with.
+
 ## 4. Invariants
 
 **Enforced by the database.** These hold whatever application code does.
@@ -1127,6 +1176,7 @@ a course, what the call is about is the course's department.
 | Only an agent has an owner, and its owner is a person: not an agent, not the system actor, not itself | CHECKs on `actor`, trigger `actor_owner_valid` |
 | An agent someone owns holds no platform role | CHECK `actor_owned_holds_no_platform_role` |
 | Making an actor active forgets who suspended it | trigger `actor_suspension_cleared` |
+| Only an agent declares that it takes conversations in the site, and only with a credential of its own | CHECK `actor_site_chat_is_agent`, composite FK `actor_site_chat_credential_fk` |
 | A seat that is not removed has a principal exactly when its actor has an owner; the principal is the owner's seat, in the same course, and nobody's delegate | composite FK and trigger `course_member_principal_valid` on `course_member` |
 | A delegate's seat is removed with its principal's, whichever release removes it | trigger `course_member_delegates_follow` |
 | Only a delegate's seat answers the course | CHECK `course_member_answers_course_is_delegate` |
@@ -1262,6 +1312,10 @@ a course, what the call is about is the course's department.
   holds the agent's row, `FOR NO KEY UPDATE`, before it looks at anything; issuing it a token
   and seating it or taking it out read the row `FOR SHARE`, so that a token or a seat made by
   the owner before is revoked or counted, never left behind.
+- An agent takes conversations in the site (§2.8) only while the credential that declared it
+  (`me.site_chat`, with the credential of the call) is live, the agent active and its owner, if
+  any, active: worked out in SQL on every read that needs it, never stored as a flag. Only an
+  agent declares it; its owner switches it off and never on.
 - `member.update_perms_bulk` changes every seat of the role but the caller's, each through the
   rule for one seat, all or none.
 - A proposal is withdrawn only by its proposer, and only while nobody has decided it.
@@ -1275,6 +1329,10 @@ a course, what the call is about is the course's department.
 - A conversation is read by its opener, by its respondent only while the opener may still
   address it, and by whoever decides actions for the opener; to anyone else it does not
   exist. Lists take the caller's own and those it oversees, in SQL.
+- An agent that takes no site chat now (§2.8) is not offered as a respondent, in SQL, and a
+  conversation is neither opened with it nor asked in (`agent_answers_elsewhere`), when
+  proposed and again when carried out; what it was asked stays readable and answerable, and a
+  person as a respondent is never refused for it.
 - An answer answers the opener's latest message, and only while nothing answers it yet,
   checked under the conversation's row lock, which writing a message takes first (`WHERE
   status = 'open'`), so that a close and a message never pass each other; a proposed answer is

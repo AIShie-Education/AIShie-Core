@@ -4,7 +4,9 @@
 # example from docs/schema.md §5 entirely through the REST API — register the
 # actors, create and open the course, seat the instructor, set up grading,
 # publish an assignment, hand in work, have an agent grade it, approve, post;
-# and have the instructor's own tutor agent answer the student's question.
+# and have the instructor's own tutor agent answer the student's question,
+# once its runtime says it answers in the site, and be asked nothing more once
+# he switches that off.
 # Then a department's administrator, invited and appointed by root, makes a
 # course beneath her appointment and seats its instructor, found by their
 # email. Then Core vouches for the instructor to an agent runtime, and the key it
@@ -181,7 +183,7 @@ call 200 GET "$C/events?since_seq=0" "$GRADER"
 json "$WORK/body" '"action.approved" in [e["type"] for e in d["result"]["events"]] or sys.exit("no action.approved in the agent feed")' >/dev/null
 KEY=yuki-hw3 call 200 POST "$C/grades" "$GRADER" "$GRADE" # the original call, replayed now, reports executed
 
-step "Sato brings in a tutor agent of his own; Yuki asks it; it finds the question in its inbox and answers"
+step "Sato brings in a tutor agent of his own; until something runs it that answers, it is asked nothing in the site"
 call 200 POST /v1/me/agents "$SATO" '{"display_name":"Course tutor"}'
 TUTOR_ID=$(json "$WORK/body" 'd["result"]["actor_id"]')
 call 200 POST "/v1/me/agents/$TUTOR_ID/tokens" "$SATO" '{"label":"runtime"}'
@@ -194,6 +196,18 @@ call 200 GET /v1/me "$GRADER"
 call 200 POST "$C/delegates" "$SATO" "{\"actor_id\":\"$TUTOR_ID\",\"preset\":\"course_tutor\"}"
 TUTOR_M=$(json "$WORK/body" 'd["result"]["member_id"]')
 call 200 GET "$C/conversations/respondents" "$YUKI"
+json "$WORK/body" '"'"$TUTOR_M"'" not in [r["member_id"] for r in d["result"]["respondents"]] or sys.exit("the tutor is offered to Yuki with nothing running it")' >/dev/null
+call 422 POST "$C/conversations" "$YUKI" "{\"respondent_member_id\":\"$TUTOR_M\",\"body\":\"What does HW3 ask for?\"}"
+[ "$(json "$WORK/body" 'd["error"]["details"]["reason"]')" = agent_answers_elsewhere ] || fail "refused, but not as answering elsewhere: $(cat "$WORK/body")"
+call 200 GET "/v1/me/agents/$TUTOR_ID" "$SATO"
+[ "$(json "$WORK/body" 'd["result"]["site_chat"]')" = False ] || fail "Sato is told the tutor takes conversations in the site"
+
+step "Its runtime says, with its token, that it answers in the site; Yuki asks it; it finds the question in its inbox and answers"
+call 200 POST /v1/me/site-chat "$TUTOR" '{"on":true}'
+[ "$(json "$WORK/body" 'd["result"]["site_chat"]')" = True ] || fail "the runtime's declaration did not hold: $(cat "$WORK/body")"
+call 200 GET "/v1/me/agents/$TUTOR_ID" "$SATO"
+[ "$(json "$WORK/body" 'd["result"]["site_chat"]')" = True ] || fail "Sato is not told the tutor takes conversations in the site"
+call 200 GET "$C/conversations/respondents" "$YUKI"
 json "$WORK/body" '"'"$TUTOR_M"'" in [r["member_id"] for r in d["result"]["respondents"]] or sys.exit("the tutor is not offered to Yuki")' >/dev/null
 call 200 POST "$C/conversations" "$YUKI" "{\"respondent_member_id\":\"$TUTOR_M\",\"body\":\"What does HW3 ask for?\"}"
 CONV=$(json "$WORK/body" 'd["result"]["conversation_id"]')
@@ -203,6 +217,14 @@ KEY="answer:$CONV:$QUESTION:1" call 200 POST "$C/conversations/$CONV/answer" "$T
 call 200 GET "$C/conversations/$CONV/messages" "$YUKI"
 [ "$(json "$WORK/body" 'd["result"]["messages"][-1]["body"]')" = "An essay with a thesis." ] || fail "Yuki does not see the answer"
 call 404 GET "$C/conversations/$CONV" "$GRADER" # nobody else's to read
+
+step "Sato switches the tutor's site chat off: Yuki asks it nothing more and still reads what it said; only its runtime switches it on"
+call 200 POST "/v1/me/agents/$TUTOR_ID" "$SATO" '{"site_chat":false}'
+call 422 POST "$C/conversations/$CONV/ask" "$YUKI" '{"body":"And how long should it be?"}'
+[ "$(json "$WORK/body" 'd["error"]["details"]["reason"]')" = agent_answers_elsewhere ] || fail "refused, but not as answering elsewhere: $(cat "$WORK/body")"
+call 200 GET "$C/conversations/$CONV/messages" "$YUKI"
+[ "$(json "$WORK/body" 'len(d["result"]["messages"])')" = 2 ] || fail "Yuki no longer reads the conversation"
+call 400 POST "/v1/me/agents/$TUTOR_ID" "$SATO" '{"site_chat":true}'
 
 step "The same server over MCP: an agent's own door, with the same token"
 mcp() { # JSON-RPC body → $WORK/body

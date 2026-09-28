@@ -147,6 +147,7 @@ type AgentView struct {
 	SuspendedByMe bool       `json:"suspended_by_me" jsonschema:"suspended by you, and so yours to reactivate; a suspension an administrator made is theirs"`
 	CreatedAt     time.Time  `json:"created_at"`
 	LastSeenAt    *time.Time `json:"last_seen_at,omitempty" jsonschema:"when it last used a token that still works, to the minute; absent if never"`
+	SiteChat      bool       `json:"site_chat" jsonschema:"whether people in the site may start conversations with it and ask it: what runs it, an agent runtime that answers on its own, said so with a token of the agent's that still works (me.site_chat); false for an agent operated from an external tool, which acts through that tool alone"`
 }
 
 type AgentSummary struct {
@@ -177,7 +178,8 @@ func agentList(d Deps) tool.Tool {
 			out := AgentListOut{Agents: make([]AgentSummary, 0, len(rows)), Limit: d.MaxAgentsPerOwner, SelfService: !d.DisableAgentSelfService}
 			for _, r := range rows {
 				out.Agents = append(out.Agents, AgentSummary{
-					AgentView:       agentView(rc.Actor.ID, r.ID, r.DisplayName, r.Status, r.SuspendedByActorID, r.CreatedAt, r.LastSeenAt),
+					AgentView: agentView(rc.Actor.ID, r.ID, r.DisplayName, r.Status, r.SuspendedByActorID, r.CreatedAt, r.LastSeenAt,
+						r.SiteChat),
 					LiveSeats:       r.LiveSeats,
 					PendingRequests: r.PendingRequests,
 				})
@@ -187,8 +189,8 @@ func agentList(d Deps) tool.Tool {
 	})
 }
 
-func agentView(owner, id uuid.UUID, name, status string, suspendedBy *uuid.UUID, created time.Time, lastSeen *time.Time) AgentView {
-	return AgentView{ActorID: id, DisplayName: name, Status: status, CreatedAt: created, LastSeenAt: lastSeen,
+func agentView(owner, id uuid.UUID, name, status string, suspendedBy *uuid.UUID, created time.Time, lastSeen *time.Time, siteChat bool) AgentView {
+	return AgentView{ActorID: id, DisplayName: name, Status: status, CreatedAt: created, LastSeenAt: lastSeen, SiteChat: siteChat,
 		SuspendedByMe: status == domain.ActorSuspended && suspendedBy != nil && *suspendedBy == owner}
 }
 
@@ -250,8 +252,12 @@ func agentGet() tool.Tool {
 			if len(seen) > 0 {
 				lastSeen = seen[0]
 			}
-			out := AgentGetOut{AgentView: agentView(rc.Actor.ID, a.ID, a.DisplayName, a.Status, a.SuspendedByActorID, a.CreatedAt, lastSeen),
-				Seats: []AgentSeat{}, Requests: []AgentRequest{}}
+			chat, err := siteChatOf(ctx, rc.Q, rc.Now, []uuid.UUID{a.ID})
+			if err != nil {
+				return AgentGetOut{}, err
+			}
+			out := AgentGetOut{AgentView: agentView(rc.Actor.ID, a.ID, a.DisplayName, a.Status, a.SuspendedByActorID, a.CreatedAt, lastSeen,
+				chat[a.ID].SiteChat), Seats: []AgentSeat{}, Requests: []AgentRequest{}}
 			seats, err := rc.Q.ListSeatsOfActor(ctx, a.ID)
 			if err != nil {
 				return AgentGetOut{}, err
@@ -281,28 +287,56 @@ func agentGet() tool.Tool {
 
 type AgentUpdateIn struct {
 	ActorID     uuid.UUID `json:"actor_id"`
-	DisplayName string    `json:"display_name"`
+	DisplayName *string   `json:"display_name,omitempty" jsonschema:"its new name; omit to keep the one it has"`
+	SiteChat    *bool     `json:"site_chat,omitempty" jsonschema:"false: people in the site may no longer start conversations with it or ask it, until what runs it says so again; true is refused, since only what runs it says so (me.site_chat)"`
 }
+
+// errSiteChatByOwner refuses an owner who would switch site chat on: whether
+// an agent answers in the site is for the program that runs it to say, with
+// its own credential, since only it knows that it polls and answers.
+var errSiteChatByOwner = apperr.Invalid("site_chat can only be switched off here: the program that runs the agent switches it on, " +
+	"with the agent's own token (me.site_chat)")
 
 func agentUpdate() tool.Tool {
 	return tool.Define(tool.Spec[AgentUpdateIn, OK]{
-		Name:        "agent.update",
-		Description: "Rename one of your agents.",
-		Kind:        tool.Write, Gate: self,
+		Name: "agent.update",
+		Description: "Rename one of your agents, or switch off its conversations in the site (site_chat false): people there " +
+			"then no longer start conversations with it or ask it more, until what runs it says it answers again. Only what " +
+			"runs it switches them on (me.site_chat), never you.",
+		Kind: tool.Write, Gate: self,
 		HTTP:    tool.Route{Method: "POST", Pattern: "/v1/me/agents/{actor_id}"},
 		Resolve: agentTarget(func(in AgentUpdateIn) uuid.UUID { return in.ActorID }),
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in AgentUpdateIn) (OK, error) {
 			if _, err := ownAgent(ctx, ec.Q, ec.Actor.ID, in.ActorID); err != nil {
 				return OK{}, err
 			}
-			name := strings.TrimSpace(in.DisplayName)
-			if name == "" {
-				return OK{}, apperr.Invalid("display_name cannot be empty")
+			switch {
+			case in.DisplayName == nil && in.SiteChat == nil:
+				return OK{}, apperr.Invalid("give display_name, site_chat or both")
+			case in.SiteChat != nil && *in.SiteChat:
+				return OK{}, errSiteChatByOwner
 			}
-			if err := ec.Q.UpdateActor(ctx, dbq.UpdateActorParams{ID: in.ActorID, DisplayName: &name}); err != nil {
-				return OK{}, err
+			changed := map[string]any{}
+			if in.DisplayName != nil {
+				name := strings.TrimSpace(*in.DisplayName)
+				if name == "" {
+					return OK{}, apperr.Invalid("display_name cannot be empty")
+				}
+				if err := ec.Q.UpdateActor(ctx, dbq.UpdateActorParams{ID: in.ActorID, DisplayName: &name}); err != nil {
+					return OK{}, err
+				}
 			}
-			ec.Emit(events.Event{Type: EventActorUpdated, SubjectType: "actor", SubjectID: &in.ActorID})
+			if in.SiteChat != nil {
+				if err := ec.Q.EndSiteChatByOwner(ctx, dbq.EndSiteChatByOwnerParams{ID: in.ActorID, OwnerActorID: &ec.Actor.ID}); err != nil {
+					return OK{}, err
+				}
+				changed["site_chat"] = false
+			}
+			e := events.Event{Type: EventActorUpdated, SubjectType: "actor", SubjectID: &in.ActorID}
+			if len(changed) > 0 {
+				e.Payload = changed
+			}
+			ec.Emit(e)
 			return OK{OK: true}, nil
 		},
 	})

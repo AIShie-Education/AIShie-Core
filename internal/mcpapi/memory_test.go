@@ -41,7 +41,7 @@ func TestTheInstructionsSayWhereMemoryIsKept(t *testing.T) {
 	kept := serveMemory(t, 0)
 	got := kept.connect(t, kept.token(t, kept.c.Grader)).InitializeResult().Instructions
 	for _, want := range []string{"memory_write", "never instructions", "memory_search", "from the memory of that conversation's opener alone",
-		"idempotency_key", "conversation_inbox"} {
+		"idempotency_key", "conversation_inbox", "call me_site_chat with on true"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("the instructions of a server that keeps memory do not say %q:\n%s", want, got)
 		}
@@ -66,9 +66,14 @@ func TestAnAgentKeepsMemoryOverMCP(t *testing.T) {
 	tutor := c.OwnedAgent(c.Sato, "Course tutor")
 	seat := c.Delegate(c.Course, tutor, c.SatoM, "course_tutor")
 	c.Exec(`UPDATE course_member SET answers_course = true WHERE id = $1`, seat)
+	// Its runtime connects, and says the tutor answers in the site; then
+	// Yuki asks it.
+	s := f.connect(t, f.token(t, tutor))
+	if env, _ := call(t, s, "me_site_chat", m{"on": true, "idempotency_key": "start"}); env.Status != "executed" {
+		t.Fatalf("me_site_chat: %+v", env)
+	}
 	opened := testkit.Result[tools.ConversationOpenOut](t, c.MustCall(yuki.Actor, "conversation.open",
 		m{"course_id": c.Course, "respondent_member_id": seat, "body": "How do I start HW3?"}, "open"))
-	s := f.connect(t, f.token(t, tutor))
 
 	write := func(key string, args m) tools.MemoryWriteOut {
 		t.Helper()

@@ -186,6 +186,30 @@ func TestEndToEndOverHTTP(t *testing.T) {
 	}
 }
 
+// What runs an agent says over REST, with its token, that the agent takes
+// conversations in the site; that token is the one it holds by. A person is
+// refused.
+func TestSiteChatIsDeclaredWithTheTokenOfTheCall(t *testing.T) {
+	a := newAPI(t, 1)
+	c := a.c
+	tutor := c.OwnedAgent(c.Sato, "Course tutor")
+	tok, credential, err := auth.IssueToken(context.Background(), dbq.New(c.Pool), tutor, &c.Sato, "runtime", nil, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	on := a.do(nil, "POST", "/v1/me/site-chat", tok.Full, m{"on": true}, "Idempotency-Key", "start-1")
+	if got, _ := on.Body["result"].(map[string]any); on.Status != http.StatusOK || got["site_chat"] != true {
+		t.Fatalf("me.site_chat: %d %s", on.Status, on.Raw)
+	}
+	if n := c.Count(`SELECT count(*) FROM actor WHERE id = $1 AND site_chat_credential_id = $2`, tutor, credential); n != 1 {
+		t.Fatal("site chat was not declared with the token of the call")
+	}
+	person := a.do(nil, "POST", "/v1/me/site-chat", a.tokenFor(c.Students[0].Actor), m{"on": true}, "Idempotency-Key", "mine")
+	if person.Status != http.StatusUnprocessableEntity || person.str("error", "details", "reason") != "not_an_agent" {
+		t.Fatalf("a person declaring site chat: %d %s", person.Status, person.Raw)
+	}
+}
+
 // What a status says of whether anything was recorded: a call that was
 // attempted answers with the action on record as its top-level action_id,
 // and a failure there with its error's own status, 400 and 404 included. A

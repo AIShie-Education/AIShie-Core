@@ -5,10 +5,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
+	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/auth"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/blob"
+	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/domain"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/ids"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/pipeline"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/tool"
@@ -206,14 +209,40 @@ func newPlatform(t testing.TB, wrap func(*blob.FSStore) blob.Store, cfg pipeline
 	return p
 }
 
-// Call invokes a tool as actor. args is marshalled to JSON.
+// Call invokes a tool as actor, with no credential. args is marshalled to
+// JSON.
 func (c *Platform) Call(actor uuid.UUID, name string, args any, key string) (pipeline.Outcome, error) {
+	c.T.Helper()
+	return c.CallWith(pipeline.Caller{ActorID: actor}, name, args, key)
+}
+
+// CallWith is Call as caller: an actor and the credential it came with.
+func (c *Platform) CallWith(caller pipeline.Caller, name string, args any, key string) (pipeline.Outcome, error) {
 	c.T.Helper()
 	raw, err := json.Marshal(args)
 	if err != nil {
 		c.T.Fatalf("marshal args: %v", err)
 	}
-	return c.P.Invoke(context.Background(), pipeline.Caller{ActorID: actor}, name, raw, key)
+	return c.P.Invoke(context.Background(), caller, name, raw, key)
+}
+
+// SiteChat has a program take agent's conversations in the site, as an
+// agent runtime does when it starts the agent: it is given a token of the
+// agent's, as the operator's command line gives one, and declares with it
+// that the agent takes them (me.site_chat). It returns the token's
+// credential: revoking it ends site chat.
+func (c *Platform) SiteChat(agent uuid.UUID) uuid.UUID {
+	c.T.Helper()
+	_, credential, err := auth.IssueToken(context.Background(), c.Q, agent, nil, "runtime", nil, time.Now())
+	if err != nil {
+		c.T.Fatalf("a token for the runtime: %v", err)
+	}
+	out, err := c.CallWith(pipeline.Caller{ActorID: agent, CredentialID: credential}, "me.site_chat", map[string]any{"on": true},
+		"site-chat-"+credential.String())
+	if err != nil || out.Status != domain.StatusExecuted {
+		c.T.Fatalf("me.site_chat: %+v %v", out, err)
+	}
+	return credential
 }
 
 // MustCall is Call for calls that are expected to be attempted: it fails the

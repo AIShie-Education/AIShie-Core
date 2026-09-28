@@ -2,7 +2,7 @@
 
 For the team building the agent runtime: a separate service, in a repository
 of its own, that hosts AI agents for AIShiteru. §2 was checked against this
-repository and a running `aishiterud` on 2026-09-27; if it and Core ever
+repository and a running `aishiterud` on 2026-09-28; if it and Core ever
 disagree, `GET /v1/tools` is right. §3 comes from the providers' documentation,
 read on 2026-09-26; **[UNVERIFIED]** marks what it did not confirm.
 
@@ -16,7 +16,9 @@ read on 2026-09-26; **[UNVERIFIED]** marks what it did not confirm.
   token, over MCP at `https://<core>/mcp`. Core pushes nothing: the runtime
   polls `conversation_inbox` for questions and `event_list` for outcomes. A
   generic MCP client with an agent token answers nobody, since it acts only
-  while a person types.
+  while a person types. So the site offers people only agents whose runtime
+  says it answers: the runtime calls `me_site_chat` when it starts an agent
+  (§2.3), and an agent nothing has declared is asked nothing in the site.
 - Core's permissions decide what an agent may do and whether a person must
   confirm it. The runtime only narrows further: allowlists, budgets, quotas.
 - The runtime reaches the mainstream LLM APIs through one internal format and
@@ -38,6 +40,7 @@ read on 2026-09-26; **[UNVERIFIED]** marks what it did not confirm.
 | Conversation transcript | `conversation_message`, append-only | reads it; caches only |
 | Turns, tool calls, tokens, wall clock | only pause, removal and `expires_at` | every budget (§7) |
 | Finding work | offers `conversation_inbox` and `event_list` | polls them |
+| Whether people in the site may ask the agent | records the token that said so; holds it while that token works and the agent and its owner are active | says so with `me_site_chat` on each start, and unsays it on stopping |
 | Rate limit | 600 calls a minute per actor, burst 100, by default | stays well under it (§7.3) |
 
 ### 1.2 Connecting
@@ -55,7 +58,7 @@ read on 2026-09-26; **[UNVERIFIED]** marks what it did not confirm.
 - **Refused.** A JSON-RPC batch (400), an id over 256 bytes (400), and
   `subscriptions/listen` (404, `-32601`).
 - **Tool names** are the registry's with the dot turned to an underscore
-  (`conversation_answer`). There are 104 tools, 41 reads and 63 writes; all
+  (`conversation_answer`). There are 120 tools, 47 reads and 73 writes; all
   match `[a-z_]+`, the longest has 26 characters, and every provider takes
   them as they are (§3.7).
 - **REST.** `GET /v1/tools` (no token needed) lists each tool's `name`,
@@ -125,6 +128,7 @@ text.
 | An answer | `answer:{conversation_id}:{in_reply_to_message_id}:{attempt}`, attempt from 1 (Core's MCP instructions give this form) |
 | A canned or fallback answer | the same: it is an attempt at the answer to that message |
 | Closing a conversation | `close:{conversation_id}` |
+| Declaring site chat, or ending it | `site_chat:{on\|off}:{start id}`, a new start id each time the agent is started or stopped: the same key again would only replay what an earlier token declared |
 | Any other write a model starts (M3) | `tool:{member_id}:{first 32 hex of sha256(tool name + canonical arguments)}` |
 
 **Write ahead.** Store `(key, tool, exact arguments)` before sending, and after
@@ -142,6 +146,7 @@ rejected, cancelled). That is safe: Core refuses a second answer to a message
 |---|---|
 | `me_get` | Checks the token and returns the agent's actor: `id`, `kind`, `display_name`, `status`, and `owner_actor_id`, the person who owns it. `owner_actor_id` is absent for an agent nobody owns (one an administrator registered without an owner), and for a person, whose own token the runtime refuses anyway (`kind` is not `agent`). It names the owner while the owner is suspended too; Core gives a suspended person no assertion (§5.1), so they cannot connect the agent meanwhile. When the agent changes hands (`actor.set_owner`), every token it had is revoked, so a stored token answers 401 before it could name the new owner. |
 | `me_memberships` | Every seat: `member_id`, `course_id`, `code`, `section`, `title`, `course_status`, `role`, `status`, `expires_at`, `student_scope`, `assignment_scope`, `principal_member_id`, `perms` (permission to level, a delegate's capped by its principal's, all `denied` while the seat does not count) and `answers_course`. Work only in active seats of courses not archived whose `perms.conversation_answer` is not denied. |
+| `me_site_chat` | `{on: true}` when the runtime starts the agent, with the token it runs it with, and `{on: false}` when it stops: until then people in the site are not offered the agent, and `conversation.open` and `conversation.ask` addressed to it are refused `failed_precondition`, `agent_answers_elsewhere`. Returns `site_chat`, whether it holds now (false while the owner is suspended). It holds only while that token works: revoked or expired, it ends by itself, and a new token must declare it again. The owner may end it (`agent.update` with `site_chat: false`), never start it; the runtime starts it again on its next start. A person's token is refused, `not_an_agent`. Conversations already open are unaffected: the agent answers them, and they stay readable. |
 
 **Finding work**
 
@@ -233,8 +238,11 @@ else; where nobody else decides actions, they must stay autonomous (schema.md
 - **Presence.** Core records a token's last use at most once a minute, and the
   frontend shows an agent as online if it was seen in the last two minutes, so
   a runtime whose calls are never 60 s apart always shows online. When an
-  owner pauses an agent in the runtime, stop calling Core for it, so that
-  presence tells the truth.
+  owner pauses an agent in the runtime, call `me_site_chat` with `on: false`
+  and then stop calling Core for it, so that neither the site nor presence
+  says it answers. When hosting ends for good, do the same and revoke the
+  agent's token with `credential_revoke` (the token may revoke itself): its
+  site chat ends with it, whatever else happens.
 - **Rate limit.** 600 calls a minute per actor, burst 100, by default
   (`RATE_LIMIT_PER_MINUTE`, `RATE_LIMIT_BURST`); reads count, and MCP and REST
   share it. §7.3 spends it.
@@ -248,7 +256,8 @@ Once:  Yuki, in Core: agent.create "Yuki's helper" → agent.issue_token → ais
        approves → seat D, principal P (Yuki's seat), student_scope listed [P]
 Runtime:
  1. me_get; me_memberships → [{course_id C, member_id D, principal_member_id P, answers_course
-    false, perms {conversation_answer, document_read, submission_read, grade_read: autonomous …}}]
+    false, perms {conversation_answer, document_read, submission_read, grade_read: autonomous …}}];
+    me_site_chat{on: true, idempotency_key "site_chat:on:<start id>"} → site_chat true
  2. toolset(D) = the read tools D's perms allow ∩ the allowlist
  3. conversation_inbox{C} every 2–10 s, jittered → []
     Yuki: conversation.open{respondent_member_id D, body "Why did I lose marks on HW3?"} → X, M1
@@ -267,8 +276,8 @@ Had Yuki written M3 during step 6, step 7 would be moved_on: back to 5, key "ans
 An instructor creates "CS101 Tutor", registers it in the runtime on the
 school's key with a course budget, and seats it with
 `member.add_delegate{preset: course_tutor}`: seat T, `answers_course` true,
-`student_scope` listed with nobody. Every student then finds T in
-`conversation.respondents`. The runtime keeps one poller for T in the course:
+`student_scope` listed with nobody. Once the runtime has started T and said so
+(`me_site_chat`), every student finds T in `conversation.respondents`. The runtime keeps one poller for T in the course:
 each inbox row is checked against the asker's quota (over it, the canned notice
 under the answer's own key, with no model call), then answered by a worker whose
 tools are `course_get`, `document_list`, `document_get`, `assignment_list` and
@@ -447,12 +456,12 @@ through a table, never by rewriting strings.
 
 ### 3.8 JSON Schema
 
-**What Core's input schemas hold**, measured over MCP on all 104 tools:
-- Unions: `["null","string"]` ×96, `["null","array"]` ×13, `["null","integer"]`
-  ×8, `["null","boolean"]` ×2; and for decimals, which Core takes as numbers
+**What Core's input schemas hold**, measured over MCP on all 120 tools:
+- Unions: `["null","string"]` ×118, `["null","array"]` ×16, `["null","integer"]`
+  ×10, `["null","boolean"]` ×4; and for decimals, which Core takes as numbers
   or strings, `["number","string"]` ×6 and `["null","number","string"]` ×8.
-- `format: uuid` ×189; one `pattern` (the decimal's) 14 times; 32-bit
-  `minimum`/`maximum` on 4 tools; `minLength`/`maxLength` only on
+- `format: uuid` ×218; one `pattern` (the decimal's) 14 times; 32-bit
+  `minimum`/`maximum` on 5 tools; `minLength`/`maxLength` only on
   `idempotency_key`.
 - `additionalProperties: false` on every object but six `perms` maps
   (`{"type":"string"}`), on member and preset writes no model is given.
@@ -678,7 +687,8 @@ The owner issues a token in Core (My agents), or the front end issues one
 for them, and hands it to the runtime, which calls `me_get` and `me_memberships`, shows the seats ("Delegate of Yuki
 in CS101: reads your work, answers only you"), and stores the token encrypted,
 never to show it again. The owner picks a model and key (an own key is tested
-with a one-token call), and polling starts. The runtime takes the token only
+with a one-token call), the runtime says the agent answers in the site
+(`me_site_chat`, §2.3), and polling starts. The runtime takes the token only
 from the agent's owner: `me_get`'s `owner_actor_id` must be the person signed
 in. It refuses a token whose `kind` is not `agent` (never a person's own), and
 leaves an agent nobody owns to the runtime's administrators. It checks the
@@ -740,7 +750,7 @@ changed; the change of owner has revoked its token in Core anyway.
 
 **Never offered to a model** in M1 and M2: `agent_*`, `credential_*`,
 `actor_*`, `member_*`, `action_decide`, `action_review`, `action_withdraw`,
-`conversation_*` (the runtime calls those itself), `preset_*`,
+`conversation_*` and `me_site_chat` (the runtime calls those itself), `preset_*`,
 `course_create`, `course_update`, `term_*`, `department_*`,
 `document_upload_url`, and every write. M3 opens particular writes to
 particular workflows (§9).

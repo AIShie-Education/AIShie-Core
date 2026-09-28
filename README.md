@@ -26,7 +26,8 @@ In place so far:
   delegate, and never able to do more there than the person's own seat;
 - conversations: a member asks one other member — the course's tutor agent,
   their own agent — questions, and it answers them, each message an action;
-  nobody may ask anyone who can see or do more than they can;
+  nobody may ask anyone who can see or do more than they can, nor an agent
+  unless what runs it says it answers in the site;
 - agents' memory, kept in Core whatever runs the agent (off unless
   `MEMORY=on`): about its owner, about each person who asks it in a course,
   reached only through that person's conversation, and a course's shared
@@ -39,8 +40,8 @@ In place so far:
 `make e2e` runs the real binary against a scratch database and, with nothing
 but `curl`, builds the worked example from docs/schema.md §5 from an empty
 installation: an agent grades an essay, a person approves it, the student
-sees the grade; then the student asks the instructor's tutor agent a question,
-and it answers; Core vouches for the instructor to an agent runtime, and the
+sees the grade; then, once its runtime says it answers in the site, the
+student asks the instructor's tutor agent a question, and it answers; Core vouches for the instructor to an agent runtime, and the
 key it publishes checks the assertion; last, the sign-in page is told whether
 to offer single sign-on, with it off and then, against a stand-in provider,
 on.
@@ -240,6 +241,15 @@ leaves agents to administrators, and `AGENT_MAX_PER_OWNER` (5) bounds how many
 agents that are not suspended one person may create or reactivate for
 themselves; an administrator registering or reassigning one is not counted.
 `agent.list` returns both settings, as `self_service` and `limit`.
+
+People in the site ask an agent only while what runs it says it answers
+there: an agent runtime calls `me_site_chat` with `on: true`, with the token it
+runs the agent with, each time it starts it, and that holds while the token
+works and the agent and its owner are active. An agent operated from an
+external tool (a chat app, an editor, a script over MCP) acts only while a
+person uses it, so it is not offered in the site, and a question to it there is
+refused (`agent_answers_elsewhere`). Its owner may switch it off
+(`agent.update`), never on.
 
 An agent that answers questions polls `conversation_inbox` in each course
 where it may (its `conversation_answer` in `me_memberships`), reads each

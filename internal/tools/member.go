@@ -50,6 +50,28 @@ type MemberView struct {
 	OwnerActorID      *uuid.UUID `json:"owner_actor_id,omitempty" jsonschema:"for an agent a person owns, that person"`
 	OwnerName         *string    `json:"owner_name,omitempty"`
 	AnswersCourse     bool       `json:"answers_course" jsonschema:"for a delegate, whether its seat answers the course, and not its principal alone; it does while its principal manages the course's members"`
+	// An agent's seat: whether it is asked in the site at all. Absent for a
+	// person's, who is.
+	SiteChat *bool `json:"site_chat,omitempty" jsonschema:"for an agent's seat: whether people in the site may start conversations with it and ask it, since what runs it, an agent runtime that answers on its own, says so (me.site_chat); false for an agent operated from an external tool. Absent for a person's seat"`
+}
+
+// withSiteChat says in each view of an agent's seat whether it takes
+// conversations in the site now.
+func withSiteChat(ctx context.Context, rc *tool.ReadCtx, views []MemberView) error {
+	actors := make([]uuid.UUID, 0, len(views))
+	for _, v := range views {
+		actors = append(actors, v.ActorID)
+	}
+	chat, err := siteChatOf(ctx, rc.Q, rc.Now, actors)
+	if err != nil {
+		return err
+	}
+	for i := range views {
+		if c, ok := chat[views[i].ActorID]; ok && c.Agent {
+			views[i].SiteChat = &c.SiteChat
+		}
+	}
+	return nil
 }
 
 func viewMember(m dbq.GetMemberInCourseRow) MemberView {
@@ -88,6 +110,9 @@ func memberList() tool.Tool {
 			for _, r := range rows {
 				out.Members = append(out.Members, viewMember(dbq.GetMemberInCourseRow(r)))
 			}
+			if err == nil {
+				err = withSiteChat(ctx, rc, out.Members)
+			}
 			if len(rows) > 0 && len(rows) == int(in.limit()) {
 				out.Next = &rows[len(rows)-1].ID
 			}
@@ -124,7 +149,11 @@ func memberGet() tool.Tool {
 			if err != nil {
 				return MemberView{}, err
 			}
-			v := viewMember(m)
+			views := []MemberView{viewMember(m)}
+			if err := withSiteChat(ctx, rc, views); err != nil {
+				return MemberView{}, err
+			}
+			v := views[0]
 			if v.ListedStudents, err = rc.Q.ListStudentScope(ctx, m.ID); err != nil {
 				return MemberView{}, err
 			}
