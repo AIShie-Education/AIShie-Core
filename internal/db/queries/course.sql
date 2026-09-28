@@ -12,6 +12,13 @@ SELECT EXISTS (SELECT 1 FROM course WHERE term_id = $1 AND code = $2 AND section
 -- name: UpdateCourse :exec
 UPDATE course SET title = $2, description = $3 WHERE id = $1;
 
+-- name: LockCourseDetails :one
+-- A course's title and description, held until a change to them is written:
+-- NO KEY UPDATE, so that two changes take turns and neither puts back what
+-- the other changed, while calls in the course, which take the row KEY
+-- SHARE through their foreign keys, do not wait.
+SELECT title, description FROM course WHERE id = $1 FOR NO KEY UPDATE;
+
 -- name: SetCourseStatus :execrows
 UPDATE course SET status = $2 WHERE id = $1 AND status <> $2;
 

@@ -543,6 +543,11 @@ type Querier interface {
 	// take turns and each sees where the other left it. A call in the course
 	// takes KEY SHARE on the row through a foreign key, and does not wait.
 	LockCourseDept(ctx context.Context, id uuid.UUID) (uuid.UUID, error)
+	// A course's title and description, held until a change to them is written:
+	// NO KEY UPDATE, so that two changes take turns and neither puts back what
+	// the other changed, while calls in the course, which take the row KEY
+	// SHARE through their foreign keys, do not wait.
+	LockCourseDetails(ctx context.Context, id uuid.UUID) (LockCourseDetailsRow, error)
 	// The same, for a write made by that authority. The appointment is held
 	// FOR SHARE to the end of the call. Ending it is an UPDATE, which waits for
 	// the call, or the call waits for it and then, reading the row again, finds

@@ -301,6 +301,7 @@ the nearest one, and the choice is recorded here so that it is a decision and no
 | Closing a conversation (`conversation.close`), retracting a message (`conversation.retract`), listing and reading conversations (`conversation.list`, `.get`, `.messages`) | `perm_document_read` | the most basic permission a seated member holds; the conversation decides who may: its two participants, and whoever decides actions for its opener (§2.8) |
 | Regrading | the lower of `perm_grade_submit` and `perm_grade_post` | it writes a grade and makes it visible in one step |
 | Course settings, status, department, first instructor | `platform_role`, or an appointment at or above the course's department (§2.10) | outside the course by definition |
+| The course's title and description, from a seat in it (`course.update_details`) | `perm_member_manage` | its instructors run the course and name it; its code, section, term, department and status stay with its administrators |
 
 An unposted grade, and a superseded one, is visible only to a member holding `perm_grade_submit`
 or `perm_grade_post`; everyone else sees live posted grades. That is the rule for students,
@@ -1307,6 +1308,9 @@ mover covers as well; it is held while it moves, and where it is then must still
 mover's, so that one moved out of their reach meanwhile is not taken back. None of this
 reaches inside a course: an administrator who wants to work in one is seated there as anyone
 is, by seating themselves (`course.seat_instructor`), which is recorded like any seating.
+The course's title and description are also its instructors' to change from inside it
+(`course.update_details`, §2.2); the rest of what `course.update` and the others change is
+not.
 
 **People, for a department administrator, are found by their whole email and invited new.**
 `actor.lookup_by_email` answers an exact address, in any case, with who the person is, whether

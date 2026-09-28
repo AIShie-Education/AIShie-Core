@@ -297,6 +297,26 @@ func (q *Queries) LockCourseDept(ctx context.Context, id uuid.UUID) (uuid.UUID, 
 	return dept_id, err
 }
 
+const lockCourseDetails = `-- name: LockCourseDetails :one
+SELECT title, description FROM course WHERE id = $1 FOR NO KEY UPDATE
+`
+
+type LockCourseDetailsRow struct {
+	Title       string
+	Description *string
+}
+
+// A course's title and description, held until a change to them is written:
+// NO KEY UPDATE, so that two changes take turns and neither puts back what
+// the other changed, while calls in the course, which take the row KEY
+// SHARE through their foreign keys, do not wait.
+func (q *Queries) LockCourseDetails(ctx context.Context, id uuid.UUID) (LockCourseDetailsRow, error) {
+	row := q.db.QueryRow(ctx, lockCourseDetails, id)
+	var i LockCourseDetailsRow
+	err := row.Scan(&i.Title, &i.Description)
+	return i, err
+}
+
 const setComponentParent = `-- name: SetComponentParent :exec
 UPDATE grade_component SET parent_id = $2 WHERE id = $1
 `

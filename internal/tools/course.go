@@ -21,7 +21,7 @@ import (
 
 func courseTools() []tool.Tool {
 	return []tool.Tool{courseCreate(), courseUpdate(), courseActivate(), courseArchive(), courseSeatInstructor(), courseList(),
-		courseMove(), courseGet()}
+		courseMove(), courseGet(), courseUpdateDetails()}
 }
 
 // Courses are managed from outside them, as a whole, by the administrators
@@ -138,7 +138,8 @@ func courseUpdate() tool.Tool {
 	return tool.Define(tool.Spec[CourseUpdateIn, OK]{
 		Name: "course.update",
 		Description: "Change a course's title or description. Its code, section and term are what it is, and do not change. " +
-			"A department administrator does this for the courses of the departments they administer.",
+			"A department administrator does this for the courses of the departments they administer; the course's " +
+			"instructors do it from their seat with course.update_details.",
 		Kind: tool.Write, Gate: administrators,
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}"},
 		Resolve: func(ctx context.Context, q dbq.Querier, in CourseUpdateIn) (tool.Target, error) {
@@ -163,6 +164,63 @@ func courseUpdate() tool.Tool {
 			}
 			ec.Emit(events.Event{Type: EventCourseUpdated, CourseID: &c.ID, SubjectType: "course", SubjectID: &c.ID})
 			return OK{OK: true}, nil
+		},
+	})
+}
+
+type CourseUpdateDetailsIn struct {
+	tool.InCourse
+	Title       *string `json:"title,omitempty"`
+	Description *string `json:"description,omitempty"`
+}
+
+type CourseUpdateDetailsOut struct {
+	Changed bool `json:"changed" jsonschema:"false when the course already said what was given: nothing was done"`
+}
+
+// courseUpdateDetails is course.update from a seat: whoever manages a course's
+// members — its instructors — names and describes it. What makes the course
+// the offering it is (code, section, term), where it sits (its department)
+// and whether it is open stay with its administrators, from outside.
+func courseUpdateDetails() tool.Tool {
+	return tool.Define(tool.Spec[CourseUpdateDetailsIn, CourseUpdateDetailsOut]{
+		Name: "course.update_details",
+		Description: "Change the course's title or description from a seat in it, for whoever manages its members, as its " +
+			"instructors do. Its code, section, term, department and status stay with its administrators (course.update, " +
+			"course.move, course.activate, course.archive). Giving what the course already says changes nothing and says " +
+			"so (changed: false).",
+		Kind: tool.Write, Gate: tool.Gate{Perms: []domain.Perm{domain.PermMemberManage}},
+		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/details"},
+		Resolve: func(_ context.Context, _ dbq.Querier, in CourseUpdateDetailsIn) (tool.Target, error) {
+			return tool.Target{CourseID: in.CourseID, Type: "course", ID: &in.CourseID}, nil
+		},
+		Execute: func(ctx context.Context, ec *tool.ExecCtx, in CourseUpdateDetailsIn) (CourseUpdateDetailsOut, error) {
+			if in.Title == nil && in.Description == nil {
+				return CourseUpdateDetailsOut{}, apperr.Invalid("give title, description or both")
+			}
+			if in.Title != nil && strings.TrimSpace(*in.Title) == "" {
+				return CourseUpdateDetailsOut{}, apperr.Invalid("title cannot be empty")
+			}
+			c, err := ec.Q.LockCourseDetails(ctx, in.CourseID)
+			if err != nil {
+				return CourseUpdateDetailsOut{}, err
+			}
+			var fields []string
+			if in.Title != nil && *in.Title != c.Title {
+				c.Title, fields = *in.Title, append(fields, "title")
+			}
+			if in.Description != nil && (c.Description == nil || *in.Description != *c.Description) {
+				c.Description, fields = in.Description, append(fields, "description")
+			}
+			if len(fields) == 0 {
+				return CourseUpdateDetailsOut{}, nil
+			}
+			if err := ec.Q.UpdateCourse(ctx, dbq.UpdateCourseParams{ID: in.CourseID, Title: c.Title, Description: c.Description}); err != nil {
+				return CourseUpdateDetailsOut{}, err
+			}
+			ec.Emit(events.Event{Type: EventCourseUpdated, CourseID: &in.CourseID, SubjectType: "course", SubjectID: &in.CourseID,
+				Payload: map[string]any{"fields": fields}})
+			return CourseUpdateDetailsOut{Changed: true}, nil
 		},
 	})
 }
