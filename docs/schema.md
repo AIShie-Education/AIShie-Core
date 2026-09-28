@@ -31,6 +31,7 @@ Another section or another term is another row with its own members, work and gr
 ```
 course
  ├ course_member ── member_student_scope / member_assignment_scope
+ ├ course_join_link (a way in, as a student, for whoever holds its token)
  ├ grade_component (tree; root = course total)
  ├ document ── document_version
  ├ assignment ── submission
@@ -67,9 +68,10 @@ actor(id, kind [human|agent|system], display_name, email null,
       status [active|suspended], platform_role null [root|admin],
       created_by_actor_id null→actor, created_at,
       owner_actor_id null→actor, suspended_by_actor_id null→actor,
-      site_chat_credential_id null)
+      site_chat_credential_id null, email_verified = true)
     check: owner_actor_id ≠ id;  owner_actor_id set ⇒ kind = 'agent' and no platform_role;
-           site_chat_credential_id set ⇒ kind = 'agent'
+           site_chat_credential_id set ⇒ kind = 'agent';
+           not email_verified ⇒ kind = 'human' and email set
     composite FK (site_chat_credential_id, id) → credential(id, actor_id)
     trigger: the owner is a person (kind = 'human')
 
@@ -133,6 +135,17 @@ the composite key holds whose it is whichever row changes. Whether it is still l
 when it is needed and never kept here, so revoking the credential ends it with nothing to
 update. Migration 0011 adds it; the release before neither reads nor writes it.
 
+`email_verified` says whether anyone but the person vouches for their email. Core sends no
+email and checks none; an email an administrator gives (`actor.register`, `actor.invite_new`,
+`actor.update`) is one they vouch for, and so is every email from before migration 0012, which
+adds the column true for them. A person who registers through a join link (§2.2) types their
+own, and it is recorded false: nobody has checked that it is theirs. The CHECK reads `kind` to
+refuse, as the refusals of ownership do: only a person's email goes unverified, and only an
+email there is. An administrator who sets the email (`actor.update`) vouches for it, and it is
+true from then on. Nothing grants on it; it is there to be shown (`actor.get`, `actor.list`,
+`me.get`), so that an administrator knows an account whose email may be anyone's. The release
+before 0012 neither reads nor writes it, and a person it registers takes the default.
+
 `created_by_actor_id` is the delegation chain: root (seeded at install, the only null) creates
 admins, an admin creates a course and seats its first instructor, the instructor adds everyone
 else. A department's administrator may stand where the admin does, for the courses of their
@@ -190,10 +203,12 @@ course_member(id, course_id→course, actor_id→actor,
               student_scope [all|listed], assignment_scope [all|listed],
               perm_<action> autonomy_level = 'denied'   ×16, see below
               created_at, principal_member_id null, answers_course = false,
+              join_link_id null,
               unique(course_id, id))
 
     unique(course_id, actor_id) where status <> 'removed'
     composite FK (course_id, principal_member_id) → course_member(course_id, id)
+    composite FK (course_id, join_link_id) → course_join_link(course_id, id)
     check: principal_member_id ≠ id;  answers_course ⇒ principal_member_id set
     trigger, for a row not removed: principal set ⇔ the actor has an owner; the principal is
              the owner's seat; a principal has no principal
@@ -203,6 +218,18 @@ member_student_scope(member_id→course_member, student_member_id→course_membe
 
 member_assignment_scope(member_id→course_member, assignment_id→assignment,
                         pk(member_id, assignment_id))
+
+course_join_link(id, course_id→course, token_prefix, secret_hash, role [student],
+                 preset_id→permission_preset, created_by_member_id, expires_at,
+                 max_uses null, uses = 0, allowed_email_domains text[] null,
+                 revoked_at null, revoked_by_member_id null, created_at,
+                 unique(token_prefix), unique(course_id, id))
+    composite FKs (course_id, created_by_member_id | revoked_by_member_id)
+                  → course_member(course_id, id)
+    check: secret_hash is a SHA-256 ('sha256:' and 64 hex digits), never the token;
+           expires_at = created_at + 10 minutes, always;  max_uses > 0;
+           0 ≤ uses ≤ max_uses;  revoked_at set ⇔ revoked_by_member_id set;
+           allowed_email_domains null, or 1..20 of them, none null
 ```
 
 One row per (actor, course). A person who is instructor in CS101 and TA in CS205 has two rows;
@@ -1180,6 +1207,8 @@ that reads which credential the call came with.
 | A seat that is not removed has a principal exactly when its actor has an owner; the principal is the owner's seat, in the same course, and nobody's delegate | composite FK and trigger `course_member_principal_valid` on `course_member` |
 | A delegate's seat is removed with its principal's, whichever release removes it | trigger `course_member_delegates_follow` |
 | Only a delegate's seat answers the course | CHECK `course_member_answers_course_is_delegate` |
+| A join link keeps a hash of its token, never the token; it expires ten minutes after it is made, never later or sooner; it is used no more times than its limit; a revocation says who made it; its maker, its revoker and the seats taken through it are of its course | CHECKs, `unique(token_prefix)` and composite FKs on `course_join_link`; composite FK `course_member_join_link_fk` |
+| Only a person's email goes unverified, and only an email there is | CHECK `actor_unverified_email_is_a_persons` |
 | A conversation's two participants are two seats of its course, and never change; a closed conversation stays closed; none is deleted | composite FKs, CHECKs and trigger `conversation_guarded` on `conversation` |
 | Only a conversation's participants write in it, only while it is open; a reply is the respondent's, to a message of the opener's in the same conversation | trigger `conversation_message_author_valid`, composite FKs on `conversation_message` |
 | A message and its retraction are in their conversation's course; one message at each `seq`; a message is retracted once | composite FKs, `unique(conversation_id, seq)`, primary key on `conversation_message_retraction` |

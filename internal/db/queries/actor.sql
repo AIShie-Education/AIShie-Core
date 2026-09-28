@@ -2,7 +2,7 @@
 -- The whole row, for showing an actor. Authorization uses GetActorForAuthz,
 -- which leaves kind out on purpose.
 SELECT id, kind, display_name, email, status, platform_role, created_by_actor_id, created_at,
-       owner_actor_id, suspended_by_actor_id, site_chat_credential_id
+       owner_actor_id, suspended_by_actor_id, site_chat_credential_id, email_verified
 FROM actor
 WHERE id = $1;
 
@@ -16,7 +16,7 @@ WHERE id = $1;
 -- made. The foreign keys to the row take only KEY SHARE, which neither
 -- conflicts with.
 SELECT id, kind, display_name, email, status, platform_role, created_by_actor_id, created_at,
-       owner_actor_id, suspended_by_actor_id, site_chat_credential_id
+       owner_actor_id, suspended_by_actor_id, site_chat_credential_id, email_verified
 FROM actor
 WHERE id = $1
 FOR SHARE;
