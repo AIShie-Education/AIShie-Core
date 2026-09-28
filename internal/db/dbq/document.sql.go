@@ -115,7 +115,7 @@ func (q *Queries) GetDocumentWithOwner(ctx context.Context, arg GetDocumentWithO
 }
 
 const getLatestVersion = `-- name: GetLatestVersion :one
-SELECT id, document_id, seq, body_md, storage_key, content_type, byte_size, checksum, author_member_id, created_at FROM document_version WHERE document_id = $1 ORDER BY seq DESC LIMIT 1
+SELECT id, document_id, seq, body_md, storage_key, content_type, byte_size, checksum, author_member_id, created_at, purged_at, purged_by_actor_id, purge_reason FROM document_version WHERE document_id = $1 ORDER BY seq DESC LIMIT 1
 `
 
 func (q *Queries) GetLatestVersion(ctx context.Context, documentID uuid.UUID) (DocumentVersion, error) {
@@ -132,12 +132,15 @@ func (q *Queries) GetLatestVersion(ctx context.Context, documentID uuid.UUID) (D
 		&i.Checksum,
 		&i.AuthorMemberID,
 		&i.CreatedAt,
+		&i.PurgedAt,
+		&i.PurgedByActorID,
+		&i.PurgeReason,
 	)
 	return i, err
 }
 
 const getVersionOfDocument = `-- name: GetVersionOfDocument :one
-SELECT id, document_id, seq, body_md, storage_key, content_type, byte_size, checksum, author_member_id, created_at FROM document_version WHERE id = $1 AND document_id = $2
+SELECT id, document_id, seq, body_md, storage_key, content_type, byte_size, checksum, author_member_id, created_at, purged_at, purged_by_actor_id, purge_reason FROM document_version WHERE id = $1 AND document_id = $2
 `
 
 type GetVersionOfDocumentParams struct {
@@ -159,6 +162,9 @@ func (q *Queries) GetVersionOfDocument(ctx context.Context, arg GetVersionOfDocu
 		&i.Checksum,
 		&i.AuthorMemberID,
 		&i.CreatedAt,
+		&i.PurgedAt,
+		&i.PurgedByActorID,
+		&i.PurgeReason,
 	)
 	return i, err
 }

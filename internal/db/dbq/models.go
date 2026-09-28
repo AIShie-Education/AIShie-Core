@@ -253,19 +253,25 @@ type Document struct {
 	SortOrder          int32
 	Status             string
 	CreatedAt          time.Time
+	PurgedAt           *time.Time
+	PurgedByActorID    *uuid.UUID
+	PurgeReason        *string
 }
 
 type DocumentVersion struct {
-	ID             uuid.UUID
-	DocumentID     uuid.UUID
-	Seq            int32
-	BodyMd         *string
-	StorageKey     *string
-	ContentType    *string
-	ByteSize       *int64
-	Checksum       *string
-	AuthorMemberID uuid.UUID
-	CreatedAt      time.Time
+	ID              uuid.UUID
+	DocumentID      uuid.UUID
+	Seq             int32
+	BodyMd          *string
+	StorageKey      *string
+	ContentType     *string
+	ByteSize        *int64
+	Checksum        *string
+	AuthorMemberID  uuid.UUID
+	CreatedAt       time.Time
+	PurgedAt        *time.Time
+	PurgedByActorID *uuid.UUID
+	PurgeReason     *string
 }
 
 type Event struct {
@@ -282,21 +288,25 @@ type Event struct {
 }
 
 type Grade struct {
-	ID                uuid.UUID
-	StudentMemberID   uuid.UUID
-	SubmissionID      *uuid.UUID
-	ComponentID       *uuid.UUID
-	Origin            string
-	Score             decimal.Decimal
-	Feedback          *string
-	Breakdown         []byte
-	RubricVersionID   *uuid.UUID
-	GraderMemberID    uuid.UUID
-	CreatedByActionID uuid.UUID
-	PostedAt          *time.Time
-	PostedByMemberID  *uuid.UUID
-	SupersededBy      *uuid.UUID
-	CreatedAt         time.Time
+	ID                 uuid.UUID
+	StudentMemberID    uuid.UUID
+	SubmissionID       *uuid.UUID
+	ComponentID        *uuid.UUID
+	Origin             string
+	Score              decimal.Decimal
+	Feedback           *string
+	Breakdown          []byte
+	RubricVersionID    *uuid.UUID
+	GraderMemberID     uuid.UUID
+	CreatedByActionID  uuid.UUID
+	PostedAt           *time.Time
+	PostedByMemberID   *uuid.UUID
+	SupersededBy       *uuid.UUID
+	CreatedAt          time.Time
+	OverrideScore      decimal.NullDecimal
+	OverrideReason     *string
+	OverrideByMemberID *uuid.UUID
+	OverriddenAt       *time.Time
 }
 
 type GradeComponent struct {

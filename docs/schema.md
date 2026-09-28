@@ -589,15 +589,21 @@ posted grades):
 document(id, course_id→course, kind [material|instructions|rubric|submission|feedback], title,
          submission_id null→submission, grade_id null→grade,
          published_version_id null→document_version, sort_order, status [active|archived],
-         created_at)
+         created_at, purged_at null, purged_by_actor_id null→actor, purge_reason null)
     composite FK (published_version_id, id) → document_version(id, document_id)
-    check: submission_id set ⇔ kind = 'submission';  grade_id set ⇔ kind = 'feedback'
+    check: submission_id set ⇔ kind = 'submission';  grade_id set ⇔ kind = 'feedback';
+           purged: all three purge columns, archived, material, instructions or a rubric,
+           a reason of 1..500 characters
+    trigger: a purged document stays purged, as it was purged
 
 document_version(id, document_id→document, seq, body_md null,
                  storage_key null, content_type null, byte_size null, checksum null,
                  author_member_id→course_member, created_at,
+                 purged_at null, purged_by_actor_id null→actor, purge_reason null,
                  unique(document_id, seq))
-    check: body_md or storage_key present
+    check: body_md or storage_key present, or purged;  purged: all three purge columns,
+           no body_md, storage_key or checksum, a reason of 1..500 characters
+    trigger: append-only, but for being purged, once
 ```
 
 **Everything readable is a document**, and a version is text, a file in object storage, or
@@ -868,10 +874,13 @@ grade(id, student_member_id→course_member,
       grader_member_id→course_member, created_by_action_id→action,
       posted_at null, posted_by_member_id null→course_member,
       superseded_by null→grade, created_at,
+      override_score null, override_reason null, override_by_member_id null→course_member,
+      overridden_at null,
       unique(id, student_member_id))
     composite FK (submission_id, student_member_id) → submission(id, student_member_id)
     composite FK (superseded_by, student_member_id) → grade(id, student_member_id)  deferred
-    check: exactly one of submission_id, component_id
+    check: exactly one of submission_id, component_id;  an override: all four override
+           columns, on a computed total, not negative, a reason of 1..500 characters
 
     unique(submission_id)                    where posted_at is not null and superseded_by is null
     unique(component_id, student_member_id)  where posted_at is not null and superseded_by is null
@@ -1379,7 +1388,9 @@ that reads which credential the call came with.
 | A session credential has a lookup prefix and an expiry | CHECKs on `credential` |
 | An invitation has a lookup prefix and an expiry, and an actor has one live invitation at most | CHECKs and a partial unique index on `credential` |
 | No credential is written for the system actor | trigger on `credential` |
-| `document_version` and `event` are append-only | triggers |
+| `event` is append-only; `document_version` is too, but for being purged once: its text, file and checksum emptied, who, when and why recorded, nothing else changed | triggers |
+| A purge says who, when and why; a purged document is material, instructions or a rubric, archived, and stays purged as it was purged | CHECKs and trigger `document_purge_kept` on `document`, CHECKs on `document_version` |
+| An override of a total is on a computed grade, not negative, and says who, when and why | CHECKs on `grade` |
 | A submitted submission never changes | trigger |
 | Owner columns match `document.kind`; a version has content; SSO rows carry an identity | CHECKs |
 | Emails are unique regardless of case | unique index on `lower(email)` |
