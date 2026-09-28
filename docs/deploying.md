@@ -172,7 +172,11 @@ Run all of these as root on the server.
   and no `/` at the end, or the server will not start. A front end on
   another site altogether, such as `*.vercel.app`, also needs
   `COOKIE_SAMESITE=none`. Safari, and every browser on iOS, still refuses
-  that sign-in cookie.
+  that sign-in cookie. `TRUSTED_ORIGINS` is for the REST routes, where a
+  browser's cookie rides along. The agents' door, `/mcp`, takes a bearer
+  token and never a cookie, so it takes an agent from any origin: an agent
+  harness in a browser or an app, such as a custom connector in Claude,
+  needs no setting here.
 - **Single sign-on** is `OIDC_ISSUER`, `OIDC_CLIENT_ID` and
   `OIDC_CLIENT_SECRET` in the env file, with
   `https://lms-staging.example.edu/v1/auth/sso/callback` registered with the

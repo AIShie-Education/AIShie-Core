@@ -101,8 +101,8 @@ type Deps struct {
 	SignIns *ratelimit.Limiter
 
 	// MCP is the agents' door, mounted at /mcp beside the REST routes and
-	// behind the same cross-origin guard, and behind notRebound. It does its
-	// own authentication, with the same authenticator.
+	// behind notRebound, but not behind their cross-origin guard (below). It
+	// does its own authentication, with the same authenticator.
 	MCP http.Handler
 }
 
@@ -177,6 +177,12 @@ func NewHandler(d Deps) http.Handler {
 			panic("httpapi: trusted origin " + o + ": " + err.Error())
 		}
 	}
+	// The agents' door takes a bearer token and never a cookie: a page on
+	// another site has no credential of anyone's to bring there, so the
+	// guard would protect nothing on it. And agents that run in a browser or
+	// an app send an Origin of their own (Claude's custom connectors, from
+	// claude.ai), which the guard refused.
+	guard.AddInsecureBypassPattern(MCPPath)
 	return s.logged(s.recovered(s.cors(guard.Handler(s.routed(mux)))))
 }
 
