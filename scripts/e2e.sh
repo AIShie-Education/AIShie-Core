@@ -14,7 +14,11 @@
 # assistant propose an assignment he may make without anyone's confirmation,
 # which he then approves himself. Then he shows a join link: a new student
 # registers through it, a registered one joins, and once he revokes it, it
-# seats nobody; his agents, without member_invite, make none.
+# seats nobody; his agents, without member_invite, make none. Then a student
+# with no email registers through another link with her student number as
+# her login ID, and signs in with it; forgets her password, and he gives her
+# a temporary one; she signs in with that, is made to set her own before
+# anything else, and works as before; and he cannot reset a TA's.
 # Then a department's administrator, invited and appointed by root, makes a
 # course beneath her appointment and seats its instructor, found by their
 # email. Then Core vouches for the instructor to an agent runtime, and the key it
@@ -64,7 +68,9 @@ call() {
   local got
   got=$(curl "${args[@]}" "$BASE$path")
   [ "$got" = "$want" ] || fail "$method $path → $got, want $want: $(cat "$WORK/body")"
-  printf '  %-4s %-62s %s\n' "$method" "$path" "$got"
+  # A join link's token is a credential of sorts: what is printed leaves it
+  # out, as the server's request log does.
+  printf '  %-4s %-62s %s\n' "$method" "$(printf '%s' "$path" | sed -E 's/aisjoin_[A-Za-z0-9_-]+/…/')" "$got"
 }
 
 # ---------------------------------------------------------------------------
@@ -366,6 +372,76 @@ call 200 POST "$C/actions/$HW4_ASK/decide" "$SATO" '{"decision":"approve"}'
 [ "$(json "$WORK/body" 'd["result"]["outcome"], d["result"]["by_owner"]')" = "executed True" ] || fail "the owner's approval: $(cat "$WORK/body")"
 call 200 GET "$C/assignments" "$SATO"
 json "$WORK/body" '"HW4" in [a["title"] for a in d["result"]["assignments"]] or sys.exit("HW4 was not made")' >/dev/null
+
+# signin WANT BODY — POST /v1/auth/login as the sign-in page does; the session
+# the cookie carries is left in $SESSION, the body in $WORK/body.
+signin() {
+  N=$((N + 1))
+  local got
+  got=$(curl -s -o "$WORK/body" -D "$WORK/headers" -w '%{http_code}' -X POST -H 'Content-Type: application/json' -d "$2" "$BASE/v1/auth/login")
+  [ "$got" = "$1" ] || fail "POST /v1/auth/login → $got, want $1: $(cat "$WORK/body")"
+  SESSION=$(sed -n 's/^[Ss]et-[Cc]ookie: ais_session=\([^;]*\).*/\1/p' "$WORK/headers" | tr -d '\r')
+  printf '  %-4s %-62s %s\n' POST /v1/auth/login "$got"
+}
+
+step "Wei, who has no email, registers through a new link with her student number as her login ID, and signs in with it"
+call 200 POST "$C/join-links" "$SATO" '{}'
+JOIN2=$(json "$WORK/body" 'd["result"]["token"]')
+call 200 GET "/v1/join/$JOIN2" ""
+[ "$(json "$WORK/body" 'd["joinable"], d["email_required"]')" = "True False" ] || fail "the page that opens the link: $(cat "$WORK/body")"
+N=$((N + 1))
+[ "$(curl -s -o "$WORK/body" -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
+  -d '{"display_name":"Wei","login_id":"20230001","password":"weis own password"}' "$BASE/v1/join/$JOIN2/register")" = 200 ] ||
+  fail "Wei could not register with a login ID and no email: $(cat "$WORK/body")"
+WEI_ID=$(json "$WORK/body" 'd["actor_id"]')
+WEI_M=$(json "$WORK/body" 'd["member_id"]')
+printf '  %-4s %-62s %s\n' POST "/v1/join/…/register" 200
+call 409 POST "/v1/join/$JOIN2/register" "" '{"display_name":"Impostor","login_id":"20230001","password":"another long password"}'
+[ "$(json "$WORK/body" 'd["error"]["details"]["reason"]')" = login_id_taken ] || fail "a login ID registered already: $(cat "$WORK/body")"
+call 200 GET /v1/auth/methods ""
+[ "$(json "$WORK/body" 'd["password_accepts"]')" = "['login_id', 'email']" ] || fail "the sign-in page is not told a login ID signs in: $(cat "$WORK/body")"
+signin 200 '{"login":"20230001","password":"weis own password"}'
+[ "$(json "$WORK/body" 'd["actor_id"], d["password_change_required"]')" = "$WEI_ID False" ] || fail "Wei signing in: $(cat "$WORK/body")"
+WEI=$SESSION
+call 200 GET /v1/me "$WEI"
+[ "$(json "$WORK/body" 'd["result"]["login_id"], d["result"]["login_id_verified"], d["result"].get("email")')" = "20230001 False None" ] ||
+  fail "Wei as registered: $(cat "$WORK/body")"
+call 200 GET "$C/members/$WEI_M" "$SATO"
+[ "$(json "$WORK/body" 'd["result"]["login_id"], d["result"]["role"]')" = "20230001 student" ] || fail "Wei's seat, to Sato: $(cat "$WORK/body")"
+signin 401 '{"login":"20230001","password":"not her password"}'
+
+step "Wei forgets her password: Sato gives her a temporary one; she signs in with it and sets her own before anything else"
+call 200 POST "$C/members/$WEI_M/reset-password" "$SATO"
+TEMPORARY=$(json "$WORK/body" 'd["result"]["temporary_password"]')
+# Two sessions end: the one she registered with, and the one she signed in with.
+[ "$(json "$WORK/body" 'd["result"]["login_id"], len(d["result"]["temporary_password"]), d["result"]["sessions_ended"]')" = "20230001 19 2" ] ||
+  fail "the reset: $(cat "$WORK/body")"
+call 401 GET /v1/me "$WEI" # signed out everywhere
+signin 401 '{"login":"20230001","password":"weis own password"}'
+signin 200 "{\"login\":\"20230001\",\"password\":\"$TEMPORARY\"}"
+[ "$(json "$WORK/body" 'd["password_change_required"]')" = True ] || fail "Wei is not told to change the temporary password: $(cat "$WORK/body")"
+WEI=$SESSION
+call 403 GET /v1/me "$WEI"
+[ "$(json "$WORK/body" 'd["error"]["details"]["reason"]')" = password_change_required ] || fail "refused, but not for the password: $(cat "$WORK/body")"
+call 403 GET "$C/documents/$DOC" "$WEI"
+call 400 POST /v1/me/password "$WEI" "{\"password\":\"$TEMPORARY\"}"
+[ "$(json "$WORK/body" 'd["error"]["details"]["reason"]')" = password_unchanged ] || fail "the temporary password taken as her own: $(cat "$WORK/body")"
+call 200 POST /v1/me/password "$WEI" '{"password":"weis new password"}'
+call 200 GET /v1/me "$WEI"
+call 200 GET "$C/documents/$DOC" "$WEI" # she reads the course's material again
+signin 200 '{"login":"20230001","password":"weis new password"}'
+[ "$(json "$WORK/body" 'd["password_change_required"]')" = False ] || fail "Wei signing in with her own: $(cat "$WORK/body")"
+signin 401 "{\"login\":\"20230001\",\"password\":\"$TEMPORARY\"}"
+unset TEMPORARY
+
+step "A TA's password is not Sato's to reset"
+register human Tanaka; TANAKA_ID=$ACTOR_ID
+call 200 POST "$C/members" "$SATO" "{\"actor_id\":\"$TANAKA_ID\",\"preset\":\"ta\"}"
+TANAKA_M=$(json "$WORK/body" 'd["result"]["member_id"]')
+call 403 POST "$C/members/$TANAKA_M/reset-password" "$SATO"
+[ "$(json "$WORK/body" 'd["error"]["details"]["reason"]')" = not_a_student ] || fail "refused, but not as a TA's: $(cat "$WORK/body")"
+call 403 POST "$C/members/$WEI_M/reset-password" "$HELPER" # his agent, which manages members, is never handed a password
+[ "$(json "$WORK/body" 'd["error"]["details"]["reason"]')" = people_only ] || fail "refused, but not as an agent: $(cat "$WORK/body")"
 
 step "The same server over MCP: an agent's own door, with the same token"
 mcp() { # JSON-RPC body → $WORK/body

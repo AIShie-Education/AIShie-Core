@@ -59,7 +59,10 @@ question, and it answers; another agent of the instructor's, given
 `member_manage`, seats a student with its own token and is refused on the
 instructor's seat; the instructor shows a join link, through which a new
 student registers and a registered one joins, and which seats nobody once
-revoked; Core vouches for the instructor to an agent runtime, and the
+revoked; a student with no email registers through another with her student
+number as her login ID and signs in with it, is given a temporary password by
+the instructor when she forgets hers, and sets her own before anything else,
+and the instructor cannot reset a TA's; Core vouches for the instructor to an agent runtime, and the
 key it publishes checks the assertion; last, the sign-in page is told whether
 to offer single sign-on, with it off and then, against a stand-in provider,
 on.
