@@ -629,6 +629,69 @@ func TestAProposerWithdrawsTheirOwnProposal(t *testing.T) {
 	b.try(t, b.yuki, "action.withdraw", m{"course_id": b.course, "action_id": uuid.New()}, apperr.NotFound)
 }
 
+// An agent's owner takes back what it proposed while nobody has decided it,
+// as the agent may itself: it acts only as their delegate. Nobody else of
+// the party does — another agent of the owner's, the agent for its owner —
+// nor anyone outside it, and nobody takes back what has been decided.
+func TestAnOwnerWithdrawsTheirAgentsProposal(t *testing.T) {
+	b := build(t)
+	bot := b.agent(t, b.sato, "Sato's helper")
+	b.delegate(t, b.sato, bot, m{"perms": m{"grade_submit": "confirm_required"}, "student_scope": "all"})
+	sibling := b.agent(t, b.sato, "Sato's other helper")
+	b.delegate(t, b.sato, sibling, m{})
+	yukiWork, kenWork := b.submit(t, b.yuki, "Yuki's essay"), b.submit(t, b.ken, "Ken's essay")
+	propose := func(actor, work uuid.UUID, key string) *uuid.UUID {
+		t.Helper()
+		out := b.MustCall(actor, "grade.submit", m{"course_id": b.course, "submission_id": work, "score": 70}, key)
+		if out.Status != domain.StatusProposed {
+			t.Fatalf("%s: %+v", key, out)
+		}
+		return out.ActionID
+	}
+	withdraw := func(action *uuid.UUID) m { return m{"course_id": b.course, "action_id": action} }
+
+	asked := propose(bot, yukiWork, "bot-yuki")
+	b.try(t, sibling, "action.withdraw", withdraw(asked), apperr.Forbidden)
+	b.try(t, b.ken, "action.withdraw", withdraw(asked), apperr.Forbidden)
+	b.do(t, b.sato, "action.withdraw", withdraw(asked))
+	if n := b.Count(`SELECT count(*) FROM action WHERE id = $1 AND status = 'cancelled'
+		AND result->'error'->'details'->>'reason' = 'withdrawn' AND result->'error'->'details'->>'by_owner' = 'true'`, asked); n != 1 {
+		t.Fatal("the proposal is not cancelled as withdrawn by its owner")
+	}
+	// The agent learns of it as of any end of a proposal, and that its
+	// owner took it back.
+	var seen bool
+	for _, e := range feed(t, b, bot) {
+		var p struct {
+			Reason  string `json:"reason"`
+			ByOwner bool   `json:"by_owner"`
+		}
+		if e.Type == "action.cancelled" && e.ActionID != nil && *e.ActionID == *asked && json.Unmarshal(e.Payload, &p) == nil {
+			seen = p.Reason == "withdrawn" && p.ByOwner
+		}
+	}
+	if !seen {
+		t.Fatal("the agent's feed does not say its owner withdrew its proposal")
+	}
+	b.try(t, b.sato, "action.withdraw", withdraw(asked), apperr.Conflict)
+
+	// Decided, it is nobody's to take back.
+	rejected := propose(bot, kenWork, "bot-ken")
+	b.do(t, b.sato, "action.decide", m{"course_id": b.course, "action_id": rejected, "decision": "reject"})
+	b.try(t, b.sato, "action.withdraw", withdraw(rejected), apperr.Conflict)
+	b.try(t, bot, "action.withdraw", withdraw(rejected), apperr.Conflict)
+
+	// An agent takes back nothing its owner proposed.
+	b.Exec(`UPDATE course_member SET perm_grade_submit = 'confirm_required' WHERE id = $1`, b.satoM)
+	own := propose(b.sato, yukiWork, "sato-yuki")
+	b.try(t, bot, "action.withdraw", withdraw(own), apperr.Forbidden)
+	b.try(t, sibling, "action.withdraw", withdraw(own), apperr.Forbidden)
+	b.do(t, b.sato, "action.withdraw", withdraw(own))
+	if n := b.Count(`SELECT count(*) FROM action WHERE id = $1 AND status = 'cancelled' AND result->'error'->'details' ? 'by_owner'`, own); n != 0 {
+		t.Fatal("a proposer's own withdrawal says an owner made it")
+	}
+}
+
 // An agent someone owns is seated only as their delegate, by them.
 func TestAnOwnedAgentIsSeatedOnlyByItsOwner(t *testing.T) {
 	b := build(t)

@@ -282,7 +282,7 @@ the nearest one, and the choice is recorded here so that it is a decision and no
 | Where every student stands on an assignment (`submission.roster`) | `perm_submission_read` | it is the submission list with the students who have not started; names and seat status only with `perm_member_read`, as the member list gives them |
 | Finding whom to seat by their whole email, or whom an actor id names (`member.lookup_actor`) | `perm_member_manage` | whoever seats members has to name them; it lists nobody |
 | Unpublishing an assignment nobody has started (`assignment.unpublish`) | `perm_assignment_write` | the undo of publishing it |
-| Taking back one's own proposal while nobody has decided it (`action.withdraw`) | `perm_document_read` | the most basic permission a seated member holds; that the proposal is the caller's own is what decides, as `action.list_mine` shows only the caller's own |
+| Taking back one's own proposal, or one's own agent's, while nobody has decided it (`action.withdraw`) | `perm_document_read` | the most basic permission a seated member holds; that the proposal is the caller's own, or their own agent's, is what decides, as `action.list_mine` shows only the caller's own |
 | Closing a conversation (`conversation.close`), retracting a message (`conversation.retract`), listing and reading conversations (`conversation.list`, `.get`, `.messages`) | `perm_document_read` | the most basic permission a seated member holds; the conversation decides who may: its two participants, and whoever decides actions for its opener (§2.8) |
 | Regrading | the lower of `perm_grade_submit` and `perm_grade_post` | it writes a grade and makes it visible in one step |
 | Course settings, status, department, first instructor | `platform_role`, or an appointment at or above the course's department (§2.10) | outside the course by definition |
@@ -669,7 +669,9 @@ event(seq, type, course_id null→course, action_id null→action,
 denied. `confirm_required` needs no approval table — the queue is `WHERE status = 'proposed'`,
 and the proposal itself lives in `payload`; nothing else is written until a human approves. A
 proposer may take their proposal back while nobody has decided it (`action.withdraw`): it is
-cancelled, as `withdrawn`.
+cancelled, as `withdrawn`. So may the owner of the agent that made it, whose delegate it is,
+whatever their own level for it; the cancellation, in `result` and in `action.cancelled`, then
+says `by_owner`. Nobody else may: not another agent of the owner's, nor an agent its owner's.
 `pending_review` needs no review table — the queue is `WHERE review_state IN ('pending', 'escalated')`,
 an escalated action still waiting for its second reviewer: someone other than whoever escalated it
 or approved its escalation.
@@ -786,14 +788,15 @@ this without anyone: a student whose agent drafts her work only by proposal (§2
 confirms those drafts herself, since she writes her work without anyone's confirmation. Where their own level is `confirm_required` or `pending_review`, the course
 has someone check them too, and so their agent: someone outside the party decides it, as for the
 rest of the party; so it is where the target is beyond their reach, or gone. Rejecting is held to
-the same rule as approving, so that one mark says which proposals are the caller's. It is the
-owner's own decision about their own agent's action and nothing more: the agent never decides its
-owner's, a sibling never another's, and at one remove (below) the party stays one. Approving
-authorizes the proposer again, as any approval does, so an owner carries out nothing their agent
-may no longer do. The decision says the owner made it: `by_owner` in its result and in the event
-it writes (`action.approved`, `action.rejected`, `action.reviewed`, `action.escalated`), and in a
-rejection's `result.decision`. The database cannot see it: the CHECKs compare seats, and an
-owner's seat is not their agent's.
+the same rule as approving, so that one mark says which proposals are the caller's; an owner who
+wants their agent's proposal gone takes it back (`action.withdraw`, above) whatever their level.
+It is the owner's own decision about their own agent's action and nothing more: the agent never
+decides its owner's, a sibling never another's, and at one remove (below) the party stays one.
+Approving authorizes the proposer again, as any approval does, so an owner carries out nothing
+their agent may no longer do. The decision says the owner made it: `by_owner` in its result and
+in the event it writes (`action.approved`, `action.rejected`, `action.reviewed`,
+`action.escalated`), and in a rejection's `result.decision`. The database cannot see it: the
+CHECKs compare seats, and an owner's seat is not their agent's.
 
 The approval and review queues list the party's actions all the same — they are the course's
 queues — and mark each with whether it is the caller's to decide (`yours_to_decide`), an owner's
@@ -1487,7 +1490,8 @@ that reads which credential the call came with.
   agent declares it; its owner switches it off and never on.
 - `member.update_perms_bulk` changes every seat of the role but the caller's, each through the
   rule for one seat, all or none.
-- A proposal is withdrawn only by its proposer, and only while nobody has decided it.
+- A proposal is withdrawn only by its proposer, or by the owner of the agent that proposed it,
+  and only while nobody has decided it.
 - Nobody gains through a conversation more than they hold (§2.8): a member addresses only a
   respondent within their own seat, or their own delegate; a delegate answers only its
   principal unless its seat answers the course, which only someone who manages the course's

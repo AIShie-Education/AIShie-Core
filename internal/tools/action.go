@@ -275,21 +275,23 @@ func actionGet() tool.Tool {
 
 type ActionWithdrawIn struct {
 	tool.InCourse
-	ActionID uuid.UUID `json:"action_id" jsonschema:"your proposal that is still waiting for a decision"`
+	ActionID uuid.UUID `json:"action_id" jsonschema:"your proposal, or one of an agent you own, that is still waiting for a decision"`
 }
 
 // actionWithdraw lets a proposer take back what they proposed while nobody
 // has decided it: a student who asked to bring an agent in and thought
-// better of it, say. It is gated by perm_document_read, like action.list_mine,
-// only because every seated member holds some permission and this is the most
-// basic one; that the proposal is the caller's own is what the tool checks.
-// The actor is compared, not the seat: someone removed and seated again is
-// still who made it.
+// better of it, say. The owner of an agent may take back what it proposed
+// as well, as it may itself: it acts only as their delegate. Nobody else
+// may, the agent's siblings included, nor an agent its owner's. It is gated
+// by perm_document_read, like action.list_mine, only because every seated
+// member holds some permission and this is the most basic one; whose the
+// proposal is, is what the tool checks. The actor is compared, not the seat:
+// someone removed and seated again is still who made it, or owns it.
 func actionWithdraw() tool.Tool {
 	return tool.Define(tool.Spec[ActionWithdrawIn, OK]{
 		Name: "action.withdraw",
-		Description: "Take back a proposal of yours that is still waiting for a decision. It is cancelled, and nothing of " +
-			"it is carried out. A proposal already decided, or someone else's, cannot be withdrawn.",
+		Description: "Take back a proposal of yours, or of an agent you own, that is still waiting for a decision. It is " +
+			"cancelled, and nothing of it is carried out. A proposal already decided, or anyone else's, cannot be withdrawn.",
 		Kind: tool.Write,
 		Gate: tool.Gate{Perms: []domain.Perm{domain.PermDocumentRead}},
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/actions/{action_id}/withdraw"},
@@ -304,13 +306,22 @@ func actionWithdraw() tool.Tool {
 			if err != nil {
 				return OK{}, err
 			}
+			// Whose it is never changes: the proposer, and an agent's owner.
+			var byOwner map[string]any
 			if prop.ActorID != ec.Actor.ID {
-				return OK{}, apperr.Forbid("only whoever proposed it withdraws a proposal")
+				did, err := ec.Q.GetActor(ctx, prop.ActorID)
+				if err != nil {
+					return OK{}, err
+				}
+				if did.OwnerActorID == nil || *did.OwnerActorID != ec.Actor.ID {
+					return OK{}, apperr.Forbid("only whoever proposed it, or the owner of the agent that did, withdraws a proposal")
+				}
+				byOwner = map[string]any{"by_owner": true}
 			}
 			if prop.Status != string(domain.StatusProposed) {
 				return OK{}, apperr.Conflicts("the action is %s, not awaiting a decision", prop.Status)
 			}
-			_, stored := pipeline.Cancellation(pipeline.CancelWithdrawn, nil)
+			_, stored := pipeline.Cancellation(pipeline.CancelWithdrawn, byOwner)
 			n, err := ec.Q.CancelProposal(ctx, dbq.CancelProposalParams{ID: prop.ID, Result: stored})
 			if err != nil {
 				return OK{}, err
@@ -319,11 +330,15 @@ func actionWithdraw() tool.Tool {
 				return OK{}, apperr.Conflicts("the proposal was decided just now")
 			}
 			// Filed under the proposal, so that it reads in the proposer's
-			// feed like any other end of a proposal.
+			// feed like any other end of a proposal, saying whether its
+			// owner took it back.
 			id := prop.ID
+			payload := map[string]any{"action_type": prop.ActionType, "reason": pipeline.CancelWithdrawn, "by_action_id": ec.ActionID}
+			if byOwner != nil {
+				payload["by_owner"] = true
+			}
 			ec.Emit(events.Event{Type: events.ActionCancelled, CourseID: prop.CourseID, ActionID: &id,
-				SubjectType: "action", SubjectID: &id,
-				Payload: map[string]any{"action_type": prop.ActionType, "reason": pipeline.CancelWithdrawn, "by_action_id": ec.ActionID}})
+				SubjectType: "action", SubjectID: &id, Payload: payload})
 			return OK{OK: true}, nil
 		},
 	})

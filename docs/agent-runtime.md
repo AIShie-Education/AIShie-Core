@@ -159,8 +159,9 @@ The events that matter carry ids, never text:
 - `action.approved`, `action.rejected` and `action.cancelled`, filed under the
   proposal's `action_id`. `action.approved` has `payload.outcome`, `executed`
   or `failed`; `action.cancelled` has `payload.reason` (proposals expire after
-  14 days by default). `payload.by_owner` is true when it was the agent's own
-  owner who approved or rejected it. A rejection's reason is in the proposal's
+  14 days by default; `withdrawn` when the agent or its owner took it back).
+  `payload.by_owner` is true when it was the agent's own owner who approved,
+  rejected or withdrew it. A rejection's reason is in the proposal's
   `result.decision.reason`, which `action_list_mine` returns.
 - `conversation.opened`, `conversation.message_posted` (`conversation_id`,
   `message_id`, `author_member_id`, `opener_member_id`,
