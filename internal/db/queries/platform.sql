@@ -37,10 +37,13 @@ SELECT EXISTS (SELECT 1 FROM actor WHERE lower(email) = lower($1));
 SELECT EXISTS (SELECT 1 FROM actor WHERE lower(email) = lower(sqlc.arg(email)) AND id <> sqlc.arg(id));
 
 -- name: UpdateActor :exec
--- A null leaves the value as it is.
+-- A null leaves the value as it is. An email an administrator gives is one
+-- they vouch for, as every email was before join links: one a person typed
+-- registering through a link (email_verified false) is theirs no longer.
 UPDATE actor
 SET display_name = coalesce(sqlc.narg(display_name), display_name),
-    email = coalesce(sqlc.narg(email), email)
+    email = coalesce(sqlc.narg(email), email),
+    email_verified = email_verified OR sqlc.narg(email)::text IS NOT NULL
 WHERE id = sqlc.arg(id);
 
 -- name: GetActorView :one
@@ -50,7 +53,8 @@ WHERE id = sqlc.arg(id);
 SELECT a.id, a.kind, a.display_name, a.email, a.status, a.platform_role, a.created_by_actor_id, a.created_at,
        EXISTS (SELECT 1 FROM credential p WHERE p.actor_id = a.id AND p.kind = 'password' AND p.revoked_at IS NULL) AS has_password,
        EXISTS (SELECT 1 FROM credential s WHERE s.actor_id = a.id AND s.kind = 'sso' AND s.revoked_at IS NULL) AS has_sso,
-       i.expires_at AS invite_expires_at, a.owner_actor_id, o.display_name AS owner_name, a.suspended_by_actor_id
+       i.expires_at AS invite_expires_at, a.owner_actor_id, o.display_name AS owner_name, a.suspended_by_actor_id,
+       a.email_verified
 FROM actor a
 LEFT JOIN credential i ON i.actor_id = a.id AND i.kind = 'invite' AND i.revoked_at IS NULL
 LEFT JOIN actor o ON o.id = a.owner_actor_id
@@ -64,7 +68,8 @@ WHERE a.id = $1;
 SELECT a.id, a.kind, a.display_name, a.email, a.status, a.platform_role, a.created_by_actor_id, a.created_at,
        EXISTS (SELECT 1 FROM credential p WHERE p.actor_id = a.id AND p.kind = 'password' AND p.revoked_at IS NULL) AS has_password,
        EXISTS (SELECT 1 FROM credential s WHERE s.actor_id = a.id AND s.kind = 'sso' AND s.revoked_at IS NULL) AS has_sso,
-       i.expires_at AS invite_expires_at, a.owner_actor_id, o.display_name AS owner_name, a.suspended_by_actor_id
+       i.expires_at AS invite_expires_at, a.owner_actor_id, o.display_name AS owner_name, a.suspended_by_actor_id,
+       a.email_verified
 FROM actor a
 LEFT JOIN credential i ON i.actor_id = a.id AND i.kind = 'invite' AND i.revoked_at IS NULL
 LEFT JOIN actor o ON o.id = a.owner_actor_id
@@ -99,9 +104,9 @@ INSERT INTO permission_preset (
     perm_document_read, perm_document_read_draft, perm_document_write, perm_rubric_read,
     perm_assignment_write, perm_submission_read, perm_submission_write, perm_grade_read,
     perm_grade_submit, perm_grade_post, perm_member_read, perm_member_manage, perm_action_decide,
-    perm_agent_delegate, perm_conversation_ask, perm_conversation_answer,
+    perm_agent_delegate, perm_conversation_ask, perm_conversation_answer, perm_member_invite,
     created_by_actor_id, created_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25);
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26);
 
 -- name: UpdatePreset :execrows
 -- Built-ins (dept_id null) are policy shipped with the system; only a
@@ -111,5 +116,6 @@ UPDATE permission_preset SET
     perm_document_read = $6, perm_document_read_draft = $7, perm_document_write = $8, perm_rubric_read = $9,
     perm_assignment_write = $10, perm_submission_read = $11, perm_submission_write = $12, perm_grade_read = $13,
     perm_grade_submit = $14, perm_grade_post = $15, perm_member_read = $16, perm_member_manage = $17,
-    perm_action_decide = $18, perm_agent_delegate = $19, perm_conversation_ask = $20, perm_conversation_answer = $21
+    perm_action_decide = $18, perm_agent_delegate = $19, perm_conversation_ask = $20, perm_conversation_answer = $21,
+    perm_member_invite = $22
 WHERE id = $1 AND dept_id IS NOT NULL;

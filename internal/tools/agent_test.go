@@ -564,7 +564,8 @@ func TestAStudentBringsHerAgentInWithApproval(t *testing.T) {
 // What a delegate is seated with is worked out from what its principal
 // holds: a preset's levels are cut down to the principal's, and a level or a
 // reach named beyond them is refused; someone who does not manage members
-// gives their agent no more than the delegate preset.
+// gives their agent, beyond what the delegate preset gives, nothing it may do
+// without its every action being confirmed.
 func TestADelegateIsSeatedWithinItsPrincipal(t *testing.T) {
 	b := build(t)
 	bot := b.agent(t, b.yuki, "Yuki's helper")
@@ -593,7 +594,13 @@ func TestADelegateIsSeatedWithinItsPrincipal(t *testing.T) {
 	b.try(t, b.yuki, "member.add_delegate", ask(m{"listed_students": []uuid.UUID{b.kenM}}), apperr.Forbidden)
 	b.try(t, b.yuki, "member.add_delegate", ask(m{"student_scope": "all"}), apperr.Forbidden)
 	b.try(t, b.yuki, "member.add_delegate", ask(m{"expires_at": until.Add(time.Hour)}), apperr.Forbidden)
-	b.try(t, b.yuki, "member.add_delegate", ask(m{"preset": "instructor", "perms": m{"member_manage": "denied"}}), apperr.Forbidden)
+	// Another preset is cut down the same way: to confirm_required beyond
+	// what the delegate preset gives, and to nothing Yuki does not hold.
+	cut := testkit.Result[tools.DelegateDefaultsOut](t, b.do(t, b.yuki, "member.delegate_defaults", m{"course_id": b.course, "preset": "instructor"}))
+	if cut.Perms["submission_write"] != "confirm_required" || cut.Perms["document_read"] != "autonomous" ||
+		cut.Perms["grade_submit"] != "denied" || cut.Perms["member_manage"] != "denied" || cut.Perms["agent_delegate"] != "denied" {
+		t.Fatalf("Yuki's agent with the instructor preset: %+v", cut.Perms)
+	}
 	// Named lower, it is asked for as named.
 	out := b.MustCall(b.yuki, "member.add_delegate", ask(m{"perms": m{"grade_read": "denied"}, "expires_at": until.Add(-time.Hour)}), "lower")
 	if out.Status != domain.StatusProposed {
@@ -917,7 +924,7 @@ func TestAMembershipSaysWhatTheSeatMayDo(t *testing.T) {
 	bot := b.agent(t, b.yuki, "Yuki's helper")
 	seat := b.delegate(t, b.yuki, bot, m{})
 	// Whatever its row says, a delegate is capped by its principal, answers
-	// no more than she asks, and never manages the course.
+	// no more than she asks, and manages the course no more than she does.
 	b.Exec(`UPDATE course_member SET perm_member_manage = 'autonomous', perm_grade_post = 'autonomous' WHERE id = $1`, seat)
 	b.do(t, b.sato, "member.update_perms", m{"course_id": b.course, "member_id": b.yukiM, "perms": m{"conversation_ask": "confirm_required"}})
 	if me := b.membership(t, bot); me.Perms["member_manage"] != "denied" || me.Perms["grade_post"] != "denied" ||

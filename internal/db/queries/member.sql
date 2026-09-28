@@ -4,9 +4,10 @@ INSERT INTO course_member (
     perm_document_read, perm_document_read_draft, perm_document_write, perm_rubric_read,
     perm_assignment_write, perm_submission_read, perm_submission_write, perm_grade_read,
     perm_grade_submit, perm_grade_post, perm_member_read, perm_member_manage, perm_action_decide,
-    perm_agent_delegate, perm_conversation_ask, perm_conversation_answer, created_at, principal_member_id, answers_course)
+    perm_agent_delegate, perm_conversation_ask, perm_conversation_answer, perm_member_invite,
+    created_at, principal_member_id, answers_course, join_link_id)
 VALUES ($1, $2, $3, $4, 'active', $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22,
-        $23, $24, $25, $26, sqlc.narg(principal_member_id), sqlc.arg(answers_course));
+        $23, $24, $25, $26, $27, sqlc.narg(principal_member_id), sqlc.arg(answers_course), sqlc.narg(join_link_id));
 
 -- name: GetMemberInCourse :one
 -- The seat, with whom it is and, for an agent someone owns, whose.
@@ -59,6 +60,7 @@ JOIN actor a ON a.id = m.actor_id
 LEFT JOIN actor o ON o.id = a.owner_actor_id
 WHERE m.course_id = $1 AND m.id > sqlc.arg(after)
   AND (sqlc.narg(role)::text IS NULL OR m.role = sqlc.narg(role))
+  AND (sqlc.narg(join_link_id)::uuid IS NULL OR m.join_link_id = sqlc.narg(join_link_id))
   AND (sqlc.arg(include_removed)::bool OR m.status <> 'removed')
 ORDER BY m.id
 LIMIT sqlc.arg(max_rows);
@@ -77,7 +79,8 @@ UPDATE course_member SET
     perm_document_read = $2, perm_document_read_draft = $3, perm_document_write = $4, perm_rubric_read = $5,
     perm_assignment_write = $6, perm_submission_read = $7, perm_submission_write = $8, perm_grade_read = $9,
     perm_grade_submit = $10, perm_grade_post = $11, perm_member_read = $12, perm_member_manage = $13,
-    perm_action_decide = $14, perm_agent_delegate = $15, perm_conversation_ask = $16, perm_conversation_answer = $17
+    perm_action_decide = $14, perm_agent_delegate = $15, perm_conversation_ask = $16, perm_conversation_answer = $17,
+    perm_member_invite = $18
 WHERE id = $1;
 
 -- name: SetMemberScopeKinds :exec
@@ -154,6 +157,18 @@ ORDER BY id;
 -- Which seat a seat is a delegate of, if any. Whose delegate a seat is never
 -- changes, so it may be read before anything is locked.
 SELECT principal_member_id FROM course_member WHERE id = $1;
+
+-- name: PrincipalsSeatsHaveRole :one
+-- Whether a principal's own seat, or the seat of another of its delegates
+-- than except, is among the seats of one roster role that are not removed or
+-- past their expiry: what a delegate's member.update_perms_bulk would reach,
+-- and must not (tools.notYourPrincipals). Asked before anything is locked.
+SELECT EXISTS (
+    SELECT 1 FROM course_member
+    WHERE course_id = $1 AND role = sqlc.arg(role) AND status <> 'removed'
+      AND (expires_at IS NULL OR expires_at > sqlc.arg(now)) AND id <> sqlc.arg(except_member_id)
+      AND (id = sqlc.arg(principal_member_id) OR principal_member_id = sqlc.arg(principal_member_id))
+)::bool;
 
 -- name: LockLiveSeatsByRole :many
 -- Every seat of one roster role that is not removed or past its expiry,

@@ -143,7 +143,7 @@ type Outcome struct {
 // Invoke runs one tool call.
 func (p *Pipeline) Invoke(ctx context.Context, caller Caller, name string, rawArgs []byte, idempotencyKey string) (Outcome, error) {
 	t, ok := p.reg.Get(name)
-	if !ok || t.Internal {
+	if !ok || t.Internal || t.Unlisted {
 		return Outcome{}, apperr.Missing("there is no tool named %q", name)
 	}
 	in, err := t.Decode(rawArgs)

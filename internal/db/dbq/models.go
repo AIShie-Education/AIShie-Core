@@ -94,6 +94,7 @@ type Actor struct {
 	OwnerActorID         *uuid.UUID
 	SuspendedByActorID   *uuid.UUID
 	SiteChatCredentialID *uuid.UUID
+	EmailVerified        bool
 }
 
 type Assignment struct {
@@ -157,6 +158,23 @@ type Course struct {
 	CreatedAt          time.Time
 }
 
+type CourseJoinLink struct {
+	ID                  uuid.UUID
+	CourseID            uuid.UUID
+	TokenPrefix         string
+	SecretHash          string
+	Role                string
+	PresetID            uuid.UUID
+	CreatedByMemberID   uuid.UUID
+	ExpiresAt           time.Time
+	MaxUses             *int32
+	Uses                int32
+	AllowedEmailDomains []string
+	RevokedAt           *time.Time
+	RevokedByMemberID   *uuid.UUID
+	CreatedAt           time.Time
+}
+
 type CourseMember struct {
 	ID                     uuid.UUID
 	CourseID               uuid.UUID
@@ -187,6 +205,8 @@ type CourseMember struct {
 	PermAgentDelegate      AutonomyLevel
 	PermConversationAsk    AutonomyLevel
 	PermConversationAnswer AutonomyLevel
+	JoinLinkID             *uuid.UUID
+	PermMemberInvite       AutonomyLevel
 }
 
 type Credential struct {
@@ -372,6 +392,7 @@ type PermissionPreset struct {
 	PermAgentDelegate      AutonomyLevel
 	PermConversationAsk    AutonomyLevel
 	PermConversationAnswer AutonomyLevel
+	PermMemberInvite       AutonomyLevel
 }
 
 type Submission struct {

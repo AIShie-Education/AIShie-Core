@@ -33,6 +33,12 @@ const CourseTutorPreset = "course_tutor"
 
 var bringsAgents = tool.Gate{Perms: []domain.Perm{domain.PermAgentDelegate}}
 
+// namedOnly are what a delegate holds only when the call that seats it names
+// them, whatever its preset carries: an agent manages the course's members,
+// or hands out its join links, because someone decided it should, never
+// because a preset came with it (docs/schema.md §2.2).
+var namedOnly = []domain.Perm{domain.PermMemberManage, domain.PermMemberInvite}
+
 type MemberAddDelegateIn struct {
 	tool.InCourse
 	ActorID  uuid.UUID  `json:"actor_id" jsonschema:"the agent you own to bring in"`
@@ -55,13 +61,14 @@ type MemberAddDelegateIn struct {
 // resolveDelegateSeat works out the seat member m's agent would be given:
 //
 //   - levels: the preset's, each clipped to what m holds (for
-//     conversation_answer, to m's conversation_ask), with member_manage and
-//     agent_delegate denied; a level named in the call replaces the
-//     preset's, and one above what m holds is refused rather than clipped:
-//     the caller asked for it by name;
-//   - for someone who does not manage the course's members, no more than
-//     the built-in delegate preset gives: a student's agent reads; an
-//     instructor may widen it later, within its principal;
+//     conversation_answer, to m's conversation_ask), with agent_delegate
+//     denied, and member_manage and member_invite too unless they are named;
+//     a level named in the call replaces the preset's, and one above what m
+//     holds is refused rather than clipped: the caller asked for it by name;
+//   - for someone who does not manage the course's members, anything the
+//     built-in delegate preset gives at a lower level at confirm_required at
+//     most (domain.DelegateCap): a student's agent reads, and may be given
+//     the student's own writes, each a proposal;
 //   - reach: the preset's kind of scope, with m's own list when m is
 //     limited to one and nobody when m reaches the whole class; a preset
 //     that reaches the whole class is narrowed to m's list when m has one.
@@ -92,6 +99,9 @@ func resolveDelegateSeat(ctx context.Context, q dbq.Querier, m *domain.Member, i
 	for _, p := range domain.AllPerms {
 		perms[p] = min(perms[p], domain.DelegateCap(m, p))
 	}
+	for _, p := range namedOnly {
+		perms[p] = domain.Denied
+	}
 	named := permSet{}
 	if err := named.apply(in.Perms); err != nil {
 		return seating{}, err
@@ -102,28 +112,17 @@ func resolveDelegateSeat(ctx context.Context, q dbq.Querier, m *domain.Member, i
 			continue
 		}
 		if limit := domain.DelegateCap(m, p); l > limit {
-			if p == domain.PermMemberManage || p == domain.PermAgentDelegate {
-				return seating{}, apperr.Forbid("a delegate never holds %s", p).With("permission", string(p))
+			switch {
+			case p == domain.PermAgentDelegate:
+				return seating{}, apperr.Forbid("a delegate never holds %s: it brings no agents of its own", p).With("permission", string(p))
+			case limit < m.Perm(p):
+				return seating{}, apperr.Forbid("your agent may hold %s at %s at most: beyond what the delegate preset gives, "+
+					"the agent of someone who does not manage the course's members acts only by proposal", p, limit).
+					With("permission", string(p))
 			}
 			return seating{}, apperr.Forbid("you hold %s at %s and cannot give your agent %s", p, limit, l).With("permission", string(p))
 		}
 		perms[p] = l
-	}
-	if !m.Perm(domain.PermMemberManage).Allowed() {
-		bound, err := q.GetBuiltinPresetByName(ctx, DelegatePreset)
-		if errors.Is(err, pgx.ErrNoRows) {
-			return seating{}, apperr.Precondition("the built-in delegate preset is missing; run `aishiterud seed`")
-		}
-		if err != nil {
-			return seating{}, err
-		}
-		most := presetPerms(bound)
-		for _, p := range domain.AllPerms {
-			if perms[p] > most[p] {
-				return seating{}, apperr.Forbid("your agent may hold %s at %s at most, as the delegate preset gives it; "+
-					"someone who manages the course's members may give it more", p, most[p]).With("permission", string(p))
-			}
-		}
 	}
 
 	s := seating{courseID: in.CourseID, actorID: in.ActorID, preset: &preset, perms: perms, role: "assistant", principal: &m.ID}
@@ -241,7 +240,12 @@ func memberAddDelegate() tool.Tool {
 			"members may choose, and which course_tutor chooses for them: then the students it can see and do no more than " +
 			"may ask it too, and whatever anyone tells it, it may repeat to the others it answers. " +
 			"Your level of agent_delegate decides whether this needs an instructor's approval first. " +
-			"Unless you manage the course's members, your agent holds no more than the delegate preset gives.",
+			"Unless you manage the course's members, whatever your agent may do beyond what the delegate preset gives " +
+			"— your own writes, such as drafting your submission — it does only by proposal (confirm_required at most), " +
+			"whoever grants it. " +
+			"It holds member_manage or member_invite only when you name them in perms, whatever the preset carries; " +
+			"then it manages the course's members, or hands out its join links, for you, and never acts on your own " +
+			"seat nor on your other agents' (not_your_principal).",
 		Kind: tool.Write, Gate: bringsAgents,
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/delegates"},
 		Resolve: func(_ context.Context, _ dbq.Querier, in MemberAddDelegateIn) (tool.Target, error) {

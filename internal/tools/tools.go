@@ -62,6 +62,7 @@ func RegisterAll(reg *tool.Registry, d Deps) {
 	reg.Register(departmentTools()...)
 	reg.Register(courseTools()...)
 	reg.Register(memberTools()...)
+	reg.Register(joinLinkTools()...)
 	reg.Register(componentTools()...)
 	reg.Register(assignmentTools()...)
 	reg.Register(submissionTools()...)

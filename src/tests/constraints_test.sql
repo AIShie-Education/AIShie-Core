@@ -51,7 +51,7 @@ END $$;
 --      3x actors · 4x courses · 5x members · 6x components
 --      7x assignments · ex documents · fx versions · ax submissions
 --      bx actions · dx grades · cx conversations · cxx their messages
---      1cx credentials
+--      1cx credentials · 1ax join links
 INSERT INTO term (id, name, starts_on, ends_on)
 VALUES ('00000000-0000-0000-0000-000000000011', '2026 Autumn', '2026-09-01', '2026-12-20');
 INSERT INTO department (id, name) VALUES ('00000000-0000-0000-0000-000000000021', 'Computing');
@@ -363,6 +363,107 @@ SELECT pg_temp.ok('revoking it leaves the row as it is: whether it is live is re
     END $chk$ $q$);
 SELECT pg_temp.ok('and switching it off clears it', $q$
     UPDATE actor SET site_chat_credential_id = NULL WHERE id = '00000000-0000-0000-0000-000000000036' $q$);
+
+-- Join links: a way into a course, as a student ------------------------------
+-- 1a1 Sato's (51) link to A · 3c Aoi, who registered through it · 5f her seat
+SELECT pg_temp.ok('a join link keeps a hash of its token, and seats with its maker''s authority', $q$
+    INSERT INTO course_join_link (id, course_id, token_prefix, secret_hash, preset_id, created_by_member_id, expires_at, max_uses)
+    VALUES ('00000000-0000-0000-0000-0000000001a1', '00000000-0000-0000-0000-000000000041', 'join-1', 'sha256:' || repeat('0', 64),
+            '00000000-0000-0000-0000-000000000091', '00000000-0000-0000-0000-000000000051', now() + interval '10 minutes', 2) $q$);
+SELECT pg_temp.fails('never the token itself', '23514', $q$
+    INSERT INTO course_join_link (course_id, token_prefix, secret_hash, preset_id, created_by_member_id, expires_at)
+    VALUES ('00000000-0000-0000-0000-000000000041', 'join-2', 'aisjoin_join2abcdefgh_' || repeat('x', 43),
+            '00000000-0000-0000-0000-000000000091', '00000000-0000-0000-0000-000000000051', now() + interval '10 minutes') $q$);
+SELECT pg_temp.fails('a prefix finds one link', '23505', $q$
+    INSERT INTO course_join_link (course_id, token_prefix, secret_hash, preset_id, created_by_member_id, expires_at)
+    VALUES ('00000000-0000-0000-0000-000000000041', 'join-1', 'sha256:' || repeat('1', 64),
+            '00000000-0000-0000-0000-000000000091', '00000000-0000-0000-0000-000000000051', now() + interval '10 minutes') $q$);
+SELECT pg_temp.fails('its maker is a seat of its course', '23503', $q$
+    INSERT INTO course_join_link (course_id, token_prefix, secret_hash, preset_id, created_by_member_id, expires_at)
+    VALUES ('00000000-0000-0000-0000-000000000041', 'join-3', 'sha256:' || repeat('3', 64),
+            '00000000-0000-0000-0000-000000000091', '00000000-0000-0000-0000-000000000055', now() + interval '10 minutes') $q$);
+SELECT pg_temp.fails('it seats a student, and nobody else', '23514', $q$
+    INSERT INTO course_join_link (course_id, token_prefix, secret_hash, role, preset_id, created_by_member_id, expires_at)
+    VALUES ('00000000-0000-0000-0000-000000000041', 'join-4', 'sha256:' || repeat('4', 64), 'ta',
+            '00000000-0000-0000-0000-000000000091', '00000000-0000-0000-0000-000000000051', now() + interval '10 minutes') $q$);
+SELECT pg_temp.fails('it expires', '23502', $q$
+    INSERT INTO course_join_link (course_id, token_prefix, secret_hash, preset_id, created_by_member_id, expires_at)
+    VALUES ('00000000-0000-0000-0000-000000000041', 'join-5', 'sha256:' || repeat('5', 64),
+            '00000000-0000-0000-0000-000000000091', '00000000-0000-0000-0000-000000000051', NULL) $q$);
+SELECT pg_temp.fails('ten minutes after it is made, and no sooner', '23514', $q$
+    INSERT INTO course_join_link (course_id, token_prefix, secret_hash, preset_id, created_by_member_id, created_at, expires_at)
+    VALUES ('00000000-0000-0000-0000-000000000041', 'join-6', 'sha256:' || repeat('6', 64),
+            '00000000-0000-0000-0000-000000000091', '00000000-0000-0000-0000-000000000051', now(), now() + interval '9 minutes 59 seconds') $q$);
+SELECT pg_temp.fails('nor later', '23514', $q$
+    INSERT INTO course_join_link (course_id, token_prefix, secret_hash, preset_id, created_by_member_id, created_at, expires_at)
+    VALUES ('00000000-0000-0000-0000-000000000041', 'join-7', 'sha256:' || repeat('7', 64),
+            '00000000-0000-0000-0000-000000000091', '00000000-0000-0000-0000-000000000051', now(), now() + interval '1 day') $q$);
+SELECT pg_temp.fails('nor has its life lengthened', '23514', $q$
+    UPDATE course_join_link SET expires_at = expires_at + interval '1 minute' WHERE id = '00000000-0000-0000-0000-0000000001a1' $q$);
+SELECT pg_temp.fails('a limit on its uses is of one or more', '23514', $q$
+    INSERT INTO course_join_link (course_id, token_prefix, secret_hash, preset_id, created_by_member_id, expires_at, max_uses)
+    VALUES ('00000000-0000-0000-0000-000000000041', 'join-8', 'sha256:' || repeat('8', 64),
+            '00000000-0000-0000-0000-000000000091', '00000000-0000-0000-0000-000000000051', now() + interval '10 minutes', 0) $q$);
+SELECT pg_temp.fails('a list of domains names one at least', '23514', $q$
+    INSERT INTO course_join_link (course_id, token_prefix, secret_hash, preset_id, created_by_member_id, expires_at, allowed_email_domains)
+    VALUES ('00000000-0000-0000-0000-000000000041', 'join-9', 'sha256:' || repeat('9', 64),
+            '00000000-0000-0000-0000-000000000091', '00000000-0000-0000-0000-000000000051', now() + interval '10 minutes', '{}') $q$);
+SELECT pg_temp.fails('and twenty at most', '23514', $q$
+    INSERT INTO course_join_link (course_id, token_prefix, secret_hash, preset_id, created_by_member_id, expires_at, allowed_email_domains)
+    VALUES ('00000000-0000-0000-0000-000000000041', 'join-a', 'sha256:' || repeat('a', 64),
+            '00000000-0000-0000-0000-000000000091', '00000000-0000-0000-0000-000000000051', now() + interval '10 minutes',
+            array(SELECT 'd' || n || '.example.edu' FROM generate_series(1, 21) n)) $q$);
+SELECT pg_temp.fails('none of them null', '23514', $q$
+    INSERT INTO course_join_link (course_id, token_prefix, secret_hash, preset_id, created_by_member_id, expires_at, allowed_email_domains)
+    VALUES ('00000000-0000-0000-0000-000000000041', 'join-b', 'sha256:' || repeat('b', 64),
+            '00000000-0000-0000-0000-000000000091', '00000000-0000-0000-0000-000000000051', now() + interval '10 minutes',
+            ARRAY['example.edu', NULL]) $q$);
+SELECT pg_temp.ok('its uses are counted up to its limit', $q$
+    UPDATE course_join_link SET uses = uses + 2 WHERE id = '00000000-0000-0000-0000-0000000001a1' $q$);
+SELECT pg_temp.fails('and never past it', '23514', $q$
+    UPDATE course_join_link SET uses = uses + 1 WHERE id = '00000000-0000-0000-0000-0000000001a1' $q$);
+SELECT pg_temp.fails('nor below none', '23514', $q$
+    UPDATE course_join_link SET uses = -1, max_uses = NULL WHERE id = '00000000-0000-0000-0000-0000000001a1' $q$);
+SELECT pg_temp.ok('a person registers through it, their email vouched for by nobody, and is seated through it', $q$
+    INSERT INTO actor (id, kind, display_name, email, email_verified, created_by_actor_id)
+    VALUES ('00000000-0000-0000-0000-00000000003c', 'human', 'Aoi', 'aoi@example.edu', false, '00000000-0000-0000-0000-000000000034');
+    INSERT INTO course_member (id, course_id, actor_id, role, added_by_actor_id, student_scope, assignment_scope, join_link_id)
+    VALUES ('00000000-0000-0000-0000-00000000005f', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-00000000003c',
+            'student', '00000000-0000-0000-0000-000000000034', 'listed', 'all', '00000000-0000-0000-0000-0000000001a1') $q$);
+SELECT pg_temp.fails('a seat names a link of its own course', '23503', $q$
+    INSERT INTO course_member (course_id, actor_id, role, added_by_actor_id, student_scope, assignment_scope, join_link_id)
+    VALUES ('00000000-0000-0000-0000-000000000042', '00000000-0000-0000-0000-00000000003c', 'student',
+            '00000000-0000-0000-0000-000000000034', 'listed', 'all', '00000000-0000-0000-0000-0000000001a1') $q$);
+SELECT pg_temp.fails('only a person''s email goes unchecked', '23514', $q$
+    INSERT INTO actor (kind, display_name, email, email_verified, created_by_actor_id)
+    VALUES ('agent', 'x', 'x@example.edu', false, '00000000-0000-0000-0000-000000000034') $q$);
+SELECT pg_temp.fails('and only an email there is', '23514', $q$
+    INSERT INTO actor (kind, display_name, email_verified, created_by_actor_id)
+    VALUES ('human', 'x', false, '00000000-0000-0000-0000-000000000034') $q$);
+SELECT pg_temp.ok('every other actor''s email is vouched for', $q$
+    DO $chk$
+    BEGIN
+        IF EXISTS (SELECT 1 FROM actor WHERE NOT email_verified AND id <> '00000000-0000-0000-0000-00000000003c') THEN
+            RAISE EXCEPTION 'an actor registered otherwise than through a link is unverified';
+        END IF;
+    END $chk$ $q$);
+SELECT pg_temp.fails('a revocation says who revoked it', '23514', $q$
+    UPDATE course_join_link SET revoked_at = now() WHERE id = '00000000-0000-0000-0000-0000000001a1' $q$);
+SELECT pg_temp.fails('who revoked it is a seat of its course', '23503', $q$
+    UPDATE course_join_link SET revoked_at = now(), revoked_by_member_id = '00000000-0000-0000-0000-000000000055'
+    WHERE id = '00000000-0000-0000-0000-0000000001a1' $q$);
+SELECT pg_temp.ok('a link is revoked, saying by whom', $q$
+    UPDATE course_join_link SET revoked_at = now(), revoked_by_member_id = '00000000-0000-0000-0000-000000000051'
+    WHERE id = '00000000-0000-0000-0000-0000000001a1' $q$);
+SELECT pg_temp.ok('member_invite, which makes links, defaults to denied on both tables', $q$
+    DO $chk$
+    BEGIN
+        IF EXISTS (SELECT 1 FROM course_member WHERE id = '00000000-0000-0000-0000-00000000005f' AND perm_member_invite <> 'denied')
+           OR EXISTS (SELECT 1 FROM permission_preset WHERE id = '00000000-0000-0000-0000-000000000091'
+                      AND perm_member_invite <> 'denied') THEN
+            RAISE EXCEPTION 'member_invite does not default to denied';
+        END IF;
+    END $chk$ $q$);
 
 -- Departments: a tree, and its administrators --------------------------------
 -- 2a1 … 2a8 a chain, 2a1 at the top · 2b1 > 2b2 > 2b3 a department and what is

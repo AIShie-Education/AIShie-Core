@@ -76,12 +76,16 @@ const (
 // denied.
 //
 // A delegate's level is the lower of its own and its principal's: your agent
-// can do nothing you cannot. Two exceptions. conversation_answer is capped
+// can do nothing you cannot. Three exceptions. conversation_answer is capped
 // by the principal's conversation_ask: your agent answering you is you
 // asking, at one remove, so a principal need not be able to answer for its
-// agent to. And a delegate never manages the course or brings agents of its
-// own: member_manage and agent_delegate are denied to it whatever its row
-// says.
+// agent to. A delegate never brings agents of its own: agent_delegate is
+// denied to it whatever its row says. And the agent of someone who does not
+// manage the course's members does, beyond what the built-in delegate
+// preset gives, nothing that is not confirmed first (DelegateCap). It may
+// manage the course's members, as far as its row and its principal's both
+// allow, but never its principal's seat nor its principal's other agents'
+// (tools.loadOther).
 func (m *Member) Perm(p Perm) Level {
 	own := m.Perms[p]
 	if m.PrincipalID == nil {
@@ -93,19 +97,40 @@ func (m *Member) Perm(p Perm) Level {
 	return MinLevel(own, DelegateCap(m.Principal, p))
 }
 
+// DelegatePresetLevels is what the built-in delegate preset gives, as
+// src/seed/presets.sql seeds it, every other permission denied: a person's
+// own assistant reads the material and its principal's work and grades, and
+// answers its principal. A test holds the two to each other.
+var DelegatePresetLevels = map[Perm]Level{
+	PermDocumentRead: Autonomous, PermSubmissionRead: Autonomous, PermGradeRead: Autonomous,
+	PermConversationAnswer: Autonomous,
+}
+
 // DelegateCap is the most a delegate of principal may hold of p: the
 // principal's own level, but conversation_answer capped by the principal's
-// conversation_ask, and member_manage and agent_delegate never. Perm applies
-// it on every call; seating and changing a delegate's seat hold the row to
-// it, so that the row says what the delegate can do.
+// conversation_ask, and agent_delegate never. For a principal who does not
+// manage the course's members — a student — anything the built-in delegate
+// preset gives at a lower level is confirm_required at most: their agent
+// may draft their work for them, say, but every such action is a proposal,
+// which someone confirms before it is carried out. member_manage and
+// member_invite are left to the principal's own level: such a principal has
+// no member_manage, and member_invite is made by no proposal. Perm applies it
+// on every call; seating and changing a delegate's seat hold the row to it,
+// so that the row says what the delegate can do.
 func DelegateCap(principal *Member, p Perm) Level {
+	var limit Level
 	switch p {
-	case PermMemberManage, PermAgentDelegate:
+	case PermAgentDelegate:
 		return Denied
 	case PermConversationAnswer:
-		return principal.Perm(PermConversationAsk)
+		limit = principal.Perm(PermConversationAsk)
+	default:
+		limit = principal.Perm(p)
 	}
-	return principal.Perm(p)
+	if p != PermMemberManage && p != PermMemberInvite && !principal.Perm(PermMemberManage).Allowed() {
+		limit = MinLevel(limit, max(DelegatePresetLevels[p], ConfirmRequired))
+	}
+	return limit
 }
 
 // AnswersOthers reports whether a delegate may be addressed by anyone but

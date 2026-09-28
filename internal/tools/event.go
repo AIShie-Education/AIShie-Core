@@ -58,6 +58,13 @@ var visibility = map[string][]domain.Perm{
 	members.EventPaused: {domain.PermMemberRead}, members.EventResumed: {domain.PermMemberRead},
 	members.EventRemoved: {domain.PermMemberRead}, members.EventRescoped: {domain.PermMemberRead},
 
+	// A join link is a way into the course, for whoever holds it: news of
+	// one is for those who make, list and revoke them (member_invite), and
+	// for those who manage the course's members. Who joined through one is
+	// member.added, with its link, for the roster's readers.
+	EventJoinLinkCreated: {domain.PermMemberInvite, domain.PermMemberManage},
+	EventJoinLinkRevoked: {domain.PermMemberInvite, domain.PermMemberManage},
+
 	EventCourseCreated: {domain.PermDocumentRead}, EventCourseUpdated: {domain.PermDocumentRead},
 	EventCourseActivated: {domain.PermDocumentRead}, EventCourseArchived: {domain.PermDocumentRead},
 	EventCourseMoved: {domain.PermDocumentRead},

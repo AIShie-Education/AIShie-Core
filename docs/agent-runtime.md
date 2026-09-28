@@ -58,7 +58,7 @@ read on 2026-09-26; **[UNVERIFIED]** marks what it did not confirm.
 - **Refused.** A JSON-RPC batch (400), an id over 256 bytes (400), and
   `subscriptions/listen` (404, `-32601`).
 - **Tool names** are the registry's with the dot turned to an underscore
-  (`conversation_answer`). There are 120 tools, 47 reads and 73 writes; all
+  (`conversation_answer`). There are 123 tools, 48 reads and 75 writes; all
   match `[a-z_]+`, the longest has 26 characters, and every provider takes
   them as they are (§3.7).
 - **REST.** `GET /v1/tools` (no token needed) lists each tool's `name`,
@@ -456,9 +456,9 @@ through a table, never by rewriting strings.
 
 ### 3.8 JSON Schema
 
-**What Core's input schemas hold**, measured over MCP on all 120 tools:
-- Unions: `["null","string"]` ×118, `["null","array"]` ×16, `["null","integer"]`
-  ×10, `["null","boolean"]` ×4; and for decimals, which Core takes as numbers
+**What Core's input schemas hold**, measured over MCP on all 123 tools:
+- Unions: `["null","string"]` ×120, `["null","array"]` ×17, `["null","integer"]`
+  ×11, `["null","boolean"]` ×4; and for decimals, which Core takes as numbers
   or strings, `["number","string"]` ×6 and `["null","number","string"]` ×8.
 - `format: uuid` ×218; one `pattern` (the decimal's) 14 times; 32-bit
   `minimum`/`maximum` on 5 tools; `minLength`/`maxLength` only on

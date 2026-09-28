@@ -53,8 +53,10 @@ type Config struct {
 
 	// CallsPerMinute and CallsBurst bound one actor's calls, per instance;
 	// SignInsPerMinute bounds sign-in attempts per email, and per address
-	// those that fail. Zero turns a limit off.
-	CallsPerMinute, CallsBurst, SignInsPerMinute int
+	// those that fail, registrations through a join link among them;
+	// JoinRegistrationsPerMinute bounds registrations through one join link.
+	// Zero turns a limit off.
+	CallsPerMinute, CallsBurst, SignInsPerMinute, JoinRegistrationsPerMinute int
 
 	// Jobs turns the background sweeps on. Every instance may leave it on: only
 	// one sweeps at a time. JobsInterval is how often a sweep is attempted.
@@ -79,6 +81,12 @@ type Config struct {
 
 	// OIDC is single sign-on. It is off unless OIDC_ISSUER is set.
 	OIDC OIDC
+	// JoinLinkRegistration lets someone with no account register through a
+	// course's join link (JOIN_LINK_REGISTRATION, on unless off): the one
+	// way a person registers on their own, a stopgap until single sign-on
+	// covers everyone. Off, people sign in — by single sign-on, say — and
+	// then join through the link; nobody registers through one.
+	JoinLinkRegistration bool
 
 	// RuntimeAudiences are the services that host agents (runtimes) this
 	// server vouches for its signed-in people to, each named by the absolute
@@ -175,9 +183,9 @@ func FromEnv() (Config, error) {
 		}
 	}
 	c.CookieSameSite = env("COOKIE_SAMESITE", "lax")
-	c.CallsPerMinute, c.CallsBurst, c.SignInsPerMinute = 600, 100, 10
+	c.CallsPerMinute, c.CallsBurst, c.SignInsPerMinute, c.JoinRegistrationsPerMinute = 600, 100, 10, 60
 	for key, dst := range map[string]*int{"RATE_LIMIT_PER_MINUTE": &c.CallsPerMinute, "RATE_LIMIT_BURST": &c.CallsBurst,
-		"SIGN_IN_ATTEMPTS_PER_MINUTE": &c.SignInsPerMinute} {
+		"SIGN_IN_ATTEMPTS_PER_MINUTE": &c.SignInsPerMinute, "JOIN_REGISTRATIONS_PER_MINUTE": &c.JoinRegistrationsPerMinute} {
 		if v := os.Getenv(key); v != "" {
 			n, err := strconv.Atoi(v)
 			if err != nil || n < 0 {
@@ -220,6 +228,14 @@ func FromEnv() (Config, error) {
 			}
 			*dst = b
 		}
+	}
+	c.JoinLinkRegistration = true
+	switch v := os.Getenv("JOIN_LINK_REGISTRATION"); v {
+	case "", "on":
+	case "off":
+		c.JoinLinkRegistration = false
+	default:
+		return Config{}, fmt.Errorf("JOIN_LINK_REGISTRATION: %q is not on or off", v)
 	}
 	c.AgentSelfService, c.AgentMaxPerOwner = true, 5
 	switch v := os.Getenv("AGENT_SELF_SERVICE"); v {

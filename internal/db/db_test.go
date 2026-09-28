@@ -405,3 +405,131 @@ func TestAgentOwnershipBackfillsAndComesOffCleanly(t *testing.T) {
 }
 
 func seatID(n int) string { return fmt.Sprintf("00000000-0000-0000-0000-%012d", n) }
+
+// Migration 0013 gives member_invite, which makes join links, to every seat
+// a person holds, not removed, at its level of member_manage, and denies it
+// to every seat an agent holds, whatever it manages; a preset gets its
+// member_manage level unless it is for students or agents (role student or
+// assistant), which get none. Going down takes the column off both tables
+// and leaves the seats as they were.
+func TestMemberInviteStartsWhereMemberManageIsForPeopleOnly(t *testing.T) {
+	pool, url := testdb.NewEmpty(t)
+	ctx := context.Background()
+	m, err := db.NewMigrator(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	if err := m.Steps(12); err != nil {
+		t.Fatalf("up to 0012: %v", err)
+	}
+	exec := func(sql string, args ...any) {
+		t.Helper()
+		if _, err := pool.Exec(ctx, sql, args...); err != nil {
+			t.Fatalf("%v\n%s", err, sql)
+		}
+	}
+	exec(`INSERT INTO actor (id, kind, display_name, platform_role) VALUES ('00000000-0000-0000-0000-000000000001', 'human', 'root', 'root')`)
+	exec(`INSERT INTO term (id, name, starts_on, ends_on) VALUES ('00000000-0000-0000-0000-000000000002', 'T', '2026-09-01', '2026-12-20')`)
+	exec(`INSERT INTO department (id, name) VALUES ('00000000-0000-0000-0000-000000000003', 'D')`)
+	exec(`INSERT INTO course (id, dept_id, term_id, code, title, created_by_actor_id) VALUES
+		('00000000-0000-0000-0000-000000000004', '00000000-0000-0000-0000-000000000003', '00000000-0000-0000-0000-000000000002', 'C', 'C',
+		 '00000000-0000-0000-0000-000000000001')`)
+	type seat struct {
+		kind, role, status, manage, want string
+		owned                            bool
+	}
+	seats := []seat{
+		{"human", "instructor", "active", "autonomous", "autonomous", false},
+		{"human", "ta", "active", "confirm_required", "confirm_required", false},
+		{"human", "ta", "paused", "pending_review", "pending_review", false},
+		{"human", "student", "active", "denied", "denied", false},
+		{"human", "assistant", "active", "autonomous", "autonomous", false}, // a person is a person, whatever their role
+		{"agent", "instructor", "active", "autonomous", "denied", false},    // an enrolment bot nobody owns
+		{"agent", "assistant", "active", "autonomous", "denied", true},      // a delegate, whatever its row says
+		{"human", "instructor", "removed", "autonomous", "denied", false},   // history
+	}
+	for i, s := range seats {
+		id := seatID(10 + i)
+		exec(`INSERT INTO actor (id, kind, display_name) VALUES ($1, $2, $3)`, id, s.kind, s.role)
+		var principal *string
+		if s.owned {
+			// Owned by the instructor, seated as their delegate.
+			exec(`UPDATE actor SET owner_actor_id = $2 WHERE id = $1`, id, seatID(10))
+			p := seatID(10)
+			principal = &p
+		}
+		exec(`INSERT INTO course_member (id, course_id, actor_id, role, status, added_by_actor_id, student_scope, assignment_scope,
+				perm_member_manage, principal_member_id)
+			VALUES ($1, '00000000-0000-0000-0000-000000000004', $1, $2, $3, '00000000-0000-0000-0000-000000000001', 'all', 'all', $4, $5)`,
+			id, s.role, s.status, s.manage, principal)
+	}
+	presets := map[string][2]string{ // name: role, member_manage
+		"student": {"student", "denied"}, "observer": {"observer", "denied"}, "ta": {"ta", "denied"},
+		"instructor": {"instructor", "autonomous"}, "tutor": {"assistant", "denied"}, "grader": {"assistant", "denied"},
+		"delegate": {"assistant", "denied"}, "course_tutor": {"assistant", "denied"},
+	}
+	for name, p := range presets {
+		exec(`INSERT INTO permission_preset (name, role, student_scope, assignment_scope, perm_member_manage) VALUES ($1, $2, 'all', 'all', $3)`,
+			name, p[0], p[1])
+	}
+	deptPresets := map[string][3]string{ // name: role, member_manage, member_invite wanted
+		"head_ta":        {"ta", "autonomous", "autonomous"},
+		"lab_lead":       {"observer", "pending_review", "pending_review"},
+		"co_instructor":  {"instructor", "confirm_required", "confirm_required"},
+		"class_rep":      {"student", "autonomous", "denied"},
+		"enrolment_bot":  {"assistant", "autonomous", "denied"},
+		"plain_student":  {"student", "denied", "denied"},
+		"plain_observer": {"observer", "denied", "denied"},
+	}
+	for name, p := range deptPresets {
+		exec(`INSERT INTO permission_preset (dept_id, name, role, student_scope, assignment_scope, perm_member_manage)
+			VALUES ('00000000-0000-0000-0000-000000000003', $1, $2, 'all', 'all', $3)`, name, p[0], p[1])
+	}
+	if err := m.Steps(1); err != nil {
+		t.Fatalf("up to 0013: %v", err)
+	}
+
+	invite := func(sql string, args ...any) string {
+		t.Helper()
+		var l string
+		if err := pool.QueryRow(ctx, sql, args...).Scan(&l); err != nil {
+			t.Fatal(err)
+		}
+		return l
+	}
+	for i, s := range seats {
+		if got := invite(`SELECT perm_member_invite::text FROM course_member WHERE id = $1`, seatID(10+i)); got != s.want {
+			t.Errorf("a %s %s's %s seat managing members at %s: member_invite %s, want %s", s.kind, s.role, s.status, s.manage, got, s.want)
+		}
+	}
+	for name := range presets {
+		want := "denied"
+		if name == "instructor" {
+			want = "autonomous"
+		}
+		if got := invite(`SELECT perm_member_invite::text FROM permission_preset WHERE dept_id IS NULL AND name = $1`, name); got != want {
+			t.Errorf("the built-in %s: member_invite %s, want %s", name, got, want)
+		}
+	}
+	for name, p := range deptPresets {
+		if got := invite(`SELECT perm_member_invite::text FROM permission_preset WHERE dept_id IS NOT NULL AND name = $1`, name); got != p[2] {
+			t.Errorf("a department's %s (%s, member_manage %s): member_invite %s, want %s", name, p[0], p[1], got, p[2])
+		}
+	}
+
+	if err := m.Steps(-1); err != nil {
+		t.Fatalf("down from 0013: %v", err)
+	}
+	var left int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM information_schema.columns
+		WHERE table_schema = 'public' AND column_name = 'perm_member_invite'`).Scan(&left); err != nil || left != 0 {
+		t.Fatalf("down from 0013 left %d columns (%v)", left, err)
+	}
+	if got := invite(`SELECT perm_member_manage::text FROM course_member WHERE id = $1`, seatID(10)); got != "autonomous" {
+		t.Fatalf("down from 0013 changed a seat: member_manage %s", got)
+	}
+	if err := m.Up(); err != nil {
+		t.Fatalf("up again: %v", err)
+	}
+}

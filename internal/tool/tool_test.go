@@ -195,18 +195,19 @@ func TestDefineTakesTheAdminGateAlone(t *testing.T) {
 
 func TestRegistry(t *testing.T) {
 	r := tool.NewRegistry()
-	a, b := valid(), valid()
+	a, b, c := valid(), valid(), valid()
 	b.Name, b.Internal = "thing.sweep", true
-	r.Register(tool.Define(a), tool.Define(b))
+	c.Name, c.Unlisted = "thing.join", true
+	r.Register(tool.Define(a), tool.Define(b), tool.Define(c))
 
 	if _, ok := r.Get("thing.do"); !ok {
 		t.Fatal("registered tool not found")
 	}
-	if got := len(r.All()); got != 2 {
+	if got := len(r.All()); got != 3 {
 		t.Fatalf("All() = %d tools", got)
 	}
 	if ex := r.Exposed(); len(ex) != 1 || ex[0].Name != "thing.do" {
-		t.Fatalf("Exposed() = %v; internal tools must not be offered", ex)
+		t.Fatalf("Exposed() = %v; internal and unlisted tools must not be offered", ex)
 	}
 	defer func() {
 		if recover() == nil {
@@ -214,4 +215,27 @@ func TestRegistry(t *testing.T) {
 		}
 	}()
 	r.Register(tool.Define(a))
+}
+
+// An unlisted tool is called by a handler of this server, at an endpoint of
+// its own: it is no internal tool, which only the sweeps call, and it has no
+// route of its own in the catalogue.
+func TestDefineKeepsUnlistedToolsOffTheCatalogue(t *testing.T) {
+	cases := map[string]func(*tool.Spec[in, out]){
+		"internal as well": func(s *tool.Spec[in, out]) { s.Internal = true },
+		"with a route":     func(s *tool.Spec[in, out]) { s.HTTP = tool.Route{Method: "POST", Pattern: "/v1/things"} },
+	}
+	for name, breakIt := range cases {
+		t.Run(name, func(t *testing.T) {
+			defer func() {
+				if r := recover(); r == nil || !strings.Contains(r.(string), "Unlisted") {
+					t.Fatalf("Define: %v", r)
+				}
+			}()
+			s := valid()
+			s.Unlisted = true
+			breakIt(&s)
+			tool.Define(s)
+		})
+	}
 }

@@ -19,7 +19,8 @@ func TestFromEnv(t *testing.T) {
 			t.Fatal(err)
 		}
 		if c.DatabaseURL == "" || c.HTTPAddr != ":8080" || c.ProposalTTL != 14*24*time.Hour || c.SessionTTL != 12*time.Hour || c.InsecureCookies ||
-			!c.AgentSelfService || c.AgentMaxPerOwner != 5 {
+			!c.AgentSelfService || c.AgentMaxPerOwner != 5 || !c.JoinLinkRegistration || c.JoinRegistrationsPerMinute != 60 ||
+			c.SignInsPerMinute != 10 {
 			t.Fatalf("defaults: %+v", c)
 		}
 		// Memory stays off until what forgets it on time is in place; its
@@ -37,6 +38,8 @@ func TestFromEnv(t *testing.T) {
 		t.Setenv("INSECURE_COOKIES", "true")
 		t.Setenv("AGENT_SELF_SERVICE", "off")
 		t.Setenv("AGENT_MAX_PER_OWNER", "2")
+		t.Setenv("JOIN_LINK_REGISTRATION", "off")
+		t.Setenv("JOIN_REGISTRATIONS_PER_MINUTE", "5")
 		t.Setenv("MEMORY", "on")
 		t.Setenv("MEMORY_MAX_OWNER", "10")
 		t.Setenv("MEMORY_MAX_ASKER", "11")
@@ -50,7 +53,7 @@ func TestFromEnv(t *testing.T) {
 			t.Fatal(err)
 		}
 		if c.ProposalTTL != 48*time.Hour || c.SessionTTL != 30*time.Minute || !c.InsecureCookies ||
-			c.AgentSelfService || c.AgentMaxPerOwner != 2 ||
+			c.AgentSelfService || c.AgentMaxPerOwner != 2 || c.JoinLinkRegistration || c.JoinRegistrationsPerMinute != 5 ||
 			len(c.TrustedOrigins) != 2 || c.TrustedOrigins[1] != "http://localhost:5173" {
 			t.Fatalf("%+v", c)
 		}
@@ -61,7 +64,8 @@ func TestFromEnv(t *testing.T) {
 	})
 	for key, bad := range map[string]string{"PROPOSAL_TTL": "two weeks", "SESSION_TTL": "-1h", "INSECURE_COOKIES": "maybe",
 		"AGENT_SELF_SERVICE": "yes", "AGENT_MAX_PER_OWNER": "0", "MEMORY": "true", "MEMORY_MAX_ASKER": "0",
-		"MEMORY_WRITES_PER_DAY": "many", "MEMORY_MAX_PER_AGENT": "-5"} {
+		"MEMORY_WRITES_PER_DAY": "many", "MEMORY_MAX_PER_AGENT": "-5", "JOIN_LINK_REGISTRATION": "no",
+		"JOIN_REGISTRATIONS_PER_MINUTE": "-1"} {
 		t.Run("rejects "+key+"="+bad, func(t *testing.T) {
 			t.Setenv(key, bad)
 			if _, err := FromEnv(); err == nil {

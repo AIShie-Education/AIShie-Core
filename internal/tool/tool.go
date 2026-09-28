@@ -171,6 +171,13 @@ type Spec[In, Out any] struct {
 	// Internal tools are called only by the system actor's background jobs
 	// and are exposed by neither adapter.
 	Internal bool
+	// Unlisted tools are exposed by neither adapter either, and have no route
+	// of their own: a handler of this server calls them, for a caller it has
+	// authenticated, with Pipeline.InvokeUnlisted. They are gated like any
+	// other tool, and recorded like any other. Joining a course by a link is
+	// the case: a person's, in a browser, at an endpoint of its own, and no
+	// agent's tool.
+	Unlisted bool
 	// OnArchived lets a Write act on an archived course. Nothing may, except
 	// what changes whether it is archived.
 	OnArchived bool
@@ -211,6 +218,7 @@ type Tool struct {
 	Gate        Gate
 	HTTP        Route
 	Internal    bool
+	Unlisted    bool
 	OnArchived  bool
 	SecretIn    []string
 	SecretOut   []string
@@ -288,6 +296,9 @@ func Define[In, Out any](s Spec[In, Out]) Tool {
 	if gates != 1 && !s.Internal {
 		fail("exactly one of Gate.Perms, Gate.Platform, Gate.Admin and Gate.Self must be set")
 	}
+	if s.Unlisted && (s.Internal || s.HTTP.Pattern != "") {
+		fail("an Unlisted tool is not Internal, and has no route of its own")
+	}
 	for _, p := range s.Gate.Perms {
 		if !p.Valid() {
 			fail("unknown permission %q", p)
@@ -333,7 +344,7 @@ func Define[In, Out any](s Spec[In, Out]) Tool {
 
 	t := Tool{
 		Name: s.Name, Description: s.Description, Kind: s.Kind, Gate: s.Gate, HTTP: s.HTTP,
-		Internal: s.Internal, OnArchived: s.OnArchived, SecretIn: s.SecretIn, SecretOut: s.SecretOut,
+		Internal: s.Internal, Unlisted: s.Unlisted, OnArchived: s.OnArchived, SecretIn: s.SecretIn, SecretOut: s.SecretOut,
 		InputSchema: inSchema, OutputSchema: outSchema,
 	}
 	t.Decode = func(raw []byte) (any, error) {

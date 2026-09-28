@@ -128,12 +128,12 @@ func (w *World) Member(course, actor uuid.UUID, preset string, opts ...MemberOpt
 			perm_document_read, perm_document_read_draft, perm_document_write, perm_rubric_read,
 			perm_assignment_write, perm_submission_read, perm_submission_write, perm_grade_read,
 			perm_grade_submit, perm_grade_post, perm_member_read, perm_member_manage, perm_action_decide,
-			perm_agent_delegate, perm_conversation_ask, perm_conversation_answer)
+			perm_agent_delegate, perm_conversation_ask, perm_conversation_answer, perm_member_invite)
 		SELECT $1, $2, $3, p.role, p.id, $4, p.student_scope, p.assignment_scope,
 			p.perm_document_read, p.perm_document_read_draft, p.perm_document_write, p.perm_rubric_read,
 			p.perm_assignment_write, p.perm_submission_read, p.perm_submission_write, p.perm_grade_read,
 			p.perm_grade_submit, p.perm_grade_post, p.perm_member_read, p.perm_member_manage, p.perm_action_decide,
-			p.perm_agent_delegate, p.perm_conversation_ask, p.perm_conversation_answer
+			p.perm_agent_delegate, p.perm_conversation_ask, p.perm_conversation_answer, p.perm_member_invite
 		FROM permission_preset p WHERE p.name = $5 AND p.dept_id IS NULL`,
 		id, course, actor, w.Root, preset)
 
@@ -171,12 +171,12 @@ func (w *World) Delegate(course, agent, principal uuid.UUID, preset string, opts
 			perm_document_read, perm_document_read_draft, perm_document_write, perm_rubric_read,
 			perm_assignment_write, perm_submission_read, perm_submission_write, perm_grade_read,
 			perm_grade_submit, perm_grade_post, perm_member_read, perm_member_manage, perm_action_decide,
-			perm_agent_delegate, perm_conversation_ask, perm_conversation_answer, principal_member_id)
+			perm_agent_delegate, perm_conversation_ask, perm_conversation_answer, perm_member_invite, principal_member_id)
 		SELECT $1, $2, $3, p.role, p.id, $4, p.student_scope, p.assignment_scope,
 			p.perm_document_read, p.perm_document_read_draft, p.perm_document_write, p.perm_rubric_read,
 			p.perm_assignment_write, p.perm_submission_read, p.perm_submission_write, p.perm_grade_read,
 			p.perm_grade_submit, p.perm_grade_post, p.perm_member_read, p.perm_member_manage, p.perm_action_decide,
-			p.perm_agent_delegate, p.perm_conversation_ask, p.perm_conversation_answer, $6
+			p.perm_agent_delegate, p.perm_conversation_ask, p.perm_conversation_answer, p.perm_member_invite, $6
 		FROM permission_preset p WHERE p.name = $5 AND p.dept_id IS NULL`,
 		id, course, agent, w.Root, preset, principal)
 	for _, o := range opts {

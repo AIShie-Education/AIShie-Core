@@ -385,6 +385,11 @@ type seating struct {
 	// says it answers the course, not its principal alone.
 	principal     *uuid.UUID
 	answersCourse bool
+	// joinLinkID is set for a seat a person takes through a join link
+	// (course.join), and addedBy then is whoever made the link, whose
+	// authority it is; otherwise the seat is added by whoever makes the call.
+	joinLinkID *uuid.UUID
+	addedBy    *uuid.UUID
 }
 
 // listsItself reports whether the seat's student list will be the seat
@@ -473,8 +478,12 @@ func seat(ctx context.Context, ec *tool.ExecCtx, s seating) (uuid.UUID, error) {
 	}
 
 	id := ids.New()
+	addedBy := ec.Actor.ID
+	if s.addedBy != nil {
+		addedBy = *s.addedBy
+	}
 	row := dbq.InsertMemberParams{
-		ID: id, CourseID: s.courseID, ActorID: s.actorID, Role: s.role, AddedByActorID: ec.Actor.ID,
+		ID: id, CourseID: s.courseID, ActorID: s.actorID, Role: s.role, AddedByActorID: addedBy,
 		ExpiresAt: s.expiresAt, StudentScope: s.studentScope, AssignmentScope: s.assignmentScope,
 		PermDocumentRead: s.perms.col(domain.PermDocumentRead), PermDocumentReadDraft: s.perms.col(domain.PermDocumentReadDraft),
 		PermDocumentWrite: s.perms.col(domain.PermDocumentWrite), PermRubricRead: s.perms.col(domain.PermRubricRead),
@@ -484,7 +493,8 @@ func seat(ctx context.Context, ec *tool.ExecCtx, s seating) (uuid.UUID, error) {
 		PermMemberRead: s.perms.col(domain.PermMemberRead), PermMemberManage: s.perms.col(domain.PermMemberManage),
 		PermActionDecide: s.perms.col(domain.PermActionDecide), PermAgentDelegate: s.perms.col(domain.PermAgentDelegate),
 		PermConversationAsk: s.perms.col(domain.PermConversationAsk), PermConversationAnswer: s.perms.col(domain.PermConversationAnswer),
-		CreatedAt: ec.Now, PrincipalMemberID: s.principal, AnswersCourse: s.answersCourse,
+		PermMemberInvite: s.perms.col(domain.PermMemberInvite), CreatedAt: ec.Now, PrincipalMemberID: s.principal,
+		AnswersCourse: s.answersCourse, JoinLinkID: s.joinLinkID,
 	}
 	if s.preset != nil {
 		row.PresetID = &s.preset.ID
@@ -506,6 +516,9 @@ func seat(ctx context.Context, ec *tool.ExecCtx, s seating) (uuid.UUID, error) {
 	payload := map[string]any{"actor_id": s.actorID, "role": s.role}
 	if s.principal != nil {
 		payload["delegate"], payload["principal_member_id"], payload["answers_course"] = true, *s.principal, s.answersCourse
+	}
+	if s.joinLinkID != nil {
+		payload["via"], payload["join_link_id"] = "join_link", *s.joinLinkID
 	}
 	ec.Emit(events.Event{
 		Type: members.EventAdded, CourseID: &s.courseID, SubjectType: "course_member", SubjectID: &id, Payload: payload,

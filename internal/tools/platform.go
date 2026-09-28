@@ -142,6 +142,7 @@ type ActorView struct {
 	Kind             string     `json:"kind"`
 	DisplayName      string     `json:"display_name"`
 	Email            *string    `json:"email,omitempty"`
+	EmailVerified    bool       `json:"email_verified" jsonschema:"false for a person who registered through a join link, whose email nobody has checked: Core sends no email; setting it with actor.update vouches for it"`
 	Status           string     `json:"status"`
 	PlatformRole     *string    `json:"platform_role,omitempty"`
 	CreatedByActorID *uuid.UUID `json:"created_by_actor_id,omitempty"`
@@ -160,7 +161,7 @@ type ActorView struct {
 }
 
 func viewActor(a dbq.GetActorViewRow) ActorView {
-	v := ActorView{ID: a.ID, Kind: a.Kind, DisplayName: a.DisplayName, Email: a.Email, Status: a.Status,
+	v := ActorView{ID: a.ID, Kind: a.Kind, DisplayName: a.DisplayName, Email: a.Email, EmailVerified: a.EmailVerified, Status: a.Status,
 		PlatformRole: a.PlatformRole, CreatedByActorID: a.CreatedByActorID, CreatedAt: a.CreatedAt,
 		HasPassword: a.HasPassword, HasSSO: a.HasSso, InviteExpiresAt: a.InviteExpiresAt,
 		OwnerActorID: a.OwnerActorID, OwnerName: a.OwnerName}
@@ -257,7 +258,8 @@ func actorUpdate() tool.Tool {
 		Name: "actor.update",
 		Description: "Correct an actor's display name or email, or give an email to a person registered without one, " +
 			"so that they can sign in with a password. What is left out stays as it is. A change of email " +
-			"withdraws an invitation waiting (actor.invite): it went to the old one.",
+			"withdraws an invitation waiting (actor.invite): it went to the old one. An email you set is one you vouch " +
+			"for: a person who registered through a join link has email_verified false, until you do.",
 		Kind: tool.Write, Gate: admins,
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/actors/{actor_id}"},
 		Resolve: func(ctx context.Context, q dbq.Querier, in ActorUpdateIn) (tool.Target, error) {
@@ -1105,7 +1107,7 @@ func presetCreate() tool.Tool {
 				PermMemberRead: ps.col(domain.PermMemberRead), PermMemberManage: ps.col(domain.PermMemberManage),
 				PermActionDecide: ps.col(domain.PermActionDecide), PermAgentDelegate: ps.col(domain.PermAgentDelegate),
 				PermConversationAsk: ps.col(domain.PermConversationAsk), PermConversationAnswer: ps.col(domain.PermConversationAnswer),
-				CreatedByActorID: &ec.Actor.ID, CreatedAt: ec.Now,
+				PermMemberInvite: ps.col(domain.PermMemberInvite), CreatedByActorID: &ec.Actor.ID, CreatedAt: ec.Now,
 			})
 		},
 	})
@@ -1147,6 +1149,7 @@ func presetUpdate() tool.Tool {
 				PermMemberRead: ps.col(domain.PermMemberRead), PermMemberManage: ps.col(domain.PermMemberManage),
 				PermActionDecide: ps.col(domain.PermActionDecide), PermAgentDelegate: ps.col(domain.PermAgentDelegate),
 				PermConversationAsk: ps.col(domain.PermConversationAsk), PermConversationAnswer: ps.col(domain.PermConversationAnswer),
+				PermMemberInvite: ps.col(domain.PermMemberInvite),
 			})
 			if err != nil {
 				return OK{}, err

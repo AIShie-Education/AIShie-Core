@@ -61,6 +61,25 @@ src/
     0010_department_admins.down.sql
                          drops the appointments and the capacity, and puts
                          every department back at the top
+    0011_site_chat.up.sql
+                         which credential of an agent's declared that it
+                         takes conversations in the site
+    0011_site_chat.down.sql
+                         drops it; the agents and their credentials stay
+    0012_join_links.up.sql
+                         a course's join links, each living ten minutes, as
+                         the hash of their tokens; the link a seat was taken
+                         through; whose email nobody but its person vouches
+                         for
+    0012_join_links.down.sql
+                         drops the links; the people who registered through
+                         them and their seats stay, as ordinary ones
+    0013_member_invite.up.sql
+                         the permission member_invite, which makes join
+                         links: a person's seat at its member_manage level,
+                         an agent's denied; presets by role
+    0013_member_invite.down.sql
+                         drops it from both tables
   seed/
     presets.sql          the eight built-in permission presets; safe to re-run
   tests/
@@ -148,8 +167,10 @@ the way down, a migration with files in `tests/down/` goes down over the data
 its `.before.sql` commits, and its `.after.sql` checks what became of it:
 0007 over a delegate with a proposal waiting and a token, 0008 over a
 conversation with an answer waiting, 0009 over a tutor's memory of a student
-and a proposal to the course's shared memory, and 0010 over a tree with an
-appointment in force and one ended.
+and a proposal to the course's shared memory, 0010 over a tree with an
+appointment in force and one ended, 0011 over an agent's site chat declared,
+0012 over join links, a person registered through one and seats taken
+through it, and 0013 over a seat and a preset that hand out links.
 
 ## What the database enforces
 

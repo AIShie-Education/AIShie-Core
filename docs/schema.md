@@ -31,6 +31,7 @@ Another section or another term is another row with its own members, work and gr
 ```
 course
  ├ course_member ── member_student_scope / member_assignment_scope
+ ├ course_join_link (a way in, as a student, for whoever holds its token)
  ├ grade_component (tree; root = course total)
  ├ document ── document_version
  ├ assignment ── submission
@@ -67,9 +68,10 @@ actor(id, kind [human|agent|system], display_name, email null,
       status [active|suspended], platform_role null [root|admin],
       created_by_actor_id null→actor, created_at,
       owner_actor_id null→actor, suspended_by_actor_id null→actor,
-      site_chat_credential_id null)
+      site_chat_credential_id null, email_verified = true)
     check: owner_actor_id ≠ id;  owner_actor_id set ⇒ kind = 'agent' and no platform_role;
-           site_chat_credential_id set ⇒ kind = 'agent'
+           site_chat_credential_id set ⇒ kind = 'agent';
+           not email_verified ⇒ kind = 'human' and email set
     composite FK (site_chat_credential_id, id) → credential(id, actor_id)
     trigger: the owner is a person (kind = 'human')
 
@@ -133,6 +135,17 @@ the composite key holds whose it is whichever row changes. Whether it is still l
 when it is needed and never kept here, so revoking the credential ends it with nothing to
 update. Migration 0011 adds it; the release before neither reads nor writes it.
 
+`email_verified` says whether anyone but the person vouches for their email. Core sends no
+email and checks none; an email an administrator gives (`actor.register`, `actor.invite_new`,
+`actor.update`) is one they vouch for, and so is every email from before migration 0012, which
+adds the column true for them. A person who registers through a join link (§2.2) types their
+own, and it is recorded false: nobody has checked that it is theirs. The CHECK reads `kind` to
+refuse, as the refusals of ownership do: only a person's email goes unverified, and only an
+email there is. An administrator who sets the email (`actor.update`) vouches for it, and it is
+true from then on. Nothing grants on it; it is there to be shown (`actor.get`, `actor.list`,
+`me.get`), so that an administrator knows an account whose email may be anyone's. The release
+before 0012 neither reads nor writes it, and a person it registers takes the default.
+
 `created_by_actor_id` is the delegation chain: root (seeded at install, the only null) creates
 admins, an admin creates a course and seats its first instructor, the instructor adds everyone
 else. A department's administrator may stand where the admin does, for the courses of their
@@ -178,7 +191,7 @@ revokes its tokens the same way (`agent.list_credentials`, `agent.revoke_credent
 permission_preset(id, dept_id null→department, name, description null,
                   role [student|instructor|ta|observer|assistant],
                   student_scope [all|listed], assignment_scope [all|listed],
-                  perm_<action> autonomy_level = 'denied'   ×16, identical to course_member
+                  perm_<action> autonomy_level = 'denied'   ×17, identical to course_member
                   created_by_actor_id null→actor, created_at)
 
     unique(name) where dept_id is null;  unique(dept_id, name) where dept_id is not null
@@ -188,12 +201,14 @@ course_member(id, course_id→course, actor_id→actor,
               status [active|paused|removed], preset_id null→permission_preset,
               added_by_actor_id→actor, expires_at null,
               student_scope [all|listed], assignment_scope [all|listed],
-              perm_<action> autonomy_level = 'denied'   ×16, see below
+              perm_<action> autonomy_level = 'denied'   ×17, see below
               created_at, principal_member_id null, answers_course = false,
+              join_link_id null,
               unique(course_id, id))
 
     unique(course_id, actor_id) where status <> 'removed'
     composite FK (course_id, principal_member_id) → course_member(course_id, id)
+    composite FK (course_id, join_link_id) → course_join_link(course_id, id)
     check: principal_member_id ≠ id;  answers_course ⇒ principal_member_id set
     trigger, for a row not removed: principal set ⇔ the actor has an owner; the principal is
              the owner's seat; a principal has no principal
@@ -203,6 +218,18 @@ member_student_scope(member_id→course_member, student_member_id→course_membe
 
 member_assignment_scope(member_id→course_member, assignment_id→assignment,
                         pk(member_id, assignment_id))
+
+course_join_link(id, course_id→course, token_prefix, secret_hash, role [student],
+                 preset_id→permission_preset, created_by_member_id, expires_at,
+                 max_uses null, uses = 0, allowed_email_domains text[] null,
+                 revoked_at null, revoked_by_member_id null, created_at,
+                 unique(token_prefix), unique(course_id, id))
+    composite FKs (course_id, created_by_member_id | revoked_by_member_id)
+                  → course_member(course_id, id)
+    check: secret_hash is a SHA-256 ('sha256:' and 64 hex digits), never the token;
+           expires_at = created_at + 10 minutes, always;  max_uses > 0;
+           0 ≤ uses ≤ max_uses;  revoked_at set ⇔ revoked_by_member_id set;
+           allowed_email_domains null, or 1..20 of them, none null
 ```
 
 One row per (actor, course). A person who is instructor in CS101 and TA in CS205 has two rows;
@@ -232,11 +259,12 @@ teaching assistant. Role is not read by authorization.
 | `perm_agent_delegate` | bringing an agent one owns into the course as one's delegate: `confirm_required` is a request an instructor approves | |
 | `perm_conversation_ask` | opening conversations, and writing in those one opened | |
 | `perm_conversation_answer` | being addressed, and answering; the level is the autonomy of the answers | |
+| `perm_member_invite` | making the course's join links, which seat whoever holds one as a student (§2.2, Join links), and listing and revoking them | |
 
 Columns rather than rows because the action-type list lives in code anyway: adding one is a
 deploy, and a migration alongside it is no extra ceremony. The column list is the catalogue.
 
-Sixteen columns do not name every operation. Where a tool has no column of its own it borrows
+Seventeen columns do not name every operation. Where a tool has no column of its own it borrows
 the nearest one, and the choice is recorded here so that it is a decision and not an accident:
 
 | Operation | Gated by | Why |
@@ -290,6 +318,21 @@ observer given `member_manage`, a TA given it — got its role's levels as well,
 grants no preset that carries more (`student` carries `agent_delegate` and `conversation_ask`;
 `tutor`, `conversation_answer`) until an instructor raises its own.
 
+`member_invite` (migration 0013) is not `member_manage`: a manager seats whoever they name, and a
+join link seats whoever holds it, unseen — a room scanning a QR code — which is a decision of its
+own. The migration gave it, once, to every seat held by a person, not removed, at that seat's
+level of `member_manage`: whoever seated students one by one may seat them by a link, as freely,
+and nobody gained a way into a course or lost one. A seat held by an agent, delegate or not,
+got `denied` whatever it manages: an agent hands out links only once someone who manages the
+members gives it `member_invite`, and a delegate's is capped by its principal's as every level
+is. That read `actor.kind`, once, in a migration; authorization never does. Presets are
+decided by their role, since they carry no actor: `student` and `assistant` presets — every
+built-in an agent is seated with (`tutor`, `grader`, `delegate`, `course_tutor`), and a
+department's own for agents — `denied`; any other its `member_manage` level, which for the
+built-ins leaves `instructor` autonomous and the rest `denied`, as the seed makes them. An agent
+that manages members and seats others with a preset that now carries `member_invite` (the
+built-in `instructor`) names `member_invite` denied when it does, or is given it first.
+
 **Scope is explicit and fails closed.** `student_scope = 'listed'` with no rows in
 `member_student_scope` means *no* students, so forgetting the rows cannot grant the class.
 A student is `listed` with a single row pointing at itself; there is no self-access special
@@ -306,11 +349,17 @@ granter's own list, no life past the granter's own `expires_at`. A student's sea
 student, as any seat reaches whoever is on its list, so a list-scoped granter raises nothing on
 a seat that reaches a student outside the list, and seats no new student whose list is
 themselves: nobody can have listed them yet. A change that widens a delegate's seat is held to
-its principal's seat as well, the same three ways, and never gives `member_manage` or
-`agent_delegate`. Narrowing is always allowed, whatever the granter holds. Nobody manages their
-own seat, nor the seat they are a delegate of, and a seat whose `expires_at` has
-passed is as good as removed whether or not the sweep has got to it: it is not revived, and
-seating the actor again is a fresh row.
+its principal's seat as well, the same three ways, and never gives `agent_delegate`. A granter
+who is a delegate grants within what it holds, which is within its principal's: its levels as
+`authorize()` caps them, its principal's list as well as its own — its row, which nothing
+narrows with its principal's, may say the whole class — and its principal's `expires_at` as well
+as its own. One exception: it holds no `agent_delegate`, never bringing agents of its own, but a
+student it seats may still ask to bring theirs, as the `student` preset says, which is its
+principal's to give, and so it gives `agent_delegate` up to its principal's level. Narrowing is
+always allowed, whatever the granter holds. Nobody manages their own seat; a delegate manages
+neither its principal's seat nor its principal's other agents' (`not_your_principal`, below); and
+a seat whose `expires_at` has passed is as good as removed whether or not the sweep has got to
+it: it is not revived, and seating the actor again is a fresh row.
 
 **Delegates.** A delegate's seat is an owned agent's (§2.1), and its principal is its owner's
 seat. A delegate never holds more than its principal, and `authorize()` makes it so on every
@@ -319,21 +368,45 @@ narrows a principal without touching its delegates — and which a manager may h
 
 - its level for each permission is the lower of its own and its principal's, except that
   `conversation_answer` is capped by the principal's `conversation_ask` (your agent answering
-  you is you asking, at one remove), and `member_manage` and `agent_delegate` are denied to it
-  whatever its row says: it does not manage the course or bring agents of its own;
+  you is you asking, at one remove), and `agent_delegate` is denied to it whatever its row
+  says: it brings no agents of its own;
+- the agent of someone who does not manage the course's members — a student's — does only by
+  proposal what the built-in `delegate` preset does not give: for each permission that preset
+  gives at a lower level than the principal holds, its level is `confirm_required` at most
+  (`domain.DelegateCap`, which knows the preset's levels as the seed makes them, and a test holds
+  the two together). A student's agent reads her work and the material, and may be given her
+  own writes — drafting her submission, asking questions for her — each of which then waits for
+  confirmation before it is carried out. `member_manage` and `member_invite` keep the rules
+  above: such a principal has no `member_manage`, and a join link is made by no proposal;
 - it reaches only what its own scope and its principal's both reach, in `authorize()` and in
   every list, which filters by both in SQL;
 - it counts only while its principal's seat is live, its owner active, and its principal still
   its owner's seat: paused with its principal, gone with it, and nothing once the agent changes
   hands. An owned agent's seat with no principal counts for nothing either.
 
+A delegate may be given `member_manage` — seat, change, pause, resume, rescope and remove
+members — and `member_invite`, as far as its principal holds them, by its owner when it is
+brought in or by anyone who manages the members afterwards: an instructor's agent can then
+enrol the class. It manages the members for its principal, and so never its principal's own
+seat — which caps its own, so that pausing, narrowing or removing it would unmake the authority
+it acts with — nor the seat of another delegate of the same principal: an agent does not
+reshape its owner's other agents, which only the owner brings in and answers for. Every tool
+that acts on one seat refuses those two (`failed`, `forbidden`, reason `not_your_principal`),
+before either is locked; `member.update_perms_bulk` refuses whole when the role asked for takes
+in either. Core holds this itself, since an agent calling over MCP has no runtime of ours between
+it and the tools. A principal who holds less `member_manage` narrows the delegate's at once, as
+any level. Whether a delegate answers the course (`answers_course`, below) still follows its
+principal's `member_manage`, never its own.
+
 The owner brings the agent in with `member.add_delegate`, gated by `perm_agent_delegate`, so
 that a student's request waits for an instructor. The seat is worked out from the owner's own:
 the preset's levels (`delegate` unless another is named) are each cut down to what the owner
-holds, `member_manage` and `agent_delegate` denied; a level named in the call above the owner's
-is refused, not cut down. Without `member_manage`, the seat holds no more than the built-in
-`delegate` preset gives: a student's agent reads, and an instructor may widen it later within its
-principal. A listed scope defaults to the owner's own list, or to nobody when the owner reaches
+holds, `agent_delegate` denied, and `member_manage` and `member_invite` denied whatever the preset
+carries: an agent manages members or hands out join links only when the call names it; a level
+named in the call above the owner's is refused, not cut down, and so, for an owner without
+`member_manage`, is a level above `confirm_required` where the built-in `delegate` preset gives
+less: a student seating her agent with the `student` preset gives it her writes at
+`confirm_required`, and nobody raises them further, whoever grants. A listed scope defaults to the owner's own list, or to nobody when the owner reaches
 the whole class; a list named must be within the owner's; a preset that reaches everything is
 narrowed to the owner's list when the owner has one. It ends when the owner's seat does, or
 earlier if asked. It answers its owner alone unless its seat *answers the course*
@@ -366,6 +439,61 @@ seats there are; a seat added later takes its preset's levels, so it is not a st
 of the course: repeat it, give the levels to `member.add`, or use a department preset. Choosing seats
 by role is what the manager asked for, as `member.list` filters by it; it is not
 authorization.
+
+**Join links.** A student comes in by a link too: an instructor shows one in class, typically as
+a QR code, and whoever opens it is seated as a student there and then. Whoever holds
+`member_invite` makes one (`course.join_link_create {course_id, max_uses?,
+allowed_email_domains?}`), and is given its token once, `aisjoin_<prefix>_<secret>`, made like an
+API token: `course_join_link` keeps the prefix, which finds the row, and the secret's SHA-256,
+compared in constant time, never the token; a replay of the call comes back without it, and it
+is in no action, result, event or log line. The front end puts it in its own join page's URL.
+
+- **Every link lives ten minutes** (`JoinLinkLifetime` in `internal/tools/joinlink.go`): its
+  `expires_at` is its `created_at` and ten minutes, whoever makes it, and nobody chooses another;
+  the CHECK `course_join_link_lives_ten_minutes` holds the same, so that a longer life is a
+  decision made in a migration. Long enough for a room to scan it; too short for a photograph of
+  the screen, passed around afterwards, to be a way in. The next class gets a new link.
+- It seats up to `max_uses` people (1..10,000; any number while it lives if not given), each
+  join counting one use, under the link's row lock, and the CHECK beneath the count holds it to
+  the limit whatever the application does; and only people whose email is at one of
+  `allowed_email_domains` (1..20 of them, exactly, lower-case: `example.edu` does not take
+  `mail.example.edu`), if given. Core checks no email, so a domain keeps out whoever gives
+  another, not whoever claims one of these.
+- It seats a student (`role`, held by a CHECK) with the course's `student` preset as
+  `member.add` finds it when the link is made, and with its maker's authority: the preset must be
+  within what the maker may grant (`withinGranter`) when the link is made and again at every
+  join, and the maker's seat must be live, their actor active and their `member_invite` at
+  `pending_review` or `autonomous` (a proposal would put the seat before someone to decide,
+  and a link seats at once). Once any of that stops holding, the link seats nobody
+  (`creator_lost_authority`), until it expires. A delegate's link is its principal's as well:
+  capped by its principal's `member_invite`, reach and life. The seat is added by the maker
+  (`added_by_actor_id`), names the link (`course_member.join_link_id`), and ends when the maker's
+  seat does, or its principal's if sooner.
+- A link is not made by proposal (`not_by_proposal`): its token is shown once, to whoever the
+  call returns to, and approving it would show it to whoever approved it, ten minutes from then.
+- `course.join_link_list` (gated by `member_invite`, newest first) says each link's `status` —
+  `live`, `expired`, `used_up` or `revoked`, what the link says of itself — whether it seats
+  anyone now (`joinable`) and why not (`reason`: those, or `course_archived` or
+  `creator_lost_authority`), its `expires_at`, `max_uses`, `uses`, domains, and who made and
+  revoked it; never a token. `member.list` with `join_link_id` says who came in through one.
+  `course.join_link_revoke` stops a link at once, whoever made it, and records who revoked it;
+  those who joined through it keep their seats. An archived course's links seat nobody.
+- Joining (`course.join`, a tool neither the REST catalogue nor MCP offers: only the join
+  endpoints call it, for a person signed in) is a write like any other, made
+  as the person joining, recorded, replayed by its key, and refused on an archived course. It
+  seats people only: an agent is refused (`people_only`), as is a suspended person
+  (`actor_not_active`), and an email at no domain the link takes (`email_domain_not_allowed`).
+  Someone with a live seat already is answered with that seat as it is (`already_member`), paused
+  or not: no use is counted, nothing resumed. A removed or expired seat is as if there were none,
+  and the join is a fresh seat. It emits `member.added`, its payload saying `via: join_link` and
+  the link's id; `course.join_link_created` and `course.join_link_revoked` are for whoever holds
+  `member_invite` or `member_manage`.
+- Someone with no account registers through a live link, and only so: there is no open sign-up.
+  They give a display name, an email and a password (the rules for any password); the person is
+  made, their password set, the join made as theirs and a session started, in one transaction,
+  or none of it is. Their email is recorded unverified (`email_verified`, §2.1), and the person is
+  created by the link's maker. An email registered already is refused (`email_taken`), telling
+  them to sign in and open the link again; nothing of the account that has it is read or touched.
 
 ### 2.3 Grading scheme
 
@@ -1101,7 +1229,7 @@ authorize(actor, course, action_type, target) → autonomy_level
    still the actor's owner; else denied (an owned actor's seat with no principal: denied)
 3. level = member.perm_<action_type>; 'denied' → denied
    a delegate: the lower of its level and its principal's (conversation_answer: the
-   principal's conversation_ask); member_manage and agent_delegate: denied
+   principal's conversation_ask); agent_delegate: denied
 4. if the target belongs to a student:
       member.student_scope = 'all', or that student ∈ member_student_scope; else denied
       a delegate: its principal's likewise
@@ -1180,6 +1308,8 @@ that reads which credential the call came with.
 | A seat that is not removed has a principal exactly when its actor has an owner; the principal is the owner's seat, in the same course, and nobody's delegate | composite FK and trigger `course_member_principal_valid` on `course_member` |
 | A delegate's seat is removed with its principal's, whichever release removes it | trigger `course_member_delegates_follow` |
 | Only a delegate's seat answers the course | CHECK `course_member_answers_course_is_delegate` |
+| A join link keeps a hash of its token, never the token; it expires ten minutes after it is made, never later or sooner; it is used no more times than its limit; a revocation says who made it; its maker, its revoker and the seats taken through it are of its course | CHECKs, `unique(token_prefix)` and composite FKs on `course_join_link`; composite FK `course_member_join_link_fk` |
+| Only a person's email goes unverified, and only an email there is | CHECK `actor_unverified_email_is_a_persons` |
 | A conversation's two participants are two seats of its course, and never change; a closed conversation stays closed; none is deleted | composite FKs, CHECKs and trigger `conversation_guarded` on `conversation` |
 | Only a conversation's participants write in it, only while it is open; a reply is the respondent's, to a message of the opener's in the same conversation | trigger `conversation_message_author_valid`, composite FKs on `conversation_message` |
 | A message and its retraction are in their conversation's course; one message at each `seq`; a message is retracted once | composite FKs, `unique(conversation_id, seq)`, primary key on `conversation_message_retraction` |
@@ -1276,19 +1406,33 @@ that reads which credential the call came with.
   and a failure stored under it would stand for the sweep: every sweep after would replay that
   failure or pass the thing over, and never sweep it.
 - A delegate holds no more than its principal (§2.2, Delegates): its levels capped by the
-  principal's (`conversation_answer` by its `conversation_ask`), never `member_manage` or
-  `agent_delegate`; its reach its own and its principal's both, in `authorize()` and in every list,
+  principal's (`conversation_answer` by its `conversation_ask`), never `agent_delegate`; its
+  reach its own and its principal's both, in `authorize()` and in every list,
   in SQL; live only while its principal is live, its owner active and still its owner. The rows
   are not trusted to say so: the release before 0007 narrows a principal without touching its
   delegates.
 - Seating a delegate (`member.add_delegate`): the seat worked out from the owner's own, levels
-  cut down to it, a level or reach named beyond it refused, no more than the `delegate` preset
-  without `member_manage`, no life past the owner's; the same worked out again on approval, and
+  cut down to it, a level or reach named beyond it refused, beyond the `delegate` preset nothing
+  above `confirm_required` without `member_manage`, no life past the owner's; the same worked out
+  again on approval, and
   refused if the owner no longer holds it. Only the owner seats their agent, and only as their
   delegate: `member.add` and `course.seat_instructor` refuse an owned agent.
 - A change that widens a delegate's seat is within its principal's as well as the granter's.
-  Nobody manages the seat they are a delegate of: a delegate never holds `member_manage`
-  (`domain.Member.Perm`).
+  A granter who is a delegate grants within its principal's reach and life as well as its own
+  (`withinGranter`, `outlastsGranter`), and `agent_delegate` up to its principal's level
+  (`grantable`).
+- A delegate that manages members acts on neither its principal's seat nor another delegate of
+  the same principal (`tools.notYourPrincipals`, reason `not_your_principal`), in every tool that
+  acts on one seat and in `member.update_perms_bulk`, which refuses whole; and holds
+  `member_manage` and `member_invite` only when the call that seats it, or a change afterwards,
+  names them, never from its preset.
+- A join link (§2.2, Join links) seats with its maker's authority, asked again at every join
+  under the link's lock with the maker's seat held KEY SHARE: `member_invite` at
+  `pending_review` or above, the student preset within what they may grant, their seat live and
+  their actor active; otherwise it seats nobody (`creator_lost_authority`). A token is looked up
+  by its prefix and compared with the kept hash in constant time, and every way it can be wrong is
+  the same `not_found`. Only a person joins; one seated already is answered with that seat and
+  counts no use; a registration through a link and its join are one transaction.
 - Removing a seat cancels its delegates' proposals and closes their conversations with its own;
   the database removes the delegates' seats with it (trigger `course_member_delegates_follow`).
   The order is the principal FOR UPDATE, then its delegates' rows, only updated, then the

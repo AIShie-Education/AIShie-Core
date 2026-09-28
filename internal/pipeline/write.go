@@ -22,15 +22,23 @@ import (
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/tool"
 )
 
-func (p *Pipeline) invokeWrite(ctx context.Context, caller Caller, t tool.Tool, in any, rawArgs []byte, key string) (Outcome, error) {
+// checkKey refuses an idempotency key the action log cannot take.
+func checkKey(t tool.Tool, key string) error {
 	switch {
 	case key == "":
-		return Outcome{}, apperr.Invalid("%s changes state, so it needs an idempotency key", t.Name)
+		return apperr.Invalid("%s changes state, so it needs an idempotency key", t.Name)
 	case !utf8.ValidString(key) || strings.ContainsRune(key, 0):
 		// The database cannot hold it, and would say so as a fault of ours.
-		return Outcome{}, apperr.Invalid("the idempotency key must be UTF-8 text without U+0000")
+		return apperr.Invalid("the idempotency key must be UTF-8 text without U+0000")
 	case utf8.RuneCountInString(key) > MaxIdempotencyKeyLen:
-		return Outcome{}, apperr.Invalid("the idempotency key is longer than %d characters", MaxIdempotencyKeyLen)
+		return apperr.Invalid("the idempotency key is longer than %d characters", MaxIdempotencyKeyLen)
+	}
+	return nil
+}
+
+func (p *Pipeline) invokeWrite(ctx context.Context, caller Caller, t tool.Tool, in any, rawArgs []byte, key string) (Outcome, error) {
+	if err := checkKey(t, key); err != nil {
+		return Outcome{}, err
 	}
 	canonical, hash, err := p.payload(t, rawArgs)
 	if err != nil {
