@@ -50,7 +50,7 @@ func (q *Queries) DocumentInUseByPublishedAssignment(ctx context.Context, arg Do
 
 const getDocumentWithOwner = `-- name: GetDocumentWithOwner :one
 SELECT d.id, d.course_id, d.kind, d.title, d.submission_id, d.grade_id, d.published_version_id,
-       d.sort_order, d.status, d.created_at,
+       d.sort_order, d.status, d.created_at, d.purged_at, d.purged_by_actor_id, d.purge_reason,
        s.student_member_id  AS submission_student,
        s.assignment_id      AS submission_assignment,
        g.student_member_id  AS grade_student,
@@ -80,6 +80,9 @@ type GetDocumentWithOwnerRow struct {
 	SortOrder            int32
 	Status               string
 	CreatedAt            time.Time
+	PurgedAt             *time.Time
+	PurgedByActorID      *uuid.UUID
+	PurgeReason          *string
 	SubmissionStudent    *uuid.UUID
 	SubmissionAssignment *uuid.UUID
 	GradeStudent         *uuid.UUID
@@ -104,6 +107,9 @@ func (q *Queries) GetDocumentWithOwner(ctx context.Context, arg GetDocumentWithO
 		&i.SortOrder,
 		&i.Status,
 		&i.CreatedAt,
+		&i.PurgedAt,
+		&i.PurgedByActorID,
+		&i.PurgeReason,
 		&i.SubmissionStudent,
 		&i.SubmissionAssignment,
 		&i.GradeStudent,
@@ -234,7 +240,7 @@ func (q *Queries) InsertDocumentVersion(ctx context.Context, arg InsertDocumentV
 }
 
 const listCourseDocuments = `-- name: ListCourseDocuments :many
-SELECT id, kind, title, published_version_id, sort_order, status, created_at
+SELECT id, kind, title, published_version_id, sort_order, status, created_at, purged_at
 FROM document d
 WHERE d.course_id = $1 AND d.id > $2
   AND d.kind = ANY($3::text[])
@@ -273,6 +279,7 @@ type ListCourseDocumentsRow struct {
 	SortOrder          int32
 	Status             string
 	CreatedAt          time.Time
+	PurgedAt           *time.Time
 }
 
 // Course-level documents: material, instructions, rubrics. Owned documents
@@ -309,6 +316,7 @@ func (q *Queries) ListCourseDocuments(ctx context.Context, arg ListCourseDocumen
 			&i.SortOrder,
 			&i.Status,
 			&i.CreatedAt,
+			&i.PurgedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -426,7 +434,7 @@ func (q *Queries) ListSubmissionDocuments(ctx context.Context, submissionID *uui
 }
 
 const listVersions = `-- name: ListVersions :many
-SELECT id, seq, (storage_key IS NOT NULL)::bool AS has_file, content_type, byte_size, author_member_id, created_at
+SELECT id, seq, (storage_key IS NOT NULL)::bool AS has_file, content_type, byte_size, author_member_id, created_at, purged_at
 FROM document_version WHERE document_id = $1 ORDER BY seq
 `
 
@@ -438,6 +446,7 @@ type ListVersionsRow struct {
 	ByteSize       *int64
 	AuthorMemberID uuid.UUID
 	CreatedAt      time.Time
+	PurgedAt       *time.Time
 }
 
 func (q *Queries) ListVersions(ctx context.Context, documentID uuid.UUID) ([]ListVersionsRow, error) {
@@ -457,7 +466,38 @@ func (q *Queries) ListVersions(ctx context.Context, documentID uuid.UUID) ([]Lis
 			&i.ByteSize,
 			&i.AuthorMemberID,
 			&i.CreatedAt,
+			&i.PurgedAt,
 		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listVersionsToPurge = `-- name: ListVersionsToPurge :many
+SELECT id, storage_key FROM document_version WHERE document_id = $1 AND purged_at IS NULL ORDER BY seq
+`
+
+type ListVersionsToPurgeRow struct {
+	ID         uuid.UUID
+	StorageKey *string
+}
+
+// The versions of a document not purged yet, and the file each holds.
+func (q *Queries) ListVersionsToPurge(ctx context.Context, documentID uuid.UUID) ([]ListVersionsToPurgeRow, error) {
+	rows, err := q.db.Query(ctx, listVersionsToPurge, documentID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListVersionsToPurgeRow
+	for rows.Next() {
+		var i ListVersionsToPurgeRow
+		if err := rows.Scan(&i.ID, &i.StorageKey); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -497,6 +537,63 @@ func (q *Queries) MaxVersionSeq(ctx context.Context, documentID uuid.UUID) (int3
 	var column_1 int32
 	err := row.Scan(&column_1)
 	return column_1, err
+}
+
+const purgeDocument = `-- name: PurgeDocument :execrows
+UPDATE document
+SET status = 'archived', purged_at = $1, purged_by_actor_id = $2,
+    purge_reason = $3
+WHERE id = $4 AND purged_at IS NULL
+`
+
+type PurgeDocumentParams struct {
+	PurgedAt        *time.Time
+	PurgedByActorID *uuid.UUID
+	PurgeReason     *string
+	ID              uuid.UUID
+}
+
+// Archived for good, saying who purged it, when and why.
+func (q *Queries) PurgeDocument(ctx context.Context, arg PurgeDocumentParams) (int64, error) {
+	result, err := q.db.Exec(ctx, purgeDocument,
+		arg.PurgedAt,
+		arg.PurgedByActorID,
+		arg.PurgeReason,
+		arg.ID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const purgeVersion = `-- name: PurgeVersion :execrows
+UPDATE document_version
+SET body_md = NULL, storage_key = NULL, checksum = NULL,
+    purged_at = $1, purged_by_actor_id = $2, purge_reason = $3
+WHERE id = $4 AND purged_at IS NULL
+`
+
+type PurgeVersionParams struct {
+	PurgedAt        *time.Time
+	PurgedByActorID *uuid.UUID
+	PurgeReason     *string
+	ID              uuid.UUID
+}
+
+// Its text, its file and the file's checksum go; the rest stays, with who,
+// when and why. The one change a version takes (document_version_guarded).
+func (q *Queries) PurgeVersion(ctx context.Context, arg PurgeVersionParams) (int64, error) {
+	result, err := q.db.Exec(ctx, purgeVersion,
+		arg.PurgedAt,
+		arg.PurgedByActorID,
+		arg.PurgeReason,
+		arg.ID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const setDocumentStatus = `-- name: SetDocumentStatus :execrows
@@ -539,6 +636,21 @@ func (q *Queries) StorageKeyInUse(ctx context.Context, storageKey *string) (bool
 	var exists bool
 	err := row.Scan(&exists)
 	return exists, err
+}
+
+const updateDocumentDetails = `-- name: UpdateDocumentDetails :exec
+UPDATE document SET title = $2, sort_order = $3 WHERE id = $1
+`
+
+type UpdateDocumentDetailsParams struct {
+	ID        uuid.UUID
+	Title     string
+	SortOrder int32
+}
+
+func (q *Queries) UpdateDocumentDetails(ctx context.Context, arg UpdateDocumentDetailsParams) error {
+	_, err := q.db.Exec(ctx, updateDocumentDetails, arg.ID, arg.Title, arg.SortOrder)
+	return err
 }
 
 const versionPinnedInScope = `-- name: VersionPinnedInScope :one

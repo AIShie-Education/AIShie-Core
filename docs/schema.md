@@ -264,7 +264,7 @@ others' scope. Giving a seat the role it has changes nothing (`changed: false`);
 |---|---|---|
 | `perm_document_read` | published material and instructions | |
 | `perm_document_read_draft` | unpublished versions | |
-| `perm_document_write` | new versions, publishing, archiving | |
+| `perm_document_write` | new versions, publishing, renaming, archiving and bringing back | |
 | `perm_rubric_read` | rubric documents | |
 | `perm_assignment_write` | creating, editing, publishing assignments | |
 | `perm_submission_read` | reading submissions | student, assignment |
@@ -304,6 +304,7 @@ the nearest one, and the choice is recorded here so that it is a decision and no
 | Undoing `treat_ungraded_as_zero` (`grade.undo_ungraded_as_zero`) | `perm_grade_post` | the undo of posting as final, with the same reach: every student it is about, over the whole course |
 | Overriding a total, taking the override off, commenting on a total (`grade.override_total`, `.clear_override`, `.comment_total`) | the lower of `perm_grade_submit` and `perm_grade_post` | as a regrade: it writes a total and makes it visible in one step |
 | Course settings, status, department, first instructor | `platform_role`, or an appointment at or above the course's department (§2.10) | outside the course by definition |
+| Purging a document or a version (`document.purge`) | `platform_role`, or an appointment at or above the course's department (§2.10) | removing data is not a seat's to do, and must be possible in an archived course |
 | The course's title and description, from a seat in it (`course.update_details`) | `perm_member_manage` | its instructors run the course and name it; its code, section, term, department and status stay with its administrators |
 
 An unposted grade, and a superseded one, is visible only to a member holding `perm_grade_submit`
@@ -651,7 +652,8 @@ document_version(id, document_id→document, seq, body_md null,
 
 **Everything readable is a document**, and a version is text, a file in object storage, or
 both. The model reads files directly, so there is no extracted-text step and no separate file
-table. Versions are append-only; an edit is `seq + 1`.
+table. Versions are append-only; an edit is `seq + 1`. The one exception is a purge (below),
+which empties a version and leaves a tombstone in its place.
 
 Two ways to attach a document, chosen by shape:
 
@@ -696,8 +698,37 @@ script for whoever opens it. The storage key is made by the server and is ungues
 the uploader says goes into it.
 
 Once a submission is handed in, its files are frozen with it. The trigger guards the
-`submission` row; that nothing is added to or archived from its documents afterwards is an
-application rule.
+`submission` row; that nothing is added to, archived from, renamed or brought back among its
+documents afterwards is an application rule.
+
+**What a document is called, and whether it is archived, change.** `document.update` renames a
+document or moves it in its list (`sort_order`), for whoever may write that kind of document —
+a feedback file on a posted grade with `perm_grade_post` as well, a submitted file only while
+its submission is a draft. It touches no version, so an archived or a purged document may be
+renamed too: a title that named what was purged, say. `document.unarchive` undoes
+`document.archive`, for whoever may archive it: the document is in lists and editable again,
+and its published version read again, which for feedback on a posted grade is a release again.
+Each is news under the document's own names (`document.updated`, `document.unarchived`, and
+their `_unreleased` forms for instructions and a rubric), or its owner's for an owned file
+(`submission.file_updated`, `.file_unarchived`, `grade.feedback_updated`, `.feedback_unarchived`).
+
+**What was uploaded by mistake is purged.** `document.purge` removes a version of a course's
+material, instructions or a rubric, or the whole document — personal data attached by mistake,
+say. It is an administrator's, from outside the course, as removing data is not something a
+seat's permissions reach (the Admin gate, §2.10): a platform administrator anywhere, a
+department administrator in the courses of the departments they cover; and, unlike every
+other write but opening the course again, it is done in an archived course too. Its text, its file and the file's checksum go, the file
+deleted from storage; the version keeps its place, author, date, content type and size, with
+who purged it, when and why (`purged_at`, `purged_by_actor_id`, `purge_reason`), and reads so
+to anyone who reads it. A purged document is archived for good — nothing is added to it or
+brought back — and the version list and `document.list` say when it was purged. What pinned a
+purged version still names it: a submission handed in under it reads the tombstone as what it
+was told, a grade its rubric the same, and neither the work nor the grade changes. A published
+version purged stays the published one, now a tombstone, until another is published; a purged
+version is never published again. A submitted file and a feedback file are their submission's
+and grade's, archived with them and never purged. The file is deleted last, once the rows say
+it is gone; if the call then fails to commit, the file is gone and the rows still name it, and
+the call made again with its key purges them, deleting what is gone already being no error.
 
 ### 2.5 Assignments and submissions
 
@@ -1347,7 +1378,8 @@ course's feed.
 **The courses beneath an appointment are its holder's to manage, from outside.** A department
 administrator does to the courses of every department they cover what a platform administrator
 does to any course: `course.create`, `.update`, `.activate`, `.archive`, `.seat_instructor`
-and `.move`, the Admin gate taking the course's department as what the call is about.
+and `.move`, and `document.purge` of what was uploaded to it by mistake (§2.4), the Admin gate
+taking the course's department as what the call is about.
 `course.list` shows them those courses and no others. A course moves only to a department the
 mover covers as well; it is held while it moves, and where it is then must still be the
 mover's, so that one moved out of their reach meanwhile is not taken back. None of this
@@ -1542,9 +1574,12 @@ that reads which credential the call came with.
   it is approved. A call that says there is no rubric is refused if one is published.
 - A hand-in approved later counts from when it was asked for, and only if the draft still
   holds what was asked to be handed in (§2.5).
-- Nothing is added to or archived from a handed-in submission's files (§2.4): the state is
-  read under the submission's lock, so a file that comes during the hand-in waits for it and
-  is then refused.
+- Nothing is added to, archived from, renamed or brought back among a handed-in submission's
+  files (§2.4): the state is read under the submission's lock, so a file that comes during
+  the hand-in waits for it and is then refused.
+- A purge (§2.4) is of material, instructions or a rubric, by an administrator covering the
+  course, under the document's lock; the file is deleted from storage after the rows are
+  emptied, and a purged version is never published.
 - The component tree is acyclic beyond the self-loop the CHECK blocks.
 - Cancelling pending proposals when a member is removed or expires.
 - Nobody hands out more than they hold (§2.2): any change that widens a seat is measured as

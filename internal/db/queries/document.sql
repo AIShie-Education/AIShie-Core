@@ -10,7 +10,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10);
 -- A document and, when it is owned, whose it is: a submitted file belongs to
 -- its submission's student and assignment; a feedback file to its grade's.
 SELECT d.id, d.course_id, d.kind, d.title, d.submission_id, d.grade_id, d.published_version_id,
-       d.sort_order, d.status, d.created_at,
+       d.sort_order, d.status, d.created_at, d.purged_at, d.purged_by_actor_id, d.purge_reason,
        s.student_member_id  AS submission_student,
        s.assignment_id      AS submission_assignment,
        g.student_member_id  AS grade_student,
@@ -37,7 +37,7 @@ SELECT * FROM document_version WHERE id = $1 AND document_id = $2;
 SELECT * FROM document_version WHERE document_id = $1 ORDER BY seq DESC LIMIT 1;
 
 -- name: ListVersions :many
-SELECT id, seq, (storage_key IS NOT NULL)::bool AS has_file, content_type, byte_size, author_member_id, created_at
+SELECT id, seq, (storage_key IS NOT NULL)::bool AS has_file, content_type, byte_size, author_member_id, created_at, purged_at
 FROM document_version WHERE document_id = $1 ORDER BY seq;
 
 -- name: SetPublishedVersion :exec
@@ -46,13 +46,35 @@ UPDATE document SET published_version_id = $2 WHERE id = $1;
 -- name: SetDocumentStatus :execrows
 UPDATE document SET status = $2 WHERE id = $1 AND status <> $2;
 
+-- name: UpdateDocumentDetails :exec
+UPDATE document SET title = $2, sort_order = $3 WHERE id = $1;
+
+-- name: ListVersionsToPurge :many
+-- The versions of a document not purged yet, and the file each holds.
+SELECT id, storage_key FROM document_version WHERE document_id = $1 AND purged_at IS NULL ORDER BY seq;
+
+-- name: PurgeVersion :execrows
+-- Its text, its file and the file's checksum go; the rest stays, with who,
+-- when and why. The one change a version takes (document_version_guarded).
+UPDATE document_version
+SET body_md = NULL, storage_key = NULL, checksum = NULL,
+    purged_at = sqlc.arg(purged_at), purged_by_actor_id = sqlc.arg(purged_by_actor_id), purge_reason = sqlc.arg(purge_reason)
+WHERE id = sqlc.arg(id) AND purged_at IS NULL;
+
+-- name: PurgeDocument :execrows
+-- Archived for good, saying who purged it, when and why.
+UPDATE document
+SET status = 'archived', purged_at = sqlc.arg(purged_at), purged_by_actor_id = sqlc.arg(purged_by_actor_id),
+    purge_reason = sqlc.arg(purge_reason)
+WHERE id = sqlc.arg(id) AND purged_at IS NULL;
+
 -- name: ListCourseDocuments :many
 -- Course-level documents: material, instructions, rubrics. Owned documents
 -- (submitted files, feedback) are reached through their owners instead.
 -- Instructions and rubrics are the assignment's: to anyone who does not
 -- write assignments they exist only once a published assignment within their
 -- scope refers to them, or a student could read next week's exam by listing.
-SELECT id, kind, title, published_version_id, sort_order, status, created_at
+SELECT id, kind, title, published_version_id, sort_order, status, created_at, purged_at
 FROM document d
 WHERE d.course_id = $1 AND d.id > sqlc.arg(after)
   AND d.kind = ANY(sqlc.arg(kinds)::text[])

@@ -530,6 +530,8 @@ type Querier interface {
 	ListSubmissions(ctx context.Context, arg ListSubmissionsParams) ([]ListSubmissionsRow, error)
 	ListTerms(ctx context.Context) ([]Term, error)
 	ListVersions(ctx context.Context, documentID uuid.UUID) ([]ListVersionsRow, error)
+	// The versions of a document not purged yet, and the file each holds.
+	ListVersionsToPurge(ctx context.Context, documentID uuid.UUID) ([]ListVersionsToPurgeRow, error)
 	LiveAppointment(ctx context.Context, arg LiveAppointmentParams) (DepartmentAdmin, error)
 	LiveComponentGradeExists(ctx context.Context, arg LiveComponentGradeExistsParams) (bool, error)
 	LiveSubmissionGradeExists(ctx context.Context, submissionID *uuid.UUID) (bool, error)
@@ -682,6 +684,11 @@ type Querier interface {
 	// and must not (tools.notYourPrincipals). Asked before anything is locked.
 	PrincipalsSeatsHaveRole(ctx context.Context, arg PrincipalsSeatsHaveRoleParams) (bool, error)
 	PublishAssignment(ctx context.Context, arg PublishAssignmentParams) (int64, error)
+	// Archived for good, saying who purged it, when and why.
+	PurgeDocument(ctx context.Context, arg PurgeDocumentParams) (int64, error)
+	// Its text, its file and the file's checksum go; the rest stays, with who,
+	// when and why. The one change a version takes (document_version_guarded).
+	PurgeVersion(ctx context.Context, arg PurgeVersionParams) (int64, error)
 	ReactivateActor(ctx context.Context, id uuid.UUID) (int64, error)
 	// Only a suspension the owner made: one an administrator made, or one made
 	// before this was recorded, is an administrator's to lift.
@@ -814,6 +821,7 @@ type Querier interface {
 	UpdateAssignment(ctx context.Context, arg UpdateAssignmentParams) error
 	UpdateComponent(ctx context.Context, arg UpdateComponentParams) error
 	UpdateCourse(ctx context.Context, arg UpdateCourseParams) error
+	UpdateDocumentDetails(ctx context.Context, arg UpdateDocumentDetailsParams) error
 	// A change to an entry's text, tags or pin, which moves its version on.
 	// Given a version, only that version is changed: no row comes back if it
 	// has moved on since (0 changes whatever it is).
