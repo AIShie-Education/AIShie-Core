@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/apperr"
@@ -152,6 +153,13 @@ func (a *Authenticator) StartSession(ctx context.Context, actorID uuid.UUID, lab
 	return a.startSession(ctx, dbq.New(a.pool), actorID, label)
 }
 
+// StartSessionIn is StartSession through q, a transaction's: the session a
+// person who registers is signed in with comes to be with their account, or
+// neither does.
+func (a *Authenticator) StartSessionIn(ctx context.Context, q *dbq.Queries, actorID uuid.UUID, label string) (Session, error) {
+	return a.startSession(ctx, q, actorID, label)
+}
+
 // startSession is StartSession through q, which may be a transaction's.
 func (a *Authenticator) startSession(ctx context.Context, q *dbq.Queries, actorID uuid.UUID, label string) (Session, error) {
 	tok, err := NewToken()
@@ -213,15 +221,25 @@ func IssueToken(ctx context.Context, q *dbq.Queries, actorID uuid.UUID, issuedBy
 // deleted: the row says when each stopped working. So is an invitation
 // waiting: it was for choosing a password, and one has been chosen.
 func SetPassword(ctx context.Context, q *dbq.Queries, actorID uuid.UUID, password string, now time.Time) error {
-	hash, err := hashNewPassword(password)
+	hash, err := HashNewPassword(password)
 	if err != nil {
 		return err
 	}
 	return setPasswordHash(ctx, q, actorID, hash, now)
 }
 
-// hashNewPassword is HashPassword, with a weak password the caller's fault.
-func hashNewPassword(password string) (string, error) {
+// CheckNewPassword holds a password someone chooses to the rules for one,
+// without hashing it: one outside them is their fault (invalid_argument).
+func CheckNewPassword(password string) error {
+	if len(password) < MinPasswordLen || len(password) > MaxPasswordLen {
+		return apperr.Invalid("%v", ErrWeakPassword)
+	}
+	return nil
+}
+
+// HashNewPassword is HashPassword for a password someone chooses: one
+// outside the rules for a password is their fault (invalid_argument).
+func HashNewPassword(password string) (string, error) {
 	hash, err := HashPassword(password)
 	if errors.Is(err, ErrWeakPassword) {
 		return "", apperr.Invalid("%v", err)
@@ -239,6 +257,52 @@ func setPasswordHash(ctx context.Context, q *dbq.Queries, actorID uuid.UUID, has
 	return q.InsertCredential(ctx, dbq.InsertCredentialParams{
 		ID: ids.New(), ActorID: actorID, Kind: KindPassword, SecretHash: &hash, CreatedAt: now,
 	})
+}
+
+// NewPerson is someone who registers themselves. A join link is the one way
+// a person does (docs/schema.md §2.2): there is no open sign-up.
+type NewPerson struct {
+	DisplayName string
+	Email       string
+	// PasswordHash is HashNewPassword's, made before the transaction that
+	// registers them, so that the hash holds no lock.
+	PasswordHash string
+	// CreatedBy is whose authority lets them in: the link's maker, which
+	// keeps the chain of who created whom (actor.created_by_actor_id)
+	// without a gap.
+	CreatedBy uuid.UUID
+}
+
+// EmailTaken refuses to register an email someone has already. It tells the
+// person to sign in, and says nothing else about the account.
+func EmailTaken() *apperr.Error {
+	return apperr.Conflicts("that email is already registered: sign in with it, then open the link again").
+		With("reason", "email_taken")
+}
+
+// RegisterPerson makes a person, their email recorded as vouched for by
+// nobody but them (email_verified false: Core sends no email), and sets
+// their password. It runs in the transaction that seats them, so that an
+// account that joins nothing is never left behind. An email registered
+// already is refused (EmailTaken), and nothing of the account that has it is
+// read or touched: two at once for one address meet at actor_email_key, and
+// the second is refused the same way. The transaction is then over; the
+// caller starts again, and finds the email taken before it gets here.
+func RegisterPerson(ctx context.Context, q *dbq.Queries, p NewPerson, now time.Time) (uuid.UUID, error) {
+	id := ids.New()
+	err := q.InsertRegisteredPerson(ctx, dbq.InsertRegisteredPersonParams{
+		ID: id, DisplayName: p.DisplayName, Email: &p.Email, CreatedByActorID: &p.CreatedBy, CreatedAt: now})
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == "actor_email_key" {
+		return uuid.Nil, EmailTaken()
+	}
+	if err != nil {
+		return uuid.Nil, err
+	}
+	if err := setPasswordHash(ctx, q, id, p.PasswordHash, now); err != nil {
+		return uuid.Nil, err
+	}
+	return id, nil
 }
 
 // IssueInvite makes an invitation for an actor to set their password, and
@@ -395,7 +459,7 @@ func (a *Authenticator) AcceptInvite(ctx context.Context, presented, password st
 	if _, err := check(dbq.New(a.pool)); err != nil {
 		return Accepted{}, err
 	}
-	hash, err := hashNewPassword(password)
+	hash, err := HashNewPassword(password)
 	if err != nil {
 		return Accepted{}, err
 	}

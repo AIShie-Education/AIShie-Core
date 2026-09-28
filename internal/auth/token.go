@@ -27,10 +27,13 @@ import (
 // An invitation is made the same way under another scheme, "aisinv_", so
 // that neither is taken for the other: an invitation presented as a bearer
 // token fails at its scheme, before anything is looked up, and a token
-// presented as an invitation does too.
+// presented as an invitation does too. So is a course's join link, under
+// "aisjoin_": it is kept in course_join_link, not as a credential, and is
+// never taken for either.
 const (
 	tokenScheme  = "ais"
 	inviteScheme = "aisinv"
+	joinScheme   = "aisjoin"
 	prefixLen    = 12
 	secretBytes  = 32
 )
@@ -49,6 +52,18 @@ func NewToken() (Token, error) { return newSecret(tokenScheme) }
 
 // NewInvite makes an invitation's secret: a token under the invitation scheme.
 func NewInvite() (Token, error) { return newSecret(inviteScheme) }
+
+// NewJoinToken makes a join link's secret: a token under the join scheme.
+// Full is shown once, to whoever made the link; Prefix and Hash are kept.
+func NewJoinToken() (Token, error) { return newSecret(joinScheme) }
+
+// JoinTokenPrefix is the prefix of a presented join link's token, or false
+// when it is not shaped like one, and there is nothing to look up.
+func JoinTokenPrefix(full string) (string, bool) { return parseScheme(full, joinScheme) }
+
+// JoinTokenMatches reports, in constant time, whether a presented join
+// link's token is the one whose hash was kept.
+func JoinTokenMatches(full, storedHash string) bool { return tokenMatches(full, storedHash) }
 
 func newSecret(scheme string) (Token, error) {
 	var p [8]byte // 8 bytes → 13 base32 characters; 12 are kept

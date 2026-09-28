@@ -37,11 +37,12 @@ func (r *Registry) All() []Tool {
 	return out
 }
 
-// Exposed returns the tools an adapter may offer: everything not Internal.
+// Exposed returns the tools an adapter may offer: everything neither
+// Internal nor Unlisted.
 func (r *Registry) Exposed() []Tool {
 	var out []Tool
 	for _, t := range r.All() {
-		if !t.Internal {
+		if !t.Internal && !t.Unlisted {
 			out = append(out, t)
 		}
 	}

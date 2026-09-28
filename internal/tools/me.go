@@ -32,12 +32,14 @@ func noTarget[In any](typ string) func(context.Context, dbq.Querier, In) (tool.T
 // ---------------------------------------------------------------------------
 
 type MeOut struct {
-	ID           uuid.UUID `json:"id"`
-	Kind         string    `json:"kind" jsonschema:"human, agent or system; for display only"`
-	DisplayName  string    `json:"display_name"`
-	Email        *string   `json:"email,omitempty"`
-	Status       string    `json:"status"`
-	PlatformRole *string   `json:"platform_role,omitempty"`
+	ID          uuid.UUID `json:"id"`
+	Kind        string    `json:"kind" jsonschema:"human, agent or system; for display only"`
+	DisplayName string    `json:"display_name"`
+	Email       *string   `json:"email,omitempty"`
+	// Absent with no email, as it was before anyone's went unchecked.
+	EmailVerified *bool   `json:"email_verified,omitempty" jsonschema:"with an email: false when you gave it registering through a join link, and nobody has checked it since; Core sends no email"`
+	Status        string  `json:"status"`
+	PlatformRole  *string `json:"platform_role,omitempty"`
 	// An agent may always know who answers for it. A service that hosts the
 	// agent compares this with the person who hands it the agent's token.
 	OwnerActorID *uuid.UUID `json:"owner_actor_id,omitempty" jsonschema:"for an agent a person owns, that person's actor id; absent for a person, and for an agent nobody owns"`
@@ -69,6 +71,9 @@ func meGet() tool.Tool {
 			}
 			out := MeOut{ID: a.ID, Kind: a.Kind, DisplayName: a.DisplayName, Email: a.Email, Status: a.Status,
 				PlatformRole: a.PlatformRole, OwnerActorID: a.OwnerActorID}
+			if a.Email != nil {
+				out.EmailVerified = &a.EmailVerified
+			}
 			if rc.Actor.Administers {
 				rows, err := rc.Q.MyAppointments(ctx, rc.Actor.ID)
 				if err != nil {

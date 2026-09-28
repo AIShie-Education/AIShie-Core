@@ -65,6 +65,9 @@ type Querier interface {
 	CountBuiltinPresets(ctx context.Context) (int64, error)
 	CountComponentAssignments(ctx context.Context, componentID *uuid.UUID) (int64, error)
 	CountComponentChildren(ctx context.Context, parentID *uuid.UUID) (int64, error)
+	// One use more, never past the limit: none when the limit is reached, and
+	// the CHECK course_join_link_uses_counted refuses it whatever asks.
+	CountJoinLinkUse(ctx context.Context, id uuid.UUID) (int64, error)
 	// What one bucket holds that its agent can still read: in force, waiting
 	// for review, turned down, and how many of the first two are pinned.
 	CountMemoryBucket(ctx context.Context, arg CountMemoryBucketParams) (CountMemoryBucketRow, error)
@@ -206,6 +209,11 @@ type Querier interface {
 	// are returned too, as GetCredentialByPrefix returns them. The actor comes
 	// with it, and who issued it: null for one made before that was recorded.
 	GetInviteByPrefix(ctx context.Context, tokenPrefix *string) (GetInviteByPrefixRow, error)
+	// A link found by the prefix of a token someone presents, with what the page
+	// that opens it may show of its course. The token is checked against
+	// secret_hash before anything here is believed.
+	GetJoinLinkByPrefix(ctx context.Context, tokenPrefix string) (GetJoinLinkByPrefixRow, error)
+	GetJoinLinkInCourse(ctx context.Context, arg GetJoinLinkInCourseParams) (CourseJoinLink, error)
 	GetLatestVersion(ctx context.Context, documentID uuid.UUID) (DocumentVersion, error)
 	GetLiveComputedGrade(ctx context.Context, arg GetLiveComputedGradeParams) (GetLiveComputedGradeRow, error)
 	// A seat comes with its principal, when it is a delegate's: the principal's
@@ -292,12 +300,17 @@ type Querier interface {
 	InsertDocumentVersion(ctx context.Context, arg InsertDocumentVersionParams) error
 	InsertEvent(ctx context.Context, arg InsertEventParams) error
 	InsertGrade(ctx context.Context, arg InsertGradeParams) error
+	InsertJoinLink(ctx context.Context, arg InsertJoinLinkParams) error
 	InsertMember(ctx context.Context, arg InsertMemberParams) error
 	// A new entry, unless the same text is already live in its bucket: then no
 	// row comes back, and GetMemoryByHash finds the one that is there.
 	InsertMemory(ctx context.Context, arg InsertMemoryParams) (uuid.UUID, error)
 	InsertMissingSubmission(ctx context.Context, arg InsertMissingSubmissionParams) (int64, error)
 	InsertPreset(ctx context.Context, arg InsertPresetParams) error
+	// A person who registers through a join link: their email is theirs to vouch
+	// for alone (email_verified false), and whoever made the link, on whose
+	// authority they are let in, is who created them.
+	InsertRegisteredPerson(ctx context.Context, arg InsertRegisteredPersonParams) error
 	InsertRetraction(ctx context.Context, arg InsertRetractionParams) (int64, error)
 	InsertSubmission(ctx context.Context, arg InsertSubmissionParams) error
 	InsertTerm(ctx context.Context, arg InsertTermParams) error
@@ -416,6 +429,10 @@ type Querier interface {
 	// of what can be answered. Whether each opener may still address the seat
 	// is for the caller to say, in Go.
 	ListInboxConversationIDs(ctx context.Context, arg ListInboxConversationIDsParams) ([]ListInboxConversationIDsRow, error)
+	// A course's links, newest first — the one on the screen now at the top —
+	// from before the id given, with the names of whoever made and revoked each.
+	// Never the token: only its hash is kept, and that is not selected.
+	ListJoinLinks(ctx context.Context, arg ListJoinLinksParams) ([]ListJoinLinksRow, error)
 	// Per assignment, the student's live posted grade on the highest attempt that
 	// has one.
 	ListLiveAssignmentScores(ctx context.Context, arg ListLiveAssignmentScoresParams) ([]ListLiveAssignmentScoresRow, error)
@@ -569,6 +586,12 @@ type Querier interface {
 	// at InsertAction, holding its caller's seat, which the first call may yet
 	// need to lock FOR UPDATE.
 	LockIdempotencyKey(ctx context.Context, arg LockIdempotencyKeyParams) error
+	// The link, held for the rest of the call: every join through it and its
+	// revocation take it in turn, so that a use is counted against what the one
+	// before left, and a revocation waits for the joins in flight or is waited
+	// for. NO KEY UPDATE: a seat that names the link takes KEY SHARE on it
+	// through its foreign key, which this leaves alone.
+	LockJoinLink(ctx context.Context, id uuid.UUID) (CourseJoinLink, error)
 	// The same, for a call that writes, and the first row that call locks: the
 	// caller's own seat, KEY SHARE, to the end of the call. It blocks only what
 	// locks the seat FOR UPDATE — a change to it, its removal, the expiry sweep —
@@ -672,6 +695,7 @@ type Querier interface {
 	// An actor's live invitation: when another replaces it, when a password is
 	// set (by it or otherwise), and when the email it was sent to changes.
 	RevokeInvites(ctx context.Context, arg RevokeInvitesParams) error
+	RevokeJoinLink(ctx context.Context, arg RevokeJoinLinkParams) (int64, error)
 	RevokePasswordCredentials(ctx context.Context, arg RevokePasswordCredentialsParams) error
 	// Whether two actors are one party, for four eyes: the same actor, one the
 	// other's owner, or two agents of one owner. An agent acts only as its
@@ -776,7 +800,9 @@ type Querier interface {
 	TouchCredential(ctx context.Context, arg TouchCredentialParams) error
 	TryJobLock(ctx context.Context, key int64) (bool, error)
 	UnpublishAssignment(ctx context.Context, id uuid.UUID) (int64, error)
-	// A null leaves the value as it is.
+	// A null leaves the value as it is. An email an administrator gives is one
+	// they vouch for, as every email was before join links: one a person typed
+	// registering through a link (email_verified false) is theirs no longer.
 	UpdateActor(ctx context.Context, arg UpdateActorParams) error
 	UpdateAssignment(ctx context.Context, arg UpdateAssignmentParams) error
 	UpdateComponent(ctx context.Context, arg UpdateComponentParams) error

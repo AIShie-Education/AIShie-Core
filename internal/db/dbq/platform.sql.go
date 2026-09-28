@@ -54,7 +54,8 @@ const getActorView = `-- name: GetActorView :one
 SELECT a.id, a.kind, a.display_name, a.email, a.status, a.platform_role, a.created_by_actor_id, a.created_at,
        EXISTS (SELECT 1 FROM credential p WHERE p.actor_id = a.id AND p.kind = 'password' AND p.revoked_at IS NULL) AS has_password,
        EXISTS (SELECT 1 FROM credential s WHERE s.actor_id = a.id AND s.kind = 'sso' AND s.revoked_at IS NULL) AS has_sso,
-       i.expires_at AS invite_expires_at, a.owner_actor_id, o.display_name AS owner_name, a.suspended_by_actor_id
+       i.expires_at AS invite_expires_at, a.owner_actor_id, o.display_name AS owner_name, a.suspended_by_actor_id,
+       a.email_verified
 FROM actor a
 LEFT JOIN credential i ON i.actor_id = a.id AND i.kind = 'invite' AND i.revoked_at IS NULL
 LEFT JOIN actor o ON o.id = a.owner_actor_id
@@ -76,6 +77,7 @@ type GetActorViewRow struct {
 	OwnerActorID       *uuid.UUID
 	OwnerName          *string
 	SuspendedByActorID *uuid.UUID
+	EmailVerified      bool
 }
 
 // One actor as an administrator sees it: the row, and whether they can sign
@@ -99,6 +101,7 @@ func (q *Queries) GetActorView(ctx context.Context, id uuid.UUID) (GetActorViewR
 		&i.OwnerActorID,
 		&i.OwnerName,
 		&i.SuspendedByActorID,
+		&i.EmailVerified,
 	)
 	return i, err
 }
@@ -342,7 +345,8 @@ const listActors = `-- name: ListActors :many
 SELECT a.id, a.kind, a.display_name, a.email, a.status, a.platform_role, a.created_by_actor_id, a.created_at,
        EXISTS (SELECT 1 FROM credential p WHERE p.actor_id = a.id AND p.kind = 'password' AND p.revoked_at IS NULL) AS has_password,
        EXISTS (SELECT 1 FROM credential s WHERE s.actor_id = a.id AND s.kind = 'sso' AND s.revoked_at IS NULL) AS has_sso,
-       i.expires_at AS invite_expires_at, a.owner_actor_id, o.display_name AS owner_name, a.suspended_by_actor_id
+       i.expires_at AS invite_expires_at, a.owner_actor_id, o.display_name AS owner_name, a.suspended_by_actor_id,
+       a.email_verified
 FROM actor a
 LEFT JOIN credential i ON i.actor_id = a.id AND i.kind = 'invite' AND i.revoked_at IS NULL
 LEFT JOIN actor o ON o.id = a.owner_actor_id
@@ -381,6 +385,7 @@ type ListActorsRow struct {
 	OwnerActorID       *uuid.UUID
 	OwnerName          *string
 	SuspendedByActorID *uuid.UUID
+	EmailVerified      bool
 }
 
 // Everyone registered, as GetActorView sees them: people and agents, not the
@@ -418,6 +423,7 @@ func (q *Queries) ListActors(ctx context.Context, arg ListActorsParams) ([]ListA
 			&i.OwnerActorID,
 			&i.OwnerName,
 			&i.SuspendedByActorID,
+			&i.EmailVerified,
 		); err != nil {
 			return nil, err
 		}
@@ -597,7 +603,8 @@ func (q *Queries) TermExists(ctx context.Context, id uuid.UUID) (bool, error) {
 const updateActor = `-- name: UpdateActor :exec
 UPDATE actor
 SET display_name = coalesce($1, display_name),
-    email = coalesce($2, email)
+    email = coalesce($2, email),
+    email_verified = email_verified OR $2::text IS NOT NULL
 WHERE id = $3
 `
 
@@ -607,7 +614,9 @@ type UpdateActorParams struct {
 	ID          uuid.UUID
 }
 
-// A null leaves the value as it is.
+// A null leaves the value as it is. An email an administrator gives is one
+// they vouch for, as every email was before join links: one a person typed
+// registering through a link (email_verified false) is theirs no longer.
 func (q *Queries) UpdateActor(ctx context.Context, arg UpdateActorParams) error {
 	_, err := q.db.Exec(ctx, updateActor, arg.DisplayName, arg.Email, arg.ID)
 	return err

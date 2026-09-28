@@ -567,6 +567,16 @@ func TestToolsListIsTheRegistry(t *testing.T) {
 	if len(listed) != len(exposed) {
 		t.Fatalf("MCP lists %d tools, the registry exposes %d", len(listed), len(exposed))
 	}
+	// Join links are made and managed like anything else in a course; taking
+	// a seat through one is a person's, at the REST endpoints alone.
+	for _, name := range []string{"course.join_link_create", "course.join_link_list", "course.join_link_revoke"} {
+		if listed[mcpapi.ToolName(name)] == nil {
+			t.Errorf("%s is not offered over MCP", name)
+		}
+	}
+	if listed[mcpapi.ToolName("course.join")] != nil {
+		t.Error("course.join is offered over MCP")
+	}
 	// What several model APIs accept as a tool name.
 	valid := regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`)
 	for _, reg := range exposed {

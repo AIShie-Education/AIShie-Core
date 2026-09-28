@@ -347,9 +347,9 @@ INSERT INTO course_member (
     perm_assignment_write, perm_submission_read, perm_submission_write, perm_grade_read,
     perm_grade_submit, perm_grade_post, perm_member_read, perm_member_manage, perm_action_decide,
     perm_agent_delegate, perm_conversation_ask, perm_conversation_answer, perm_member_invite,
-    created_at, principal_member_id, answers_course)
+    created_at, principal_member_id, answers_course, join_link_id)
 VALUES ($1, $2, $3, $4, 'active', $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22,
-        $23, $24, $25, $26, $27, $28, $29)
+        $23, $24, $25, $26, $27, $28, $29, $30)
 `
 
 type InsertMemberParams struct {
@@ -382,6 +382,7 @@ type InsertMemberParams struct {
 	CreatedAt              time.Time
 	PrincipalMemberID      *uuid.UUID
 	AnswersCourse          bool
+	JoinLinkID             *uuid.UUID
 }
 
 func (q *Queries) InsertMember(ctx context.Context, arg InsertMemberParams) error {
@@ -415,6 +416,7 @@ func (q *Queries) InsertMember(ctx context.Context, arg InsertMemberParams) erro
 		arg.CreatedAt,
 		arg.PrincipalMemberID,
 		arg.AnswersCourse,
+		arg.JoinLinkID,
 	)
 	return err
 }
@@ -486,15 +488,17 @@ JOIN actor a ON a.id = m.actor_id
 LEFT JOIN actor o ON o.id = a.owner_actor_id
 WHERE m.course_id = $1 AND m.id > $2
   AND ($3::text IS NULL OR m.role = $3)
-  AND ($4::bool OR m.status <> 'removed')
+  AND ($4::uuid IS NULL OR m.join_link_id = $4)
+  AND ($5::bool OR m.status <> 'removed')
 ORDER BY m.id
-LIMIT $5
+LIMIT $6
 `
 
 type ListMembersParams struct {
 	CourseID       uuid.UUID
 	After          uuid.UUID
 	Role           *string
+	JoinLinkID     *uuid.UUID
 	IncludeRemoved bool
 	MaxRows        int32
 }
@@ -542,6 +546,7 @@ func (q *Queries) ListMembers(ctx context.Context, arg ListMembersParams) ([]Lis
 		arg.CourseID,
 		arg.After,
 		arg.Role,
+		arg.JoinLinkID,
 		arg.IncludeRemoved,
 		arg.MaxRows,
 	)

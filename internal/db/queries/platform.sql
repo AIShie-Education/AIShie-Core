@@ -37,10 +37,13 @@ SELECT EXISTS (SELECT 1 FROM actor WHERE lower(email) = lower($1));
 SELECT EXISTS (SELECT 1 FROM actor WHERE lower(email) = lower(sqlc.arg(email)) AND id <> sqlc.arg(id));
 
 -- name: UpdateActor :exec
--- A null leaves the value as it is.
+-- A null leaves the value as it is. An email an administrator gives is one
+-- they vouch for, as every email was before join links: one a person typed
+-- registering through a link (email_verified false) is theirs no longer.
 UPDATE actor
 SET display_name = coalesce(sqlc.narg(display_name), display_name),
-    email = coalesce(sqlc.narg(email), email)
+    email = coalesce(sqlc.narg(email), email),
+    email_verified = email_verified OR sqlc.narg(email)::text IS NOT NULL
 WHERE id = sqlc.arg(id);
 
 -- name: GetActorView :one
@@ -50,7 +53,8 @@ WHERE id = sqlc.arg(id);
 SELECT a.id, a.kind, a.display_name, a.email, a.status, a.platform_role, a.created_by_actor_id, a.created_at,
        EXISTS (SELECT 1 FROM credential p WHERE p.actor_id = a.id AND p.kind = 'password' AND p.revoked_at IS NULL) AS has_password,
        EXISTS (SELECT 1 FROM credential s WHERE s.actor_id = a.id AND s.kind = 'sso' AND s.revoked_at IS NULL) AS has_sso,
-       i.expires_at AS invite_expires_at, a.owner_actor_id, o.display_name AS owner_name, a.suspended_by_actor_id
+       i.expires_at AS invite_expires_at, a.owner_actor_id, o.display_name AS owner_name, a.suspended_by_actor_id,
+       a.email_verified
 FROM actor a
 LEFT JOIN credential i ON i.actor_id = a.id AND i.kind = 'invite' AND i.revoked_at IS NULL
 LEFT JOIN actor o ON o.id = a.owner_actor_id
@@ -64,7 +68,8 @@ WHERE a.id = $1;
 SELECT a.id, a.kind, a.display_name, a.email, a.status, a.platform_role, a.created_by_actor_id, a.created_at,
        EXISTS (SELECT 1 FROM credential p WHERE p.actor_id = a.id AND p.kind = 'password' AND p.revoked_at IS NULL) AS has_password,
        EXISTS (SELECT 1 FROM credential s WHERE s.actor_id = a.id AND s.kind = 'sso' AND s.revoked_at IS NULL) AS has_sso,
-       i.expires_at AS invite_expires_at, a.owner_actor_id, o.display_name AS owner_name, a.suspended_by_actor_id
+       i.expires_at AS invite_expires_at, a.owner_actor_id, o.display_name AS owner_name, a.suspended_by_actor_id,
+       a.email_verified
 FROM actor a
 LEFT JOIN credential i ON i.actor_id = a.id AND i.kind = 'invite' AND i.revoked_at IS NULL
 LEFT JOIN actor o ON o.id = a.owner_actor_id

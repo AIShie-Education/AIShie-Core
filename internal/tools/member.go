@@ -50,6 +50,9 @@ type MemberView struct {
 	OwnerActorID      *uuid.UUID `json:"owner_actor_id,omitempty" jsonschema:"for an agent a person owns, that person"`
 	OwnerName         *string    `json:"owner_name,omitempty"`
 	AnswersCourse     bool       `json:"answers_course" jsonschema:"for a delegate, whether its seat answers the course, and not its principal alone; it does while its principal manages the course's members"`
+	// A seat a person took through a join link, who was added by whoever
+	// made the link.
+	JoinLinkID *uuid.UUID `json:"join_link_id,omitempty" jsonschema:"for a seat a person took through a join link, the link (course.join_link_list)"`
 	// An agent's seat: whether it is asked in the site at all. Absent for a
 	// person's, who is.
 	SiteChat *bool `json:"site_chat,omitempty" jsonschema:"for an agent's seat: whether people in the site may start conversations with it and ask it, since what runs it, an agent runtime that answers on its own, says so (me.site_chat); false for an agent operated from an external tool. Absent for a person's seat"`
@@ -79,13 +82,14 @@ func viewMember(m dbq.GetMemberInCourseRow) MemberView {
 		Status: m.Status, PresetID: m.PresetID, ExpiresAt: m.ExpiresAt, StudentScope: m.StudentScope,
 		AssignmentScope: m.AssignmentScope, Perms: memberPerms(m).view(), CreatedAt: m.CreatedAt,
 		PrincipalMemberID: m.PrincipalMemberID, OwnerActorID: m.OwnerActorID, OwnerName: m.OwnerName,
-		AnswersCourse: m.AnswersCourse}
+		AnswersCourse: m.AnswersCourse, JoinLinkID: m.JoinLinkID}
 }
 
 type MemberListIn struct {
 	tool.InCourse
-	Role           *string `json:"role,omitempty" jsonschema:"only members with this roster role, e.g. student"`
-	IncludeRemoved bool    `json:"include_removed,omitempty"`
+	Role           *string    `json:"role,omitempty" jsonschema:"only members with this roster role, e.g. student"`
+	JoinLinkID     *uuid.UUID `json:"join_link_id,omitempty" jsonschema:"only the seats people took through this join link"`
+	IncludeRemoved bool       `json:"include_removed,omitempty"`
 	Page
 }
 
@@ -105,7 +109,7 @@ func memberList() tool.Tool {
 		},
 		Query: func(ctx context.Context, rc *tool.ReadCtx, in MemberListIn) (MemberListOut, error) {
 			rows, err := rc.Q.ListMembers(ctx, dbq.ListMembersParams{CourseID: in.CourseID, After: in.after(),
-				Role: in.Role, IncludeRemoved: in.IncludeRemoved, MaxRows: in.limit()})
+				Role: in.Role, JoinLinkID: in.JoinLinkID, IncludeRemoved: in.IncludeRemoved, MaxRows: in.limit()})
 			out := MemberListOut{Members: make([]MemberView, 0, len(rows))}
 			for _, r := range rows {
 				out.Members = append(out.Members, viewMember(dbq.GetMemberInCourseRow(r)))

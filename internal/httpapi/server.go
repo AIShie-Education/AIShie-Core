@@ -302,7 +302,7 @@ func (s *server) callTool(t tool.Tool) func(http.ResponseWriter, *http.Request) 
 // GET /v1/tools uses, and it is the same call as the tool's own route.
 func (s *server) callByName(w http.ResponseWriter, r *http.Request) {
 	t, ok := s.Pipeline.Registry().Get(r.PathValue("tool_name"))
-	if !ok || t.Internal {
+	if !ok || t.Internal || t.Unlisted {
 		s.writeError(w, r, apperr.Missing("there is no tool named %q", r.PathValue("tool_name")))
 		return
 	}

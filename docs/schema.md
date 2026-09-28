@@ -440,6 +440,61 @@ of the course: repeat it, give the levels to `member.add`, or use a department p
 by role is what the manager asked for, as `member.list` filters by it; it is not
 authorization.
 
+**Join links.** A student comes in by a link too: an instructor shows one in class, typically as
+a QR code, and whoever opens it is seated as a student there and then. Whoever holds
+`member_invite` makes one (`course.join_link_create {course_id, max_uses?,
+allowed_email_domains?}`), and is given its token once, `aisjoin_<prefix>_<secret>`, made like an
+API token: `course_join_link` keeps the prefix, which finds the row, and the secret's SHA-256,
+compared in constant time, never the token; a replay of the call comes back without it, and it
+is in no action, result, event or log line. The front end puts it in its own join page's URL.
+
+- **Every link lives ten minutes** (`JoinLinkLifetime` in `internal/tools/joinlink.go`): its
+  `expires_at` is its `created_at` and ten minutes, whoever makes it, and nobody chooses another;
+  the CHECK `course_join_link_lives_ten_minutes` holds the same, so that a longer life is a
+  decision made in a migration. Long enough for a room to scan it; too short for a photograph of
+  the screen, passed around afterwards, to be a way in. The next class gets a new link.
+- It seats up to `max_uses` people (1..10,000; any number while it lives if not given), each
+  join counting one use, under the link's row lock, and the CHECK beneath the count holds it to
+  the limit whatever the application does; and only people whose email is at one of
+  `allowed_email_domains` (1..20 of them, exactly, lower-case: `example.edu` does not take
+  `mail.example.edu`), if given. Core checks no email, so a domain keeps out whoever gives
+  another, not whoever claims one of these.
+- It seats a student (`role`, held by a CHECK) with the course's `student` preset as
+  `member.add` finds it when the link is made, and with its maker's authority: the preset must be
+  within what the maker may grant (`withinGranter`) when the link is made and again at every
+  join, and the maker's seat must be live, their actor active and their `member_invite` at
+  `pending_review` or `autonomous` (a proposal would put the seat before someone to decide,
+  and a link seats at once). Once any of that stops holding, the link seats nobody
+  (`creator_lost_authority`), until it expires. A delegate's link is its principal's as well:
+  capped by its principal's `member_invite`, reach and life. The seat is added by the maker
+  (`added_by_actor_id`), names the link (`course_member.join_link_id`), and ends when the maker's
+  seat does, or its principal's if sooner.
+- A link is not made by proposal (`not_by_proposal`): its token is shown once, to whoever the
+  call returns to, and approving it would show it to whoever approved it, ten minutes from then.
+- `course.join_link_list` (gated by `member_invite`, newest first) says each link's `status` —
+  `live`, `expired`, `used_up` or `revoked`, what the link says of itself — whether it seats
+  anyone now (`joinable`) and why not (`reason`: those, or `course_archived` or
+  `creator_lost_authority`), its `expires_at`, `max_uses`, `uses`, domains, and who made and
+  revoked it; never a token. `member.list` with `join_link_id` says who came in through one.
+  `course.join_link_revoke` stops a link at once, whoever made it, and records who revoked it;
+  those who joined through it keep their seats. An archived course's links seat nobody.
+- Joining (`course.join`, a tool neither the REST catalogue nor MCP offers: only the join
+  endpoints call it, for a person signed in) is a write like any other, made
+  as the person joining, recorded, replayed by its key, and refused on an archived course. It
+  seats people only: an agent is refused (`people_only`), as is a suspended person
+  (`actor_not_active`), and an email at no domain the link takes (`email_domain_not_allowed`).
+  Someone with a live seat already is answered with that seat as it is (`already_member`), paused
+  or not: no use is counted, nothing resumed. A removed or expired seat is as if there were none,
+  and the join is a fresh seat. It emits `member.added`, its payload saying `via: join_link` and
+  the link's id; `course.join_link_created` and `course.join_link_revoked` are for whoever holds
+  `member_invite` or `member_manage`.
+- Someone with no account registers through a live link, and only so: there is no open sign-up.
+  They give a display name, an email and a password (the rules for any password); the person is
+  made, their password set, the join made as theirs and a session started, in one transaction,
+  or none of it is. Their email is recorded unverified (`email_verified`, §2.1), and the person is
+  created by the link's maker. An email registered already is refused (`email_taken`), telling
+  them to sign in and open the link again; nothing of the account that has it is read or touched.
+
 ### 2.3 Grading scheme
 
 ```
@@ -1371,6 +1426,13 @@ that reads which credential the call came with.
   acts on one seat and in `member.update_perms_bulk`, which refuses whole; and holds
   `member_manage` and `member_invite` only when the call that seats it, or a change afterwards,
   names them, never from its preset.
+- A join link (§2.2, Join links) seats with its maker's authority, asked again at every join
+  under the link's lock with the maker's seat held KEY SHARE: `member_invite` at
+  `pending_review` or above, the student preset within what they may grant, their seat live and
+  their actor active; otherwise it seats nobody (`creator_lost_authority`). A token is looked up
+  by its prefix and compared with the kept hash in constant time, and every way it can be wrong is
+  the same `not_found`. Only a person joins; one seated already is answered with that seat and
+  counts no use; a registration through a link and its join are one transaction.
 - Removing a seat cancels its delegates' proposals and closes their conversations with its own;
   the database removes the delegates' seats with it (trigger `course_member_delegates_follow`).
   The order is the principal FOR UPDATE, then its delegates' rows, only updated, then the
