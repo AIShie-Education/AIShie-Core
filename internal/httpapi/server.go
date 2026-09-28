@@ -549,6 +549,10 @@ func (s *server) cors(next http.Handler) http.Handler {
 		trusted[o] = true
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == MCPPath {
+			mcpCORS(w, r, next)
+			return
+		}
 		if origin := r.Header.Get("Origin"); trusted[origin] {
 			h := w.Header()
 			h.Set("Access-Control-Allow-Origin", origin)
@@ -565,6 +569,30 @@ func (s *server) cors(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// mcpCORS lets an agent harness that runs in a browser, or in an app's web
+// view, use /mcp from any origin: it answers the browser's preflight itself,
+// before the bearer check (a preflight carries no Authorization header), and
+// lets the page read the answers and the headers MCP sets. It allows no
+// credentials, and needs none: /mcp takes a bearer token and never a cookie,
+// so a page gets nothing from it without a token it already holds.
+func mcpCORS(w http.ResponseWriter, r *http.Request, next http.Handler) {
+	if r.Header.Get("Origin") == "" {
+		next.ServeHTTP(w, r)
+		return
+	}
+	h := w.Header()
+	h.Set("Access-Control-Allow-Origin", "*")
+	h.Set("Access-Control-Expose-Headers", "Mcp-Session-Id, Mcp-Protocol-Version, WWW-Authenticate")
+	if r.Method == http.MethodOptions && r.Header.Get("Access-Control-Request-Method") != "" {
+		h.Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+		h.Set("Access-Control-Allow-Headers", "Authorization, Content-Type, Accept, Mcp-Protocol-Version, Mcp-Session-Id, Last-Event-ID")
+		h.Set("Access-Control-Max-Age", "600")
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	next.ServeHTTP(w, r)
 }
 
 // ---------------------------------------------------------------------------
