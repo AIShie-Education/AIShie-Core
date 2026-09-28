@@ -778,8 +778,11 @@ func TestAQuestionIsAnsweredOnce(t *testing.T) {
 }
 
 // The answers of a course tutor its instructor owns are that instructor's
-// party's: the queues list them, and say they are someone else's to decide.
-func TestAnInstructorsOwnTutorIsDecidedBySomeoneElse(t *testing.T) {
+// party's: the queues list them, and say whose they are to decide. The
+// instructor decides them where they would answer without anyone's
+// confirmation themselves; where their own answers wait for one, someone
+// else decides the tutor's.
+func TestAnInstructorsOwnTutorIsDecidedByThemOnlyWhereTheyAnswerFreely(t *testing.T) {
 	c := newCast(t)
 	b := c.built
 	b.do(t, b.sato, "member.update_perms", m{"course_id": b.course, "member_id": c.courseTutor, "perms": m{"conversation_answer": "confirm_required"}})
@@ -789,19 +792,40 @@ func TestAnInstructorsOwnTutorIsDecidedBySomeoneElse(t *testing.T) {
 		t.Fatalf("the tutor's answer: %+v", answer)
 	}
 	request := b.MustCall(b.ken, "member.add_delegate", m{"course_id": b.course, "actor_id": b.agent(t, b.ken, "Ken's helper")}, "request")
-	queue := map[uuid.UUID]*bool{}
-	for _, a := range testkit.Result[tools.ActionListOut](t, b.do(t, b.sato, "action.list_proposed", m{"course_id": b.course})).Actions {
-		queue[a.ID] = a.YoursToDecide
+	queue := func() map[uuid.UUID]*bool {
+		got := map[uuid.UUID]*bool{}
+		for _, a := range testkit.Result[tools.ActionListOut](t, b.do(t, b.sato, "action.list_proposed", m{"course_id": b.course})).Actions {
+			got[a.ID] = a.YoursToDecide
+		}
+		return got
 	}
-	if v := queue[*answer.ActionID]; v == nil || *v {
-		t.Fatalf("Sato's own tutor's answer, as his queue lists it: %v", v)
-	}
-	if v := queue[*request.ActionID]; v == nil || !*v {
+	if v := queue()[*request.ActionID]; v == nil || !*v {
 		t.Fatalf("Ken's request, as Sato's queue lists it: %v", v)
 	}
+
+	// Sato's own answers wait for a confirmation: his tutor's are not his.
+	b.Exec(`UPDATE course_member SET perm_conversation_answer = 'confirm_required' WHERE id = $1`, b.satoM)
+	if v := queue()[*answer.ActionID]; v == nil || *v {
+		t.Fatalf("Sato's own tutor's answer, as his queue lists it while his own answers wait: %v", v)
+	}
 	d := b.MustCall(b.sato, "action.decide", m{"course_id": b.course, "action_id": answer.ActionID, "decision": "approve"}, "decide")
-	if d.Status != domain.StatusFailed || d.Error.Code != apperr.Forbidden {
-		t.Fatalf("Sato deciding his own tutor's answer: %+v", d)
+	if d.Status != domain.StatusFailed || d.Error.Code != apperr.Forbidden || d.Error.Details["reason"] != "owner_not_autonomous" {
+		t.Fatalf("Sato deciding his own tutor's answer while his own answers wait: %+v", d)
+	}
+
+	// He answers without anyone again: the tutor's answer is his to decide,
+	// and approved, it is posted, the record saying its owner approved it.
+	b.Exec(`UPDATE course_member SET perm_conversation_answer = 'autonomous' WHERE id = $1`, b.satoM)
+	if v := queue()[*answer.ActionID]; v == nil || !*v {
+		t.Fatalf("Sato's own tutor's answer, as his queue lists it: %v", v)
+	}
+	if v := testkit.Result[pipeline.DecideOut](t, b.do(t, b.sato, "action.decide",
+		m{"course_id": b.course, "action_id": answer.ActionID, "decision": "approve"})); v.Outcome != domain.StatusExecuted || !v.ByOwner {
+		t.Fatalf("Sato approving his own tutor's answer: %+v", v)
+	}
+	if got := testkit.Result[tools.ConversationMessagesOut](t, b.do(t, b.ken, "conversation.messages",
+		m{"course_id": b.course, "conversation_id": conv})).Messages; len(got) != 2 || got[1].Body == nil || *got[1].Body != "Yes." {
+		t.Fatalf("Ken's conversation once the answer was approved: %+v", got)
 	}
 }
 

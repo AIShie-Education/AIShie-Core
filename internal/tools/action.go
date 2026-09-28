@@ -21,7 +21,7 @@ import (
 func actionTools(d Deps) []tool.Tool {
 	return []tool.Tool{
 		actionDecide(d), actionReview(d), actionWithdraw(),
-		actionListProposed(), actionListPendingReview(), actionListMine(), actionGet(),
+		actionListProposed(d), actionListPendingReview(d), actionListMine(), actionGet(),
 	}
 }
 
@@ -46,7 +46,10 @@ func actionDecide(d Deps) tool.Tool {
 		Description: "Approve or reject a proposal: an action that was blocked before execution because its proposer " +
 			"needs confirmation. Approving runs it now, as the proposer, after checking that the proposer is still " +
 			"allowed to do it; if not, or if the proposal is too old, it is cancelled instead. Nobody decides their own proposal, " +
-			"nor a decision someone else proposed about it, nor approves closing an escalation they raised or approved.",
+			"nor their owner's, nor another agent's of their owner, nor a decision someone else proposed about any of those, " +
+			"nor approves closing an escalation they raised or approved. An agent's owner decides its proposal only where " +
+			"they could do the same themselves without anyone's confirmation: their own level for it autonomous, and its " +
+			"target within their reach; by_owner then says so.",
 		Kind: tool.Write,
 		Gate: decidePerm,
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/actions/{action_id}/decide"},
@@ -63,7 +66,9 @@ func actionReview(d Deps) tool.Tool {
 	return tool.Define(tool.Spec[pipeline.ReviewIn, pipeline.ReviewOut]{
 		Name: pipeline.ToolActionReview,
 		Description: "Record that an action which executed pending review has been looked at: reviewed, or escalated " +
-			"for someone else to look at. Reviewing undoes nothing; putting something right is a separate action.",
+			"for someone else to look at. Reviewing undoes nothing; putting something right is a separate action. Nobody " +
+			"reviews their own action, their owner's or another agent's of their owner; an agent's owner reviews what it " +
+			"did only where they could do the same themselves without anyone's confirmation.",
 		Kind: tool.Write,
 		Gate: decidePerm,
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/actions/{action_id}/review"},
@@ -96,7 +101,7 @@ type ActionView struct {
 	Result             json.RawMessage `json:"result,omitempty"`
 	CreatedAt          time.Time       `json:"created_at"`
 	// YoursToDecide is set in the approval and review queues.
-	YoursToDecide *bool `json:"yours_to_decide,omitempty" jsonschema:"in the approval and review queues: false when the action is yours, your agent's, your owner's or another agent of your owner's, which someone else decides and reviews; true otherwise, though a decision about a decision may still be refused at one remove"`
+	YoursToDecide *bool `json:"yours_to_decide,omitempty" jsonschema:"in the approval and review queues: false when the action is yours, your owner's or another agent's of your owner, and when it is your own agent's and you could not do the same yourself without anyone's confirmation (your own level for it below autonomous, or its target beyond your reach): someone else decides and reviews those; true otherwise, though a decision about a decision may still be refused at one remove"`
 }
 
 func viewAction(a dbq.Action) ActionView {
@@ -135,8 +140,10 @@ func actionPage(rows []dbq.Action, limit int32) ActionListOut {
 // queuePage is a page of a queue, each action saying whether the caller may
 // decide or review it: not if it is the caller's own party's (pipeline.Decide,
 // pipeline.Review), which the queue lists all the same, since it is the
-// course's queue and someone else's to clear.
-func queuePage(ctx context.Context, rc *tool.ReadCtx, rows []dbq.Action, limit int32) (ActionListOut, error) {
+// course's queue and someone else's to clear; but for the caller's own
+// agent's, where the caller could have done it themselves without anyone's
+// confirmation (pipeline.OwnerMayJudge), measured now as a decision would be.
+func queuePage(ctx context.Context, rc *tool.ReadCtx, p *pipeline.Pipeline, rows []dbq.Action, limit int32) (ActionListOut, error) {
 	out := actionPage(rows, limit)
 	if len(rows) == 0 {
 		return out, nil
@@ -149,8 +156,13 @@ func queuePage(ctx context.Context, rc *tool.ReadCtx, rows []dbq.Action, limit i
 	if err != nil {
 		return out, err
 	}
-	for i := range out.Actions {
-		yours := !slices.Contains(ours, out.Actions[i].ActorID)
+	for i, r := range rows {
+		yours := !slices.Contains(ours, r.ActorID)
+		if !yours && rc.Member != nil {
+			if yours, err = p.OwnerMayJudge(ctx, rc.Q, rc.Actor, rc.Member.ID, r, rc.Now); err != nil {
+				return out, err
+			}
+		}
 		out.Actions[i].YoursToDecide = &yours
 	}
 	return out, nil
@@ -160,11 +172,12 @@ func courseOnly(_ context.Context, _ dbq.Querier, in ActionListIn) (tool.Target,
 	return tool.Target{CourseID: in.CourseID, Type: "action"}, nil
 }
 
-func actionListProposed() tool.Tool {
+func actionListProposed(d Deps) tool.Tool {
 	return tool.Define(tool.Spec[ActionListIn, ActionListOut]{
 		Name: "action.list_proposed",
 		Description: "The approval queue: proposals in this course waiting for a decision, oldest first. yours_to_decide is " +
-			"false on those of your own party — yours, your agents', your owner's — which someone else decides.",
+			"false on those of your own party, which someone else decides — yours, your owner's, your owner's other " +
+			"agents', and your own agents' unless you could do the same yourself without anyone's confirmation.",
 		Kind:    tool.Read,
 		Gate:    decidePerm,
 		HTTP:    tool.Route{Method: "GET", Pattern: "/v1/courses/{course_id}/actions/proposed"},
@@ -174,16 +187,17 @@ func actionListProposed() tool.Tool {
 			if err != nil {
 				return ActionListOut{}, err
 			}
-			return queuePage(ctx, rc, rows, in.limit())
+			return queuePage(ctx, rc, d.Pipeline, rows, in.limit())
 		},
 	})
 }
 
-func actionListPendingReview() tool.Tool {
+func actionListPendingReview(d Deps) tool.Tool {
 	return tool.Define(tool.Spec[ActionListIn, ActionListOut]{
 		Name: "action.list_pending_review",
 		Description: "The review queue: actions that executed pending review and have not been reviewed, or were escalated. " +
-			"yours_to_decide is false on those of your own party — yours, your agents', your owner's — which someone else reviews.",
+			"yours_to_decide is false on those of your own party, which someone else reviews — yours, your owner's, your " +
+			"owner's other agents', and your own agents' unless you could do the same yourself without anyone's confirmation.",
 		Kind:    tool.Read,
 		Gate:    decidePerm,
 		HTTP:    tool.Route{Method: "GET", Pattern: "/v1/courses/{course_id}/actions/pending-review"},
@@ -193,7 +207,7 @@ func actionListPendingReview() tool.Tool {
 			if err != nil {
 				return ActionListOut{}, err
 			}
-			return queuePage(ctx, rc, rows, in.limit())
+			return queuePage(ctx, rc, d.Pipeline, rows, in.limit())
 		},
 	})
 }

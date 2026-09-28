@@ -774,11 +774,30 @@ Nobody approves or reviews their own action. The CHECKs compare seats; the appli
 actors as well, so the rule holds across every seat one actor has held: someone removed and
 seated again has a new seat, and is still who made the action. It compares parties, in fact: an
 actor, an agent it owns or its owner, and another agent of the same owner are one party, since an
-agent someone owns acts only as their delegate. An owner does not approve or review what their
-agent did, nor an agent what its owner or a sibling did, nor does any of them close an escalation
-another of them raised. The approval and review queues list such actions all the same — they are
-the course's queues — and mark each with whether it is the caller's to decide
-(`yours_to_decide`). The database cannot go further
+agent someone owns acts only as their delegate. An agent does not approve or review what its
+owner or a sibling did, nor does any of the party close an escalation another of them raised.
+
+**An owner decides what their own agent did where they could have done it themselves.** They
+approve or reject its proposal, and review what it did under review, only if their own seat, when
+they decide, holds every permission that gates the action at `autonomous` and reaches its target:
+the authorization they would face making the very same call themselves then (`authorize()`, §3,
+from their own seat). Their agent does nothing they could not do anyway, and they could have done
+this without anyone: a student whose agent drafts her work only by proposal (§2.2, Delegates)
+confirms those drafts herself, since she writes her work without anyone's confirmation. Where their own level is `confirm_required` or `pending_review`, the course
+has someone check them too, and so their agent: someone outside the party decides it, as for the
+rest of the party; so it is where the target is beyond their reach, or gone. Rejecting is held to
+the same rule as approving, so that one mark says which proposals are the caller's. It is the
+owner's own decision about their own agent's action and nothing more: the agent never decides its
+owner's, a sibling never another's, and at one remove (below) the party stays one. Approving
+authorizes the proposer again, as any approval does, so an owner carries out nothing their agent
+may no longer do. The decision says the owner made it: `by_owner` in its result and in the event
+it writes (`action.approved`, `action.rejected`, `action.reviewed`, `action.escalated`), and in a
+rejection's `result.decision`. The database cannot see it: the CHECKs compare seats, and an
+owner's seat is not their agent's.
+
+The approval and review queues list the party's actions all the same — they are the course's
+queues — and mark each with whether it is the caller's to decide (`yours_to_decide`), an owner's
+own agent's by the rule above, measured as the decision would be. The database cannot go further
 and require the decider to be human, because nothing reads `actor.kind`. Nor can it see past one
 row: a decision is an action like any other, so it may itself wait for a decision or be under
 review — a triage agent whose approvals a human confirms. Confirming it carries out what it
@@ -956,9 +975,11 @@ instance's clock would. A call writing in a conversation takes its caller's seat
 other participant's next, KEY SHARE (its principal's after it), and the conversation last.
 An answer that waits for approval is a proposal; approving it runs every check again. Four
 eyes count parties (§2.6), so the answers of a course tutor an instructor owns, when they
-wait for approval or review, are decided by someone other than that instructor. Where that
-instructor is the only one who decides actions, nobody can: such a tutor's answers stay
-autonomous there, or someone else is seated to decide them.
+wait for approval or review, are decided by someone other than that instructor, unless the
+instructor's own `perm_conversation_answer` is `autonomous`: then they could have answered
+without anyone, and decide them too. Where that instructor answers only with a confirmation and
+is the only one who decides actions, nobody can: such a tutor's answers stay autonomous there,
+or someone else is seated to decide them.
 
 Either participant closes a conversation (`conversation.close`), with a reason if they like,
 which may not be `seat_removed`; nothing more is written in it, and it stays readable. A message is withdrawn (`conversation.retract`) by its author, or
@@ -1449,6 +1470,10 @@ that reads which credential the call came with.
   again.
 - Four eyes counts parties (§2.6): an actor, the agents it owns or its owner, and the owner's
   other agents are one, in `action.decide`, `action.review`, at any remove and for escalations.
+  One exception, at no remove: an owner approves, rejects or reviews their own agent's action
+  where their own seat, as `authorize()` finds it for the same call when they decide, holds it at
+  `autonomous` and reaches its target; `yours_to_decide` is worked out the same way, and the
+  decision and its event say `by_owner`.
 - Only an agent's owner acts on it through `agent.*`, and to anyone else it does not exist.
   What an owner does for themselves is capped: `agent.create`, and `agent.reactivate` of one they
   suspended, are refused once they have `AGENT_MAX_PER_OWNER` agents that are not suspended,

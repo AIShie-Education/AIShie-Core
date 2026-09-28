@@ -7,10 +7,11 @@
 # and have the instructor's own tutor agent answer the student's question,
 # once its runtime says it answers in the site, and be asked nothing more once
 # he switches that off; and have another agent of his, given member_manage,
-# seat a student with its own token, and be refused on his seat. Then he shows
-# a join link: a new student registers through it, a registered one joins,
-# and once he revokes it, it seats nobody; his agents, without
-# member_invite, make none.
+# seat a student with its own token, and be refused on his seat, and his own
+# assistant propose an assignment he may make without anyone's confirmation,
+# which he then approves himself. Then he shows a join link: a new student
+# registers through it, a registered one joins, and once he revokes it, it
+# seats nobody; his agents, without member_invite, make none.
 # Then a department's administrator, invited and appointed by root, makes a
 # course beneath her appointment and seats its instructor, found by their
 # email. Then Core vouches for the instructor to an agent runtime, and the key it
@@ -298,6 +299,22 @@ call 422 POST "/v1/join/$JOIN/register" "" '{"display_name":"Rin","email":"rin@e
 [ "$(json "$WORK/body" 'd["error"]["details"]["reason"]')" = revoked ] || fail "registering through a revoked link: $(cat "$WORK/body")"
 KEY=ren-late call 422 POST "/v1/join/$JOIN" "$REN"
 [ "$(json "$WORK/body" 'd["error"]["details"]["reason"]')" = revoked ] || fail "joining through a revoked link: $(cat "$WORK/body")"
+
+step "Sato's own assistant proposes HW4, its assignments waiting for a confirmation; Sato, who makes assignments without one, approves it himself and it is made"
+call 200 POST /v1/me/agents "$SATO" '{"display_name":"Assistant"}'
+ASSIST_ID=$(json "$WORK/body" 'd["result"]["actor_id"]')
+call 200 POST "/v1/me/agents/$ASSIST_ID/tokens" "$SATO" '{"label":"e2e"}'
+ASSIST=$(json "$WORK/body" 'd["result"]["token"]')
+call 200 POST "$C/delegates" "$SATO" "{\"actor_id\":\"$ASSIST_ID\",\"perms\":{\"assignment_write\":\"confirm_required\"}}"
+call 202 POST "$C/assignments" "$ASSIST" '{"title":"HW4","points_possible":100}'
+HW4_ASK=$(json "$WORK/body" 'd["action_id"]')
+call 200 GET "$C/actions/proposed" "$SATO"
+[ "$(json "$WORK/body" '[a["yours_to_decide"] for a in d["result"]["actions"] if a["id"] == "'"$HW4_ASK"'"]')" = "[True]" ] ||
+  fail "Sato is not told his assistant's proposal is his to decide: $(cat "$WORK/body")"
+call 200 POST "$C/actions/$HW4_ASK/decide" "$SATO" '{"decision":"approve"}'
+[ "$(json "$WORK/body" 'd["result"]["outcome"], d["result"]["by_owner"]')" = "executed True" ] || fail "the owner's approval: $(cat "$WORK/body")"
+call 200 GET "$C/assignments" "$SATO"
+json "$WORK/body" '"HW4" in [a["title"] for a in d["result"]["assignments"]] or sys.exit("HW4 was not made")' >/dev/null
 
 step "The same server over MCP: an agent's own door, with the same token"
 mcp() { # JSON-RPC body → $WORK/body

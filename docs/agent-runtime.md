@@ -159,7 +159,8 @@ The events that matter carry ids, never text:
 - `action.approved`, `action.rejected` and `action.cancelled`, filed under the
   proposal's `action_id`. `action.approved` has `payload.outcome`, `executed`
   or `failed`; `action.cancelled` has `payload.reason` (proposals expire after
-  14 days by default). A rejection's reason is in the proposal's
+  14 days by default). `payload.by_owner` is true when it was the agent's own
+  owner who approved or rejected it. A rejection's reason is in the proposal's
   `result.decision.reason`, which `action_list_mine` returns.
 - `conversation.opened`, `conversation.message_posted` (`conversation_id`,
   `message_id`, `author_member_id`, `opener_member_id`,
@@ -209,8 +210,9 @@ polite reason rather than leave it at the head of the inbox. An answer waiting
 for approval to a message since overtaken holds nothing up: the inbox shows the
 newer message, and approving the old answer can only fail. The answers of an
 instructor's own tutor that wait for approval or review are decided by someone
-else; where nobody else decides actions, they must stay autonomous (schema.md
-§2.8).
+else, unless the instructor answers without a confirmation themselves, when
+they may decide them too; where nobody else decides actions and the instructor
+may not, they must stay autonomous (schema.md §2.8).
 
 ### 2.5 Memory, presence, limits
 
@@ -761,8 +763,11 @@ The runtime neither holds back a write to imitate `confirm_required` nor
 avoids proposals to look autonomous; it tells the owner what happened
 ("waiting for your instructor's approval"). `proposed` is normal, and the
 runtime, not the model, decides what follows. Nobody decides their own
-proposal, their agent's or their owner's, and Core refuses it, so a runtime
-never pairs a decider's and a proposer's token for one party.
+proposal, their owner's or another agent's of their owner, and Core refuses
+it. An owner decides their own agent's proposal only where they could have
+done it themselves without anyone's confirmation (schema.md §2.6): that is a
+person's decision in Core, never the runtime's, so a runtime never pairs a
+decider's and a proposer's token for one party, nor approves for the owner.
 
 ### 6.3 Personal data and retractions
 
