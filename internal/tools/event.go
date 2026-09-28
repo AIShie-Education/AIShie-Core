@@ -57,6 +57,7 @@ var visibility = map[string][]domain.Perm{
 	members.EventAdded: {domain.PermMemberRead}, members.EventUpdated: {domain.PermMemberRead},
 	members.EventPaused: {domain.PermMemberRead}, members.EventResumed: {domain.PermMemberRead},
 	members.EventRemoved: {domain.PermMemberRead}, members.EventRescoped: {domain.PermMemberRead},
+	members.EventRoleChanged: {domain.PermMemberRead},
 
 	// A join link is a way into the course, for whoever holds it: news of
 	// one is for those who make, list and revoke them (member_invite), and

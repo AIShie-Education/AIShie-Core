@@ -712,6 +712,8 @@ type Querier interface {
 	SetDocumentStatus(ctx context.Context, arg SetDocumentStatusParams) (int64, error)
 	SetMemberExpiry(ctx context.Context, arg SetMemberExpiryParams) error
 	SetMemberPerms(ctx context.Context, arg SetMemberPermsParams) error
+	// A fact of the roster; nothing that authorizes reads it.
+	SetMemberRole(ctx context.Context, arg SetMemberRoleParams) error
 	SetMemberScopeKinds(ctx context.Context, arg SetMemberScopeKindsParams) error
 	SetMemberStatus(ctx context.Context, arg SetMemberStatusParams) (int64, error)
 	SetPublishedVersion(ctx context.Context, arg SetPublishedVersionParams) error

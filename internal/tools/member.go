@@ -20,7 +20,8 @@ import (
 
 func memberTools() []tool.Tool {
 	return []tool.Tool{memberList(), memberGet(), memberLookupActor(), memberAdd(), memberUpdatePerms(), memberRescope(),
-		memberPause(), memberResume(), memberRemove(), memberAddDelegate(), memberDelegateDefaults(), memberUpdatePermsBulk()}
+		memberPause(), memberResume(), memberRemove(), memberAddDelegate(), memberDelegateDefaults(), memberUpdatePermsBulk(),
+		memberSetRole()}
 }
 
 var (
@@ -998,6 +999,79 @@ func memberUpdatePermsBulk() tool.Tool {
 				ec.Emit(events.Event{Type: members.EventUpdated, CourseID: &in.CourseID, SubjectType: "course_member", SubjectID: &m.ID})
 				out.Updated++
 			}
+			return out, nil
+		},
+	})
+}
+
+// ---------------------------------------------------------------------------
+// member.set_role
+// ---------------------------------------------------------------------------
+
+type MemberSetRoleIn struct {
+	tool.InCourse
+	MemberID uuid.UUID `json:"member_id"`
+	Role     string    `json:"role" jsonschema:"student, instructor, ta, observer or assistant"`
+}
+
+type MemberSetRoleOut struct {
+	Role     string `json:"role"`
+	Previous string `json:"previous" jsonschema:"the role the seat had before this call"`
+	Changed  bool   `json:"changed" jsonschema:"false when the seat already had the role: nothing was done"`
+}
+
+// memberSetRole changes the one fact about a seat that the roster is made of.
+// Role is never read by authorization, so this changes nothing a seat may do,
+// and is not a grant: the seat's levels and reach are exactly what they were.
+// What role does decide is who is on the roster — who hands work in, who is
+// graded, who a due date marks missing — and those tools read it as they go,
+// so the change takes effect for each on its next call. What a student has
+// already handed in and been given stays theirs.
+//
+// A delegate's seat is an owned agent's, always assistant: it is its
+// principal's agent, never on the roster, and is not given another role. A
+// delegate that manages members is held off its principal's seat and its
+// principal's other agents' as every tool acting on one seat holds it
+// (loadOther, notYourPrincipals), before anything is looked at.
+func memberSetRole() tool.Tool {
+	return tool.Define(tool.Spec[MemberSetRoleIn, MemberSetRoleOut]{
+		Name: "member.set_role",
+		Description: "Change a seat's roster role: student, ta, instructor, observer or assistant. The role is a fact of " +
+			"the roster and nothing more: it decides who is on the gradebook and who hands work in, never what a seat may " +
+			"do. Its permissions and scope stay exactly as they are, since authorization never reads role; change them " +
+			"with member.update_perms and member.rescope. A student made a TA keeps everything they handed in and every " +
+			"grade and total they were given, readable as before, and work already handed in may still be graded; from " +
+			"then on they are off the roster: not listed as a student, not marked missing when a due date passes, handing " +
+			"in nothing new and given no new grade on a component. Someone made a student is on the roster and may hand " +
+			"work in. Not on your own seat, and not on a delegate's, which is always assistant; a delegate that manages the " +
+			"course's members changes the role of neither its principal's seat nor its principal's other agents' " +
+			"(not_your_principal). Giving a seat the role it has changes nothing and says so (changed: false).",
+		Kind: tool.Write, Gate: manageMembers,
+		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/members/{member_id}/role"},
+		Resolve: func(ctx context.Context, q dbq.Querier, in MemberSetRoleIn) (tool.Target, error) {
+			return resolveMember(ctx, q, in.CourseID, in.MemberID)
+		},
+		Execute: func(ctx context.Context, ec *tool.ExecCtx, in MemberSetRoleIn) (MemberSetRoleOut, error) {
+			if !validRoles[in.Role] {
+				return MemberSetRoleOut{}, apperr.Invalid("role must be student, instructor, ta, observer or assistant")
+			}
+			m, err := loadOther(ctx, ec, in.CourseID, in.MemberID)
+			if err != nil {
+				return MemberSetRoleOut{}, err
+			}
+			if m.PrincipalMemberID != nil {
+				return MemberSetRoleOut{}, apperr.Precondition("a delegate's seat is its principal's agent, always assistant, and on no roster").
+					With("reason", "delegate_seat")
+			}
+			out := MemberSetRoleOut{Role: in.Role, Previous: m.Role, Changed: m.Role != in.Role}
+			if !out.Changed {
+				return out, nil
+			}
+			if err := ec.Q.SetMemberRole(ctx, dbq.SetMemberRoleParams{ID: m.ID, Role: in.Role}); err != nil {
+				return MemberSetRoleOut{}, err
+			}
+			ec.Emit(events.Event{Type: members.EventRoleChanged, CourseID: &in.CourseID, SubjectType: "course_member", SubjectID: &m.ID,
+				Payload: map[string]any{"from": m.Role, "to": in.Role}})
 			return out, nil
 		},
 	})

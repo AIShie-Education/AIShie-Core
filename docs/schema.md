@@ -244,6 +244,20 @@ an agent seated in ten courses has ten, each with its own permissions and scope.
 `assistant`, so they never appear on the roster or receive a grade — but so can a human
 teaching assistant. Role is not read by authorization.
 
+A seat's role changes (`member.set_role`, gated by `perm_member_manage` like every change to a
+seat, never on one's own and never on a delegate's, which is always `assistant`: its
+principal's agent, on no roster; and, by a delegate that manages members, neither on its
+principal's seat nor on its principal's other agents', `not_your_principal`, below). It is not a grant and changes nothing a seat may do, since
+nothing that authorizes reads it: its levels and reach stay as they are, to be changed with
+`member.update_perms` and `member.rescope`. What reads role reads it as it goes. A student
+made a TA keeps what they handed in and every grade and total they were given, readable as
+before, and work already handed in may still be graded and regraded; from then on they are off
+the roster — not listed as a student, not marked missing when a due date passes, handing in
+nothing new, given no new grade on a component — and other seats' lists that name them are
+kept as they are. Someone made a student is on the roster, hands work in, and may be listed in
+others' scope. Giving a seat the role it has changes nothing (`changed: false`); a change emits
+`member.role_changed`, from and to.
+
 **Permissions are columns.** One `autonomy_level` column per action type:
 
 | Column | Gates | Scoped |
@@ -1561,6 +1575,9 @@ that reads which credential the call came with.
   agent declares it; its owner switches it off and never on.
 - `member.update_perms_bulk` changes every seat of the role but the caller's, each through the
   rule for one seat, all or none.
+- A seat's role changes by `member.set_role` alone, which changes nothing else on the seat,
+  refuses the caller's own seat, a delegate caller's principal's and its principal's other
+  agents' (`not_your_principal`), and a delegate's, which stays `assistant`.
 - A proposal is withdrawn only by its proposer, or by the owner of the agent that proposed it,
   and only while nobody has decided it.
 - Nobody gains through a conversation more than they hold (§2.8): a member addresses only a

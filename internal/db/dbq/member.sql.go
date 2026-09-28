@@ -877,6 +877,21 @@ func (q *Queries) SetMemberPerms(ctx context.Context, arg SetMemberPermsParams) 
 	return err
 }
 
+const setMemberRole = `-- name: SetMemberRole :exec
+UPDATE course_member SET role = $2 WHERE id = $1
+`
+
+type SetMemberRoleParams struct {
+	ID   uuid.UUID
+	Role string
+}
+
+// A fact of the roster; nothing that authorizes reads it.
+func (q *Queries) SetMemberRole(ctx context.Context, arg SetMemberRoleParams) error {
+	_, err := q.db.Exec(ctx, setMemberRole, arg.ID, arg.Role)
+	return err
+}
+
 const setMemberScopeKinds = `-- name: SetMemberScopeKinds :exec
 UPDATE course_member SET student_scope = $2, assignment_scope = $3 WHERE id = $1
 `
