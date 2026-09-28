@@ -84,7 +84,7 @@ func (q *Queries) CountSeatsInOpenCourses(ctx context.Context, actorID uuid.UUID
 
 const getActor = `-- name: GetActor :one
 SELECT id, kind, display_name, email, status, platform_role, created_by_actor_id, created_at,
-       owner_actor_id, suspended_by_actor_id
+       owner_actor_id, suspended_by_actor_id, site_chat_credential_id
 FROM actor
 WHERE id = $1
 `
@@ -105,6 +105,7 @@ func (q *Queries) GetActor(ctx context.Context, id uuid.UUID) (Actor, error) {
 		&i.CreatedAt,
 		&i.OwnerActorID,
 		&i.SuspendedByActorID,
+		&i.SiteChatCredentialID,
 	)
 	return i, err
 }
@@ -127,7 +128,7 @@ func (q *Queries) GetActorByEmail(ctx context.Context, lower string) (GetActorBy
 
 const getActorForShare = `-- name: GetActorForShare :one
 SELECT id, kind, display_name, email, status, platform_role, created_by_actor_id, created_at,
-       owner_actor_id, suspended_by_actor_id
+       owner_actor_id, suspended_by_actor_id, site_chat_credential_id
 FROM actor
 WHERE id = $1
 FOR SHARE
@@ -155,6 +156,7 @@ func (q *Queries) GetActorForShare(ctx context.Context, id uuid.UUID) (Actor, er
 		&i.CreatedAt,
 		&i.OwnerActorID,
 		&i.SuspendedByActorID,
+		&i.SiteChatCredentialID,
 	)
 	return i, err
 }

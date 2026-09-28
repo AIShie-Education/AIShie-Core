@@ -83,16 +83,17 @@ type Action struct {
 }
 
 type Actor struct {
-	ID                 uuid.UUID
-	Kind               string
-	DisplayName        string
-	Email              *string
-	Status             string
-	PlatformRole       *string
-	CreatedByActorID   *uuid.UUID
-	CreatedAt          time.Time
-	OwnerActorID       *uuid.UUID
-	SuspendedByActorID *uuid.UUID
+	ID                   uuid.UUID
+	Kind                 string
+	DisplayName          string
+	Email                *string
+	Status               string
+	PlatformRole         *string
+	CreatedByActorID     *uuid.UUID
+	CreatedAt            time.Time
+	OwnerActorID         *uuid.UUID
+	SuspendedByActorID   *uuid.UUID
+	SiteChatCredentialID *uuid.UUID
 }
 
 type Assignment struct {

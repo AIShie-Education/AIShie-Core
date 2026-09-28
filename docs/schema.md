@@ -66,15 +66,18 @@ department(id, name, parent_id null→department, created_at)   -- a tree of the
 actor(id, kind [human|agent|system], display_name, email null,
       status [active|suspended], platform_role null [root|admin],
       created_by_actor_id null→actor, created_at,
-      owner_actor_id null→actor, suspended_by_actor_id null→actor)
-    check: owner_actor_id ≠ id;  owner_actor_id set ⇒ kind = 'agent' and no platform_role
+      owner_actor_id null→actor, suspended_by_actor_id null→actor,
+      site_chat_credential_id null)
+    check: owner_actor_id ≠ id;  owner_actor_id set ⇒ kind = 'agent' and no platform_role;
+           site_chat_credential_id set ⇒ kind = 'agent'
+    composite FK (site_chat_credential_id, id) → credential(id, actor_id)
     trigger: the owner is a person (kind = 'human')
 
 credential(id, actor_id→actor, kind [password|sso|api_token|session|invite],
            secret_hash null, provider null, subject null, token_prefix null,
            label null, last_used_at null, expires_at null, revoked_at null, created_at,
            issued_by_actor_id null→actor,
-           unique(provider, subject), unique(token_prefix))
+           unique(provider, subject), unique(token_prefix), unique(id, actor_id))
 
 course(id, dept_id→department, term_id→term, code, section = '', title, description null,
        status [draft|active|archived], copied_from_course_id null→course,
@@ -120,6 +123,13 @@ suspend an agent its owner has suspended, which takes the suspension over. Null 
 owner's": a suspension made before migration 0007, or by the release before it, is an
 administrator's to lift. Making an actor active clears it, whichever release does it, so that a
 later suspension is never taken for the owner's.
+
+`site_chat_credential_id` is the credential of an agent's with which a program that runs it
+declared that the agent takes conversations in the site (§2.8). Only an agent has one, and only
+a credential of its own: the CHECK reads `kind` to refuse, as the refusals of ownership do, and
+the composite key holds whose it is whichever row changes. Whether it is still live is read
+when it is needed and never kept here, so revoking the credential ends it with nothing to
+update. Migration 0011 adds it; the release before neither reads nor writes it.
 
 `created_by_actor_id` is the delegation chain: root (seeded at install, the only null) creates
 admins, an admin creates a course and seats its first instructor, the instructor adds everyone
@@ -1127,6 +1137,7 @@ a course, what the call is about is the course's department.
 | Only an agent has an owner, and its owner is a person: not an agent, not the system actor, not itself | CHECKs on `actor`, trigger `actor_owner_valid` |
 | An agent someone owns holds no platform role | CHECK `actor_owned_holds_no_platform_role` |
 | Making an actor active forgets who suspended it | trigger `actor_suspension_cleared` |
+| Only an agent declares that it takes conversations in the site, and only with a credential of its own | CHECK `actor_site_chat_is_agent`, composite FK `actor_site_chat_credential_fk` |
 | A seat that is not removed has a principal exactly when its actor has an owner; the principal is the owner's seat, in the same course, and nobody's delegate | composite FK and trigger `course_member_principal_valid` on `course_member` |
 | A delegate's seat is removed with its principal's, whichever release removes it | trigger `course_member_delegates_follow` |
 | Only a delegate's seat answers the course | CHECK `course_member_answers_course_is_delegate` |

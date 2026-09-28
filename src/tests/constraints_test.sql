@@ -51,6 +51,7 @@ END $$;
 --      3x actors · 4x courses · 5x members · 6x components
 --      7x assignments · ex documents · fx versions · ax submissions
 --      bx actions · dx grades · cx conversations · cxx their messages
+--      1cx credentials
 INSERT INTO term (id, name, starts_on, ends_on)
 VALUES ('00000000-0000-0000-0000-000000000011', '2026 Autumn', '2026-09-01', '2026-12-20');
 INSERT INTO department (id, name) VALUES ('00000000-0000-0000-0000-000000000021', 'Computing');
@@ -335,6 +336,33 @@ SELECT pg_temp.ok('the new permissions default to denied on both tables', $q$
     END $chk$ $q$);
 SELECT pg_temp.fails('only a delegate''s seat answers the course', '23514', $q$
     UPDATE course_member SET answers_course = true WHERE id = '00000000-0000-0000-0000-000000000051' $q$);
+
+-- Site chat: which credential of an agent's declared it ------------------------
+-- 1c1 the grader's (36) token · 1c2 Sato's (34)
+INSERT INTO credential (id, actor_id, kind, secret_hash, token_prefix) VALUES
+    ('00000000-0000-0000-0000-0000000001c1', '00000000-0000-0000-0000-000000000036', 'api_token', 'h', 'sc-agent'),
+    ('00000000-0000-0000-0000-0000000001c2', '00000000-0000-0000-0000-000000000034', 'api_token', 'h', 'sc-person');
+SELECT pg_temp.ok('an agent declares site chat with a credential of its own', $q$
+    UPDATE actor SET site_chat_credential_id = '00000000-0000-0000-0000-0000000001c1' WHERE id = '00000000-0000-0000-0000-000000000036' $q$);
+SELECT pg_temp.fails('not with someone else''s', '23503', $q$
+    UPDATE actor SET site_chat_credential_id = '00000000-0000-0000-0000-0000000001c2' WHERE id = '00000000-0000-0000-0000-000000000036' $q$);
+SELECT pg_temp.fails('nor with one that does not exist', '23503', $q$
+    UPDATE actor SET site_chat_credential_id = '00000000-0000-0000-0000-0000000000ff' WHERE id = '00000000-0000-0000-0000-000000000036' $q$);
+SELECT pg_temp.fails('a person declares no site chat, even with a credential of their own', '23514', $q$
+    UPDATE actor SET site_chat_credential_id = '00000000-0000-0000-0000-0000000001c2' WHERE id = '00000000-0000-0000-0000-000000000034' $q$);
+SELECT pg_temp.fails('a credential that declared it is not moved to another actor', '23503', $q$
+    UPDATE credential SET actor_id = '00000000-0000-0000-0000-000000000034' WHERE id = '00000000-0000-0000-0000-0000000001c1' $q$);
+SELECT pg_temp.ok('revoking it leaves the row as it is: whether it is live is read, not kept', $q$
+    UPDATE credential SET revoked_at = now() WHERE id = '00000000-0000-0000-0000-0000000001c1';
+    DO $chk$
+    BEGIN
+        IF NOT EXISTS (SELECT 1 FROM actor WHERE id = '00000000-0000-0000-0000-000000000036'
+                       AND site_chat_credential_id = '00000000-0000-0000-0000-0000000001c1') THEN
+            RAISE EXCEPTION 'revoking the credential changed the actor';
+        END IF;
+    END $chk$ $q$);
+SELECT pg_temp.ok('and switching it off clears it', $q$
+    UPDATE actor SET site_chat_credential_id = NULL WHERE id = '00000000-0000-0000-0000-000000000036' $q$);
 
 -- Departments: a tree, and its administrators --------------------------------
 -- 2a1 … 2a8 a chain, 2a1 at the top · 2b1 > 2b2 > 2b3 a department and what is
