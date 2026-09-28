@@ -235,6 +235,7 @@ func TestAnAssertionSaysWhoIsSignedIn(t *testing.T) {
 	if h.Algorithm != "EdDSA" || h.KeyID != pinnedKid || h.ExtraHeaders["typ"] != "JWT" {
 		t.Fatalf("header: %+v", h)
 	}
+	compact(t, got.Token, key.Public().(ed25519.PublicKey))
 	jti, _ := claims["jti"].(string)
 	if !regexp.MustCompile(`^[A-Za-z0-9_-]{22}$`).MatchString(jti) {
 		t.Fatalf("jti %q is not 128 random bits", jti)
@@ -417,6 +418,51 @@ func swapKid(t *testing.T, token, kid string) string {
 	hdr["kid"] = kid
 	h, _ = json.Marshal(hdr)
 	return base64.RawURLEncoding.EncodeToString(h) + "." + parts[1] + "." + parts[2]
+}
+
+// compact checks by hand, rather than with a library that might forgive
+// what it reads, that an assertion is a JWS in compact serialisation as
+// RFC 7515 and RFC 7519 write one: three parts of base64url with no padding;
+// a header of alg EdDSA, typ JWT and the key's thumbprint as kid, and
+// nothing else; claims whose times are whole numbers of seconds; and an
+// Ed25519 signature by pub over exactly the first two parts and the dot
+// between them.
+func compact(t *testing.T, token string, pub ed25519.PublicKey) {
+	t.Helper()
+	if !regexp.MustCompile(`^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{86}$`).MatchString(token) {
+		t.Fatalf("not three parts of unpadded base64url, the last a 64-byte signature: %q", token)
+	}
+	parts := strings.Split(token, ".")
+	enc := base64.RawURLEncoding.Strict()
+	decode := func(part string) map[string]any {
+		t.Helper()
+		b, err := enc.DecodeString(part)
+		if err != nil {
+			t.Fatalf("%q is not strict base64url: %v", part, err)
+		}
+		dec := json.NewDecoder(bytes.NewReader(b))
+		dec.UseNumber()
+		var v map[string]any
+		if err := dec.Decode(&v); err != nil || dec.More() {
+			t.Fatalf("%s is not one JSON object: %v", b, err)
+		}
+		return v
+	}
+	thumb := sha256.Sum256([]byte(`{"crv":"Ed25519","kty":"OKP","x":"` + base64.RawURLEncoding.EncodeToString(pub) + `"}`))
+	if h := decode(parts[0]); !reflect.DeepEqual(h, map[string]any{"alg": "EdDSA", "typ": "JWT", "kid": base64.RawURLEncoding.EncodeToString(thumb[:])}) {
+		t.Fatalf("header %v", h)
+	}
+	claims := decode(parts[1])
+	for _, name := range []string{"iat", "nbf", "exp"} {
+		n, ok := claims[name].(json.Number)
+		if _, err := n.Int64(); !ok || err != nil || strings.ContainsAny(n.String(), ".eE+-") {
+			t.Fatalf("%s is %v, not a whole number of seconds", name, claims[name])
+		}
+	}
+	sig, err := enc.DecodeString(parts[2])
+	if err != nil || !ed25519.Verify(pub, []byte(parts[0]+"."+parts[1]), sig) {
+		t.Fatalf("the signature is not Ed25519 over the header and the claims: %v", err)
+	}
 }
 
 // mustDecode is an assertion's claims, as the JSON they were signed as.

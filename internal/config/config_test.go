@@ -101,12 +101,32 @@ func TestAssertionSettings(t *testing.T) {
 	for _, bad := range []string{"test.aishie.app/runtime", "/runtime", "ftp://test.aishie.app/runtime", "mailto:ops@aishie.app",
 		"https://", "https:///runtime", "https://:443/runtime", "https://ops:secret@test.aishie.app/runtime",
 		"https://test.aishie.app/runtime?tenant=1", "https://test.aishie.app/runtime?", "https://test.aishie.app/runtime#top",
-		"https://test.aishie.app/runtime#", "HTTPS://test.aishie.app/runtime", "https://test.aishie.app/run time", "https://test.aishie.app/%zz"} {
+		"https://test.aishie.app/runtime#", "HTTPS://test.aishie.app/runtime", "https://test.aishie.app/run time", "https://test.aishie.app/%zz",
+		// The same place written another way, or a way out of the path.
+		"https://Test.aishie.app/runtime", "https://[FE80::1]/runtime", "https://test.aishie.app:443/runtime", "http://test.aishie.app:80/runtime",
+		"https://test.aishie.app:/runtime", "https://test.aishie.app:0443/runtime", "https://test.aishie.app:99999/runtime",
+		"https://test.aishie.app:0/runtime", "https://[::1]:/runtime",
+		"https://test.aishie.app/%72untime", "https://test.aishie.app/a%2Fb", "https://test.aishie.app/a%2fb", "https://test.aishie.app/%2E%2E/admin",
+		"https://test.aishie.app/runtime/../admin", "https://test.aishie.app/runtime/..", "https://test.aishie.app/./runtime",
+		"https://test.aishie.app/runtime/.", "https://test.aishie.app//runtime", "https://test.aishie.app/runtime//api",
+		"https://test.aishie.app/runtime\\..\\admin", "https://тест.example/runtime"} {
 		t.Run("rejects the audience "+bad, func(t *testing.T) {
 			t.Setenv("SIGNING_KEY", signingKey)
 			t.Setenv("RUNTIME_AUDIENCES", "https://test.aishie.app/runtime,"+bad)
 			if _, err := FromEnv(); err == nil || !strings.Contains(err.Error(), "RUNTIME_AUDIENCES") {
 				t.Fatalf("accepted, or refused for another reason: %v", err)
+			}
+		})
+	}
+	// Written the one way, each is taken as it is.
+	for _, good := range []string{"https://test.aishie.app/runtime", "https://test.aishie.app/runtime/", "https://test.aishie.app",
+		"https://test.aishie.app/", "http://localhost:9091/runtime", "https://[::1]:9091/runtime", "https://[::1]/runtime",
+		"https://test.aishie.app:8443/runtime", "http://test.aishie.app:443/runtime", "https://test.aishie.app/run%20time/v1"} {
+		t.Run("takes the audience "+good, func(t *testing.T) {
+			t.Setenv("SIGNING_KEY", signingKey)
+			t.Setenv("RUNTIME_AUDIENCES", good)
+			if c, err := FromEnv(); err != nil || !slices.Equal(c.RuntimeAudiences, []string{good}) {
+				t.Fatalf("%v %q", err, c.RuntimeAudiences)
 			}
 		})
 	}

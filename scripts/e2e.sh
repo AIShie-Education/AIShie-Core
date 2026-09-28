@@ -223,6 +223,8 @@ cp "$WORK/body" "$WORK/keys.json"
   fail "the key set: $(cat "$WORK/keys.json")"
 call 200 POST /v1/auth/assertion "$SATO" "{\"audience\":\"$RUNTIME\"}"
 ASSERTION=$(json "$WORK/body" 'd["assertion"]')
+# Compact JWS: three parts of base64url with no padding, the last a 64-byte signature.
+[[ "$ASSERTION" =~ ^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{86}$ ]] || fail "the assertion is not a compact JWS in unpadded base64url"
 [ "$(jwt 0 'd["alg"], d["kid"]')" = "$(json "$WORK/keys.json" '"EdDSA", d["keys"][0]["kid"]')" ] || fail "the header does not name the published key"
 [ "$(jwt 1 'd["iss"], d["aud"], d["sub"], d["kind"], d["name"], d["exp"] - d["iat"]')" = "$BASE $RUNTIME $SATO_ID human Sato 300" ] ||
   fail "the claims: $(jwt 1 d)"

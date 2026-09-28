@@ -242,6 +242,36 @@ func TestAnAssertionIsRefused(t *testing.T) {
 			}
 		})
 	}
+	// The body is exactly {"audience": "…"}: what else a JSON decoder would
+	// let through is refused, and so is a body larger than any the API takes.
+	for name, body := range map[string]string{
+		"the key in another case":         `{"Audience":"` + runtimeAudience + `"}`,
+		"the key in capitals":             `{"AUDIENCE":"` + runtimeAudience + `"}`,
+		"the key twice, the last listed":  `{"audience":"https://evil.example/runtime","audience":"` + runtimeAudience + `"}`,
+		"the same key twice":              `{"audience":"` + runtimeAudience + `","audience":"` + runtimeAudience + `"}`,
+		"a second object after it":        `{"audience":"` + runtimeAudience + `"} {"sub":"someone else"}`,
+		"something else after it":         `{"audience":"` + runtimeAudience + `"} x`,
+		"null":                            `null`,
+		"an audience that is null":        `{"audience":null}`,
+		"an audience that is a number":    `{"audience":1}`,
+		"an audience that is a list":      `{"audience":["` + runtimeAudience + `"]}`,
+		"an audience with a space before": `{"audience":" ` + runtimeAudience + `"}`,
+		"too large":                       `{"audience":"` + runtimeAudience + `","padding":"` + strings.Repeat("x", 1<<20) + `"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			res, raw := a.raw("POST", a.srv.URL+httpapi.AssertionPath, "application/json", []byte(body), "Authorization", "Bearer "+sato)
+			if res.StatusCode != 400 || !strings.Contains(string(raw), `"invalid_argument"`) || strings.Contains(string(raw), "eyJ") {
+				t.Fatalf("%d %s, want 400 invalid_argument", res.StatusCode, raw)
+			}
+		})
+	}
+	// Written plainly, the same body is taken: what is refused above is
+	// refused for what it adds.
+	if res, raw := a.raw("POST", a.srv.URL+httpapi.AssertionPath, "application/json", []byte(" {\"audience\" : \""+runtimeAudience+"\"}\n"),
+		"Authorization", "Bearer "+sato); res.StatusCode != 200 {
+		t.Fatalf("a plain body with white space around it: %d %s", res.StatusCode, raw)
+	}
+
 	// Suspended since signing in: the session still authenticates, and is
 	// given nothing.
 	c.Exec(`UPDATE actor SET status = 'suspended' WHERE id = $1`, c.Sato)

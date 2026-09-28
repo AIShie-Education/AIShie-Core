@@ -186,7 +186,10 @@ Run all of these as root on the server.
   More than one runtime is a comma-separated list. Give each URL exactly as
   the runtime has it: it is compared byte for byte, so a `/` at the end
   counts. The server refuses to start on one that is not an absolute `http` or
-  `https` URL, or that carries a query, a fragment or a user name. The
+  `https` URL, that carries a query, a fragment or a user name, or that is not
+  written the one way a URL is: a lower-case scheme and host, no port that is
+  the scheme's own (`:443` for `https`), nothing percent-encoded that need not
+  be, and no `.`, `..` or empty segment in the path. The
   assertions are signed with a key derived from `SIGNING_KEY`, so nothing
   else is needed. To keep them apart, set `ASSERTION_KEY` to a key of its own,
   made with `openssl rand -base64 32` and kept like `SIGNING_KEY`; changing it

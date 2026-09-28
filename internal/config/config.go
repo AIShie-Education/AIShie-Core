@@ -290,6 +290,14 @@ func (c *Config) readAssertions() error {
 }
 
 // checkAudience says what is wrong with an audience, if anything.
+//
+// A runtime compares the audience byte for byte, so it must be written the
+// one way a URL is written: a lower-case scheme and host, no port that is
+// the scheme's own or not a plain number, and a path escaped as Go escapes
+// it, with nothing percent-encoded that need not be. Its path has no "." or
+// ".." segment and no empty one but a final "/": such a URL names the same
+// place as another written differently, or, after a proxy tidies it, a
+// place outside the runtime's path altogether.
 func checkAudience(a string) error {
 	u, err := url.Parse(a)
 	switch {
@@ -303,12 +311,52 @@ func checkAudience(a string) error {
 		return errors.New("carries a user name or password")
 	case u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || strings.Contains(a, "#"):
 		return errors.New("has a query or a fragment")
+	case u.Host != strings.ToLower(u.Host):
+		return errors.New("has upper case in its host; a host is written in lower case")
+	case !canonicalPort(u):
+		return errors.New("names a port that is empty, not a plain number from 1 to 65535, or the scheme's own")
+	case u.RawPath != "":
+		return errors.New("percent-encodes what needs no encoding, or a / or a lower-case escape; write the path plainly")
+	case !plainPath(u.Path):
+		return errors.New(`has a ".", ".." or empty segment in its path`)
 	case u.String() != a:
-		// A runtime compares it byte for byte, so it is written the one way
-		// a URL is written: a lower-case scheme, and a path escaped.
 		return errors.New("is not written the way a URL is, lower-case scheme and path escaped")
 	}
 	return nil
+}
+
+// canonicalPort reports whether a URL's port, if it names one, is written as
+// a URL's port is: a number with no leading zero, from 1 to 65535, and not
+// the one its scheme implies.
+func canonicalPort(u *url.URL) bool {
+	i := strings.LastIndex(u.Host, ":")
+	if i < 0 || strings.HasSuffix(u.Host, "]") {
+		return true // no port at all: a name, or an IPv6 address in brackets
+	}
+	p := u.Host[i+1:]
+	n, err := strconv.Atoi(p)
+	switch {
+	case err != nil || strconv.Itoa(n) != p || n < 1 || n > 65535:
+		return false
+	case u.Scheme == "https" && n == 443, u.Scheme == "http" && n == 80:
+		return false
+	}
+	return true
+}
+
+// plainPath reports whether a URL path has no "." or ".." segment and no
+// empty segment but the last, which a final "/" leaves.
+func plainPath(p string) bool {
+	if p == "" {
+		return true
+	}
+	segs := strings.Split(strings.TrimPrefix(p, "/"), "/")
+	for i, s := range segs {
+		if s == "." || s == ".." || (s == "" && i < len(segs)-1) {
+			return false
+		}
+	}
+	return true
 }
 
 // decodeSeed takes an Ed25519 seed in base64, padded or not, standard or
