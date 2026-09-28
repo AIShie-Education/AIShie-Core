@@ -332,41 +332,24 @@ func TestIdsFromAnotherCourseAreNotFound(t *testing.T) {
 	}
 }
 
-// A score is a score in the scheme it was given under. Once a grade has been
-// entered beneath a component, its place in the scheme is fixed: moving it
-// would change what every one of those grades counts toward. And a parent's
-// totals, once written down, keep it from ever being graded directly.
-func TestAGradedComponentKeepsItsPlace(t *testing.T) {
+// A component graded directly stays so once a grade is entered on it: its
+// grades would otherwise be grades on a bucket, where its totals are written.
+// And a parent's totals, once written down, keep it from ever being graded
+// directly, where those totals would sit in the way for ever.
+func TestAGradedComponentKeepsWhatItIs(t *testing.T) {
 	b := build(t)
 	exams := testkit.Result[tools.IDOut](t, b.do(t, b.sato, "component.create", m{"course_id": b.course, "parent_id": b.total, "name": "Exams", "weight": 30})).ID
 	final := testkit.Result[tools.IDOut](t, b.do(t, b.sato, "component.create",
 		m{"course_id": b.course, "parent_id": exams, "name": "Final", "points_possible": 100})).ID
-	quiz := testkit.Result[tools.IDOut](t, b.do(t, b.sato, "component.create",
-		m{"course_id": b.course, "parent_id": exams, "name": "Quiz", "points_possible": 10})).ID
-	move := func(id, under uuid.UUID) m {
-		return m{"course_id": b.course, "component_id": id, "new_parent_id": under}
-	}
-	// Nothing entered yet: the scheme is still being arranged.
-	b.do(t, b.sato, "component.move", move(quiz, b.total))
-	b.do(t, b.sato, "component.move", move(quiz, exams))
-
 	// A draft is enough.
 	g := testkit.Result[tools.GradeSubmitOut](t, b.do(t, b.sato, "grade.submit",
 		m{"course_id": b.course, "component_id": final, "student_member_id": b.yukiM, "score": 80})).GradeID
-	b.try(t, b.sato, "component.move", move(final, b.total), apperr.FailedPrecondition)
-	b.try(t, b.sato, "component.move", move(exams, b.bucket), apperr.FailedPrecondition) // graded beneath it
-	b.do(t, b.sato, "component.move", move(quiz, b.total))                               // nothing entered for the quiz
-	// The same for a bucket once one of its assignments is graded.
-	work := b.submit(t, b.yuki, "essay")
-	b.do(t, b.sato, "grade.submit", m{"course_id": b.course, "submission_id": work, "score": 70})
-	b.try(t, b.sato, "component.move", move(b.bucket, exams), apperr.FailedPrecondition)
+	b.try(t, b.sato, "component.update", m{"course_id": b.course, "component_id": final, "clear_points_possible": true}, apperr.FailedPrecondition)
 
 	b.do(t, b.sato, "grade.post", m{"course_id": b.course, "grade_ids": []uuid.UUID{g}})
 	if n := b.Count(`SELECT count(*) FROM grade WHERE component_id = $1 AND origin = 'computed' AND superseded_by IS NULL`, exams); n != 1 {
 		t.Fatalf("%d live totals on Exams, want Yuki's", n)
 	}
-	// A parent whose totals were written down can never become something
-	// graded directly, where those totals would sit in the way for ever.
 	// The tools no longer let a parent be emptied once graded; a scheme from
 	// before that rule still might be.
 	legacy := testkit.Result[tools.IDOut](t, b.do(t, b.sato, "component.create", m{"course_id": b.course, "parent_id": b.total, "name": "Legacy"})).ID
@@ -422,18 +405,18 @@ func TestAnUnpublishedAssignmentStaysOutOfTheGradebook(t *testing.T) {
 
 // A score is a score out of the points possible when it was given. Once any
 // grade has been entered — a draft waiting to be posted as much as a posted
-// one — what the work is worth no longer changes under it: a 95 entered out
-// of 100 must not be posted out of 50 with nobody having said so.
-func TestPointsAreFixedOnceAGradeIsEntered(t *testing.T) {
+// one — a change of what the work is worth says what becomes of it: a 95
+// entered out of 100 must not be posted out of 50 with nobody having said so.
+// (TestAChangeOfPointsSaysWhatBecomesOfItsGrades has what it may say.)
+func TestPointsChangeOnlySayingWhatBecomesOfGrades(t *testing.T) {
 	b := build(t)
-	// Before anything is entered, an assignment can be rescaled.
+	// Before anything is entered, an assignment is rescaled as it was.
 	b.do(t, b.sato, "assignment.update", m{"course_id": b.course, "assignment_id": b.hw3, "points_possible": 100})
 	work := b.submit(t, b.yuki, "essay")
 	draft := testkit.Result[tools.GradeSubmitOut](t, b.do(t, b.sato, "grade.submit", m{"course_id": b.course, "submission_id": work, "score": 95})).GradeID
 	b.try(t, b.sato, "assignment.update", m{"course_id": b.course, "assignment_id": b.hw3, "points_possible": 50}, apperr.FailedPrecondition)
 	b.try(t, b.sato, "assignment.update", m{"course_id": b.course, "assignment_id": b.hw3, "points_possible": 200}, apperr.FailedPrecondition)
-	b.try(t, b.sato, "assignment.update", m{"course_id": b.course, "assignment_id": b.hw3, "component_id": b.midterm}, apperr.FailedPrecondition)
-	// What is not about the grade still changes.
+	// What is not about the points still changes as it did.
 	b.do(t, b.sato, "assignment.update", m{"course_id": b.course, "assignment_id": b.hw3, "title": "HW3 (revised brief)"})
 	b.do(t, b.sato, "grade.post", m{"course_id": b.course, "grade_ids": []uuid.UUID{draft}})
 	if n := b.Count(`SELECT count(*) FROM grade WHERE id = $1 AND posted_at IS NOT NULL AND score = 95`, draft); n != 1 {
@@ -446,10 +429,11 @@ func TestPointsAreFixedOnceAGradeIsEntered(t *testing.T) {
 	b.do(t, b.sato, "component.update", m{"course_id": b.course, "component_id": b.midterm, "name": "Midterm exam"})
 }
 
-// The same when the grade and the rescaling come at once. Each checks before
-// it writes — the score against the points possible, the points against the
-// grades entered — and neither may pass on what the other has not written
-// yet, or a 95 stands on an assignment worth 50.
+// The same when the grade and the rescaling come at once, and the change says
+// nothing of grades. Each checks before it writes — the score against the
+// points possible, the points against the grades entered — and neither may
+// pass on what the other has not written yet, or a 95 stands on an
+// assignment worth 50.
 func TestPointsStayFixedWhileAGradeIsEntered(t *testing.T) {
 	b := build(t)
 	work := b.submit(t, b.yuki, "essay")

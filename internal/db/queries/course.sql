@@ -79,22 +79,3 @@ SELECT pg_advisory_xact_lock(hashtextextended('component-tree:' || (sqlc.arg(cou
 
 -- name: ComponentHasGrades :one
 SELECT EXISTS (SELECT 1 FROM grade WHERE component_id = $1 AND origin = 'entered');
-
--- name: ComponentHasLiveGrades :one
-SELECT EXISTS (SELECT 1 FROM grade WHERE component_id = $1 AND origin = 'entered' AND superseded_by IS NULL);
-
--- name: ComponentSubtreeHasLiveGrades :one
--- Any entered grade, live, on the component, on a component beneath it, or
--- on a submission to an assignment beneath it.
-WITH RECURSIVE sub(component_id) AS (
-    SELECT gc.id FROM grade_component gc WHERE gc.id = sqlc.arg(component_id)
-    UNION ALL
-    SELECT c.id FROM grade_component c JOIN sub ON c.parent_id = sub.component_id
-)
-SELECT EXISTS (
-    SELECT 1 FROM grade g
-    WHERE g.origin = 'entered' AND g.superseded_by IS NULL
-      AND (g.component_id IN (SELECT sub.component_id FROM sub)
-           OR g.submission_id IN (SELECT s.id FROM submission s JOIN assignment a ON a.id = s.assignment_id
-                                  WHERE a.component_id IN (SELECT sub.component_id FROM sub)))
-);

@@ -289,6 +289,7 @@ the nearest one, and the choice is recorded here so that it is a decision and no
 | Operation | Gated by | Why |
 |---|---|---|
 | Editing the grading scheme (`component.*`) | `perm_assignment_write` | the scheme is where assignments hang, and is set up by whoever sets them up |
+| Changing what graded work is worth, saying what becomes of its grades (`existing_grades` on `assignment.update`, `component.update`) | the lowest of `perm_assignment_write`, `perm_grade_submit` and `perm_grade_post` | it writes grades again and posts them, as a regrade does |
 | Reading assignments, the course, the event feed | `perm_document_read` | the most basic permission a seated member holds; what the feed *shows* is decided per event |
 | Reading the grading scheme | `perm_grade_read` | |
 | Correcting lateness (`submission.set_lateness`) | `perm_grade_submit` | not `perm_submission_write`, or a student could un-late themselves |
@@ -586,11 +587,28 @@ posted grades):
   `drop_lowest` of them.
 - Work with no posted grade is left out and the rest re-normalised — a "grade so far", marked
   incomplete. `treat_ungraded_as_zero` counts it as zero instead, for final grades.
-- A score is a score out of the points possible when it was given: once any grade has been
+- A score is a score out of the points possible when it was given, so once any grade has been
   entered for an assignment or a directly graded component — a draft as much as a posted one —
-  its `points_possible` and its place in the tree no longer change. A proposed grade carries
-  the points possible it was proposed out of, and is refused on approval if the work has been
-  rescaled while it waited.
+  a change of its `points_possible` says what becomes of them (`existing_grades`): `rescale`
+  writes each score again in proportion, to four decimal places, in a new row that supersedes
+  the old as a regrade does — a posted grade posted, a draft a draft, its feedback, breakdown,
+  rubric and feedback files carried on, a score the conversion leaves as it was left alone —
+  and `keep_scores` leaves each score as it is, out of the new points, refused if a score
+  within the old points would be above the new ones. Work worth nothing has nothing to rescale
+  from. Saying it is changing grades, and takes `perm_grade_submit` and `perm_grade_post` as
+  well as `perm_assignment_write`, at the lowest of the three. Graded work also moves in the
+  tree: an assignment to another bucket or out of the grade, a component under another parent.
+  Either change rewrites at once every posted total it changes, where the work was and where
+  it is, for every student who has one, and so must reach all of them over the whole course
+  (student scope, and an assignment scope of `all`), checked again as it is carried out. A
+  component graded directly stays so once a grade is entered on it, since its grades would
+  otherwise sit on a bucket beside the totals written there. A proposed grade carries the
+  points possible it was proposed out of, and is refused on approval if the work has been
+  rescaled while it waited. A weight or a `drop_lowest` changed does not rewrite posted totals:
+  the next post or regrade beneath them does.
+- A total left with nothing beneath it to go on — its work moved away, ungraded work no longer
+  counted as zero — is written again as having none (`no_total`: score 0, a working whose
+  fraction is null), rather than go on showing what it last did.
 - Final is final. The policy a snapshot was worked out under travels with it (`breakdown`
   carries `ungraded_as_zero`), and once a student's totals have been written with ungraded
   work counted as zero, every later post or regrade beneath them keeps counting it so.
@@ -913,7 +931,8 @@ serves HW3, the midterm, the assignments bucket and the course total.
   when a lower grade changes later; updating it is a regrade, with history. A post or regrade
   beneath a snapshot writes a new one when anything it shows has changed — the number, whether
   it is complete, or any line of its working, a weight changed since included — and nothing
-  when nothing has.
+  when nothing has. So does a change of what graded work is worth or where it counts (§2.3),
+  at once.
 - **`breakdown`** holds per-criterion detail for submission grades:
   `[{criterion, points, max, comment}]`. The rubric is prose the model reads; the breakdown is
   its output. Structured criteria tables were dropped as a second copy of the rubric.
@@ -1351,7 +1370,8 @@ grade on a component, a course total, a whole gradebook — is within scope only
 `assignment_scope = 'all'`. Otherwise "names no assignment" would mean "skips the check", and
 a grader listed for HW3 alone could read the class's midterm. Posting or regrading with
 `treat_ungraded_as_zero` is such a target too, whatever the grades in it: it decides how every
-other assignment counts in the course total, for good.
+other assignment counts in the course total, for good. So is a change of what graded work is
+worth or where it counts, which rewrites the totals of every student who has one (§2.3).
 
 Steps 1–3 run before the target is looked up, and the lookup happens only for a caller who
 passed them. A non-member probing ids gets the same recorded denial whether or not the id
@@ -1479,9 +1499,14 @@ that reads which credential the call came with.
   writer: a post that reaches a student after a weight has changed does not write their totals
   over under the old one.
 - Once a grade has been entered for an assignment or a directly graded component, a draft as
-  much as a posted one, its `points_possible` and its place in the tree stay as they are
-  (§2.3), even when the grade and the change come at the same moment; a proposed grade is
-  carried out only against the points possible it was proposed out of.
+  much as a posted one, a change of its `points_possible` says what becomes of it (§2.3) and
+  carries every live grade across, even when a grade and the change come at the same moment:
+  the change holds the work (the assignment's row, or the tree lock for a component) and then
+  its grades, and `grade.submit` and `grade.regrade` hold the work before they check a score
+  against it, so a grade entered first is found and carried, and one entered second is checked
+  against the new points. A proposed grade is carried out only against the points possible it
+  was proposed out of. A change that moves graded work in the scheme, or changes its points,
+  rewrites the posted totals it changes, and reaches every student who has one.
 - A draft is as old as the call that made it (§2.3), a draft written by an approved proposal
   included: an approval replaces only what came before the proposal.
 - A grade's `rubric_version_id` is the rubric its grader was shown (§2.4): for a proposal, the

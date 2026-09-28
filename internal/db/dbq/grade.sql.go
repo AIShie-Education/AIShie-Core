@@ -206,7 +206,7 @@ func (q *Queries) GetGradesInCourse(ctx context.Context, arg GetGradesInCoursePa
 }
 
 const getLiveComputedGrade = `-- name: GetLiveComputedGrade :one
-SELECT id, score, breakdown
+SELECT id, score, breakdown, feedback, override_score, override_reason, override_by_member_id, overridden_at
 FROM grade
 WHERE component_id = $1 AND student_member_id = $2 AND origin = 'computed'
   AND posted_at IS NOT NULL AND superseded_by IS NULL
@@ -218,15 +218,32 @@ type GetLiveComputedGradeParams struct {
 }
 
 type GetLiveComputedGradeRow struct {
-	ID        uuid.UUID
-	Score     decimal.Decimal
-	Breakdown []byte
+	ID                 uuid.UUID
+	Score              decimal.Decimal
+	Breakdown          []byte
+	Feedback           *string
+	OverrideScore      decimal.NullDecimal
+	OverrideReason     *string
+	OverrideByMemberID *uuid.UUID
+	OverriddenAt       *time.Time
 }
 
+// A total as it stands, with what a person has given it besides the number
+// worked out: an override and a comment, which a total written again carries
+// on.
 func (q *Queries) GetLiveComputedGrade(ctx context.Context, arg GetLiveComputedGradeParams) (GetLiveComputedGradeRow, error) {
 	row := q.db.QueryRow(ctx, getLiveComputedGrade, arg.ComponentID, arg.StudentMemberID)
 	var i GetLiveComputedGradeRow
-	err := row.Scan(&i.ID, &i.Score, &i.Breakdown)
+	err := row.Scan(
+		&i.ID,
+		&i.Score,
+		&i.Breakdown,
+		&i.Feedback,
+		&i.OverrideScore,
+		&i.OverrideReason,
+		&i.OverrideByMemberID,
+		&i.OverriddenAt,
+	)
 	return i, err
 }
 
@@ -302,25 +319,30 @@ func (q *Queries) GetSubmissionInCourse(ctx context.Context, arg GetSubmissionIn
 
 const insertGrade = `-- name: InsertGrade :exec
 INSERT INTO grade (id, student_member_id, submission_id, component_id, origin, score, feedback, breakdown,
-                   rubric_version_id, grader_member_id, created_by_action_id, posted_at, posted_by_member_id, created_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+                   rubric_version_id, grader_member_id, created_by_action_id, posted_at, posted_by_member_id, created_at,
+                   override_score, override_reason, override_by_member_id, overridden_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
 `
 
 type InsertGradeParams struct {
-	ID                uuid.UUID
-	StudentMemberID   uuid.UUID
-	SubmissionID      *uuid.UUID
-	ComponentID       *uuid.UUID
-	Origin            string
-	Score             decimal.Decimal
-	Feedback          *string
-	Breakdown         []byte
-	RubricVersionID   *uuid.UUID
-	GraderMemberID    uuid.UUID
-	CreatedByActionID uuid.UUID
-	PostedAt          *time.Time
-	PostedByMemberID  *uuid.UUID
-	CreatedAt         time.Time
+	ID                 uuid.UUID
+	StudentMemberID    uuid.UUID
+	SubmissionID       *uuid.UUID
+	ComponentID        *uuid.UUID
+	Origin             string
+	Score              decimal.Decimal
+	Feedback           *string
+	Breakdown          []byte
+	RubricVersionID    *uuid.UUID
+	GraderMemberID     uuid.UUID
+	CreatedByActionID  uuid.UUID
+	PostedAt           *time.Time
+	PostedByMemberID   *uuid.UUID
+	CreatedAt          time.Time
+	OverrideScore      decimal.NullDecimal
+	OverrideReason     *string
+	OverrideByMemberID *uuid.UUID
+	OverriddenAt       *time.Time
 }
 
 func (q *Queries) InsertGrade(ctx context.Context, arg InsertGradeParams) error {
@@ -339,6 +361,10 @@ func (q *Queries) InsertGrade(ctx context.Context, arg InsertGradeParams) error 
 		arg.PostedAt,
 		arg.PostedByMemberID,
 		arg.CreatedAt,
+		arg.OverrideScore,
+		arg.OverrideReason,
+		arg.OverrideByMemberID,
+		arg.OverriddenAt,
 	)
 	return err
 }
@@ -534,6 +560,101 @@ func (q *Queries) ListLiveComponentScores(ctx context.Context, studentMemberID u
 	return items, nil
 }
 
+const listStudentsGradedBeneath = `-- name: ListStudentsGradedBeneath :many
+WITH RECURSIVE sub(component_id) AS (
+    SELECT gc.id FROM grade_component gc WHERE gc.id = $1
+    UNION ALL
+    SELECT c.id FROM grade_component c JOIN sub ON c.parent_id = sub.component_id
+)
+SELECT DISTINCT g.student_member_id
+FROM grade g
+WHERE g.origin = 'entered' AND g.superseded_by IS NULL
+  AND (g.component_id IN (SELECT sub.component_id FROM sub)
+       OR g.submission_id IN (SELECT s.id FROM submission s JOIN assignment a ON a.id = s.assignment_id
+                              WHERE a.component_id IN (SELECT sub.component_id FROM sub)))
+ORDER BY 1
+`
+
+// The students with a live grade entered on the component, on one beneath it,
+// or on a submission to an assignment beneath it.
+func (q *Queries) ListStudentsGradedBeneath(ctx context.Context, componentID uuid.UUID) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, listStudentsGradedBeneath, componentID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []uuid.UUID
+	for rows.Next() {
+		var student_member_id uuid.UUID
+		if err := rows.Scan(&student_member_id); err != nil {
+			return nil, err
+		}
+		items = append(items, student_member_id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listStudentsGradedOnAssignment = `-- name: ListStudentsGradedOnAssignment :many
+SELECT DISTINCT g.student_member_id
+FROM grade g
+JOIN submission s ON s.id = g.submission_id
+WHERE s.assignment_id = $1 AND g.origin = 'entered' AND g.superseded_by IS NULL
+ORDER BY 1
+`
+
+// The students with a live grade entered on the assignment, a draft or posted.
+func (q *Queries) ListStudentsGradedOnAssignment(ctx context.Context, assignmentID uuid.UUID) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, listStudentsGradedOnAssignment, assignmentID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []uuid.UUID
+	for rows.Next() {
+		var student_member_id uuid.UUID
+		if err := rows.Scan(&student_member_id); err != nil {
+			return nil, err
+		}
+		items = append(items, student_member_id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listStudentsWithLiveTotals = `-- name: ListStudentsWithLiveTotals :many
+SELECT DISTINCT g.student_member_id
+FROM grade g
+JOIN grade_component c ON c.id = g.component_id
+WHERE c.course_id = $1 AND g.origin = 'computed' AND g.posted_at IS NOT NULL AND g.superseded_by IS NULL
+ORDER BY 1
+`
+
+// Every student of the course who has a total written down.
+func (q *Queries) ListStudentsWithLiveTotals(ctx context.Context, courseID uuid.UUID) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, listStudentsWithLiveTotals, courseID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []uuid.UUID
+	for rows.Next() {
+		var student_member_id uuid.UUID
+		if err := rows.Scan(&student_member_id); err != nil {
+			return nil, err
+		}
+		items = append(items, student_member_id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const liveComponentGradeExists = `-- name: LiveComponentGradeExists :one
 SELECT EXISTS (
     SELECT 1 FROM grade
@@ -616,6 +737,112 @@ func (q *Queries) LockGradesInCourse(ctx context.Context, arg LockGradesInCourse
 	return items, nil
 }
 
+const lockLiveEnteredGradesOfAssignment = `-- name: LockLiveEnteredGradesOfAssignment :many
+SELECT g.id, g.student_member_id, g.submission_id, g.component_id, g.score, g.feedback, g.breakdown,
+       g.rubric_version_id, g.posted_at
+FROM grade g
+JOIN submission s ON s.id = g.submission_id
+WHERE s.assignment_id = $1 AND g.origin = 'entered' AND g.superseded_by IS NULL
+ORDER BY g.id
+FOR UPDATE OF g
+`
+
+type LockLiveEnteredGradesOfAssignmentRow struct {
+	ID              uuid.UUID
+	StudentMemberID uuid.UUID
+	SubmissionID    *uuid.UUID
+	ComponentID     *uuid.UUID
+	Score           decimal.Decimal
+	Feedback        *string
+	Breakdown       []byte
+	RubricVersionID *uuid.UUID
+	PostedAt        *time.Time
+}
+
+// Every live grade entered on the assignment's submissions, draft or posted,
+// held in id order, as grade.post holds the drafts it posts.
+func (q *Queries) LockLiveEnteredGradesOfAssignment(ctx context.Context, assignmentID uuid.UUID) ([]LockLiveEnteredGradesOfAssignmentRow, error) {
+	rows, err := q.db.Query(ctx, lockLiveEnteredGradesOfAssignment, assignmentID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []LockLiveEnteredGradesOfAssignmentRow
+	for rows.Next() {
+		var i LockLiveEnteredGradesOfAssignmentRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.StudentMemberID,
+			&i.SubmissionID,
+			&i.ComponentID,
+			&i.Score,
+			&i.Feedback,
+			&i.Breakdown,
+			&i.RubricVersionID,
+			&i.PostedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const lockLiveEnteredGradesOfComponent = `-- name: LockLiveEnteredGradesOfComponent :many
+SELECT g.id, g.student_member_id, g.submission_id, g.component_id, g.score, g.feedback, g.breakdown,
+       g.rubric_version_id, g.posted_at
+FROM grade g
+WHERE g.component_id = $1 AND g.origin = 'entered' AND g.superseded_by IS NULL
+ORDER BY g.id
+FOR UPDATE
+`
+
+type LockLiveEnteredGradesOfComponentRow struct {
+	ID              uuid.UUID
+	StudentMemberID uuid.UUID
+	SubmissionID    *uuid.UUID
+	ComponentID     *uuid.UUID
+	Score           decimal.Decimal
+	Feedback        *string
+	Breakdown       []byte
+	RubricVersionID *uuid.UUID
+	PostedAt        *time.Time
+}
+
+// Every live grade entered directly on the component, draft or posted.
+func (q *Queries) LockLiveEnteredGradesOfComponent(ctx context.Context, componentID *uuid.UUID) ([]LockLiveEnteredGradesOfComponentRow, error) {
+	rows, err := q.db.Query(ctx, lockLiveEnteredGradesOfComponent, componentID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []LockLiveEnteredGradesOfComponentRow
+	for rows.Next() {
+		var i LockLiveEnteredGradesOfComponentRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.StudentMemberID,
+			&i.SubmissionID,
+			&i.ComponentID,
+			&i.Score,
+			&i.Feedback,
+			&i.Breakdown,
+			&i.RubricVersionID,
+			&i.PostedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const lockStudentTotals = `-- name: LockStudentTotals :exec
 SELECT pg_advisory_xact_lock(hashtextextended(
     'totals:' || ($1::uuid)::text || ':' || ($2::uuid)::text, 0))
@@ -645,6 +872,22 @@ func (q *Queries) LockSubmissionForGrading(ctx context.Context, id uuid.UUID) (s
 	var state string
 	err := row.Scan(&state)
 	return state, err
+}
+
+const moveFeedbackFiles = `-- name: MoveFeedbackFiles :exec
+UPDATE document SET grade_id = $1 WHERE grade_id = $2 AND kind = 'feedback'
+`
+
+type MoveFeedbackFilesParams struct {
+	NewGradeID *uuid.UUID
+	OldGradeID *uuid.UUID
+}
+
+// A grade's feedback files go with it when it is written again without
+// being graded again: a total worked out anew, a score rescaled.
+func (q *Queries) MoveFeedbackFiles(ctx context.Context, arg MoveFeedbackFilesParams) error {
+	_, err := q.db.Exec(ctx, moveFeedbackFiles, arg.NewGradeID, arg.OldGradeID)
+	return err
 }
 
 const newestComponentDraftAt = `-- name: NewestComponentDraftAt :one

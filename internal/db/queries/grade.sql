@@ -37,8 +37,9 @@ SELECT document_id FROM document_version WHERE id = $1;
 
 -- name: InsertGrade :exec
 INSERT INTO grade (id, student_member_id, submission_id, component_id, origin, score, feedback, breakdown,
-                   rubric_version_id, grader_member_id, created_by_action_id, posted_at, posted_by_member_id, created_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14);
+                   rubric_version_id, grader_member_id, created_by_action_id, posted_at, posted_by_member_id, created_at,
+                   override_score, override_reason, override_by_member_id, overridden_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18);
 
 -- name: SupersedeSubmissionDrafts :exec
 -- A new draft replaces earlier drafts for the same submission.
@@ -99,10 +100,70 @@ UPDATE grade SET posted_at = $2, posted_by_member_id = $3
 WHERE id = $1 AND posted_at IS NULL AND superseded_by IS NULL;
 
 -- name: GetLiveComputedGrade :one
-SELECT id, score, breakdown
+-- A total as it stands, with what a person has given it besides the number
+-- worked out: an override and a comment, which a total written again carries
+-- on.
+SELECT id, score, breakdown, feedback, override_score, override_reason, override_by_member_id, overridden_at
 FROM grade
 WHERE component_id = $1 AND student_member_id = $2 AND origin = 'computed'
   AND posted_at IS NOT NULL AND superseded_by IS NULL;
+
+-- name: ListStudentsWithLiveTotals :many
+-- Every student of the course who has a total written down.
+SELECT DISTINCT g.student_member_id
+FROM grade g
+JOIN grade_component c ON c.id = g.component_id
+WHERE c.course_id = $1 AND g.origin = 'computed' AND g.posted_at IS NOT NULL AND g.superseded_by IS NULL
+ORDER BY 1;
+
+-- name: ListStudentsGradedOnAssignment :many
+-- The students with a live grade entered on the assignment, a draft or posted.
+SELECT DISTINCT g.student_member_id
+FROM grade g
+JOIN submission s ON s.id = g.submission_id
+WHERE s.assignment_id = $1 AND g.origin = 'entered' AND g.superseded_by IS NULL
+ORDER BY 1;
+
+-- name: ListStudentsGradedBeneath :many
+-- The students with a live grade entered on the component, on one beneath it,
+-- or on a submission to an assignment beneath it.
+WITH RECURSIVE sub(component_id) AS (
+    SELECT gc.id FROM grade_component gc WHERE gc.id = sqlc.arg(component_id)
+    UNION ALL
+    SELECT c.id FROM grade_component c JOIN sub ON c.parent_id = sub.component_id
+)
+SELECT DISTINCT g.student_member_id
+FROM grade g
+WHERE g.origin = 'entered' AND g.superseded_by IS NULL
+  AND (g.component_id IN (SELECT sub.component_id FROM sub)
+       OR g.submission_id IN (SELECT s.id FROM submission s JOIN assignment a ON a.id = s.assignment_id
+                              WHERE a.component_id IN (SELECT sub.component_id FROM sub)))
+ORDER BY 1;
+
+-- name: LockLiveEnteredGradesOfAssignment :many
+-- Every live grade entered on the assignment's submissions, draft or posted,
+-- held in id order, as grade.post holds the drafts it posts.
+SELECT g.id, g.student_member_id, g.submission_id, g.component_id, g.score, g.feedback, g.breakdown,
+       g.rubric_version_id, g.posted_at
+FROM grade g
+JOIN submission s ON s.id = g.submission_id
+WHERE s.assignment_id = $1 AND g.origin = 'entered' AND g.superseded_by IS NULL
+ORDER BY g.id
+FOR UPDATE OF g;
+
+-- name: LockLiveEnteredGradesOfComponent :many
+-- Every live grade entered directly on the component, draft or posted.
+SELECT g.id, g.student_member_id, g.submission_id, g.component_id, g.score, g.feedback, g.breakdown,
+       g.rubric_version_id, g.posted_at
+FROM grade g
+WHERE g.component_id = $1 AND g.origin = 'entered' AND g.superseded_by IS NULL
+ORDER BY g.id
+FOR UPDATE;
+
+-- name: MoveFeedbackFiles :exec
+-- A grade's feedback files go with it when it is written again without
+-- being graded again: a total worked out anew, a score rescaled.
+UPDATE document SET grade_id = sqlc.arg(new_grade_id) WHERE grade_id = sqlc.arg(old_grade_id) AND kind = 'feedback';
 
 -- Serialising what races -------------------------------------------------------
 

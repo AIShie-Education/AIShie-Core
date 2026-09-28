@@ -24,41 +24,6 @@ func (q *Queries) ComponentHasGrades(ctx context.Context, componentID *uuid.UUID
 	return exists, err
 }
 
-const componentHasLiveGrades = `-- name: ComponentHasLiveGrades :one
-SELECT EXISTS (SELECT 1 FROM grade WHERE component_id = $1 AND origin = 'entered' AND superseded_by IS NULL)
-`
-
-func (q *Queries) ComponentHasLiveGrades(ctx context.Context, componentID *uuid.UUID) (bool, error) {
-	row := q.db.QueryRow(ctx, componentHasLiveGrades, componentID)
-	var exists bool
-	err := row.Scan(&exists)
-	return exists, err
-}
-
-const componentSubtreeHasLiveGrades = `-- name: ComponentSubtreeHasLiveGrades :one
-WITH RECURSIVE sub(component_id) AS (
-    SELECT gc.id FROM grade_component gc WHERE gc.id = $1
-    UNION ALL
-    SELECT c.id FROM grade_component c JOIN sub ON c.parent_id = sub.component_id
-)
-SELECT EXISTS (
-    SELECT 1 FROM grade g
-    WHERE g.origin = 'entered' AND g.superseded_by IS NULL
-      AND (g.component_id IN (SELECT sub.component_id FROM sub)
-           OR g.submission_id IN (SELECT s.id FROM submission s JOIN assignment a ON a.id = s.assignment_id
-                                  WHERE a.component_id IN (SELECT sub.component_id FROM sub)))
-)
-`
-
-// Any entered grade, live, on the component, on a component beneath it, or
-// on a submission to an assignment beneath it.
-func (q *Queries) ComponentSubtreeHasLiveGrades(ctx context.Context, componentID uuid.UUID) (bool, error) {
-	row := q.db.QueryRow(ctx, componentSubtreeHasLiveGrades, componentID)
-	var exists bool
-	err := row.Scan(&exists)
-	return exists, err
-}
-
 const courseCodeTaken = `-- name: CourseCodeTaken :one
 SELECT EXISTS (SELECT 1 FROM course WHERE term_id = $1 AND code = $2 AND section = $3)
 `

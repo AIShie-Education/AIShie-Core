@@ -39,6 +39,9 @@ type GradeView struct {
 	SupersededBy      *uuid.UUID      `json:"superseded_by,omitempty"`
 	CreatedAt         time.Time       `json:"created_at"`
 	FeedbackFiles     []FileRef       `json:"feedback_files,omitempty" jsonschema:"read each with document.get"`
+	// A computed total that has lost everything beneath it: work moved away,
+	// ungraded work no longer counted as zero.
+	NoTotal bool `json:"no_total,omitempty" jsonschema:"for a computed total: nothing beneath it counts any more, so it has no value, and its score of 0 means nothing"`
 }
 
 // FileRef points at an owned document: a submitted file, a feedback file.
@@ -60,7 +63,8 @@ func viewGrade(g dbq.GetGradeFullRow) GradeView {
 	return GradeView{ID: g.ID, StudentMemberID: g.StudentMemberID, SubmissionID: g.SubmissionID, ComponentID: g.ComponentID,
 		AssignmentID: g.AssignmentID, Origin: g.Origin, Score: g.Score, Feedback: g.Feedback, Breakdown: g.Breakdown,
 		RubricVersionID: g.RubricVersionID, GraderMemberID: g.GraderMemberID, CreatedByActionID: g.CreatedByActionID,
-		State: state, PostedAt: g.PostedAt, SupersededBy: g.SupersededBy, CreatedAt: g.CreatedAt}
+		State: state, PostedAt: g.PostedAt, SupersededBy: g.SupersededBy, CreatedAt: g.CreatedAt,
+		NoTotal: g.Origin == "computed" && voidTotal(g.Breakdown)}
 }
 
 // seesDrafts: drafts and history are for those who grade. Everyone else sees

@@ -516,6 +516,19 @@ func lockGradeTarget(ctx context.Context, q dbq.Querier, courseID uuid.UUID, s *
 	return q.LockComponentGradeTarget(ctx, dbq.LockComponentGradeTargetParams{ComponentID: s.component.ID, StudentMemberID: s.student})
 }
 
+// holdWorth holds still, to the end of the call, what the work a grade is
+// for is worth: the assignment FOR SHARE, as grade.submit takes it
+// (lockGradeTarget), which assignment.update's row lock waits for and holds
+// off; or, for a component graded directly, the course's tree lock, which
+// component.update takes before it changes the points.
+func holdWorth(ctx context.Context, q dbq.Querier, courseID uuid.UUID, s gradeSubject) error {
+	if s.assignment != nil {
+		_, err := q.ShareAssignmentForGrading(ctx, dbq.ShareAssignmentForGradingParams{ID: s.assignment.ID, CourseID: courseID})
+		return err
+	}
+	return q.LockCourseComponents(ctx, courseID)
+}
+
 // noNewerDraft refuses to replace a draft entered after this call was made.
 // A direct call is as new as anything: it applies to a proposal being
 // carried out on its approval.
@@ -944,6 +957,17 @@ func gradeRegrade(d Deps) tool.Tool {
 			return in, pinContent(ctx, q, s, &in.GradeContent)
 		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in GradeRegradeIn) (GradeRegradeOut, error) {
+			// What the work is worth is held still first, as grade.submit
+			// holds it, and then the grade: a change of points takes the
+			// work and then its grades, and rescales every grade it finds.
+			// A regrade that came first is finished by then and its grade is
+			// found; one that comes second finds the work worth what it is
+			// now, and its grade replaced if it was rescaled.
+			if _, s, err := load(ctx, ec.Q, in); err != nil {
+				return GradeRegradeOut{}, err
+			} else if err := holdWorth(ctx, ec.Q, in.CourseID, s); err != nil {
+				return GradeRegradeOut{}, err
+			}
 			if _, err := ec.Q.LockGradesInCourse(ctx, dbq.LockGradesInCourseParams{Ids: []uuid.UUID{in.GradeID}, CourseID: in.CourseID}); err != nil {
 				return GradeRegradeOut{}, err
 			}
