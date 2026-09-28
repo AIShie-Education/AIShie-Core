@@ -964,8 +964,10 @@ The tree is an adjacency list walked with recursive CTEs, which stop at 16 level
 holds tens or hundreds of rows, and a move changes one of them, where a closure table would have
 to be kept in step. Every change to its shape, a department made or moved, takes one advisory
 lock first (`pg_advisory_xact_lock(1095324500, 0)`, "AIST"), so that two changes never each
-check the tree as it stood and together make a cycle or a tree too deep. The trigger reads the
-tree as committed, which under that lock is the tree as it is, and refuses both whatever the
+check the tree as it stood and together make a cycle or a tree too deep; so does a rename, so
+that two names given at once are measured against each other. Sibling names are unique in any
+case, which the application holds under that lock. The trigger reads the tree as committed,
+which under that lock is the tree as it is, and refuses a cycle or a tree too deep whatever the
 application does.
 
 **A department may have administrators.** A row of `department_admin` is an appointment: who,
@@ -999,14 +1001,22 @@ with `authority_dept_id` the appointment's department for an appointment.
 
 **What is beneath an appointment is its holder's to shape and staff.** A department
 administrator creates departments under any department they cover (`department.create`, which
-takes the tree lock), and appoints and removes the administrators of a department only when
-they cover the department *above* it (`department.add_admin`, `.remove_admin`). So nobody
-staffs their own appointment's department or any above it: nobody widens their own reach,
-removes a fellow administrator, or removes whoever is above them. Every appointment says who
-made it. `department.list_tree` gives everyone the tree, with what the caller may do at each
+takes the tree lock). They rename a department (`department.update`), move it
+(`department.move`), and appoint and remove its administrators (`department.add_admin`,
+`.remove_admin`) only when they cover the department *above* it. So nobody reshapes or staffs
+their own appointment's department or any above it: nobody widens their own reach, removes a
+fellow administrator, or removes whoever is above them. Every appointment says who made it.
+A move takes everything beneath the department with it, courses included, and with them who
+administers them: whoever did only through a department no longer above them stops, at once,
+since reach is looked up on every call. So a department goes only under one the mover covers
+as well, never to the top unless a platform administrator moves it, never under itself or one
+beneath it, and never past eight levels; where it is now is read again under the tree lock, so
+a department moved out of the mover's reach while they waited is not theirs to take back.
+`department.list_tree` gives everyone the tree, with what the caller may do at each
 department; `department.list_admins` gives the administrators of a department, and those above
 it, to whoever covers it; `me.get` lists the caller's own appointments. The events
-(`department.created`, `.admin_added`, `.admin_removed`) are in no course's feed.
+(`department.created`, `.updated`, `.moved`, `.admin_added`, `.admin_removed`) are in no
+course's feed.
 
 ## 3. Authorization
 
@@ -1257,9 +1267,10 @@ about. Both are recorded on the action (`authority`), and neither reaches inside
   under an advisory lock on the holder and the bucket; the same text again is the entry already
   there.
 - A department administrator acts only on what an appointment of theirs covers (§2.10), and
-  staffs only the departments strictly beneath one: nobody appoints or removes the
-  administrators of their own department or one above it, and a department at the top is a
-  platform administrator's alone. Their appointment is looked up on every call, never kept;
+  reshapes and staffs only the departments strictly beneath one: nobody renames, moves, or
+  appoints or removes the administrators of their own department or one above it, nobody moves
+  a department out of their own reach, and a department at the top is a platform
+  administrator's alone. Their appointment is looked up on every call, never kept;
   a write holds it `FOR SHARE`, so ending it waits for the calls that rely on it and every
   call after finds it ended.
 - `actor.kind` and `course_member.role` are never read by authorization.

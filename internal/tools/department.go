@@ -20,16 +20,16 @@ import (
 
 // Departments form a tree, and each may have administrators (docs/schema.md
 // §2.10). An appointment reaches the department and everything beneath it.
-// What is beneath an appointment is its holder's to staff: they appoint and
-// remove the administrators of every department strictly beneath it, never
-// of their own or of one above, so nobody widens their own reach, removes a
-// fellow administrator, or removes whoever is above them. A department at the
-// top of the tree is a platform administrator's alone. Nothing here reaches
-// inside a course.
+// What is beneath an appointment is its holder's to shape and staff: they
+// rename and move every department strictly beneath it, and appoint and
+// remove its administrators, never their own department or one above, so
+// nobody widens their own reach, removes a fellow administrator, or removes
+// whoever is above them. A department at the top of the tree is a platform
+// administrator's alone. Nothing here reaches inside a course.
 
 func departmentTools() []tool.Tool {
 	return []tool.Tool{
-		departmentCreate(), departmentList(), departmentListTree(),
+		departmentCreate(), departmentUpdate(), departmentMove(), departmentList(), departmentListTree(),
 		departmentAddAdmin(), departmentRemoveAdmin(), departmentListAdmins(),
 	}
 }
@@ -37,6 +37,8 @@ func departmentTools() []tool.Tool {
 // Every department event is a platform event: in no course's feed.
 const (
 	EventDepartmentCreated      = "department.created"
+	EventDepartmentUpdated      = "department.updated"
+	EventDepartmentMoved        = "department.moved"
 	EventDepartmentAdminAdded   = "department.admin_added"
 	EventDepartmentAdminRemoved = "department.admin_removed"
 )
@@ -73,6 +75,39 @@ func nameFree(ctx context.Context, q dbq.Querier, parent *uuid.UUID, name string
 		return apperr.Conflicts("another department there is already called %q", name).With("reason", "name_taken")
 	}
 	return nil
+}
+
+// reshaping is the target of a change to a department itself, its name or
+// its place in the tree: as with its administrators (staffing), whoever
+// administers the department above it may make it, so nobody reshapes their
+// own appointment's department or one above it.
+func reshaping(ctx context.Context, q dbq.Querier, dept uuid.UUID) (tool.Target, error) {
+	d, err := findDepartment(ctx, q, dept, "no such department")
+	if err != nil {
+		return tool.Target{}, err
+	}
+	return tool.Target{Type: "department", ID: &d.ID, DeptID: d.ParentID}, nil
+}
+
+// reaches reports whether the caller of an Admin-gated write may act beneath
+// parent: a department, or the top of the tree for nil. A platform
+// administrator may anywhere; a department administrator where an
+// appointment of theirs is at parent or above it, which is then held FOR
+// SHARE to the end of the call (authz.AdminScope.Covers).
+func reaches(ctx context.Context, ec *tool.ExecCtx, parent *uuid.UUID) (bool, error) {
+	if parent == nil {
+		return ec.Admin.Platform, nil
+	}
+	_, ok, err := ec.Admin.Covers(ctx, ec.Q, *parent)
+	return ok, err
+}
+
+// movedAway refuses a change to what the gate let the caller act on, when
+// it has been moved out of their reach since: the gate looked at where it
+// was, and the change is to where it is.
+func movedAway() error {
+	return apperr.Forbid("it has been moved meanwhile, out of the departments you administer").
+		With("reason", "department_out_of_scope")
 }
 
 // ---------------------------------------------------------------------------
@@ -135,6 +170,153 @@ func departmentCreate() tool.Tool {
 	})
 }
 
+type DepartmentUpdateIn struct {
+	DeptID uuid.UUID `json:"dept_id"`
+	Name   string    `json:"name"`
+}
+
+func departmentUpdate() tool.Tool {
+	return tool.Define(tool.Spec[DepartmentUpdateIn, DepartmentView]{
+		Name: "department.update",
+		Description: "Rename a department. Whoever administers the department above it does this, or a platform " +
+			"administrator; a department's own administrators do not rename it, and one at the top of the tree is a " +
+			"platform administrator's. Sibling names are unique in any case. Nothing else about it changes.",
+		Kind: tool.Write, Gate: administrators,
+		HTTP: tool.Route{Method: "POST", Pattern: "/v1/departments/{dept_id}"},
+		Resolve: func(ctx context.Context, q dbq.Querier, in DepartmentUpdateIn) (tool.Target, error) {
+			return reshaping(ctx, q, in.DeptID)
+		},
+		Execute: func(ctx context.Context, ec *tool.ExecCtx, in DepartmentUpdateIn) (DepartmentView, error) {
+			name, err := departmentName(in.Name)
+			if err != nil {
+				return DepartmentView{}, err
+			}
+			// The tree lock, as create and move take it: a name is measured
+			// against its siblings' where the department is now, and two
+			// names given at once are measured against each other.
+			if err := ec.Q.LockDepartmentTree(ctx); err != nil {
+				return DepartmentView{}, err
+			}
+			d, err := findDepartment(ctx, ec.Q, in.DeptID, "no such department")
+			if err != nil {
+				return DepartmentView{}, err
+			}
+			if ok, err := reaches(ctx, ec, d.ParentID); err != nil {
+				return DepartmentView{}, err
+			} else if !ok {
+				return DepartmentView{}, movedAway()
+			}
+			if d.Name == name {
+				return DepartmentView{}, apperr.Conflicts("it already has that name").With("reason", "same_name")
+			}
+			if err := nameFree(ctx, ec.Q, d.ParentID, name, d.ID); err != nil {
+				return DepartmentView{}, err
+			}
+			if err := ec.Q.RenameDepartment(ctx, dbq.RenameDepartmentParams{ID: d.ID, Name: name}); err != nil {
+				return DepartmentView{}, err
+			}
+			ec.Emit(events.Event{Type: EventDepartmentUpdated, SubjectType: "department", SubjectID: &d.ID})
+			return DepartmentView{ID: d.ID, Name: name, ParentID: d.ParentID}, nil
+		},
+	})
+}
+
+type DepartmentMoveIn struct {
+	DeptID   uuid.UUID  `json:"dept_id"`
+	ParentID *uuid.UUID `json:"parent_id" jsonschema:"where it goes: a department, or null for the top of the tree"`
+}
+
+func departmentMove() tool.Tool {
+	return tool.Define(tool.Spec[DepartmentMoveIn, OK]{
+		Name: "department.move",
+		Description: "Move a department, with everything beneath it, under another department or to the top of the tree. " +
+			"A department administrator moves the departments beneath the ones they administer, only to a department they " +
+			"administer as well, and never to the top, which is a platform administrator's. The departments and courses " +
+			"beneath it go with it, and so does who administers them: whoever administered them only through a department " +
+			"that is no longer above them stops at once, and whoever administers the department it joins starts. Nothing " +
+			"inside its courses changes. A department never goes under itself or one beneath it, the tree is at most 8 " +
+			"levels deep, and sibling names are unique in any case.",
+		Kind: tool.Write, Gate: administrators,
+		HTTP: tool.Route{Method: "POST", Pattern: "/v1/departments/{dept_id}/move"},
+		Resolve: func(ctx context.Context, q dbq.Querier, in DepartmentMoveIn) (tool.Target, error) {
+			target, err := reshaping(ctx, q, in.DeptID)
+			if err != nil {
+				return target, err
+			}
+			if in.ParentID != nil {
+				if _, err := findDepartment(ctx, q, *in.ParentID, "no such department to move it under"); err != nil {
+					return tool.Target{}, err
+				}
+			}
+			return target, nil
+		},
+		Execute: func(ctx context.Context, ec *tool.ExecCtx, in DepartmentMoveIn) (OK, error) {
+			// The tree lock first: the tree measured below is the tree this
+			// move changes, whoever else is moving a department. The trigger
+			// measures again. Where the department is now is read under it,
+			// and must still be the caller's: moved since the gate looked,
+			// taking it from there would move what is no longer theirs.
+			if err := ec.Q.LockDepartmentTree(ctx); err != nil {
+				return OK{}, err
+			}
+			d, err := findDepartment(ctx, ec.Q, in.DeptID, "no such department")
+			if err != nil {
+				return OK{}, err
+			}
+			if ok, err := reaches(ctx, ec, d.ParentID); err != nil {
+				return OK{}, err
+			} else if !ok {
+				return OK{}, movedAway()
+			}
+			if (d.ParentID == nil && in.ParentID == nil) || (d.ParentID != nil && in.ParentID != nil && *d.ParentID == *in.ParentID) {
+				return OK{}, apperr.Conflicts("it is there already").With("reason", "same_parent")
+			}
+			// Where it goes must be the caller's too, so that nobody moves
+			// what they administer out of their own reach, or anyone else's
+			// into it.
+			if ok, err := reaches(ctx, ec, in.ParentID); err != nil {
+				return OK{}, err
+			} else if !ok {
+				return OK{}, apperr.Forbid("a department goes only under one you administer; the top of the tree is a platform administrator's").
+					With("reason", "destination_out_of_scope")
+			}
+			if in.ParentID != nil {
+				inside, err := ec.Q.InSubtree(ctx, dbq.InSubtreeParams{DeptID: d.ID, OtherID: *in.ParentID})
+				if err != nil {
+					return OK{}, err
+				}
+				if inside {
+					return OK{}, apperr.Precondition("a department cannot go under itself or under a department beneath it").
+						With("reason", "cycle")
+				}
+				depth, err := ec.Q.DepartmentDepth(ctx, *in.ParentID)
+				if err != nil {
+					return OK{}, err
+				}
+				height, err := ec.Q.SubtreeHeight(ctx, d.ID)
+				if err != nil {
+					return OK{}, err
+				}
+				if int(depth)+int(height) > domain.MaxDepartmentDepth {
+					return OK{}, apperr.Precondition("departments nest at most %d levels deep", domain.MaxDepartmentDepth).
+						With("reason", "too_deep").With("max_depth", domain.MaxDepartmentDepth)
+				}
+			}
+			if err := nameFree(ctx, ec.Q, in.ParentID, d.Name, d.ID); err != nil {
+				return OK{}, err
+			}
+			// department_tree_valid refuses a cycle or a tree too deep here,
+			// should anything have changed the tree without the lock.
+			if err := ec.Q.SetDepartmentParent(ctx, dbq.SetDepartmentParentParams{ID: d.ID, ParentID: in.ParentID}); err != nil {
+				return OK{}, err
+			}
+			ec.Emit(events.Event{Type: EventDepartmentMoved, SubjectType: "department", SubjectID: &d.ID,
+				Payload: map[string]any{"from_parent_id": d.ParentID, "to_parent_id": in.ParentID}})
+			return OK{OK: true}, nil
+		},
+	})
+}
+
 type DepartmentView struct {
 	ID       uuid.UUID  `json:"id"`
 	Name     string     `json:"name"`
@@ -174,7 +356,7 @@ type DepartmentNode struct {
 	ParentID    *uuid.UUID `json:"parent_id,omitempty"`
 	Depth       int        `json:"depth" jsonschema:"1 at the top of the tree"`
 	Administers bool       `json:"administers" jsonschema:"you administer it: an appointment of yours is at it or above it, or you are a platform administrator"`
-	Manages     bool       `json:"manages" jsonschema:"you may appoint or remove its administrators: an appointment of yours is above it, or you are a platform administrator"`
+	Manages     bool       `json:"manages" jsonschema:"you may rename it, move it and appoint or remove its administrators: an appointment of yours is above it, or you are a platform administrator"`
 	Appointed   bool       `json:"appointed" jsonschema:"you are appointed at this department itself"`
 	CourseCount *int       `json:"course_count,omitempty" jsonschema:"courses directly in it, archived ones included; only where you administer it"`
 	AdminCount  *int       `json:"admin_count,omitempty" jsonschema:"its own administrators; only where you administer it"`
@@ -189,9 +371,9 @@ func departmentListTree() tool.Tool {
 	return tool.Define(tool.Spec[DepartmentTreeIn, DepartmentTreeOut]{
 		Name: "department.list_tree",
 		Description: "The departments as a tree, each before those beneath it, siblings by name, with what you may do with " +
-			"each: whether you administer it, and whether you may appoint and remove its administrators (an appointment " +
-			"of yours is above it). Course and administrator counts are given where you administer. Any signed-in actor " +
-			"may read this; to someone who administers nothing, every flag is false.",
+			"each: whether you administer it, and whether you may rename it, move it and appoint and remove its " +
+			"administrators (an appointment of yours is above it). Course and administrator counts are given where you " +
+			"administer. Any signed-in actor may read this; to someone who administers nothing, every flag is false.",
 		Kind: tool.Read, Gate: self,
 		HTTP: tool.Route{Method: "GET", Pattern: "/v1/departments/tree"},
 		Resolve: func(ctx context.Context, q dbq.Querier, in DepartmentTreeIn) (tool.Target, error) {
@@ -282,10 +464,11 @@ func departmentAddAdmin() tool.Tool {
 	return tool.Define(tool.Spec[DepartmentAdminIn, DepartmentAddAdminOut]{
 		Name: "department.add_admin",
 		Description: "Make a person an administrator of a department. They then administer it and every department beneath " +
-			"it: they create departments there and appoint the administrators of those beneath it. An administrator of a " +
-			"department appoints the administrators of the departments beneath it, never of their own or of one above; a " +
-			"platform administrator appoints anywhere, and alone at the top of the tree. Only a person can be one, never an " +
-			"agent, and nobody appoints themselves. An appointment gives no seat in any course, and nothing inside one.",
+			"it: they create departments there, and rename and move those beneath it and appoint their administrators. An " +
+			"administrator of a department appoints the administrators of the departments beneath it, never of their own or " +
+			"of one above; a platform administrator appoints anywhere, and alone at the top of the tree. Only a person can be " +
+			"one, never an agent, and nobody appoints themselves. An appointment gives no seat in any course, and nothing " +
+			"inside one.",
 		Kind: tool.Write, Gate: administrators,
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/departments/{dept_id}/admins"},
 		Resolve: func(ctx context.Context, q dbq.Querier, in DepartmentAdminIn) (tool.Target, error) {

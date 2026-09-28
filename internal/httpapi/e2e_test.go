@@ -379,11 +379,10 @@ func TestBrowserSession(t *testing.T) {
 	}
 }
 
-// A person an administrator registered chooses their password through an
-// invitation, in the browser, and is signed in.
 // docs/schema.md §2.10 over REST: root builds a tree and appoints an
 // administrator in it, who makes a department beneath the appointment,
-// staffs it, and is refused what is not theirs, until the appointment ends.
+// staffs it, renames and moves it, and is refused what is not theirs, until
+// the appointment ends.
 func TestATreeIsBuiltAndStaffedOverHTTP(t *testing.T) {
 	a := newAPI(t, 1)
 	c := a.c
@@ -417,6 +416,18 @@ func TestATreeIsBuiltAndStaffedOverHTTP(t *testing.T) {
 		!strings.Contains(tree.Raw, `"id":"`+sw+`","name":"Software","parent_id":"`+eng+`","depth":2,"administers":true,"manages":false,"appointed":true`) {
 		t.Fatalf("department.list_tree: %d %s", tree.Status, tree.Raw)
 	}
+	// He renames and moves what is beneath his appointment, and only to where it is his as well.
+	if renamed := post(sato, "/v1/departments/"+ai, m{"name": "Machine Learning"}, "rename-ai", 200); renamed.str("result", "name") != "Machine Learning" {
+		t.Fatalf("department.update: %s", renamed.Raw)
+	}
+	vision := post(sato, "/v1/departments", m{"name": "Vision", "parent_id": sw}, "vision-1", 200).str("result", "id")
+	post(sato, "/v1/departments/"+ai+"/move", m{"parent_id": vision}, "move-ai", 200)
+	if top := post(sato, "/v1/departments/"+ai+"/move", m{"parent_id": nil}, "ai-to-top", 403); top.str("error", "details", "reason") != "destination_out_of_scope" {
+		t.Fatalf("to the top: %s", top.Raw)
+	}
+	if away := post(sato, "/v1/departments/"+ai+"/move", m{"parent_id": eng}, "ai-to-eng", 403); away.str("error", "details", "reason") != "destination_out_of_scope" {
+		t.Fatalf("out of his reach: %s", away.Raw)
+	}
 	// Not his own department's staff, not at the top, and nothing of a platform administrator's.
 	if own := post(sato, "/v1/departments/"+sw+"/admins", m{"actor_id": yuki}, "yuki-sw", 403); own.str("error", "details", "reason") != "department_out_of_scope" || own.str("action_id") == "" {
 		t.Fatalf("his own department's staff: %s", own.Raw)
@@ -434,6 +445,8 @@ func TestATreeIsBuiltAndStaffedOverHTTP(t *testing.T) {
 	}
 }
 
+// A person an administrator registered chooses their password through an
+// invitation, in the browser, and is signed in.
 func TestInvitationOverHTTP(t *testing.T) {
 	a := newAPI(t, 0)
 	c := a.c

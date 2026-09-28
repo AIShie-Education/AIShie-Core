@@ -90,7 +90,8 @@ var visibility = map[string][]domain.Perm{
 	// They are listed so that leaving them out is visibly a decision.
 	EventActorRegistered: nil, EventActorUpdated: nil, EventActorInvited: nil, EventActorCredentialRevoked: nil,
 	EventActorSuspended: nil, EventActorReactivated: nil, EventAgentCreated: nil,
-	EventDepartmentCreated: nil, EventDepartmentAdminAdded: nil, EventDepartmentAdminRemoved: nil,
+	EventDepartmentCreated: nil, EventDepartmentUpdated: nil, EventDepartmentMoved: nil,
+	EventDepartmentAdminAdded: nil, EventDepartmentAdminRemoved: nil,
 }
 
 // KnownEventTypes lists every event type that has a visibility rule.
