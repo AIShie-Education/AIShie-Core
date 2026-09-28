@@ -116,6 +116,10 @@ type Querier interface {
 	// for any such call in flight, and every call after it finds the appointment
 	// ended.
 	EndAppointment(ctx context.Context, arg EndAppointmentParams) (int64, error)
+	// Its owner switches it off: only while they are its owner, since an
+	// owner's change (actor.set_owner) holds the row, and revokes every
+	// credential it has, which ends it anyway.
+	EndSiteChatByOwner(ctx context.Context, arg EndSiteChatByOwnerParams) error
 	// Whether the actor, or anyone of the same party (SameParty), had a hand in
 	// escalating the action, from any seat: made the review that escalated it,
 	// or approved that review, or confirmed that approval, and so on up. An
@@ -317,8 +321,9 @@ type Querier interface {
 	ListActors(ctx context.Context, arg ListActorsParams) ([]ListActorsRow, error)
 	// A person's agents, oldest first, with what their owner needs to see at a
 	// glance: when one last used a token that still works, how many seats it
-	// holds that count now, and how many requests of the owner's to seat it
-	// wait for a decision.
+	// holds that count now, how many requests of the owner's to seat it wait
+	// for a decision, and whether it takes conversations in the site now, by
+	// the rule of SiteChatOf.
 	ListAgentsOf(ctx context.Context, arg ListAgentsOfParams) ([]ListAgentsOfRow, error)
 	// The appointments at a department and, with inherited, at every department
 	// above it, whose administrators administer it too: nearest first, then by
@@ -697,6 +702,10 @@ type Querier interface {
 	SetMemberScopeKinds(ctx context.Context, arg SetMemberScopeKindsParams) error
 	SetMemberStatus(ctx context.Context, arg SetMemberStatusParams) (int64, error)
 	SetPublishedVersion(ctx context.Context, arg SetPublishedVersionParams) error
+	// The credential an agent calls with declares that it takes conversations
+	// in the site, in place of any that did before; null, that it takes none.
+	// The key holds a credential to the agent's own (actor_site_chat_credential_fk).
+	SetSiteChat(ctx context.Context, arg SetSiteChatParams) error
 	SetSubmissionLateness(ctx context.Context, arg SetSubmissionLatenessParams) (int64, error)
 	// Serialising what races -------------------------------------------------------
 	// The assignment a submission's grade is out of, read again and held still
@@ -721,6 +730,15 @@ type Querier interface {
 	// has the name, in any case. id is the department being named, left out of
 	// the comparison; a new one's id is not there yet.
 	SiblingNameTaken(ctx context.Context, arg SiblingNameTakenParams) (bool, error)
+	// Whether each of the given actors takes conversations in the site now
+	// (docs/schema.md §2.8): an agent does while the credential with which a
+	// program that runs it declared so (me.site_chat) is live, neither revoked
+	// nor expired, the agent is active, and its owner, if it has one, is
+	// active. A person or the system actor never does; agent says which is
+	// which, so that a view can leave people out. ListAgentsOf and
+	// ListRespondentCandidates hold the same rule: a change to one is a change
+	// to all three.
+	SiteChatOf(ctx context.Context, arg SiteChatOfParams) ([]SiteChatOfRow, error)
 	StorageKeyInUse(ctx context.Context, storageKey *string) (bool, error)
 	// A grade entered, or proposed and not yet decided: either way, one is on its
 	// way for exactly this work.

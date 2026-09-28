@@ -117,6 +117,10 @@ func (p *Pipeline) Registry() *tool.Registry { return p.reg }
 // Caller is who is making the call, as established by authentication.
 type Caller struct {
 	ActorID uuid.UUID
+	// CredentialID is the token or session the call came with, which a Write
+	// is given (tool.ExecCtx.CredentialID). uuid.Nil for a call made with
+	// none: from a test, say.
+	CredentialID uuid.UUID
 }
 
 // Outcome is what became of a call that got as far as being attempted.

@@ -10,11 +10,13 @@ import (
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/auth"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/authz"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/db/dbq"
+	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/events"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/tool"
 )
 
 func meTools() []tool.Tool {
-	return []tool.Tool{meGet(), meMemberships(), credentialList(), credentialIssueToken(), credentialSetPassword(), credentialRevoke()}
+	return []tool.Tool{meGet(), meMemberships(), meSiteChat(), credentialList(), credentialIssueToken(), credentialSetPassword(),
+		credentialRevoke()}
 }
 
 var self = tool.Gate{Self: true}
@@ -133,6 +135,91 @@ func meMemberships() tool.Tool {
 				})
 			}
 			return out, nil
+		},
+	})
+}
+
+// ---------------------------------------------------------------------------
+// me.site_chat
+// ---------------------------------------------------------------------------
+
+// Site chat is whether an agent takes conversations in the site: whether
+// people there are offered it to ask, and may ask it (docs/schema.md §2.8).
+// It is for an agent a program runs that answers on its own — an agent
+// runtime, which polls conversation.inbox — and that program says so, with
+// the credential it calls with. An assistant that a person drives from a
+// tool of their own acts only while they use it, and a question put to it in
+// the site would wait for good: it never says so, and is asked nothing
+// there. What was declared holds only while the credential that declared it
+// is live, the agent active and its owner too (SiteChatOf): revoking the
+// runtime's token ends it, with nothing left to say otherwise.
+
+type SiteChatIn struct {
+	On bool `json:"on" jsonschema:"true: people in the site may start conversations with you and ask you, for as long as the credential you call with works; false: they may not"`
+}
+
+type SiteChatOut struct {
+	SiteChat bool `json:"site_chat" jsonschema:"whether you take conversations in the site now; with on true, false only while your owner is suspended"`
+}
+
+var (
+	errSiteChatNotAgent = apperr.Precondition("site chat is for agents a program runs; a person is asked in the site as themselves").
+				With("reason", "not_an_agent")
+	errSiteChatNoCredential = apperr.Precondition("site chat is declared with the credential the program running you calls with, and this call came with none").
+				With("reason", "no_credential")
+)
+
+// siteChatOf is whether each of the given actors takes conversations in the
+// site now, by id, and whether it is an agent: the rule is SQL's
+// (SiteChatOf).
+func siteChatOf(ctx context.Context, q dbq.Querier, now time.Time, actors []uuid.UUID) (map[uuid.UUID]dbq.SiteChatOfRow, error) {
+	out := map[uuid.UUID]dbq.SiteChatOfRow{}
+	if len(actors) == 0 {
+		return out, nil
+	}
+	rows, err := q.SiteChatOf(ctx, dbq.SiteChatOfParams{Now: &now, ActorIds: actors})
+	for _, r := range rows {
+		out[r.ID] = r
+	}
+	return out, err
+}
+
+func meSiteChat() tool.Tool {
+	return tool.Define(tool.Spec[SiteChatIn, SiteChatOut]{
+		Name: "me.site_chat",
+		Description: "Say whether people in the site may start conversations with you and ask you there. Turn it on only if " +
+			"what runs you polls conversation_inbox and answers on its own, as an AIShie agent runtime does, and on each " +
+			"start, under a new idempotency key: it holds while the token you call with works, and ends when that token is " +
+			"revoked. An assistant a person drives from a tool of their own never turns it on: it acts only while they use " +
+			"it, so questions would wait unanswered. Turn it off when you stop answering. Your owner may turn it off, never " +
+			"on. For agents only.",
+		Kind: tool.Write, Gate: self,
+		HTTP:    tool.Route{Method: "POST", Pattern: "/v1/me/site-chat"},
+		Resolve: noTarget[SiteChatIn]("actor"),
+		Execute: func(ctx context.Context, ec *tool.ExecCtx, in SiteChatIn) (SiteChatOut, error) {
+			me, err := ec.Q.GetActor(ctx, ec.Actor.ID)
+			if err != nil {
+				return SiteChatOut{}, err
+			}
+			// A refusal that reads kind, as the database's does: site chat
+			// is an agent's. Nothing that grants reads it.
+			if me.Kind != "agent" {
+				return SiteChatOut{}, errSiteChatNotAgent
+			}
+			var credential *uuid.UUID
+			if in.On {
+				if ec.CredentialID == uuid.Nil {
+					return SiteChatOut{}, errSiteChatNoCredential
+				}
+				credential = &ec.CredentialID
+			}
+			if err := ec.Q.SetSiteChat(ctx, dbq.SetSiteChatParams{ID: me.ID, CredentialID: credential}); err != nil {
+				return SiteChatOut{}, err
+			}
+			ec.Emit(events.Event{Type: EventActorUpdated, SubjectType: "actor", SubjectID: &me.ID,
+				Payload: map[string]any{"site_chat": in.On}})
+			now, err := siteChatOf(ctx, ec.Q, ec.Now, []uuid.UUID{me.ID})
+			return SiteChatOut{SiteChat: now[me.ID].SiteChat}, err
 		},
 	})
 }

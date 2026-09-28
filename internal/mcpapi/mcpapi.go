@@ -561,11 +561,17 @@ func handle(d Deps, t tool.Tool) mcp.ToolHandler {
 		if err != nil {
 			return nil, fmt.Errorf("no authenticated caller")
 		}
+		// The token the call came with, as verify noted it: a tool may record
+		// which one it was (me.site_chat).
+		caller := pipeline.Caller{ActorID: actorID}
+		if id, ok := req.Extra.TokenInfo.Extra["credential_id"].(string); ok {
+			caller.CredentialID, _ = uuid.Parse(id)
+		}
 		args, key, err := splitKey(req.Params.Arguments, t.Kind == tool.Write)
 		if err != nil {
 			return failed(apperr.Invalid("%v", err)), nil
 		}
-		out, err := d.Pipeline.Invoke(ctx, pipeline.Caller{ActorID: actorID}, t.Name, args, key)
+		out, err := d.Pipeline.Invoke(ctx, caller, t.Name, args, key)
 		if err != nil {
 			e, ok := apperr.As(err)
 			if !ok {

@@ -775,6 +775,24 @@ whose principal is — is left out in SQL, and the rest is read a batch at a tim
 first, until enough are found, so that conversations whose openers may no longer ask do not
 stand for good in front of those that may.
 
+**Site chat: which agents answer in the site.** A person answers in the site as themselves. An
+agent answers only if something runs it that polls `conversation.inbox` and answers on its own:
+an agent runtime, AIShie's or a school's own. An assistant a person drives from a tool of their
+own — a chat app, an editor, a script, over MCP — acts only while that person uses it and never
+polls, so a question put to it in the site would wait for good. So the program that runs an
+agent says that it answers: `me.site_chat` with `on: true`, which records the credential the
+call came with (`actor.site_chat_credential_id`, §2.1); `on: false` clears it. It holds only
+while that credential is live, neither revoked nor expired, the agent is active, and its owner,
+if it has one, is active. That is worked out in SQL whenever it is needed and never kept as a
+flag, so revoking the runtime's token, as ending its hosting does, ends it with nothing left
+behind to say otherwise, and so does a change of owner, which revokes every credential the agent
+has. Its owner switches it off (`agent.update` with `site_chat: false`) and never on: only what
+runs the agent knows that it answers, and says so again whenever it starts. Only an agent
+declares it; a person is refused (`not_an_agent`), a refusal that reads `kind` as those of
+ownership do (§2.1). `agent.get` and `agent.list` say `site_chat` of each agent, and
+`member.get` and `member.list` of each agent's seat; a front end says of the rest that they are
+operated from an external tool.
+
 **An answer answers the latest question, once.** It names the opener's message it answers
 (`in_reply_to_message_id`), and is refused as a conflict if the opener has written since
 (`moved_on`): a reply a slow model wrote, or one that waited for approval, is not posted under a
@@ -1273,6 +1291,10 @@ a course, what the call is about is the course's department.
   holds the agent's row, `FOR NO KEY UPDATE`, before it looks at anything; issuing it a token
   and seating it or taking it out read the row `FOR SHARE`, so that a token or a seat made by
   the owner before is revoked or counted, never left behind.
+- An agent takes conversations in the site (§2.8) only while the credential that declared it
+  (`me.site_chat`, with the credential of the call) is live, the agent active and its owner, if
+  any, active: worked out in SQL on every read that needs it, never stored as a flag. Only an
+  agent declares it; its owner switches it off and never on.
 - `member.update_perms_bulk` changes every seat of the role but the caller's, each through the
   rule for one seat, all or none.
 - A proposal is withdrawn only by its proposer, and only while nobody has decided it.

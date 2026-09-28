@@ -57,9 +57,15 @@ SELECT count(*) FROM actor WHERE owner_actor_id = $1 AND status <> 'suspended';
 -- name: ListAgentsOf :many
 -- A person's agents, oldest first, with what their owner needs to see at a
 -- glance: when one last used a token that still works, how many seats it
--- holds that count now, and how many requests of the owner's to seat it
--- wait for a decision.
+-- holds that count now, how many requests of the owner's to seat it wait
+-- for a decision, and whether it takes conversations in the site now, by
+-- the rule of SiteChatOf.
 SELECT a.id, a.display_name, a.status, a.suspended_by_actor_id, a.created_at, seen.last_used_at AS last_seen_at,
+       (a.status = 'active'
+        AND (a.owner_actor_id IS NULL OR EXISTS (SELECT 1 FROM actor o WHERE o.id = a.owner_actor_id AND o.status = 'active'))
+        AND EXISTS (SELECT 1 FROM credential sc
+                     WHERE sc.id = a.site_chat_credential_id AND sc.actor_id = a.id AND sc.revoked_at IS NULL
+                       AND (sc.expires_at IS NULL OR sc.expires_at > sqlc.arg(now))))::bool AS site_chat,
        (SELECT count(*) FROM course_member m
          WHERE m.actor_id = a.id AND m.status = 'active'
            AND (m.expires_at IS NULL OR m.expires_at > sqlc.arg(now))) AS live_seats,
@@ -190,3 +196,34 @@ SELECT a.kind = 'human' AS is_person,
        EXISTS (SELECT 1 FROM actor i WHERE i.id = sqlc.arg(issuer_id)::uuid AND i.platform_role IN ('root', 'admin')) AS issuer_platform
 FROM actor a
 WHERE a.id = sqlc.arg(actor_id)::uuid;
+
+-- name: SiteChatOf :many
+-- Whether each of the given actors takes conversations in the site now
+-- (docs/schema.md §2.8): an agent does while the credential with which a
+-- program that runs it declared so (me.site_chat) is live, neither revoked
+-- nor expired, the agent is active, and its owner, if it has one, is
+-- active. A person or the system actor never does; agent says which is
+-- which, so that a view can leave people out. ListAgentsOf and
+-- ListRespondentCandidates hold the same rule: a change to one is a change
+-- to all three.
+SELECT a.id, (a.kind = 'agent')::bool AS agent,
+       (a.status = 'active'
+        AND (a.owner_actor_id IS NULL OR EXISTS (SELECT 1 FROM actor o WHERE o.id = a.owner_actor_id AND o.status = 'active'))
+        AND EXISTS (SELECT 1 FROM credential sc
+                     WHERE sc.id = a.site_chat_credential_id AND sc.actor_id = a.id AND sc.revoked_at IS NULL
+                       AND (sc.expires_at IS NULL OR sc.expires_at > sqlc.arg(now))))::bool AS site_chat
+FROM actor a
+WHERE a.id = ANY(sqlc.arg(actor_ids)::uuid[]);
+
+-- name: SetSiteChat :exec
+-- The credential an agent calls with declares that it takes conversations
+-- in the site, in place of any that did before; null, that it takes none.
+-- The key holds a credential to the agent's own (actor_site_chat_credential_fk).
+UPDATE actor SET site_chat_credential_id = sqlc.narg(credential_id) WHERE id = sqlc.arg(id);
+
+-- name: EndSiteChatByOwner :exec
+-- Its owner switches it off: only while they are its owner, since an
+-- owner's change (actor.set_owner) holds the row, and revokes every
+-- credential it has, which ends it anyway.
+UPDATE actor SET site_chat_credential_id = NULL
+WHERE id = sqlc.arg(id) AND owner_actor_id = sqlc.arg(owner_actor_id);

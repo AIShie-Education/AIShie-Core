@@ -287,7 +287,8 @@ func (s *server) callTool(t tool.Tool) func(http.ResponseWriter, *http.Request) 
 			return
 		}
 		p := r.Context().Value(callerKey{}).(auth.Principal)
-		out, err := s.Pipeline.Invoke(r.Context(), pipeline.Caller{ActorID: p.ActorID}, t.Name, args, r.Header.Get(HeaderIdempotencyKey))
+		out, err := s.Pipeline.Invoke(r.Context(), pipeline.Caller{ActorID: p.ActorID, CredentialID: p.CredentialID}, t.Name, args,
+			r.Header.Get(HeaderIdempotencyKey))
 		if err != nil {
 			s.writeError(w, r, err)
 			return
