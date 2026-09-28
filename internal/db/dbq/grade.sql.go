@@ -560,6 +560,34 @@ func (q *Queries) ListLiveComponentScores(ctx context.Context, studentMemberID u
 	return items, nil
 }
 
+const listLiveTotalComponents = `-- name: ListLiveTotalComponents :many
+SELECT component_id
+FROM grade
+WHERE student_member_id = $1 AND origin = 'computed' AND posted_at IS NOT NULL AND superseded_by IS NULL
+ORDER BY component_id
+`
+
+// Where the student has a total written down.
+func (q *Queries) ListLiveTotalComponents(ctx context.Context, studentMemberID uuid.UUID) ([]*uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, listLiveTotalComponents, studentMemberID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []*uuid.UUID
+	for rows.Next() {
+		var component_id *uuid.UUID
+		if err := rows.Scan(&component_id); err != nil {
+			return nil, err
+		}
+		items = append(items, component_id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listLiveTotalOverrides = `-- name: ListLiveTotalOverrides :many
 SELECT component_id, override_score
 FROM grade
@@ -586,6 +614,37 @@ func (q *Queries) ListLiveTotalOverrides(ctx context.Context, studentMemberID uu
 			return nil, err
 		}
 		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listStudentsCountedAsZero = `-- name: ListStudentsCountedAsZero :many
+SELECT DISTINCT g.student_member_id
+FROM grade g
+JOIN grade_component c ON c.id = g.component_id
+WHERE c.course_id = $1 AND g.origin = 'computed' AND g.posted_at IS NOT NULL AND g.superseded_by IS NULL
+  AND (g.breakdown->>'ungraded_as_zero')::boolean IS TRUE
+ORDER BY 1
+`
+
+// The students of the course with a total written down counting ungraded
+// work as zero.
+func (q *Queries) ListStudentsCountedAsZero(ctx context.Context, courseID uuid.UUID) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, listStudentsCountedAsZero, courseID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []uuid.UUID
+	for rows.Next() {
+		var student_member_id uuid.UUID
+		if err := rows.Scan(&student_member_id); err != nil {
+			return nil, err
+		}
+		items = append(items, student_member_id)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -1019,6 +1078,21 @@ func (q *Queries) ShareAssignmentForGrading(ctx context.Context, arg ShareAssign
 		&i.PublishedAt,
 	)
 	return i, err
+}
+
+const studentCountedAsZero = `-- name: StudentCountedAsZero :one
+SELECT EXISTS (
+    SELECT 1 FROM grade
+    WHERE student_member_id = $1 AND origin = 'computed' AND posted_at IS NOT NULL AND superseded_by IS NULL
+      AND (breakdown->>'ungraded_as_zero')::boolean IS TRUE
+)
+`
+
+func (q *Queries) StudentCountedAsZero(ctx context.Context, studentMemberID uuid.UUID) (bool, error) {
+	row := q.db.QueryRow(ctx, studentCountedAsZero, studentMemberID)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
 }
 
 const submissionHasGrades = `-- name: SubmissionHasGrades :one

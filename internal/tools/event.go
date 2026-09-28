@@ -40,7 +40,7 @@ var visibility = map[string][]domain.Perm{
 	events.GradeTotalUpdated: {domain.PermGradeRead},
 	// A total overridden, cleared or commented on is posted, as the total is.
 	events.GradeTotalOverridden: {domain.PermGradeRead}, events.GradeTotalOverrideCleared: {domain.PermGradeRead},
-	events.GradeTotalCommented: {domain.PermGradeRead},
+	events.GradeTotalCommented: {domain.PermGradeRead}, events.GradeUngradedAsZeroUndone: {domain.PermGradeRead},
 
 	EventSubmissionSubmitted: {domain.PermSubmissionRead},
 	EventSubmissionLateness:  {domain.PermSubmissionRead},

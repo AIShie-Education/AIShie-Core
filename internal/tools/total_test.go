@@ -218,3 +218,91 @@ func gradebookOf(t *testing.T, b *built, actor, student uuid.UUID) map[uuid.UUID
 	}
 	return lines
 }
+
+// Posting as final can be undone, for one student or for every student it
+// was applied to: their totals are written again as a grade so far, and
+// from then on posts and regrades beneath them no longer count ungraded work
+// as zero, until someone posts as final again.
+func TestUngradedAsZeroIsUndone(t *testing.T) {
+	b := build(t)
+	_, yukiHW := b.gradeHW3(t, b.yuki, 80, false)
+	_, kenHW := b.gradeHW3(t, b.ken, 70, false)
+	b.do(t, b.sato, "grade.post", m{"course_id": b.course, "grade_ids": []uuid.UUID{yukiHW, kenHW}, "treat_ungraded_as_zero": true})
+	final := func(student uuid.UUID) bool {
+		return b.Count(`SELECT count(*) FROM grade WHERE student_member_id = $1 AND origin = 'computed' AND superseded_by IS NULL
+			AND (breakdown->>'ungraded_as_zero')::boolean`, student) > 0
+	}
+	_, total, _, _ := b.liveTotalRow(t, b.total, b.yukiM)
+	want(t, "Yuki's final total", total, "45.71") // (40×0.8 + 30×0) / 70: the midterm, never sat, a zero
+	undo := func(args m) m {
+		args["course_id"] = b.course
+		return args
+	}
+
+	// Only whoever may post as final, over the whole course.
+	ta := testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", m{"kind": "human", "display_name": "TA"})).ActorID
+	b.do(t, b.sato, "member.add", m{"course_id": b.course, "actor_id": ta, "preset": "ta"})
+	if out := b.MustCall(ta, "grade.undo_ungraded_as_zero", undo(m{"student_member_id": b.yukiM}), "ta"); out.Status != domain.StatusDenied {
+		t.Fatalf("a TA who cannot post: %+v", out)
+	}
+	b.do(t, b.sato, "member.update_perms", m{"course_id": b.course, "member_id": b.graderM, "perms": m{"grade_post": "autonomous"}})
+	if out := b.MustCall(b.grader, "grade.undo_ungraded_as_zero", undo(m{"student_member_id": b.yukiM}), "grader"); reason(out) != "assignment_out_of_scope" {
+		t.Fatalf("a grader listed for HW3: %+v", out)
+	}
+	for _, bad := range []m{{}, {"student_member_id": b.yukiM, "all_students": true}} {
+		if _, err := b.Call(b.sato, "grade.undo_ungraded_as_zero", undo(bad), "bad-"+uuid.NewString()); !apperr.Is(err, apperr.InvalidArgument) {
+			t.Fatalf("%v: %v", bad, err)
+		}
+	}
+	if !final(b.yukiM) || !final(b.kenM) {
+		t.Fatal("a refused undo was kept")
+	}
+
+	// Yuki's: her totals are a grade so far again, at once.
+	out := b.do(t, b.sato, "grade.undo_ungraded_as_zero", undo(m{"student_member_id": b.yukiM}))
+	if res := testkit.Result[tools.GradeUndoUngradedAsZeroOut](t, out); res.Students != 1 || res.Snapshots != 2 {
+		t.Fatalf("undo for Yuki: %+v", res)
+	}
+	if final(b.yukiM) || !final(b.kenM) {
+		t.Fatal("the undo was not Yuki's alone")
+	}
+	_, total, _, _ = b.liveTotalRow(t, b.total, b.yukiM)
+	want(t, "Yuki's total, a grade so far", total, "80")
+	if n := b.Count(`SELECT count(*) FROM grade WHERE student_member_id = $1 AND component_id = $2 AND superseded_by IS NOT NULL
+		AND (breakdown->>'ungraded_as_zero')::boolean`, b.yukiM, b.total); n != 1 {
+		t.Fatal("the final total is not kept in the history")
+	}
+	if n := b.Count(`SELECT count(*) FROM event WHERE type = 'grade.ungraded_as_zero_undone' AND action_id = $1 AND student_member_id = $2`, *out.ActionID, b.yukiM); n != 1 {
+		t.Fatal("no grade.ungraded_as_zero_undone event")
+	}
+	seen := false
+	for _, e := range feed(t, b, b.yuki) {
+		seen = seen || e.Type == "grade.ungraded_as_zero_undone"
+	}
+	if !seen {
+		t.Fatal("Yuki is not told")
+	}
+	if out := b.MustCall(b.sato, "grade.undo_ungraded_as_zero", undo(m{"student_member_id": b.yukiM}), "again"); reason(out) != "not_counted_as_zero" {
+		t.Fatalf("undoing what is not there: %+v", out)
+	}
+	// A regrade beneath now leaves ungraded work out, as it did before.
+	b.do(t, b.sato, "grade.regrade", m{"course_id": b.course, "grade_id": yukiHW, "score": 90})
+	_, total, _, _ = b.liveTotalRow(t, b.total, b.yukiM)
+	want(t, "Yuki's total after a regrade", total, "90")
+
+	// Everyone's that was made final: Ken's.
+	if res := testkit.Result[tools.GradeUndoUngradedAsZeroOut](t, b.do(t, b.sato, "grade.undo_ungraded_as_zero", undo(m{"all_students": true}))); res.Students != 1 {
+		t.Fatalf("undo for all: %+v", res)
+	}
+	if final(b.kenM) {
+		t.Fatal("Ken's totals are still final")
+	}
+	if out := b.MustCall(b.sato, "grade.undo_ungraded_as_zero", undo(m{"all_students": true}), "nobody"); reason(out) != "not_counted_as_zero" {
+		t.Fatalf("undoing for all when nobody is final: %+v", out)
+	}
+	// And it may be applied again.
+	b.do(t, b.sato, "grade.regrade", m{"course_id": b.course, "grade_id": kenHW, "score": 75, "treat_ungraded_as_zero": true})
+	if !final(b.kenM) {
+		t.Fatal("posting as final again did not make Ken's totals final")
+	}
+}

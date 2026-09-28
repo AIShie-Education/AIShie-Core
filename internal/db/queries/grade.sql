@@ -108,6 +108,30 @@ FROM grade
 WHERE component_id = $1 AND student_member_id = $2 AND origin = 'computed'
   AND posted_at IS NOT NULL AND superseded_by IS NULL;
 
+-- name: ListStudentsCountedAsZero :many
+-- The students of the course with a total written down counting ungraded
+-- work as zero.
+SELECT DISTINCT g.student_member_id
+FROM grade g
+JOIN grade_component c ON c.id = g.component_id
+WHERE c.course_id = $1 AND g.origin = 'computed' AND g.posted_at IS NOT NULL AND g.superseded_by IS NULL
+  AND (g.breakdown->>'ungraded_as_zero')::boolean IS TRUE
+ORDER BY 1;
+
+-- name: StudentCountedAsZero :one
+SELECT EXISTS (
+    SELECT 1 FROM grade
+    WHERE student_member_id = $1 AND origin = 'computed' AND posted_at IS NOT NULL AND superseded_by IS NULL
+      AND (breakdown->>'ungraded_as_zero')::boolean IS TRUE
+);
+
+-- name: ListLiveTotalComponents :many
+-- Where the student has a total written down.
+SELECT component_id
+FROM grade
+WHERE student_member_id = $1 AND origin = 'computed' AND posted_at IS NOT NULL AND superseded_by IS NULL
+ORDER BY component_id;
+
 -- name: ListStudentsWithLiveTotals :many
 -- Every student of the course who has a total written down.
 SELECT DISTINCT g.student_member_id

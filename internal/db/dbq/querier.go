@@ -433,6 +433,8 @@ type Querier interface {
 	// wait for: the call waits instead for the principal, and then finds it
 	// removed.
 	ListLiveDelegatesOf(ctx context.Context, principalMemberID *uuid.UUID) ([]uuid.UUID, error)
+	// Where the student has a total written down.
+	ListLiveTotalComponents(ctx context.Context, studentMemberID uuid.UUID) ([]*uuid.UUID, error)
 	// The student's totals a person has overridden, and with what, out of 100.
 	ListLiveTotalOverrides(ctx context.Context, studentMemberID uuid.UUID) ([]ListLiveTotalOverridesRow, error)
 	ListMembers(ctx context.Context, arg ListMembersParams) ([]ListMembersRow, error)
@@ -509,6 +511,9 @@ type Querier interface {
 	ListStaleProposals(ctx context.Context, arg ListStaleProposalsParams) ([]ListStaleProposalsRow, error)
 	ListStudentScope(ctx context.Context, memberID uuid.UUID) ([]uuid.UUID, error)
 	ListStudentScopesOf(ctx context.Context, memberIds []uuid.UUID) ([]MemberStudentScope, error)
+	// The students of the course with a total written down counting ungraded
+	// work as zero.
+	ListStudentsCountedAsZero(ctx context.Context, courseID uuid.UUID) ([]uuid.UUID, error)
 	// The students with a live grade entered on the component, on one beneath it,
 	// or on a submission to an assignment beneath it.
 	ListStudentsGradedBeneath(ctx context.Context, componentID uuid.UUID) ([]uuid.UUID, error)
@@ -773,6 +778,7 @@ type Querier interface {
 	// to all three.
 	SiteChatOf(ctx context.Context, arg SiteChatOfParams) ([]SiteChatOfRow, error)
 	StorageKeyInUse(ctx context.Context, storageKey *string) (bool, error)
+	StudentCountedAsZero(ctx context.Context, studentMemberID uuid.UUID) (bool, error)
 	// A grade entered, or proposed and not yet decided: either way, one is on its
 	// way for exactly this work.
 	SubmissionHasGrades(ctx context.Context, submissionID *uuid.UUID) (bool, error)

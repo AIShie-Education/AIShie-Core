@@ -301,6 +301,7 @@ the nearest one, and the choice is recorded here so that it is a decision and no
 | Taking back one's own proposal, or one's own agent's, while nobody has decided it (`action.withdraw`) | `perm_document_read` | the most basic permission a seated member holds; that the proposal is the caller's own, or their own agent's, is what decides, as `action.list_mine` shows only the caller's own |
 | Closing a conversation (`conversation.close`), retracting a message (`conversation.retract`), listing and reading conversations (`conversation.list`, `.get`, `.messages`) | `perm_document_read` | the most basic permission a seated member holds; the conversation decides who may: its two participants, and whoever decides actions for its opener (§2.8) |
 | Regrading | the lower of `perm_grade_submit` and `perm_grade_post` | it writes a grade and makes it visible in one step |
+| Undoing `treat_ungraded_as_zero` (`grade.undo_ungraded_as_zero`) | `perm_grade_post` | the undo of posting as final, with the same reach: every student it is about, over the whole course |
 | Overriding a total, taking the override off, commenting on a total (`grade.override_total`, `.clear_override`, `.comment_total`) | the lower of `perm_grade_submit` and `perm_grade_post` | as a regrade: it writes a total and makes it visible in one step |
 | Course settings, status, department, first instructor | `platform_role`, or an appointment at or above the course's department (§2.10) | outside the course by definition |
 | The course's title and description, from a seat in it (`course.update_details`) | `perm_member_manage` | its instructors run the course and name it; its code, section, term, department and status stay with its administrators |
@@ -612,9 +613,15 @@ posted grades):
 - A total left with nothing beneath it to go on — its work moved away, ungraded work no longer
   counted as zero — is written again as having none (`no_total`: score 0, a working whose
   fraction is null), rather than go on showing what it last did.
-- Final is final. The policy a snapshot was worked out under travels with it (`breakdown`
-  carries `ungraded_as_zero`), and once a student's totals have been written with ungraded
-  work counted as zero, every later post or regrade beneath them keeps counting it so.
+- Final stays final until it is undone. The policy a snapshot was worked out under travels with
+  it (`breakdown` carries `ungraded_as_zero`), and once a student's totals have been written
+  with ungraded work counted as zero, every later post or regrade beneath them keeps counting
+  it so. `grade.undo_ungraded_as_zero`, for one student or for every student whose totals
+  count it so, gated as posting as final is (`perm_grade_post`, over every student it is
+  about, with an assignment scope of the whole course), writes each of their totals again at
+  once as a grade so far, under the student's totals lock, the final ones kept as history;
+  from then on posts and regrades leave ungraded work out again, until someone posts as final
+  again. Grades themselves are not touched.
 - A draft is as old as the call that made it. An approved proposal replaces the drafts that
   were there when it was proposed, and fails — rather than silently overwriting — if a newer
   draft has been entered for the same work since.
@@ -1389,8 +1396,9 @@ grade on a component, a course total, a whole gradebook — is within scope only
 `assignment_scope = 'all'`. Otherwise "names no assignment" would mean "skips the check", and
 a grader listed for HW3 alone could read the class's midterm. Posting or regrading with
 `treat_ungraded_as_zero` is such a target too, whatever the grades in it: it decides how every
-other assignment counts in the course total, for good. So is a change of what graded work is
-worth or where it counts, which rewrites the totals of every student who has one (§2.3).
+other assignment counts in the course total, until it is undone, and undoing it is such a
+target as well. So is a change of what graded work is worth or where it counts, which rewrites
+the totals of every student who has one (§2.3).
 
 Steps 1–3 run before the target is looked up, and the lookup happens only for a caller who
 passed them. A non-member probing ids gets the same recorded denial whether or not the id

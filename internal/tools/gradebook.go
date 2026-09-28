@@ -100,6 +100,13 @@ func loadScores(ctx context.Context, q dbq.Querier, courseID, student uuid.UUID)
 // assignments and components whose grades moved; only their ancestors are
 // looked at.
 func snapshot(ctx context.Context, ec *tool.ExecCtx, courseID uuid.UUID, changed map[uuid.UUID][]uuid.UUID, policy gradecalc.Policy) (int, error) {
+	return snapshotUnder(ctx, ec, courseID, changed, policy, false)
+}
+
+// snapshotUnder is snapshot, with reset saying that policy is to be taken as
+// it is: not made final by what a student's totals were written under
+// before. Only undoing ungraded-as-zero says so.
+func snapshotUnder(ctx context.Context, ec *tool.ExecCtx, courseID uuid.UUID, changed map[uuid.UUID][]uuid.UUID, policy gradecalc.Policy, reset bool) (int, error) {
 	// In a fixed order, so that the events come out the same way every time.
 	students := make([]uuid.UUID, 0, len(changed))
 	for s := range changed {
@@ -131,12 +138,13 @@ func snapshot(ctx context.Context, ec *tool.ExecCtx, courseID uuid.UUID, changed
 		if err != nil {
 			return 0, err
 		}
-		// Final is final. Once a student's totals have been written with
-		// ungraded work counted as zero, a later post or regrade beneath
-		// them — made without saying so again — must not quietly turn them
-		// back into a grade so far. The policy travels with the snapshot.
+		// Final is final until it is undone. Once a student's totals have
+		// been written with ungraded work counted as zero, a later post or
+		// regrade beneath them — made without saying so again — must not
+		// quietly turn them back into a grade so far. The policy travels
+		// with the snapshot. Only undoing it, on purpose, does (reset).
 		studentPolicy := policy
-		if !studentPolicy.UngradedAsZero {
+		if !studentPolicy.UngradedAsZero && !reset {
 			live, err := ec.Q.GetLiveComputedGrade(ctx, dbq.GetLiveComputedGradeParams{ComponentID: &root.ID, StudentMemberID: student})
 			if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 				return 0, err

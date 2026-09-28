@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -24,7 +25,7 @@ import (
 
 func gradeTools(d Deps) []tool.Tool {
 	return []tool.Tool{gradeSubmit(d), gradePost(), gradeRegrade(d), gradebookGet(),
-		gradeOverrideTotal(), gradeClearOverride(), gradeCommentTotal()}
+		gradeOverrideTotal(), gradeClearOverride(), gradeCommentTotal(), gradeUndoUngradedAsZero()}
 }
 
 // FeedbackFile is a file returned with a grade: a marked-up script, a
@@ -565,7 +566,7 @@ type GradePostIn struct {
 	tool.InCourse
 	GradeIDs            []uuid.UUID `json:"grade_ids,omitempty" jsonschema:"the draft grades to post; or give assignment_id. Approving a proposal to post them posts those still waiting, passes over any posted since, and fails if one has been replaced"`
 	AssignmentID        *uuid.UUID  `json:"assignment_id,omitempty" jsonschema:"post every draft grade waiting for this assignment. A proposal records the drafts that were waiting when it was made, as grade_ids beside this: approving it posts those of them still waiting, passes over any posted since, and fails if one has been replaced"`
-	TreatUngradedAsZero bool        `json:"treat_ungraded_as_zero,omitempty" jsonschema:"for final grades: count ungraded work as zero in the totals. Once a student's totals have been written this way they stay final: later posts and regrades keep counting ungraded work as zero. It decides the course total, so it needs an assignment scope of the whole course"`
+	TreatUngradedAsZero bool        `json:"treat_ungraded_as_zero,omitempty" jsonschema:"for final grades: count ungraded work as zero in the totals. Once a student's totals have been written this way they stay final: later posts and regrades keep counting ungraded work as zero, until grade.undo_ungraded_as_zero. It decides the course total, so it needs an assignment scope of the whole course"`
 }
 
 type GradePostOut struct {
@@ -807,7 +808,7 @@ func gradePost() tool.Tool {
 
 // postScope is steps 4 and 5 for a batch: every student and assignment in it.
 // Posting as final is a decision about the course total as well — every other
-// assignment's ungraded work becomes a zero, for good — so it spans
+// assignment's ungraded work becomes a zero, until it is undone — so it spans
 // assignments whatever is in the batch.
 func postScope(rows []dbq.GetGradesInCourseRow, final bool) authz.Target {
 	t := authz.Target{SpansAssignments: final}
@@ -1339,6 +1340,126 @@ func gradeCommentTotal() tool.Tool {
 			ec.Emit(events.Event{Type: events.GradeTotalCommented, CourseID: &in.CourseID, SubjectType: "grade", SubjectID: &id,
 				StudentMemberID: &in.StudentMemberID, Payload: map[string]any{"component_id": in.ComponentID, "replaces": live.ID}})
 			return TotalOut{GradeID: id, Changed: true}, nil
+		},
+	})
+}
+
+// ---------------------------------------------------------------------------
+// grade.undo_ungraded_as_zero
+// ---------------------------------------------------------------------------
+
+type GradeUndoUngradedAsZeroIn struct {
+	tool.InCourse
+	StudentMemberID *uuid.UUID `json:"student_member_id,omitempty" jsonschema:"the student whose totals count ungraded work as zero; or give all_students"`
+	AllStudents     bool       `json:"all_students,omitempty" jsonschema:"every student of the course whose totals count ungraded work as zero"`
+}
+
+type GradeUndoUngradedAsZeroOut struct {
+	Students  int `json:"students" jsonschema:"how many students' totals no longer count ungraded work as zero"`
+	Snapshots int `json:"snapshots" jsonschema:"how many totals were written down again"`
+}
+
+// countedAsZero is who the call is about: the one student named, or every
+// student whose totals count ungraded work as zero now.
+func countedAsZero(ctx context.Context, q dbq.Querier, in GradeUndoUngradedAsZeroIn) ([]uuid.UUID, error) {
+	if (in.StudentMemberID == nil) == !in.AllStudents {
+		return nil, apperr.Invalid("give student_member_id or all_students, one of them")
+	}
+	if in.StudentMemberID != nil {
+		if _, err := q.GetRosterEntry(ctx, dbq.GetRosterEntryParams{ID: *in.StudentMemberID, CourseID: in.CourseID}); errors.Is(err, pgx.ErrNoRows) {
+			return nil, apperr.Missing("no such member in this course")
+		} else if err != nil {
+			return nil, err
+		}
+		return []uuid.UUID{*in.StudentMemberID}, nil
+	}
+	return q.ListStudentsCountedAsZero(ctx, in.CourseID)
+}
+
+// gradeUndoUngradedAsZero takes back posting as final: a student's totals,
+// written with ungraded work counted as zero, which every post and regrade
+// beneath them then kept counting so, are written again as a grade so far,
+// and from then on they are what posts and regrades make them, as before
+// anything was posted as final. It is posting's own undo, so it is gated as
+// posting as final is: grade_post, over every student it reaches, with an
+// assignment scope of the whole course. A total left with nothing to go on —
+// a bucket whose only grades were those zeros — is written as having none.
+func gradeUndoUngradedAsZero() tool.Tool {
+	return tool.Define(tool.Spec[GradeUndoUngradedAsZeroIn, GradeUndoUngradedAsZeroOut]{
+		Name: "grade.undo_ungraded_as_zero",
+		Description: "Undo treat_ungraded_as_zero for one student, or for every student it was applied to: their totals " +
+			"are written again, at once, leaving ungraded work out as a grade so far, and later posts and regrades no longer " +
+			"count it as zero until someone posts as final again. A total with nothing left beneath it says it has none. " +
+			"Gated as posting as final is: grade_post, reaching every student it is about, with an assignment scope of " +
+			"the whole course. Grades themselves are not touched, and the totals it replaces stay in the history.",
+		Kind: tool.Write,
+		Gate: tool.Gate{Perms: []domain.Perm{domain.PermGradePost}},
+		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/grades/undo-ungraded-as-zero"},
+		Resolve: func(ctx context.Context, q dbq.Querier, in GradeUndoUngradedAsZeroIn) (tool.Target, error) {
+			students, err := countedAsZero(ctx, q, in)
+			if err != nil {
+				return tool.Target{}, err
+			}
+			t := tool.Target{CourseID: in.CourseID, Type: "gradebook", Scope: authz.Target{StudentMemberIDs: students, SpansAssignments: true}}
+			if in.StudentMemberID != nil {
+				t.ID = in.StudentMemberID
+			}
+			return t, nil
+		},
+		Execute: func(ctx context.Context, ec *tool.ExecCtx, in GradeUndoUngradedAsZeroIn) (GradeUndoUngradedAsZeroOut, error) {
+			students, err := countedAsZero(ctx, ec.Q, in)
+			if err != nil {
+				return GradeUndoUngradedAsZeroOut{}, err
+			}
+			// Everyone it is about now, some perhaps made final since the
+			// call was authorized.
+			if reason, err := authz.CheckScope(ctx, ec.Q, ec.Member, authz.Target{StudentMemberIDs: students, SpansAssignments: true}); err != nil {
+				return GradeUndoUngradedAsZeroOut{}, err
+			} else if reason != authz.ReasonNone {
+				return GradeUndoUngradedAsZeroOut{}, apperr.Forbid("a student made final since this call was authorized is outside your scope; call again").
+					With("reason", string(reason))
+			}
+			sort.Slice(students, func(i, j int) bool { return students[i].String() < students[j].String() })
+			var out GradeUndoUngradedAsZeroOut
+			for _, student := range students {
+				// Under the student's totals lock, which the rewrite takes
+				// again: whether they are final is read as it is now.
+				if err := ec.Q.LockStudentTotals(ctx, dbq.LockStudentTotalsParams{CourseID: in.CourseID, StudentMemberID: student}); err != nil {
+					return GradeUndoUngradedAsZeroOut{}, err
+				}
+				final, err := ec.Q.StudentCountedAsZero(ctx, student)
+				if err != nil {
+					return GradeUndoUngradedAsZeroOut{}, err
+				}
+				if !final {
+					if in.StudentMemberID != nil {
+						return GradeUndoUngradedAsZeroOut{}, apperr.Conflicts("the student's totals do not count ungraded work as zero").
+							With("reason", "not_counted_as_zero")
+					}
+					continue
+				}
+				components, err := ec.Q.ListLiveTotalComponents(ctx, student)
+				if err != nil {
+					return GradeUndoUngradedAsZeroOut{}, err
+				}
+				items := make([]uuid.UUID, 0, len(components))
+				for _, c := range components {
+					items = append(items, *c)
+				}
+				n, err := snapshotUnder(ctx, ec, in.CourseID, map[uuid.UUID][]uuid.UUID{student: items}, gradecalc.Policy{}, true)
+				if err != nil {
+					return GradeUndoUngradedAsZeroOut{}, err
+				}
+				out.Students++
+				out.Snapshots += n
+				s := student
+				ec.Emit(events.Event{Type: events.GradeUngradedAsZeroUndone, CourseID: &in.CourseID, SubjectType: "gradebook", SubjectID: &s,
+					StudentMemberID: &s})
+			}
+			if out.Students == 0 {
+				return out, apperr.Precondition("no student's totals count ungraded work as zero").With("reason", "not_counted_as_zero")
+			}
+			return out, nil
 		},
 	})
 }

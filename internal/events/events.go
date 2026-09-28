@@ -36,6 +36,8 @@ const (
 	GradeTotalOverridden      = "grade.total_overridden"
 	GradeTotalOverrideCleared = "grade.total_override_cleared"
 	GradeTotalCommented       = "grade.total_commented"
+	// A student's totals stopped counting ungraded work as zero.
+	GradeUngradedAsZeroUndone = "grade.ungraded_as_zero_undone"
 
 	// A conversation's news is its two participants' and nobody else's
 	// (docs/schema.md §2.8). Its subject is the conversation, and its
