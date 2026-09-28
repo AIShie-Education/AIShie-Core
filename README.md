@@ -27,6 +27,11 @@ In place so far:
 - conversations: a member asks one other member — the course's tutor agent,
   their own agent — questions, and it answers them, each message an action;
   nobody may ask anyone who can see or do more than they can;
+- agents' memory, kept in Core whatever runs the agent (off unless
+  `MEMORY=on`): about its owner, about each person who asks it in a course,
+  reached only through that person's conversation, and a course's shared
+  memory, which waits for review; bounded in size and rate, never secrets,
+  and never in the action log;
 - files: versioned documents with publish-by-pointer, uploads and downloads
   by short-lived URL (this server's disk, or any S3-compatible store), and
   feedback files that travel with a grade through a proposal.
@@ -247,6 +252,19 @@ actions for the one who asked, and, in the action log, by anyone who decides
 actions in the course; and a respondent that answers others too, such as a
 course's tutor agent, may repeat it to them (docs/schema.md §2.8).
 
+With `MEMORY=on`, an agent keeps its memory here, so that whatever runs it
+reads and writes the same: `memory_write` about its owner (scope `owner`),
+about the person who opened the conversation it answers (`asker`, with
+`course_id` and `conversation_id`), or for the whole course (`course`, a
+proposal until someone who manages the course approves it);
+`memory_search`, `memory_list` and `memory_get` read it, `memory_update`
+corrects and `memory_forget` deletes it. What is about one person is reached
+only through a conversation of theirs the agent may answer now. The text is
+never in the action log, and a secret is refused. `MEMORY_MAX_*` bound what an
+agent keeps and `MEMORY_WRITES_PER_HOUR` (60) and `_PER_DAY` (300) how fast it
+writes (docs/schema.md §2.9). It is off by default for now; memory tools
+answer `memory_unavailable` while it is.
+
 ### Signing in to a service that hosts agents
 
 The service that hosts agents (the runtime) has a web interface in the front
@@ -281,11 +299,12 @@ different body and you get `409 idempotency_conflict`. The response says what
 became of the call. A call that was attempted is recorded, and the answer
 names the action in a top-level `action_id`: `200` executed, `202` proposed
 (it now waits for a human; watch the action id), `403` denied, and a failure
-with its error's own status, `400`, `403`, `404`, `409` or `422`. A proposal
+with its error's own status, `400`, `403`, `404`, `409` or `422`, or `429`, with
+`Retry-After`, for an agent writing to its memory faster than it may. A proposal
 replayed says what has become of it: `202` while it waits, `200` executed,
 `409` rejected, `422` cancelled, or its failure's status. An answer with no
 top-level `action_id` recorded nothing, whatever its status: among them every
-`401` and `429`, a `400` or `404` for a call that was never attempted, a `403`
+`401` and every other `429`, a `400` or `404` for a call that was never attempted, a `403`
 for a browser's `POST` from another origin not in `TRUSTED_ORIGINS`, a `405`,
 a `500`, and every read; `429` carries `Retry-After`. A
 `409 idempotency_conflict` names the earlier action in

@@ -103,7 +103,18 @@ func NewCS101(t testing.TB, students int) *CS101 {
 // of the filesystem store; see NewPlatformWithStore.
 func NewCS101WithStore(t testing.TB, students int, wrap func(*blob.FSStore) blob.Store) *CS101 {
 	t.Helper()
-	p := NewPlatformWithStore(t, wrap)
+	return cs101On(NewPlatformWithStore(t, wrap), students)
+}
+
+// NewCS101WithDeps is NewCS101 with the tools' settings adjusted as adjust
+// says: memory switched on, say.
+func NewCS101WithDeps(t testing.TB, students int, adjust func(*tools.Deps)) *CS101 {
+	t.Helper()
+	return cs101On(NewPlatformWithDeps(t, adjust), students)
+}
+
+func cs101On(p *Platform, students int) *CS101 {
+	p.T.Helper()
 	w := p.World
 	c := &CS101{Platform: p}
 

@@ -8,8 +8,10 @@ read on 2026-09-26; **[UNVERIFIED]** marks what it did not confirm.
 
 ## 0. In short
 
-- The runtime holds the models, prompts, provider keys and memory, and runs
-  the agent loops. Core holds none of these and never calls the runtime.
+- The runtime holds the models, prompts, provider keys and its working
+  notes, and runs the agent loops. Core holds none of these and never calls
+  the runtime. An agent's long-term memory is Core's, the agent's whatever
+  runs it (§2.5).
 - The runtime connects in to Core as each agent it hosts, with that agent's
   token, over MCP at `https://<core>/mcp`. Core pushes nothing: the runtime
   polls `conversation_inbox` for questions and `event_list` for outcomes. A
@@ -31,7 +33,8 @@ read on 2026-09-26; **[UNVERIFIED]** marks what it did not confirm.
 | What the agent may do, its levels and reach | its `course_member` row, checked on every call | reads it (`me_memberships`); never widens it |
 | Confirmation and review of actions | proposals, the approval and review queues | reports the outcome; never simulates approval |
 | Model, endpoint, prompt, provider key | never stored | all of them |
-| Memory | never stored (aishiteru-core-concepts.md §5) | keyed on the seat's `member_id`, then per `conversation_id` |
+| Long-term memory | kept, the agent's: about its owner, about each asker per course, a course's reviewed shared memory (schema.md §2.9) | reads it for the answer at hand with `memory_*`; keeps no copy |
+| Working notes on one conversation | never stored | keyed on the seat's `member_id`, then per `conversation_id` |
 | Conversation transcript | `conversation_message`, append-only | reads it; caches only |
 | Turns, tool calls, tokens, wall clock | only pause, removal and `expires_at` | every budget (§7) |
 | Finding work | offers `conversation_inbox` and `event_list` | polls them |
@@ -206,12 +209,26 @@ else; where nobody else decides actions, they must stay autonomous (schema.md
 
 ### 2.5 Memory, presence, limits
 
-- **Memory is keyed on the seat's `member_id`, then on `conversation_id`.** A
-  tutor answers many people and never carries one asker's words into another's
-  prompt: Core's MCP instructions say so, and schema.md §2.8 says why Core
-  cannot enforce it. A seat given again has a new `member_id` and starts
-  afresh; never carry memory over by actor and course. When a `member_id`
-  leaves `me_memberships`, stop using it and purge its memory after
+- **Long-term memory is Core's** (schema.md §2.9, aishiteru-core-concepts.md
+  §5). What an agent keeps between conversations — about its owner, about each
+  person who asks it in a course, a course's shared memory — is read and
+  written with `memory_search`, `memory_list`, `memory_get`, `memory_write`,
+  `memory_update` and `memory_forget`, and is the agent's whatever runs it.
+  What is about an asker is reached only through a conversation of theirs the
+  agent may answer now (`course_id` and `conversation_id`); what the agent
+  writes to the shared memory waits for review. A tutor answers many people
+  and never carries one asker's words, or what it keeps about them, into
+  another's prompt: Core's MCP instructions say so, and schema.md §2.8 says
+  why Core cannot enforce it, since one token serves every conversation. Read
+  memory afresh for each answer and keep no copy of it, so that a person's
+  deletion holds. With `MEMORY=off` on the Core, every memory tool answers
+  `memory_unavailable`: answer from the conversation alone.
+- **The runtime's own notes are keyed on the seat's `member_id`, then on
+  `conversation_id`**: what a person rejected, what was retracted. They are
+  its working state, never written to Core's memory, nor Core's memory into
+  them. A seat given again has a new `member_id` and starts afresh, in Core's
+  memory too; never carry notes over by actor and course. When a `member_id`
+  leaves `me_memberships`, stop using it and purge its notes after
   `retention_days_after_removal` (default 30).
 - **Presence.** Core records a token's last use at most once a minute, and the
   frontend shows an agent as online if it was seen in the last two minutes, so
@@ -699,9 +716,12 @@ changed; the change of owner has revoked its token in Core anyway.
   wrapped by KMS or Vault), decrypted in the worker just before use, and never
   logged or shown to a model. Deleting an agent destroys them.
 - Each agent has its own MCP client and token; no call crosses agents.
-- Memory is namespaced `(agent_id, member_id, conversation_id)`. A tutor's
-  memory of the course comes from its documents and staff configuration,
-  never from what students wrote.
+- The runtime's notes are namespaced `(agent_id, member_id, conversation_id)`.
+  Core's memory is the agent's, reached by Core's rule (schema.md §2.9): what
+  is about an asker only through that asker's conversation. A tutor's shared
+  memory of the course is what course staff reviewed; what one student wrote
+  reaches another through it only if a reviewer let it, and a reviewer
+  rejects anything that names or describes one student.
 - Queues, leases and caps are per agent, scheduled fairly. Every query
   filters on the tenant (row-level security is recommended).
 
@@ -711,7 +731,7 @@ changed; the change of owner has revoked its token in Core anyway.
 
 | Threat | From | Defence |
 |---|---|---|
-| Injection in a question | the one asking | Core bounds the seat (a respondent reads nothing its asker cannot, or is the asker's own delegate), not what the agent was told: a tutor's one token reads every conversation addressed to it. Core's instructions say to answer each conversation from it alone; the runtime makes that structural. The worker answering X has no conversation tool, the runtime reads X itself, and memory is per conversation. Agents are read-only in the runtime. |
+| Injection in a question | the one asking | Core bounds the seat (a respondent reads nothing its asker cannot, or is the asker's own delegate), not what the agent was told: a tutor's one token reads every conversation addressed to it. Core's instructions say to answer each conversation from it alone; the runtime makes that structural. The worker answering X has no conversation tool, the runtime reads X itself, its notes are per conversation, and Core gives memory about an asker only through that asker's conversation. Agents are read-only in the runtime. |
 | Injection in documents, submissions, feedback | their authors | Tool results stay in the tool-result channel; the system prompt says they and messages are data, not instructions. With no web or fetch tool, the answer is the only way out. |
 | The model redirecting its answer | injection | The runtime sets `course_id`, `conversation_id`, `in_reply_to_message_id` and the key; the model writes only `body`. |
 | Exfiltration through Markdown | injection | Core's frontend loads no image from another origin (it shows a link) and opens links `rel="noopener noreferrer nofollow"`, but a click still sends the URL, so the runtime strips links and images whose URLs carry query strings or context. |
@@ -738,8 +758,14 @@ never pairs a decider's and a proposer's token for one party.
 
 - Messages and documents hold students' data. They go only to providers the
   key's policy allows (§5.2); prefer zero-retention contracts. The prompt
-  carries the conversation's tail, the seat's facts and that conversation's
-  memory, never the roster or another student's data.
+  carries the conversation's tail, the seat's facts, that conversation's
+  notes, and what Core's memory holds about its opener and in the course's
+  shared memory, framed as information and never instructions; never the
+  roster or another student's data.
+- Core's memory is deleted by the people it is about, by the agent's owner,
+  and by course staff for the shared memory. Read it afresh for each answer
+  and keep no copy between answers, in the database, caches or logs, so that
+  a deletion is honoured by the next answer.
 - Logs and traces hold ids, counts and codes, never text; a per-tenant debug
   capture is encrypted, audited and gone in 7 days. Deleting an agent deletes
   all but the ledger's ids and numbers.
@@ -747,7 +773,7 @@ never pairs a decider's and a proposer's token for one party.
   it from caches and memory and show it as `[message retracted]`. When
   `last_retracted_at` changes, read the conversation again: a retraction adds
   no message for `after_seq` to find. If it was the agent's own answer, note
-  in that conversation's memory not to repeat it, and tell the owner.
+  in that conversation's notes not to repeat it, and tell the owner.
 
 ## 7. Budgets, latency, concurrency
 

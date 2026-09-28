@@ -367,3 +367,44 @@ func TestADelegateHoldsNoMoreThanItsPrincipal(t *testing.T) {
 		t.Fatalf("an owned agent's seat with no principal: %s (%q)", got.Level, got.Reason)
 	}
 }
+
+// SeatFor is steps 1 and 2 without step 3: whether an actor's seat counts,
+// whatever it may do there, and why not if it does not.
+func TestSeatForSaysWhetherASeatCounts(t *testing.T) {
+	c := newCS101(t)
+	ctx := context.Background()
+	now := time.Now()
+	helper := c.w.OwnedAgent(c.yuki, "Yuki's helper")
+	helperM := c.w.Delegate(c.course, helper, c.yukiM, "delegate")
+	for _, tc := range []struct {
+		name   string
+		actor  uuid.UUID
+		course uuid.UUID
+		write  bool
+		seat   uuid.UUID
+		reason authz.Reason
+	}{
+		{"a live seat, even one that may do nothing", c.nobodyYet, c.course, true, c.emptyM, authz.ReasonNone},
+		{"a delegate's, its principal live", helper, c.course, true, helperM, authz.ReasonNone},
+		{"no seat", c.stranger, c.course, false, uuid.Nil, authz.ReasonNotAMember},
+		{"a paused seat", c.paused, c.course, false, uuid.Nil, authz.ReasonMemberNotLive},
+		{"an expired seat", c.expired, c.course, true, uuid.Nil, authz.ReasonMemberNotLive},
+		{"an actor suspended", c.suspended, c.course, false, uuid.Nil, authz.ReasonActorNotActive},
+		{"a write to an archived course", c.sato, c.archived, true, uuid.Nil, authz.ReasonCourseArchived},
+		{"a read of one", c.sato, c.archived, false, uuid.Nil, authz.ReasonNone},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, reason, err := authz.SeatFor(ctx, c.w.Q, tc.actor, tc.course, tc.write, now)
+			if err != nil || reason != tc.reason || (tc.seat != uuid.Nil && (m == nil || m.ID != tc.seat)) {
+				t.Fatalf("%v %q %v", m, reason, err)
+			}
+		})
+	}
+	c.w.Exec(`UPDATE course_member SET status = 'paused' WHERE id = $1`, c.yukiM)
+	if _, reason, err := authz.SeatFor(ctx, c.w.Q, helper, c.course, false, now); err != nil || reason != authz.ReasonPrincipalNotActive {
+		t.Fatalf("a delegate whose principal is paused: %q %v", reason, err)
+	}
+	if _, _, err := authz.SeatFor(ctx, c.w.Q, c.sato, uuid.New(), false, now); !apperr.Is(err, apperr.NotFound) {
+		t.Fatalf("no such course: %v", err)
+	}
+}

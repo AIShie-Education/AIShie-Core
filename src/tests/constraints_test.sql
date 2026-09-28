@@ -731,6 +731,254 @@ SELECT pg_temp.fails('nobody writes in a closed conversation', '23514', $q$
 SELECT pg_temp.fails('a closed conversation stays closed', '23001', $q$
     UPDATE conversation SET status = 'open', closed_reason = NULL WHERE id = '00000000-0000-0000-0000-0000000000c1' $q$);
 
+-- Memory ---------------------------------------------------------------------
+-- 3b Sato's tutor, an agent he owns · 5e its seat in A, his delegate, answering the course
+-- mx memory entries. Who made an entry and when, and the text's hash, are
+-- the application's to write; defaults for the rest of this transaction keep
+-- each check below about the one rule it tests. Rolled back with everything
+-- else.
+INSERT INTO actor (id, kind, display_name, owner_actor_id, created_by_actor_id)
+VALUES ('00000000-0000-0000-0000-00000000003b', 'agent', 'Sato''s tutor', '00000000-0000-0000-0000-000000000034', '00000000-0000-0000-0000-000000000034');
+INSERT INTO course_member (id, course_id, actor_id, role, added_by_actor_id, student_scope, assignment_scope, principal_member_id, answers_course)
+VALUES ('00000000-0000-0000-0000-00000000005e', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-00000000003b', 'assistant',
+        '00000000-0000-0000-0000-000000000034', 'listed', 'listed', '00000000-0000-0000-0000-000000000051', true);
+ALTER TABLE memory_entry
+    ALTER COLUMN id SET DEFAULT gen_random_uuid(),
+    ALTER COLUMN source SET DEFAULT 'agent',
+    ALTER COLUMN created_by_actor_id SET DEFAULT '00000000-0000-0000-0000-00000000003b',
+    ALTER COLUMN updated_by_actor_id SET DEFAULT '00000000-0000-0000-0000-00000000003b',
+    ALTER COLUMN created_by_action_id SET DEFAULT '00000000-0000-0000-0000-0000000000b1',
+    ALTER COLUMN updated_by_action_id SET DEFAULT '00000000-0000-0000-0000-0000000000b1',
+    ALTER COLUMN created_at SET DEFAULT now(),
+    ALTER COLUMN updated_at SET DEFAULT now();
+
+SELECT pg_temp.ok('an agent keeps memory about its owner', $q$
+    INSERT INTO memory_entry (id, holder_actor_id, scope, subject_actor_id, body, search_text, text_hash)
+    VALUES ('00000000-0000-0000-0000-0000000000f1', '00000000-0000-0000-0000-00000000003b', 'owner',
+            '00000000-0000-0000-0000-000000000034', 'Prefers worked examples.', 'prefers worked examples', '\x01') $q$);
+SELECT pg_temp.ok('owner memory may say in which course it was learnt', $q$
+    INSERT INTO memory_entry (holder_actor_id, scope, course_id, subject_actor_id, body, text_hash)
+    VALUES ('00000000-0000-0000-0000-00000000003b', 'owner', '00000000-0000-0000-0000-000000000041',
+            '00000000-0000-0000-0000-000000000034', 'Teaches CS101 on Mondays.', '\x02') $q$);
+SELECT pg_temp.ok('an agent keeps memory about someone who asks it, in its seat', $q$
+    INSERT INTO memory_entry (id, holder_actor_id, scope, course_id, holder_member_id, subject_actor_id, subject_member_id,
+                              body, search_text, text_hash)
+    VALUES ('00000000-0000-0000-0000-0000000000f2', '00000000-0000-0000-0000-00000000003b', 'asker', '00000000-0000-0000-0000-000000000041',
+            '00000000-0000-0000-0000-00000000005e', '00000000-0000-0000-0000-000000000035', '00000000-0000-0000-0000-000000000052',
+            'Finds recursion hard.', 'finds recursion hard', '\x01') $q$);
+SELECT pg_temp.ok('an agent proposes to a course''s shared memory', $q$
+    INSERT INTO memory_entry (id, holder_actor_id, scope, course_id, holder_member_id, status, body, text_hash)
+    VALUES ('00000000-0000-0000-0000-0000000000f3', '00000000-0000-0000-0000-00000000003b', 'course', '00000000-0000-0000-0000-000000000041',
+            '00000000-0000-0000-0000-00000000005e', 'proposed', 'HW3 is due Friday.', '\x01') $q$);
+SELECT pg_temp.ok('course staff write a course''s shared memory, in force at once', $q$
+    INSERT INTO memory_entry (id, holder_actor_id, scope, course_id, holder_member_id, body, text_hash, source, created_by_actor_id, updated_by_actor_id)
+    VALUES ('00000000-0000-0000-0000-0000000000f4', '00000000-0000-0000-0000-00000000003b', 'course', '00000000-0000-0000-0000-000000000041',
+            '00000000-0000-0000-0000-00000000005e', 'Office hours are on Tuesdays.', '\x02', 'staff',
+            '00000000-0000-0000-0000-000000000034', '00000000-0000-0000-0000-000000000034') $q$);
+SELECT pg_temp.ok('the bucket and the search vector are worked out from the row', $q$
+    DO $chk$
+    BEGIN
+        IF (SELECT bucket FROM memory_entry WHERE id = '00000000-0000-0000-0000-0000000000f2')
+               <> 'asker:00000000-0000-0000-0000-000000000052'
+           OR (SELECT bucket FROM memory_entry WHERE id = '00000000-0000-0000-0000-0000000000f3')
+               <> 'course:00000000-0000-0000-0000-00000000005e'
+           OR (SELECT bucket FROM memory_entry WHERE id = '00000000-0000-0000-0000-0000000000f1') <> 'owner'
+           OR NOT (SELECT search @@ to_tsquery('simple', 'recursion') FROM memory_entry WHERE id = '00000000-0000-0000-0000-0000000000f2') THEN
+            RAISE EXCEPTION 'bucket or search not as the row says';
+        END IF;
+    END $chk$ $q$);
+SELECT pg_temp.fails('a person keeps no memory', '23514', $q$
+    INSERT INTO memory_entry (holder_actor_id, scope, subject_actor_id, body, text_hash)
+    VALUES ('00000000-0000-0000-0000-000000000035', 'owner', '00000000-0000-0000-0000-000000000035', 'Note to self.', '\x09') $q$);
+SELECT pg_temp.fails('owner memory is about the agent''s owner', '23514', $q$
+    INSERT INTO memory_entry (holder_actor_id, scope, subject_actor_id, body, text_hash)
+    VALUES ('00000000-0000-0000-0000-00000000003b', 'owner', '00000000-0000-0000-0000-000000000035', 'Yuki is shy.', '\x09') $q$);
+SELECT pg_temp.fails('an agent nobody owns keeps no owner memory', '23514', $q$
+    INSERT INTO memory_entry (holder_actor_id, scope, subject_actor_id, body, text_hash)
+    VALUES ('00000000-0000-0000-0000-000000000036', 'owner', '00000000-0000-0000-0000-000000000034', 'Sato grades late.', '\x09') $q$);
+SELECT pg_temp.fails('the holder''s seat is the holder''s', '23514', $q$
+    INSERT INTO memory_entry (holder_actor_id, scope, course_id, holder_member_id, body, text_hash)
+    VALUES ('00000000-0000-0000-0000-00000000003b', 'course', '00000000-0000-0000-0000-000000000041',
+            '00000000-0000-0000-0000-000000000053', 'Borrowed seat.', '\x09') $q$);
+SELECT pg_temp.fails('the subject''s seat is the subject''s', '23514', $q$
+    INSERT INTO memory_entry (holder_actor_id, scope, course_id, holder_member_id, subject_actor_id, subject_member_id, body, text_hash)
+    VALUES ('00000000-0000-0000-0000-00000000003b', 'asker', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-00000000005e',
+            '00000000-0000-0000-0000-000000000037', '00000000-0000-0000-0000-000000000052', 'Ken, filed under Yuki.', '\x09') $q$);
+SELECT pg_temp.fails('both seats are of the entry''s course', '23503', $q$
+    INSERT INTO memory_entry (holder_actor_id, scope, course_id, holder_member_id, subject_actor_id, subject_member_id, body, text_hash)
+    VALUES ('00000000-0000-0000-0000-00000000003b', 'asker', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-00000000005e',
+            '00000000-0000-0000-0000-000000000037', '00000000-0000-0000-0000-000000000054', 'Ken, from section B.', '\x09') $q$);
+SELECT pg_temp.fails('an entry names the action that wrote it', '23502', $q$
+    INSERT INTO memory_entry (holder_actor_id, scope, subject_actor_id, body, text_hash, created_by_action_id)
+    VALUES ('00000000-0000-0000-0000-00000000003b', 'owner', '00000000-0000-0000-0000-000000000034', 'Out of nowhere.', '\x09', NULL) $q$);
+
+-- The shape of each scope.
+SELECT pg_temp.fails('scope is owner, asker or course', '23514', $q$
+    INSERT INTO memory_entry (holder_actor_id, scope, course_id, holder_member_id, body, text_hash)
+    VALUES ('00000000-0000-0000-0000-00000000003b', 'team', '00000000-0000-0000-0000-000000000041',
+            '00000000-0000-0000-0000-00000000005e', 'Team notes.', '\x09') $q$);
+SELECT pg_temp.fails('status is active, proposed or rejected', '23514', $q$
+    INSERT INTO memory_entry (holder_actor_id, scope, course_id, holder_member_id, status, body, text_hash)
+    VALUES ('00000000-0000-0000-0000-00000000003b', 'course', '00000000-0000-0000-0000-000000000041',
+            '00000000-0000-0000-0000-00000000005e', 'archived', 'Old news.', '\x09') $q$);
+SELECT pg_temp.fails('source is agent, owner or staff', '23514', $q$
+    INSERT INTO memory_entry (holder_actor_id, scope, subject_actor_id, body, text_hash, source)
+    VALUES ('00000000-0000-0000-0000-00000000003b', 'owner', '00000000-0000-0000-0000-000000000034', 'Heard it somewhere.', '\x09', 'model') $q$);
+SELECT pg_temp.fails('owner memory is kept in no seat', '23514', $q$
+    INSERT INTO memory_entry (holder_actor_id, scope, course_id, holder_member_id, subject_actor_id, body, text_hash)
+    VALUES ('00000000-0000-0000-0000-00000000003b', 'owner', '00000000-0000-0000-0000-000000000041',
+            '00000000-0000-0000-0000-00000000005e', '00000000-0000-0000-0000-000000000034', 'In a seat.', '\x09') $q$);
+SELECT pg_temp.fails('owner memory is never proposed', '23514', $q$
+    INSERT INTO memory_entry (holder_actor_id, scope, subject_actor_id, status, body, text_hash)
+    VALUES ('00000000-0000-0000-0000-00000000003b', 'owner', '00000000-0000-0000-0000-000000000034', 'proposed', 'For review.', '\x09') $q$);
+SELECT pg_temp.fails('asker memory is kept in the agent''s seat', '23514', $q$
+    INSERT INTO memory_entry (holder_actor_id, scope, course_id, subject_actor_id, subject_member_id, body, text_hash)
+    VALUES ('00000000-0000-0000-0000-00000000003b', 'asker', '00000000-0000-0000-0000-000000000041',
+            '00000000-0000-0000-0000-000000000035', '00000000-0000-0000-0000-000000000052', 'Seatless.', '\x09') $q$);
+-- Without the seat a bucket is keyed on, there is no bucket to put it in.
+SELECT pg_temp.fails('asker memory names whom it is about', '23502', $q$
+    INSERT INTO memory_entry (holder_actor_id, scope, course_id, holder_member_id, body, text_hash)
+    VALUES ('00000000-0000-0000-0000-00000000003b', 'asker', '00000000-0000-0000-0000-000000000041',
+            '00000000-0000-0000-0000-00000000005e', 'About somebody.', '\x09') $q$);
+SELECT pg_temp.fails('asker memory is never proposed', '23514', $q$
+    INSERT INTO memory_entry (holder_actor_id, scope, course_id, holder_member_id, subject_actor_id, subject_member_id, status, body, text_hash)
+    VALUES ('00000000-0000-0000-0000-00000000003b', 'asker', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-00000000005e',
+            '00000000-0000-0000-0000-000000000035', '00000000-0000-0000-0000-000000000052', 'proposed', 'For review.', '\x09') $q$);
+SELECT pg_temp.fails('shared memory is about nobody', '23514', $q$
+    INSERT INTO memory_entry (holder_actor_id, scope, course_id, holder_member_id, subject_actor_id, body, text_hash)
+    VALUES ('00000000-0000-0000-0000-00000000003b', 'course', '00000000-0000-0000-0000-000000000041',
+            '00000000-0000-0000-0000-00000000005e', '00000000-0000-0000-0000-000000000035', 'Yuki is behind.', '\x09') $q$);
+SELECT pg_temp.fails('shared memory is kept in the agent''s seat', '23502', $q$
+    INSERT INTO memory_entry (holder_actor_id, scope, course_id, body, text_hash)
+    VALUES ('00000000-0000-0000-0000-00000000003b', 'course', '00000000-0000-0000-0000-000000000041', 'Seatless.', '\x09') $q$);
+
+-- The text.
+SELECT pg_temp.fails('an entry in force has text', '23514', $q$
+    INSERT INTO memory_entry (holder_actor_id, scope, subject_actor_id, text_hash)
+    VALUES ('00000000-0000-0000-0000-00000000003b', 'owner', '00000000-0000-0000-0000-000000000034', '\x09') $q$);
+SELECT pg_temp.fails('and the hash of its text', '23514', $q$
+    INSERT INTO memory_entry (holder_actor_id, scope, subject_actor_id, body)
+    VALUES ('00000000-0000-0000-0000-00000000003b', 'owner', '00000000-0000-0000-0000-000000000034', 'Unhashed.') $q$);
+SELECT pg_temp.fails('an entry says something', '23514', $q$
+    INSERT INTO memory_entry (holder_actor_id, scope, subject_actor_id, body, text_hash)
+    VALUES ('00000000-0000-0000-0000-00000000003b', 'owner', '00000000-0000-0000-0000-000000000034', '', '\x09') $q$);
+SELECT pg_temp.fails('an entry is at most 1000 characters', '23514', $q$
+    INSERT INTO memory_entry (holder_actor_id, scope, subject_actor_id, body, text_hash)
+    VALUES ('00000000-0000-0000-0000-00000000003b', 'owner', '00000000-0000-0000-0000-000000000034', repeat('x', 1001), '\x09') $q$);
+-- Characters are counted as the database's encoding counts them: in UTF-8,
+-- which the server's deployments use, a character of four bytes is one.
+SELECT pg_temp.ok('1000 characters of four bytes each are 4000 bytes, the most', $q$
+    DO $utf8$
+    BEGIN
+        IF current_setting('server_encoding') = 'UTF8' THEN
+            INSERT INTO memory_entry (holder_actor_id, scope, subject_actor_id, body, text_hash)
+            VALUES ('00000000-0000-0000-0000-00000000003b', 'owner', '00000000-0000-0000-0000-000000000034',
+                    repeat(chr(128512), 1000), '\x03');
+        END IF;
+    END $utf8$ $q$);
+SELECT pg_temp.fails('a rejected proposal keeps no text', '23514', $q$
+    INSERT INTO memory_entry (holder_actor_id, scope, course_id, holder_member_id, status, body, text_hash, decided_at)
+    VALUES ('00000000-0000-0000-0000-00000000003b', 'course', '00000000-0000-0000-0000-000000000041',
+            '00000000-0000-0000-0000-00000000005e', 'rejected', 'Kept anyway.', '\x09', now()) $q$);
+SELECT pg_temp.ok('at most five tags', $q$
+    INSERT INTO memory_entry (holder_actor_id, scope, subject_actor_id, body, text_hash, tags)
+    VALUES ('00000000-0000-0000-0000-00000000003b', 'owner', '00000000-0000-0000-0000-000000000034', 'Tagged.', '\x04',
+            '{goal,fact,progress,preference,difficulty}') $q$);
+SELECT pg_temp.fails('not six', '23514', $q$
+    INSERT INTO memory_entry (holder_actor_id, scope, subject_actor_id, body, text_hash, tags)
+    VALUES ('00000000-0000-0000-0000-00000000003b', 'owner', '00000000-0000-0000-0000-000000000034', 'Over-tagged.', '\x09',
+            '{goal,fact,progress,preference,difficulty,misc}') $q$);
+
+-- One text per bucket.
+SELECT pg_temp.fails('the same text twice in one bucket', '23505', $q$
+    INSERT INTO memory_entry (holder_actor_id, scope, subject_actor_id, body, text_hash)
+    VALUES ('00000000-0000-0000-0000-00000000003b', 'owner', '00000000-0000-0000-0000-000000000034', 'Prefers worked examples.', '\x01') $q$);
+SELECT pg_temp.fails('nor proposed beside the same text in force', '23505', $q$
+    INSERT INTO memory_entry (holder_actor_id, scope, course_id, holder_member_id, status, body, text_hash)
+    VALUES ('00000000-0000-0000-0000-00000000003b', 'course', '00000000-0000-0000-0000-000000000041',
+            '00000000-0000-0000-0000-00000000005e', 'proposed', 'Office hours are on Tuesdays.', '\x02') $q$);
+SELECT pg_temp.ok('the same text in another bucket', $q$
+    INSERT INTO memory_entry (holder_actor_id, scope, course_id, holder_member_id, subject_actor_id, subject_member_id, body, text_hash)
+    VALUES ('00000000-0000-0000-0000-00000000003b', 'asker', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-00000000005e',
+            '00000000-0000-0000-0000-000000000037', '00000000-0000-0000-0000-000000000058', 'Finds recursion hard.', '\x01') $q$);
+
+-- Review.
+SELECT pg_temp.fails('a proposal is undecided', '23514', $q$
+    INSERT INTO memory_entry (holder_actor_id, scope, course_id, holder_member_id, status, body, text_hash, decided_at, decided_by_member_id)
+    VALUES ('00000000-0000-0000-0000-00000000003b', 'course', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-00000000005e',
+            'proposed', 'Decided already.', '\x09', now(), '00000000-0000-0000-0000-000000000051') $q$);
+SELECT pg_temp.fails('a rejection says when it was made', '23514', $q$
+    INSERT INTO memory_entry (holder_actor_id, scope, course_id, holder_member_id, status)
+    VALUES ('00000000-0000-0000-0000-00000000003b', 'course', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-00000000005e',
+            'rejected') $q$);
+SELECT pg_temp.fails('a decision''s reason is at most 500 characters', '23514', $q$
+    UPDATE memory_entry SET decided_at = now(), decided_by_member_id = '00000000-0000-0000-0000-000000000051',
+                            decision_reason = repeat('x', 501)
+    WHERE id = '00000000-0000-0000-0000-0000000000f4' $q$);
+SELECT pg_temp.fails('who decided is a seat of the entry''s course', '23503', $q$
+    UPDATE memory_entry SET decided_at = now(), decided_by_member_id = '00000000-0000-0000-0000-000000000055'
+    WHERE id = '00000000-0000-0000-0000-0000000000f4' $q$);
+SELECT pg_temp.ok('a shared proposal names the entry it corrects', $q$
+    INSERT INTO memory_entry (holder_actor_id, scope, course_id, holder_member_id, status, body, text_hash, replaces_id)
+    VALUES ('00000000-0000-0000-0000-00000000003b', 'course', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-00000000005e',
+            'proposed', 'Office hours are on Wednesdays.', '\x05', '00000000-0000-0000-0000-0000000000f4') $q$);
+SELECT pg_temp.fails('only a shared proposal replaces an entry', '23514', $q$
+    UPDATE memory_entry SET replaces_id = '00000000-0000-0000-0000-0000000000f4' WHERE id = '00000000-0000-0000-0000-0000000000f1' $q$);
+SELECT pg_temp.ok('a proposal is rejected, and its text goes', $q$
+    UPDATE memory_entry SET status = 'rejected', body = NULL, search_text = '', text_hash = NULL, decided_at = now(),
+                            decided_by_member_id = '00000000-0000-0000-0000-000000000051', decision_reason = 'Too vague.'
+    WHERE id = '00000000-0000-0000-0000-0000000000f3' $q$);
+SELECT pg_temp.fails('a rejected entry stays as it is', '23001', $q$
+    UPDATE memory_entry SET decision_reason = 'On second thoughts.' WHERE id = '00000000-0000-0000-0000-0000000000f3' $q$);
+SELECT pg_temp.ok('the same text proposed again once rejected', $q$
+    INSERT INTO memory_entry (holder_actor_id, scope, course_id, holder_member_id, status, body, text_hash)
+    VALUES ('00000000-0000-0000-0000-00000000003b', 'course', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-00000000005e',
+            'proposed', 'HW3 is due Friday.', '\x01') $q$);
+SELECT pg_temp.ok('a rejected entry is deleted', $q$
+    DELETE FROM memory_entry WHERE id = '00000000-0000-0000-0000-0000000000f3' $q$);
+
+-- What never changes, and what does.
+SELECT pg_temp.ok('an entry''s text, tags and pin change, and its version with them', $q$
+    UPDATE memory_entry SET body = 'Prefers worked examples in Python.', search_text = 'prefers worked examples in python',
+                            text_hash = '\x06', tags = '{preference}', pinned = true, version = version + 1, source = 'owner'
+    WHERE id = '00000000-0000-0000-0000-0000000000f1' $q$);
+SELECT pg_temp.fails('whose an entry is never changes', '23001', $q$
+    UPDATE memory_entry SET holder_actor_id = '00000000-0000-0000-0000-000000000036' WHERE id = '00000000-0000-0000-0000-0000000000f1' $q$);
+SELECT pg_temp.fails('nor its scope', '23001', $q$
+    UPDATE memory_entry SET scope = 'course' WHERE id = '00000000-0000-0000-0000-0000000000f2' $q$);
+SELECT pg_temp.fails('nor whom it is about', '23001', $q$
+    UPDATE memory_entry SET subject_actor_id = '00000000-0000-0000-0000-000000000037', subject_member_id = '00000000-0000-0000-0000-000000000058'
+    WHERE id = '00000000-0000-0000-0000-0000000000f2' $q$);
+SELECT pg_temp.fails('nor in which seat it is kept', '23001', $q$
+    UPDATE memory_entry SET holder_member_id = '00000000-0000-0000-0000-000000000053' WHERE id = '00000000-0000-0000-0000-0000000000f2' $q$);
+SELECT pg_temp.fails('nor its course', '23001', $q$
+    UPDATE memory_entry SET course_id = '00000000-0000-0000-0000-000000000041' WHERE id = '00000000-0000-0000-0000-0000000000f1' $q$);
+SELECT pg_temp.fails('nor when, by whom and by what action it was made', '23001', $q$
+    UPDATE memory_entry SET created_at = created_at - interval '1 day' WHERE id = '00000000-0000-0000-0000-0000000000f1' $q$);
+
+-- Freezing.
+SELECT pg_temp.ok('an entry is frozen when its seat is removed', $q$
+    UPDATE memory_entry SET purge_after = now() + interval '30 days', purge_reason = 'seat_removed'
+    WHERE id = '00000000-0000-0000-0000-0000000000f2' $q$);
+SELECT pg_temp.fails('a frozen entry says why', '23514', $q$
+    UPDATE memory_entry SET purge_reason = NULL WHERE id = '00000000-0000-0000-0000-0000000000f2' $q$);
+SELECT pg_temp.fails('an entry is frozen only for a removed seat or an archived course', '23514', $q$
+    UPDATE memory_entry SET purge_reason = 'stale' WHERE id = '00000000-0000-0000-0000-0000000000f2' $q$);
+
+-- The owner's switch, and the count of writes.
+SELECT pg_temp.ok('an owner switches an agent''s memory off', $q$
+    INSERT INTO memory_setting (holder_actor_id, enabled, updated_by_actor_id, updated_at)
+    VALUES ('00000000-0000-0000-0000-00000000003b', false, '00000000-0000-0000-0000-000000000034', now()) $q$);
+SELECT pg_temp.fails('an agent has one setting', '23505', $q$
+    INSERT INTO memory_setting (holder_actor_id, enabled, updated_by_actor_id, updated_at)
+    VALUES ('00000000-0000-0000-0000-00000000003b', true, '00000000-0000-0000-0000-000000000034', now()) $q$);
+SELECT pg_temp.ok('an hour''s writes are counted', $q$
+    INSERT INTO memory_write_count (holder_actor_id, hour, n)
+    VALUES ('00000000-0000-0000-0000-00000000003b', date_trunc('hour', now()), 1) $q$);
+SELECT pg_temp.fails('a count is of one write or more', '23514', $q$
+    INSERT INTO memory_write_count (holder_actor_id, hour, n)
+    VALUES ('00000000-0000-0000-0000-00000000003b', date_trunc('hour', now()) - interval '1 hour', 0) $q$);
+
 \o
 ROLLBACK;
 \echo 'All checks passed.'
