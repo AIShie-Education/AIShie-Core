@@ -258,6 +258,8 @@ func FromEnv() (Config, error) {
 // with no key to sign for them are refused, as single sign-on is without
 // SIGNING_KEY: with a key made up at each start, what one instance signs
 // would not check against what another publishes, nor survive a restart.
+// So are audiences without PUBLIC_URL, which is the assertions' issuer: the
+// default, a localhost URL, would be refused by every runtime, and only then.
 func (c *Config) readAssertions() error {
 	for _, a := range strings.Split(os.Getenv("RUNTIME_AUDIENCES"), ",") {
 		if a = strings.TrimSpace(a); a == "" {
@@ -285,6 +287,9 @@ func (c *Config) readAssertions() error {
 	}
 	if len(c.RuntimeAudiences) > 0 && c.AssertionKey == nil && c.SigningKey == "" {
 		return fmt.Errorf("RUNTIME_AUDIENCES needs ASSERTION_KEY or SIGNING_KEY: assertions must check against the same key on every instance and after a restart")
+	}
+	if len(c.RuntimeAudiences) > 0 && os.Getenv("PUBLIC_URL") == "" {
+		return fmt.Errorf("RUNTIME_AUDIENCES needs PUBLIC_URL: it is the issuer a runtime takes assertions from, and the default, %s, is none a runtime would name", c.PublicURL)
 	}
 	return nil
 }

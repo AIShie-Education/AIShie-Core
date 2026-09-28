@@ -51,6 +51,7 @@ func TestFromEnv(t *testing.T) {
 func TestAssertionSettings(t *testing.T) {
 	const signingKey = "an installation's signing key, 32+ characters long"
 	seed := bytes.Repeat([]byte{7}, 32)
+	t.Setenv("PUBLIC_URL", "https://test.aishie.app")
 	t.Run("off by default, with a five-minute lifetime", func(t *testing.T) {
 		c, err := FromEnv()
 		if err != nil {
@@ -96,6 +97,19 @@ func TestAssertionSettings(t *testing.T) {
 		t.Setenv("ASSERTION_KEY", base64.StdEncoding.EncodeToString(seed))
 		if _, err := FromEnv(); err != nil {
 			t.Fatalf("with ASSERTION_KEY: %v", err)
+		}
+	})
+	// The issuer is PUBLIC_URL; its localhost default is no runtime's.
+	t.Run("audiences need PUBLIC_URL", func(t *testing.T) {
+		t.Setenv("SIGNING_KEY", signingKey)
+		t.Setenv("RUNTIME_AUDIENCES", "https://test.aishie.app/runtime")
+		t.Setenv("PUBLIC_URL", "")
+		if _, err := FromEnv(); err == nil || !strings.Contains(err.Error(), "RUNTIME_AUDIENCES needs PUBLIC_URL") {
+			t.Fatalf("without PUBLIC_URL: %v", err)
+		}
+		t.Setenv("RUNTIME_AUDIENCES", "")
+		if _, err := FromEnv(); err != nil {
+			t.Fatalf("without audiences, PUBLIC_URL may be left to its default: %v", err)
 		}
 	})
 	for _, bad := range []string{"test.aishie.app/runtime", "/runtime", "ftp://test.aishie.app/runtime", "mailto:ops@aishie.app",

@@ -85,7 +85,8 @@ Environment:
                        Register <PUBLIC_URL>/v1/auth/sso/callback with the provider.
   RUNTIME_AUDIENCES    the services that host agents a signed-in person may be vouched for to,
                        comma separated absolute URLs such as https://lms.example.edu/runtime;
-                       POST /v1/auth/assertion makes the assertion, GET /v1/auth/keys checks it
+                       POST /v1/auth/assertion makes the assertion, GET /v1/auth/keys checks it;
+                       needs PUBLIC_URL, the assertions' issuer
   ASSERTION_KEY        base64 of a 32-byte Ed25519 seed; default derived from SIGNING_KEY,
                        one of which RUNTIME_AUDIENCES needs
   ASSERTION_TTL        default 5m, from 1m to 15m; never longer than the session asking

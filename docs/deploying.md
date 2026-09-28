@@ -189,9 +189,10 @@ Run all of these as root on the server.
   `https` URL, that carries a query, a fragment or a user name, or that is not
   written the one way a URL is: a lower-case scheme and host, no port that is
   the scheme's own (`:443` for `https`), nothing percent-encoded that need not
-  be, and no `.`, `..` or empty segment, and none of `!'()*`, in the path. The
-  assertions are signed with a key derived from `SIGNING_KEY`, so nothing
-  else is needed. To keep them apart, set `ASSERTION_KEY` to a key of its own,
+  be, and no `.`, `..` or empty segment, and none of `!'()*`, in the path. It
+  also refuses audiences without `PUBLIC_URL`, the assertions' issuer, which
+  `setup-server.sh` writes. The assertions are signed with a key derived from
+  `SIGNING_KEY`, so nothing else is needed. To keep them apart, set `ASSERTION_KEY` to a key of its own,
   made with `openssl rand -base64 32` and kept like `SIGNING_KEY`; changing it
   later makes a runtime fetch the new key, and assertions already made stop
   working, which costs people a new one, asked for by the front end without
