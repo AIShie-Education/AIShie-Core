@@ -4,6 +4,9 @@
 # example from docs/schema.md §5 entirely through the REST API — register the
 # actors, create and open the course, seat the instructor, set up grading,
 # publish an assignment, hand in work, have an agent grade it, approve, post;
+# have the instructor rename the course, halve the assignment's points with
+# the grade rescaled, override and restore the student's total, rename and
+# bring back the slides, and make the student a TA and a student again;
 # and have the instructor's own tutor agent answer the student's question,
 # once its runtime says it answers in the site, and be asked nothing more once
 # he switches that off; and have another agent of his, given member_manage,
@@ -191,6 +194,51 @@ call 200 GET "$C/gradebook/$YUKI_M" "$YUKI"
 call 200 GET "$C/events?since_seq=0" "$GRADER"
 json "$WORK/body" '"action.approved" in [e["type"] for e in d["result"]["events"]] or sys.exit("no action.approved in the agent feed")' >/dev/null
 KEY=yuki-hw3 call 200 POST "$C/grades" "$GRADER" "$GRADE" # the original call, replayed now, reports executed
+
+step "Sato renames the course from his seat; its code and the rest stay the administrators'"
+call 200 POST "$C/details" "$SATO" '{"title":"Computing for Everyone","description":"No experience needed."}'
+[ "$(json "$WORK/body" 'd["result"]["changed"]')" = True ] || fail "the rename changed nothing"
+call 200 GET "$C" "$YUKI"
+[ "$(json "$WORK/body" 'd["result"]["title"], d["result"]["code"]')" = "Computing for Everyone CS101" ] || fail "the course reads $(cat "$WORK/body")"
+call 403 POST "$C/details" "$YUKI" '{"title":"Mine"}'
+call 400 POST "$C/details" "$SATO" '{"code":"CS999"}' # no such field here: the code is the administrators'
+
+step "Sato halves what HW3 is worth, saying Yuki's grade is rescaled: 85 of 100 is 42.5 of 50, and her total stays 85"
+call 422 POST "$C/assignments/$HW3" "$SATO" '{"points_possible":50}'
+[ "$(json "$WORK/body" 'd["error"]["details"]["reason"]')" = existing_grades_required ] || fail "refused, but not for want of existing_grades: $(cat "$WORK/body")"
+call 200 POST "$C/assignments/$HW3" "$SATO" '{"points_possible":50,"existing_grades":"rescale"}'
+[ "$(json "$WORK/body" 'd["result"]["rescaled"]')" = 1 ] || fail "want Yuki's one grade rescaled: $(cat "$WORK/body")"
+call 200 GET "$C/grades" "$YUKI"
+[ "$(json "$WORK/body" '[g["score"] for g in d["result"]["grades"] if g["origin"] == "entered"]')" = "[42.5]" ] || fail "Yuki's grade: $(cat "$WORK/body")"
+call 200 GET "$C/gradebook/$YUKI_M" "$YUKI"
+[ "$(json "$WORK/body" 'd["result"]["components"][0]["percent"]')" = 85 ] || fail "Yuki's total moved: $(cat "$WORK/body")"
+
+step "Sato overrides Yuki's course total, with a reason; the number worked out stays beside it, and the override comes off again"
+call 403 POST "$C/gradebook/$YUKI_M/totals/$TOTAL/override" "$GRADER" '{"score":90,"reason":"Generous."}'
+call 200 POST "$C/gradebook/$YUKI_M/totals/$TOTAL/override" "$SATO" '{"score":88,"reason":"Participation in every lab."}'
+call 200 GET "$C/gradebook/$YUKI_M" "$YUKI"
+[ "$(json "$WORK/body" 'd["result"]["components"][0]["percent"], d["result"]["components"][0]["override_percent"]')" = "85 88" ] ||
+  fail "Yuki's total and its override: $(cat "$WORK/body")"
+call 200 POST "$C/gradebook/$YUKI_M/totals/$TOTAL/clear-override" "$SATO"
+call 200 GET "$C/gradebook/$YUKI_M" "$YUKI"
+[ "$(json "$WORK/body" 'd["result"]["components"][0].get("override_percent")')" = None ] || fail "the override is still there: $(cat "$WORK/body")"
+
+step "Sato renames the slides, archives them and brings them back"
+call 200 POST "$C/documents/$DOC" "$SATO" '{"title":"Lecture 1: Loops"}'
+call 200 POST "$C/documents/$DOC/archive" "$SATO"
+call 404 GET "$C/documents/$DOC" "$YUKI" # withdrawn
+call 200 POST "$C/documents/$DOC/unarchive" "$SATO"
+call 200 GET "$C/documents/$DOC" "$YUKI"
+[ "$(json "$WORK/body" 'd["result"]["title"]')" = "Lecture 1: Loops" ] || fail "Yuki reads $(cat "$WORK/body")"
+
+step "Sato makes Yuki a TA and a student again: the roster follows, and nothing she may do changes"
+call 200 POST "$C/members/$YUKI_M/role" "$SATO" '{"role":"ta"}'
+[ "$(json "$WORK/body" 'd["result"]["previous"], d["result"]["changed"]')" = "student True" ] || fail "the role change: $(cat "$WORK/body")"
+call 200 GET "$C/members?role=student" "$SATO"
+[ "$(json "$WORK/body" 'len(d["result"]["members"])')" = 0 ] || fail "a TA is listed as a student"
+call 200 GET "$C/grades" "$YUKI" # her records are hers
+call 403 POST "$C/members/$SATO_M/role" "$SATO" '{"role":"observer"}' # not on one's own seat
+call 200 POST "$C/members/$YUKI_M/role" "$SATO" '{"role":"student"}'
 
 step "Sato brings in a tutor agent of his own; until something runs it that answers, it is asked nothing in the site"
 call 200 POST /v1/me/agents "$SATO" '{"display_name":"Course tutor"}'
