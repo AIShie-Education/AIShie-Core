@@ -148,6 +148,84 @@ SELECT pg_temp.fails('the system actor holds no credential', '23514', $q$
 SELECT pg_temp.fails('a credential is not moved to the system actor', '23514', $q$
     UPDATE credential SET actor_id = '00000000-0000-0000-0000-000000000033' WHERE token_prefix = 'sess-1' $q$);
 
+-- Login IDs: a person's student or staff number, a sign-in name beside the email.
+SELECT pg_temp.ok('a person has a login ID, as an administrator gives it', $q$
+    UPDATE actor SET login_id = 'HNU20230001' WHERE id = '00000000-0000-0000-0000-000000000035' $q$);
+SELECT pg_temp.ok('and an email beside it', $q$
+    UPDATE actor SET login_id = 'T19880042', email = 'sato@hainanu.edu.cn' WHERE id = '00000000-0000-0000-0000-000000000034' $q$);
+SELECT pg_temp.fails('a login ID is unique regardless of case', '23505', $q$
+    INSERT INTO actor (kind, display_name, login_id, created_by_actor_id)
+    VALUES ('human', 'x', 'hnu20230001', '00000000-0000-0000-0000-000000000031') $q$);
+SELECT pg_temp.fails('and is not taken over by another person', '23505', $q$
+    UPDATE actor SET login_id = 'Hnu20230001' WHERE id = '00000000-0000-0000-0000-000000000037' $q$);
+SELECT pg_temp.ok('its longest: 64 letters, digits, dots, hyphens and underscores', $q$
+    UPDATE actor SET login_id = 'hnu.2023-00_' || repeat('7', 52) WHERE id = '00000000-0000-0000-0000-000000000037' $q$);
+SELECT pg_temp.fails('never longer', '23514', $q$
+    UPDATE actor SET login_id = repeat('7', 65) WHERE id = '00000000-0000-0000-0000-000000000037' $q$);
+SELECT pg_temp.fails('never empty', '23514', $q$
+    UPDATE actor SET login_id = '' WHERE id = '00000000-0000-0000-0000-000000000037' $q$);
+SELECT pg_temp.fails('never with an @, so never taken for an email', '23514', $q$
+    UPDATE actor SET login_id = 'ken@example.edu' WHERE id = '00000000-0000-0000-0000-000000000037' $q$);
+SELECT pg_temp.fails('never with a space, so kept trimmed', '23514', $q$
+    UPDATE actor SET login_id = ' 20230003' WHERE id = '00000000-0000-0000-0000-000000000037' $q$);
+SELECT pg_temp.fails('nor a space within', '23514', $q$
+    UPDATE actor SET login_id = '2023 0003' WHERE id = '00000000-0000-0000-0000-000000000037' $q$);
+SELECT pg_temp.fails('nor a line after it', '23514', $q$
+    UPDATE actor SET login_id = E'20230003\n' WHERE id = '00000000-0000-0000-0000-000000000037' $q$);
+SELECT pg_temp.fails('and in ASCII: no letter of another alphabet', '23514', $q$
+    UPDATE actor SET login_id = 'hnué2023' WHERE id = '00000000-0000-0000-0000-000000000037' $q$);
+SELECT pg_temp.fails('nor a full-width digit', '23514', $q$
+    UPDATE actor SET login_id = '２０２３' WHERE id = '00000000-0000-0000-0000-000000000037' $q$);
+SELECT pg_temp.fails('an agent has no login ID', '23514', $q$
+    UPDATE actor SET login_id = 'grader-v2' WHERE id = '00000000-0000-0000-0000-000000000036' $q$);
+SELECT pg_temp.fails('nor is one registered with one', '23514', $q$
+    INSERT INTO actor (kind, display_name, login_id, created_by_actor_id)
+    VALUES ('agent', 'bot', 'bot-1', '00000000-0000-0000-0000-000000000031') $q$);
+SELECT pg_temp.fails('nor has the system actor one', '23514', $q$
+    UPDATE actor SET login_id = 'system' WHERE id = '00000000-0000-0000-0000-000000000033' $q$);
+SELECT pg_temp.ok('a person who typed their own has it recorded unchecked', $q$
+    INSERT INTO actor (kind, display_name, login_id, login_id_verified, created_by_actor_id)
+    VALUES ('human', 'Wei', '20230009', false, '00000000-0000-0000-0000-000000000034') $q$);
+SELECT pg_temp.fails('only a person''s login ID goes unchecked', '23514', $q$
+    INSERT INTO actor (kind, display_name, login_id_verified, created_by_actor_id)
+    VALUES ('agent', 'bot', false, '00000000-0000-0000-0000-000000000031') $q$);
+SELECT pg_temp.fails('and only a login ID there is', '23514', $q$
+    INSERT INTO actor (kind, display_name, email, login_id_verified, created_by_actor_id)
+    VALUES ('human', 'x', 'x@example.edu', false, '00000000-0000-0000-0000-000000000031') $q$);
+SELECT pg_temp.ok('every other actor''s login ID is vouched for', $q$
+    DO $chk$
+    BEGIN
+        IF EXISTS (SELECT 1 FROM actor WHERE NOT login_id_verified AND login_id IS DISTINCT FROM '20230009') THEN
+            RAISE EXCEPTION 'an actor registered otherwise than through a link is unverified';
+        END IF;
+    END $chk$ $q$);
+
+-- A temporary password: one someone else set, which its person must change.
+SELECT pg_temp.ok('a password is not temporary unless it is marked', $q$
+    INSERT INTO credential (actor_id, kind, secret_hash, label)
+    VALUES ('00000000-0000-0000-0000-000000000035', 'password', 'h', 'own-1');
+    DO $chk$
+    BEGIN
+        IF EXISTS (SELECT 1 FROM credential WHERE label = 'own-1' AND must_change) THEN
+            RAISE EXCEPTION 'a password is temporary by default';
+        END IF;
+    END $chk$ $q$);
+SELECT pg_temp.ok('a password someone else set is marked to be changed, saying who set it', $q$
+    INSERT INTO credential (actor_id, kind, secret_hash, issued_by_actor_id, must_change)
+    VALUES ('00000000-0000-0000-0000-000000000035', 'password', 'h', '00000000-0000-0000-0000-000000000034', true) $q$);
+SELECT pg_temp.fails('a temporary password says who set it', '23514', $q$
+    INSERT INTO credential (actor_id, kind, secret_hash, must_change)
+    VALUES ('00000000-0000-0000-0000-000000000035', 'password', 'h', true) $q$);
+SELECT pg_temp.fails('only a password is changed so', '23514', $q$
+    INSERT INTO credential (actor_id, kind, secret_hash, token_prefix, expires_at, issued_by_actor_id, must_change)
+    VALUES ('00000000-0000-0000-0000-000000000035', 'session', 'h', 'sess-mc', now() + interval '12 hours',
+            '00000000-0000-0000-0000-000000000034', true) $q$);
+SELECT pg_temp.fails('never a token', '23514', $q$
+    INSERT INTO credential (actor_id, kind, secret_hash, token_prefix, issued_by_actor_id, must_change)
+    VALUES ('00000000-0000-0000-0000-000000000036', 'api_token', 'h', 'tok-mc', '00000000-0000-0000-0000-000000000034', true) $q$);
+SELECT pg_temp.fails('nor a password marked afterwards with nobody who set it', '23514', $q$
+    UPDATE credential SET must_change = true WHERE label = 'own-1' $q$);
+
 -- Courses and membership -----------------------------------------------------
 SELECT pg_temp.fails('same term, code and section twice', '23505', $q$
     INSERT INTO course (dept_id, term_id, code, section, title, created_by_actor_id)

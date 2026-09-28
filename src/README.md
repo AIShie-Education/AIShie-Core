@@ -89,6 +89,15 @@ src/
     0014_agent_owner_and_decisions.down.sql
                          drops both; every agent keeps its owner, and every
                          seat and preset its levels
+    0016_login_ids.up.sql
+                         a person's login ID, their student or staff number,
+                         unique in any case, never an agent's, and whether
+                         anyone vouches for it; a password someone else set,
+                         which its person must change
+    0016_login_ids.down.sql
+                         drops them; a person with a login ID and no email
+                         can no longer sign in by password, and a temporary
+                         password works as any other
   seed/
     presets.sql          the eight built-in permission presets; safe to re-run
   tests/
@@ -179,9 +188,11 @@ conversation with an answer waiting, 0009 over a tutor's memory of a student
 and a proposal to the course's shared memory, 0010 over a tree with an
 appointment in force and one ended, 0011 over an agent's site chat declared,
 0012 over join links, a person registered through one and seats taken
-through it, 0013 over a seat and a preset that hand out links, and 0014
+through it, 0013 over a seat and a preset that hand out links, 0014
 over an owned agent and one nobody owns, seated deciding by proposal, whose
-owners, and levels, may change again once it is down.
+owners, and levels, may change again once it is down, and 0016 over login
+IDs, one of them a person's own and unchecked, and a temporary password
+signed in with.
 
 ## What the database enforces
 
@@ -213,6 +224,8 @@ MCP, these are the invariants that survive a bug in the tool layer.
 | No credential is written for the system actor, nor moved to it | `credential_not_for_system_actor` trigger |
 | Status, role, kind and scope columns hold only listed values | `*_valid` CHECKs |
 | Emails are unique regardless of case | unique index on `lower(email)` |
+| Login IDs are unique regardless of case, 1..64 of `[0-9A-Za-z._-]` (never an `@` or a space), and only a person's; one goes unverified only if it is a person's and there | unique index `actor_login_id_key`, `actor_login_id_valid`, `actor_login_id_is_a_persons`, `actor_unverified_login_id_is_a_persons` |
+| Only a password is marked to be changed, and it says who set it | `credential_must_change_is_an_issued_password` |
 | Only an agent has an owner; its owner is a person, not an agent, the system actor or itself; an agent someone owns holds no platform role | `actor_not_own_owner`, `actor_owned_is_agent`, `actor_owned_holds_no_platform_role`, trigger `actor_owner_valid` |
 | An agent's owner is fixed when it is registered: never changed, taken away or given later | trigger `actor_owner_fixed` |
 | An agent's seat that is not removed decides only by proposal: `action_decide` at `confirm_required` at most, a level above it written as that | trigger `course_member_agent_ceiling` |
