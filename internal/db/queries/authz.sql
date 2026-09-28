@@ -3,9 +3,12 @@
 -- branch on either, and a test fails if this file ever names them.
 
 -- name: GetActorForAuthz :one
-SELECT id, display_name, status, platform_role
-FROM actor
-WHERE id = $1;
+-- administers: whether the actor holds any live appointment, so that only a
+-- department administrator's calls go on to look for the one they rely on.
+SELECT a.id, a.display_name, a.status, a.platform_role,
+       EXISTS (SELECT 1 FROM department_admin da WHERE da.actor_id = a.id AND da.removed_at IS NULL) AS administers
+FROM actor a
+WHERE a.id = $1;
 
 -- name: GetCourseForAuthz :one
 SELECT id, status

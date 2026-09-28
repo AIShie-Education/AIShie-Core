@@ -220,17 +220,25 @@ func (q *Queries) GetPreset(ctx context.Context, id uuid.UUID) (PermissionPreset
 }
 
 const insertDepartment = `-- name: InsertDepartment :exec
-INSERT INTO department (id, name, created_at) VALUES ($1, $2, $3)
+INSERT INTO department (id, name, parent_id, created_at) VALUES ($1, $2, $3, $4)
 `
 
 type InsertDepartmentParams struct {
 	ID        uuid.UUID
 	Name      string
+	ParentID  *uuid.UUID
 	CreatedAt time.Time
 }
 
+// A null parent_id is a department at the top of the tree. The trigger
+// department_tree_valid refuses one that would be too deep.
 func (q *Queries) InsertDepartment(ctx context.Context, arg InsertDepartmentParams) error {
-	_, err := q.db.Exec(ctx, insertDepartment, arg.ID, arg.Name, arg.CreatedAt)
+	_, err := q.db.Exec(ctx, insertDepartment,
+		arg.ID,
+		arg.Name,
+		arg.ParentID,
+		arg.CreatedAt,
+	)
 	return err
 }
 
@@ -417,19 +425,31 @@ func (q *Queries) ListActors(ctx context.Context, arg ListActorsParams) ([]ListA
 }
 
 const listDepartments = `-- name: ListDepartments :many
-SELECT id, name, created_at FROM department ORDER BY name, id
+SELECT id, name, parent_id, created_at FROM department ORDER BY name, id
 `
 
-func (q *Queries) ListDepartments(ctx context.Context) ([]Department, error) {
+type ListDepartmentsRow struct {
+	ID        uuid.UUID
+	Name      string
+	ParentID  *uuid.UUID
+	CreatedAt time.Time
+}
+
+func (q *Queries) ListDepartments(ctx context.Context) ([]ListDepartmentsRow, error) {
 	rows, err := q.db.Query(ctx, listDepartments)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []Department
+	var items []ListDepartmentsRow
 	for rows.Next() {
-		var i Department
-		if err := rows.Scan(&i.ID, &i.Name, &i.CreatedAt); err != nil {
+		var i ListDepartmentsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.ParentID,
+			&i.CreatedAt,
+		); err != nil {
 			return nil, err
 		}
 		items = append(items, i)

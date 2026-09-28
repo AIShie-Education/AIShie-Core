@@ -54,6 +54,13 @@ src/
                          by the hour. Deleted, not retired
     0009_memory.down.sql drops the three tables; every entry is lost, and the
                          actions that wrote them never held their text
+    0010_department_admins.up.sql
+                         departments as a tree, at most 8 levels deep, never
+                         a cycle; their administrators' appointments, kept
+                         once ended; in what capacity an action was allowed
+    0010_department_admins.down.sql
+                         drops the appointments and the capacity, and puts
+                         every department back at the top
   seed/
     presets.sql          the eight built-in permission presets; safe to re-run
   tests/
@@ -141,7 +148,8 @@ the way down, a migration with files in `tests/down/` goes down over the data
 its `.before.sql` commits, and its `.after.sql` checks what became of it:
 0007 over a delegate with a proposal waiting and a token, 0008 over a
 conversation with an answer waiting, 0009 over a tutor's memory of a student
-and a proposal to the course's shared memory.
+and a proposal to the course's shared memory, and 0010 over a tree with an
+appointment in force and one ended.
 
 ## What the database enforces
 
@@ -187,6 +195,10 @@ MCP, these are the invariants that survive a bug in the tool layer.
 | Each scope of memory has its shape; only shared memory is proposed or rejected; a live entry has 1..1000 characters and its hash, a rejected one neither | `memory_shape_valid`, `memory_body_valid` |
 | One text per bucket among live entries | partial unique index `memory_text_key` |
 | Whose an entry is, about whom, where and when it was made never change; a rejected entry never changes | trigger `memory_entry_guarded` |
+| A department is never under itself or under a department beneath it, and the tree is at most 8 levels deep | `department_not_own_parent`, trigger `department_tree_valid` |
+| A department's administrator is a person; nobody appoints themselves; one live appointment per person and department | trigger `department_admin_guarded`, `department_admin_not_self_appointed`, partial unique index `department_admin_one_live` |
+| An appointment is kept as written, and ended once, saying by whom | trigger `department_admin_guarded`, `department_admin_removal_recorded` |
+| An action's capacity is `platform`, `department` or none, and only `department` names a department | `action_authority_valid`, `action_authority_dept_fk` |
 | Domain rows are never silently cascade-deleted | FKs default to NO ACTION |
 
 ## What the application must enforce

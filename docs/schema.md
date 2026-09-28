@@ -59,7 +59,9 @@ seating the first instructor.
 ```
 term(id, name, starts_on, ends_on)
 
-department(id, name, created_at)                       -- groups courses; no part in authorization
+department(id, name, parent_id null→department, created_at)   -- a tree of them (§2.9)
+    check: parent_id ≠ id
+    trigger: no department under itself or under one beneath it; at most 8 levels
 
 actor(id, kind [human|agent|system], display_name, email null,
       status [active|suspended], platform_role null [root|admin],
@@ -499,9 +501,11 @@ action(id, actor_id→actor, course_id null→course, member_id null→course_me
        review_state [none|pending|reviewed|escalated],
        reviewed_by_member_id null→course_member, reviewed_at null,
        executed_at null, result jsonb null, created_at,
+       authority null [platform|department], authority_dept_id null→department,
        unique(actor_id, idempotency_key),
        check(decided_by_member_id ≠ member_id), check(reviewed_by_member_id ≠ member_id),
-       check(status agrees with authz_result), check(executed_at set ⇔ status = 'executed'))
+       check(status agrees with authz_result), check(executed_at set ⇔ status = 'executed'),
+       check(authority_dept_id set ⇒ authority = 'department'))
 
 event(seq, type, course_id null→course, action_id null→action,
       subject_type, subject_id null,
@@ -517,6 +521,10 @@ cancelled, as `withdrawn`.
 `pending_review` needs no review table — the queue is `WHERE review_state IN ('pending', 'escalated')`,
 an escalated action still waiting for its second reviewer: someone other than whoever escalated it
 or approved its escalation.
+
+`authority` says in what capacity a call outside any course was allowed, when it was not the
+caller's own account's: by a platform role, or by a department administrator's appointment,
+whose department `authority_dept_id` names (§2.9).
 
 `unique(actor_id, idempotency_key)` is not optional. A tool call retried after a timeout would
 otherwise post a second grade silently at 3am.
@@ -938,6 +946,45 @@ course, with its owner's switch: the new owner may read nothing the agent kept a
 owner, nor about the people it answered for them. A write to memory holds the agent's row `FOR
 SHARE`, as issuing it a token does, so none lands after the change.
 
+### 2.10 Departments and their administrators
+
+```
+department_admin(id, dept_id→department, actor_id→actor, appointed_by_actor_id→actor, appointed_at,
+                 removed_by_actor_id null→actor, removed_at null)
+    check: appointed_by_actor_id ≠ actor_id;  removed_at set ⇔ removed_by_actor_id set
+    unique(dept_id, actor_id) where removed_at is null
+    trigger: actor_id is a person (kind = 'human'); a row is never deleted, and changes only
+             by being ended, once
+```
+
+**Departments form a tree**, a faculty above its schools above their departments, at most 8
+levels deep: `domain.MaxDepartmentDepth`, and the same number in the trigger
+`department_tree_valid`, which a test holds equal. `parent_id` null is a department at the top.
+The tree is an adjacency list walked with recursive CTEs, which stop at 16 levels as a guard: it
+holds tens or hundreds of rows, and a move changes one of them, where a closure table would have
+to be kept in step. Every change to its shape, a department made or moved, takes one advisory
+lock first (`pg_advisory_xact_lock(1095324500, 0)`, "AIST"), so that two changes never each
+check the tree as it stood and together make a cycle or a tree too deep. The trigger reads the
+tree as committed, which under that lock is the tree as it is, and refuses both whatever the
+application does.
+
+**A department may have administrators.** A row of `department_admin` is an appointment: who,
+where, made by whom and when. Ending one records who ended it and when, and the row stays, so
+the history of who could manage what, and who decided it, is kept; appointing the same person
+again is a new row, and a person holds one live appointment at a department at most. Only a
+person is appointed: never an agent, and so never an agent someone owns, and never the system
+actor. The trigger reads `kind` to refuse, as the refusals of ownership do (§2.1); nothing that
+grants reads it. Nobody appoints themselves.
+
+An appointment at a department reaches every department beneath it: its holder *covers* the
+department and all of its subtree, and the appointment they rely on for one is the nearest
+covering it, which is the one recorded (`action.authority_dept_id`). They cover nothing inside a
+course. What a department's administrators may do is to manage courses and the tree from
+outside, as a platform administrator does; in a course they are what a seat of their own there
+makes them, like anyone else, and with none they are nobody there. `domain.Actor` carries
+whether an actor holds any live appointment (`administers`, one probe of an index per call), so
+that only an administrator's calls look further for the one they rely on.
+
 ## 3. Authorization
 
 ```
@@ -1027,6 +1074,9 @@ check `actor.platform_role` instead. That is the only place it is read.
 | One text per bucket among the entries in force and proposed | partial unique index `memory_text_key` |
 | Whose an entry is, about whom, where, and when and by what action it was made never change; a rejected entry never changes | trigger `memory_entry_guarded` |
 | At most five tags; a proposal is undecided and a rejection dated; only a shared proposal replaces an entry; a frozen entry says why | CHECKs on `memory_entry` |
+| A department is never under itself or under a department beneath it; the tree is at most 8 levels deep | CHECK `department_not_own_parent`, trigger `department_tree_valid` |
+| A department's administrator is a person, appointed by someone else, at most once at a time per department; an appointment is kept as written and ended once, saying by whom | trigger `department_admin_guarded`, CHECKs and a partial unique index on `department_admin` |
+| An action's capacity is `platform`, `department` or none, and only `department` names a department | `action_authority_valid`, `action_authority_dept_fk` |
 
 **Enforced by the application.** Each is a place a bug can hide, and each needs a test.
 

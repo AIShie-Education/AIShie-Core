@@ -186,20 +186,35 @@ func (q *Queries) InsertCourse(ctx context.Context, arg InsertCourseParams) erro
 }
 
 const listCourses = `-- name: ListCourses :many
-SELECT id, dept_id, term_id, code, section, title, description, status, created_at
-FROM course
-WHERE id > $1
-  AND ($2::uuid IS NULL OR term_id = $2)
-  AND ($3::uuid IS NULL OR dept_id = $3)
-ORDER BY id
-LIMIT $4
+WITH RECURSIVE mine (id) AS (
+    SELECT da.dept_id FROM department_admin da
+    WHERE da.actor_id = $7::uuid AND da.removed_at IS NULL AND NOT $2::bool
+  UNION
+    SELECT d.id FROM department d JOIN mine ON d.parent_id = mine.id
+), within (id) AS (
+    SELECT $5::uuid WHERE $5::uuid IS NOT NULL
+  UNION
+    SELECT d.id FROM department d JOIN within ON d.parent_id = within.id
+)
+SELECT c.id, c.dept_id, c.term_id, c.code, c.section, c.title, c.description, c.status, c.created_at
+FROM course c
+WHERE c.id > $1
+  AND ($2::bool OR c.dept_id IN (SELECT id FROM mine))
+  AND ($3::uuid IS NULL OR c.term_id = $3)
+  AND ($4::uuid IS NULL OR c.dept_id = $4)
+  AND ($5::uuid IS NULL OR c.dept_id IN (SELECT id FROM within))
+ORDER BY c.id
+LIMIT $6
 `
 
 type ListCoursesParams struct {
-	After   uuid.UUID
-	TermID  *uuid.UUID
-	DeptID  *uuid.UUID
-	MaxRows int32
+	After        uuid.UUID
+	Platform     bool
+	TermID       *uuid.UUID
+	DeptID       *uuid.UUID
+	WithinDeptID *uuid.UUID
+	MaxRows      int32
+	ActorID      uuid.UUID
 }
 
 type ListCoursesRow struct {
@@ -214,12 +229,19 @@ type ListCoursesRow struct {
 	CreatedAt   time.Time
 }
 
+// Courses as their administrators see them. platform lists every course;
+// otherwise, those in the departments actor administers and beneath them.
+// dept_id is one department; within_dept_id a department and everything
+// beneath it.
 func (q *Queries) ListCourses(ctx context.Context, arg ListCoursesParams) ([]ListCoursesRow, error) {
 	rows, err := q.db.Query(ctx, listCourses,
 		arg.After,
+		arg.Platform,
 		arg.TermID,
 		arg.DeptID,
+		arg.WithinDeptID,
 		arg.MaxRows,
+		arg.ActorID,
 	)
 	if err != nil {
 		return nil, err
@@ -271,6 +293,20 @@ type SetComponentParentParams struct {
 
 func (q *Queries) SetComponentParent(ctx context.Context, arg SetComponentParentParams) error {
 	_, err := q.db.Exec(ctx, setComponentParent, arg.ID, arg.ParentID)
+	return err
+}
+
+const setCourseDept = `-- name: SetCourseDept :exec
+UPDATE course SET dept_id = $2 WHERE id = $1
+`
+
+type SetCourseDeptParams struct {
+	ID     uuid.UUID
+	DeptID uuid.UUID
+}
+
+func (q *Queries) SetCourseDept(ctx context.Context, arg SetCourseDeptParams) error {
+	_, err := q.db.Exec(ctx, setCourseDept, arg.ID, arg.DeptID)
 	return err
 }
 

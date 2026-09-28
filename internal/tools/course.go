@@ -249,7 +249,9 @@ func courseList() tool.Tool {
 		HTTP:    tool.Route{Method: "GET", Pattern: "/v1/courses"},
 		Resolve: noTarget[CourseListIn]("course"),
 		Query: func(ctx context.Context, rc *tool.ReadCtx, in CourseListIn) (CourseListOut, error) {
-			rows, err := rc.Q.ListCourses(ctx, dbq.ListCoursesParams{After: in.after(), TermID: in.TermID, DeptID: in.DeptID, MaxRows: in.limit()})
+			// Gated by platform role: every caller sees every course.
+			rows, err := rc.Q.ListCourses(ctx, dbq.ListCoursesParams{After: in.after(), ActorID: rc.Actor.ID, Platform: true,
+				TermID: in.TermID, DeptID: in.DeptID, MaxRows: in.limit()})
 			out := CourseListOut{Courses: make([]CourseView, 0, len(rows))}
 			for _, r := range rows {
 				out.Courses = append(out.Courses, viewCourse(dbq.GetCourseRow(r)))

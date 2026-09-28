@@ -152,3 +152,41 @@ WHERE m.actor_id = $1 AND m.status <> 'removed' AND c.status <> 'archived';
 -- set through one, an invitation waiting.
 UPDATE credential SET revoked_at = $2
 WHERE actor_id = $1 AND revoked_at IS NULL;
+
+-- name: LookupActorByEmail :one
+-- The one person or agent a whole email address belongs to, in any case,
+-- and whether they can sign in, as GetActorView says it. Never the system
+-- actor. There is no partial match: this finds someone whose address the
+-- caller already has, and lists nobody.
+SELECT a.id, a.kind, a.display_name, a.status,
+       EXISTS (SELECT 1 FROM credential p WHERE p.actor_id = a.id AND p.kind = 'password' AND p.revoked_at IS NULL) AS has_password,
+       EXISTS (SELECT 1 FROM credential s WHERE s.actor_id = a.id AND s.kind = 'sso' AND s.revoked_at IS NULL) AS has_sso,
+       i.expires_at AS invite_expires_at
+FROM actor a
+LEFT JOIN credential i ON i.actor_id = a.id AND i.kind = 'invite' AND i.revoked_at IS NULL
+WHERE a.kind <> 'system' AND lower(a.email) = lower(sqlc.arg(email));
+
+-- name: InvitableBy :one
+-- What decides whether a department administrator (issuer) may invite a
+-- person (actor), and whether that invitation may still be taken up: an
+-- invitation is the keys to the account, so the account must reach nothing
+-- beyond what the issuer administers. One row of facts; the rule is the
+-- caller's. seats_outside counts the person's live seats in courses outside
+-- the departments the issuer administers, and beneath them, as ListCourses
+-- finds those.
+WITH RECURSIVE mine (id) AS (
+    SELECT da.dept_id FROM department_admin da
+    WHERE da.actor_id = sqlc.arg(issuer_id)::uuid AND da.removed_at IS NULL
+  UNION
+    SELECT d.id FROM department d JOIN mine ON d.parent_id = mine.id
+)
+SELECT a.kind = 'human' AS is_person,
+       EXISTS (SELECT 1 FROM credential c WHERE c.actor_id = a.id AND c.kind IN ('password', 'sso') AND c.revoked_at IS NULL) AS can_sign_in,
+       (a.platform_role IS NOT NULL)::bool AS holds_role,
+       EXISTS (SELECT 1 FROM department_admin x WHERE x.actor_id = a.id AND x.removed_at IS NULL) AS administers,
+       EXISTS (SELECT 1 FROM actor o WHERE o.owner_actor_id = a.id) AS owns_agents,
+       (SELECT count(*) FROM course_member m JOIN course c ON c.id = m.course_id
+        WHERE m.actor_id = a.id AND m.status <> 'removed' AND c.dept_id NOT IN (SELECT id FROM mine)) AS seats_outside,
+       EXISTS (SELECT 1 FROM actor i WHERE i.id = sqlc.arg(issuer_id)::uuid AND i.platform_role IN ('root', 'admin')) AS issuer_platform
+FROM actor a
+WHERE a.id = sqlc.arg(actor_id)::uuid;

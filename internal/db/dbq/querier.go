@@ -15,6 +15,11 @@ type Querier interface {
 	AddAssignmentScope(ctx context.Context, arg AddAssignmentScopeParams) error
 	AddMemoryWrite(ctx context.Context, arg AddMemoryWriteParams) error
 	AddStudentScope(ctx context.Context, arg AddStudentScopeParams) error
+	// Live appointments at each department itself.
+	AdminCountsByDept(ctx context.Context) ([]AdminCountsByDeptRow, error)
+	// Every department actor covers. strictly: an appointment of theirs is
+	// above it, so they may reshape it and staff it. appointed: one is at it.
+	AdministeredDepartments(ctx context.Context, actorID uuid.UUID) ([]AdministeredDepartmentsRow, error)
 	// When an agent last used a token that still works: no row if never.
 	AgentLastSeen(ctx context.Context, arg AgentLastSeenParams) ([]*time.Time, error)
 	// Whether an answer of the member's to one question waits for a decision.
@@ -75,7 +80,13 @@ type Querier interface {
 	CountStudentsInScope(ctx context.Context, arg CountStudentsInScopeParams) (int64, error)
 	// How many of the given member ids are current students of this course.
 	CountStudentsOfCourse(ctx context.Context, arg CountStudentsOfCourseParams) (int64, error)
+	// Every live appointment that reaches the course: at its department or
+	// above, nearest first, with the person's seat here if they hold one, which
+	// they were given as anyone is: an appointment gives nobody a seat.
+	CourseAdministrators(ctx context.Context, courseID uuid.UUID) ([]CourseAdministratorsRow, error)
 	CourseCodeTaken(ctx context.Context, arg CourseCodeTakenParams) (bool, error)
+	// Courses directly in each department, archived ones included.
+	CourseCountsByDept(ctx context.Context) ([]CourseCountsByDeptRow, error)
 	DeleteMemory(ctx context.Context, arg DeleteMemoryParams) (int64, error)
 	// Everything an agent holds, and its owner's switch with it: what a change
 	// of owner leaves of its memory, which is nothing.
@@ -84,13 +95,27 @@ type Querier interface {
 	// says nothing the action log does not, so it is the one kind of row that is
 	// actually deleted.
 	DeleteStaleSessions(ctx context.Context, expiredBefore *time.Time) (int64, error)
+	// The appointment through which actor administers dept: one at dept, or the
+	// nearest above it. No row: they do not.
+	DepartmentAuthority(ctx context.Context, arg DepartmentAuthorityParams) (DepartmentAuthorityRow, error)
+	// How many levels the department is down the tree: 1 at the top.
+	DepartmentDepth(ctx context.Context, deptID uuid.UUID) (int32, error)
 	DepartmentExists(ctx context.Context, id uuid.UUID) (bool, error)
+	// The departments as a tree: each before those beneath it, siblings by name.
+	// depth is 1 at the top. With root_id, only that department and what is
+	// beneath it, still at their depth in the whole tree.
+	DepartmentTree(ctx context.Context, rootID *uuid.UUID) ([]DepartmentTreeRow, error)
 	// Whether a published assignment within the member's scope refers to the
 	// document as its instructions or rubric. A delegate's scope is its
 	// principal's too.
 	DocumentInUseByPublishedAssignment(ctx context.Context, arg DocumentInUseByPublishedAssignmentParams) (bool, error)
 	EmailTaken(ctx context.Context, lower string) (bool, error)
 	EmailTakenByAnother(ctx context.Context, arg EmailTakenByAnotherParams) (bool, error)
+	// Zero rows: it had ended already. An Admin-gated write by the appointee
+	// holds the appointment FOR SHARE (LockDepartmentAuthority), so this waits
+	// for any such call in flight, and every call after it finds the appointment
+	// ended.
+	EndAppointment(ctx context.Context, arg EndAppointmentParams) (int64, error)
 	// Whether the actor, or anyone of the same party (SameParty), had a hand in
 	// escalating the action, from any seat: made the review that escalated it,
 	// or approved that review, or confirmed that approval, and so on up. An
@@ -114,6 +139,8 @@ type Querier interface {
 	// Everything authorize() reads. Two columns are deliberately never selected
 	// here: the actor's type and the member's roster role. Authorization does not
 	// branch on either, and a test fails if this file ever names them.
+	// administers: whether the actor holds any live appointment, so that only a
+	// department administrator's calls go on to look for the one they rely on.
 	GetActorForAuthz(ctx context.Context, id uuid.UUID) (GetActorForAuthzRow, error)
 	// The same, FOR SHARE, for a write that acts on who owns the actor, or on
 	// whether it may be seated, and does not change the row: issuing an owned
@@ -158,6 +185,7 @@ type Querier interface {
 	// rejected the same way.
 	GetCredentialByPrefix(ctx context.Context, tokenPrefix *string) (GetCredentialByPrefixRow, error)
 	GetCredentialForActor(ctx context.Context, arg GetCredentialForActorParams) (GetCredentialForActorRow, error)
+	GetDepartment(ctx context.Context, id uuid.UUID) (GetDepartmentRow, error)
 	GetDeptPresetByName(ctx context.Context, arg GetDeptPresetByNameParams) (PermissionPreset, error)
 	GetDocumentInCourse(ctx context.Context, arg GetDocumentInCourseParams) (GetDocumentInCourseRow, error)
 	GetDocumentPublishedVersion(ctx context.Context, id uuid.UUID) (*uuid.UUID, error)
@@ -228,11 +256,16 @@ type Querier interface {
 	GetSubmissionInCourse(ctx context.Context, arg GetSubmissionInCourseParams) (GetSubmissionInCourseRow, error)
 	GetSystemActor(ctx context.Context) (uuid.UUID, error)
 	GetVersionOfDocument(ctx context.Context, arg GetVersionOfDocumentParams) (DocumentVersion, error)
+	// Whether other is the department itself or beneath it.
+	InSubtree(ctx context.Context, arg InSubtreeParams) (bool, error)
 	// Zero rows means another call with the same key got there first; the caller
 	// then reads that row and replays it. ON CONFLICT waits for an in-flight
 	// transaction holding the key, so two simultaneous calls cannot both act.
 	InsertAction(ctx context.Context, arg InsertActionParams) (int64, error)
 	InsertActor(ctx context.Context, arg InsertActorParams) error
+	// The partial unique index department_admin_one_live refuses a second live
+	// appointment of one person at one department, two made at once included.
+	InsertAppointment(ctx context.Context, arg InsertAppointmentParams) error
 	InsertAssignment(ctx context.Context, arg InsertAssignmentParams) error
 	InsertComponent(ctx context.Context, arg InsertComponentParams) error
 	// Conversations (docs/schema.md §2.8). Who may address whom is decided in
@@ -246,6 +279,8 @@ type Querier interface {
 	InsertConversationMessage(ctx context.Context, arg InsertConversationMessageParams) (int32, error)
 	InsertCourse(ctx context.Context, arg InsertCourseParams) error
 	InsertCredential(ctx context.Context, arg InsertCredentialParams) error
+	// A null parent_id is a department at the top of the tree. The trigger
+	// department_tree_valid refuses one that would be too deep.
 	InsertDepartment(ctx context.Context, arg InsertDepartmentParams) error
 	InsertDocument(ctx context.Context, arg InsertDocumentParams) error
 	InsertDocumentVersion(ctx context.Context, arg InsertDocumentVersionParams) error
@@ -260,6 +295,14 @@ type Querier interface {
 	InsertRetraction(ctx context.Context, arg InsertRetractionParams) (int64, error)
 	InsertSubmission(ctx context.Context, arg InsertSubmissionParams) error
 	InsertTerm(ctx context.Context, arg InsertTermParams) error
+	// What decides whether a department administrator (issuer) may invite a
+	// person (actor), and whether that invitation may still be taken up: an
+	// invitation is the keys to the account, so the account must reach nothing
+	// beyond what the issuer administers. One row of facts; the rule is the
+	// caller's. seats_outside counts the person's live seats in courses outside
+	// the departments the issuer administers, and beneath them, as ListCourses
+	// finds those.
+	InvitableBy(ctx context.Context, arg InvitableByParams) (InvitableByRow, error)
 	// The opener's newest message: the one an answer is to answer.
 	LatestOpenerMessage(ctx context.Context, conversationID uuid.UUID) (LatestOpenerMessageRow, error)
 	// exclude_types leaves out whole action types: a chat's messages from a
@@ -275,6 +318,11 @@ type Querier interface {
 	// holds that count now, and how many requests of the owner's to seat it
 	// wait for a decision.
 	ListAgentsOf(ctx context.Context, arg ListAgentsOfParams) ([]ListAgentsOfRow, error)
+	// The appointments at a department and, with inherited, at every department
+	// above it, whose administrators administer it too: nearest first, then by
+	// name. Ended ones only with include_removed. With the names of who holds
+	// each, who made it and who ended it.
+	ListAppointments(ctx context.Context, arg ListAppointmentsParams) ([]ListAppointmentsRow, error)
 	// Every current student of the course whom the caller's student scope
 	// reaches, with their latest attempt at one assignment, if any: the students
 	// who have not started are rows too, with no submission. The caller's
@@ -310,6 +358,10 @@ type Querier interface {
 	// write assignments they exist only once a published assignment within their
 	// scope refers to them, or a student could read next week's exam by listing.
 	ListCourseDocuments(ctx context.Context, arg ListCourseDocumentsParams) ([]ListCourseDocumentsRow, error)
+	// Courses as their administrators see them. platform lists every course;
+	// otherwise, those in the departments actor administers and beneath them.
+	// dept_id is one department; within_dept_id a department and everything
+	// beneath it.
 	ListCourses(ctx context.Context, arg ListCoursesParams) ([]ListCoursesRow, error)
 	// Never the hash. The issuer's name comes with the row, for an administrator
 	// telling one token from another.
@@ -318,7 +370,7 @@ type Querier interface {
 	// for a decision. Only the owner's: an owner changed since is not shown what
 	// the one before asked for (actor.set_owner cancels those anyway).
 	ListDelegateRequestsFor(ctx context.Context, targetID *uuid.UUID) ([]ListDelegateRequestsForRow, error)
-	ListDepartments(ctx context.Context) ([]Department, error)
+	ListDepartments(ctx context.Context) ([]ListDepartmentsRow, error)
 	// The live drafts waiting to be posted for one assignment.
 	ListDraftGradeIDsForAssignment(ctx context.Context, arg ListDraftGradeIDsForAssignmentParams) ([]uuid.UUID, error)
 	// The feed, from a cursor. Three filters, all here rather than afterwards:
@@ -447,6 +499,7 @@ type Querier interface {
 	ListSubmissions(ctx context.Context, arg ListSubmissionsParams) ([]ListSubmissionsRow, error)
 	ListTerms(ctx context.Context) ([]Term, error)
 	ListVersions(ctx context.Context, documentID uuid.UUID) ([]ListVersionsRow, error)
+	LiveAppointment(ctx context.Context, arg LiveAppointmentParams) (DepartmentAdmin, error)
 	LiveComponentGradeExists(ctx context.Context, arg LiveComponentGradeExistsParams) (bool, error)
 	LiveSubmissionGradeExists(ctx context.Context, submissionID *uuid.UUID) (bool, error)
 	// The agent's row, for the rest of an owner's change, before anything about
@@ -475,6 +528,21 @@ type Querier interface {
 	// the decision is waiting for the agent's row, which the owner's change
 	// holds, and finds the agent is no longer the proposer's once it has it.
 	LockDelegateRequestsFor(ctx context.Context, targetID *uuid.UUID) ([]LockDelegateRequestsForRow, error)
+	// The same, for a write made by that authority. The appointment is held
+	// FOR SHARE to the end of the call. Ending it is an UPDATE, which waits for
+	// the call, or the call waits for it and then, reading the row again, finds
+	// it ended. A department row is never locked here.
+	LockDepartmentAuthority(ctx context.Context, arg LockDepartmentAuthorityParams) (LockDepartmentAuthorityRow, error)
+	// The department tree and its administrators (docs/schema.md §2.9).
+	//
+	// The tree is an adjacency list, walked with recursive CTEs. Every walk
+	// stops at 16 levels, twice what the trigger department_tree_valid allows,
+	// as a guard: a deeper tree cannot be written.
+	// The tree lock: taken before any change to the tree's shape (a department
+	// created, or moved), so that two changes never each check the tree and then
+	// together make a cycle or a tree too deep. The first key is "AIST"; the
+	// event streams' is "AISE".
+	LockDepartmentTree(ctx context.Context) error
 	// Serialises version numbering: two writers must not both take seq n+1.
 	LockDocument(ctx context.Context, id uuid.UUID) error
 	// Held until the transaction ends. See events.Flush for why.
@@ -540,6 +608,11 @@ type Querier interface {
 	LockSubmissionForGrading(ctx context.Context, id uuid.UUID) (string, error)
 	// All of one student's attempts at one assignment, locked, newest first.
 	LockSubmissionsOf(ctx context.Context, arg LockSubmissionsOfParams) ([]LockSubmissionsOfRow, error)
+	// The one person or agent a whole email address belongs to, in any case,
+	// and whether they can sign in, as GetActorView says it. Never the system
+	// actor. There is no partial match: this finds someone whose address the
+	// caller already has, and lists nobody.
+	LookupActorByEmail(ctx context.Context, email string) (LookupActorByEmailRow, error)
 	// The actor a whole email address, or an id, belongs to, for someone seating
 	// them, with their seat in this course if they have a live one, and their
 	// owner if they are an agent someone owns. The email must match whole, in
@@ -551,6 +624,8 @@ type Querier interface {
 	MaxVersionSeq(ctx context.Context, documentID uuid.UUID) (int32, error)
 	// Whether an agent's owner lets it keep memory: no row is yes.
 	MemoryEnabled(ctx context.Context, holderActorID uuid.UUID) (bool, error)
+	// The departments an actor is appointed to administer now.
+	MyAppointments(ctx context.Context, actorID uuid.UUID) ([]MyAppointmentsRow, error)
 	NewestComponentDraftAt(ctx context.Context, arg NewestComponentDraftAtParams) (time.Time, error)
 	NewestSubmissionDraftAt(ctx context.Context, submissionID *uuid.UUID) (time.Time, error)
 	PostGrade(ctx context.Context, arg PostGradeParams) (int64, error)
@@ -560,6 +635,7 @@ type Querier interface {
 	// before this was recorded, is an administrator's to lift.
 	ReactivateAgentByOwner(ctx context.Context, arg ReactivateAgentByOwnerParams) (int64, error)
 	ReleaseJobLock(ctx context.Context, key int64) (bool, error)
+	RenameDepartment(ctx context.Context, arg RenameDepartmentParams) error
 	// A 'missing' row is a placeholder written when the due date passed with
 	// nothing handed in. Late work takes it over rather than sitting beside it.
 	ReopenMissingSubmission(ctx context.Context, arg ReopenMissingSubmissionParams) error
@@ -605,7 +681,9 @@ type Querier interface {
 	SetActionReview(ctx context.Context, arg SetActionReviewParams) (int64, error)
 	SetActorOwner(ctx context.Context, arg SetActorOwnerParams) error
 	SetComponentParent(ctx context.Context, arg SetComponentParentParams) error
+	SetCourseDept(ctx context.Context, arg SetCourseDeptParams) error
 	SetCourseStatus(ctx context.Context, arg SetCourseStatusParams) (int64, error)
+	SetDepartmentParent(ctx context.Context, arg SetDepartmentParentParams) error
 	SetDocumentStatus(ctx context.Context, arg SetDocumentStatusParams) (int64, error)
 	SetMemberExpiry(ctx context.Context, arg SetMemberExpiryParams) error
 	SetMemberPerms(ctx context.Context, arg SetMemberPermsParams) error
@@ -632,11 +710,18 @@ type Querier interface {
 	// principal's alone, before a delegate's seat is locked FOR UPDATE, is
 	// tools.holdPrincipalOf.
 	ShareSeats(ctx context.Context, ids []uuid.UUID) error
+	// Whether another department under the same parent (at the top, for null)
+	// has the name, in any case. id is the department being named, left out of
+	// the comparison; a new one's id is not there yet.
+	SiblingNameTaken(ctx context.Context, arg SiblingNameTakenParams) (bool, error)
 	StorageKeyInUse(ctx context.Context, storageKey *string) (bool, error)
 	// A grade entered, or proposed and not yet decided: either way, one is on its
 	// way for exactly this work.
 	SubmissionHasGrades(ctx context.Context, submissionID *uuid.UUID) (bool, error)
 	SubmitSubmission(ctx context.Context, arg SubmitSubmissionParams) (int64, error)
+	// How many levels the department and what is beneath it take up: 1 for one
+	// with nothing beneath it.
+	SubtreeHeight(ctx context.Context, deptID uuid.UUID) (int32, error)
 	SupersedeComponentDrafts(ctx context.Context, arg SupersedeComponentDraftsParams) error
 	SupersedeGrade(ctx context.Context, arg SupersedeGradeParams) (int64, error)
 	// A new draft replaces earlier drafts for the same submission.

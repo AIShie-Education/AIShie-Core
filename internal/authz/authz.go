@@ -335,7 +335,7 @@ func LoadActor(ctx context.Context, q dbq.Querier, id uuid.UUID) (domain.Actor, 
 	if err != nil {
 		return domain.Actor{}, fmt.Errorf("load actor: %w", err)
 	}
-	a := domain.Actor{ID: row.ID, DisplayName: row.DisplayName, Status: row.Status}
+	a := domain.Actor{ID: row.ID, DisplayName: row.DisplayName, Status: row.Status, Administers: row.Administers}
 	if row.PlatformRole != nil {
 		a.PlatformRole = *row.PlatformRole
 	}

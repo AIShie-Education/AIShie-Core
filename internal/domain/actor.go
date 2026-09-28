@@ -14,6 +14,10 @@ type Actor struct {
 	DisplayName  string
 	Status       string // active | suspended
 	PlatformRole string // "", root or admin; read only for operations outside any course
+	// Administers says the actor holds at least one live appointment as a
+	// department's administrator. It is read to decide whether to look for
+	// the appointment a call relies on, and never grants anything by itself.
+	Administers bool
 }
 
 func (a Actor) Active() bool { return a.Status == ActorActive }

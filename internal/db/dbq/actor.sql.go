@@ -200,6 +200,62 @@ func (q *Queries) InsertActor(ctx context.Context, arg InsertActorParams) error 
 	return err
 }
 
+const invitableBy = `-- name: InvitableBy :one
+WITH RECURSIVE mine (id) AS (
+    SELECT da.dept_id FROM department_admin da
+    WHERE da.actor_id = $1::uuid AND da.removed_at IS NULL
+  UNION
+    SELECT d.id FROM department d JOIN mine ON d.parent_id = mine.id
+)
+SELECT a.kind = 'human' AS is_person,
+       EXISTS (SELECT 1 FROM credential c WHERE c.actor_id = a.id AND c.kind IN ('password', 'sso') AND c.revoked_at IS NULL) AS can_sign_in,
+       (a.platform_role IS NOT NULL)::bool AS holds_role,
+       EXISTS (SELECT 1 FROM department_admin x WHERE x.actor_id = a.id AND x.removed_at IS NULL) AS administers,
+       EXISTS (SELECT 1 FROM actor o WHERE o.owner_actor_id = a.id) AS owns_agents,
+       (SELECT count(*) FROM course_member m JOIN course c ON c.id = m.course_id
+        WHERE m.actor_id = a.id AND m.status <> 'removed' AND c.dept_id NOT IN (SELECT id FROM mine)) AS seats_outside,
+       EXISTS (SELECT 1 FROM actor i WHERE i.id = $1::uuid AND i.platform_role IN ('root', 'admin')) AS issuer_platform
+FROM actor a
+WHERE a.id = $2::uuid
+`
+
+type InvitableByParams struct {
+	IssuerID uuid.UUID
+	ActorID  uuid.UUID
+}
+
+type InvitableByRow struct {
+	IsPerson       bool
+	CanSignIn      bool
+	HoldsRole      bool
+	Administers    bool
+	OwnsAgents     bool
+	SeatsOutside   int64
+	IssuerPlatform bool
+}
+
+// What decides whether a department administrator (issuer) may invite a
+// person (actor), and whether that invitation may still be taken up: an
+// invitation is the keys to the account, so the account must reach nothing
+// beyond what the issuer administers. One row of facts; the rule is the
+// caller's. seats_outside counts the person's live seats in courses outside
+// the departments the issuer administers, and beneath them, as ListCourses
+// finds those.
+func (q *Queries) InvitableBy(ctx context.Context, arg InvitableByParams) (InvitableByRow, error) {
+	row := q.db.QueryRow(ctx, invitableBy, arg.IssuerID, arg.ActorID)
+	var i InvitableByRow
+	err := row.Scan(
+		&i.IsPerson,
+		&i.CanSignIn,
+		&i.HoldsRole,
+		&i.Administers,
+		&i.OwnsAgents,
+		&i.SeatsOutside,
+		&i.IssuerPlatform,
+	)
+	return i, err
+}
+
 const listAgentsOf = `-- name: ListAgentsOf :many
 SELECT a.id, a.display_name, a.status, a.suspended_by_actor_id, a.created_at, seen.last_used_at AS last_seen_at,
        (SELECT count(*) FROM course_member m
@@ -501,6 +557,45 @@ SELECT 1 FROM actor WHERE id = $1 FOR NO KEY UPDATE
 func (q *Queries) LockOwnerForAgents(ctx context.Context, id uuid.UUID) error {
 	_, err := q.db.Exec(ctx, lockOwnerForAgents, id)
 	return err
+}
+
+const lookupActorByEmail = `-- name: LookupActorByEmail :one
+SELECT a.id, a.kind, a.display_name, a.status,
+       EXISTS (SELECT 1 FROM credential p WHERE p.actor_id = a.id AND p.kind = 'password' AND p.revoked_at IS NULL) AS has_password,
+       EXISTS (SELECT 1 FROM credential s WHERE s.actor_id = a.id AND s.kind = 'sso' AND s.revoked_at IS NULL) AS has_sso,
+       i.expires_at AS invite_expires_at
+FROM actor a
+LEFT JOIN credential i ON i.actor_id = a.id AND i.kind = 'invite' AND i.revoked_at IS NULL
+WHERE a.kind <> 'system' AND lower(a.email) = lower($1)
+`
+
+type LookupActorByEmailRow struct {
+	ID              uuid.UUID
+	Kind            string
+	DisplayName     string
+	Status          string
+	HasPassword     bool
+	HasSso          bool
+	InviteExpiresAt *time.Time
+}
+
+// The one person or agent a whole email address belongs to, in any case,
+// and whether they can sign in, as GetActorView says it. Never the system
+// actor. There is no partial match: this finds someone whose address the
+// caller already has, and lists nobody.
+func (q *Queries) LookupActorByEmail(ctx context.Context, email string) (LookupActorByEmailRow, error) {
+	row := q.db.QueryRow(ctx, lookupActorByEmail, email)
+	var i LookupActorByEmailRow
+	err := row.Scan(
+		&i.ID,
+		&i.Kind,
+		&i.DisplayName,
+		&i.Status,
+		&i.HasPassword,
+		&i.HasSso,
+		&i.InviteExpiresAt,
+	)
+	return i, err
 }
 
 const reactivateAgentByOwner = `-- name: ReactivateAgentByOwner :execrows

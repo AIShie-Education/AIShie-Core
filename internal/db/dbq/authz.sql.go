@@ -50,9 +50,10 @@ func (q *Queries) CountStudentsInScope(ctx context.Context, arg CountStudentsInS
 
 const getActorForAuthz = `-- name: GetActorForAuthz :one
 
-SELECT id, display_name, status, platform_role
-FROM actor
-WHERE id = $1
+SELECT a.id, a.display_name, a.status, a.platform_role,
+       EXISTS (SELECT 1 FROM department_admin da WHERE da.actor_id = a.id AND da.removed_at IS NULL) AS administers
+FROM actor a
+WHERE a.id = $1
 `
 
 type GetActorForAuthzRow struct {
@@ -60,11 +61,14 @@ type GetActorForAuthzRow struct {
 	DisplayName  string
 	Status       string
 	PlatformRole *string
+	Administers  bool
 }
 
 // Everything authorize() reads. Two columns are deliberately never selected
 // here: the actor's type and the member's roster role. Authorization does not
 // branch on either, and a test fails if this file ever names them.
+// administers: whether the actor holds any live appointment, so that only a
+// department administrator's calls go on to look for the one they rely on.
 func (q *Queries) GetActorForAuthz(ctx context.Context, id uuid.UUID) (GetActorForAuthzRow, error) {
 	row := q.db.QueryRow(ctx, getActorForAuthz, id)
 	var i GetActorForAuthzRow
@@ -73,6 +77,7 @@ func (q *Queries) GetActorForAuthz(ctx context.Context, id uuid.UUID) (GetActorF
 		&i.DisplayName,
 		&i.Status,
 		&i.PlatformRole,
+		&i.Administers,
 	)
 	return i, err
 }
