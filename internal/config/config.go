@@ -16,6 +16,8 @@ import (
 	"time"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/memory"
 )
 
 type Config struct {
@@ -100,6 +102,14 @@ type Config struct {
 	// are not suspended.
 	AgentSelfService bool
 	AgentMaxPerOwner int
+
+	// Memory is agents' memory, kept in Core (docs/schema.md §2.9): whether
+	// this installation keeps it at all (MEMORY, off unless on), how much an
+	// agent may keep (MEMORY_MAX_OWNER, _ASKER, _SHARED, _PROPOSED,
+	// _PER_AGENT) and how fast it may write (MEMORY_WRITES_PER_HOUR,
+	// _PER_DAY). It stays off until what forgets it on time, when seats and
+	// courses end, is in place.
+	Memory memory.Config
 }
 
 // OIDC describes the identity provider. The defaults are PolyU's ADFS, which
@@ -226,6 +236,9 @@ func FromEnv() (Config, error) {
 		}
 		c.AgentMaxPerOwner = n
 	}
+	if err := c.readMemory(); err != nil {
+		return Config{}, err
+	}
 	c.OIDC = OIDC{ProviderName: env("OIDC_PROVIDER_NAME", "polyu-adfs"), Issuer: os.Getenv("OIDC_ISSUER"),
 		ClientID: os.Getenv("OIDC_CLIENT_ID"), ClientSecret: os.Getenv("OIDC_CLIENT_SECRET"),
 		SubjectClaim: env("OIDC_SUBJECT_CLAIM", "upn"), Scopes: strings.Fields(env("OIDC_SCOPES", "openid profile email"))}
@@ -260,6 +273,33 @@ func FromEnv() (Config, error) {
 		return Config{}, fmt.Errorf("JOBS_INTERVAL: %s is too often; at least 1s", c.JobsInterval)
 	}
 	return c, nil
+}
+
+// readMemory reads MEMORY and the limits of agents' memory. A limit is a
+// whole number, one or more; one not set is its default.
+func (c *Config) readMemory() error {
+	switch v := os.Getenv("MEMORY"); v {
+	case "", "off":
+	case "on":
+		c.Memory.Enabled = true
+	default:
+		return fmt.Errorf("MEMORY: %q is not on or off", v)
+	}
+	for key, dst := range map[string]*int{
+		"MEMORY_MAX_OWNER": &c.Memory.MaxOwner, "MEMORY_MAX_ASKER": &c.Memory.MaxAsker, "MEMORY_MAX_SHARED": &c.Memory.MaxShared,
+		"MEMORY_MAX_PROPOSED": &c.Memory.MaxProposed, "MEMORY_MAX_PER_AGENT": &c.Memory.MaxPerAgent,
+		"MEMORY_WRITES_PER_HOUR": &c.Memory.WritesPerHour, "MEMORY_WRITES_PER_DAY": &c.Memory.WritesPerDay,
+	} {
+		if v := os.Getenv(key); v != "" {
+			n, err := strconv.Atoi(v)
+			if err != nil || n < 1 {
+				return fmt.Errorf("%s: %q is not a number, one or more", key, v)
+			}
+			*dst = n
+		}
+	}
+	c.Memory = c.Memory.WithDefaults()
+	return nil
 }
 
 // MaxDisplayName is the most characters OIDC_DISPLAY_NAME may have: it is a

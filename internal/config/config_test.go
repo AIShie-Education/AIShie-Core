@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/memory"
 )
 
 func TestFromEnv(t *testing.T) {
@@ -20,6 +22,13 @@ func TestFromEnv(t *testing.T) {
 			!c.AgentSelfService || c.AgentMaxPerOwner != 5 {
 			t.Fatalf("defaults: %+v", c)
 		}
+		// Memory stays off until what forgets it on time is in place; its
+		// limits are there whether or not.
+		if c.Memory != (memory.Config{}).WithDefaults() || c.Memory.Enabled || c.Memory.MaxOwner != 200 || c.Memory.MaxAsker != 50 ||
+			c.Memory.MaxShared != 200 || c.Memory.MaxProposed != 50 || c.Memory.MaxPerAgent != 5000 ||
+			c.Memory.WritesPerHour != 60 || c.Memory.WritesPerDay != 300 {
+			t.Fatalf("memory's defaults: %+v", c.Memory)
+		}
 	})
 	t.Run("everything can be set", func(t *testing.T) {
 		t.Setenv("PROPOSAL_TTL", "48h")
@@ -28,6 +37,14 @@ func TestFromEnv(t *testing.T) {
 		t.Setenv("INSECURE_COOKIES", "true")
 		t.Setenv("AGENT_SELF_SERVICE", "off")
 		t.Setenv("AGENT_MAX_PER_OWNER", "2")
+		t.Setenv("MEMORY", "on")
+		t.Setenv("MEMORY_MAX_OWNER", "10")
+		t.Setenv("MEMORY_MAX_ASKER", "11")
+		t.Setenv("MEMORY_MAX_SHARED", "12")
+		t.Setenv("MEMORY_MAX_PROPOSED", "13")
+		t.Setenv("MEMORY_MAX_PER_AGENT", "14")
+		t.Setenv("MEMORY_WRITES_PER_HOUR", "15")
+		t.Setenv("MEMORY_WRITES_PER_DAY", "16")
 		c, err := FromEnv()
 		if err != nil {
 			t.Fatal(err)
@@ -37,9 +54,14 @@ func TestFromEnv(t *testing.T) {
 			len(c.TrustedOrigins) != 2 || c.TrustedOrigins[1] != "http://localhost:5173" {
 			t.Fatalf("%+v", c)
 		}
+		if want := (memory.Config{Enabled: true, MaxOwner: 10, MaxAsker: 11, MaxShared: 12, MaxProposed: 13, MaxPerAgent: 14,
+			WritesPerHour: 15, WritesPerDay: 16}); c.Memory != want {
+			t.Fatalf("memory: %+v, want %+v", c.Memory, want)
+		}
 	})
 	for key, bad := range map[string]string{"PROPOSAL_TTL": "two weeks", "SESSION_TTL": "-1h", "INSECURE_COOKIES": "maybe",
-		"AGENT_SELF_SERVICE": "yes", "AGENT_MAX_PER_OWNER": "0"} {
+		"AGENT_SELF_SERVICE": "yes", "AGENT_MAX_PER_OWNER": "0", "MEMORY": "true", "MEMORY_MAX_ASKER": "0",
+		"MEMORY_WRITES_PER_DAY": "many", "MEMORY_MAX_PER_AGENT": "-5"} {
 		t.Run("rejects "+key+"="+bad, func(t *testing.T) {
 			t.Setenv(key, bad)
 			if _, err := FromEnv(); err == nil {

@@ -13,6 +13,7 @@ import (
 
 type Querier interface {
 	AddAssignmentScope(ctx context.Context, arg AddAssignmentScopeParams) error
+	AddMemoryWrite(ctx context.Context, arg AddMemoryWriteParams) error
 	AddStudentScope(ctx context.Context, arg AddStudentScopeParams) error
 	// When an agent last used a token that still works: no row if never.
 	AgentLastSeen(ctx context.Context, arg AgentLastSeenParams) ([]*time.Time, error)
@@ -59,6 +60,14 @@ type Querier interface {
 	CountBuiltinPresets(ctx context.Context) (int64, error)
 	CountComponentAssignments(ctx context.Context, componentID *uuid.UUID) (int64, error)
 	CountComponentChildren(ctx context.Context, parentID *uuid.UUID) (int64, error)
+	// What one bucket holds that its agent can still read: in force, waiting
+	// for review, turned down, and how many of the first two are pinned.
+	CountMemoryBucket(ctx context.Context, arg CountMemoryBucketParams) (CountMemoryBucketRow, error)
+	// Everything one agent holds, frozen and turned down included.
+	CountMemoryOfHolder(ctx context.Context, holderActorID uuid.UUID) (int64, error)
+	// An agent's writes in the hour that starts at hour, and in the day that
+	// ends with it, with the oldest hour that day's count still holds.
+	CountMemoryWrites(ctx context.Context, arg CountMemoryWritesParams) (CountMemoryWritesRow, error)
 	CountRootActors(ctx context.Context) (int64, error)
 	// Seats an actor holds, not removed, in courses that are not archived: while
 	// there is one, its owner does not change.
@@ -67,6 +76,10 @@ type Querier interface {
 	// How many of the given member ids are current students of this course.
 	CountStudentsOfCourse(ctx context.Context, arg CountStudentsOfCourseParams) (int64, error)
 	CourseCodeTaken(ctx context.Context, arg CourseCodeTakenParams) (bool, error)
+	DeleteMemory(ctx context.Context, arg DeleteMemoryParams) (int64, error)
+	// Everything an agent holds, and its owner's switch with it: what a change
+	// of owner leaves of its memory, which is nothing.
+	DeleteMemoryOfHolder(ctx context.Context, holderActorID uuid.UUID) (int64, error)
 	// A session is a credential with a short life. Long after it has expired it
 	// says nothing the action log does not, so it is the one kind of row that is
 	// actually deleted.
@@ -190,6 +203,11 @@ type Querier interface {
 	// of its seats may do (a conversation's respondent), for a list's worth of
 	// seats in one statement. Locks nothing.
 	GetMembersForAuthz(ctx context.Context, ids []uuid.UUID) ([]GetMembersForAuthzRow, error)
+	GetMemory(ctx context.Context, id uuid.UUID) (GetMemoryRow, error)
+	// The live entry of a bucket that holds this text.
+	GetMemoryByHash(ctx context.Context, arg GetMemoryByHashParams) (GetMemoryByHashRow, error)
+	// The same, locked, by a change to it, which takes its bucket's lock first.
+	GetMemoryForUpdate(ctx context.Context, id uuid.UUID) (GetMemoryForUpdateRow, error)
 	GetPasswordCredential(ctx context.Context, actorID uuid.UUID) (GetPasswordCredentialRow, error)
 	GetPreset(ctx context.Context, id uuid.UUID) (PermissionPreset, error)
 	// Roster facts about a member. This is not authorization: that a grade can
@@ -234,6 +252,9 @@ type Querier interface {
 	InsertEvent(ctx context.Context, arg InsertEventParams) error
 	InsertGrade(ctx context.Context, arg InsertGradeParams) error
 	InsertMember(ctx context.Context, arg InsertMemberParams) error
+	// A new entry, unless the same text is already live in its bucket: then no
+	// row comes back, and GetMemoryByHash finds the one that is there.
+	InsertMemory(ctx context.Context, arg InsertMemoryParams) (uuid.UUID, error)
 	InsertMissingSubmission(ctx context.Context, arg InsertMissingSubmissionParams) (int64, error)
 	InsertPreset(ctx context.Context, arg InsertPresetParams) error
 	InsertRetraction(ctx context.Context, arg InsertRetractionParams) (int64, error)
@@ -353,6 +374,9 @@ type Querier interface {
 	ListLiveDelegatesOf(ctx context.Context, principalMemberID *uuid.UUID) ([]uuid.UUID, error)
 	ListMembers(ctx context.Context, arg ListMembersParams) ([]ListMembersRow, error)
 	ListMembershipsForActor(ctx context.Context, actorID uuid.UUID) ([]ListMembershipsForActorRow, error)
+	// A page of one bucket in one status, by id: newest first, after the last
+	// id seen, or oldest first.
+	ListMemoryBucket(ctx context.Context, arg ListMemoryBucketParams) ([]ListMemoryBucketRow, error)
 	// Which of these uploads, each given with the course its key names, are
 	// this deployment's and attached to nothing? The course must be one this
 	// database has. document.upload_url issues keys only under courses that
@@ -483,6 +507,17 @@ type Querier interface {
 	// or none. Choosing seats by role is what the manager asked for; it is not
 	// authorization, which each change goes through on its own.
 	LockLiveSeatsByRole(ctx context.Context, arg LockLiveSeatsByRoleParams) ([]uuid.UUID, error)
+	// Agents' memory (docs/schema.md §2.9). What an agent may reach of it is
+	// decided in Go (tools.memoryAccess), from its seats as authorization reads
+	// them; these queries read and write one agent's entries, a bucket at a
+	// time, and never give an agent a frozen entry (purge_after set). Entries
+	// are deleted, not retired: what is forgotten is gone.
+	//
+	// The reads name their columns rather than taking the row: the search
+	// vector is the database's to use, never the application's to read.
+	// Writes to one bucket are counted one at a time: each takes this before it
+	// counts, to the end of its transaction (memory.LockKey).
+	LockMemoryBucket(ctx context.Context, arg LockMemoryBucketParams) error
 	// An owner's agents are counted against the limit one creation, or one
 	// reactivation, at a time. NO KEY UPDATE, not UPDATE: the call's own action
 	// row, and every other action row naming the owner, holds KEY SHARE on this
@@ -514,6 +549,8 @@ type Querier interface {
 	MarkActionExecuted(ctx context.Context, arg MarkActionExecutedParams) error
 	MarkActionFailed(ctx context.Context, arg MarkActionFailedParams) error
 	MaxVersionSeq(ctx context.Context, documentID uuid.UUID) (int32, error)
+	// Whether an agent's owner lets it keep memory: no row is yes.
+	MemoryEnabled(ctx context.Context, holderActorID uuid.UUID) (bool, error)
 	NewestComponentDraftAt(ctx context.Context, arg NewestComponentDraftAtParams) (time.Time, error)
 	NewestSubmissionDraftAt(ctx context.Context, submissionID *uuid.UUID) (time.Time, error)
 	PostGrade(ctx context.Context, arg PostGradeParams) (int64, error)
@@ -548,6 +585,12 @@ type Querier interface {
 	// Which of the given actors are of one party with the actor (SameParty):
 	// whose actions it neither decides nor reviews.
 	SamePartyAmong(ctx context.Context, arg SamePartyAmongParams) ([]uuid.UUID, error)
+	// An agent's entries in force in the given buckets, pinned first, then by
+	// how well they match query (a to_tsquery argument, memory.QueryTerms) with
+	// a term for recency that halves at 30 days, so that with no query, or no
+	// match, the newest come first. only_matches keeps what matches, and what
+	// is pinned.
+	SearchMemory(ctx context.Context, arg SearchMemoryParams) ([]SearchMemoryRow, error)
 	// Whether a seat counts for nothing for good, whatever becomes of it: a
 	// delegate's whose principal is removed or past its expiry, or one that does
 	// not match its actor's ownership (an owned agent's seat with no principal,
@@ -620,6 +663,10 @@ type Querier interface {
 	UpdateAssignment(ctx context.Context, arg UpdateAssignmentParams) error
 	UpdateComponent(ctx context.Context, arg UpdateComponentParams) error
 	UpdateCourse(ctx context.Context, arg UpdateCourseParams) error
+	// A change to an entry's text, tags or pin, which moves its version on.
+	// Given a version, only that version is changed: no row comes back if it
+	// has moved on since (0 changes whatever it is).
+	UpdateMemoryBody(ctx context.Context, arg UpdateMemoryBodyParams) (int32, error)
 	// Built-ins (dept_id null) are policy shipped with the system; only a
 	// department's own presets are edited here.
 	UpdatePreset(ctx context.Context, arg UpdatePresetParams) (int64, error)

@@ -287,6 +287,51 @@ type MemberStudentScope struct {
 	StudentMemberID uuid.UUID
 }
 
+type MemoryEntry struct {
+	ID                uuid.UUID
+	HolderActorID     uuid.UUID
+	Scope             string
+	CourseID          *uuid.UUID
+	HolderMemberID    *uuid.UUID
+	SubjectActorID    *uuid.UUID
+	SubjectMemberID   *uuid.UUID
+	Bucket            string
+	Status            string
+	Body              *string
+	SearchText        string
+	Search            interface{}
+	TextHash          []byte
+	Tags              []string
+	Pinned            bool
+	Source            string
+	Version           int32
+	ReplacesID        *uuid.UUID
+	CreatedByActorID  uuid.UUID
+	CreatedByActionID uuid.UUID
+	UpdatedByActorID  uuid.UUID
+	UpdatedByActionID uuid.UUID
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
+	DecidedByMemberID *uuid.UUID
+	DecidedAt         *time.Time
+	DecisionReason    *string
+	PurgeAfter        *time.Time
+	PurgeReason       *string
+}
+
+type MemorySetting struct {
+	HolderActorID    uuid.UUID
+	Enabled          bool
+	UpdatedByActorID uuid.UUID
+	UpdatedAt        time.Time
+}
+
+type MemoryWriteCount struct {
+	HolderActorID uuid.UUID
+	Hour          time.Time
+	N             int32
+}
+
 type PermissionPreset struct {
 	ID                     uuid.UUID
 	DeptID                 *uuid.UUID

@@ -48,6 +48,12 @@ src/
     0008_conversations.down.sql
                          cancels answers waiting for approval, then drops the
                          three tables; the actions that wrote them stay
+    0009_memory.up.sql   agents' memory: entries about an agent's owner,
+                         about each person who asks it, and a course's
+                         shared memory; the owner's switch; writes counted
+                         by the hour. Deleted, not retired
+    0009_memory.down.sql drops the three tables; every entry is lost, and the
+                         actions that wrote them never held their text
   seed/
     presets.sql          the eight built-in permission presets; safe to re-run
   tests/
@@ -134,7 +140,8 @@ left behind, and up again — and is what CI runs on PostgreSQL 13 and 18. On
 the way down, a migration with files in `tests/down/` goes down over the data
 its `.before.sql` commits, and its `.after.sql` checks what became of it:
 0007 over a delegate with a proposal waiting and a token, 0008 over a
-conversation with an answer waiting.
+conversation with an answer waiting, 0009 over a tutor's memory of a student
+and a proposal to the course's shared memory.
 
 ## What the database enforces
 
@@ -176,6 +183,10 @@ MCP, these are the invariants that survive a bug in the tool layer.
 | A message and its retraction are in their conversation's course; one message at each `seq`, from 1; a message is retracted once | composite FKs, `unique(conversation_id, seq)`, `conversation_message_seq_positive`, primary key of `conversation_message_retraction` |
 | Every message and retraction names its action | `created_by_action_id NOT NULL` |
 | `conversation_message` and `conversation_message_retraction` are append-only | `reject_mutation()` triggers on UPDATE, DELETE, TRUNCATE |
+| Memory is held by agents; owner memory is about the agent's owner; each seat an entry names is its actor's, in the entry's course | trigger `memory_entry_guarded`, composite FKs on `memory_entry` |
+| Each scope of memory has its shape; only shared memory is proposed or rejected; a live entry has 1..1000 characters and its hash, a rejected one neither | `memory_shape_valid`, `memory_body_valid` |
+| One text per bucket among live entries | partial unique index `memory_text_key` |
+| Whose an entry is, about whom, where and when it was made never change; a rejected entry never changes | trigger `memory_entry_guarded` |
 | Domain rows are never silently cascade-deleted | FKs default to NO ACTION |
 
 ## What the application must enforce
@@ -229,7 +240,8 @@ unique index.
 
 Executed against PostgreSQL 18.6: up, down and up again apply cleanly, and
 `tests/constraints_test.sql` passes (93 checks; 162 since migrations 0007
-and 0008, which have been run on PostgreSQL 16). **Not yet run on PostgreSQL
+and 0008, which have been run on PostgreSQL 16; 220 since 0009, run on 16 and
+18). **Not yet run on PostgreSQL
 13**, the stated minimum: CI runs this suite and the Go tests on both 13 and
 18, so the first pipeline run settles it — update this paragraph with the
 result.

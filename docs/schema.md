@@ -15,7 +15,9 @@ exact types and constraints.
 - **Scores and points**: `numeric`, never float.
 - **Status columns**: `text` with a `CHECK`, so adding or renaming a value is a one-line
   migration. The only enum is `autonomy_level`, because it must be ordered.
-- **Deletion**: status columns, not hard deletes. Foreign keys default to `NO ACTION`.
+- **Deletion**: status columns, not hard deletes. Foreign keys default to `NO ACTION`. Memory
+  (§2.9) is the one thing Core deletes rather than retires: what a person asks to be forgotten
+  is gone, and so is what a retention period ends. No other row points at it.
 - **Who did it**: inside a course, points at `course_member`, so a record carries the role it
   was made under and stays distinct when the same actor is removed and re-added. Creation and
   adding point at `actor`, because the creator may not be a member (an admin, or the system).
@@ -35,8 +37,11 @@ course
  ├ action
  ├ grade
  ├ conversation ── conversation_message ── conversation_message_retraction
+ ├ memory_entry (an agent's memory of the course's askers, and the course's shared memory)
  └ event
 ```
+
+An agent's memory of its owner is its own, outside any course (§2.9).
 
 Humans and agents alike join a course as a `course_member`. That one row is the roster entry,
 the role, the permissions and the scope. There is no separate grant table and no scope chain:
@@ -792,6 +797,103 @@ participants and to nobody else, whatever they hold: not by permission (the visi
 lists none for them), and not by the rule that shows a member the events of its own actions,
 so a manager whose removal of a seat closed a conversation is not told of it.
 
+### 2.9 Memory
+
+```
+memory_entry(id, holder_actor_id→actor, scope [owner|asker|course], course_id null→course,
+             holder_member_id null, subject_actor_id null→actor, subject_member_id null,
+             bucket (generated: 'owner', 'asker:' ‖ subject_member_id, 'course:' ‖ holder_member_id),
+             status [active|proposed|rejected], body null, search_text,
+             search (generated: to_tsvector('simple', search_text)), text_hash null,
+             tags text[], pinned, source [agent|owner|staff], version, replaces_id null,
+             created_by_actor_id→actor, created_by_action_id→action,
+             updated_by_actor_id→actor, updated_by_action_id→action, created_at, updated_at,
+             decided_by_member_id null, decided_at null, decision_reason null,
+             purge_after null, purge_reason null [seat_removed|course_archived])
+    composite FKs (course_id, holder_member_id | subject_member_id | decided_by_member_id)
+                  → course_member(course_id, id)
+    check: owner — about a person, in no seat, only ever active; asker — both seats and whom
+           it is about, only ever active; course — in the agent's seat, about nobody;
+           text 1..1000 characters (4000 bytes) and its hash while live, neither once
+           rejected; at most 5 tags; a proposal undecided, a rejection dated, a reason at
+           most 500 characters; only a shared proposal replaces an entry; frozen
+           (purge_after) exactly when it says why
+    unique (holder_actor_id, bucket, text_hash) among active and proposed entries
+    trigger: the holder is an agent; owner memory is about the agent's owner; each seat
+             named is its actor's; whose it is, about whom, where, and when and by what
+             action it was made never change; a rejected entry never changes
+
+memory_setting(holder_actor_id→actor, enabled, updated_by_actor_id→actor, updated_at)
+    -- no row: on
+
+memory_write_count(holder_actor_id→actor, hour, n > 0, primary key (holder_actor_id, hour))
+```
+
+**Memory is kept in Core, and belongs to the agent.** What an agent keeps between
+conversations is kept here, so that whatever program runs the agent — a service that hosts
+agents, a model connected over MCP, anything else holding its token — reads and writes the same
+memory, and a change of program keeps it. A program's own working state stays with it: its
+notes on one conversation, its leases, its history. Only agents hold memory; people keep their
+own notes. There are three scopes:
+
+- **owner**: about the agent's owner (`subject_actor_id`), across courses. `course_id`, when
+  set, only says where it was learnt. An agent nobody owns keeps none.
+- **asker**: about one person who asks the agent in one course, other than its owner: the
+  agent's seat (`holder_member_id`) and the asker's (`subject_member_id`). It is for answering
+  that person alone.
+- **course**: a course's shared memory, in the agent's seat: what any student of the course
+  may be told. What the agent writes there is a proposal (`proposed`) until someone who
+  manages the course's members approves it; a rejection keeps the reviewer's reason and none of
+  the text. A proposal that corrects an entry in force names it (`replaces_id`).
+
+A person is the subject of one scope, never two: what an agent keeps about its owner is owner
+memory, even when the owner asks it in a course. Asker and shared memory are keyed on seats, as
+Core's handles are (§2.2): a seat removed and seated again is a new seat and a fresh start, and
+what was kept in the old one is frozen — `purge_after` is set, with why — never read by an
+agent again, and deleted once that date passes.
+
+**The bucket** is what an entry's limits and the uniqueness of its text are counted in: one per
+agent for its owner, one per asker's seat, one per the agent's seat for the shared memory. The
+same text twice in one bucket is one entry: `text_hash` is the SHA-256 of the text as it is
+kept, and a write of the same text again returns the entry that is there. Writes to a bucket
+are counted one at a time, each under a transaction-scoped advisory lock on the holder and the
+bucket.
+
+**Deleted, not retired** (§0). Nothing points at an entry. The actions that wrote entries stay,
+without the text: the tools that take memory text declare it secret, so the action log keeps
+neither it nor anything that would give it away, and their results carry ids, never text.
+
+**What an entry may say** is checked by the application (`internal/memory.CheckText`) for every
+writer, the agent, its owner and course staff alike: line breaks made LF, trimmed, 1 to 1000
+characters and at most 4000 bytes, no control character but a line break or a tab, and nothing
+shaped like a secret — a Core token or invitation, a provider's API key, a cloud access key, a
+JSON Web Token, a private key — which is refused (`holds_secret`) without the refusal repeating
+it. Passwords, health and the like cannot be recognised; the tools forbid them, and the people
+an entry is about can delete it. Tags are at most five lower-case words.
+
+**Search** is PostgreSQL's full text search in the `simple` configuration, which splits words
+at spaces and so cannot find a word of Chinese or Japanese. The application therefore splits
+the text itself, before the database sees it (`internal/memory.SearchText`): NFKC-normalised
+and lower-cased, a run of letters and digits of a script written with spaces is a word, and a
+run of Han, Hiragana, Katakana or Hangul becomes its overlapping pairs of characters. A search
+is split the same way (`QueryTerms`), each term at most 64 bytes, a word of four characters or
+more matching as a prefix, at most 24 terms, any one matching. Terms hold only letters, digits
+and marks, so no search is a syntax error to `to_tsquery`. It takes a UTF-8 database, as
+every deployment has: in `SQL_ASCII` the parser reads nothing but ASCII as letters, and finds
+no Chinese, Japanese or Korean at all. Entries are ranked pinned first, then by relevance plus
+a term for recency that halves at 30 days, then newest. Embeddings, when they come, are a
+table of their own beside `memory_entry`, keyed on its id.
+
+**Limits.** An entry is 1 to 1000 characters; a bucket holds at most 20 pinned entries; an
+owner's bucket at most 200 entries in force (`MEMORY_MAX_OWNER`), an asker's 50
+(`MEMORY_MAX_ASKER`), a course's shared bucket 200 (`MEMORY_MAX_SHARED`) and 50 proposals
+waiting (`MEMORY_MAX_PROPOSED`); an agent 5000 entries in all (`MEMORY_MAX_PER_AGENT`). An
+agent writes or corrects at most 60 entries an hour and 300 a day (`MEMORY_WRITES_PER_HOUR`,
+`MEMORY_WRITES_PER_DAY`), counted by the hour in `memory_write_count`, in the database so that
+the limit holds across instances. Forgetting is never limited. An agent's owner may switch its
+memory off (`memory_setting`); what it has is kept until someone deletes it. `MEMORY=on` turns
+memory on for the installation; it is off by default.
+
 ## 3. Authorization
 
 ```
@@ -875,6 +977,12 @@ check `actor.platform_role` instead. That is the only place it is read.
 | A message and its retraction are in their conversation's course; one message at each `seq`; a message is retracted once | composite FKs, `unique(conversation_id, seq)`, primary key on `conversation_message_retraction` |
 | Every message and retraction names its action | `created_by_action_id NOT NULL` |
 | `conversation_message` and `conversation_message_retraction` are append-only | triggers |
+| Memory is held by agents, owner memory is about the agent's owner, and each seat an entry names is its actor's, in the entry's course | trigger `memory_entry_guarded`, composite FKs on `memory_entry` |
+| Each scope of memory has its shape: owner memory in no seat, asker memory in both, shared memory in the agent's seat and about nobody; only shared memory is proposed or rejected | `memory_shape_valid` |
+| A live entry has 1..1000 characters of text and its hash; a rejected one has neither | `memory_body_valid` |
+| One text per bucket among the entries in force and proposed | partial unique index `memory_text_key` |
+| Whose an entry is, about whom, where, and when and by what action it was made never change; a rejected entry never changes | trigger `memory_entry_guarded` |
+| At most five tags; a proposal is undecided and a rejection dated; only a shared proposal replaces an entry; a frozen entry says why | CHECKs on `memory_entry` |
 
 **Enforced by the application.** Each is a place a bug can hide, and each needs a test.
 
@@ -1046,15 +1154,13 @@ garbage in the grades, full record in the log.
   remove are the v1 controls.
 - **Redis.** The event feed is read from Postgres; `event.seq` is already the cursor a stream
   would use.
-- **Full-text search.** `to_tsvector('simple')` does not segment Chinese or Japanese, so it was
-  dropped rather than shipped broken. Needs `pg_bigm`/PGroonga or application-side
-  segmentation.
+- **Full-text search** of course content. `to_tsvector('simple')` does not segment Chinese or
+  Japanese, so it was dropped rather than shipped broken. Needs `pg_bigm`/PGroonga or
+  application-side segmentation, which memory's search does for itself (§2.9).
 - **JIT provisioning** on first SSO login.
 - **Organisation hierarchy** above `department`; cross-course administrative roles beyond
   `platform_role`.
-- **Agent memory.** Agents key their own stores on `course_member.id`, which is the durable
-  handle for "this agent in this course", and keep what people wrote to them per
-  conversation: an agent that answers several people shares none of it between them (§2.8).
+- **Embeddings and semantic search** of memory (§2.9): full text and recency in v1.
 - **The concept graph**, quizzes, retention policy.
 - **Waiting for news.** `event.list` and `conversation.inbox` are polled. A long poll, or
   `LISTEN`/`NOTIFY` behind one, would let an agent answer as soon as it is asked without
