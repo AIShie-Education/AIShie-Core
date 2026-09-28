@@ -71,7 +71,7 @@ func (q *Queries) GetCredentialForActor(ctx context.Context, arg GetCredentialFo
 }
 
 const getInviteByPrefix = `-- name: GetInviteByPrefix :one
-SELECT c.id, c.actor_id, c.secret_hash, c.expires_at, c.revoked_at,
+SELECT c.id, c.actor_id, c.secret_hash, c.expires_at, c.revoked_at, c.issued_by_actor_id,
        a.kind AS actor_kind, a.status AS actor_status, a.email AS actor_email
 FROM credential c
 JOIN actor a ON a.id = c.actor_id
@@ -80,20 +80,21 @@ FOR UPDATE OF c
 `
 
 type GetInviteByPrefixRow struct {
-	ID          uuid.UUID
-	ActorID     uuid.UUID
-	SecretHash  *string
-	ExpiresAt   *time.Time
-	RevokedAt   *time.Time
-	ActorKind   string
-	ActorStatus string
-	ActorEmail  *string
+	ID              uuid.UUID
+	ActorID         uuid.UUID
+	SecretHash      *string
+	ExpiresAt       *time.Time
+	RevokedAt       *time.Time
+	IssuedByActorID *uuid.UUID
+	ActorKind       string
+	ActorStatus     string
+	ActorEmail      *string
 }
 
 // An invitation, found by its prefix before its hash is checked, and locked:
 // it is used once, and two tries at it take turns. Revoked and expired rows
 // are returned too, as GetCredentialByPrefix returns them. The actor comes
-// with it.
+// with it, and who issued it: null for one made before that was recorded.
 func (q *Queries) GetInviteByPrefix(ctx context.Context, tokenPrefix *string) (GetInviteByPrefixRow, error) {
 	row := q.db.QueryRow(ctx, getInviteByPrefix, tokenPrefix)
 	var i GetInviteByPrefixRow
@@ -103,6 +104,7 @@ func (q *Queries) GetInviteByPrefix(ctx context.Context, tokenPrefix *string) (G
 		&i.SecretHash,
 		&i.ExpiresAt,
 		&i.RevokedAt,
+		&i.IssuedByActorID,
 		&i.ActorKind,
 		&i.ActorStatus,
 		&i.ActorEmail,

@@ -40,6 +40,13 @@ WHERE c.id > sqlc.arg(after)
 ORDER BY c.id
 LIMIT sqlc.arg(max_rows);
 
+-- name: LockCourseDept :one
+-- The department a course is in, held until the end of a move: NO KEY
+-- UPDATE, as the move's own UPDATE takes it, so that two moves of one course
+-- take turns and each sees where the other left it. A call in the course
+-- takes KEY SHARE on the row through a foreign key, and does not wait.
+SELECT dept_id FROM course WHERE id = $1 FOR NO KEY UPDATE;
+
 -- name: SetCourseDept :exec
 UPDATE course SET dept_id = $2 WHERE id = $1;
 

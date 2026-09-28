@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/apperr"
+	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/authz"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/db"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/db/dbq"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/domain"
@@ -242,10 +243,12 @@ func setPasswordHash(ctx context.Context, q *dbq.Queries, actorID uuid.UUID, has
 
 // IssueInvite makes an invitation for an actor to set their password, and
 // revokes the one they had: only the newest works. Who may be invited is the
-// tool's to decide (actor.invite); the database holds the one live
-// invitation, and refuses one for the system actor. Setting a password, by
-// the invitation or otherwise, revokes it (SetPassword).
-func IssueInvite(ctx context.Context, q *dbq.Queries, actorID uuid.UUID, label string, expiresAt, now time.Time) (Token, uuid.UUID, error) {
+// tool's to decide (actor.invite, actor.invite_new); the database holds the
+// one live invitation, and refuses one for the system actor. Setting a
+// password, by the invitation or otherwise, revokes it (SetPassword).
+// issuedBy is who made it, and is asked again when it is taken up
+// (AcceptInvite).
+func IssueInvite(ctx context.Context, q *dbq.Queries, actorID uuid.UUID, issuedBy *uuid.UUID, label string, expiresAt, now time.Time) (Token, uuid.UUID, error) {
 	tok, err := NewInvite()
 	if err != nil {
 		return Token{}, uuid.Nil, err
@@ -256,16 +259,87 @@ func IssueInvite(ctx context.Context, q *dbq.Queries, actorID uuid.UUID, label s
 	id := ids.New()
 	if err := q.InsertCredential(ctx, dbq.InsertCredentialParams{
 		ID: id, ActorID: actorID, Kind: KindInvite, SecretHash: &tok.Hash,
-		TokenPrefix: &tok.Prefix, Label: &label, ExpiresAt: &expiresAt, CreatedAt: now,
+		TokenPrefix: &tok.Prefix, Label: &label, ExpiresAt: &expiresAt, CreatedAt: now, IssuedByActorID: issuedBy,
 	}); err != nil {
 		return Token{}, uuid.Nil, err
 	}
 	return tok, id, nil
 }
 
+// Why a department administrator may not invite a person (again), as
+// InviteRefusal says it: the clauses of the rule, in the order they are
+// asked.
+const (
+	InviteNotAPerson      = "not_a_person"
+	InviteSignedIn        = "signed_in"
+	InvitePlatformRole    = "platform_role"
+	InviteAdministers     = "administers"
+	InviteOwnsAgents      = "owns_agents"
+	InviteSeatedElsewhere = "seated_elsewhere"
+)
+
+// InviteRefusal is the rule for an invitation a department administrator
+// makes, applied to what InvitableBy found: the first clause the person
+// fails, or "" when they pass them all. Whoever holds an invitation can sign
+// in as the person it is for, so the person's account must reach nothing
+// the issuer does not administer already: they are a person, have never
+// been able to sign in, hold no platform role and no appointment, own no
+// agent, and hold seats only in courses of the departments the issuer
+// administers. A platform administrator is held to actor.invite's own rule
+// instead.
+func InviteRefusal(r dbq.InvitableByRow) string {
+	switch {
+	case !r.IsPerson:
+		return InviteNotAPerson
+	case r.CanSignIn:
+		return InviteSignedIn
+	case r.HoldsRole:
+		return InvitePlatformRole
+	case r.Administers:
+		return InviteAdministers
+	case r.OwnsAgents:
+		return InviteOwnsAgents
+	case r.SeatsOutside > 0:
+		return InviteSeatedElsewhere
+	}
+	return ""
+}
+
+// issuerStands reports whether whoever issued an invitation would still be
+// let make it: an active platform administrator, or an active department
+// administrator the rule lets invite the person as they are now. The rule
+// is asked again because the person may have been seated elsewhere since,
+// or the issuer's appointment ended, and the invitation would then open an
+// account that reaches beyond its issuer; and someone who administers
+// nothing is refused though a person with no seats passes every clause. An
+// invitation made before its issuer was recorded is a platform
+// administrator's, as every invitation then was.
+func issuerStands(ctx context.Context, q *dbq.Queries, issuedBy *uuid.UUID, actorID uuid.UUID) (bool, error) {
+	if issuedBy == nil {
+		return true, nil
+	}
+	issuer, err := authz.LoadActor(ctx, q, *issuedBy)
+	if err != nil {
+		return false, err
+	}
+	switch {
+	case !issuer.Active():
+		return false, nil
+	case authz.Platform(issuer, domain.PlatformRoot, domain.PlatformAdmin).Level.Allowed():
+		return true, nil
+	case !issuer.Administers:
+		return false, nil
+	}
+	facts, err := q.InvitableBy(ctx, dbq.InvitableByParams{IssuerID: *issuedBy, ActorID: actorID})
+	if err != nil {
+		return false, err
+	}
+	return InviteRefusal(facts) == "", nil
+}
+
 // errBadInvite is one message for every way an invitation can be wrong:
-// unknown, used, replaced, withdrawn, expired, or for an account that is
-// suspended.
+// unknown, used, replaced, withdrawn, expired, for an account that is
+// suspended, or from an issuer who could no longer make it.
 var errBadInvite = apperr.New(apperr.Unauthenticated,
 	"the invitation is not valid: it may have expired, been used, or been replaced by a newer one")
 
@@ -305,6 +379,15 @@ func (a *Authenticator) AcceptInvite(ctx context.Context, presented, password st
 			// suspension since then holds. The system actor is refused as
 			// Authenticate refuses it, though it holds no credential.
 			inv.ActorKind == "system", inv.ActorStatus != domain.ActorActive, inv.ActorEmail == nil:
+			return inv, errBadInvite
+		}
+		// Asked again in the transaction that takes it up, under the
+		// invitation's lock: an issuer who could not make it now is refused
+		// as an expired one is, and the refusal says nothing more.
+		switch ok, err := issuerStands(ctx, q, inv.IssuedByActorID, inv.ActorID); {
+		case err != nil:
+			return inv, fmt.Errorf("invitation issuer: %w", err)
+		case !ok:
 			return inv, errBadInvite
 		}
 		return inv, nil

@@ -200,7 +200,7 @@ type Querier interface {
 	// An invitation, found by its prefix before its hash is checked, and locked:
 	// it is used once, and two tries at it take turns. Revoked and expired rows
 	// are returned too, as GetCredentialByPrefix returns them. The actor comes
-	// with it.
+	// with it, and who issued it: null for one made before that was recorded.
 	GetInviteByPrefix(ctx context.Context, tokenPrefix *string) (GetInviteByPrefixRow, error)
 	GetLatestVersion(ctx context.Context, documentID uuid.UUID) (DocumentVersion, error)
 	GetLiveComputedGrade(ctx context.Context, arg GetLiveComputedGradeParams) (GetLiveComputedGradeRow, error)
@@ -525,6 +525,11 @@ type Querier interface {
 	// Taken before changing the tree's shape, so that two moves cannot each
 	// check for a cycle and then create one between them.
 	LockCourseComponents(ctx context.Context, courseID uuid.UUID) error
+	// The department a course is in, held until the end of a move: NO KEY
+	// UPDATE, as the move's own UPDATE takes it, so that two moves of one course
+	// take turns and each sees where the other left it. A call in the course
+	// takes KEY SHARE on the row through a foreign key, and does not wait.
+	LockCourseDept(ctx context.Context, id uuid.UUID) (uuid.UUID, error)
 	// Every proposal to seat an agent that waits for a decision, locked, for an
 	// owner's change to cancel. One a decision holds already is passed over:
 	// the decision is waiting for the agent's row, which the owner's change

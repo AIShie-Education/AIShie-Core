@@ -19,14 +19,23 @@ import (
 )
 
 func courseTools() []tool.Tool {
-	return []tool.Tool{courseCreate(), courseUpdate(), courseActivate(), courseArchive(), courseSeatInstructor(), courseList(), courseGet()}
+	return []tool.Tool{courseCreate(), courseUpdate(), courseActivate(), courseArchive(), courseSeatInstructor(), courseList(),
+		courseMove(), courseGet()}
 }
+
+// Courses are managed from outside them, as a whole, by the administrators
+// gate: a platform administrator manages every course, and a department
+// administrator the courses of the departments an appointment of theirs
+// covers (docs/schema.md §2.10). Neither is anybody inside a course by it:
+// what is done in one is done from a seat there, which an administrator who
+// wants one is given as anyone is, course.seat_instructor included.
 
 const (
 	EventCourseCreated   = "course.created"
 	EventCourseUpdated   = "course.updated"
 	EventCourseActivated = "course.activated"
 	EventCourseArchived  = "course.archived"
+	EventCourseMoved     = "course.moved"
 )
 
 type CourseView struct {
@@ -41,16 +50,19 @@ type CourseView struct {
 	CreatedAt   time.Time `json:"created_at"`
 }
 
-// platformCourse resolves a course for a platform tool. The input carries a
-// plain course_id rather than embedding tool.InCourse, because these tools
-// are gated by platform role, not by a seat in the course.
+// platformCourse resolves a course for a tool that manages it from outside.
+// The input carries a plain course_id rather than embedding tool.InCourse,
+// because these tools are gated by the administrators gate, not by a seat in
+// the course. The course's department is what a department administrator
+// must cover.
 func platformCourse(ctx context.Context, q dbq.Querier, id uuid.UUID) (tool.Target, error) {
-	if _, err := q.GetCourse(ctx, id); errors.Is(err, pgx.ErrNoRows) {
+	c, err := q.GetCourse(ctx, id)
+	if errors.Is(err, pgx.ErrNoRows) {
 		return tool.Target{}, apperr.Missing("no such course")
 	} else if err != nil {
 		return tool.Target{}, err
 	}
-	return tool.Target{CourseID: id, Type: "course", ID: &id}, nil
+	return tool.Target{CourseID: id, Type: "course", ID: &id, DeptID: &c.DeptID}, nil
 }
 
 type CourseCreateIn struct {
@@ -71,18 +83,19 @@ func courseCreate() tool.Tool {
 	return tool.Define(tool.Spec[CourseCreateIn, CourseCreateOut]{
 		Name: "course.create",
 		Description: "Create one course offering — CS101 section A, this term — as a draft, with the root of its grading " +
-			"scheme. It has no members yet: seat its first instructor with course.seat_instructor, and they add the rest.",
-		Kind: tool.Write, Gate: admins,
-		HTTP:    tool.Route{Method: "POST", Pattern: "/v1/courses"},
-		Resolve: noTarget[CourseCreateIn]("course"),
+			"scheme. It has no members yet: seat its first instructor with course.seat_instructor, and they add the rest. " +
+			"A department administrator creates courses in the departments they administer and beneath them.",
+		Kind: tool.Write, Gate: administrators,
+		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses"},
+		Resolve: func(ctx context.Context, q dbq.Querier, in CourseCreateIn) (tool.Target, error) {
+			if _, err := findDepartment(ctx, q, in.DeptID, "no such department"); err != nil {
+				return tool.Target{}, err
+			}
+			return tool.Target{Type: "course", DeptID: &in.DeptID}, nil
+		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in CourseCreateIn) (CourseCreateOut, error) {
 			if strings.TrimSpace(in.Code) == "" || strings.TrimSpace(in.Title) == "" {
 				return CourseCreateOut{}, apperr.Invalid("code and title are required")
-			}
-			if ok, err := ec.Q.DepartmentExists(ctx, in.DeptID); err != nil {
-				return CourseCreateOut{}, err
-			} else if !ok {
-				return CourseCreateOut{}, apperr.Missing("no such department")
 			}
 			if ok, err := ec.Q.TermExists(ctx, in.TermID); err != nil {
 				return CourseCreateOut{}, err
@@ -122,9 +135,10 @@ type CourseUpdateIn struct {
 
 func courseUpdate() tool.Tool {
 	return tool.Define(tool.Spec[CourseUpdateIn, OK]{
-		Name:        "course.update",
-		Description: "Change a course's title or description. Its code, section and term are what it is, and do not change.",
-		Kind:        tool.Write, Gate: admins,
+		Name: "course.update",
+		Description: "Change a course's title or description. Its code, section and term are what it is, and do not change. " +
+			"A department administrator does this for the courses of the departments they administer.",
+		Kind: tool.Write, Gate: administrators,
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}"},
 		Resolve: func(ctx context.Context, q dbq.Querier, in CourseUpdateIn) (tool.Target, error) {
 			return platformCourse(ctx, q, in.CourseID)
@@ -158,7 +172,8 @@ type CourseIDIn struct {
 
 func courseSetStatus(name, desc, path, status, event string) tool.Tool {
 	return tool.Define(tool.Spec[CourseIDIn, OK]{
-		Name: name, Description: desc, Kind: tool.Write, Gate: admins,
+		Name: name, Description: desc + " A department administrator does this for the courses of the departments they administer.",
+		Kind: tool.Write, Gate: administrators,
 		// Changing whether a course is archived is the one write an archived
 		// course accepts.
 		OnArchived: true,
@@ -205,8 +220,11 @@ func courseSeatInstructor() tool.Tool {
 	return tool.Define(tool.Spec[SeatInstructorIn, MemberIDOut]{
 		Name: "course.seat_instructor",
 		Description: "Seat an actor in a course with the built-in instructor preset. This is how a course gets its first " +
-			"member; from there the instructor adds everyone else with member.add.",
-		Kind: tool.Write, Gate: admins,
+			"member; from there the instructor adds everyone else with member.add. A department administrator does this for " +
+			"the courses of the departments they administer. They find the person with actor.lookup_by_email, or register and " +
+			"invite them with actor.invite_new. Administering a course gives nothing inside it: an administrator who wants " +
+			"to work in one seats themselves here, and that is recorded like any seating.",
+		Kind: tool.Write, Gate: administrators,
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/instructors"},
 		Resolve: func(ctx context.Context, q dbq.Querier, in SeatInstructorIn) (tool.Target, error) {
 			return platformCourse(ctx, q, in.CourseID)
@@ -226,8 +244,9 @@ func courseSeatInstructor() tool.Tool {
 }
 
 type CourseListIn struct {
-	TermID *uuid.UUID `json:"term_id,omitempty"`
-	DeptID *uuid.UUID `json:"dept_id,omitempty"`
+	TermID       *uuid.UUID `json:"term_id,omitempty"`
+	DeptID       *uuid.UUID `json:"dept_id,omitempty" jsonschema:"only courses directly in this department"`
+	WithinDeptID *uuid.UUID `json:"within_dept_id,omitempty" jsonschema:"only courses in this department or beneath it"`
 	Page
 }
 
@@ -243,15 +262,22 @@ func viewCourse(c dbq.GetCourseRow) CourseView {
 
 func courseList() tool.Tool {
 	return tool.Define(tool.Spec[CourseListIn, CourseListOut]{
-		Name:        "course.list",
-		Description: "Every course on the platform, optionally by term or department. For the courses you are seated in, use me.memberships.",
-		Kind:        tool.Read, Gate: admins,
-		HTTP:    tool.Route{Method: "GET", Pattern: "/v1/courses"},
-		Resolve: noTarget[CourseListIn]("course"),
+		Name: "course.list",
+		Description: "Courses as their administrators see them, without a seat in them: every course on the platform for a " +
+			"platform administrator; for a department administrator, those in the departments they administer and beneath " +
+			"them. Optionally by term, by one department (dept_id), or by a department and everything beneath it " +
+			"(within_dept_id). For the courses you are seated in, use me.memberships.",
+		Kind: tool.Read, Gate: administrators,
+		HTTP: tool.Route{Method: "GET", Pattern: "/v1/courses"},
+		Resolve: func(context.Context, dbq.Querier, CourseListIn) (tool.Target, error) {
+			return tool.Target{Type: "course", AnyDept: true}, nil
+		},
 		Query: func(ctx context.Context, rc *tool.ReadCtx, in CourseListIn) (CourseListOut, error) {
-			// Gated by platform role: every caller sees every course.
-			rows, err := rc.Q.ListCourses(ctx, dbq.ListCoursesParams{After: in.after(), ActorID: rc.Actor.ID, Platform: true,
-				TermID: in.TermID, DeptID: in.DeptID, MaxRows: in.limit()})
+			// A platform administrator sees every course; anyone else, the
+			// courses beneath their appointments as they stand now, and a
+			// course outside them is simply not there.
+			rows, err := rc.Q.ListCourses(ctx, dbq.ListCoursesParams{After: in.after(), ActorID: rc.Actor.ID, Platform: rc.Admin.Platform,
+				TermID: in.TermID, DeptID: in.DeptID, WithinDeptID: in.WithinDeptID, MaxRows: in.limit()})
 			out := CourseListOut{Courses: make([]CourseView, 0, len(rows))}
 			for _, r := range rows {
 				out.Courses = append(out.Courses, viewCourse(dbq.GetCourseRow(r)))
@@ -260,6 +286,67 @@ func courseList() tool.Tool {
 				out.Next = &rows[len(rows)-1].ID
 			}
 			return out, err
+		},
+	})
+}
+
+type CourseMoveIn struct {
+	CourseID uuid.UUID `json:"course_id"`
+	DeptID   uuid.UUID `json:"dept_id" jsonschema:"the department it moves to"`
+}
+
+func courseMove() tool.Tool {
+	return tool.Define(tool.Spec[CourseMoveIn, OK]{
+		Name: "course.move",
+		Description: "Move a course to another department. A department administrator moves courses between departments " +
+			"they administer: never to one they do not, nor one that has been moved out of their reach. Its members, their " +
+			"seats and everything in the course are unchanged. Who administers it changes with its department: the " +
+			"administrators of the department it leaves who do not administer the one it joins stop at once, and those of " +
+			"the one it joins start.",
+		Kind: tool.Write, Gate: administrators,
+		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/move"},
+		Resolve: func(ctx context.Context, q dbq.Querier, in CourseMoveIn) (tool.Target, error) {
+			target, err := platformCourse(ctx, q, in.CourseID)
+			if err != nil {
+				return target, err
+			}
+			if _, err := findDepartment(ctx, q, in.DeptID, "no such department to move it to"); err != nil {
+				return tool.Target{}, err
+			}
+			return target, nil
+		},
+		Execute: func(ctx context.Context, ec *tool.ExecCtx, in CourseMoveIn) (OK, error) {
+			// The course is held first, and where it is read under that: the
+			// gate looked where it was, and a move made since may have taken
+			// it out of the caller's reach, when moving it on would take back
+			// what is no longer theirs.
+			from, err := ec.Q.LockCourseDept(ctx, in.CourseID)
+			if err != nil {
+				return OK{}, err
+			}
+			if ok, err := reaches(ctx, ec, &from); err != nil {
+				return OK{}, err
+			} else if !ok {
+				return OK{}, movedAway()
+			}
+			if from == in.DeptID {
+				return OK{}, apperr.Conflicts("the course is in that department already").With("reason", "same_department")
+			}
+			// Where it goes must be the caller's too, so that nobody moves
+			// what they administer out of their own reach, or anyone else's
+			// into it.
+			if ok, err := reaches(ctx, ec, &in.DeptID); err != nil {
+				return OK{}, err
+			} else if !ok {
+				return OK{}, apperr.Forbid("a course goes only to a department you administer").
+					With("reason", "destination_out_of_scope")
+			}
+			if err := ec.Q.SetCourseDept(ctx, dbq.SetCourseDeptParams{ID: in.CourseID, DeptID: in.DeptID}); err != nil {
+				return OK{}, err
+			}
+			ec.Emit(events.Event{Type: EventCourseMoved, CourseID: &in.CourseID, SubjectType: "course", SubjectID: &in.CourseID,
+				Payload: map[string]any{"from_dept_id": from, "to_dept_id": in.DeptID}})
+			return OK{OK: true}, nil
 		},
 	})
 }

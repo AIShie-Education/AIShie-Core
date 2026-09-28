@@ -1,12 +1,15 @@
 package tools_test
 
 import (
+	"context"
 	"encoding/json"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/apperr"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/domain"
@@ -462,5 +465,228 @@ func (w tree) everyEmittedTypeHasARule() {
 	}
 	if err := rows.Err(); err != nil {
 		w.t.Fatal(err)
+	}
+}
+
+// begin opens a transaction beside the tools', to hold locks in as a change
+// already under way would; calls made meanwhile queue behind it until commit.
+func (w tree) begin() (tx pgx.Tx, commit func()) {
+	w.t.Helper()
+	ctx := context.Background()
+	tx, err := w.Pool.Begin(ctx)
+	if err != nil {
+		w.t.Fatal(err)
+	}
+	w.t.Cleanup(func() { _ = tx.Rollback(ctx) })
+	return tx, func() {
+		if err := tx.Commit(ctx); err != nil {
+			w.t.Fatal(err)
+		}
+	}
+}
+
+// start makes a call in the background; its outcome arrives on the channel.
+func (w tree) start(actor uuid.UUID, name string, args m) <-chan pipeline.Outcome {
+	done := make(chan pipeline.Outcome, 1)
+	go func() {
+		out, err := w.Call(actor, name, args, "bg-"+uuid.NewString())
+		if err != nil {
+			w.t.Errorf("%s: %v", name, err)
+		}
+		done <- out
+	}()
+	return done
+}
+
+// blocked waits until n calls are waiting for a lock in this test's
+// database, or one of them has finished instead, which is for the test to
+// find out.
+func (w tree) blocked(n int, done ...<-chan pipeline.Outcome) {
+	w.t.Helper()
+	for deadline := time.Now().Add(10 * time.Second); w.Count(`SELECT count(*) FROM pg_locks l
+		JOIN pg_stat_activity a ON a.pid = l.pid WHERE NOT l.granted AND a.datname = current_database()`) < n; {
+		for _, d := range done {
+			if len(d) > 0 {
+				return
+			}
+		}
+		if time.Now().After(deadline) {
+			w.t.Fatalf("%d calls never came to wait for a lock", n)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// parentOf is where a department is in the tree now: uuid.Nil at the top.
+func (w tree) parentOf(dept uuid.UUID) uuid.UUID {
+	w.t.Helper()
+	var p *uuid.UUID
+	if err := w.Pool.QueryRow(w.t.Context(), `SELECT parent_id FROM department WHERE id = $1`, dept).Scan(&p); err != nil {
+		w.t.Fatal(err)
+	}
+	if p == nil {
+		return uuid.Nil
+	}
+	return *p
+}
+
+// §9.3 of the spec, "Moving a department", as far as the tree goes: a
+// department administrator moves what is strictly beneath an appointment of
+// theirs, only to where they administer as well, never to the top, never
+// under itself and never past eight levels.
+func TestTheTreeIsReshapedWithinReach(t *testing.T) {
+	w := newTree(t)
+	w.fails(w.Ada, "department.move", m{"dept_id": w.S, "parent_id": w.D}, apperr.FailedPrecondition, "cycle")
+	w.fails(w.Ada, "department.move", m{"dept_id": w.S, "parent_id": w.S}, apperr.FailedPrecondition, "cycle")
+	// The gate passes, since Bob covers AI's parent; History is not his.
+	w.fails(w.Bob, "department.move", m{"dept_id": w.D, "parent_id": w.S3}, apperr.Forbidden, "destination_out_of_scope")
+	w.fails(w.Bob, "department.move", m{"dept_id": w.D, "parent_id": nil}, apperr.Forbidden, "destination_out_of_scope")
+
+	// Ada covers both ends through Engineering.
+	moved := w.do(w.Ada, "department.move", m{"dept_id": w.D, "parent_id": w.S2})
+	w.wantCapacity(moved, domain.AuthorityDepartment, w.F)
+	if w.parentOf(w.D) != w.S2 {
+		t.Fatal("AI is not under Design")
+	}
+	if n := w.Count(`SELECT count(*) FROM event WHERE type = 'department.moved' AND subject_id = $1 AND course_id IS NULL
+		AND payload->>'from_parent_id' = $2 AND payload->>'to_parent_id' = $3`, w.D, w.S.String(), w.S2.String()); n != 1 {
+		t.Fatal("no department.moved, outside any course, saying from where to where")
+	}
+	// Its courses went with it, and so did who administers them: not Bob,
+	// through Computing, any more.
+	w.denied(w.Bob, "department.create", m{"name": "Vision", "parent_id": w.D}, "department_out_of_scope")
+	w.denied(w.Bob, "department.list_admins", m{"dept_id": w.D}, "department_out_of_scope")
+	if n := w.Count(`SELECT count(*) FROM course WHERE id IN ($1, $2) AND dept_id = $3`, w.CD, w.CArch, w.D); n != 2 {
+		t.Fatal("AI's courses did not stay in AI")
+	}
+	w.fails(w.Ada, "department.move", m{"dept_id": w.D, "parent_id": w.S2}, apperr.Conflict, "same_parent")
+
+	w.fails(w.Ada, "department.move", m{"dept_id": w.S, "parent_id": nil}, apperr.Forbidden, "destination_out_of_scope")
+	w.fails(w.Ada, "department.move", m{"dept_id": w.S, "parent_id": w.S3}, apperr.Forbidden, "destination_out_of_scope")
+	// Not her own appointment's department, and not one at the top.
+	w.denied(w.Ada, "department.move", m{"dept_id": w.F, "parent_id": w.S2}, "department_out_of_scope")
+	w.denied(w.Ada, "department.move", m{"dept_id": w.U, "parent_id": w.F}, "platform_role_required")
+	w.denied(w.Yuki, "department.move", m{"dept_id": w.D, "parent_id": w.S}, "platform_role_required")
+	w.denied(w.Robo, "department.move", m{"dept_id": w.D, "parent_id": w.S}, "platform_role_required")
+	if _, err := w.Call(w.Ada, "department.move", m{"dept_id": w.D, "parent_id": uuid.New()}, "nowhere"); !apperr.Is(err, apperr.NotFound) {
+		t.Fatalf("under a department that does not exist: %v", err)
+	}
+
+	// Sibling names are unique where it goes.
+	w.do(w.Ada, "department.create", m{"name": "ai", "parent_id": w.S})
+	w.fails(w.Ada, "department.move", m{"dept_id": w.D, "parent_id": w.S}, apperr.Conflict, "name_taken")
+
+	// A platform administrator moves anything anywhere, the top included,
+	// and nothing past eight levels: University 1, Engineering 2, Computing
+	// 3, then 4, 5 and 6 beneath it; Humanities, History and one more are
+	// three levels.
+	parent := w.S
+	for _, name := range []string{"4", "5", "6"} {
+		parent = testkit.Result[tools.IDOut](t, w.do(w.Admin, "department.create", m{"name": name, "parent_id": parent})).ID
+	}
+	six, five := parent, w.parentOf(parent)
+	w.do(w.Admin, "department.create", m{"name": "Archives", "parent_id": w.S3})
+	out := w.MustCall(w.Admin, "department.move", m{"dept_id": w.F2, "parent_id": six}, "too-deep")
+	if out.Status != domain.StatusFailed || out.Error.Code != apperr.FailedPrecondition ||
+		out.Error.Details["reason"] != "too_deep" || out.Error.Details["max_depth"] != domain.MaxDepartmentDepth {
+		t.Fatalf("three levels under the sixth: %+v", out)
+	}
+	w.wantCapacity(w.do(w.Admin, "department.move", m{"dept_id": w.F2, "parent_id": five}), domain.AuthorityPlatform, uuid.Nil)
+	w.do(w.Admin, "department.move", m{"dept_id": w.S2, "parent_id": nil})
+	if w.parentOf(w.S2) != uuid.Nil {
+		t.Fatal("Design is not at the top")
+	}
+	// Engineering's reach went with it: Design, and AI beneath it, are no
+	// longer Ada's.
+	w.denied(w.Ada, "department.create", m{"name": "Robotics", "parent_id": w.D}, "department_out_of_scope")
+	w.everyEmittedTypeHasARule()
+}
+
+// A department is renamed from above: by whoever administers the department
+// it is under, or a platform administrator, never by its own administrators.
+func TestADepartmentIsRenamedFromAbove(t *testing.T) {
+	w := newTree(t)
+	renamed := w.do(w.Ada, "department.update", m{"dept_id": w.S, "name": "  Computer Science "})
+	w.wantCapacity(renamed, domain.AuthorityDepartment, w.F)
+	if v := testkit.Result[tools.DepartmentView](t, renamed); v.ID != w.S || v.Name != "Computer Science" || v.ParentID == nil || *v.ParentID != w.F {
+		t.Fatalf("department.update: %+v", v)
+	}
+	if n := w.Count(`SELECT count(*) FROM event WHERE type = 'department.updated' AND subject_id = $1 AND course_id IS NULL`, w.S); n != 1 {
+		t.Fatal("no department.updated, outside any course")
+	}
+	w.wantCapacity(w.do(w.Bob, "department.update", m{"dept_id": w.D, "name": "Artificial Intelligence"}), domain.AuthorityDepartment, w.S)
+	w.wantCapacity(w.do(w.Admin, "department.update", m{"dept_id": w.U, "name": "The University"}), domain.AuthorityPlatform, uuid.Nil)
+
+	// Not one's own appointment's department, nor a sibling's, nor the top.
+	w.denied(w.Bob, "department.update", m{"dept_id": w.S, "name": "Informatics"}, "department_out_of_scope")
+	w.denied(w.Ada, "department.update", m{"dept_id": w.F, "name": "Engineering and Design"}, "department_out_of_scope")
+	w.denied(w.Carol, "department.update", m{"dept_id": w.S, "name": "Informatics"}, "department_out_of_scope")
+	w.denied(w.Ada, "department.update", m{"dept_id": w.U, "name": "Polytechnic"}, "platform_role_required")
+	w.denied(w.Yuki, "department.update", m{"dept_id": w.D, "name": "AI"}, "platform_role_required")
+	w.denied(w.Robo, "department.update", m{"dept_id": w.D, "name": "AI"}, "platform_role_required")
+
+	w.fails(w.Ada, "department.update", m{"dept_id": w.S2, "name": "computer science"}, apperr.Conflict, "name_taken")
+	w.fails(w.Ada, "department.update", m{"dept_id": w.S2, "name": "Design"}, apperr.Conflict, "same_name")
+	w.do(w.Ada, "department.update", m{"dept_id": w.S2, "name": "DESIGN"})
+	w.fails(w.Ada, "department.update", m{"dept_id": w.S2, "name": " "}, apperr.InvalidArgument, "")
+	if _, err := w.Call(w.Ada, "department.update", m{"dept_id": uuid.New(), "name": "X"}, "nobody"); !apperr.Is(err, apperr.NotFound) {
+		t.Fatalf("a department that does not exist: %v", err)
+	}
+	w.everyEmittedTypeHasARule()
+}
+
+// A move is measured under the tree lock, where the department is then:
+// moved out of the caller's reach while they waited, it is not theirs to
+// take back.
+func TestADepartmentMovedAwayMeanwhileIsNotTakenBack(t *testing.T) {
+	w := newTree(t)
+	tx, commit := w.begin()
+	if _, err := tx.Exec(t.Context(), `SELECT pg_advisory_xact_lock(1095324500, 0)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(t.Context(), `UPDATE department SET parent_id = $2 WHERE id = $1`, w.D, w.S3); err != nil {
+		t.Fatal(err)
+	}
+	// The gate finds AI under Computing, which Ada covers.
+	done := w.start(w.Ada, "department.move", m{"dept_id": w.D, "parent_id": w.S2})
+	w.blocked(1, done)
+	commit()
+	out := <-done
+	if out.Status != domain.StatusFailed || out.Error.Code != apperr.Forbidden || out.Error.Details["reason"] != "department_out_of_scope" {
+		t.Fatalf("taking back a department moved out of reach: %+v", out)
+	}
+	if w.parentOf(w.D) != w.S3 {
+		t.Fatal("AI was taken back")
+	}
+}
+
+// department_tree_valid is the backstop behind the checks: a change that
+// passed them, and then met a tree changed without the lock, is refused, and
+// the tree is left without a cycle.
+func TestTheTreeTriggerRefusesAMoveThatRacedPastItsChecks(t *testing.T) {
+	w := newTree(t)
+	// A writer that takes no tree lock puts AI under Design, and holds
+	// Design's row meanwhile.
+	tx, commit := w.begin()
+	if _, err := tx.Exec(t.Context(), `SELECT 1 FROM department WHERE id = $1 FOR UPDATE`, w.S2); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(t.Context(), `UPDATE department SET parent_id = $2 WHERE id = $1`, w.D, w.S2); err != nil {
+		t.Fatal(err)
+	}
+	// Design under AI passes every check on the tree as committed, and then
+	// waits for Design's row.
+	done := w.start(w.Admin, "department.move", m{"dept_id": w.S2, "parent_id": w.D})
+	w.blocked(1, done)
+	commit()
+	out := <-done
+	if out.Status != domain.StatusFailed || out.Error.Code != apperr.Conflict {
+		t.Fatalf("a move into a cycle made meanwhile: %+v", out)
+	}
+	if w.parentOf(w.S2) != w.F || w.parentOf(w.D) != w.S2 {
+		t.Fatal("the tree is not as the writer left it")
+	}
+	if n := w.Count(`SELECT count(*) FROM event WHERE type = 'department.moved'`); n != 0 {
+		t.Fatal("a refused move is in the feed")
 	}
 }

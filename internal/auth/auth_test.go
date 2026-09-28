@@ -351,7 +351,7 @@ func TestInvitations(t *testing.T) {
 	invite := func(valid time.Duration) string {
 		t.Helper()
 		now := time.Now()
-		tok, _, err := auth.IssueInvite(ctx, q, yuki, "test", now.Add(valid), now)
+		tok, _, err := auth.IssueInvite(ctx, q, yuki, nil, "test", now.Add(valid), now)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -490,7 +490,7 @@ func TestInvitations(t *testing.T) {
 	}
 
 	// The system actor is never invited.
-	if _, _, err := auth.IssueInvite(ctx, q, res.SystemID, "test", time.Now().Add(time.Hour), time.Now()); err == nil {
+	if _, _, err := auth.IssueInvite(ctx, q, res.SystemID, nil, "test", time.Now().Add(time.Hour), time.Now()); err == nil {
 		t.Fatal("an invitation for the system actor")
 	}
 }

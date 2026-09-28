@@ -282,6 +282,21 @@ func (q *Queries) LockCourseComponents(ctx context.Context, courseID uuid.UUID) 
 	return err
 }
 
+const lockCourseDept = `-- name: LockCourseDept :one
+SELECT dept_id FROM course WHERE id = $1 FOR NO KEY UPDATE
+`
+
+// The department a course is in, held until the end of a move: NO KEY
+// UPDATE, as the move's own UPDATE takes it, so that two moves of one course
+// take turns and each sees where the other left it. A call in the course
+// takes KEY SHARE on the row through a foreign key, and does not wait.
+func (q *Queries) LockCourseDept(ctx context.Context, id uuid.UUID) (uuid.UUID, error) {
+	row := q.db.QueryRow(ctx, lockCourseDept, id)
+	var dept_id uuid.UUID
+	err := row.Scan(&dept_id)
+	return dept_id, err
+}
+
 const setComponentParent = `-- name: SetComponentParent :exec
 UPDATE grade_component SET parent_id = $2 WHERE id = $1
 `

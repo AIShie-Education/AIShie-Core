@@ -379,11 +379,10 @@ func TestBrowserSession(t *testing.T) {
 	}
 }
 
-// A person an administrator registered chooses their password through an
-// invitation, in the browser, and is signed in.
 // docs/schema.md §2.10 over REST: root builds a tree and appoints an
 // administrator in it, who makes a department beneath the appointment,
-// staffs it, and is refused what is not theirs, until the appointment ends.
+// staffs it, renames and moves it, and is refused what is not theirs, until
+// the appointment ends.
 func TestATreeIsBuiltAndStaffedOverHTTP(t *testing.T) {
 	a := newAPI(t, 1)
 	c := a.c
@@ -417,6 +416,18 @@ func TestATreeIsBuiltAndStaffedOverHTTP(t *testing.T) {
 		!strings.Contains(tree.Raw, `"id":"`+sw+`","name":"Software","parent_id":"`+eng+`","depth":2,"administers":true,"manages":false,"appointed":true`) {
 		t.Fatalf("department.list_tree: %d %s", tree.Status, tree.Raw)
 	}
+	// He renames and moves what is beneath his appointment, and only to where it is his as well.
+	if renamed := post(sato, "/v1/departments/"+ai, m{"name": "Machine Learning"}, "rename-ai", 200); renamed.str("result", "name") != "Machine Learning" {
+		t.Fatalf("department.update: %s", renamed.Raw)
+	}
+	vision := post(sato, "/v1/departments", m{"name": "Vision", "parent_id": sw}, "vision-1", 200).str("result", "id")
+	post(sato, "/v1/departments/"+ai+"/move", m{"parent_id": vision}, "move-ai", 200)
+	if top := post(sato, "/v1/departments/"+ai+"/move", m{"parent_id": nil}, "ai-to-top", 403); top.str("error", "details", "reason") != "destination_out_of_scope" {
+		t.Fatalf("to the top: %s", top.Raw)
+	}
+	if away := post(sato, "/v1/departments/"+ai+"/move", m{"parent_id": eng}, "ai-to-eng", 403); away.str("error", "details", "reason") != "destination_out_of_scope" {
+		t.Fatalf("out of his reach: %s", away.Raw)
+	}
 	// Not his own department's staff, not at the top, and nothing of a platform administrator's.
 	if own := post(sato, "/v1/departments/"+sw+"/admins", m{"actor_id": yuki}, "yuki-sw", 403); own.str("error", "details", "reason") != "department_out_of_scope" || own.str("action_id") == "" {
 		t.Fatalf("his own department's staff: %s", own.Raw)
@@ -434,6 +445,84 @@ func TestATreeIsBuiltAndStaffedOverHTTP(t *testing.T) {
 	}
 }
 
+// docs/schema.md §2.10 over REST, for courses and people: root invites a
+// new person and appoints her in the tree; she makes a course beneath her
+// appointment, finds its instructor by their whole email, registers and
+// invites another, seats both, moves the course, and is refused the
+// directory and whatever lies outside her appointment.
+func TestADepartmentAdministratorManagesCoursesOverHTTP(t *testing.T) {
+	a := newAPI(t, 0)
+	c := a.c
+	root := a.tokenFor(c.Root)
+	post := func(token, path string, body m, key string, want int) response {
+		t.Helper()
+		res := a.do(nil, "POST", path, token, body, "Idempotency-Key", key)
+		if res.Status != want {
+			t.Fatalf("POST %s: %d %s, want %d", path, res.Status, res.Raw, want)
+		}
+		return res
+	}
+	eng := post(root, "/v1/departments", m{"name": "Engineering"}, "eng", 200).str("result", "id")
+	law := post(root, "/v1/departments", m{"name": "Law"}, "law", 200).str("result", "id")
+	invited := post(root, "/v1/actor-invitations", m{"display_name": "Ada", "email": "ada@example.edu"}, "ada", 200)
+	ada := invited.str("result", "actor_id")
+	acc := a.do(nil, "POST", "/v1/auth/invite", "", m{"token": invited.str("result", "token"), "password": "adas own password"})
+	var session string
+	for _, ck := range (&http.Response{Header: acc.Header}).Cookies() {
+		if ck.Name == httpapi.SessionCookie {
+			session = ck.Value
+		}
+	}
+	if acc.Status != 200 || acc.str("actor_id") != ada || session == "" {
+		t.Fatalf("Ada takes up root's invitation: %d %s", acc.Status, acc.Raw)
+	}
+	post(root, "/v1/departments/"+eng+"/admins", m{"actor_id": ada}, "ada-eng", 200)
+
+	design := post(session, "/v1/departments", m{"name": "Design", "parent_id": eng}, "design", 200).str("result", "id")
+	course := post(session, "/v1/courses", m{"dept_id": design, "term_id": c.Term, "code": "DES101", "title": "Drawing"},
+		"des101", 200).str("result", "course_id")
+	cp := "/v1/courses/" + course
+
+	mori := post(root, "/v1/actors", m{"kind": "human", "display_name": "Mori", "email": "mori@example.edu"}, "mori", 200).str("result", "actor_id")
+	found := a.do(nil, "GET", "/v1/actor-lookup?email=MORI%40Example.edu", session, nil)
+	if found.Status != 200 || found.str("result", "actor_id") != mori || strings.Contains(found.Raw, "example.edu") {
+		t.Fatalf("actor.lookup_by_email: %d %s", found.Status, found.Raw)
+	}
+	if partial := a.do(nil, "GET", "/v1/actor-lookup?email=mori", session, nil); partial.Status != 404 {
+		t.Fatalf("a partial email: %d %s", partial.Status, partial.Raw)
+	}
+	post(session, cp+"/instructors", m{"actor_id": mori}, "seat-mori", 200)
+	noor := post(session, "/v1/actor-invitations", m{"display_name": "Noor", "email": "noor@example.edu"}, "noor", 200)
+	if !strings.HasPrefix(noor.str("result", "token"), "aisinv_") {
+		t.Fatalf("actor.invite_new: %s", noor.Raw)
+	}
+	post(session, cp+"/instructors", m{"actor_id": noor.str("result", "actor_id")}, "seat-noor", 200)
+	if taken := post(session, "/v1/actor-invitations", m{"display_name": "Mori", "email": "mori@example.edu"}, "mori-again", 409); taken.str("error", "details", "actor_id") != mori {
+		t.Fatalf("an email already registered: %s", taken.Raw)
+	}
+
+	post(session, cp+"/move", m{"dept_id": eng}, "to-eng", 200)
+	if away := post(session, cp+"/move", m{"dept_id": law}, "to-law", 403); away.str("error", "details", "reason") != "destination_out_of_scope" {
+		t.Fatalf("out of her reach: %s", away.Raw)
+	}
+	list := a.do(nil, "GET", "/v1/courses?within_dept_id="+eng, session, nil)
+	if list.Status != 200 || !strings.Contains(list.Raw, course) || strings.Contains(list.Raw, c.Course.String()) {
+		t.Fatalf("course.list: %d %s", list.Status, list.Raw)
+	}
+	// CS101, in a department she does not administer, and the directory are not hers.
+	if other := post(session, "/v1/courses/"+c.Course.String(), m{"title": "Mine"}, "cs101", 403); other.str("error", "details", "reason") != "department_out_of_scope" {
+		t.Fatalf("another department's course: %s", other.Raw)
+	}
+	if inside := a.do(nil, "GET", cp, session, nil); inside.Status != 403 || inside.str("error", "details", "reason") != "not_a_member" {
+		t.Fatalf("inside her own department's course, unseated: %d %s", inside.Status, inside.Raw)
+	}
+	if actors := a.do(nil, "GET", "/v1/actors", session, nil); actors.Status != 403 || actors.str("error", "details", "reason") != "platform_role_required" {
+		t.Fatalf("the directory: %d %s", actors.Status, actors.Raw)
+	}
+}
+
+// A person an administrator registered chooses their password through an
+// invitation, in the browser, and is signed in.
 func TestInvitationOverHTTP(t *testing.T) {
 	a := newAPI(t, 0)
 	c := a.c

@@ -165,10 +165,14 @@ password. An invitation works once, for seven days unless the administrator
 gives another number of days (at most thirty), and inviting again replaces
 it; a password set some other way, or a new email, withdraws it. Taken up by
 someone who has a password already, it replaces that password: it is also how
-a forgotten one is reset. An agent is given a token instead (below). `actor.list` finds anyone
-registered, with whether they have a password yet or an invitation waiting,
-and `actor.update` corrects a name or gives an email to someone registered
-without one.
+a forgotten one is reset. An agent is given a token instead (below).
+`actor.list` finds anyone registered, with whether they have a password yet or
+an invitation waiting, and `actor.update` corrects a name or gives an email to
+someone registered without one. A department's administrator registers and
+invites someone new in one step (`actor.invite_new`), finds someone registered
+by their whole email (`actor.lookup_by_email`), and invites again only a
+person whose account reaches nothing beyond the departments they administer;
+that is asked again when the invitation is taken up.
 
 ### Single sign-on
 
