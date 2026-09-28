@@ -270,7 +270,7 @@ a green `make ci` locally means the same thing.
 
 A push to `main` whose checks all pass is published:
 [publish.yml](.github/workflows/publish.yml) pushes its image as
-`ghcr.io/aishiteru-lms/aishiteru-core:sha-<commit>`, moves `:edge` to it, and
+`ghcr.io/aishie-education/aishie-core:sha-<commit>`, moves `:edge` to it, and
 hands it to [deploy.yml](.github/workflows/deploy.yml) for the `staging`
 environment.
 

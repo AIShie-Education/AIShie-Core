@@ -21,7 +21,7 @@ defaults:
     shell: bash
 
 env:
-  IMAGE: ghcr.io/aishiteru-lms/aishiteru-core
+  IMAGE: ghcr.io/aishie-education/aishie-core
 
 jobs:
   image:

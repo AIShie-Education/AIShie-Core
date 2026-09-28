@@ -9,8 +9,8 @@ here=$(cd "$(dirname "$0")" && pwd)
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
-IMG=ghcr.io/aishiteru-lms/aishiteru-core:0.2.0
-OLD=ghcr.io/aishiteru-lms/aishiteru-core:0.1.0
+IMG=ghcr.io/aishie-education/aishie-core:0.2.0
+OLD=ghcr.io/aishie-education/aishie-core:0.1.0
 
 # The stand-ins. Each appends its command line to $CALLS; docker keeps the
 # image of the container named aishiteru in $STATE/container. An image's id
@@ -85,8 +85,8 @@ called() { grep -q -- "$1" "$CALLS"; }
 line() { grep -n -- "$1" "$CALLS" | head -n 1 | cut -d: -f1 || true; }
 
 # Anything that is not this repository's image is refused before anything runs.
-for bad in "" "nginx:latest" "ghcr.io/aishiteru-lms/aishiteru-core" \
-  "ghcr.io/aishiteru-lms/aishiteru-core-evil:1" "ghcr.io/other/aishiteru-core:1" \
+for bad in "" "nginx:latest" "ghcr.io/aishie-education/aishie-core" \
+  "ghcr.io/aishie-education/aishie-core-evil:1" "ghcr.io/other/aishiteru-core:1" \
   "$IMG;id" "$IMG id" "$IMG\$(id)" "$IMG\`id\`" "$IMG|id" "$IMG&id" "$IMG'x"; do
   setup refused
   if deploy "$bad"; then fail "accepted «$bad»"; fi
@@ -95,7 +95,7 @@ done
 
 # By digest, as the Deploy workflow calls it.
 setup by-digest
-deploy "ghcr.io/aishiteru-lms/aishiteru-core@sha256:$(printf 'a%.0s' $(seq 64))" || fail "refused a digest: $(cat "$STATE/out")"
+deploy "ghcr.io/aishie-education/aishie-core@sha256:$(printf 'a%.0s' $(seq 64))" || fail "refused a digest: $(cat "$STATE/out")"
 
 # A first deploy: backup, migrate, seed, start, and wait for the new version.
 setup first
@@ -172,8 +172,8 @@ grep -q "did not report healthy either" "$STATE/out" || fail "said: $(tail -n 1 
 # The same image under another name (:sha- by hand, then by digest) is not a
 # version to go back to.
 setup unhealthy-alias
-SHA_NAME=ghcr.io/aishiteru-lms/aishiteru-core:sha-abc1234
-DIGEST_NAME="ghcr.io/aishiteru-lms/aishiteru-core@sha256:$(printf 'd%.0s' $(seq 64))"
+SHA_NAME=ghcr.io/aishie-education/aishie-core:sha-abc1234
+DIGEST_NAME="ghcr.io/aishie-education/aishie-core@sha256:$(printf 'd%.0s' $(seq 64))"
 echo "$SHA_NAME" > "$STATE/container"
 printf '%s same\n%s same\n' "$SHA_NAME" "$DIGEST_NAME" > "$STATE/ids"
 HEALTH_JSON='{"status":"starting"}'
