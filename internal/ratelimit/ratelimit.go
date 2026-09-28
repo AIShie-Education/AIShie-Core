@@ -15,7 +15,7 @@ import (
 )
 
 // Limiter holds one token bucket per key: an actor id, or for sign-in
-// attempts an address or an email.
+// attempts an address, an email or a login ID.
 type Limiter struct {
 	perSecond float64
 	burst     float64

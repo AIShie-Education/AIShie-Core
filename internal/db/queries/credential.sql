@@ -22,7 +22,9 @@ INSERT INTO credential (id, actor_id, kind, secret_hash, provider, subject, toke
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11);
 
 -- name: GetPasswordCredential :one
-SELECT id, secret_hash
+-- The actor's live password, and whether someone else set it for them to
+-- change (must_change).
+SELECT id, secret_hash, must_change
 FROM credential
 WHERE actor_id = $1 AND kind = 'password' AND revoked_at IS NULL
 ORDER BY created_at DESC
@@ -31,6 +33,26 @@ LIMIT 1;
 -- name: RevokePasswordCredentials :exec
 UPDATE credential SET revoked_at = $2
 WHERE actor_id = $1 AND kind = 'password' AND revoked_at IS NULL;
+
+-- name: InsertTemporaryPassword :exec
+-- A password someone else set for its person, who must change it before
+-- anything else (member.reset_password): marked must_change, saying who set
+-- it, as the CHECK credential_must_change_is_an_issued_password holds.
+INSERT INTO credential (id, actor_id, kind, secret_hash, label, created_at, issued_by_actor_id, must_change)
+VALUES (sqlc.arg(id), sqlc.arg(actor_id), 'password', sqlc.arg(secret_hash), sqlc.arg(label), sqlc.arg(created_at),
+        sqlc.arg(issued_by_actor_id), true);
+
+-- name: RevokeSessions :execrows
+-- Signs an actor out everywhere: every browser session they have. Their API
+-- tokens are left as they are.
+UPDATE credential SET revoked_at = $2
+WHERE actor_id = $1 AND kind = 'session' AND revoked_at IS NULL;
+
+-- name: PasswordChangeRequired :one
+-- Whether an actor's live password is one someone else set, which they must
+-- change before anything else.
+SELECT EXISTS (SELECT 1 FROM credential
+               WHERE actor_id = $1 AND kind = 'password' AND revoked_at IS NULL AND must_change)::bool;
 
 -- name: RevokeCredential :execrows
 -- Only the owner's own credential; someone else's id changes nothing.
@@ -48,7 +70,7 @@ SELECT id, kind FROM credential WHERE id = $1 AND actor_id = $2;
 -- Never the hash. The issuer's name comes with the row, for an administrator
 -- telling one token from another.
 SELECT c.id, c.kind, c.provider, c.subject, c.token_prefix, c.label, c.last_used_at, c.expires_at, c.revoked_at,
-       c.created_at, c.issued_by_actor_id, i.display_name AS issued_by_name
+       c.created_at, c.issued_by_actor_id, i.display_name AS issued_by_name, c.must_change
 FROM credential c
 LEFT JOIN actor i ON i.id = c.issued_by_actor_id
 WHERE c.actor_id = $1
@@ -77,7 +99,7 @@ WHERE actor_id = $1 AND kind = 'invite' AND revoked_at IS NULL;
 -- are returned too, as GetCredentialByPrefix returns them. The actor comes
 -- with it, and who issued it: null for one made before that was recorded.
 SELECT c.id, c.actor_id, c.secret_hash, c.expires_at, c.revoked_at, c.issued_by_actor_id,
-       a.kind AS actor_kind, a.status AS actor_status, a.email AS actor_email
+       a.kind AS actor_kind, a.status AS actor_status, a.email AS actor_email, a.login_id AS actor_login_id
 FROM credential c
 JOIN actor a ON a.id = c.actor_id
 WHERE c.token_prefix = $1 AND c.kind = 'invite'

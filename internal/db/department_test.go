@@ -255,12 +255,29 @@ func TestTreeWalks(t *testing.T) {
 func TestInvitableByAndLookupByEmail(t *testing.T) {
 	w := testkit.NewDeptTree(t)
 	ctx := context.Background()
-	found, err := w.Q.LookupActorByEmail(ctx, "KEN@Example.EDU")
+	byEmail := func(email string) (dbq.LookupActorBySignInNameRow, error) {
+		return w.Q.LookupActorBySignInName(ctx, dbq.LookupActorBySignInNameParams{Email: &email})
+	}
+	found, err := byEmail("KEN@Example.EDU")
 	if err != nil || found.ID != w.Ken || found.Kind != "human" || found.HasPassword || found.HasSso || found.InviteExpiresAt != nil {
 		t.Fatalf("Ken by his email in another case: %+v (%v)", found, err)
 	}
-	if _, err := w.Q.LookupActorByEmail(ctx, "ken@example"); !errors.Is(err, pgx.ErrNoRows) {
+	if _, err := byEmail("ken@example"); !errors.Is(err, pgx.ErrNoRows) {
 		t.Fatalf("a part of an email found someone: %v", err)
+	}
+	// And by his login ID, whole and in any case, once he has one.
+	if _, err := w.Pool.Exec(ctx, `UPDATE actor SET login_id = 'HNU2023007' WHERE id = $1`, w.Ken); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"hnu2023007", "HNU2023007"} {
+		if got, err := w.Q.LookupActorBySignInName(ctx, dbq.LookupActorBySignInNameParams{LoginID: &id}); err != nil || got.ID != w.Ken {
+			t.Fatalf("Ken by his login ID %q: %+v (%v)", id, got, err)
+		}
+	}
+	for _, part := range []string{"HNU", "2023007", "ken@example.edu"} {
+		if _, err := w.Q.LookupActorBySignInName(ctx, dbq.LookupActorBySignInNameParams{LoginID: &part}); !errors.Is(err, pgx.ErrNoRows) {
+			t.Fatalf("%q, not his whole login ID, found someone: %v", part, err)
+		}
 	}
 
 	of := func(issuer, actor uuid.UUID) dbq.InvitableByRow {

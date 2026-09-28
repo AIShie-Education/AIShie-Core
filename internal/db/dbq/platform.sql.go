@@ -55,7 +55,7 @@ SELECT a.id, a.kind, a.display_name, a.email, a.status, a.platform_role, a.creat
        EXISTS (SELECT 1 FROM credential p WHERE p.actor_id = a.id AND p.kind = 'password' AND p.revoked_at IS NULL) AS has_password,
        EXISTS (SELECT 1 FROM credential s WHERE s.actor_id = a.id AND s.kind = 'sso' AND s.revoked_at IS NULL) AS has_sso,
        i.expires_at AS invite_expires_at, a.owner_actor_id, o.display_name AS owner_name, a.suspended_by_actor_id,
-       a.email_verified
+       a.email_verified, a.login_id, a.login_id_verified
 FROM actor a
 LEFT JOIN credential i ON i.actor_id = a.id AND i.kind = 'invite' AND i.revoked_at IS NULL
 LEFT JOIN actor o ON o.id = a.owner_actor_id
@@ -78,6 +78,8 @@ type GetActorViewRow struct {
 	OwnerName          *string
 	SuspendedByActorID *uuid.UUID
 	EmailVerified      bool
+	LoginID            *string
+	LoginIDVerified    bool
 }
 
 // One actor as an administrator sees it: the row, and whether they can sign
@@ -102,6 +104,8 @@ func (q *Queries) GetActorView(ctx context.Context, id uuid.UUID) (GetActorViewR
 		&i.OwnerName,
 		&i.SuspendedByActorID,
 		&i.EmailVerified,
+		&i.LoginID,
+		&i.LoginIDVerified,
 	)
 	return i, err
 }
@@ -346,7 +350,7 @@ SELECT a.id, a.kind, a.display_name, a.email, a.status, a.platform_role, a.creat
        EXISTS (SELECT 1 FROM credential p WHERE p.actor_id = a.id AND p.kind = 'password' AND p.revoked_at IS NULL) AS has_password,
        EXISTS (SELECT 1 FROM credential s WHERE s.actor_id = a.id AND s.kind = 'sso' AND s.revoked_at IS NULL) AS has_sso,
        i.expires_at AS invite_expires_at, a.owner_actor_id, o.display_name AS owner_name, a.suspended_by_actor_id,
-       a.email_verified
+       a.email_verified, a.login_id, a.login_id_verified
 FROM actor a
 LEFT JOIN credential i ON i.actor_id = a.id AND i.kind = 'invite' AND i.revoked_at IS NULL
 LEFT JOIN actor o ON o.id = a.owner_actor_id
@@ -356,7 +360,8 @@ WHERE a.id > $1 AND a.kind <> 'system'
   AND ($4::uuid IS NULL OR a.owner_actor_id = $4)
   AND ($5::text IS NULL
        OR strpos(lower(a.display_name), lower($5)) > 0
-       OR strpos(lower(coalesce(a.email, '')), lower($5)) > 0)
+       OR strpos(lower(coalesce(a.email, '')), lower($5)) > 0
+       OR strpos(lower(coalesce(a.login_id, '')), lower($5)) > 0)
 ORDER BY a.id
 LIMIT $6
 `
@@ -386,12 +391,14 @@ type ListActorsRow struct {
 	OwnerName          *string
 	SuspendedByActorID *uuid.UUID
 	EmailVerified      bool
+	LoginID            *string
+	LoginIDVerified    bool
 }
 
 // Everyone registered, as GetActorView sees them: people and agents, not the
 // system actor, which nobody registers or manages. The search is a piece of
-// the name or of the email, in any case, taken as it is: strpos has no
-// wildcards to escape.
+// the name, of the email or of the login ID, in any case, taken as it is:
+// strpos has no wildcards to escape.
 func (q *Queries) ListActors(ctx context.Context, arg ListActorsParams) ([]ListActorsRow, error) {
 	rows, err := q.db.Query(ctx, listActors,
 		arg.After,
@@ -424,6 +431,8 @@ func (q *Queries) ListActors(ctx context.Context, arg ListActorsParams) ([]ListA
 			&i.OwnerName,
 			&i.SuspendedByActorID,
 			&i.EmailVerified,
+			&i.LoginID,
+			&i.LoginIDVerified,
 		); err != nil {
 			return nil, err
 		}
@@ -554,6 +563,33 @@ func (q *Queries) ListTerms(ctx context.Context) ([]Term, error) {
 	return items, nil
 }
 
+const loginIDTaken = `-- name: LoginIDTaken :one
+SELECT EXISTS (SELECT 1 FROM actor WHERE lower(login_id) = lower($1))
+`
+
+func (q *Queries) LoginIDTaken(ctx context.Context, lower string) (bool, error) {
+	row := q.db.QueryRow(ctx, loginIDTaken, lower)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
+}
+
+const loginIDTakenByAnother = `-- name: LoginIDTakenByAnother :one
+SELECT EXISTS (SELECT 1 FROM actor WHERE lower(login_id) = lower($1) AND id <> $2)
+`
+
+type LoginIDTakenByAnotherParams struct {
+	LoginID string
+	ID      uuid.UUID
+}
+
+func (q *Queries) LoginIDTakenByAnother(ctx context.Context, arg LoginIDTakenByAnotherParams) (bool, error) {
+	row := q.db.QueryRow(ctx, loginIDTakenByAnother, arg.LoginID, arg.ID)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
+}
+
 const reactivateActor = `-- name: ReactivateActor :execrows
 UPDATE actor SET status = 'active', suspended_by_actor_id = NULL WHERE id = $1 AND status = 'suspended'
 `
@@ -604,21 +640,30 @@ const updateActor = `-- name: UpdateActor :exec
 UPDATE actor
 SET display_name = coalesce($1, display_name),
     email = coalesce($2, email),
-    email_verified = email_verified OR $2::text IS NOT NULL
-WHERE id = $3
+    email_verified = email_verified OR $2::text IS NOT NULL,
+    login_id = coalesce($3, login_id),
+    login_id_verified = login_id_verified OR $3::text IS NOT NULL
+WHERE id = $4
 `
 
 type UpdateActorParams struct {
 	DisplayName *string
 	Email       *string
+	LoginID     *string
 	ID          uuid.UUID
 }
 
 // A null leaves the value as it is. An email an administrator gives is one
 // they vouch for, as every email was before join links: one a person typed
-// registering through a link (email_verified false) is theirs no longer.
+// registering through a link (email_verified false) is theirs no longer. So
+// is a login ID.
 func (q *Queries) UpdateActor(ctx context.Context, arg UpdateActorParams) error {
-	_, err := q.db.Exec(ctx, updateActor, arg.DisplayName, arg.Email, arg.ID)
+	_, err := q.db.Exec(ctx, updateActor,
+		arg.DisplayName,
+		arg.Email,
+		arg.LoginID,
+		arg.ID,
+	)
 	return err
 }
 

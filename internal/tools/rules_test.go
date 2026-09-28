@@ -749,7 +749,8 @@ func TestPeopleAreListedCorrectedAndInvited(t *testing.T) {
 	b.try(t, b.admin, "actor.invite", m{"actor_id": b.yuki, "expires_in_days": 31}, apperr.InvalidArgument)
 	invited := b.do(t, b.admin, "actor.invite", m{"actor_id": b.yuki, "expires_in_days": 3})
 	inv := testkit.Result[tools.ActorInviteOut](t, invited)
-	if !strings.HasPrefix(inv.Token, "aisinv_") || inv.Email != "Yuki@example.edu" || time.Until(inv.ExpiresAt) < 71*time.Hour {
+	if !strings.HasPrefix(inv.Token, "aisinv_") || inv.Email == nil || *inv.Email != "Yuki@example.edu" || inv.LoginID != nil ||
+		time.Until(inv.ExpiresAt) < 71*time.Hour {
 		t.Fatalf("invitation: %+v", inv)
 	}
 	if n := b.Count(`SELECT count(*) FROM action WHERE id = $1 AND (result ? 'token' OR result::text LIKE '%aisinv_%')`, *invited.ActionID); n != 0 {

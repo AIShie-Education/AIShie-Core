@@ -69,6 +69,11 @@ var visibility = map[string][]domain.Perm{
 	EventJoinLinkCreated: {domain.PermMemberInvite, domain.PermMemberManage},
 	EventJoinLinkRevoked: {domain.PermMemberInvite, domain.PermMemberManage},
 
+	// Someone's password was reset, by whom (the action's, and the payload's
+	// reset_by_member_id): for those who manage the course's members, who
+	// may reset one. Never the password.
+	EventMemberPasswordReset: {domain.PermMemberManage},
+
 	EventCourseCreated: {domain.PermDocumentRead}, EventCourseUpdated: {domain.PermDocumentRead},
 	EventCourseActivated: {domain.PermDocumentRead}, EventCourseArchived: {domain.PermDocumentRead},
 	EventCourseMoved: {domain.PermDocumentRead},

@@ -175,6 +175,7 @@ type assertionClaims struct {
 	Kind         string  `json:"kind"`
 	Name         string  `json:"name"`
 	Email        *string `json:"email,omitempty"`
+	LoginID      *string `json:"login_id,omitempty"`
 	PlatformRole *string `json:"platform_role,omitempty"`
 	// SessionID is the credential the person asked with, so that what the
 	// runtime records can be traced back to a sign-in.
@@ -192,16 +193,22 @@ var (
 	errNotAnAudience = apperr.Invalid("the audience is not one this server makes assertions for")
 	errNotActive     = apperr.Forbid("a suspended account is given no assertion")
 	errNotAPerson    = apperr.Forbid("only a person is given an assertion; an agent's credential cannot ask for one")
+	// ErrPasswordChangeRequired refuses everything but setting one's own
+	// password to a person whose password someone else set, until they
+	// have: an assertion as much as a call (pipeline, authorize).
+	ErrPasswordChangeRequired = apperr.Forbid("set a password of your own first (credential.set_password): the one you "+
+		"signed in with was set for you by someone else").With("reason", "password_change_required")
 )
 
 // Assert makes an assertion, for audience, of the person p authenticated.
 //
 // Authenticate does not look at the actor's standing, so the actor is read
 // again here: a suspended one is refused, and so is anyone who is not a
-// person — an agent's token vouches for no one a runtime should let in. The
-// assertion lasts the configured time, and never longer than the credential
-// it was asked with, so that an assertion made in the last minutes of a
-// session ends with it.
+// person — an agent's token vouches for no one a runtime should let in — and
+// a person who must first set a password of their own, whose password
+// someone else set (password_change_required). The assertion lasts the
+// configured time, and never longer than the credential it was asked with,
+// so that an assertion made in the last minutes of a session ends with it.
 func (a *Asserter) Assert(ctx context.Context, p Principal, audience string) (Assertion, error) {
 	if !slices.Contains(a.audiences, audience) {
 		return Assertion{}, errNotAnAudience
@@ -218,6 +225,12 @@ func (a *Asserter) Assert(ctx context.Context, p Principal, audience string) (As
 		return Assertion{}, errNotActive
 	case actor.Kind != "human":
 		return Assertion{}, errNotAPerson
+	}
+	switch must, err := dbq.New(a.pool).PasswordChangeRequired(ctx, actor.ID); {
+	case err != nil:
+		return Assertion{}, fmt.Errorf("assertion: password lookup: %w", err)
+	case must:
+		return Assertion{}, ErrPasswordChangeRequired
 	}
 
 	now := a.now()
@@ -238,7 +251,7 @@ func (a *Asserter) Assert(ctx context.Context, p Principal, audience string) (As
 	token, err := a.sign(assertionClaims{
 		Issuer: a.issuer, Audience: audience, Subject: actor.ID.String(),
 		IssuedAt: iat, NotBefore: iat, Expires: expires, ID: b64(jti),
-		Kind: actor.Kind, Name: actor.DisplayName, Email: actor.Email, PlatformRole: actor.PlatformRole,
+		Kind: actor.Kind, Name: actor.DisplayName, Email: actor.Email, LoginID: actor.LoginID, PlatformRole: actor.PlatformRole,
 		SessionID: p.CredentialID.String(),
 	})
 	if err != nil {

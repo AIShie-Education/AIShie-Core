@@ -658,7 +658,9 @@ cookie: the proxy in front of it strips `Cookie`.
 - **Refused.** `400 invalid_argument` for an audience not listed, or for a
   body that is anything but that one object (another member, a key in
   another case or given twice, anything after it); `403` for a
-  suspended account or for anyone but a person (an agent's token gets none);
+  suspended account or for anyone but a person (an agent's token gets none),
+  and for a person who must first set a password of their own, whose
+  password someone else set (`password_change_required`);
   `401` with no valid credential; `404` when Core lists no audience; `429`
   under the caller's rate limit; `403` for a browser's `POST` from an origin
   Core does not trust.
@@ -666,7 +668,8 @@ cookie: the proxy in front of it strips `Cookie`.
   "JWT", "kid": …}`, signed with Ed25519. Claims: `iss` (Core's `PUBLIC_URL`,
   no `/` at the end), `aud` (the audience asked for, a string), `sub` (the
   person's actor id), `iat`, `nbf`, `exp`, `jti` (random), `kind` (`human`),
-  `name` (the display name), `email` and `platform_role` when there are any,
+  `name` (the display name), `email`, `login_id` (the person's student or staff
+  number, which they sign in with) and `platform_role` when there are any,
   and `sid` (the id of the Core credential it was asked with). It lasts
   `ASSERTION_TTL` (5 minutes by default, at most 15), and never past the
   session or token it was asked with.
@@ -678,8 +681,8 @@ cookie: the proxy in front of it strips `Cookie`.
   own audience, `exp` and `nbf` hold
   (with a few seconds' leeway at most), and `kind` is `human`. It never
   forwards an assertion, and Core takes none as a credential of its own.
-- **Roles.** The person is `sub`, and nothing else: `name` and `email` are
-  for display. `platform_role` `root` or `admin` is a school administrator.
+- **Roles.** The person is `sub`, and nothing else: `name`, `email` and
+  `login_id` are for display. `platform_role` `root` or `admin` is a school administrator.
   Owning an agent is `me_get`'s `owner_actor_id` equal to `sub`. Tutor
   settings for a course need no role of the person's: the owner of an agent
   that holds a seat with `answers_course` there may change them.

@@ -136,7 +136,7 @@ func (q *Queries) GetLiveMembership(ctx context.Context, arg GetLiveMembershipPa
 }
 
 const getMemberInCourse = `-- name: GetMemberInCourse :one
-SELECT m.id, m.course_id, m.actor_id, m.role, m.status, m.preset_id, m.added_by_actor_id, m.expires_at, m.student_scope, m.assignment_scope, m.perm_document_read, m.perm_document_read_draft, m.perm_document_write, m.perm_rubric_read, m.perm_assignment_write, m.perm_submission_read, m.perm_submission_write, m.perm_grade_read, m.perm_grade_submit, m.perm_grade_post, m.perm_member_read, m.perm_member_manage, m.perm_action_decide, m.created_at, m.principal_member_id, m.answers_course, m.perm_agent_delegate, m.perm_conversation_ask, m.perm_conversation_answer, m.join_link_id, m.perm_member_invite, a.display_name, a.kind AS actor_kind, a.owner_actor_id, o.display_name AS owner_name
+SELECT m.id, m.course_id, m.actor_id, m.role, m.status, m.preset_id, m.added_by_actor_id, m.expires_at, m.student_scope, m.assignment_scope, m.perm_document_read, m.perm_document_read_draft, m.perm_document_write, m.perm_rubric_read, m.perm_assignment_write, m.perm_submission_read, m.perm_submission_write, m.perm_grade_read, m.perm_grade_submit, m.perm_grade_post, m.perm_member_read, m.perm_member_manage, m.perm_action_decide, m.created_at, m.principal_member_id, m.answers_course, m.perm_agent_delegate, m.perm_conversation_ask, m.perm_conversation_answer, m.join_link_id, m.perm_member_invite, a.display_name, a.kind AS actor_kind, a.owner_actor_id, o.display_name AS owner_name, a.login_id
 FROM course_member m
 JOIN actor a ON a.id = m.actor_id
 LEFT JOIN actor o ON o.id = a.owner_actor_id
@@ -184,6 +184,7 @@ type GetMemberInCourseRow struct {
 	ActorKind              string
 	OwnerActorID           *uuid.UUID
 	OwnerName              *string
+	LoginID                *string
 }
 
 // The seat, with whom it is and, for an agent someone owns, whose.
@@ -226,12 +227,13 @@ func (q *Queries) GetMemberInCourse(ctx context.Context, arg GetMemberInCoursePa
 		&i.ActorKind,
 		&i.OwnerActorID,
 		&i.OwnerName,
+		&i.LoginID,
 	)
 	return i, err
 }
 
 const getMemberInCourseForUpdate = `-- name: GetMemberInCourseForUpdate :one
-SELECT m.id, m.course_id, m.actor_id, m.role, m.status, m.preset_id, m.added_by_actor_id, m.expires_at, m.student_scope, m.assignment_scope, m.perm_document_read, m.perm_document_read_draft, m.perm_document_write, m.perm_rubric_read, m.perm_assignment_write, m.perm_submission_read, m.perm_submission_write, m.perm_grade_read, m.perm_grade_submit, m.perm_grade_post, m.perm_member_read, m.perm_member_manage, m.perm_action_decide, m.created_at, m.principal_member_id, m.answers_course, m.perm_agent_delegate, m.perm_conversation_ask, m.perm_conversation_answer, m.join_link_id, m.perm_member_invite, a.display_name, a.kind AS actor_kind, a.owner_actor_id, o.display_name AS owner_name
+SELECT m.id, m.course_id, m.actor_id, m.role, m.status, m.preset_id, m.added_by_actor_id, m.expires_at, m.student_scope, m.assignment_scope, m.perm_document_read, m.perm_document_read_draft, m.perm_document_write, m.perm_rubric_read, m.perm_assignment_write, m.perm_submission_read, m.perm_submission_write, m.perm_grade_read, m.perm_grade_submit, m.perm_grade_post, m.perm_member_read, m.perm_member_manage, m.perm_action_decide, m.created_at, m.principal_member_id, m.answers_course, m.perm_agent_delegate, m.perm_conversation_ask, m.perm_conversation_answer, m.join_link_id, m.perm_member_invite, a.display_name, a.kind AS actor_kind, a.owner_actor_id, o.display_name AS owner_name, a.login_id
 FROM course_member m
 JOIN actor a ON a.id = m.actor_id
 LEFT JOIN actor o ON o.id = a.owner_actor_id
@@ -280,6 +282,7 @@ type GetMemberInCourseForUpdateRow struct {
 	ActorKind              string
 	OwnerActorID           *uuid.UUID
 	OwnerName              *string
+	LoginID                *string
 }
 
 // The same row, locked for the rest of the transaction: the management tools
@@ -323,6 +326,7 @@ func (q *Queries) GetMemberInCourseForUpdate(ctx context.Context, arg GetMemberI
 		&i.ActorKind,
 		&i.OwnerActorID,
 		&i.OwnerName,
+		&i.LoginID,
 	)
 	return i, err
 }
@@ -482,7 +486,7 @@ func (q *Queries) ListLiveDelegatesOf(ctx context.Context, principalMemberID *uu
 }
 
 const listMembers = `-- name: ListMembers :many
-SELECT m.id, m.course_id, m.actor_id, m.role, m.status, m.preset_id, m.added_by_actor_id, m.expires_at, m.student_scope, m.assignment_scope, m.perm_document_read, m.perm_document_read_draft, m.perm_document_write, m.perm_rubric_read, m.perm_assignment_write, m.perm_submission_read, m.perm_submission_write, m.perm_grade_read, m.perm_grade_submit, m.perm_grade_post, m.perm_member_read, m.perm_member_manage, m.perm_action_decide, m.created_at, m.principal_member_id, m.answers_course, m.perm_agent_delegate, m.perm_conversation_ask, m.perm_conversation_answer, m.join_link_id, m.perm_member_invite, a.display_name, a.kind AS actor_kind, a.owner_actor_id, o.display_name AS owner_name
+SELECT m.id, m.course_id, m.actor_id, m.role, m.status, m.preset_id, m.added_by_actor_id, m.expires_at, m.student_scope, m.assignment_scope, m.perm_document_read, m.perm_document_read_draft, m.perm_document_write, m.perm_rubric_read, m.perm_assignment_write, m.perm_submission_read, m.perm_submission_write, m.perm_grade_read, m.perm_grade_submit, m.perm_grade_post, m.perm_member_read, m.perm_member_manage, m.perm_action_decide, m.created_at, m.principal_member_id, m.answers_course, m.perm_agent_delegate, m.perm_conversation_ask, m.perm_conversation_answer, m.join_link_id, m.perm_member_invite, a.display_name, a.kind AS actor_kind, a.owner_actor_id, o.display_name AS owner_name, a.login_id
 FROM course_member m
 JOIN actor a ON a.id = m.actor_id
 LEFT JOIN actor o ON o.id = a.owner_actor_id
@@ -539,6 +543,7 @@ type ListMembersRow struct {
 	ActorKind              string
 	OwnerActorID           *uuid.UUID
 	OwnerName              *string
+	LoginID                *string
 }
 
 func (q *Queries) ListMembers(ctx context.Context, arg ListMembersParams) ([]ListMembersRow, error) {
@@ -593,6 +598,7 @@ func (q *Queries) ListMembers(ctx context.Context, arg ListMembersParams) ([]Lis
 			&i.ActorKind,
 			&i.OwnerActorID,
 			&i.OwnerName,
+			&i.LoginID,
 		); err != nil {
 			return nil, err
 		}
@@ -702,13 +708,15 @@ FROM actor a
 LEFT JOIN course_member m ON m.actor_id = a.id AND m.course_id = $1 AND m.status <> 'removed'
 LEFT JOIN actor o ON o.id = a.owner_actor_id
 WHERE a.kind <> 'system'
-  AND (a.id = $2 OR lower(a.email) = lower($3))
+  AND (a.id = $2 OR lower(a.email) = lower($3)
+       OR lower(a.login_id) = lower($4))
 `
 
 type LookupActorForSeatingParams struct {
 	CourseID uuid.UUID
 	ActorID  *uuid.UUID
 	Email    *string
+	LoginID  *string
 }
 
 type LookupActorForSeatingRow struct {
@@ -721,13 +729,18 @@ type LookupActorForSeatingRow struct {
 	OwnerName    *string
 }
 
-// The actor a whole email address, or an id, belongs to, for someone seating
-// them, with their seat in this course if they have a live one, and their
-// owner if they are an agent someone owns. The email must match whole, in
-// any case: this finds a person whose address one already has, and lists
-// nobody.
+// The actor a whole email address, a whole login ID, or an id, belongs to,
+// for someone seating them, with their seat in this course if they have a
+// live one, and their owner if they are an agent someone owns. The email or
+// the login ID must match whole, in any case: this finds a person whose
+// address or number one already has, and lists nobody.
 func (q *Queries) LookupActorForSeating(ctx context.Context, arg LookupActorForSeatingParams) (LookupActorForSeatingRow, error) {
-	row := q.db.QueryRow(ctx, lookupActorForSeating, arg.CourseID, arg.ActorID, arg.Email)
+	row := q.db.QueryRow(ctx, lookupActorForSeating,
+		arg.CourseID,
+		arg.ActorID,
+		arg.Email,
+		arg.LoginID,
+	)
 	var i LookupActorForSeatingRow
 	err := row.Scan(
 		&i.ID,

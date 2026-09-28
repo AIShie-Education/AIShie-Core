@@ -153,26 +153,32 @@ func (q *Queries) InsertJoinLink(ctx context.Context, arg InsertJoinLinkParams) 
 }
 
 const insertRegisteredPerson = `-- name: InsertRegisteredPerson :exec
-INSERT INTO actor (id, kind, display_name, email, email_verified, status, created_by_actor_id, created_at)
-VALUES ($1, 'human', $2, $3, false, 'active', $4, $5)
+INSERT INTO actor (id, kind, display_name, email, email_verified, login_id, login_id_verified, status,
+                   created_by_actor_id, created_at)
+VALUES ($1, 'human', $2, $3, $3::text IS NULL,
+        $4, $4::text IS NULL, 'active', $5, $6)
 `
 
 type InsertRegisteredPersonParams struct {
 	ID               uuid.UUID
 	DisplayName      string
 	Email            *string
+	LoginID          *string
 	CreatedByActorID *uuid.UUID
 	CreatedAt        time.Time
 }
 
-// A person who registers through a join link: their email is theirs to vouch
-// for alone (email_verified false), and whoever made the link, on whose
-// authority they are let in, is who created them.
+// A person who registers through a join link: their email and their login
+// ID, whichever they give, are theirs to vouch for alone (email_verified,
+// login_id_verified false), and whoever made the link, on whose authority
+// they are let in, is who created them. One they do not give is null, and
+// vouched for, as there is nothing to doubt.
 func (q *Queries) InsertRegisteredPerson(ctx context.Context, arg InsertRegisteredPersonParams) error {
 	_, err := q.db.Exec(ctx, insertRegisteredPerson,
 		arg.ID,
 		arg.DisplayName,
 		arg.Email,
+		arg.LoginID,
 		arg.CreatedByActorID,
 		arg.CreatedAt,
 	)

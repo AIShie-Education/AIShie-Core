@@ -93,17 +93,23 @@ func refused(t *testing.T, out pipeline.Outcome, status domain.ActionStatus, why
 // password, which is hashed there and not here.
 func (b *built) register(t *testing.T, token, name, email string) (pipeline.Outcome, uuid.UUID, error) {
 	t.Helper()
+	return b.registerAs(t, token, tools.JoinRegistration{DisplayName: name, Email: email})
+}
+
+// registerAs is register with whatever the person gives: a login ID, an
+// email, or both.
+func (b *built) registerAs(t *testing.T, token string, reg tools.JoinRegistration) (pipeline.Outcome, uuid.UUID, error) {
+	t.Helper()
 	ctx, q := t.Context(), dbq.New(b.Pool)
 	p, err := tools.PreviewJoinLink(ctx, q, token, b.P.Clock())
 	if err != nil {
 		return pipeline.Outcome{}, uuid.Nil, err
 	}
-	if err := tools.JoinRegistrationRefusal(ctx, q, p, email); err != nil {
+	if err := tools.JoinRegistrationRefusal(ctx, q, p, reg); err != nil {
 		return pipeline.Outcome{}, uuid.Nil, err
 	}
 	var made uuid.UUID
 	raw, _ := json.Marshal(m{"token": token})
-	reg := tools.JoinRegistration{DisplayName: name, Email: email}
 	out, err := b.P.InvokeAsNew(ctx, tools.ToolCourseJoin, raw, "register:"+p.LinkID().String(), pipeline.NewActor{
 		Make: func(ctx context.Context, q *dbq.Queries, now time.Time) (uuid.UUID, error) {
 			id, err := auth.RegisterPerson(ctx, q, p.RegisteringPerson(reg, "$argon2id$stand-in"), now)
@@ -524,7 +530,8 @@ func TestAJoinLinkSaysWhyItSeatsNobody(t *testing.T) {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
-	if strings.Join(keys, ",") != "allowed_email_domains,course,expires_at,joinable,registration" || len(shown["course"].(map[string]any)) != 3 {
+	if strings.Join(keys, ",") != "allowed_email_domains,course,email_required,expires_at,joinable,registration" ||
+		len(shown["course"].(map[string]any)) != 3 || shown["email_required"] != true {
 		t.Fatalf("the preview shows %s", raw)
 	}
 	if l := b.listed(t, live.LinkID); l.Status != "live" || !l.Joinable || l.CreatedByMemberID != b.satoM || l.CreatedByName != "Sato" ||

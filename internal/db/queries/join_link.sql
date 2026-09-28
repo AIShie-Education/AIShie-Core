@@ -50,8 +50,12 @@ ORDER BY l.id DESC
 LIMIT sqlc.arg(max_rows);
 
 -- name: InsertRegisteredPerson :exec
--- A person who registers through a join link: their email is theirs to vouch
--- for alone (email_verified false), and whoever made the link, on whose
--- authority they are let in, is who created them.
-INSERT INTO actor (id, kind, display_name, email, email_verified, status, created_by_actor_id, created_at)
-VALUES ($1, 'human', $2, $3, false, 'active', $4, $5);
+-- A person who registers through a join link: their email and their login
+-- ID, whichever they give, are theirs to vouch for alone (email_verified,
+-- login_id_verified false), and whoever made the link, on whose authority
+-- they are let in, is who created them. One they do not give is null, and
+-- vouched for, as there is nothing to doubt.
+INSERT INTO actor (id, kind, display_name, email, email_verified, login_id, login_id_verified, status,
+                   created_by_actor_id, created_at)
+VALUES (sqlc.arg(id), 'human', sqlc.arg(display_name), sqlc.narg(email), sqlc.narg(email)::text IS NULL,
+        sqlc.narg(login_id), sqlc.narg(login_id)::text IS NULL, 'active', sqlc.arg(created_by_actor_id), sqlc.arg(created_at));

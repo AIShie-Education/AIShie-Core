@@ -10,8 +10,9 @@ import (
 // The front end's sign-in page asks this server how a person may sign in,
 // before it offers anything:
 //
-//	GET /v1/auth/methods → {"password": true, "sso": null}
-//	                     → {"password": true, "sso": {"label": "PolyU NetID", "start": "/v1/auth/sso/start"}}
+//	GET /v1/auth/methods → {"password": true, "password_accepts": ["login_id", "email"], "sso": null}
+//	                     → {"password": true, "password_accepts": ["login_id", "email"],
+//	                        "sso": {"label": "PolyU NetID", "start": "/v1/auth/sso/start"}}
 //
 // One web image serves every installation, so whether it shows a single
 // sign-on button, and what the button says, is this server's to say, not the
@@ -21,6 +22,10 @@ import (
 // a sign-in; the front end adds return_to, and this server's origin when it
 // is on another one. "password" is always true, since password sign-in cannot
 // be turned off; it is there so that the answer can say otherwise one day.
+// "password_accepts" is what password sign-in takes for whose account it is,
+// in the order the sign-in field's label should name them: a login ID — a
+// student or staff number — and an email; POST /v1/auth/login takes either
+// in "login", and tells them apart by the @ an email has.
 //
 // Nothing else about the provider is said: not its issuer, its client id,
 // its scopes or its secret. The answer is the same for everyone and changes
@@ -39,9 +44,13 @@ const (
 )
 
 type methodsOut struct {
-	Password bool       `json:"password"`
-	SSO      *ssoMethod `json:"sso"`
+	Password        bool       `json:"password"`
+	PasswordAccepts []string   `json:"password_accepts"`
+	SSO             *ssoMethod `json:"sso"`
 }
+
+// passwordAccepts is what a password sign-in takes as the account's name.
+var passwordAccepts = []string{"login_id", "email"}
 
 type ssoMethod struct {
 	Label *string `json:"label"`
@@ -55,7 +64,7 @@ type ssoMethod struct {
 // request from nowhere in particular, without CORS headers, would otherwise
 // be given to the front end, and its browser would keep it from the page.
 func (s *server) methods(w http.ResponseWriter, _ *http.Request) {
-	out := methodsOut{Password: true}
+	out := methodsOut{Password: true, PasswordAccepts: passwordAccepts}
 	if s.SSO != nil {
 		out.SSO = &ssoMethod{Start: ssoStartPath}
 		if s.SSOLabel != "" {

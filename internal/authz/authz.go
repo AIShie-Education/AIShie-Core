@@ -60,6 +60,9 @@ const (
 	// A department administrator's Admin-gated call about a department they
 	// do not cover.
 	ReasonDepartmentScope Reason = "department_out_of_scope"
+	// A call by a person whose password someone else set, other than
+	// setting their own (tool.Spec.SetsOwnPassword).
+	ReasonPasswordChangeRequired Reason = "password_change_required"
 )
 
 // Decision is the result of a check. Member is set whenever a membership row
@@ -397,7 +400,8 @@ func LoadActor(ctx context.Context, q dbq.Querier, id uuid.UUID) (domain.Actor, 
 	if err != nil {
 		return domain.Actor{}, fmt.Errorf("load actor: %w", err)
 	}
-	a := domain.Actor{ID: row.ID, DisplayName: row.DisplayName, Status: row.Status, Administers: row.Administers}
+	a := domain.Actor{ID: row.ID, DisplayName: row.DisplayName, Status: row.Status, Administers: row.Administers,
+		PasswordChangeRequired: row.PasswordChangeRequired}
 	if row.PlatformRole != nil {
 		a.PlatformRole = *row.PlatformRole
 	}

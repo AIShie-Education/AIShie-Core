@@ -96,8 +96,8 @@ type Deps struct {
 	Assertions *auth.Asserter
 
 	// Calls bounds how fast one actor may call; SignIns bounds sign-in
-	// attempts per email, and per address those that fail, and counts
-	// registrations through a join link from an address with them;
+	// attempts per email or login ID, and per address those that fail, and
+	// counts registrations through a join link from an address with them;
 	// Registrations bounds registrations through one join link. Nil means
 	// no limit.
 	Calls         *ratelimit.Limiter
@@ -385,7 +385,12 @@ func bearer(r *http.Request) string {
 	return strings.TrimSpace(token)
 }
 
+// loginIn is what a sign-in gives: login, an email or a login ID (a person's
+// student or staff number), which an @ tells apart, and the password. email
+// is the name clients from before login IDs send it under, and is taken as
+// login is; given both, they must say the same.
 type loginIn struct {
+	Login    string `json:"login"`
 	Email    string `json:"email"`
 	Password string `json:"password"`
 }
@@ -393,6 +398,11 @@ type loginIn struct {
 type loginOut struct {
 	ActorID   string    `json:"actor_id"`
 	ExpiresAt time.Time `json:"expires_at"`
+	// PasswordChangeRequired: the password signed in with is one someone
+	// else set, and the person must set their own (POST /v1/me/password)
+	// before anything else; every other call is refused until then
+	// (password_change_required).
+	PasswordChangeRequired bool `json:"password_change_required"`
 }
 
 // login is not a tool: there is no actor yet to call one as. It sets the
@@ -401,7 +411,15 @@ type loginOut struct {
 func (s *server) login(w http.ResponseWriter, r *http.Request) {
 	var in loginIn
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes)).Decode(&in); err != nil {
-		s.writeError(w, r, apperr.Invalid("the body must be JSON with email and password"))
+		s.writeError(w, r, apperr.Invalid("the body must be JSON with login (an email or a login ID) and password"))
+		return
+	}
+	name := in.Login
+	switch {
+	case name == "":
+		name = in.Email
+	case in.Email != "" && in.Email != in.Login:
+		s.writeError(w, r, apperr.Invalid("give login or email, not both"))
 		return
 	}
 	// Guessing is limited twice over: by where it comes from, and by whose
@@ -409,21 +427,23 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 	// this protects the server as much as the password.
 	//
 	// The address is asked first, so that an attempt it refuses touches
-	// nothing under the email: it neither spends the allowance of the account
-	// it was aimed at nor leaves a bucket behind for ten minutes.
+	// nothing under the name: it neither spends the allowance of the account
+	// it was aimed at nor leaves a bucket behind for ten minutes. The name is
+	// its own key whatever it is, found or not, an email or a login ID, so
+	// that nothing about the limit says which accounts there are.
 	var keys []string
 	addr, known := s.clientAddr(r)
 	if known {
 		keys = append(keys, addrKey(addr))
 	}
-	keys = append(keys, emailKey(in.Email))
+	keys = append(keys, signInKey(name))
 	for _, key := range keys {
 		if ok, wait := s.SignIns.Allow(key); !ok {
 			s.tooMany(w, r, wait)
 			return
 		}
 	}
-	sess, err := s.Auth.Login(r.Context(), in.Email, in.Password)
+	sess, err := s.Auth.Login(r.Context(), name, in.Password)
 	if err != nil {
 		s.writeError(w, r, err)
 		return
@@ -439,7 +459,8 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 		s.SignIns.Refund(addrKey(addr))
 	}
 	http.SetCookie(w, s.sessionCookie(sess.Token, sess.ExpiresAt))
-	writeJSON(w, http.StatusOK, loginOut{ActorID: sess.ActorID.String(), ExpiresAt: sess.ExpiresAt})
+	writeJSON(w, http.StatusOK, loginOut{ActorID: sess.ActorID.String(), ExpiresAt: sess.ExpiresAt,
+		PasswordChangeRequired: sess.PasswordChangeRequired})
 }
 
 type acceptInviteIn struct {
@@ -447,9 +468,12 @@ type acceptInviteIn struct {
 	Password string `json:"password"`
 }
 
+// acceptInviteOut says what the person signs in with from now on: their
+// email, their login ID, or both.
 type acceptInviteOut struct {
 	ActorID   string    `json:"actor_id"`
-	Email     string    `json:"email"`
+	Email     *string   `json:"email,omitempty"`
+	LoginID   *string   `json:"login_id,omitempty"`
 	ExpiresAt time.Time `json:"expires_at"`
 }
 
@@ -481,7 +505,8 @@ func (s *server) acceptInvite(w http.ResponseWriter, r *http.Request) {
 		s.SignIns.Refund(addrKey(addr))
 	}
 	http.SetCookie(w, s.sessionCookie(acc.Token, acc.ExpiresAt))
-	writeJSON(w, http.StatusOK, acceptInviteOut{ActorID: acc.ActorID.String(), Email: acc.Email, ExpiresAt: acc.ExpiresAt})
+	writeJSON(w, http.StatusOK, acceptInviteOut{ActorID: acc.ActorID.String(), Email: acc.Email, LoginID: acc.LoginID,
+		ExpiresAt: acc.ExpiresAt})
 }
 
 // addrKey is the sign-in limit's key for an address. An IPv6 address is
@@ -519,6 +544,19 @@ var nat64 = netip.MustParsePrefix("64:ff9b::/96")
 func emailKey(email string) string {
 	sum := sha256.Sum256([]byte(strings.ToLower(strings.TrimSpace(email))))
 	return "email:" + hex.EncodeToString(sum[:])
+}
+
+// signInKey is the sign-in limit's key for what a sign-in names: an email's
+// (emailKey) for one with an @, as Login takes it, and a login ID's
+// otherwise, made the same way under a name of its own. The two never meet,
+// since no login ID has an @; an account with both has an allowance under
+// each.
+func signInKey(name string) string {
+	if auth.IsEmail(name) {
+		return emailKey(name)
+	}
+	sum := sha256.Sum256([]byte(strings.ToLower(strings.TrimSpace(name))))
+	return "login:" + hex.EncodeToString(sum[:])
 }
 
 func (s *server) logout(w http.ResponseWriter, r *http.Request) {

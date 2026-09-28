@@ -16,6 +16,7 @@ import (
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/apperr"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/auth"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/db/dbq"
+	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/ids"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/testdb"
 )
 
@@ -220,6 +221,135 @@ func TestLogin(t *testing.T) {
 	}
 }
 
+// A person signs in with their login ID as with their email: whichever the
+// name is, an @ says which, and each is matched in any case and trimmed.
+// Wrong or unknown, either is answered alike, and like an email.
+func TestLoginByLoginID(t *testing.T) {
+	pool := testdb.New(t)
+	ctx := context.Background()
+	res, err := auth.Bootstrap(ctx, pool, auth.BootstrapInput{DisplayName: "Root", Email: "root@example.edu", Password: "a long enough password"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := dbq.New(pool)
+	wei, fang := ids.New(), ids.New()
+	for _, p := range []struct {
+		id          uuid.UUID
+		name, login string
+		email       *string
+		password    string
+	}{
+		{wei, "Wei", "HNU20230001", nil, "weis long password"},
+		{fang, "Fang", "20230002", ptr("fang@example.edu"), "fangs long password"},
+	} {
+		login := p.login
+		if err := q.InsertActor(ctx, dbq.InsertActorParams{ID: p.id, Kind: "human", DisplayName: p.name, Email: p.email,
+			LoginID: &login, CreatedByActorID: &res.RootID, CreatedAt: time.Now()}); err != nil {
+			t.Fatal(err)
+		}
+		if err := auth.SetPassword(ctx, q, p.id, p.password, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	a := auth.NewAuthenticator(pool, time.Hour)
+	for _, tc := range []struct {
+		name     string
+		password string
+		want     uuid.UUID
+	}{
+		{"HNU20230001", "weis long password", wei},
+		{"hnu20230001", "weis long password", wei},
+		{" HNU20230001\t", "weis long password", wei},
+		{"20230002", "fangs long password", fang},
+		{"FANG@example.edu", "fangs long password", fang},
+	} {
+		sess, err := a.Login(ctx, tc.name, tc.password)
+		if err != nil || sess.ActorID != tc.want || sess.PasswordChangeRequired {
+			t.Fatalf("%q: %+v %v", tc.name, sess, err)
+		}
+	}
+	_, noSuch := a.Login(ctx, "nobody@example.edu", "a long enough password")
+	for _, tc := range []struct{ name, password string }{
+		{"HNU20230001", "not the password!"},   // a login ID, the wrong password
+		{"HNU20230009", "weis long password"},  // no such login ID
+		{"HNU2023000", "weis long password"},   // a piece of one
+		{"HNU 20230001", "weis long password"}, // no login ID at all, and so nobody's
+		{"20230002@", "fangs long password"},   // an email, and so not the login ID
+		{strings.Repeat("7", 65), "a long enough password"},
+		{"", "a long enough password"},
+	} {
+		if _, err := a.Login(ctx, tc.name, tc.password); err == nil || err.Error() != noSuch.Error() {
+			t.Errorf("%q: %v, want %v", tc.name, err, noSuch)
+		}
+	}
+	if strings.Contains(noSuch.Error(), "email or the password") {
+		t.Fatalf("the refusal speaks of an email alone: %v", noSuch)
+	}
+}
+
+// A password someone else set says so at sign-in, until one is set of the
+// person's own.
+func TestATemporaryPasswordSaysSoAtSignIn(t *testing.T) {
+	pool := testdb.New(t)
+	ctx := context.Background()
+	res, err := auth.Bootstrap(ctx, pool, auth.BootstrapInput{DisplayName: "Root", Email: "root@example.edu", Password: "a long enough password"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := dbq.New(pool)
+	wei, login := ids.New(), "20230001"
+	if err := q.InsertActor(ctx, dbq.InsertActorParams{ID: wei, Kind: "human", DisplayName: "Wei", LoginID: &login,
+		CreatedByActorID: &res.RootID, CreatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	a := auth.NewAuthenticator(pool, time.Hour)
+	own, err := func() (auth.Session, error) {
+		if err := auth.SetPassword(ctx, q, wei, "weis own password", time.Now()); err != nil {
+			return auth.Session{}, err
+		}
+		return a.Login(ctx, login, "weis own password")
+	}()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	temporary, err := auth.NewTemporaryPassword()
+	if err != nil || len(temporary) != 19 || strings.Count(temporary, "-") != 3 || strings.ContainsAny(temporary, "01ilo") {
+		t.Fatalf("a temporary password: %q %v", temporary, err)
+	}
+	if other, _ := auth.NewTemporaryPassword(); other == temporary {
+		t.Fatal("two temporary passwords alike")
+	}
+	ended, err := auth.SetTemporaryPassword(ctx, q, wei, res.RootID, temporary, "set by root", time.Now())
+	if err != nil || ended != 1 {
+		t.Fatalf("setting it: ended %d sessions, %v", ended, err)
+	}
+	if _, err := a.Authenticate(ctx, own.Token); !apperr.Is(err, apperr.Unauthenticated) {
+		t.Fatalf("the session before: %v", err)
+	}
+	if _, err := a.Login(ctx, login, "weis own password"); !apperr.Is(err, apperr.Unauthenticated) {
+		t.Fatalf("the password before: %v", err)
+	}
+	sess, err := a.Login(ctx, login, temporary)
+	if err != nil || !sess.PasswordChangeRequired {
+		t.Fatalf("signing in with it: %+v %v", sess, err)
+	}
+	if must, err := q.PasswordChangeRequired(ctx, wei); err != nil || !must {
+		t.Fatalf("PasswordChangeRequired: %v %v", must, err)
+	}
+	if err := auth.SetPassword(ctx, q, wei, "weis new password", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if sess, err := a.Login(ctx, login, "weis new password"); err != nil || sess.PasswordChangeRequired {
+		t.Fatalf("signing in with the new one: %+v %v", sess, err)
+	}
+	if must, err := q.PasswordChangeRequired(ctx, wei); err != nil || must {
+		t.Fatalf("PasswordChangeRequired after: %v %v", must, err)
+	}
+}
+
+func ptr[T any](v T) *T { return &v }
+
 func TestSetPasswordReplacesTheOldOne(t *testing.T) {
 	pool := testdb.New(t)
 	ctx := context.Background()
@@ -382,7 +512,7 @@ func TestInvitations(t *testing.T) {
 		t.Fatalf("weak password: %v", err)
 	}
 	acc, err := a.AcceptInvite(ctx, inv, "the first password")
-	if err != nil || acc.ActorID != yuki || acc.Email != email {
+	if err != nil || acc.ActorID != yuki || acc.Email == nil || *acc.Email != email || acc.LoginID != nil {
 		t.Fatalf("accept: %+v %v", acc, err)
 	}
 	if p, err := a.Authenticate(ctx, acc.Token); err != nil || p.ActorID != yuki || p.Kind != auth.KindSession {

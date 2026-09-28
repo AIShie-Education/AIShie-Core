@@ -5,8 +5,14 @@
 -- name: GetActorForAuthz :one
 -- administers: whether the actor holds any live appointment, so that only a
 -- department administrator's calls go on to look for the one they rely on.
+-- password_change_required: whether their live password is one someone else
+-- set (member.reset_password), which they must change before anything else.
+-- Only a password is marked so (credential_must_change_is_an_issued_password),
+-- so the mark alone finds it.
 SELECT a.id, a.display_name, a.status, a.platform_role,
-       EXISTS (SELECT 1 FROM department_admin da WHERE da.actor_id = a.id AND da.removed_at IS NULL) AS administers
+       EXISTS (SELECT 1 FROM department_admin da WHERE da.actor_id = a.id AND da.removed_at IS NULL) AS administers,
+       EXISTS (SELECT 1 FROM credential c
+               WHERE c.actor_id = a.id AND c.must_change AND c.revoked_at IS NULL) AS password_change_required
 FROM actor a
 WHERE a.id = $1;
 

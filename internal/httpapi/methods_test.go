@@ -16,18 +16,21 @@ import (
 // provider.
 func TestTheSignInPageIsToldHowToSignIn(t *testing.T) {
 	start := "/v1/auth/sso/start"
+	// A password sign-in takes a login ID or an email, in the order the
+	// sign-in field's label names them.
+	accepts := []any{"login_id", "email"}
 	for _, tc := range []struct {
 		name  string
 		sso   bool
 		label string
 		want  m
 	}{
-		{"password alone", false, "", m{"password": true, "sso": nil}},
-		{"single sign-on, in the front end's own words", true, "", m{"password": true, "sso": m{"label": nil, "start": start}}},
-		{"single sign-on, named", true, "PolyU NetID", m{"password": true, "sso": m{"label": "PolyU NetID", "start": start}}},
+		{"password alone", false, "", m{"password": true, "password_accepts": accepts, "sso": nil}},
+		{"single sign-on, in the front end's own words", true, "", m{"password": true, "password_accepts": accepts, "sso": m{"label": nil, "start": start}}},
+		{"single sign-on, named", true, "PolyU NetID", m{"password": true, "password_accepts": accepts, "sso": m{"label": "PolyU NetID", "start": start}}},
 		{"single sign-on, named in any script and with what HTML makes much of", true, `理大 <NetID> & "SSO"`,
-			m{"password": true, "sso": m{"label": `理大 <NetID> & "SSO"`, "start": start}}},
-		{"a name, with single sign-on off", false, "PolyU NetID", m{"password": true, "sso": nil}},
+			m{"password": true, "password_accepts": accepts, "sso": m{"label": `理大 <NetID> & "SSO"`, "start": start}}},
+		{"a name, with single sign-on off", false, "PolyU NetID", m{"password": true, "password_accepts": accepts, "sso": nil}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			label := func(d *httpapi.Deps) { d.SSOLabel = tc.label; d.TrustedOrigins = []string{frontEnd} }
@@ -70,7 +73,7 @@ func TestTheSignInPageIsToldHowToSignIn(t *testing.T) {
 // it to the other.
 func TestAnyoneMayAskHowToSignIn(t *testing.T) {
 	s := newSSOWith(t, nil, func(d *httpapi.Deps) { d.SSOLabel = "PolyU NetID" })
-	want := m{"password": true, "sso": m{"label": "PolyU NetID", "start": "/v1/auth/sso/start"}}
+	want := m{"password": true, "password_accepts": []any{"login_id", "email"}, "sso": m{"label": "PolyU NetID", "start": "/v1/auth/sso/start"}}
 	for _, tc := range []struct {
 		name    string
 		token   string

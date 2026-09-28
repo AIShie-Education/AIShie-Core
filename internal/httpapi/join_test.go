@@ -76,7 +76,8 @@ func TestAJoinLinkOverHTTP(t *testing.T) {
 	// What the page may show, to anyone: the course, and whether it may be
 	// joined, and by registering; nothing else.
 	pv := a.do(nil, "GET", httpapi.JoinPath+token, "", nil)
-	if pv.Status != 200 || keysOf(pv.Body) != "allowed_email_domains,course,expires_at,joinable,registration" ||
+	if pv.Status != 200 || keysOf(pv.Body) != "allowed_email_domains,course,email_required,expires_at,joinable,registration" ||
+		pv.Body["email_required"] != true ||
 		keysOf(pv.Body["course"].(map[string]any)) != "code,section,title" || pv.Body["joinable"] != true || pv.Body["registration"] != true ||
 		pv.str("course", "code") != "CS101" || pv.Header.Get("Cache-Control") != "no-store" {
 		t.Fatalf("preview: %d %v %s", pv.Status, pv.Header, pv.Raw)

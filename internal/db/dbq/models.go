@@ -95,6 +95,8 @@ type Actor struct {
 	SuspendedByActorID   *uuid.UUID
 	SiteChatCredentialID *uuid.UUID
 	EmailVerified        bool
+	LoginID              *string
+	LoginIDVerified      bool
 }
 
 type Assignment struct {
@@ -223,6 +225,7 @@ type Credential struct {
 	RevokedAt       *time.Time
 	CreatedAt       time.Time
 	IssuedByActorID *uuid.UUID
+	MustChange      bool
 }
 
 type Department struct {
