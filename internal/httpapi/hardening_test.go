@@ -815,3 +815,35 @@ func TestACallCarriesOneIdempotencyKey(t *testing.T) {
 		t.Fatalf("%d actions recorded", n)
 	}
 }
+
+// Agent harnesses that run in a browser or an app send an Origin of their
+// own: Claude's custom connectors, say, from https://claude.ai. /mcp takes a
+// bearer token and never a cookie, so a page on another site has no
+// credential to bring there, and an agent gets through from any origin. The
+// REST routes, where a browser's cookie rides along, are still guarded.
+func TestMCPTakesAnAgentFromAnyOrigin(t *testing.T) {
+	a := hardened(t, nil, nil, nil)
+	sato := a.tokenFor(a.c.Sato)
+	for _, h := range [][]string{
+		{"Origin", "https://claude.ai"},
+		{"Origin", "https://claude.ai", "Sec-Fetch-Site", "cross-site"},
+		{"Sec-Fetch-Site", "cross-site"},
+	} {
+		headers := append([]string{"Authorization", "Bearer " + sato, "Accept", "application/json, text/event-stream"}, h...)
+		res, body := a.raw("POST", a.srv.URL+httpapi.MCPPath, "application/json",
+			[]byte(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`), headers...)
+		if res.StatusCode != http.StatusOK || !strings.Contains(string(body), `"tools"`) {
+			t.Errorf("MCP with %v: %d %.300s", h, res.StatusCode, body)
+		}
+	}
+	// Without its token, it is refused for that, from anywhere.
+	res, body := a.raw("POST", a.srv.URL+httpapi.MCPPath, "application/json",
+		[]byte(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`), "Origin", "https://claude.ai", "Accept", "application/json, text/event-stream")
+	if res.StatusCode != http.StatusUnauthorized {
+		t.Errorf("MCP with no token: %d %.300s", res.StatusCode, body)
+	}
+	// The REST routes still refuse a page on another site.
+	if r := a.do(nil, "POST", "/v1/auth/logout", sato, nil, "Origin", "https://claude.ai", "Sec-Fetch-Site", "cross-site"); r.Status != http.StatusForbidden {
+		t.Errorf("REST from another site: %d %s", r.Status, r.Raw)
+	}
+}
