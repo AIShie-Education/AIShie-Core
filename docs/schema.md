@@ -375,6 +375,8 @@ narrows a principal without touching its delegates — and which a manager may h
   `conversation_answer` is capped by the principal's `conversation_ask` (your agent answering
   you is you asking, at one remove), and `agent_delegate` is denied to it whatever its row
   says: it brings no agents of its own;
+- it decides and reviews only by proposal, as any agent does (Ceilings, below):
+  `action_decide` is `confirm_required` at most;
 - the agent of someone who does not manage the course's members — a student's — does only by
   proposal what the built-in `delegate` preset does not give: for each permission that preset
   gives at a lower level than the principal holds, its level is `confirm_required` at most
@@ -426,6 +428,45 @@ owner's names for whoever decides it; approving it works the seat out again from
 refuses anything the owner no longer holds. `member.delegate_defaults` shows what the call would
 seat. `member.add` and `course.seat_instructor` refuse an owned agent: only its owner seats it,
 and only as their delegate.
+
+**Ceilings.** A seat's ceiling for a permission is the most it may hold of it at all, whatever
+its row says and whoever grants it; what a granter holds limits them further ("nobody hands out
+more than they hold", above), but that is the granter's, and the ceiling is the seat's. One
+function works them out (`domain.Ceiling`), from whether the seat's actor is an agent and, for a
+delegate, its principal's seat as it stands; everything that enforces a ceiling, and everything
+that shows one, calls it:
+
+| Reason | Permission | Ceiling | Whose seat |
+|---|---|---|---|
+| `agent_never` | `agent_delegate` | `denied` | a delegate's: it brings no agents of its own |
+| `agent_decides_by_proposal` | `action_decide` | `confirm_required` | any agent's, owned or not: each decision and review of an agent's is a proposal a person confirms — a triage assistant |
+| `student_agent_by_proposal` | any but `member_manage`, `member_invite` | `confirm_required`, where the built-in `delegate` preset gives less | the delegate of someone who does not manage the course's members (Delegates, above) |
+| `principal_level` | any | the principal's level; for `conversation_answer`, its `conversation_ask` | a delegate's |
+
+A person's seat has none below `autonomous`. Where two bound a permission at the same level, the
+reason given is the first in the table: the one that holds whatever the principal holds.
+
+- **At every call.** `authorize()` caps a delegate by them, whatever its row says (§3). For an
+  agent nobody owns it cannot, since it never reads `actor.kind`; the database holds that seat
+  instead: an agent's row that is not removed, and would hold `action_decide` above
+  `confirm_required`, is written holding `confirm_required` (trigger
+  `course_member_agent_ceiling`, migration 0014, which lowered the rows that said more, and the
+  presets for agents, told by their role `assistant`, as 0013 told them). That reads `kind` to
+  limit, never to grant, as the refusals of ownership do (§2.1). Cutting down rather than refusing
+  keeps the release before 0014 working while it goes in.
+- **Seating.** `member.add`, `course.seat_instructor` and `member.add_delegate` cut a preset's
+  levels down to the seat's ceilings, as a delegate's are cut down to what its owner holds, and
+  refuse a level the call names above one.
+- **Widening.** Every change that widens a seat (`member.update_perms`,
+  `member.update_perms_bulk`, `member.rescope`) is held to its ceilings as well as to the
+  granter's own, and refused above one; `member.update_perms_bulk` refuses whole, naming the
+  seat.
+- **Showing.** `member.get` and `member.list` (each member), `me.memberships` (each seat) and
+  `member.delegate_defaults` (the seat it would make) give `perm_ceilings`, every permission's
+  ceiling, and `perm_ceiling_reasons`, the reason for each below `autonomous`, so that a front end
+  offers only what may be given. A refusal above a ceiling gives the same code as its `reason`,
+  with `permission` and `ceiling`. A test holds every ceiling shown to what enforcement allows,
+  over seats of every kind and every permission.
 
 **Lifecycle**: add (new row, preset copied), pause (`status = 'paused'`, same id survives),
 remove (`status = 'removed'`, pending proposals cancelled, history kept), re-add (new row, new
@@ -801,9 +842,11 @@ CHECKs compare seats, and an owner's seat is not their agent's.
 The approval and review queues list the party's actions all the same — they are the course's
 queues — and mark each with whether it is the caller's to decide (`yours_to_decide`), an owner's
 own agent's by the rule above, measured as the decision would be. The database cannot go further
-and require the decider to be human, because nothing reads `actor.kind`. Nor can it see past one
-row: a decision is an action like any other, so it may itself wait for a decision or be under
-review — a triage agent whose approvals a human confirms. Confirming it carries out what it
+and require the decider to be human, because nothing that authorizes reads `actor.kind`; but an
+agent holds `action_decide` at `confirm_required` at most (§2.2, Ceilings), so whatever an agent
+decides or reviews waits for a member who is not one. Nor can the database see past one row: a
+decision is an action like any other, so it may itself wait for a decision or be under review —
+a triage agent whose approvals a human confirms. Confirming it carries out what it
 decided, so nobody confirms or reviews a decision about their own action either, at any remove.
 
 ### 2.7 Grades
@@ -1258,7 +1301,8 @@ authorize(actor, course, action_type, target) → autonomy_level
    still the actor's owner; else denied (an owned actor's seat with no principal: denied)
 3. level = member.perm_<action_type>; 'denied' → denied
    a delegate: the lower of its level and its principal's (conversation_answer: the
-   principal's conversation_ask); agent_delegate: denied
+   principal's conversation_ask); agent_delegate: denied; action_decide: confirm_required
+   at most (§2.2, Ceilings; an agent nobody owns is held to that by the database)
 4. if the target belongs to a student:
       member.student_scope = 'all', or that student ∈ member_student_scope; else denied
       a delegate: its principal's likewise
@@ -1332,6 +1376,7 @@ that reads which credential the call came with.
 | Emails are unique regardless of case | unique index on `lower(email)` |
 | Only an agent has an owner, and its owner is a person: not an agent, not the system actor, not itself | CHECKs on `actor`, trigger `actor_owner_valid` |
 | An agent's owner is fixed when it is registered: never changed, taken away, or given to one registered without | trigger `actor_owner_fixed` |
+| An agent's seat that is not removed holds `action_decide` at `confirm_required` at most: more is written as that | trigger `course_member_agent_ceiling` |
 | An agent someone owns holds no platform role | CHECK `actor_owned_holds_no_platform_role` |
 | Making an actor active forgets who suspended it | trigger `actor_suspension_cleared` |
 | Only an agent declares that it takes conversations in the site, and only with a credential of its own | CHECK `actor_site_chat_is_agent`, composite FK `actor_site_chat_credential_fk` |
@@ -1447,6 +1492,9 @@ that reads which credential the call came with.
   again on approval, and
   refused if the owner no longer holds it. Only the owner seats their agent, and only as their
   delegate: `member.add` and `course.seat_instructor` refuse an owned agent.
+- A seat holds no more than its ceilings (§2.2, Ceilings): one function works them out, and
+  seating, every widening change, `authorize()` for a delegate and the member views all call it;
+  a level named above one is refused with the reason the views give.
 - A change that widens a delegate's seat is within its principal's as well as the granter's.
   A granter who is a delegate grants within its principal's reach and life as well as its own
   (`withinGranter`, `outlastsGranter`), and `agent_delegate` up to its principal's level

@@ -1144,7 +1144,7 @@ func TestADelegateListsNothingItsPrincipalCannotReach(t *testing.T) {
 	// An overseer's delegate lists the conversations of the students its
 	// principal oversees, and no others.
 	watcher := b.agent(t, b.sato, "Sato's watcher")
-	watch := b.delegate(t, b.sato, watcher, m{"perms": m{"action_decide": "autonomous"}})
+	watch := b.delegate(t, b.sato, watcher, m{"perms": m{"action_decide": "confirm_required"}})
 	b.Exec(`UPDATE course_member SET student_scope = 'all' WHERE id = $1`, watch)
 	b.Exec(`UPDATE course_member SET student_scope = 'listed' WHERE id = $1`, b.satoM)
 	b.Exec(`INSERT INTO member_student_scope (member_id, student_member_id) VALUES ($1, $2)`, b.satoM, b.kenM)

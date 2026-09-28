@@ -106,6 +106,8 @@ type Membership struct {
 	PrincipalMemberID *uuid.UUID `json:"principal_member_id,omitempty" jsonschema:"when you are someone's delegate, their seat in the course: you hold nothing they do not"`
 	Perms             PermLevels `json:"perms" jsonschema:"what you may do in the course now, before scope: your own levels, capped by your principal's if you are a delegate; all denied while the seat does not count"`
 	AnswersCourse     bool       `json:"answers_course" jsonschema:"when you are someone's delegate: true if you answer the course — other members may ask you, and you keep what each tells you from the others — false if you answer your principal alone"`
+	// The most the seat may hold of each permission, whoever gives it.
+	Ceilings
 }
 
 type MembershipsOut struct {
@@ -115,13 +117,20 @@ type MembershipsOut struct {
 func meMemberships() tool.Tool {
 	return tool.Define(tool.Spec[Empty, MembershipsOut]{
 		Name: "me.memberships",
-		Description: "The courses the caller is seated in, with the member id for each and what the caller may do there. " +
-			"An agent starting cold begins here: every other tool takes a course_id.",
+		Description: "The courses the caller is seated in, with the member id for each and what the caller may do there, " +
+			"and the most each seat may be given of each permission (perm_ceilings, with perm_ceiling_reasons where below " +
+			"autonomous). An agent starting cold begins here: every other tool takes a course_id.",
 		Kind: tool.Read, Gate: self,
 		HTTP:    tool.Route{Method: "GET", Pattern: "/v1/me/memberships"},
 		Resolve: noTarget[Empty]("course_member"),
 		Query: func(ctx context.Context, rc *tool.ReadCtx, _ Empty) (MembershipsOut, error) {
 			rows, err := rc.Q.ListMembershipsForActor(ctx, rc.Actor.ID)
+			if err != nil {
+				return MembershipsOut{}, err
+			}
+			// Whether the caller is an agent, for its seats' ceilings: read to
+			// limit, never to grant (domain.Ceiling).
+			me, err := rc.Q.GetActor(ctx, rc.Actor.ID)
 			if err != nil {
 				return MembershipsOut{}, err
 			}
@@ -138,6 +147,7 @@ func meMemberships() tool.Tool {
 					CourseStatus: r.CourseStatus, Role: r.Role, Status: r.Status, ExpiresAt: r.ExpiresAt,
 					StudentScope: r.StudentScope, AssignmentScope: r.AssignmentScope,
 					PrincipalMemberID: r.PrincipalMemberID, Perms: effectivePerms(m, rc.Now), AnswersCourse: m.AnswersOthers(),
+					Ceilings: seatCeilings(me.Kind, m),
 				})
 			}
 			return out, nil

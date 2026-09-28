@@ -80,11 +80,15 @@ src/
                          an agent's denied; presets by role
     0013_member_invite.down.sql
                          drops it from both tables
-    0014_agent_owner_fixed.up.sql
+    0014_agent_owner_and_decisions.up.sql
                          an agent's owner never changes: a trigger refuses
-                         any change to it, taking it away or giving one
-    0014_agent_owner_fixed.down.sql
-                         drops the refusal; every agent keeps its owner
+                         any change to it, taking it away or giving one; an
+                         agent decides only by proposal: its seats and the
+                         presets for agents lowered to confirm_required, and
+                         an agent's seat written at no more
+    0014_agent_owner_and_decisions.down.sql
+                         drops both; every agent keeps its owner, and every
+                         seat and preset its levels
   seed/
     presets.sql          the eight built-in permission presets; safe to re-run
   tests/
@@ -176,8 +180,8 @@ and a proposal to the course's shared memory, 0010 over a tree with an
 appointment in force and one ended, 0011 over an agent's site chat declared,
 0012 over join links, a person registered through one and seats taken
 through it, 0013 over a seat and a preset that hand out links, and 0014
-over an owned agent and one nobody owns, whose owners may change again once
-it is down.
+over an owned agent and one nobody owns, seated deciding by proposal, whose
+owners, and levels, may change again once it is down.
 
 ## What the database enforces
 
@@ -211,6 +215,7 @@ MCP, these are the invariants that survive a bug in the tool layer.
 | Emails are unique regardless of case | unique index on `lower(email)` |
 | Only an agent has an owner; its owner is a person, not an agent, the system actor or itself; an agent someone owns holds no platform role | `actor_not_own_owner`, `actor_owned_is_agent`, `actor_owned_holds_no_platform_role`, trigger `actor_owner_valid` |
 | An agent's owner is fixed when it is registered: never changed, taken away or given later | trigger `actor_owner_fixed` |
+| An agent's seat that is not removed decides only by proposal: `action_decide` at `confirm_required` at most, a level above it written as that | trigger `course_member_agent_ceiling` |
 | Making an actor active forgets who suspended it | trigger `actor_suspension_cleared` |
 | A seat that is not removed has a principal exactly when its actor has an owner; the principal is the owner's seat, in the same course, and nobody's delegate | composite FK `course_member_principal_fk`, trigger `course_member_principal_valid` |
 | A delegate's seat is removed with its principal's, whichever release removes it | trigger `course_member_delegates_follow` |

@@ -490,7 +490,10 @@ func TestNobodyDecidesTheirOwnActionAtOneRemove(t *testing.T) {
 	taM := c.Member(c.Course, ta, "ta",
 		testkit.WithPerm(domain.PermGradeSubmit, domain.ConfirmRequired),
 		testkit.WithPerm(domain.PermActionDecide, domain.Autonomous))
-	triage := c.Actor("agent", "triage")
+	// The triager's decisions wait for a confirmation, as an agent's always
+	// do; it is a person here, since further on it is trusted to decide on
+	// its own, and under review, which an agent never is.
+	triage := c.Actor("human", "triage")
 	triageM := c.Member(c.Course, triage, "ta", testkit.WithPerm(domain.PermActionDecide, domain.ConfirmRequired))
 	second := c.Actor("agent", "second opinion")
 	c.Member(c.Course, second, "ta", testkit.WithPerm(domain.PermActionDecide, domain.ConfirmRequired))
@@ -520,10 +523,10 @@ func TestNobodyDecidesTheirOwnActionAtOneRemove(t *testing.T) {
 		t.Fatalf("the second agent's approval: %+v", deeper)
 	}
 	refused("the TA at two removes", decide(ta, deeper.ActionID, "approve", "ta-deeper"))
-	// Every link counts, not only the last: the agent, trusted to decide on
-	// its own since, confirming the approval of its own approval.
+	// Every link counts, not only the last: the triager, trusted to decide
+	// on its own since, confirming the approval of its own approval.
 	c.Exec(`UPDATE course_member SET perm_action_decide = 'autonomous' WHERE id = $1`, triageM)
-	refused("the agent confirming the approval of its own decision", decide(triage, deeper.ActionID, "approve", "t-deeper"))
+	refused("the triager confirming the approval of its own decision", decide(triage, deeper.ActionID, "approve", "t-deeper"))
 	if n := c.Count(`SELECT count(*) FROM grade`); n != 0 {
 		t.Fatal("the TA's own proposal was carried out on her own say-so")
 	}
@@ -686,15 +689,17 @@ func TestNobodyClosesTheirOwnEscalationAtOneRemove(t *testing.T) {
 // An agent someone owns acts only as their delegate, so four eyes counts
 // its owner and it, and any other agent of the owner's, as one party: none
 // decides or reviews another's action, at any remove, nor closes an
-// escalation another raised. Anyone else may. The one exception, an owner
-// deciding what they could have done themselves, is not in play here:
-// Sato's own grades wait for a confirmation too
+// escalation another raised. Anyone else may. An agent decides and reviews
+// only by proposal, so what one of the party would decide waits for a
+// person, and is refused once that person confirms it. The one exception,
+// an owner deciding what they could have done themselves, is not in play
+// here: Sato's own grades wait for a confirmation too
 // (TestAnOwnerDecidesWhatTheyCouldHaveDoneThemselves).
 func TestOneOwnersAgentsAndTheOwnerAreOneParty(t *testing.T) {
 	c := testkit.NewCS101(t, 3)
 	c.Exec(`UPDATE course_member SET perm_grade_submit = 'confirm_required' WHERE id = $1`, c.SatoM)
 	decider := []testkit.MemberOpt{testkit.ListedStudents(c.Students[0].Member, c.Students[1].Member, c.Students[2].Member),
-		testkit.WithPerm(domain.PermActionDecide, domain.Autonomous)}
+		testkit.WithPerm(domain.PermActionDecide, domain.ConfirmRequired)}
 	satoBot := c.OwnedAgent(c.Sato, "Sato's agent")
 	c.Delegate(c.Course, satoBot, c.SatoM, "delegate", append(decider, testkit.WithPerm(domain.PermGradeSubmit, domain.ConfirmRequired))...)
 	satoBot2 := c.OwnedAgent(c.Sato, "Sato's other agent")
@@ -705,6 +710,8 @@ func TestOneOwnersAgentsAndTheOwnerAreOneParty(t *testing.T) {
 	c.Delegate(c.Course, moriBot, moriM, "delegate", decider...)
 	triage := c.Actor("agent", "triage")
 	c.Member(c.Course, triage, "ta", testkit.WithPerm(domain.PermActionDecide, domain.ConfirmRequired))
+	other := c.Actor("human", "Other reviewer")
+	c.Member(c.Course, other, "instructor")
 
 	decide := func(actor uuid.UUID, action *uuid.UUID, key string) pipeline.Outcome {
 		t.Helper()
@@ -731,6 +738,18 @@ func TestOneOwnersAgentsAndTheOwnerAreOneParty(t *testing.T) {
 			}
 		}
 	}
+	// confirmed is what an agent's decision or review comes to: a proposal,
+	// which the other reviewer, outside both parties, confirms.
+	confirmed := func(what string, out pipeline.Outcome, want domain.ActionStatus) {
+		t.Helper()
+		if out.Status != domain.StatusProposed {
+			t.Fatalf("%s, which an agent only proposes: %+v", what, out)
+		}
+		v := testkit.Result[pipeline.DecideOut](t, decide(other, out.ActionID, "confirm-"+out.ActionID.String()))
+		if v.Outcome != want || (want == domain.StatusFailed && (v.Error == nil || v.Error.Code != apperr.Forbidden)) {
+			t.Fatalf("%s, once confirmed: %+v", what, v)
+		}
+	}
 
 	// The owner does not approve their agent's proposal where they could
 	// not have done it without a confirmation, nor does another of their
@@ -740,7 +759,7 @@ func TestOneOwnersAgentsAndTheOwnerAreOneParty(t *testing.T) {
 		t.Fatalf("Sato's agent grading: %+v", fromBot)
 	}
 	refused("Sato approving his agent's proposal", decide(c.Sato, fromBot.ActionID, "sato"))
-	refused("Sato's other agent approving it", decide(satoBot2, fromBot.ActionID, "bot2"))
+	confirmed("Sato's other agent approving it", decide(satoBot2, fromBot.ActionID, "bot2"), domain.StatusFailed)
 	// Nor at one remove: someone else's approval of it that waits for a
 	// person is not Sato's to confirm.
 	nested := decide(triage, fromBot.ActionID, "triage")
@@ -748,7 +767,7 @@ func TestOneOwnersAgentsAndTheOwnerAreOneParty(t *testing.T) {
 		t.Fatalf("the triage agent's approval: %+v", nested)
 	}
 	refused("Sato confirming an approval of his agent's proposal", decide(c.Sato, nested.ActionID, "sato-nested"))
-	refused("Sato's other agent confirming it", decide(satoBot2, nested.ActionID, "bot2-nested"))
+	confirmed("Sato's other agent confirming it", decide(satoBot2, nested.ActionID, "bot2-nested"), domain.StatusFailed)
 	executed("Mori confirming it", decide(mori, nested.ActionID, "mori-nested"))
 
 	// An agent does not approve its owner's proposal.
@@ -756,8 +775,8 @@ func TestOneOwnersAgentsAndTheOwnerAreOneParty(t *testing.T) {
 	if fromMori.Status != domain.StatusProposed {
 		t.Fatalf("Mori grading: %+v", fromMori)
 	}
-	refused("Mori's agent approving Mori's proposal", decide(moriBot, fromMori.ActionID, "moribot"))
-	executed("Sato's agent approving Mori's", decide(satoBot, fromMori.ActionID, "satobot"))
+	confirmed("Mori's agent approving Mori's proposal", decide(moriBot, fromMori.ActionID, "moribot"), domain.StatusFailed)
+	confirmed("Sato's agent approving Mori's", decide(satoBot, fromMori.ActionID, "satobot"), domain.StatusExecuted)
 
 	// Nor reviews it, and an escalation one of the party raised is for
 	// someone outside it to close.
@@ -766,16 +785,14 @@ func TestOneOwnersAgentsAndTheOwnerAreOneParty(t *testing.T) {
 	if underReview.ReviewState != domain.ReviewPending {
 		t.Fatalf("Mori's grade under review: %+v", underReview)
 	}
-	refused("Mori's agent reviewing Mori's grade", review(moriBot, underReview.ActionID, "reviewed", "moribot-review"))
+	confirmed("Mori's agent reviewing Mori's grade", review(moriBot, underReview.ActionID, "reviewed", "moribot-review"), domain.StatusFailed)
 	executed("Sato escalating Mori's grade", review(c.Sato, underReview.ActionID, "escalated", "sato-escalate"))
-	refused("Sato's agent closing Sato's escalation", review(satoBot, underReview.ActionID, "reviewed", "satobot-close"))
+	confirmed("Sato's agent closing Sato's escalation", review(satoBot, underReview.ActionID, "reviewed", "satobot-close"), domain.StatusFailed)
 	closing := review(triage, underReview.ActionID, "reviewed", "triage-close")
 	if closing.Status != domain.StatusProposed {
 		t.Fatalf("the triage agent's review: %+v", closing)
 	}
-	refused("Sato's agent approving a review that closes Sato's escalation", decide(satoBot2, closing.ActionID, "bot2-close"))
-	other := c.Actor("human", "Other reviewer")
-	c.Member(c.Course, other, "instructor")
+	confirmed("Sato's agent approving a review that closes Sato's escalation", decide(satoBot2, closing.ActionID, "bot2-close"), domain.StatusFailed)
 	executed("someone outside both parties closing it", decide(other, closing.ActionID, "other-close"))
 	if n := c.Count(`SELECT count(*) FROM action WHERE id = $1 AND review_state = 'reviewed'`, *underReview.ActionID); n != 1 {
 		t.Fatal("Mori's grade was not closed by someone outside the parties")
@@ -801,7 +818,7 @@ func TestAnOwnerDecidesWhatTheyCouldHaveDoneThemselves(t *testing.T) {
 		testkit.WithPerm(domain.PermGradeSubmit, domain.ConfirmRequired), testkit.WithPerm(domain.PermActionDecide, domain.ConfirmRequired))
 	sibling := c.OwnedAgent(c.Sato, "Sato's other agent")
 	c.Delegate(c.Course, sibling, c.SatoM, "delegate", testkit.ListedStudents(members...),
-		testkit.WithPerm(domain.PermActionDecide, domain.Autonomous))
+		testkit.WithPerm(domain.PermActionDecide, domain.ConfirmRequired))
 	mori := c.Actor("human", "Mori")
 	c.Member(c.Course, mori, "instructor")
 	triage := c.Actor("agent", "triage")
@@ -841,6 +858,18 @@ func TestAnOwnerDecidesWhatTheyCouldHaveDoneThemselves(t *testing.T) {
 			t.Fatalf("%s: %+v", what, out)
 		}
 	}
+	// An agent decides and reviews only by proposal: what the sibling would
+	// decide waits for a person, Mori, and is refused once he confirms it.
+	refusedOnceConfirmed := func(what string, out pipeline.Outcome) {
+		t.Helper()
+		if out.Status != domain.StatusProposed {
+			t.Fatalf("%s, which an agent only proposes: %+v", what, out)
+		}
+		v := decided(what+", confirmed by Mori", decide(mori, out.ActionID, "approve", "mori-"+out.ActionID.String()), domain.StatusFailed, false)
+		if v.Error == nil || v.Error.Code != apperr.Forbidden {
+			t.Fatalf("%s, once confirmed: %+v", what, v)
+		}
+	}
 	yours := func(actor uuid.UUID, queue string, action *uuid.UUID) bool {
 		t.Helper()
 		list := testkit.Result[tools.ActionListOut](t, c.MustCall(actor, queue, m{"course_id": c.Course}, ""))
@@ -877,10 +906,10 @@ func TestAnOwnerDecidesWhatTheyCouldHaveDoneThemselves(t *testing.T) {
 
 	// His other agent decides nothing of it, nor an agent its owner's.
 	sib := propose(bot, 1, "p1")
-	refused("Sato's other agent approving", decide(sibling, sib, "approve", "sib-1"), nil)
+	refusedOnceConfirmed("Sato's other agent approving", decide(sibling, sib, "approve", "sib-1"))
 	set(c.SatoM, domain.PermGradeSubmit, domain.ConfirmRequired)
 	own := propose(c.Sato, 9, "sato-own")
-	refused("Sato's agent approving Sato's grade", decide(sibling, own, "approve", "sib-own"), nil)
+	refusedOnceConfirmed("Sato's agent approving Sato's grade", decide(sibling, own, "approve", "sib-own"))
 
 	// Where Sato's own grades wait for a confirmation, or a review, his
 	// agent's are not his to decide, either way.
@@ -972,7 +1001,7 @@ func TestAnOwnerDecidesWhatTheyCouldHaveDoneThemselves(t *testing.T) {
 		t.Fatal("yours_to_decide on a review while Sato's own grades are under review")
 	}
 	refused("Sato reviewing, his own grades under review", review(c.Sato, unchecked, "sato-8"), "owner_not_autonomous")
-	refused("Sato's other agent reviewing", review(sibling, unchecked, "sib-8"), nil)
+	refusedOnceConfirmed("Sato's other agent reviewing", review(sibling, unchecked, "sib-8"))
 	if out := review(mori, unchecked, "mori-8"); out.Status != domain.StatusExecuted || testkit.Result[pipeline.ReviewOut](t, out).ByOwner {
 		t.Fatalf("Mori reviewing it: %+v", out)
 	}

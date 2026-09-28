@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/apperr"
+	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/authz"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/db/dbq"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/domain"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/events"
@@ -390,6 +391,9 @@ type seating struct {
 	// authority it is; otherwise the seat is added by whoever makes the call.
 	joinLinkID *uuid.UUID
 	addedBy    *uuid.UUID
+	// named are the levels the call named, which seat() refuses above the
+	// seat's ceilings; the rest, a preset's, it cuts down to them.
+	named PermLevels
 }
 
 // listsItself reports whether the seat's student list will be the seat
@@ -425,6 +429,19 @@ func seat(ctx context.Context, ec *tool.ExecCtx, s seating) (uuid.UUID, error) {
 	// owner seats it so. The database refuses it too.
 	if s.principal == nil && a.OwnerActorID != nil {
 		return uuid.Nil, apperr.Precondition("the agent belongs to someone: its owner brings it in, with member.add_delegate")
+	}
+	// No more than the seat may hold at all, whoever seats it: an agent
+	// decides only by proposal, and a delegate holds no more than its
+	// principal (domain.Ceiling). A preset's level is cut down; a level the
+	// call named is refused.
+	var principal *domain.Member
+	if s.principal != nil {
+		if principal, err = authz.LoadMember(ctx, ec.Q, *s.principal); err != nil {
+			return uuid.Nil, err
+		}
+	}
+	if err := toCeilings(isAgent(a.Kind), principal, s.perms, s.named); err != nil {
+		return uuid.Nil, err
 	}
 	// A seat whose expiry has passed is removed now rather than by the next
 	// sweep: it is in the way of the fresh one, and it was over anyway. So is

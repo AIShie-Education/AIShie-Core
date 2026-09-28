@@ -245,6 +245,9 @@ HELPER_M=$(json "$WORK/body" 'd["result"]["member_id"]')
 call 200 GET "$C/members/$HELPER_M" "$SATO"
 [ "$(json "$WORK/body" 'd["result"]["perms"]["member_manage"], d["result"]["perms"]["agent_delegate"]')" = "autonomous denied" ] ||
   fail "the helper's seat: $(cat "$WORK/body")"
+# Seated with the instructor preset, it still decides only by proposal, and its seat says why.
+[ "$(json "$WORK/body" 'd["result"]["perms"]["action_decide"], d["result"]["perm_ceilings"]["action_decide"], d["result"]["perm_ceiling_reasons"]["action_decide"]')" = "confirm_required confirm_required agent_decides_by_proposal" ] ||
+  fail "the helper's ceilings: $(cat "$WORK/body")"
 call 200 POST "$C/members" "$HELPER" "{\"actor_id\":\"$KEN_ID\",\"preset\":\"student\"}"
 KEN_M=$(json "$WORK/body" 'd["result"]["member_id"]')
 call 200 GET "$C/members/$KEN_M" "$SATO"

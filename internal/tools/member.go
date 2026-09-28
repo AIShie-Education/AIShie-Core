@@ -56,6 +56,28 @@ type MemberView struct {
 	// An agent's seat: whether it is asked in the site at all. Absent for a
 	// person's, who is.
 	SiteChat *bool `json:"site_chat,omitempty" jsonschema:"for an agent's seat: whether people in the site may start conversations with it and ask it, since what runs it, an agent runtime that answers on its own, says so (me.site_chat); false for an agent operated from an external tool. Absent for a person's seat"`
+	// The most the seat may hold of each permission, and why where that is
+	// below autonomous: what a front end offers when it changes the seat.
+	Ceilings
+}
+
+// withCeilings says in each view the most its seat may hold of each
+// permission (ceilingsOf), its delegates' principals loaded as they stand.
+func withCeilings(ctx context.Context, q dbq.Querier, views []MemberView) error {
+	var principals []uuid.UUID
+	for _, v := range views {
+		if v.PrincipalMemberID != nil {
+			principals = append(principals, *v.PrincipalMemberID)
+		}
+	}
+	loaded, err := principalsOf(ctx, q, principals)
+	if err != nil {
+		return err
+	}
+	for i := range views {
+		views[i].Ceilings = ceilingsFor(views[i].Kind, views[i].PrincipalMemberID, loaded)
+	}
+	return nil
 }
 
 // withSiteChat says in each view of an agent's seat whether it takes
@@ -100,9 +122,11 @@ type MemberListOut struct {
 
 func memberList() tool.Tool {
 	return tool.Define(tool.Spec[MemberListIn, MemberListOut]{
-		Name:        "member.list",
-		Description: "The members of a course — people and agents alike — with their roster role, status, permissions and scope.",
-		Kind:        tool.Read, Gate: readMembers,
+		Name: "member.list",
+		Description: "The members of a course — people and agents alike — with their roster role, status, permissions and scope, " +
+			"and for each seat the most it may be given of each permission (perm_ceilings), and why where that is below " +
+			"autonomous (perm_ceiling_reasons): offer nothing above it.",
+		Kind: tool.Read, Gate: readMembers,
 		HTTP: tool.Route{Method: "GET", Pattern: "/v1/courses/{course_id}/members"},
 		Resolve: func(_ context.Context, _ dbq.Querier, in MemberListIn) (tool.Target, error) {
 			return tool.Target{CourseID: in.CourseID, Type: "course_member"}, nil
@@ -116,6 +140,9 @@ func memberList() tool.Tool {
 			}
 			if err == nil {
 				err = withSiteChat(ctx, rc, out.Members)
+			}
+			if err == nil {
+				err = withCeilings(ctx, rc.Q, out.Members)
 			}
 			if len(rows) > 0 && len(rows) == int(in.limit()) {
 				out.Next = &rows[len(rows)-1].ID
@@ -141,9 +168,10 @@ func resolveMember(ctx context.Context, q dbq.Querier, courseID, memberID uuid.U
 
 func memberGet() tool.Tool {
 	return tool.Define(tool.Spec[MemberIDIn, MemberView]{
-		Name:        "member.get",
-		Description: "One member in full, including exactly which students and assignments a 'listed' scope lists.",
-		Kind:        tool.Read, Gate: readMembers,
+		Name: "member.get",
+		Description: "One member in full, including exactly which students and assignments a 'listed' scope lists, and the " +
+			"most the seat may be given of each permission (perm_ceilings, with perm_ceiling_reasons where below autonomous).",
+		Kind: tool.Read, Gate: readMembers,
 		HTTP: tool.Route{Method: "GET", Pattern: "/v1/courses/{course_id}/members/{member_id}"},
 		Resolve: func(ctx context.Context, q dbq.Querier, in MemberIDIn) (tool.Target, error) {
 			return resolveMember(ctx, q, in.CourseID, in.MemberID)
@@ -155,6 +183,9 @@ func memberGet() tool.Tool {
 			}
 			views := []MemberView{viewMember(m)}
 			if err := withSiteChat(ctx, rc, views); err != nil {
+				return MemberView{}, err
+			}
+			if err := withCeilings(ctx, rc.Q, views); err != nil {
 				return MemberView{}, err
 			}
 			v := views[0]
@@ -247,7 +278,9 @@ func memberAdd() tool.Tool {
 		Name: "member.add",
 		Description: "Seat an actor — a person or an agent — in the course. A preset gives the starting role, permissions " +
 			"and scope, and any of them can be overridden here. You cannot grant more than you hold yourself: no permission " +
-			"above your own level, and no scope wider than your own. An agent someone owns is not seated here: its owner " +
+			"above your own level, and no scope wider than your own. An agent decides and reviews only by proposal: its " +
+			"action_decide is confirm_required at most, a preset's cut down to it and a level named above it refused " +
+			"(agent_decides_by_proposal). An agent someone owns is not seated here: its owner " +
 			"brings it in as their delegate, with member.add_delegate.",
 		Kind: tool.Write, Gate: manageMembers,
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/members"},
@@ -261,7 +294,8 @@ func memberAdd() tool.Tool {
 			}
 			s := seating{courseID: in.CourseID, actorID: in.ActorID, preset: &preset, perms: presetPerms(preset),
 				role: preset.Role, studentScope: preset.StudentScope, assignmentScope: preset.AssignmentScope,
-				listedStudents: in.ListedStudents, listedAssignments: in.ListedAssignments, expiresAt: asStored(in.ExpiresAt)}
+				listedStudents: in.ListedStudents, listedAssignments: in.ListedAssignments, expiresAt: asStored(in.ExpiresAt),
+				named: in.Perms}
 			if in.Role != nil {
 				s.role = *in.Role
 			}
@@ -532,11 +566,14 @@ type shape struct {
 	// principal is set for a delegate's seat, which is held to its
 	// principal's as well as to the granter's.
 	principal *uuid.UUID
+	// agent says the seat is an agent's, which decides only by proposal
+	// (domain.Ceiling).
+	agent bool
 }
 
 func shapeOf(ctx context.Context, q *dbq.Queries, m dbq.GetMemberInCourseRow) (shape, error) {
 	s := shape{perms: memberPerms(m), studentScope: m.StudentScope, assignmentScope: m.AssignmentScope, expiresAt: m.ExpiresAt,
-		principal: m.PrincipalMemberID}
+		principal: m.PrincipalMemberID, agent: isAgent(m.ActorKind)}
 	var err error
 	if s.students, err = q.ListStudentScope(ctx, m.ID); err != nil {
 		return s, err
@@ -583,8 +620,9 @@ func opens(fromKind string, from []uuid.UUID, toKind string, to []uuid.UUID) boo
 
 // grant is the one check every change to a seat goes through: if the change
 // widens anything, the whole of what the member will then hold must be
-// within the granter's own, and, for a delegate's seat, within its
-// principal's as well (withinPrincipal).
+// within the granter's own, within what the seat may hold at all
+// (withinCeilings), and, for a delegate's seat, within its principal's as
+// well (withinPrincipal).
 func grant(ctx context.Context, ec *tool.ExecCtx, before, after shape) error {
 	if !after.widens(before) {
 		return nil
@@ -598,7 +636,7 @@ func grant(ctx context.Context, ec *tool.ExecCtx, before, after shape) error {
 	if after.principal != nil {
 		return withinPrincipal(ctx, ec.Q, *after.principal, after)
 	}
-	return nil
+	return withinCeilings(after.agent, nil, after.perms)
 }
 
 // withinPrincipal holds a widening change to a delegate's seat to its
@@ -617,11 +655,8 @@ func withinPrincipal(ctx context.Context, q *dbq.Queries, principalID uuid.UUID,
 	if err != nil {
 		return err
 	}
-	for _, perm := range domain.AllPerms {
-		if limit := domain.DelegateCap(p, perm); after.perms[perm] > limit {
-			return apperr.Forbid("the delegate's principal holds %s at %s, so the delegate cannot hold it at %s", perm, limit, after.perms[perm]).
-				With("permission", string(perm))
-		}
+	if err := withinCeilings(true, p, after.perms); err != nil {
+		return err
 	}
 	if err := withinGranter(ctx, q, p, permSet{}, false, after.studentScope, after.students, after.assignmentScope, after.assignments); err != nil {
 		if e, ok := apperr.As(err); ok {
@@ -646,7 +681,8 @@ func memberUpdatePerms() tool.Tool {
 		Name: "member.update_perms",
 		Description: "Change individual permissions on a member. It takes effect on their next call: nothing is cached. " +
 			"Raising one is a grant: everything the member will then hold — every permission, over their whole scope, " +
-			"for as long as their seat lasts — must be within what you hold yourself. Lowering is always allowed.",
+			"for as long as their seat lasts — must be within what you hold yourself, and within what the seat may hold " +
+			"at all (perm_ceilings in member.get; above it the refusal gives the same reason code). Lowering is always allowed.",
 		Kind: tool.Write, Gate: manageMembers,
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/members/{member_id}/perms"},
 		Resolve: func(ctx context.Context, q dbq.Querier, in MemberUpdatePermsIn) (tool.Target, error) {
@@ -884,8 +920,10 @@ func memberUpdatePermsBulk() tool.Tool {
 		Name: "member.update_perms_bulk",
 		Description: "Change individual permissions on every seat with one roster role — every student, say — other than " +
 			"your own, removed and expired seats left out. Each change is held to the rules of member.update_perms: " +
-			"raising a level is a grant that must be within what you hold yourself, over that member's whole scope. " +
-			"If any one seat cannot be changed, none is. It changes the seats there are now: a seat added later takes its " +
+			"raising a level is a grant that must be within what you hold yourself, over that member's whole scope, and " +
+			"within what the seat may hold at all (perm_ceilings): an agent's action_decide goes no higher than " +
+			"confirm_required. If any one seat cannot be changed, none is, and the refusal names it (member_id) and says " +
+			"why (reason). It changes the seats there are now: a seat added later takes its " +
 			"preset's levels, so repeat the call, give the levels to member.add, or use a department preset. " +
 			"A delegate's call is refused whole (not_your_principal) when the role takes in its principal's seat or " +
 			"another agent of its principal's.",

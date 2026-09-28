@@ -111,16 +111,12 @@ func resolveDelegateSeat(ctx context.Context, q dbq.Querier, m *domain.Member, i
 		if !ok {
 			continue
 		}
-		if limit := domain.DelegateCap(m, p); l > limit {
-			switch {
-			case p == domain.PermAgentDelegate:
-				return seating{}, apperr.Forbid("a delegate never holds %s: it brings no agents of its own", p).With("permission", string(p))
-			case limit < m.Perm(p):
-				return seating{}, apperr.Forbid("your agent may hold %s at %s at most: beyond what the delegate preset gives, "+
-					"the agent of someone who does not manage the course's members acts only by proposal", p, limit).
-					With("permission", string(p))
+		if limit, why := domain.Ceiling(true, m, p); l > limit {
+			if why == domain.CeilingPrincipalLevel {
+				return seating{}, apperr.Forbid("you hold %s at %s and cannot give your agent %s", p, limit, l).
+					With("permission", string(p)).With("reason", string(why)).With("ceiling", limit.String())
 			}
-			return seating{}, apperr.Forbid("you hold %s at %s and cannot give your agent %s", p, limit, l).With("permission", string(p))
+			return seating{}, errAboveCeiling(p, l, limit, why)
 		}
 		perms[p] = l
 	}
@@ -241,7 +237,9 @@ func memberAddDelegate() tool.Tool {
 			"Your level of agent_delegate decides whether this needs an instructor's approval first. " +
 			"Unless you manage the course's members, whatever your agent may do beyond what the delegate preset gives " +
 			"— your own writes, such as drafting your submission — it does only by proposal (confirm_required at most), " +
-			"whoever grants it. " +
+			"whoever grants it. It decides and reviews only by proposal, as any agent does: action_decide at " +
+			"confirm_required at most. A level named above what it may hold is refused, saying why (reason, as " +
+			"perm_ceiling_reasons in member.delegate_defaults gives it); a preset's is cut down. " +
 			"It holds member_manage or member_invite only when you name them in perms, whatever the preset carries; " +
 			"then it manages the course's members, or hands out its join links, for you, and never acts on your own " +
 			"seat nor on your other agents' (not_your_principal).",
@@ -325,6 +323,9 @@ type DelegateDefaultsOut struct {
 	// Level is the caller's agent_delegate: what member.add_delegate would
 	// come to.
 	Level string `json:"level" jsonschema:"autonomous: seated at once; pending_review: seated, and reviewed after; confirm_required: a request an instructor approves"`
+	// The most the agent's seat may hold of each permission, whatever is
+	// named: what member.add_delegate accepts at most.
+	Ceilings
 }
 
 func memberDelegateDefaults() tool.Tool {
@@ -332,7 +333,8 @@ func memberDelegateDefaults() tool.Tool {
 		Name: "member.delegate_defaults",
 		Description: "What member.add_delegate would seat your agent with here if you named nothing but the preset: its " +
 			"permissions, which students and assignments it would reach, when it would end, and whether bringing it in " +
-			"needs an instructor's approval first, and whether it would answer the course or you alone.",
+			"needs an instructor's approval first, and whether it would answer the course or you alone; and the most it " +
+			"may be given of each permission if you name one (perm_ceilings, with perm_ceiling_reasons where below autonomous).",
 		Kind: tool.Read, Gate: bringsAgents,
 		HTTP: tool.Route{Method: "GET", Pattern: "/v1/courses/{course_id}/delegates/defaults"},
 		Resolve: func(_ context.Context, _ dbq.Querier, in DelegateDefaultsIn) (tool.Target, error) {
@@ -346,7 +348,8 @@ func memberDelegateDefaults() tool.Tool {
 			out := DelegateDefaultsOut{PresetID: s.preset.ID, Preset: s.preset.Name, Role: s.role, Perms: s.perms.view(),
 				StudentScope: s.studentScope, ListedStudents: nonNil(s.listedStudents),
 				AssignmentScope: s.assignmentScope, ListedAssignments: nonNil(s.listedAssignments),
-				ExpiresAt: s.expiresAt, AnswersCourse: s.answersCourse, Level: rc.Member.Perm(domain.PermAgentDelegate).String()}
+				ExpiresAt: s.expiresAt, AnswersCourse: s.answersCourse, Level: rc.Member.Perm(domain.PermAgentDelegate).String(),
+				Ceilings: ceilingsOf(true, rc.Member)}
 			return out, nil
 		},
 	})

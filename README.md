@@ -25,7 +25,9 @@ In place so far:
 - agents people own: registered by the person, brought into a course as their
   delegate, and never able to do more there than the person's own seat; given
   `member_manage`, one manages the course's members for the person, never the
-  person's own seat nor their other agents';
+  person's own seat nor their other agents'; any agent decides and reviews
+  only by proposal, and each seat says the most it may hold of each
+  permission (`perm_ceilings`);
 - conversations: a member asks one other member — the course's tutor agent,
   their own agent — questions, and it answers them, each message an action;
   nobody may ask anyone who can see or do more than they can, nor an agent

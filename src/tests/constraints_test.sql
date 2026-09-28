@@ -284,6 +284,50 @@ SELECT pg_temp.ok('making an actor active again forgets who suspended it', $q$
 SELECT pg_temp.ok('an owned agent is seated as its owner''s delegate', $q$
     INSERT INTO course_member (id, course_id, actor_id, role, added_by_actor_id, student_scope, assignment_scope, principal_member_id)
     VALUES ('00000000-0000-0000-0000-00000000005a', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000000038', 'assistant', '00000000-0000-0000-0000-000000000035', 'listed', 'all', '00000000-0000-0000-0000-000000000052') $q$);
+-- An agent decides only by proposal: its seat is written with action_decide
+-- at confirm_required at most, owned or not; a person's as it is given.
+SELECT pg_temp.ok('an agent''s seat is written deciding only by proposal', $q$
+    UPDATE course_member SET perm_action_decide = 'autonomous' WHERE id = '00000000-0000-0000-0000-000000000053';
+    UPDATE course_member SET perm_action_decide = 'pending_review' WHERE id = '00000000-0000-0000-0000-00000000005a';
+    DO $chk$
+    BEGIN
+        IF EXISTS (SELECT 1 FROM course_member WHERE id IN ('00000000-0000-0000-0000-000000000053', '00000000-0000-0000-0000-00000000005a')
+                   AND perm_action_decide <> 'confirm_required') THEN
+            RAISE EXCEPTION 'an agent''s seat holds action_decide above confirm_required';
+        END IF;
+    END $chk$ $q$);
+SELECT pg_temp.ok('and so is a new one', $q$
+    INSERT INTO actor (id, kind, display_name, created_by_actor_id)
+    VALUES ('00000000-0000-0000-0000-0000000003d0', 'agent', 'triage', '00000000-0000-0000-0000-000000000031');
+    INSERT INTO course_member (id, course_id, actor_id, role, added_by_actor_id, student_scope, assignment_scope, perm_action_decide)
+    VALUES ('00000000-0000-0000-0000-0000000005d0', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-0000000003d0',
+            'assistant', '00000000-0000-0000-0000-000000000034', 'all', 'all', 'autonomous');
+    DO $chk$
+    BEGIN
+        IF NOT EXISTS (SELECT 1 FROM course_member WHERE id = '00000000-0000-0000-0000-0000000005d0' AND perm_action_decide = 'confirm_required') THEN
+            RAISE EXCEPTION 'a new agent''s seat holds action_decide above confirm_required';
+        END IF;
+    END $chk$ $q$);
+SELECT pg_temp.ok('a person''s seat decides as it is given, and an agent''s below the ceiling too', $q$
+    UPDATE course_member SET perm_action_decide = 'pending_review' WHERE id = '00000000-0000-0000-0000-000000000058';
+    UPDATE course_member SET perm_action_decide = 'denied' WHERE id = '00000000-0000-0000-0000-000000000053';
+    DO $chk$
+    BEGIN
+        IF NOT EXISTS (SELECT 1 FROM course_member WHERE id = '00000000-0000-0000-0000-000000000051' AND perm_action_decide = 'autonomous')
+           OR NOT EXISTS (SELECT 1 FROM course_member WHERE id = '00000000-0000-0000-0000-000000000058' AND perm_action_decide = 'pending_review')
+           OR NOT EXISTS (SELECT 1 FROM course_member WHERE id = '00000000-0000-0000-0000-000000000053' AND perm_action_decide = 'denied') THEN
+            RAISE EXCEPTION 'a level at or below the ceiling, or a person''s, was changed';
+        END IF;
+    END $chk$ $q$);
+SELECT pg_temp.ok('a removed agent''s seat is history, and is left as it was written', $q$
+    UPDATE course_member SET status = 'removed' WHERE id = '00000000-0000-0000-0000-0000000005d0';
+    UPDATE course_member SET perm_action_decide = 'autonomous' WHERE id = '00000000-0000-0000-0000-0000000005d0';
+    DO $chk$
+    BEGIN
+        IF NOT EXISTS (SELECT 1 FROM course_member WHERE id = '00000000-0000-0000-0000-0000000005d0' AND perm_action_decide = 'autonomous') THEN
+            RAISE EXCEPTION 'a removed seat was changed';
+        END IF;
+    END $chk$ $q$);
 SELECT pg_temp.fails('an owned agent is not seated without a principal', '23514', $q$
     INSERT INTO course_member (course_id, actor_id, role, added_by_actor_id, student_scope, assignment_scope)
     VALUES ('00000000-0000-0000-0000-000000000042', '00000000-0000-0000-0000-000000000038', 'assistant', '00000000-0000-0000-0000-000000000034', 'all', 'all') $q$);
