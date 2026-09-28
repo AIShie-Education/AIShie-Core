@@ -86,6 +86,11 @@ type Deps struct {
 	SSO    auth.IdentityProvider
 	Signer *signing.Signer
 
+	// Assertions vouch for the person signed in here to a service that
+	// hosts agents, and publish the key that checks them. Nil means this
+	// server has no key and makes none.
+	Assertions *auth.Asserter
+
 	// Calls bounds how fast one actor may call; SignIns bounds sign-in
 	// attempts per email, and per address those that fail. Nil means no
 	// limit.
@@ -137,6 +142,8 @@ func NewHandler(d Deps) http.Handler {
 			mux.HandleFunc("GET "+ssoReturnPath, s.ssoCallback)
 		}
 		mux.Handle("POST /v1/auth/logout", s.authenticated(s.logout))
+		mux.Handle("POST "+AssertionPath, s.assertions(s.authenticated(s.assert)))
+		mux.HandleFunc("GET "+KeysPath, s.keys)
 		mux.HandleFunc("GET /v1/tools", s.listTools)
 		mux.Handle("POST /v1/tools/{tool_name}", s.authenticated(s.callByName))
 		for _, t := range d.Pipeline.Registry().Exposed() {

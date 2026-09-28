@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/auth"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/blob"
@@ -82,6 +83,12 @@ Environment:
   OIDC_SUBJECT_CLAIM   default upn; the claim an account is known by
   OIDC_SCOPES          default "openid profile email"
                        Register <PUBLIC_URL>/v1/auth/sso/callback with the provider.
+  RUNTIME_AUDIENCES    the services that host agents a signed-in person may be vouched for to,
+                       comma separated absolute URLs such as https://lms.example.edu/runtime;
+                       POST /v1/auth/assertion makes the assertion, GET /v1/auth/keys checks it
+  ASSERTION_KEY        base64 of a 32-byte Ed25519 seed; default derived from SIGNING_KEY,
+                       one of which RUNTIME_AUDIENCES needs
+  ASSERTION_TTL        default 5m, from 1m to 15m; never longer than the session asking
 `
 
 func main() {
@@ -196,6 +203,10 @@ func serve(cfg config.Config) error {
 			return err
 		}
 	}
+	asserter, err := newAsserter(pool, cfg)
+	if err != nil {
+		return err
+	}
 	srv := &http.Server{
 		Addr: cfg.HTTPAddr,
 		Handler: httpapi.NewHandler(httpapi.Deps{
@@ -205,7 +216,7 @@ func serve(cfg config.Config) error {
 			TrustedOrigins: cfg.TrustedOrigins, TrustedProxies: cfg.TrustedProxies,
 			InsecureCookies: cfg.InsecureCookies, CookieSameSite: sameSite(cfg.CookieSameSite),
 			Blob: store, MaxUploadBytes: cfg.MaxUploadBytes,
-			SSO: sso, Signer: signatures,
+			SSO: sso, Signer: signatures, Assertions: asserter,
 		}),
 		// Headers within ten seconds, an idle keep-alive for two minutes; the
 		// body and the response are bounded per request by the handler.
@@ -215,6 +226,11 @@ func serve(cfg config.Config) error {
 	errc := make(chan error, 1)
 	go func() { errc <- srv.ListenAndServe() }()
 	log.Info("listening", "addr", cfg.HTTPAddr, "blob_store", cfg.BlobStore, "version", version.Version, "schema_latest", latest, "tools", len(reg.Exposed()))
+	if asserter != nil {
+		// The key's id is public, and says which key a runtime should find
+		// at /v1/auth/keys.
+		log.Info("assertions", "audiences", len(cfg.RuntimeAudiences), "kid", asserter.KeyID(), "ttl", cfg.AssertionTTL.String())
+	}
 
 	select {
 	case err := <-errc:
@@ -234,6 +250,22 @@ func serve(cfg config.Config) error {
 	case <-shutdownCtx.Done():
 	}
 	return nil
+}
+
+// newAsserter makes what vouches for a signed-in person to a service that
+// hosts agents, or nil on a server with no key for it: no ASSERTION_KEY and
+// no SIGNING_KEY, which config allows only while RUNTIME_AUDIENCES is empty.
+// With a key and no audiences, the key is still published.
+func newAsserter(pool *pgxpool.Pool, cfg config.Config) (*auth.Asserter, error) {
+	key, err := auth.AssertionKey(cfg.AssertionKey, cfg.SigningKey)
+	if errors.Is(err, auth.ErrNoAssertionKey) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return auth.NewAsserter(pool, auth.AssertionConfig{Issuer: strings.TrimRight(cfg.PublicURL, "/"),
+		Audiences: cfg.RuntimeAudiences, TTL: cfg.AssertionTTL, Key: key})
 }
 
 func sameSite(mode string) http.SameSite {
