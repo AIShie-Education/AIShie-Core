@@ -176,7 +176,9 @@ Run all of these as root on the server.
   browser's cookie rides along. The agents' door, `/mcp`, takes a bearer
   token and never a cookie, so it takes an agent from any origin: an agent
   harness in a browser or an app, such as a custom connector in Claude,
-  needs no setting here.
+  needs no setting here, and one in a browser or an app's web view gets
+  its preflight answered and may read the answers (CORS for any origin,
+  without credentials).
 - **Single sign-on** is `OIDC_ISSUER`, `OIDC_CLIENT_ID` and
   `OIDC_CLIENT_SECRET` in the env file, with
   `https://lms-staging.example.edu/v1/auth/sso/callback` registered with the

@@ -847,3 +847,44 @@ func TestMCPTakesAnAgentFromAnyOrigin(t *testing.T) {
 		t.Errorf("REST from another site: %d %s", r.Status, r.Raw)
 	}
 }
+
+// An agent harness that runs in a browser, or in an app's web view, asks
+// first whether it may send /mcp its Authorization header (a preflight),
+// and reads the answers only if they say it may. /mcp says yes to any
+// origin, without credentials: it takes a bearer token alone, so no origin
+// gets anything from it without one. The REST routes still answer only
+// their own front end.
+func TestMCPAnswersABrowsersPreflight(t *testing.T) {
+	a := hardened(t, nil, nil, nil)
+	sato := a.tokenFor(a.c.Sato)
+	req, err := http.NewRequest(http.MethodOptions, a.srv.URL+httpapi.MCPPath, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Origin", "https://claude.ai")
+	req.Header.Set("Access-Control-Request-Method", "POST")
+	req.Header.Set("Access-Control-Request-Headers", "authorization, content-type, mcp-protocol-version")
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res.Body.Close()
+	h := res.Header
+	if res.StatusCode != http.StatusNoContent || h.Get("Access-Control-Allow-Origin") != "*" ||
+		!strings.Contains(strings.ToLower(h.Get("Access-Control-Allow-Headers")), "authorization") ||
+		!strings.Contains(strings.ToLower(h.Get("Access-Control-Allow-Headers")), "mcp-protocol-version") ||
+		!strings.Contains(h.Get("Access-Control-Allow-Methods"), "POST") || h.Get("Access-Control-Allow-Credentials") != "" {
+		t.Fatalf("preflight: %d %v", res.StatusCode, h)
+	}
+	// The call itself, from the same origin: its answer may be read.
+	got, body := a.raw("POST", a.srv.URL+httpapi.MCPPath, "application/json", []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`),
+		"Authorization", "Bearer "+sato, "Accept", "application/json, text/event-stream", "Origin", "https://claude.ai")
+	if got.StatusCode != http.StatusOK || got.Header.Get("Access-Control-Allow-Origin") != "*" ||
+		!strings.Contains(got.Header.Get("Access-Control-Expose-Headers"), "Mcp-Session-Id") {
+		t.Fatalf("call: %d %v %.200s", got.StatusCode, got.Header, body)
+	}
+	// A REST route still answers another origin nothing a browser would let it read.
+	if r := a.do(nil, "GET", "/v1/me", sato, nil, "Origin", "https://claude.ai"); r.Header.Get("Access-Control-Allow-Origin") != "" {
+		t.Fatalf("REST gave another origin CORS headers: %v", r.Header)
+	}
+}
