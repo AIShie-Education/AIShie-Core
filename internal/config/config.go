@@ -294,10 +294,11 @@ func (c *Config) readAssertions() error {
 // A runtime compares the audience byte for byte, so it must be written the
 // one way a URL is written: a lower-case scheme and host, no port that is
 // the scheme's own or not a plain number, and a path escaped as Go escapes
-// it, with nothing percent-encoded that need not be. Its path has no "." or
-// ".." segment and no empty one but a final "/": such a URL names the same
-// place as another written differently, or, after a proxy tidies it, a
-// place outside the runtime's path altogether.
+// it, with nothing percent-encoded that need not be and none of ! ' ( ) *,
+// which URLs write both ways. Its path has no "." or ".." segment and no
+// empty one but a final "/": such a URL names the same place as another
+// written differently, or, after a proxy tidies it, a place outside the
+// runtime's path altogether.
 func checkAudience(a string) error {
 	u, err := url.Parse(a)
 	switch {
@@ -315,8 +316,10 @@ func checkAudience(a string) error {
 		return errors.New("has upper case in its host; a host is written in lower case")
 	case !canonicalPort(u):
 		return errors.New("names a port that is empty, not a plain number from 1 to 65535, or the scheme's own")
+	case strings.ContainsAny(u.Path, "!'()*"):
+		return errors.New("has one of ! ' ( ) * in its path, which URLs write both escaped and not")
 	case u.RawPath != "":
-		return errors.New("percent-encodes what needs no encoding, or a / or a lower-case escape; write the path plainly")
+		return errors.New("escapes its path otherwise than plainly: an escape that is not needed or not in upper case, or an escaped /")
 	case !plainPath(u.Path):
 		return errors.New(`has a ".", ".." or empty segment in its path`)
 	case u.String() != a:

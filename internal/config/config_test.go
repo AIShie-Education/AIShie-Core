@@ -109,7 +109,8 @@ func TestAssertionSettings(t *testing.T) {
 		"https://test.aishie.app/%72untime", "https://test.aishie.app/a%2Fb", "https://test.aishie.app/a%2fb", "https://test.aishie.app/%2E%2E/admin",
 		"https://test.aishie.app/runtime/../admin", "https://test.aishie.app/runtime/..", "https://test.aishie.app/./runtime",
 		"https://test.aishie.app/runtime/.", "https://test.aishie.app//runtime", "https://test.aishie.app/runtime//api",
-		"https://test.aishie.app/runtime\\..\\admin", "https://тест.example/runtime"} {
+		"https://test.aishie.app/runtime\\..\\admin", "https://тест.example/runtime", "https://test.aishie.app/run!time", "https://test.aishie.app/run%21time",
+		"https://test.aishie.app/(runtime)", "https://test.aishie.app/runtime*"} {
 		t.Run("rejects the audience "+bad, func(t *testing.T) {
 			t.Setenv("SIGNING_KEY", signingKey)
 			t.Setenv("RUNTIME_AUDIENCES", "https://test.aishie.app/runtime,"+bad)
