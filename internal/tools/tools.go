@@ -9,6 +9,7 @@ import (
 	"github.com/shopspring/decimal"
 
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/blob"
+	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/memory"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/pipeline"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/tool"
 )
@@ -33,6 +34,10 @@ type Deps struct {
 	// MaxAgentsPerOwner bounds the agents one person may have that are not
 	// suspended; zero means DefaultMaxAgentsPerOwner.
 	MaxAgentsPerOwner int
+	// Memory is agents' memory: whether this installation keeps it (off
+	// by default, and every memory tool refuses), and its limits, a zero
+	// one its default.
+	Memory memory.Config
 }
 
 // DefaultMaxUploadBytes is 50 MiB: a scanned exam script, not a video.
@@ -46,6 +51,7 @@ func RegisterAll(reg *tool.Registry, d Deps) {
 	if d.MaxAgentsPerOwner <= 0 {
 		d.MaxAgentsPerOwner = DefaultMaxAgentsPerOwner
 	}
+	d.Memory = d.Memory.WithDefaults()
 	if d.Uploads == nil {
 		// A random key: fine for one process, until it restarts.
 		d.Uploads, _ = blob.NewSigner("")
@@ -63,6 +69,7 @@ func RegisterAll(reg *tool.Registry, d Deps) {
 	reg.Register(gradeReadTools()...)
 	reg.Register(actionTools(d)...)
 	reg.Register(conversationTools()...)
+	reg.Register(memoryTools(d)...)
 	reg.Register(eventTools()...)
 	reg.Register(systemTools()...)
 }

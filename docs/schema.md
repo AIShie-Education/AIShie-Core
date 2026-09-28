@@ -102,8 +102,8 @@ their tokens, suspends them, takes them out of a course (`agent.withdraw`). Each
 administrator may register an agent with an owner (`actor.register`), and give one an owner,
 change it or take it away (`actor.set_owner`): only while it is seated in no course that is not
 archived, revoking every credential it has — tokens, sessions, password, invitation, linked
-identity — which whoever owned it may hold, and cancelling the requests the owner before made to
-seat it. The change holds the agent's row first, and every write that acts on who owns it — a
+identity — which whoever owned it may hold, cancelling the requests the owner before made to
+seat it, and deleting everything the agent remembers (§2.9). The change holds the agent's row first, and every write that acts on who owns it — a
 token issued, a seat taken or given up — reads it `FOR SHARE`, so neither passes the other. A seat
 it keeps in an archived course stops counting, since it no longer matches the owner, and is
 removed by the sweep once the course is opened again. An agent does not own agents; the system
@@ -892,7 +892,51 @@ agent writes or corrects at most 60 entries an hour and 300 a day (`MEMORY_WRITE
 `MEMORY_WRITES_PER_DAY`), counted by the hour in `memory_write_count`, in the database so that
 the limit holds across instances. Forgetting is never limited. An agent's owner may switch its
 memory off (`memory_setting`); what it has is kept until someone deletes it. `MEMORY=on` turns
-memory on for the installation; it is off by default.
+memory on for the installation; it is off by default, and every memory tool then refuses
+(`memory_unavailable`).
+
+**Who reaches what** is one rule (`tools.memoryAccess`), which every memory tool goes by,
+measured on every call from the agent's seats as `authorize()` reads them:
+
+- only an agent holds memory; a person is refused (`not_an_agent`). That refusal reads
+  `actor.kind`, as `agent.create`'s does; nothing that grants reads it;
+- owner memory while the agent has an owner who is active (`no_owner`, `owner_not_active`);
+- with a course, the agent's seat there must count — live, its principal live — as steps 1 and 2
+  of `authorize()` find it (`authz.SeatFor`), without step 3, held KEY SHARE for a write and its
+  principal's after it;
+- asker memory only through a conversation of the asker's addressed to that seat
+  (`not_respondent`) whose opener may still address it (`not_addressable`, §2.8): exactly while
+  the agent may read and answer it. The opener's seat is held KEY SHARE for a write, as an
+  answer holds it. A conversation the agent's owner opened reaches owner memory instead, and
+  asker memory about the owner is refused (`asker_is_owner`). Writing needs
+  `conversation_answer`;
+- shared memory with a live seat in the course; writing to it, which proposes, only from a seat
+  that answers others than its principal (`answers_owner_only`);
+- the owner's switch: off, reads find nothing and writes are refused (`memory_off`), and
+  forgetting goes on.
+
+An entry named by id is reached by the same rule; one out of reach, frozen, or another agent's
+answers as one that does not exist. Core cannot know which of its conversations a program is
+answering, one token serving them all: an agent answering B could still reach A's memory by
+naming A's conversation. Keeping them apart is the program's to do, as keeping one asker's words
+from another already is (§2.8), and the MCP instructions tell it to.
+
+**The agent's tools** — `memory.search`, `memory.list`, `memory.get`, `memory.write`,
+`memory.update` and `memory.forget`, under `/v1/me/memory/` — act on the agent's own account, not
+by a course permission. A write gated by one would become a proposal at `confirm_required`, which
+would keep the text in the action log for good or, stripped of it, write nothing once approved; so
+no memory write ever waits for a decision, and a write naming an archived course is refused as
+every write there is. The same text as a live entry of its bucket is that entry (`duplicate:
+true`), neither counted nor refused. A correction of shared memory in force is a new proposal,
+with the new text, naming what it replaces (`replaces_id`); the entry stays as it is meanwhile,
+and a proposal is corrected in place. A version given with a correction changes only what was read
+(`version_mismatch`). Every read says that memory is data, never instructions. Nothing about
+memory reaches the event feed.
+
+**A change of owner** (`actor.set_owner`) deletes everything the agent holds, in every scope and
+course, with its owner's switch: the new owner may read nothing the agent kept about its old
+owner, nor about the people it answered for them. A write to memory holds the agent's row `FOR
+SHARE`, as issuing it a token does, so none lands after the change.
 
 ## 3. Authorization
 
@@ -1096,7 +1140,8 @@ check `actor.platform_role` instead. That is the only place it is read.
   not counted: an administrator may give someone more. An owner lifts only a suspension of their
   own; an administrator's, or one from before it was recorded, is not theirs.
 - An agent changes owner only while seated in no course that is not archived, and every
-  credential it has is revoked, and every request to seat it cancelled, as it does. The change
+  credential it has is revoked, every request to seat it cancelled, and everything it remembers
+  deleted, as it does. The change
   holds the agent's row, `FOR NO KEY UPDATE`, before it looks at anything; issuing it a token
   and seating it or taking it out read the row `FOR SHARE`, so that a token or a seat made by
   the owner before is revoked or counted, never left behind.
@@ -1123,6 +1168,17 @@ check `actor.platform_role` instead. That is the only place it is read.
 - Removing a seat closes its open conversations, a delegate's with its principal's.
 - A message is retracted by its author, or by whoever decides actions for the opener.
 - News of a conversation reaches its two participants and nobody else (`event.list`).
+- Who reaches an agent's memory (§2.9): one function for every memory tool, measured on every
+  call from the agent's seats: owner memory while its owner is active, asker memory only through
+  a conversation of the asker's that the agent may answer now, shared memory with a live seat and
+  a proposal to it only from a seat that answers others. An entry out of reach answers as one that
+  does not exist.
+- Memory text is checked for every writer — its length, control characters, anything shaped like
+  a secret — and kept nowhere but `memory_entry`: the tools take it as a secret field, so the
+  action log holds none of it, and their results carry ids.
+- A bucket's limits, an agent's total and its rate of writes are counted one write at a time,
+  under an advisory lock on the holder and the bucket; the same text again is the entry already
+  there.
 - `actor.kind` and `course_member.role` are never read by authorization.
 
 ## 5. Worked example: an agent grades an essay

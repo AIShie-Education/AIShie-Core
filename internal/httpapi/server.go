@@ -29,6 +29,7 @@ import (
 	"net/http"
 	"net/netip"
 	"path"
+	"strconv"
 	"strings"
 	"time"
 
@@ -608,6 +609,17 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 func writeOutcome(w http.ResponseWriter, out pipeline.Outcome) {
 	if out.Replayed {
 		w.Header().Set(HeaderReplayed, "true")
+	}
+	// A call refused for coming too often after it was attempted — an agent
+	// writing to its memory faster than it may — is recorded, and says when
+	// to try again as a call that was never attempted does.
+	if out.Error != nil && out.Error.Code == apperr.RateLimited {
+		switch secs := out.Error.Details["retry_after_seconds"].(type) {
+		case int:
+			w.Header().Set("Retry-After", strconv.Itoa(secs))
+		case float64: // as a replay reads it back
+			w.Header().Set("Retry-After", strconv.Itoa(int(secs)))
+		}
 	}
 	writeJSON(w, outcomeStatus(out), out)
 }

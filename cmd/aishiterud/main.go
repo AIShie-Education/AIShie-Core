@@ -176,7 +176,7 @@ func serve(cfg config.Config) error {
 	reg := tool.NewRegistry()
 	pl := pipeline.New(pool, reg, pipeline.Config{ProposalTTL: cfg.ProposalTTL, Secrets: signatures})
 	tools.RegisterAll(reg, tools.Deps{Pipeline: pl, Blob: store, Uploads: signer, MaxUploadBytes: cfg.MaxUploadBytes,
-		DisableAgentSelfService: !cfg.AgentSelfService, MaxAgentsPerOwner: cfg.AgentMaxPerOwner})
+		DisableAgentSelfService: !cfg.AgentSelfService, MaxAgentsPerOwner: cfg.AgentMaxPerOwner, Memory: cfg.Memory})
 
 	// The sweeps act as the system actor, which bootstrap creates. Before
 	// bootstrap there is nothing to sweep and nobody to sweep as.
@@ -216,7 +216,7 @@ func serve(cfg config.Config) error {
 		Addr: cfg.HTTPAddr,
 		Handler: httpapi.NewHandler(httpapi.Deps{
 			Pool: pool, LatestSchema: latest, Pipeline: pl, Log: log,
-			Auth: authn, MCP: mcpapi.NewHandler(mcpapi.Deps{Pipeline: pl, Auth: authn, Log: log, Calls: calls}),
+			Auth: authn, MCP: mcpapi.NewHandler(mcpapi.Deps{Pipeline: pl, Auth: authn, Log: log, Calls: calls, Memory: cfg.Memory.Enabled}),
 			Calls: calls, SignIns: ratelimit.New(cfg.SignInsPerMinute, cfg.SignInsPerMinute),
 			TrustedOrigins: cfg.TrustedOrigins, TrustedProxies: cfg.TrustedProxies,
 			InsecureCookies: cfg.InsecureCookies, CookieSameSite: sameSite(cfg.CookieSameSite),
@@ -230,7 +230,8 @@ func serve(cfg config.Config) error {
 	}
 	errc := make(chan error, 1)
 	go func() { errc <- srv.ListenAndServe() }()
-	log.Info("listening", "addr", cfg.HTTPAddr, "blob_store", cfg.BlobStore, "version", version.Version, "schema_latest", latest, "tools", len(reg.Exposed()))
+	log.Info("listening", "addr", cfg.HTTPAddr, "blob_store", cfg.BlobStore, "version", version.Version, "schema_latest", latest, "tools", len(reg.Exposed()),
+		"memory", cfg.Memory.Enabled)
 	if asserter != nil {
 		// The key's id is public, and says which key a runtime should find
 		// at /v1/auth/keys.

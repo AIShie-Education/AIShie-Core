@@ -47,16 +47,26 @@ Note that `pending_review` and `confirm_required` both involve a human, at oppos
 
 **Scope** narrows a membership further: to listed students, to listed assignments, or both. Scope is explicit and fails closed — a member limited to a list with nothing on it can touch nobody.
 
-## 5. Memory: Outside the Core
+## 5. Memory: In Core, Held by the Agent
 
-Memory is an agent concern, not a platform concern. Agents live elsewhere, so they keep their memory elsewhere. Core stores none of it.
+Memory is kept in Core and belongs to the agent, not to whatever program runs it. Any brain that holds the agent's token — a service that hosts agents, a model connected over MCP, anything else — reads and writes the same memory, and switching brains keeps it. One brain at a time still runs an agent.
 
-What core owes them instead is two things:
+It comes in three scopes:
 
-- **A stable handle.** A course membership *is* the relationship — "tutor for Yuki in CS101" is one `course_member` row with a permanent id — so an external agent can key its own store against `course_member.id` and have a durable notion of which relationship it is resuming. Removing and re-adding an agent gives it a new id, and therefore a fresh start.
-- **A read surface good enough to cold-start on.** Since core holds no memory, *every* agent rebuilds its picture of a student or a course on every invocation. That makes the read tools load-bearing in a way they would not be if the platform cached context on the agent's behalf.
+- **About its owner.** For an agent a person owns: what helps it help that person, across courses. It is used only when it is the owner being helped.
+- **About each person who asks it**, one course at a time, keyed on the agent's seat and the asker's. It is used only when answering that person, and reached only through a conversation of theirs the agent may answer now.
+- **A course's shared memory**: what any student of the course may be told. What the agent writes there waits for review by someone who manages the course's members before any answer may use it.
 
-The original relationship-bound vs. task-scoped distinction survives as a description of how agents *behave*, not as something the platform implements. A tutor agent accumulates context across a semester because its host chooses to; core cannot tell the difference and does not need to.
+A person is the subject of one scope, never two: what an agent keeps about its owner is about its owner, even when the owner asks it in a course. Who reaches what is one rule, the rule of conversations again, measured on every call from the agent's seats: memory is never more visible than the conversations it came from. Only agents hold memory; people keep their own notes.
+
+What stays outside Core is a brain's own working state: its notes on one conversation, its leases and its ledger, a host's chat history.
+
+What Core owed agents when it kept no memory it still owes them:
+
+- **A stable handle.** A course membership *is* the relationship — "tutor for Yuki in CS101" is one `course_member` row with a permanent id — and memory about an asker, and a course's shared memory, are keyed on it. Removing and re-adding an agent gives it a new id, and therefore a fresh start; what the old seat kept is never read by an agent again, and is deleted after a retention period.
+- **A read surface good enough to cold-start on.** Memory holds what was learnt, not what is so: the read tools stay load-bearing, and an agent still rebuilds its picture of a student or a course from them.
+
+**People can see it, correct it and delete it.** The agent writes on its own, bounded in size, number and rate, and never secrets; the person an entry is about, the agent's owner, and course staff for the shared memory read, correct and delete what it wrote. Memory is the one thing Core deletes rather than retires. It is data, never instructions, and every read of it says so.
 
 ## 6. Termination: Explicit per Job-Nature
 
@@ -96,7 +106,7 @@ Course material is authored and stored as **ordinary documents** — no graph-au
 | State | Mutable/relational, updated by events |
 | Actors | Unified human + agent, one surface, differentiated only by course membership; registered here, hosted elsewhere |
 | Autonomy | Explicit per action-type; one ordered ladder shared with permission; presets as table rows, scope fails closed |
-| Memory | Not in core — agents keep their own; `course_member.id` is the stable relationship handle |
+| Memory | In Core, held by the agent: about its owner, about each asker per course, and a course's reviewed shared memory; seen and deleted by the people it is about |
 | Termination | Declared on the membership; v1 = pause, remove, expiry; budgets deferred; tokens never enforceable |
 | Content | Document-primary; agent-derived concept graph deferred as an add-on |
 

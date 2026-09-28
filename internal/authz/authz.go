@@ -121,16 +121,54 @@ func Evaluate(actor domain.Actor, courseStatus string, member *domain.Member, pe
 // ForActor runs steps 1–3 for an actor in a course. A course that does not
 // exist is a not_found error, not a denial.
 func ForActor(ctx context.Context, q dbq.Querier, actorID, courseID uuid.UUID, perms []domain.Perm, write bool, now time.Time) (Decision, error) {
-	actor, err := LoadActor(ctx, q, actorID)
+	actor, courseStatus, member, err := seatOf(ctx, q, actorID, courseID, write)
 	if err != nil {
 		return Decision{}, err
 	}
+	return Evaluate(actor, courseStatus, member, perms, write, now), nil
+}
+
+// SeatFor is steps 1 and 2 without step 3: the actor's seat in a course,
+// held for a write as ForActor holds it (the seat KEY SHARE first, a
+// delegate's principal second), and the reason it does not count if it does
+// not. It is for a call made on the actor's own account that acts through a
+// seat without being gated by one of its permissions (an agent's memory),
+// and so asks of the seat only that it is there and counts: live, its
+// principal live, its course open for a write. A course that does not exist
+// is a not_found error.
+func SeatFor(ctx context.Context, q dbq.Querier, actorID, courseID uuid.UUID, write bool, now time.Time) (*domain.Member, Reason, error) {
+	actor, courseStatus, member, err := seatOf(ctx, q, actorID, courseID, write)
+	if err != nil {
+		return nil, "", err
+	}
+	switch {
+	case !actor.Active():
+		return member, ReasonActorNotActive, nil
+	case write && courseStatus == domain.CourseArchived:
+		return member, ReasonCourseArchived, nil
+	case member == nil:
+		return nil, ReasonNotAMember, nil
+	case !member.Live(now):
+		return member, ReasonMemberNotLive, nil
+	case !member.PrincipalLive(now):
+		return member, ReasonPrincipalNotActive, nil
+	}
+	return member, ReasonNone, nil
+}
+
+// seatOf loads what steps 1 and 2 look at: the actor, its course's status,
+// and its seat there if it has one that is not removed, locked for a write.
+func seatOf(ctx context.Context, q dbq.Querier, actorID, courseID uuid.UUID, write bool) (domain.Actor, string, *domain.Member, error) {
+	actor, err := LoadActor(ctx, q, actorID)
+	if err != nil {
+		return domain.Actor{}, "", nil, err
+	}
 	course, err := q.GetCourseForAuthz(ctx, courseID)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return Decision{}, apperr.Missing("course %s does not exist", courseID)
+		return domain.Actor{}, "", nil, apperr.Missing("course %s does not exist", courseID)
 	}
 	if err != nil {
-		return Decision{}, fmt.Errorf("load course: %w", err)
+		return domain.Actor{}, "", nil, fmt.Errorf("load course: %w", err)
 	}
 	var member *domain.Member
 	var row dbq.GetLiveMemberForAuthzRow
@@ -152,11 +190,11 @@ func ForActor(ctx context.Context, q dbq.Querier, actorID, courseID uuid.UUID, p
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
 	case err != nil:
-		return Decision{}, fmt.Errorf("load member: %w", err)
+		return domain.Actor{}, "", nil, fmt.Errorf("load member: %w", err)
 	default:
 		member = memberFromRow(dbq.GetMemberForAuthzRow(row))
 	}
-	return Evaluate(actor, course.Status, member, perms, write, now), nil
+	return actor, course.Status, member, nil
 }
 
 // ForMember runs steps 1–3 against one specific membership row. Approving a

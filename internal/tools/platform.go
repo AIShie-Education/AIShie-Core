@@ -421,8 +421,9 @@ func actorSetOwner() tool.Tool {
 			"first (agent.withdraw by its owner, or member.remove), and for an agent that holds a platform role, which an " +
 			"agent someone owns does not. Every credential the agent has — tokens, sessions, password, invitation, linked " +
 			"identity — is revoked, since whoever owned it before may hold them, and the old owner's requests to seat it " +
-			"that wait for a decision are cancelled; issue it a new token. A seat it keeps in an archived course counts " +
-			"for nothing from then on.",
+			"that wait for a decision are cancelled; issue it a new token. Everything the agent remembers is deleted: what " +
+			"it kept about its old owner, and about the people it answered for them. A seat it keeps in an archived course " +
+			"counts for nothing from then on.",
 		Kind: tool.Write, Gate: admins,
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/actors/{actor_id}/owner"},
 		Resolve: func(ctx context.Context, q dbq.Querier, in ActorSetOwnerIn) (tool.Target, error) {
@@ -472,6 +473,15 @@ func actorSetOwner() tool.Tool {
 				return OK{}, err
 			}
 			if err := ec.Q.RevokeAllCredentials(ctx, dbq.RevokeAllCredentialsParams{ActorID: in.ActorID, RevokedAt: &ec.Now}); err != nil {
+				return OK{}, err
+			}
+			// Nor may the new owner read what the agent remembers: about its
+			// old owner, and, in courses since archived, about the people it
+			// answered for them. All of it goes, in every scope, with the
+			// old owner's switch (docs/schema.md §2.9). A write of the
+			// agent's to its memory holds the agent's row FOR SHARE, as a
+			// token issued does, so none lands after this.
+			if _, err := ec.Q.DeleteMemoryOfHolder(ctx, in.ActorID); err != nil {
 				return OK{}, err
 			}
 			// Whoever owned it before may have asked to seat it somewhere.
