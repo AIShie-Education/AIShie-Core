@@ -41,6 +41,12 @@ import (
 // who may answer, and whether a respondent may still read what it was asked —
 // and it is measured now, on every call, since seats change.
 //
+// An agent is asked in the site only while what runs it says it answers
+// there (me.site_chat): one operated from an external tool is not offered,
+// and a new question to it is refused, since nothing here would ever answer
+// it (answersElsewhere). That is asked of a new question alone, never of an
+// answer or a read, and never of a person.
+//
 // Every message is an action, and its payload holds what was written: the
 // action log shows it to whoever decides actions in the course, unscoped, as
 // it shows every proposal (docs/schema.md §7). The events say only that
@@ -435,6 +441,30 @@ func notAddressable(prefix, why string) error {
 	return apperr.Forbid("%s: %s", prefix, why).With("reason", "not_addressable")
 }
 
+// errAnswersElsewhere refuses a question to an agent that takes no
+// conversations in the site: nothing runs it that polls its inbox and
+// answers, and the question would wait for good.
+var errAnswersElsewhere = apperr.Precondition("that agent takes no conversations in the site: it is operated from an external tool, and acts there").
+	With("reason", "agent_answers_elsewhere")
+
+// answersElsewhere refuses a respondent that is an agent which takes no
+// conversations in the site now (docs/schema.md §2.8; the rule is SQL's,
+// SiteChatOf). A person is asked in the site as ever. It is asked of a new
+// question only, conversation.open's and conversation.ask's, never of an
+// answer or a read: what an agent was asked stays readable and answerable.
+// It reads kind to refuse, as the refusals of ownership do; nothing that
+// grants reads it.
+func answersElsewhere(ctx context.Context, q dbq.Querier, now time.Time, respondent *domain.Member) error {
+	chat, err := siteChatOf(ctx, q, now, []uuid.UUID{respondent.ActorID})
+	if err != nil {
+		return err
+	}
+	if c := chat[respondent.ActorID]; c.Agent && !c.SiteChat {
+		return errAnswersElsewhere
+	}
+	return nil
+}
+
 type ConversationOpenIn struct {
 	tool.InCourse
 	RespondentMemberID uuid.UUID `json:"respondent_member_id" jsonschema:"whom to ask: one of conversation.respondents"`
@@ -449,7 +479,8 @@ type ConversationOpenOut struct {
 
 // checkOpen is conversation.open's rule without writing anything: for a
 // proposal, when it is queued; for a call, when it runs, with the
-// respondent's seat held.
+// respondent's seat held. Whom one may address comes first, and only then
+// whether that one, an agent, is asked here at all.
 func checkOpen(ctx context.Context, q dbq.Querier, m, respondent *domain.Member, now time.Time, in ConversationOpenIn) error {
 	if _, err := optionalText("title", in.Title, maxTitleChars); err != nil {
 		return err
@@ -466,7 +497,7 @@ func checkOpen(ctx context.Context, q dbq.Querier, m, respondent *domain.Member,
 	if why != "" {
 		return notAddressable("you may not address that member", why)
 	}
-	return nil
+	return answersElsewhere(ctx, q, now, respondent)
 }
 
 func conversationOpen() tool.Tool {
@@ -474,9 +505,11 @@ func conversationOpen() tool.Tool {
 		Name: "conversation.open",
 		Description: "Start a conversation with one member of the course — the course's tutor agent, your own agent — and, " +
 			"if you give body, ask the first question. You may address only someone who can see and do nothing you cannot, " +
-			"or your own agent: conversation.respondents lists them. Keep asking with conversation.ask; answers come back " +
-			"as messages (conversation.messages). Both of you, and course staff who decide actions for you, can read it; " +
-			"and a respondent that answers others too, such as the course's tutor, may repeat to them what you write.",
+			"or your own agent, and an agent only while what runs it answers in the site (agent_answers_elsewhere otherwise: " +
+			"it is operated from an external tool): conversation.respondents lists them. Keep asking with conversation.ask; " +
+			"answers come back as messages (conversation.messages). Both of you, and course staff who decide actions for " +
+			"you, can read it; and a respondent that answers others too, such as the course's tutor, may repeat to them " +
+			"what you write.",
 		Kind: tool.Write, Gate: asks,
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/conversations"},
 		Resolve: func(ctx context.Context, q dbq.Querier, in ConversationOpenIn) (tool.Target, error) {
@@ -538,7 +571,8 @@ type MessageIDOut struct {
 }
 
 // checkAsk is conversation.ask's rule: the caller opened the conversation,
-// it is open, and the caller may still address its respondent.
+// it is open, the caller may still address its respondent, and the
+// respondent, if an agent, still takes conversations in the site.
 func checkAsk(ctx context.Context, q dbq.Querier, m, respondent *domain.Member, now time.Time, c dbq.Conversation, body string) error {
 	if c.OpenerMemberID != m.ID {
 		return errNotOpener
@@ -556,14 +590,16 @@ func checkAsk(ctx context.Context, q dbq.Querier, m, respondent *domain.Member, 
 	if why != "" {
 		return notAddressable("the respondent is no longer available to you; start a new conversation with someone who is", why)
 	}
-	return nil
+	return answersElsewhere(ctx, q, now, respondent)
 }
 
 func conversationAsk() tool.Tool {
 	return tool.Define(tool.Spec[ConversationAskIn, MessageIDOut]{
 		Name: "conversation.ask",
 		Description: "Write in a conversation you opened: a question, or anything more you have to say. It is refused once the " +
-			"conversation is closed, or once you may no longer address its respondent; start a new conversation then.",
+			"conversation is closed, or once you may no longer address its respondent; start a new conversation then. It is " +
+			"refused too, as agent_answers_elsewhere, while its respondent is an agent that takes no conversations in the " +
+			"site: what was written stays readable.",
 		Kind: tool.Write, Gate: asks,
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/conversations/{conversation_id}/ask"},
 		Resolve: func(ctx context.Context, q dbq.Querier, in ConversationAskIn) (tool.Target, error) {
@@ -971,8 +1007,9 @@ func conversationRespondents() tool.Tool {
 	return tool.Define(tool.Spec[tool.InCourse, RespondentsOut]{
 		Name: "conversation.respondents",
 		Description: "Whom you may start a conversation with here: members who answer questions and can see and do nothing " +
-			"you cannot — the course's tutor agent, say — and your own agents. Each says how its answers arrive, whether it " +
-			"answers others too (answers_course: it may repeat to them what you write), and, for an agent, when it was last seen.",
+			"you cannot — the course's tutor agent, say — and your own agents, an agent only while what runs it answers in " +
+			"the site. Each says how its answers arrive, whether it answers others too (answers_course: it may repeat to them " +
+			"what you write), and, for an agent, when it was last seen.",
 		Kind: tool.Read, Gate: asks,
 		HTTP: tool.Route{Method: "GET", Pattern: "/v1/courses/{course_id}/conversations/respondents"},
 		Resolve: func(_ context.Context, _ dbq.Querier, in tool.InCourse) (tool.Target, error) {

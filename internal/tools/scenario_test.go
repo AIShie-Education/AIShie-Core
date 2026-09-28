@@ -87,6 +87,8 @@ func buildOn(t *testing.T, p *testkit.Platform) *built {
 	b.kenM = add(b.ken, m{"preset": "student"})
 	b.graderM = add(b.grader, m{"preset": "grader", "listed_assignments": []uuid.UUID{b.hw3}})
 	b.tutorM = add(b.tutor, m{"preset": "tutor", "listed_students": []uuid.UUID{b.yukiM}})
+	// A runtime runs the tutor, and says so: people in the site may ask it.
+	b.SiteChat(b.tutor)
 	return b
 }
 

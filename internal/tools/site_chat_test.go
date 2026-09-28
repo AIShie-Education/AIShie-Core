@@ -195,3 +195,110 @@ func TestAnOwnerSwitchesSiteChatOffAndNeverOn(t *testing.T) {
 		t.Fatalf("declared again by its runtime: %+v", out)
 	}
 }
+
+// refusedElsewhere insists a call was refused as a question to an agent that
+// takes no conversations in the site.
+func refusedElsewhere(t *testing.T, what string, out pipeline.Outcome) {
+	t.Helper()
+	if out.Status != domain.StatusFailed || out.Error == nil || out.Error.Code != apperr.FailedPrecondition || reason(out) != "agent_answers_elsewhere" {
+		t.Fatalf("%s: %+v, want failed_precondition agent_answers_elsewhere", what, out)
+	}
+}
+
+// An agent nothing runs here is asked nothing here: it is not offered, and a
+// conversation with it is neither opened nor carried on. What was written
+// stays readable, and may be closed and retracted, and the agent answers
+// what it was asked. People are asked as ever.
+func TestAnAgentOperatedFromOutsideIsNotAskedInTheSite(t *testing.T) {
+	b := build(t)
+	tutor := b.agent(t, b.sato, "Course tutor")
+	seat := b.delegate(t, b.sato, tutor, m{"preset": "course_tutor"})
+	opening := m{"course_id": b.course, "respondent_member_id": seat, "body": "What does HW3 ask for?"}
+
+	// Nothing has said it answers here.
+	if _, ok := b.respondents(t, b.yuki)[seat]; ok {
+		t.Fatal("an agent operated from outside is offered to Yuki")
+	}
+	refusedElsewhere(t, "opening a conversation with it", b.MustCall(b.yuki, "conversation.open", opening, "before"))
+
+	// Its runtime starts: it is offered, asked, and answers.
+	token := b.SiteChat(tutor)
+	if _, ok := b.respondents(t, b.yuki)[seat]; !ok {
+		t.Fatal("an agent whose runtime says it answers here is not offered to Yuki")
+	}
+	conv, first := b.open(t, b.yuki, seat, "What does HW3 ask for?")
+	if in := b.inbox(t, tutor); len(in) != 1 || in[0].ID != conv {
+		t.Fatalf("the tutor's inbox: %+v", in)
+	}
+	b.do(t, tutor, "conversation.answer", answerArgs(b, conv, first, "An essay with a thesis."))
+	second := b.ask(t, b.yuki, conv, "How long should it be?")
+
+	// Its runtime's token is revoked, as when its hosting ends.
+	b.do(t, b.sato, "agent.revoke_credential", m{"actor_id": tutor, "credential_id": token})
+	if _, ok := b.respondents(t, b.yuki)[seat]; ok {
+		t.Fatal("an agent whose runtime's token is revoked is still offered")
+	}
+	refusedElsewhere(t, "asking it more", b.MustCall(b.yuki, "conversation.ask",
+		m{"course_id": b.course, "conversation_id": conv, "body": "Are you there?"}, "after-ask"))
+	refusedElsewhere(t, "opening another", b.MustCall(b.yuki, "conversation.open", opening, "after-open"))
+
+	// What was written stays: read by both, answered, retracted, closed.
+	if msgs := b.messages(t, b.yuki, conv); len(msgs) != 3 || msgs[2].ID != second {
+		t.Fatalf("the conversation, as Yuki reads it: %+v", msgs)
+	}
+	if got := b.conversation(t, tutor, conv); got.State != tools.StateAwaitingAnswer {
+		t.Fatalf("the conversation, as the tutor reads it: %+v", got)
+	}
+	if in := b.inbox(t, tutor); len(in) != 1 || in[0].ID != conv {
+		t.Fatalf("what the tutor was asked is gone from its inbox: %+v", in)
+	}
+	b.do(t, tutor, "conversation.answer", answerArgs(b, conv, second, "About a thousand words."))
+	b.do(t, b.yuki, "conversation.retract", m{"course_id": b.course, "message_id": second})
+	b.do(t, b.yuki, "conversation.close", m{"course_id": b.course, "conversation_id": conv})
+
+	// A person answers in the site as ever: Mori, a TA who answers, whom
+	// Sato may address.
+	mori := testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", m{"kind": "human", "display_name": "Mori"})).ActorID
+	moriM := testkit.Result[tools.MemberIDOut](t, b.do(t, b.sato, "member.add", m{"course_id": b.course, "actor_id": mori, "preset": "ta",
+		"perms": m{"conversation_answer": "autonomous"}})).MemberID
+	if _, ok := b.respondents(t, b.sato)[moriM]; !ok {
+		t.Fatal("a person who answers is not offered")
+	}
+	asked, question := b.open(t, b.sato, moriM, "Can you mark HW3 by Friday?")
+	b.do(t, mori, "conversation.answer", answerArgs(b, asked, question, "Yes."))
+}
+
+// Its owner's word, or a suspension, takes an agent out of the site's
+// conversations: it is neither offered nor asked more. What runs it says so
+// again to bring it back after its owner's word; a suspension lifted brings
+// it back by itself, its runtime's token still working.
+func TestAnOwnerOrASuspensionTakesAnAgentOutOfTheSite(t *testing.T) {
+	c := newCast(t)
+	b := c.built
+	tutor := b.seatActor(t, c.courseTutor)
+	conv, _ := b.open(t, b.ken, c.courseTutor, "Is the midterm open book?")
+	offered := func(want bool, when string) {
+		t.Helper()
+		if _, ok := b.respondents(t, b.ken)[c.courseTutor]; ok != want {
+			t.Fatalf("%s: offered to Ken %v, want %v", when, ok, want)
+		}
+	}
+	ask := m{"course_id": b.course, "conversation_id": conv, "body": "Hello?"}
+
+	b.do(t, b.sato, "agent.update", m{"actor_id": tutor, "site_chat": false})
+	offered(false, "switched off by its owner")
+	refusedElsewhere(t, "asking it, switched off by its owner", b.MustCall(b.ken, "conversation.ask", ask, "owner-off"))
+	refusedElsewhere(t, "opening with it, switched off by its owner", b.MustCall(b.ken, "conversation.open",
+		m{"course_id": b.course, "respondent_member_id": c.courseTutor, "body": "Hello?"}, "owner-off-open"))
+	b.try(t, b.sato, "agent.update", m{"actor_id": tutor, "site_chat": true}, apperr.InvalidArgument)
+	offered(false, "its owner trying to switch it on")
+
+	b.SiteChat(tutor)
+	offered(true, "its runtime saying so again")
+	b.ask(t, b.ken, conv, "And is the final?")
+
+	b.do(t, b.sato, "agent.suspend", m{"actor_id": tutor})
+	offered(false, "the agent suspended")
+	b.do(t, b.sato, "agent.reactivate", m{"actor_id": tutor})
+	offered(true, "the agent reactivated")
+}

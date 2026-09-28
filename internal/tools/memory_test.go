@@ -53,6 +53,8 @@ func newMemCast(t *testing.T, adjust func(*memory.Config)) *memCast {
 	c.tutorM = b.delegate(t, b.sato, c.tutor, m{"preset": "course_tutor"})
 	c.helper = b.agent(t, b.yuki, "Yuki's helper")
 	c.helperM = b.delegate(t, b.yuki, c.helper, m{})
+	b.SiteChat(c.tutor)
+	b.SiteChat(c.helper)
 	c.yukiTutor, _ = b.open(t, b.yuki, c.tutorM, "How do I start HW3?")
 	c.satoTutor, _ = b.open(t, b.sato, c.tutorM, "What do students ask most?")
 	c.yukiHelper, _ = b.open(t, b.yuki, c.helperM, "Remind me what is due.")
