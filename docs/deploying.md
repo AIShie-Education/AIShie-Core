@@ -63,7 +63,9 @@ The scripts in [`deploy/`](../deploy) do the work:
    booted may still be updating itself, and the script waits for that.
 
    Keep a copy of the env file somewhere safe. `SIGNING_KEY` must not change,
-   or every upload and download link already given out stops working.
+   or every upload and download link already given out stops working, and,
+   unless `ASSERTION_KEY` is set, the key a service that hosts agents checks
+   Core's assertions with changes too.
 
 2. Let the server pull the image. The package is private, and GitHub's
    registry takes only a personal access token (classic), not a fine-grained
@@ -171,6 +173,30 @@ Run all of these as root on the server.
   another site altogether, such as `*.vercel.app`, also needs
   `COOKIE_SAMESITE=none`. Safari, and every browser on iOS, still refuses
   that sign-in cookie. Single sign-on is `OIDC_*` (README, Single sign-on).
+- **A service that hosts agents** (the agent runtime), where people connect
+  their agents from the front end, knows who they are by an assertion Core
+  makes for them (README, Signing in to a service that hosts agents). Name
+  the runtime's audience, the absolute URL it is configured to answer to, in
+  the env file, beside `SIGNING_KEY`:
+
+  ```
+  RUNTIME_AUDIENCES=https://lms-staging.example.edu/runtime
+  ```
+
+  More than one runtime is a comma-separated list. Give each URL exactly as
+  the runtime has it: it is compared byte for byte, so a `/` at the end
+  counts. The server refuses to start on one that is not an absolute `http` or
+  `https` URL, or that carries a query, a fragment or a user name. The
+  assertions are signed with a key derived from `SIGNING_KEY`, so nothing
+  else is needed. To keep them apart, set `ASSERTION_KEY` to a key of its own,
+  made with `openssl rand -base64 32` and kept like `SIGNING_KEY`; changing it
+  later makes a runtime fetch the new key, and assertions already made stop
+  working, which costs people a new one, asked for by the front end without
+  their noticing. `ASSERTION_TTL` (default `5m`, from `1m` to `15m`) is how
+  long one lasts, and so how long a sign-out or a suspension takes to reach a
+  runtime. A runtime checks them against `https://lms-staging.example.edu/v1/auth/keys`;
+  both routes are under `/v1`, which the proxy already sends to Core. Set
+  none of these, and no assertion is made.
 - **A person's first sign-in:** register them with their email, then invite
   them, in the front end from their page, or as below. The invitation's
   token is for the front end's page that takes invitations, where the person
@@ -298,15 +324,16 @@ else regularly:
 
 - `/var/backups/aishiteru/`, the database;
 - `/srv/aishiteru/data/`, the uploaded files;
-- `/etc/aishiteru/aishiteru.env`, which holds `SIGNING_KEY` and the database
-  password.
+- `/etc/aishiteru/aishiteru.env`, which holds `SIGNING_KEY` (and
+  `ASSERTION_KEY`, if it is set) and the database password.
 
 ## More than one server per environment
 
 Two servers behind a load balancer need more than this set-up gives:
 
 - files in S3 (`BLOB_STORE=s3` and the `S3_*` settings);
-- the same `SIGNING_KEY` on every server;
+- the same `SIGNING_KEY` on every server, and the same `ASSERTION_KEY` if it
+  is set;
 - `HTTP_ADDR` that the load balancer can reach;
 - `TRUSTED_PROXIES` set to the load balancer's addresses;
 - the database on a server of its own.

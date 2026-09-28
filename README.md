@@ -35,7 +35,8 @@ In place so far:
 but `curl`, builds the worked example from docs/schema.md §5 from an empty
 installation: an agent grades an essay, a person approves it, the student
 sees the grade; then the student asks the instructor's tutor agent a question,
-and it answers.
+and it answers; last, Core vouches for the instructor to an agent runtime, and
+the key it publishes checks the assertion.
 
 - MCP: agents connect at `/mcp` (stateless streamable HTTP, bearer token) and
   get the same catalogue as REST, tool for tool, through the same pipeline.
@@ -48,6 +49,9 @@ and it answers.
 
 - single sign-on over OpenID Connect (written against ADFS), which signs in
   people who are already registered and creates nobody;
+- assertions: a short-lived, signed statement of who is signed in, which a
+  service that hosts agents checks against the key Core publishes, so that
+  it needs no sign-in of its own;
 - the things a server on the open internet needs: a per-actor rate limit
   shared by REST and MCP, a limit on sign-in attempts, a request log with no
   credentials in it, and a refusal to start against a schema older than the
@@ -221,6 +225,30 @@ written is readable by the two participants, by course staff who decide
 actions for the one who asked, and, in the action log, by anyone who decides
 actions in the course; and a respondent that answers others too, such as a
 course's tutor agent, may repeat it to them (docs/schema.md §2.8).
+
+### Signing in to a service that hosts agents
+
+The service that hosts agents (the runtime) has a web interface in the front
+end, where people connect their agents to it. It knows who they are by
+Core's word, not by a sign-in of its own: the front end, signed in here,
+asks `POST /v1/auth/assertion` with `{"audience": "https://lms.example.edu/runtime"}`
+and gets back `{"assertion": "eyJ…", "expires_at": "…"}`, a JWT signed with
+Ed25519 that names the person (`sub`, `kind`, `name`, `email`,
+`platform_role`) for that audience alone, which it sends to the runtime as a
+bearer token. The runtime checks it against `GET /v1/auth/keys`, a JSON Web
+Key Set anyone may read. Only an active person is given one, never an agent,
+and it lasts `ASSERTION_TTL` (5 minutes; 1 to 15) and never past the session
+or token that asked. It is no credential here: Core takes only its own
+`ais_` tokens. The request log never carries it, and the answer is not to be
+cached.
+
+`RUNTIME_AUDIENCES` lists the audiences, comma separated absolute URLs; with
+none, no assertion is made. The key is `ASSERTION_KEY` (base64 of a 32-byte
+Ed25519 seed, `openssl rand -base64 32`), or else one derived from
+`SIGNING_KEY`, so a server that has it needs nothing new. A server given
+`RUNTIME_AUDIENCES` and neither key refuses to start. The key set is
+published whenever there is a key. The handout, docs/agent-runtime.md §5.1,
+says what the runtime checks.
 
 ### The API in one paragraph
 
