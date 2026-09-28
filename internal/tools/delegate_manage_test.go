@@ -94,9 +94,22 @@ func TestADelegateManagesMembersWithApprovalWhenThatIsItsLevel(t *testing.T) {
 	if out.Status != domain.StatusProposed {
 		t.Fatalf("with member_manage at confirm_required: %+v", out)
 	}
-	// Not decided by its owner, whose proposal it is at one remove.
+	// Its owner seats students without anyone's confirmation, so he may
+	// decide what his agent proposes to do the same (docs/schema.md §2.6).
+	if d := testkit.Result[pipeline.DecideOut](t, b.do(t, b.sato, "action.decide",
+		m{"course_id": b.course, "action_id": out.ActionID, "decision": "approve"})); d.Outcome != domain.StatusExecuted || !d.ByOwner {
+		t.Fatalf("Sato approving his agent's proposal: %+v", d)
+	}
+	// Were his own seating to wait for a confirmation, his agent's would be
+	// someone else's to decide.
+	b.Exec(`UPDATE course_member SET perm_member_manage = 'confirm_required' WHERE id = $1`, b.satoM)
+	ren := b.person(t, "Ren", "")
+	out = b.MustCall(helper, "member.add", m{"course_id": b.course, "actor_id": ren, "preset": "student"}, "helper-asks-again")
+	if out.Status != domain.StatusProposed {
+		t.Fatalf("with member_manage at confirm_required: %+v", out)
+	}
 	if d := b.MustCall(b.sato, "action.decide", m{"course_id": b.course, "action_id": out.ActionID, "decision": "approve"}, "sato-decides"); d.Status == domain.StatusExecuted {
-		t.Fatalf("Sato approved his own agent's proposal: %+v", d)
+		t.Fatalf("Sato approved his own agent's proposal while his own seating waits for a confirmation: %+v", d)
 	}
 	d := testkit.Result[pipeline.DecideOut](t, b.do(t, mori, "action.decide", m{"course_id": b.course, "action_id": out.ActionID, "decision": "approve"}))
 	if d.Outcome != domain.StatusExecuted {

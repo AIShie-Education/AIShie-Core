@@ -263,9 +263,12 @@ Run all of these as root on the server.
   stops people registering them, leaving it to administrators
   (`actor.register` with `owner_actor_id`); `AGENT_MAX_PER_OWNER` (default 5)
   bounds how many that are not suspended one person may create or reactivate
-  for themselves (an administrator's `actor.register`, `actor.set_owner` and
-  `actor.reactivate` are not counted). `agent.list` returns both settings, as
-  `self_service` and `limit`. Migration 0007
+  for themselves (an administrator's `actor.register` and `actor.reactivate`
+  are not counted). `agent.list` returns both settings, as `self_service` and
+  `limit`. An agent's owner is the one it is registered with, for good:
+  migration 0014 makes the database refuse any change to it, and
+  `actor.set_owner` is gone (the release before it still offers it while the
+  migration goes in, and the call fails, changing nothing). Migration 0007
   gave every seat the new permissions of its roster role's built-in preset;
   the two new built-in presets, `delegate` and `course_tutor`, come with the
   `seed` a deploy runs after it. A seat the old version added while the

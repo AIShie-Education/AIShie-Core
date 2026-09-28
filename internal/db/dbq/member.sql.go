@@ -794,9 +794,10 @@ type SeatOrphanedParams struct {
 // delegate's whose principal is removed or past its expiry, or one that does
 // not match its actor's ownership (an owned agent's seat with no principal,
 // or with one that is not its owner's). Neither a removed seat nor an expired
-// one comes back, and an owner is not changed while the agent has a seat in
-// a course that is not archived (actor.set_owner), where only this could
-// find it. With no clock (now null), a principal's expiry is not judged:
+// one comes back. An agent's owner never changes now (migration 0014); the
+// last kind is a seat an agent kept in an archived course when it changed
+// hands before that, where only this could find it once the course is
+// opened again. With no clock (now null), a principal's expiry is not judged:
 // whoever asks leaves it to seat(), which has one. ListOrphanedSeats is the
 // same rule for every seat, and the authorization queries' owner_matches
 // its other half: a change to one is a change to all three.

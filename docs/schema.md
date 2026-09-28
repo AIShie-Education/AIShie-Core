@@ -73,7 +73,7 @@ actor(id, kind [human|agent|system], display_name, email null,
            site_chat_credential_id set ⇒ kind = 'agent';
            not email_verified ⇒ kind = 'human' and email set
     composite FK (site_chat_credential_id, id) → credential(id, actor_id)
-    trigger: the owner is a person (kind = 'human')
+    trigger: the owner is a person (kind = 'human'), and never changes
 
 credential(id, actor_id→actor, kind [password|sso|api_token|session|invite],
            secret_hash null, provider null, subject null, token_prefix null,
@@ -109,17 +109,22 @@ of their own (`agent.create`, unless `AGENT_SELF_SERVICE=off`), up to `AGENT_MAX
 are not suspended, and looks after them with the `agent.*` tools: names them, issues and revokes
 their tokens, suspends them, takes them out of a course (`agent.withdraw`). Each of those answers
 "no such agent of yours" for an actor the caller does not own, whether it exists or not. An
-administrator may register an agent with an owner (`actor.register`), and give one an owner,
-change it or take it away (`actor.set_owner`): only while it is seated in no course that is not
-archived, revoking every credential it has — tokens, sessions, password, invitation, linked
-identity — which whoever owned it may hold, cancelling the requests the owner before made to
-seat it, and deleting everything the agent remembers (§2.9). The change holds the agent's row first, and every write that acts on who owns it — a
-token issued, a seat taken or given up — reads it `FOR SHARE`, so neither passes the other. A seat
-it keeps in an archived course stops counting, since it no longer matches the owner, and is
-removed by the sweep once the course is opened again. An agent does not own agents; the system
-actor owns nothing; an agent someone owns holds no platform role, since owning it and holding its
-tokens would then be more than a seat; an administrator does not give root or another
-administrator an agent to answer for.
+administrator may register an agent with an owner (`actor.register`).
+
+**An agent's owner never changes.** It is fixed when the agent is registered — by `agent.create`,
+whose caller owns it, or by an administrator's `actor.register` — and nobody sets, changes or
+takes it away afterwards, a platform administrator included; an agent registered with no owner
+stays nobody's. The database holds it (trigger `actor_owner_fixed`, migration 0014). So a
+delegate seat always matches its agent's owner, what an agent keeps about its owner (§2.9) is
+about the same person for as long as it is kept, and a token issued for an agent is never in the
+hands of someone it no longer answers to: nothing is revoked, cancelled or forgotten for a change
+of hands, and nothing that reads who owns an agent holds its row to keep it so. Before 0014 an
+administrator could change an owner (`actor.set_owner`) while the agent sat in no course that was
+not archived; a seat it kept in an archived course then stopped counting, since it no longer
+matched the owner, and is removed by the sweep once the course is opened again (§2.2). An agent
+does not own agents; the system actor owns nothing; an agent someone owns holds no platform role,
+since owning it and holding its tokens would then be more than a seat; an administrator does not
+give root or another administrator an agent to answer for.
 
 `suspended_by_actor_id` says who made the suspension in force, and is read only while `status =
 'suspended'`. An owner lifts only a suspension of their own. An administrator lifts any, and may
@@ -277,7 +282,8 @@ the nearest one, and the choice is recorded here so that it is a decision and no
 | Where every student stands on an assignment (`submission.roster`) | `perm_submission_read` | it is the submission list with the students who have not started; names and seat status only with `perm_member_read`, as the member list gives them |
 | Finding whom to seat by their whole email, or whom an actor id names (`member.lookup_actor`) | `perm_member_manage` | whoever seats members has to name them; it lists nobody |
 | Unpublishing an assignment nobody has started (`assignment.unpublish`) | `perm_assignment_write` | the undo of publishing it |
-| Taking back one's own proposal while nobody has decided it (`action.withdraw`) | `perm_document_read` | the most basic permission a seated member holds; that the proposal is the caller's own is what decides, as `action.list_mine` shows only the caller's own |
+| Deciding, reviewing and reading one's own agent's actions (`action.decide`, `.review`, `.get`), and the queues of them (`action.list_proposed`, `.list_pending_review`) | `perm_action_decide`, or owning the agent | an owner decides and reviews their agent's action where they could have done it themselves (§2.6), which needs no `perm_action_decide`; without it they reach their own agents' actions alone, and anything else is denied as it is to anyone without it |
+| Taking back one's own proposal, or one's own agent's, while nobody has decided it (`action.withdraw`) | `perm_document_read` | the most basic permission a seated member holds; that the proposal is the caller's own, or their own agent's, is what decides, as `action.list_mine` shows only the caller's own |
 | Closing a conversation (`conversation.close`), retracting a message (`conversation.retract`), listing and reading conversations (`conversation.list`, `.get`, `.messages`) | `perm_document_read` | the most basic permission a seated member holds; the conversation decides who may: its two participants, and whoever decides actions for its opener (§2.8) |
 | Regrading | the lower of `perm_grade_submit` and `perm_grade_post` | it writes a grade and makes it visible in one step |
 | Course settings, status, department, first instructor | `platform_role`, or an appointment at or above the course's department (§2.10) | outside the course by definition |
@@ -370,6 +376,8 @@ narrows a principal without touching its delegates — and which a manager may h
   `conversation_answer` is capped by the principal's `conversation_ask` (your agent answering
   you is you asking, at one remove), and `agent_delegate` is denied to it whatever its row
   says: it brings no agents of its own;
+- it decides and reviews only by proposal, as any agent does (Ceilings, below):
+  `action_decide` is `confirm_required` at most;
 - the agent of someone who does not manage the course's members — a student's — does only by
   proposal what the built-in `delegate` preset does not give: for each permission that preset
   gives at a lower level than the principal holds, its level is `confirm_required` at most
@@ -381,8 +389,9 @@ narrows a principal without touching its delegates — and which a manager may h
 - it reaches only what its own scope and its principal's both reach, in `authorize()` and in
   every list, which filters by both in SQL;
 - it counts only while its principal's seat is live, its owner active, and its principal still
-  its owner's seat: paused with its principal, gone with it, and nothing once the agent changes
-  hands. An owned agent's seat with no principal counts for nothing either.
+  its owner's seat: paused with its principal, gone with it, and nothing if the agent changed
+  hands before owners were fixed (§2.1). An owned agent's seat with no principal counts for
+  nothing either.
 
 A delegate may be given `member_manage` — seat, change, pause, resume, rescope and remove
 members — and `member_invite`, as far as its principal holds them, by its owner when it is
@@ -421,6 +430,45 @@ refuses anything the owner no longer holds. `member.delegate_defaults` shows wha
 seat. `member.add` and `course.seat_instructor` refuse an owned agent: only its owner seats it,
 and only as their delegate.
 
+**Ceilings.** A seat's ceiling for a permission is the most it may hold of it at all, whatever
+its row says and whoever grants it; what a granter holds limits them further ("nobody hands out
+more than they hold", above), but that is the granter's, and the ceiling is the seat's. One
+function works them out (`domain.Ceiling`), from whether the seat's actor is an agent and, for a
+delegate, its principal's seat as it stands; everything that enforces a ceiling, and everything
+that shows one, calls it:
+
+| Reason | Permission | Ceiling | Whose seat |
+|---|---|---|---|
+| `agent_never` | `agent_delegate` | `denied` | a delegate's: it brings no agents of its own |
+| `agent_decides_by_proposal` | `action_decide` | `confirm_required` | any agent's, owned or not: each decision and review of an agent's is a proposal a person confirms — a triage assistant |
+| `student_agent_by_proposal` | any but `member_manage`, `member_invite` | `confirm_required`, where the built-in `delegate` preset gives less | the delegate of someone who does not manage the course's members (Delegates, above) |
+| `principal_level` | any | the principal's level; for `conversation_answer`, its `conversation_ask` | a delegate's |
+
+A person's seat has none below `autonomous`. Where two bound a permission at the same level, the
+reason given is the first in the table: the one that holds whatever the principal holds.
+
+- **At every call.** `authorize()` caps a delegate by them, whatever its row says (§3). For an
+  agent nobody owns it cannot, since it never reads `actor.kind`; the database holds that seat
+  instead: an agent's row that is not removed, and would hold `action_decide` above
+  `confirm_required`, is written holding `confirm_required` (trigger
+  `course_member_agent_ceiling`, migration 0014, which lowered the rows that said more, and the
+  presets for agents, told by their role `assistant`, as 0013 told them). That reads `kind` to
+  limit, never to grant, as the refusals of ownership do (§2.1). Cutting down rather than refusing
+  keeps the release before 0014 working while it goes in.
+- **Seating.** `member.add`, `course.seat_instructor` and `member.add_delegate` cut a preset's
+  levels down to the seat's ceilings, as a delegate's are cut down to what its owner holds, and
+  refuse a level the call names above one.
+- **Widening.** Every change that widens a seat (`member.update_perms`,
+  `member.update_perms_bulk`, `member.rescope`) is held to its ceilings as well as to the
+  granter's own, and refused above one; `member.update_perms_bulk` refuses whole, naming the
+  seat.
+- **Showing.** `member.get` and `member.list` (each member), `me.memberships` (each seat) and
+  `member.delegate_defaults` (the seat it would make) give `perm_ceilings`, every permission's
+  ceiling, and `perm_ceiling_reasons`, the reason for each below `autonomous`, so that a front end
+  offers only what may be given. A refusal above a ceiling gives the same code as its `reason`,
+  with `permission` and `ceiling`. A test holds every ceiling shown to what enforcement allows,
+  over seats of every kind and every permission.
+
 **Lifecycle**: add (new row, preset copied), pause (`status = 'paused'`, same id survives),
 remove (`status = 'removed'`, pending proposals cancelled, history kept), re-add (new row, new
 id). `expires_at` is an automatic remove. Every one of these is itself an action
@@ -431,7 +479,7 @@ the principal anyway. The database removes a delegate's seat with its principal'
 release before 0007, which knows no delegates, does not leave one behind; that release does not
 cancel its proposals, which approval refuses and the expiry sweep cancels. An owner takes their
 agent out of a course with `agent.withdraw`. A delegate's seat left behind — its agent changed
-hands, or its principal's seat past its expiry — is removed by a sweep (`member.remove_orphan`),
+hands before 0014, or its principal's seat past its expiry — is removed by a sweep (`member.remove_orphan`),
 and by seating the agent again. `member.update_perms_bulk` changes a permission on every live seat of
 one roster role at once, other than the caller's — "students may bring agents only with
 approval" — each change held to the rules of a change to one seat, all or none. It changes the
@@ -663,7 +711,9 @@ event(seq, type, course_id null→course, action_id null→action,
 denied. `confirm_required` needs no approval table — the queue is `WHERE status = 'proposed'`,
 and the proposal itself lives in `payload`; nothing else is written until a human approves. A
 proposer may take their proposal back while nobody has decided it (`action.withdraw`): it is
-cancelled, as `withdrawn`.
+cancelled, as `withdrawn`. So may the owner of the agent that made it, whose delegate it is,
+whatever their own level for it; the cancellation, in `result` and in `action.cancelled`, then
+says `by_owner`. Nobody else may: not another agent of the owner's, nor an agent its owner's.
 `pending_review` needs no review table — the queue is `WHERE review_state IN ('pending', 'escalated')`,
 an escalated action still waiting for its second reviewer: someone other than whoever escalated it
 or approved its escalation.
@@ -768,14 +818,44 @@ Nobody approves or reviews their own action. The CHECKs compare seats; the appli
 actors as well, so the rule holds across every seat one actor has held: someone removed and
 seated again has a new seat, and is still who made the action. It compares parties, in fact: an
 actor, an agent it owns or its owner, and another agent of the same owner are one party, since an
-agent someone owns acts only as their delegate. An owner does not approve or review what their
-agent did, nor an agent what its owner or a sibling did, nor does any of them close an escalation
-another of them raised. The approval and review queues list such actions all the same — they are
-the course's queues — and mark each with whether it is the caller's to decide
-(`yours_to_decide`). The database cannot go further
-and require the decider to be human, because nothing reads `actor.kind`. Nor can it see past one
-row: a decision is an action like any other, so it may itself wait for a decision or be under
-review — a triage agent whose approvals a human confirms. Confirming it carries out what it
+agent someone owns acts only as their delegate. An agent does not approve or review what its
+owner or a sibling did, nor does any of the party close an escalation another of them raised.
+
+**An owner decides what their own agent did where they could have done it themselves.** They
+approve or reject its proposal, and review what it did under review, only if their own seat, when
+they decide, holds every permission that gates the action at `autonomous` and reaches its target:
+the authorization they would face making the very same call themselves then (`authorize()`, §3,
+from their own seat). Their agent does nothing they could not do anyway, and they could have done
+this without anyone. So it needs no `perm_action_decide` of theirs, and whatever they hold of it,
+their decision is carried out at once, `autonomous`, as their own doing of it would be: a student,
+who decides nothing else, confirms her own agent's drafts of her work (§2.2, Delegates), since she
+writes her work without anyone's confirmation. The tools' gate says so (`tool.Gate.OwnAgents`):
+without `perm_action_decide` an owner reaches their own agents' actions and nothing else — deciding,
+reviewing and reading them (`action.get`, any of them), and the queues listing them alone — and
+anything else is denied as it is to anyone who does not hold it, an action id that does not exist
+included. Where their own level is `confirm_required` or `pending_review`, the course
+has someone check them too, and so their agent: someone outside the party decides it, as for the
+rest of the party; so it is where the target is beyond their reach, or gone. Rejecting is held to
+the same rule as approving, so that one mark says which proposals are the caller's; an owner who
+wants their agent's proposal gone takes it back (`action.withdraw`, above) whatever their level.
+It is the owner's own decision about their own agent's action and nothing more: the agent never
+decides its owner's, a sibling never another's, and at one remove (below) the party stays one.
+Approving authorizes the proposer again, as any approval does, so an owner carries out nothing
+their agent may no longer do. The decision says the owner made it: `by_owner` in its result and
+in the event it writes (`action.approved`, `action.rejected`, `action.reviewed`,
+`action.escalated`), and in a rejection's `result.decision`. The database cannot see it: the
+CHECKs compare seats, and an owner's seat is not their agent's.
+
+The approval and review queues list the party's actions all the same — they are the course's
+queues — and mark each with whether it is the caller's to decide (`yours_to_decide`), an owner's
+own agent's by the rule above, measured as the decision would be. A caller without
+`perm_action_decide` who owns an agent that holds or held a seat in the course is shown their own
+agents' actions there, and nobody else's. The database cannot go further
+and require the decider to be human, because nothing that authorizes reads `actor.kind`; but an
+agent holds `action_decide` at `confirm_required` at most (§2.2, Ceilings), so whatever an agent
+decides or reviews waits for a member who is not one. Nor can the database see past one row: a
+decision is an action like any other, so it may itself wait for a decision or be under review —
+a triage agent whose approvals a human confirms. Confirming it carries out what it
 decided, so nobody confirms or reviews a decision about their own action either, at any remove.
 
 ### 2.7 Grades
@@ -916,8 +996,7 @@ call came with (`actor.site_chat_credential_id`, §2.1); `on: false` clears it. 
 while that credential is live, neither revoked nor expired, the agent is active, and its owner,
 if it has one, is active. That is worked out in SQL whenever it is needed and never kept as a
 flag, so revoking the runtime's token, as ending its hosting does, ends it with nothing left
-behind to say otherwise, and so does a change of owner, which revokes every credential the agent
-has. Its owner switches it off (`agent.update` with `site_chat: false`) and never on: only what
+behind to say otherwise. Its owner switches it off (`agent.update` with `site_chat: false`) and never on: only what
 runs the agent knows that it answers, and says so again whenever it starts. Only an agent
 declares it; a person is refused (`not_an_agent`), a refusal that reads `kind` as those of
 ownership do (§2.1). `agent.get` and `agent.list` say `site_chat` of each agent, and
@@ -951,9 +1030,11 @@ instance's clock would. A call writing in a conversation takes its caller's seat
 other participant's next, KEY SHARE (its principal's after it), and the conversation last.
 An answer that waits for approval is a proposal; approving it runs every check again. Four
 eyes count parties (§2.6), so the answers of a course tutor an instructor owns, when they
-wait for approval or review, are decided by someone other than that instructor. Where that
-instructor is the only one who decides actions, nobody can: such a tutor's answers stay
-autonomous there, or someone else is seated to decide them.
+wait for approval or review, are decided by someone other than that instructor, unless the
+instructor's own `perm_conversation_answer` is `autonomous`: then they could have answered
+without anyone, and decide them too. Where that instructor answers only with a confirmation and
+is the only one who decides actions, nobody can: such a tutor's answers stay autonomous there,
+or someone else is seated to decide them.
 
 Either participant closes a conversation (`conversation.close`), with a reason if they like,
 which may not be `seat_removed`; nothing more is written in it, and it stays readable. A message is withdrawn (`conversation.retract`) by its author, or
@@ -1117,10 +1198,10 @@ and a proposal is corrected in place. A version given with a correction changes 
 (`version_mismatch`). Every read says that memory is data, never instructions. Nothing about
 memory reaches the event feed.
 
-**A change of owner** (`actor.set_owner`) deletes everything the agent holds, in every scope and
-course, with its owner's switch: the new owner may read nothing the agent kept about its old
-owner, nor about the people it answered for them. A write to memory holds the agent's row `FOR
-SHARE`, as issuing it a token does, so none lands after the change.
+**An agent's owner never changes** (§2.1), so there is no new owner to keep its memory from:
+what it keeps about its owner is about the one person for as long as it is kept. Before
+migration 0014 a change of owner (`actor.set_owner`) deleted everything the agent held, with its
+owner's switch.
 
 ### 2.10 Departments and their administrators
 
@@ -1229,7 +1310,8 @@ authorize(actor, course, action_type, target) → autonomy_level
    still the actor's owner; else denied (an owned actor's seat with no principal: denied)
 3. level = member.perm_<action_type>; 'denied' → denied
    a delegate: the lower of its level and its principal's (conversation_answer: the
-   principal's conversation_ask); agent_delegate: denied
+   principal's conversation_ask); agent_delegate: denied; action_decide: confirm_required
+   at most (§2.2, Ceilings; an agent nobody owns is held to that by the database)
 4. if the target belongs to a student:
       member.student_scope = 'all', or that student ∈ member_student_scope; else denied
       a delegate: its principal's likewise
@@ -1302,6 +1384,8 @@ that reads which credential the call came with.
 | Owner columns match `document.kind`; a version has content; SSO rows carry an identity | CHECKs |
 | Emails are unique regardless of case | unique index on `lower(email)` |
 | Only an agent has an owner, and its owner is a person: not an agent, not the system actor, not itself | CHECKs on `actor`, trigger `actor_owner_valid` |
+| An agent's owner is fixed when it is registered: never changed, taken away, or given to one registered without | trigger `actor_owner_fixed` |
+| An agent's seat that is not removed holds `action_decide` at `confirm_required` at most: more is written as that | trigger `course_member_agent_ceiling` |
 | An agent someone owns holds no platform role | CHECK `actor_owned_holds_no_platform_role` |
 | Making an actor active forgets who suspended it | trigger `actor_suspension_cleared` |
 | Only an agent declares that it takes conversations in the site, and only with a credential of its own | CHECK `actor_site_chat_is_agent`, composite FK `actor_site_chat_credential_fk` |
@@ -1417,6 +1501,9 @@ that reads which credential the call came with.
   again on approval, and
   refused if the owner no longer holds it. Only the owner seats their agent, and only as their
   delegate: `member.add` and `course.seat_instructor` refuse an owned agent.
+- A seat holds no more than its ceilings (§2.2, Ceilings): one function works them out, and
+  seating, every widening change, `authorize()` for a delegate and the member views all call it;
+  a level named above one is refused with the reason the views give.
 - A change that widens a delegate's seat is within its principal's as well as the granter's.
   A granter who is a delegate grants within its principal's reach and life as well as its own
   (`withinGranter`, `outlastsGranter`), and `agent_delegate` up to its principal's level
@@ -1443,26 +1530,28 @@ that reads which credential the call came with.
   again.
 - Four eyes counts parties (§2.6): an actor, the agents it owns or its owner, and the owner's
   other agents are one, in `action.decide`, `action.review`, at any remove and for escalations.
+  One exception, at no remove: an owner approves, rejects or reviews their own agent's action
+  where their own seat, as `authorize()` finds it for the same call when they decide, holds it at
+  `autonomous` and reaches its target; `yours_to_decide` is worked out the same way, and the
+  decision and its event say `by_owner`. That takes no `perm_action_decide` and is `autonomous`
+  whatever the owner holds of it (`tool.Gate.OwnAgents`); without it, an owner reaches their own
+  agents' actions alone, in `action.decide`, `.review`, `.get` and the queues, and is denied the
+  rest as anyone without it is.
 - Only an agent's owner acts on it through `agent.*`, and to anyone else it does not exist.
   What an owner does for themselves is capped: `agent.create`, and `agent.reactivate` of one they
   suspended, are refused once they have `AGENT_MAX_PER_OWNER` agents that are not suspended,
   counted under a lock on the owner, so two at once are counted one after the other. An
-  administrator's `actor.register` with an owner, `actor.set_owner` and `actor.reactivate` are
+  administrator's `actor.register` with an owner and `actor.reactivate` are
   not counted: an administrator may give someone more. An owner lifts only a suspension of their
   own; an administrator's, or one from before it was recorded, is not theirs.
-- An agent changes owner only while seated in no course that is not archived, and every
-  credential it has is revoked, every request to seat it cancelled, and everything it remembers
-  deleted, as it does. The change
-  holds the agent's row, `FOR NO KEY UPDATE`, before it looks at anything; issuing it a token
-  and seating it or taking it out read the row `FOR SHARE`, so that a token or a seat made by
-  the owner before is revoked or counted, never left behind.
 - An agent takes conversations in the site (§2.8) only while the credential that declared it
   (`me.site_chat`, with the credential of the call) is live, the agent active and its owner, if
   any, active: worked out in SQL on every read that needs it, never stored as a flag. Only an
   agent declares it; its owner switches it off and never on.
 - `member.update_perms_bulk` changes every seat of the role but the caller's, each through the
   rule for one seat, all or none.
-- A proposal is withdrawn only by its proposer, and only while nobody has decided it.
+- A proposal is withdrawn only by its proposer, or by the owner of the agent that proposed it,
+  and only while nobody has decided it.
 - Nobody gains through a conversation more than they hold (§2.8): a member addresses only a
   respondent within their own seat, or their own delegate; a delegate answers only its
   principal unless its seat answers the course, which only someone who manages the course's

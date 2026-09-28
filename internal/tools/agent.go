@@ -44,24 +44,11 @@ const DefaultMaxAgentsPerOwner = 5
 const EventAgentCreated = "agent.created"
 
 // ownAgent returns the agent if the caller owns it, and errNotYourAgent if
-// not, whether or not it exists. It locks nothing: for a read, and for a
-// write that changes the agent's own row, whose UPDATE says whose it is
-// again (agent.suspend, agent.reactivate) or does not depend on it.
+// not, whether or not it exists. It locks nothing, for a write as for a
+// read: whose an agent is never changes (docs/schema.md §2.1), so what it
+// says holds for the rest of the call.
 func ownAgent(ctx context.Context, q dbq.Querier, owner, agent uuid.UUID) (dbq.Actor, error) {
 	a, err := q.GetActor(ctx, agent)
-	return mine(a, err, owner)
-}
-
-// holdOwnAgent is ownAgent for a write that acts on the ownership it reads
-// and leaves the agent's row as it is — a token issued, a seat taken or
-// given up: the row is read FOR SHARE (GetActorForShare), so that a change
-// of owner waits for the write, or the write for it.
-func holdOwnAgent(ctx context.Context, q dbq.Querier, owner, agent uuid.UUID) (dbq.Actor, error) {
-	a, err := q.GetActorForShare(ctx, agent)
-	return mine(a, err, owner)
-}
-
-func mine(a dbq.Actor, err error, owner uuid.UUID) (dbq.Actor, error) {
 	if errors.Is(err, pgx.ErrNoRows) || (err == nil && (a.OwnerActorID == nil || *a.OwnerActorID != owner)) {
 		return a, errNotYourAgent
 	}
@@ -103,7 +90,8 @@ func agentCreate(d Deps) tool.Tool {
 		Description: "Register an agent of your own. It runs elsewhere, on whatever you connect to it with a token " +
 			"(agent.issue_token); no endpoint, model or prompt is stored here. It can do nothing until you bring it into a " +
 			"course where you are seated (member.add_delegate), and there it acts only as your delegate, never with more " +
-			"than your own seat. A person may have a limited number of agents that are not suspended.",
+			"than your own seat. It is yours for good: nobody gives it another owner. A person may have a limited number " +
+			"of agents that are not suspended.",
 		Kind: tool.Write, Gate: self,
 		HTTP:    tool.Route{Method: "POST", Pattern: "/v1/me/agents"},
 		Resolve: noTarget[AgentCreateIn]("actor"),
@@ -417,7 +405,7 @@ func agentIssueToken() tool.Tool {
 		SecretOut: []string{"token"},
 		Resolve:   agentTarget(func(in AgentIssueTokenIn) uuid.UUID { return in.ActorID }),
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in AgentIssueTokenIn) (IssueTokenOut, error) {
-			if _, err := holdOwnAgent(ctx, ec.Q, ec.Actor.ID, in.ActorID); err != nil {
+			if _, err := ownAgent(ctx, ec.Q, ec.Actor.ID, in.ActorID); err != nil {
 				return IssueTokenOut{}, err
 			}
 			expires, err := tokenExpiry(in.Label, in.ExpiresInDays, ec.Now)
@@ -507,7 +495,7 @@ func agentWithdraw() tool.Tool {
 			return tool.Target{CourseID: in.CourseID, Type: "course_member"}, nil
 		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in AgentWithdrawIn) (MemberRemoveOut, error) {
-			if _, err := holdOwnAgent(ctx, ec.Q, ec.Actor.ID, in.ActorID); err != nil {
+			if _, err := ownAgent(ctx, ec.Q, ec.Actor.ID, in.ActorID); err != nil {
 				return MemberRemoveOut{}, err
 			}
 			live, err := ec.Q.GetLiveMembership(ctx, dbq.GetLiveMembershipParams{CourseID: in.CourseID, ActorID: in.ActorID})

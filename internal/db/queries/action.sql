@@ -111,6 +111,31 @@ WHERE course_id = $1 AND review_state IN ('pending', 'escalated') AND id > sqlc.
 ORDER BY id
 LIMIT sqlc.arg(max_rows);
 
+-- name: ListProposedActionsOfAgentsOf :many
+-- The approval queue as an agent's owner sees it who decides nothing else
+-- in the course: their own agents' proposals, and nobody else's.
+SELECT * FROM action x
+WHERE x.course_id = sqlc.arg(course_id) AND x.status = 'proposed' AND x.id > sqlc.arg(after)
+  AND x.actor_id IN (SELECT a.id FROM actor a WHERE a.owner_actor_id = sqlc.arg(owner_actor_id))
+ORDER BY x.id
+LIMIT sqlc.arg(max_rows);
+
+-- name: ListPendingReviewActionsOfAgentsOf :many
+-- The review queue likewise: their own agents' actions under review.
+SELECT * FROM action x
+WHERE x.course_id = sqlc.arg(course_id) AND x.review_state IN ('pending', 'escalated') AND x.id > sqlc.arg(after)
+  AND x.actor_id IN (SELECT a.id FROM actor a WHERE a.owner_actor_id = sqlc.arg(owner_actor_id))
+ORDER BY x.id
+LIMIT sqlc.arg(max_rows);
+
+-- name: OwnsAgentSeatedIn :one
+-- Whether the actor owns an agent that holds, or held, a seat in the
+-- course: whose queues of their own agents' actions they may read there.
+SELECT EXISTS (
+    SELECT 1 FROM course_member m JOIN actor a ON a.id = m.actor_id
+    WHERE m.course_id = sqlc.arg(course_id) AND a.owner_actor_id = sqlc.arg(owner_actor_id)
+)::bool AS owns;
+
 -- name: ListActionsByMember :many
 -- exclude_types leaves out whole action types: a chat's messages from a
 -- list of what one has done, say.

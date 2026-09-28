@@ -157,14 +157,6 @@ func TestSiteChatLastsNoLongerThanItsCredentialItsAgentAndItsOwner(t *testing.T)
 	if !b.siteChat(t, b.yuki, helper) {
 		t.Fatal("its owner reactivated, the agent does not take conversations in the site")
 	}
-
-	// Another owner revokes every credential it had, and so ends it.
-	loose := b.agent(t, b.sato, "Unseated helper")
-	b.SiteChat(loose)
-	b.do(t, b.admin, "actor.set_owner", m{"actor_id": loose, "owner_actor_id": b.yuki})
-	if b.siteChat(t, b.yuki, loose) {
-		t.Fatal("an agent handed to another owner still takes conversations in the site")
-	}
 }
 
 // Its owner switches it off, and never on: only what runs the agent knows

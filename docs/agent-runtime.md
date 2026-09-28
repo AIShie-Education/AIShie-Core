@@ -144,8 +144,8 @@ rejected, cancelled). That is safe: Core refuses a second answer to a message
 
 | Tool | Use |
 |---|---|
-| `me_get` | Checks the token and returns the agent's actor: `id`, `kind`, `display_name`, `status`, and `owner_actor_id`, the person who owns it. `owner_actor_id` is absent for an agent nobody owns (one an administrator registered without an owner), and for a person, whose own token the runtime refuses anyway (`kind` is not `agent`). It names the owner while the owner is suspended too; Core gives a suspended person no assertion (§5.1), so they cannot connect the agent meanwhile. When the agent changes hands (`actor.set_owner`), every token it had is revoked, so a stored token answers 401 before it could name the new owner. |
-| `me_memberships` | Every seat: `member_id`, `course_id`, `code`, `section`, `title`, `course_status`, `role`, `status`, `expires_at`, `student_scope`, `assignment_scope`, `principal_member_id`, `perms` (permission to level, a delegate's capped by its principal's, all `denied` while the seat does not count) and `answers_course`. Work only in active seats of courses not archived whose `perms.conversation_answer` is not denied. |
+| `me_get` | Checks the token and returns the agent's actor: `id`, `kind`, `display_name`, `status`, and `owner_actor_id`, the person who owns it. `owner_actor_id` is absent for an agent nobody owns (one an administrator registered without an owner), and for a person, whose own token the runtime refuses anyway (`kind` is not `agent`). It names the owner while the owner is suspended too; Core gives a suspended person no assertion (§5.1), so they cannot connect the agent meanwhile. An agent's owner is fixed when it is registered and never changes (schema.md §2.1), so the owner a stored token's agent names is the one it named when the token was taken. |
+| `me_memberships` | Every seat: `member_id`, `course_id`, `code`, `section`, `title`, `course_status`, `role`, `status`, `expires_at`, `student_scope`, `assignment_scope`, `principal_member_id`, `perms` (permission to level, a delegate's capped by its principal's, all `denied` while the seat does not count), `answers_course`, and `perm_ceilings` with `perm_ceiling_reasons`: the most each permission of the seat could ever be, and why where that is below `autonomous` (an agent's `action_decide` is `confirm_required` at most: its decisions and reviews are proposals). Work only in active seats of courses not archived whose `perms.conversation_answer` is not denied. |
 | `me_site_chat` | `{on: true}` when the runtime starts the agent, with the token it runs it with, and `{on: false}` when it stops: until then people in the site are not offered the agent, and `conversation.open` and `conversation.ask` addressed to it are refused `failed_precondition`, `agent_answers_elsewhere`. Returns `site_chat`, whether it holds now (false while the owner is suspended). It holds only while that token works: revoked or expired, it ends by itself, and a new token must declare it again. The owner may end it (`agent.update` with `site_chat: false`), never start it; the runtime starts it again on its next start. A person's token is refused, `not_an_agent`. Conversations already open are unaffected: the agent answers them, and they stay readable. |
 
 **Finding work**
@@ -159,7 +159,9 @@ The events that matter carry ids, never text:
 - `action.approved`, `action.rejected` and `action.cancelled`, filed under the
   proposal's `action_id`. `action.approved` has `payload.outcome`, `executed`
   or `failed`; `action.cancelled` has `payload.reason` (proposals expire after
-  14 days by default). A rejection's reason is in the proposal's
+  14 days by default; `withdrawn` when the agent or its owner took it back).
+  `payload.by_owner` is true when it was the agent's own owner who approved,
+  rejected or withdrew it. A rejection's reason is in the proposal's
   `result.decision.reason`, which `action_list_mine` returns.
 - `conversation.opened`, `conversation.message_posted` (`conversation_id`,
   `message_id`, `author_member_id`, `opener_member_id`,
@@ -209,8 +211,9 @@ polite reason rather than leave it at the head of the inbox. An answer waiting
 for approval to a message since overtaken holds nothing up: the inbox shows the
 newer message, and approving the old answer can only fail. The answers of an
 instructor's own tutor that wait for approval or review are decided by someone
-else; where nobody else decides actions, they must stay autonomous (schema.md
-§2.8).
+else, unless the instructor answers without a confirmation themselves, when
+they may decide them too; where nobody else decides actions and the instructor
+may not, they must stay autonomous (schema.md §2.8).
 
 ### 2.5 Memory, presence, limits
 
@@ -691,9 +694,9 @@ with a one-token call), the runtime says the agent answers in the site
 (`me_site_chat`, §2.3), and polling starts. The runtime takes the token only
 from the agent's owner: `me_get`'s `owner_actor_id` must be the person signed
 in. It refuses a token whose `kind` is not `agent` (never a person's own), and
-leaves an agent nobody owns to the runtime's administrators. It checks the
-owner again whenever the agent starts, and stops an agent whose owner has
-changed; the change of owner has revoked its token in Core anyway.
+leaves an agent nobody owns to the runtime's administrators. An agent's owner
+never changes in Core, so the owner checked when the token was taken stays
+its owner for as long as the token works.
 
 ### 5.2 Whose key
 
@@ -761,8 +764,14 @@ The runtime neither holds back a write to imitate `confirm_required` nor
 avoids proposals to look autonomous; it tells the owner what happened
 ("waiting for your instructor's approval"). `proposed` is normal, and the
 runtime, not the model, decides what follows. Nobody decides their own
-proposal, their agent's or their owner's, and Core refuses it, so a runtime
-never pairs a decider's and a proposer's token for one party.
+proposal, their owner's or another agent's of their owner, and Core refuses
+it. An owner decides their own agent's proposal only where they could have
+done it themselves without anyone's confirmation (schema.md §2.6), even one who
+decides nothing else in the course, such as a student confirming her agent's
+drafts of her work: that is a person's decision in Core, in the front end's
+approval queue, which shows such an owner their own agents' proposals alone;
+never the runtime's, so a runtime never pairs a decider's and a proposer's
+token for one party, nor approves for the owner.
 
 ### 6.3 Personal data and retractions
 

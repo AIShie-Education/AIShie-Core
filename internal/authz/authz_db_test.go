@@ -354,14 +354,16 @@ func TestADelegateHoldsNoMoreThanItsPrincipal(t *testing.T) {
 	expect("nothing while its owner is suspended", domain.PermDocumentRead, false, authz.Target{}, domain.Denied, authz.ReasonPrincipalNotActive)
 	w.Exec(`UPDATE actor SET status = 'active' WHERE id = $1`, c.yuki)
 	expect("back with its owner", domain.PermDocumentRead, false, authz.Target{}, domain.Autonomous, "")
-	w.Exec(`UPDATE actor SET owner_actor_id = $2 WHERE id = $1`, agent, c.ken)
+	// Owners no longer change (migration 0014); one changed before that
+	// left seats that count for nothing.
+	w.ChangeOwnerAsBefore0014(agent, &c.ken)
 	expect("nothing once another owns it", domain.PermDocumentRead, false, authz.Target{}, domain.Denied, authz.ReasonPrincipalNotActive)
-	w.Exec(`UPDATE actor SET owner_actor_id = NULL WHERE id = $1`, agent)
+	w.ChangeOwnerAsBefore0014(agent, nil)
 	expect("nor once nobody does", domain.PermDocumentRead, false, authz.Target{}, domain.Denied, authz.ReasonPrincipalNotActive)
 
 	// An agent seated before anyone owned it counts for nothing once someone
 	// does: it must be brought in again, by its owner.
-	w.Exec(`UPDATE actor SET owner_actor_id = $2 WHERE id = $1`, c.tutor, c.sato)
+	w.ChangeOwnerAsBefore0014(c.tutor, &c.sato)
 	got := run(t, c, check{"", c.tutor, c.course, domain.PermDocumentRead, false, authz.Target{}, 0, ""})
 	if got.Level != domain.Denied || got.Reason != authz.ReasonPrincipalNotActive {
 		t.Fatalf("an owned agent's seat with no principal: %s (%q)", got.Level, got.Reason)

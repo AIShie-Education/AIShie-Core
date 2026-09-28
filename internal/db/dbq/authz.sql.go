@@ -190,7 +190,8 @@ type GetLiveMemberForAuthzRow struct {
 // queries below select the same columns, in the same order. owner_matches
 // says the seat is what its actor's ownership says it must be: no principal
 // for an actor nobody owns, the owner's seat for one somebody does. An owner
-// can change after a seat was taken, and the seat then stops counting.
+// no longer changes (migration 0014), but one changed before that left seats
+// in archived courses that count for nothing once the course is opened again.
 // The partial unique index allows at most one row per (course, actor) that is
 // not removed. A paused row is returned so the caller can say why it denied.
 func (q *Queries) GetLiveMemberForAuthz(ctx context.Context, arg GetLiveMemberForAuthzParams) (GetLiveMemberForAuthzRow, error) {

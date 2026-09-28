@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -51,6 +52,9 @@ type DecideOut struct {
 	Outcome domain.ActionStatus `json:"outcome"`
 	Result  json.RawMessage     `json:"result,omitempty"`
 	Error   *apperr.Error       `json:"error,omitempty"`
+	// ByOwner says the decider was the owner of the agent that proposed it,
+	// deciding what they could have done themselves (ownerJudges).
+	ByOwner bool `json:"by_owner,omitempty" jsonschema:"true when you decided as the owner of the agent that proposed it"`
 }
 
 // Cancellation reasons recorded on a proposal.
@@ -106,15 +110,27 @@ func (p *Pipeline) Decide(ctx context.Context, ec *tool.ExecCtx, in DecideIn) (D
 	if ec.Member == nil || prop.MemberID == nil {
 		return DecideOut{}, apperr.Forbid("only a course member decides a member's proposal")
 	}
+	byOwner := false
 	if same, err := sameParty(ctx, ec.Q, prop.ActorID, ec.Actor.ID); err != nil {
 		return DecideOut{}, err
 	} else if *prop.MemberID == ec.Member.ID || same {
 		// The database refuses the same seat too; saying so here is kinder.
 		// The actor is compared here as well: someone removed and seated
 		// again has a new seat, and is still who made the proposal. So is
-		// the party: an agent decides nothing its owner proposed, nor its
-		// owner anything it did, nor another of the owner's agents.
-		return DecideOut{}, apperr.Forbid("nobody decides their own proposal, nor their agent's, nor their owner's")
+		// the party: an agent decides nothing its owner proposed, nor
+		// another of the owner's agents anything it did. Its owner decides
+		// what it proposed only where they could have done it themselves
+		// without anyone's confirmation (ownerJudges).
+		owner, may, err := p.ownerJudges(ctx, ec.Q, ec.Actor, ec.Member.ID, prop, ec.Now)
+		switch {
+		case err != nil:
+			return DecideOut{}, err
+		case owner && !may:
+			return DecideOut{}, errOwnerNotAutonomous("decide")
+		case !may:
+			return DecideOut{}, apperr.Forbid("nobody decides their own proposal, nor their owner's, nor another agent's of their owner")
+		}
+		byOwner = true
 	}
 	if own, err := judgesOwn(ctx, ec.Q, prop, ec.Member.ID, ec.Actor.ID); err != nil {
 		return DecideOut{}, err
@@ -128,34 +144,53 @@ func (p *Pipeline) Decide(ctx context.Context, ec *tool.ExecCtx, in DecideIn) (D
 			return DecideOut{}, apperr.Forbid("an escalation is for someone else to look at")
 		}
 	}
-	out := DecideOut{ActionID: prop.ID}
+	out := DecideOut{ActionID: prop.ID, ByOwner: byOwner}
+	// What the event says of the decision, and the record of a rejection:
+	// that the proposer's owner made it, when they did.
+	said := func(m map[string]any) map[string]any {
+		if byOwner {
+			if m == nil {
+				m = map[string]any{}
+			}
+			m["by_owner"] = true
+		}
+		return m
+	}
+	cancel := func(code string, details map[string]any) (DecideOut, error) {
+		o, err := p.cancel(ctx, ec, prop, code, details)
+		o.ByOwner = byOwner
+		return o, err
+	}
 
 	if p.cfg.ProposalTTL > 0 && prop.CreatedAt.Add(p.cfg.ProposalTTL).Before(ec.Now) {
-		return p.cancel(ctx, ec, prop, CancelExpired, nil)
+		return cancel(CancelExpired, nil)
 	}
 
 	if in.Decision == DecisionReject {
-		res, _ := json.Marshal(map[string]any{"decision": map[string]any{
+		res, _ := json.Marshal(map[string]any{"decision": said(map[string]any{
 			"decision": DecisionReject, "reason": in.Reason, "by_action_id": ec.ActionID,
-		}})
+		})})
 		if err := finish(ctx, ec.Q, prop.ID, domain.StatusRejected, &ec.Member.ID, ec, false, res); err != nil {
 			return DecideOut{}, err
 		}
-		ec.Emit(proposalEvent(events.ActionRejected, prop, ec.ActionID, nil))
+		ec.Emit(proposalEvent(events.ActionRejected, prop, ec.ActionID, said(nil)))
 		out.Outcome = domain.StatusRejected
 		return out, nil
 	}
 
 	// Approve. The world may have moved since the proposal was made, so the
 	// proposer is authorized again, now, against the membership row the
-	// proposal was made under, and the target is looked up again.
+	// proposal was made under, and the target is looked up again. An owner
+	// who approves has passed their own authorization for it just now; the
+	// proposer's is what the approval carries out, and it is checked all
+	// the same.
 	t, ok := p.reg.Get(prop.ActionType)
 	if !ok {
-		return p.cancel(ctx, ec, prop, CancelToolNoLongerHere, nil)
+		return cancel(CancelToolNoLongerHere, nil)
 	}
 	args, err := t.Decode(prop.Payload)
 	if err != nil {
-		return p.cancel(ctx, ec, prop, CancelToolNoLongerHere, map[string]any{"detail": err.Error()})
+		return cancel(CancelToolNoLongerHere, map[string]any{"detail": err.Error()})
 	}
 	proposer, err := authz.LoadActor(ctx, ec.Q, prop.ActorID)
 	if err != nil {
@@ -164,11 +199,11 @@ func (p *Pipeline) Decide(ctx context.Context, ec *tool.ExecCtx, in DecideIn) (D
 	a, err := p.authorize(ctx, ec.Q, t, args, proposer, prop.MemberID, ec.Now)
 	switch {
 	case apperr.Is(err, apperr.NotFound):
-		return p.cancel(ctx, ec, prop, CancelTargetGone, nil)
+		return cancel(CancelTargetGone, nil)
 	case err != nil:
 		return DecideOut{}, err
 	case !a.decision.Level.Allowed():
-		return p.cancel(ctx, ec, prop, CancelReauthorization, map[string]any{"authz_reason": string(a.decision.Reason)})
+		return cancel(CancelReauthorization, map[string]any{"authz_reason": string(a.decision.Reason)})
 	}
 
 	// Approved says what the approver did; outcome says what came of it. A
@@ -179,7 +214,7 @@ func (p *Pipeline) Decide(ctx context.Context, ec *tool.ExecCtx, in DecideIn) (D
 		if err := finish(ctx, ec.Q, prop.ID, domain.StatusFailed, &ec.Member.ID, ec, false, errorResult(e)); err != nil {
 			return DecideOut{}, err
 		}
-		ec.Emit(proposalEvent(events.ActionApproved, prop, ec.ActionID, map[string]any{"outcome": domain.StatusFailed, "error": e.Code}))
+		ec.Emit(proposalEvent(events.ActionApproved, prop, ec.ActionID, said(map[string]any{"outcome": domain.StatusFailed, "error": e.Code})))
 		out.Outcome, out.Error = domain.StatusFailed, e
 		return out, nil
 	}
@@ -228,7 +263,7 @@ func (p *Pipeline) Decide(ctx context.Context, ec *tool.ExecCtx, in DecideIn) (D
 	if err := finish(ctx, ec.Q, prop.ID, domain.StatusExecuted, &ec.Member.ID, ec, true, stripTopLevel(full, t.SecretOut)); err != nil {
 		return DecideOut{}, err
 	}
-	ec.Emit(proposalEvent(events.ActionApproved, prop, ec.ActionID, map[string]any{"outcome": domain.StatusExecuted}))
+	ec.Emit(proposalEvent(events.ActionApproved, prop, ec.ActionID, said(map[string]any{"outcome": domain.StatusExecuted})))
 	child.Drain(ec.Emit)
 	out.Outcome, out.Result = domain.StatusExecuted, full
 	return out, nil
@@ -237,11 +272,73 @@ func (p *Pipeline) Decide(ctx context.Context, ec *tool.ExecCtx, in DecideIn) (D
 // sameParty reports whether two actors are one party for four eyes: the same
 // actor, one of them the other's owner, or two agents of one owner. An agent
 // someone owns acts only as their delegate, so it is them, at one remove.
+// One party judges nothing of its own, but for its owner's judging an
+// agent's action they could have done themselves (ownerJudges).
 func sameParty(ctx context.Context, q *dbq.Queries, a, b uuid.UUID) (bool, error) {
 	if a == b {
 		return true, nil
 	}
 	return q.SameParty(ctx, dbq.SamePartyParams{A: a, B: b})
+}
+
+// ownerJudges reports whether actor, deciding or reviewing a from its seat,
+// is the owner of the agent that did a (owner), and, if so, whether they may
+// (may): whether they could have done a themselves just now without anyone's
+// confirmation. That is their own authorization for the very same call, as
+// authorize() would give it them from that seat if they made it now: every
+// permission that gates it held at autonomous, and its target within their
+// reach. Where their own level is lower, the course has someone check them
+// too, and so their agent: someone outside the party decides it. It is the
+// one case in which a party judges its own, and only at no remove: nobody
+// else of the party — the agent itself, its sibling — and nobody judging an
+// action of the party through a decision about it (judgesOwn) is let by it.
+// It is the same rule for approving and rejecting, and for reviewing.
+func (p *Pipeline) ownerJudges(ctx context.Context, q dbq.Querier, actor domain.Actor, seat uuid.UUID, a dbq.Action, now time.Time) (owner, may bool, err error) {
+	if a.MemberID == nil || *a.MemberID == seat || a.ActorID == actor.ID {
+		return false, false, nil
+	}
+	did, err := q.GetActor(ctx, a.ActorID)
+	if err != nil {
+		return false, false, err
+	}
+	if did.OwnerActorID == nil || *did.OwnerActorID != actor.ID {
+		return false, false, nil
+	}
+	t, ok := p.reg.Get(a.ActionType)
+	if !ok {
+		return true, false, nil
+	}
+	args, err := t.Decode(a.Payload)
+	if err != nil {
+		return true, false, nil
+	}
+	got, err := p.authorize(ctx, q, t, args, actor, &seat, now)
+	if err != nil {
+		// A target gone, or not found in the course: not something they
+		// could do now. Anything else is a fault, and says so.
+		if _, ok := apperr.As(err); ok {
+			return true, false, nil
+		}
+		return true, false, err
+	}
+	return true, got.decision.Level == domain.Autonomous, nil
+}
+
+// OwnerMayJudge is ownerJudges for the approval and review queues, which say
+// of each action whether it is the caller's to decide (yours_to_decide): true
+// when the caller, from seat, is the owner of the agent that did a and could
+// have done it themselves just now without anyone's confirmation.
+func (p *Pipeline) OwnerMayJudge(ctx context.Context, q dbq.Querier, actor domain.Actor, seat uuid.UUID, a dbq.Action, now time.Time) (bool, error) {
+	_, may, err := p.ownerJudges(ctx, q, actor, seat, a, now)
+	return may, err
+}
+
+// errOwnerNotAutonomous refuses an agent's owner who could not have done
+// what their agent did without someone's confirmation.
+func errOwnerNotAutonomous(what string) *apperr.Error {
+	return apperr.Forbid("you %s what your agent did only where you would do it yourself without anyone's confirmation; "+
+		"here your own level for it is lower, or it is beyond your reach, so someone else %ss it", what, what).
+		With("reason", "owner_not_autonomous")
 }
 
 // judgesOwn reports whether a is a decision or a review about an action of
@@ -376,6 +473,8 @@ type ReviewIn struct {
 type ReviewOut struct {
 	ActionID    uuid.UUID          `json:"action_id"`
 	ReviewState domain.ReviewState `json:"review_state"`
+	// ByOwner says the reviewer was the owner of the agent that did it.
+	ByOwner bool `json:"by_owner,omitempty" jsonschema:"true when you reviewed it as the owner of the agent that did it"`
 }
 
 // Review records that a human has looked at a pending_review action after the
@@ -402,13 +501,25 @@ func (p *Pipeline) Review(ctx context.Context, ec *tool.ExecCtx, in ReviewIn) (R
 	if ec.Member == nil {
 		return ReviewOut{}, apperr.Forbid("only a course member reviews")
 	}
+	byOwner := false
 	if same, err := sameParty(ctx, ec.Q, row.ActorID, ec.Actor.ID); err != nil {
 		return ReviewOut{}, err
 	} else if (row.MemberID != nil && *row.MemberID == ec.Member.ID) || same {
 		// The database refuses only the same seat; the actor is compared
 		// here, so a seat taken since is refused too, and so is its party:
-		// an agent and its owner do not review each other.
-		return ReviewOut{}, apperr.Forbid("nobody reviews their own action, nor their agent's, nor their owner's")
+		// an agent does not review its owner's action, nor a sibling's. Its
+		// owner reviews what it did only where they could have done it
+		// themselves without anyone's confirmation (ownerJudges).
+		owner, may, err := p.ownerJudges(ctx, ec.Q, ec.Actor, ec.Member.ID, row, ec.Now)
+		switch {
+		case err != nil:
+			return ReviewOut{}, err
+		case owner && !may:
+			return ReviewOut{}, errOwnerNotAutonomous("review")
+		case !may:
+			return ReviewOut{}, apperr.Forbid("nobody reviews their own action, nor their owner's, nor another agent's of their owner")
+		}
+		byOwner = true
 	}
 	if own, err := judgesOwn(ctx, ec.Q, row, ec.Member.ID, ec.Actor.ID); err != nil {
 		return ReviewOut{}, err
@@ -442,6 +553,10 @@ func (p *Pipeline) Review(ctx context.Context, ec *tool.ExecCtx, in ReviewIn) (R
 	if in.Outcome == ReviewEscalated {
 		typ = events.ActionEscalated
 	}
-	ec.Emit(proposalEvent(typ, row, ec.ActionID, nil))
-	return ReviewOut{ActionID: row.ID, ReviewState: domain.ReviewState(in.Outcome)}, nil
+	var extra map[string]any
+	if byOwner {
+		extra = map[string]any{"by_owner": true}
+	}
+	ec.Emit(proposalEvent(typ, row, ec.ActionID, extra))
+	return ReviewOut{ActionID: row.ID, ReviewState: domain.ReviewState(in.Outcome), ByOwner: byOwner}, nil
 }

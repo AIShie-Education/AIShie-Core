@@ -15,7 +15,6 @@ import (
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/domain"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/events"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/ids"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/pipeline"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/tool"
 )
 
@@ -28,7 +27,7 @@ import (
 
 func platformTools() []tool.Tool {
 	return []tool.Tool{
-		actorRegister(), actorGet(), actorList(), actorUpdate(), actorSuspend(), actorReactivate(), actorSetOwner(),
+		actorRegister(), actorGet(), actorList(), actorUpdate(), actorSuspend(), actorReactivate(),
 		actorIssueToken(), actorListCredentials(), actorRevokeCredential(), actorInvite(), actorLinkSSO(),
 		actorLookupByEmail(), actorInviteNew(),
 		termCreate(), termList(),
@@ -65,7 +64,7 @@ type ActorRegisterIn struct {
 	DisplayName  string     `json:"display_name"`
 	Email        *string    `json:"email,omitempty" jsonschema:"needed for a person to sign in with a password"`
 	PlatformRole *string    `json:"platform_role,omitempty" jsonschema:"admin; only root may grant it"`
-	OwnerActorID *uuid.UUID `json:"owner_actor_id,omitempty" jsonschema:"for an agent only: the active person who owns it, and whose delegate alone it will be"`
+	OwnerActorID *uuid.UUID `json:"owner_actor_id,omitempty" jsonschema:"for an agent only: the active person who owns it, and whose delegate alone it will be, for good"`
 }
 
 type ActorOut struct {
@@ -80,7 +79,9 @@ func actorRegister() tool.Tool {
 			"single sign-on (actor.link_sso). " +
 			"An agent is registered here and runs elsewhere: no endpoint, model or prompt is stored. " +
 			"Give it a token with actor.issue_token. An agent may be given an owner, a person: it then acts only as " +
-			"that person's delegate, seated by them (member.add_delegate), never with more than their own seat.",
+			"that person's delegate, seated by them (member.add_delegate), never with more than their own seat. " +
+			"The owner is given here or never: nobody changes it or takes it away afterwards, and an agent registered " +
+			"without one stays nobody's.",
 		Kind: tool.Write, Gate: admins,
 		HTTP:    tool.Route{Method: "POST", Pattern: "/v1/actors"},
 		Resolve: noTarget[ActorRegisterIn]("actor"),
@@ -414,110 +415,6 @@ func actorReactivate() tool.Tool {
 				return OK{}, apperr.Conflicts("the actor is already active")
 			}
 			ec.Emit(events.Event{Type: EventActorReactivated, SubjectType: "actor", SubjectID: &in.ActorID})
-			return OK{OK: true}, nil
-		},
-	})
-}
-
-type ActorSetOwnerIn struct {
-	ActorID      uuid.UUID  `json:"actor_id"`
-	OwnerActorID *uuid.UUID `json:"owner_actor_id" jsonschema:"the person who is to own the agent; null for nobody"`
-}
-
-func actorSetOwner() tool.Tool {
-	return tool.Define(tool.Spec[ActorSetOwnerIn, OK]{
-		Name: "actor.set_owner",
-		Description: "Give an agent an owner, change it, or take it away (owner_actor_id null). An agent someone owns " +
-			"acts only as their delegate. Refused while the agent is seated in a course that is not archived: take it out " +
-			"first (agent.withdraw by its owner, or member.remove), and for an agent that holds a platform role, which an " +
-			"agent someone owns does not. Every credential the agent has — tokens, sessions, password, invitation, linked " +
-			"identity — is revoked, since whoever owned it before may hold them, and the old owner's requests to seat it " +
-			"that wait for a decision are cancelled; issue it a new token. Everything the agent remembers is deleted: what " +
-			"it kept about its old owner, and about the people it answered for them. A seat it keeps in an archived course " +
-			"counts for nothing from then on.",
-		Kind: tool.Write, Gate: admins,
-		HTTP: tool.Route{Method: "POST", Pattern: "/v1/actors/{actor_id}/owner"},
-		Resolve: func(ctx context.Context, q dbq.Querier, in ActorSetOwnerIn) (tool.Target, error) {
-			return resolveActor(ctx, q, ActorIDIn{ActorID: in.ActorID})
-		},
-		Execute: func(ctx context.Context, ec *tool.ExecCtx, in ActorSetOwnerIn) (OK, error) {
-			// The agent is held first, and everything about it read after:
-			// a token issued or a seat taken meanwhile, which read who owns
-			// it FOR SHARE, has finished, and is revoked or counted below,
-			// or waits for this and finds the new owner.
-			if err := ec.Q.LockAgentForOwnerChange(ctx, in.ActorID); err != nil {
-				return OK{}, err
-			}
-			if err := mayActOn(ctx, ec, in.ActorID); err != nil {
-				return OK{}, err
-			}
-			a, err := ec.Q.GetActor(ctx, in.ActorID)
-			if err != nil {
-				return OK{}, err
-			}
-			switch {
-			case in.OwnerActorID != nil && a.Kind != "agent":
-				return OK{}, apperr.Precondition("only an agent has an owner")
-			case in.OwnerActorID != nil && a.PlatformRole != nil:
-				return OK{}, apperr.Precondition("the agent holds a platform role, and an agent someone owns holds none")
-			case (a.OwnerActorID == nil && in.OwnerActorID == nil) ||
-				(a.OwnerActorID != nil && in.OwnerActorID != nil && *a.OwnerActorID == *in.OwnerActorID):
-				return OK{}, apperr.Conflicts("the agent already has that owner")
-			}
-			if in.OwnerActorID != nil {
-				if err := mayOwn(ctx, ec, *in.OwnerActorID); err != nil {
-					return OK{}, err
-				}
-			}
-			// A seat's principal is its actor's owner's seat. Changing the
-			// owner under a seat would leave it pointing at someone else's,
-			// or at none: it is taken out of its courses first, where it
-			// can be. An archived course takes no writes, its withdrawal
-			// included; a seat there stops counting instead, and is removed
-			// by the sweep once the course is opened again.
-			if n, err := ec.Q.CountSeatsInOpenCourses(ctx, in.ActorID); err != nil {
-				return OK{}, err
-			} else if n > 0 {
-				return OK{}, apperr.Precondition("the agent is seated in %d course(s): withdraw it from its courses first", n)
-			}
-			if err := ec.Q.SetActorOwner(ctx, dbq.SetActorOwnerParams{ID: in.ActorID, OwnerActorID: in.OwnerActorID}); err != nil {
-				return OK{}, err
-			}
-			if err := ec.Q.RevokeAllCredentials(ctx, dbq.RevokeAllCredentialsParams{ActorID: in.ActorID, RevokedAt: &ec.Now}); err != nil {
-				return OK{}, err
-			}
-			// Nor may the new owner read what the agent remembers: about its
-			// old owner, and, in courses since archived, about the people it
-			// answered for them. All of it goes, in every scope, with the
-			// old owner's switch (docs/schema.md §2.9). A write of the
-			// agent's to its memory holds the agent's row FOR SHARE, as a
-			// token issued does, so none lands after this.
-			if _, err := ec.Q.DeleteMemoryOfHolder(ctx, in.ActorID); err != nil {
-				return OK{}, err
-			}
-			// Whoever owned it before may have asked to seat it somewhere.
-			// Those requests are theirs, name a seat of theirs as principal,
-			// and could only fail if approved: they go, and the new owner is
-			// not shown them.
-			requests, err := ec.Q.LockDelegateRequestsFor(ctx, &in.ActorID)
-			if err != nil {
-				return OK{}, err
-			}
-			_, stored := pipeline.Cancellation(pipeline.CancelTargetGone, map[string]any{"why": "owner_changed"})
-			for _, r := range requests {
-				n, err := ec.Q.CancelProposal(ctx, dbq.CancelProposalParams{ID: r.ID, Result: stored})
-				if err != nil {
-					return OK{}, err
-				}
-				if n == 0 {
-					continue
-				}
-				proposal := r.ID
-				ec.Emit(events.Event{Type: events.ActionCancelled, CourseID: r.CourseID, ActionID: &proposal,
-					SubjectType: "action", SubjectID: &proposal, Payload: map[string]any{"reason": pipeline.CancelTargetGone}})
-			}
-			ec.Emit(events.Event{Type: EventActorUpdated, SubjectType: "actor", SubjectID: &in.ActorID,
-				Payload: map[string]any{"owner_actor_id": in.OwnerActorID}})
 			return OK{OK: true}, nil
 		},
 	})

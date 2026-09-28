@@ -20,7 +20,7 @@ import (
 // An agent's memory: what it reaches of it, and how, is one rule
 // (memoryAccess), measured on every call from its seats; what it writes
 // stays out of the action log; how much it keeps and how fast it writes are
-// bounded; and a change of owner leaves it nothing.
+// bounded.
 
 // memCast is a course with every kind of agent that keeps memory, each with
 // something kept already, made through the tools:
@@ -682,34 +682,5 @@ func TestMemoryNotFoundIsTheSameWhateverTheReason(t *testing.T) {
 	}
 	if n := c.Count(`SELECT count(*) FROM memory_entry WHERE id = $1`, frozen); n != 1 {
 		t.Fatal("a frozen entry was forgotten by the agent")
-	}
-}
-
-// A change of owner leaves the agent nothing it remembered, in any scope or
-// course, nor its owner's switch.
-func TestSetOwnerForgetsEverything(t *testing.T) {
-	c := newMemCast(t, nil)
-	c.write(t, c.tutor, m{"scope": "owner", "course_id": c.course, "text": "Sato is in room 101."})
-	c.Exec(`INSERT INTO memory_setting (holder_actor_id, enabled, updated_by_actor_id, updated_at) VALUES ($1, true, $2, now())`, c.tutor, c.sato)
-	count := func(agent uuid.UUID) int {
-		return c.Count(`SELECT (SELECT count(*) FROM memory_entry WHERE holder_actor_id = $1) + (SELECT count(*) FROM memory_setting WHERE holder_actor_id = $1)`, agent)
-	}
-	if n := c.Count(`SELECT count(DISTINCT scope) FROM memory_entry WHERE holder_actor_id = $1`, c.tutor); n != 3 || count(c.tutor) != 5 {
-		t.Fatalf("the tutor keeps %d scopes, %d rows", n, count(c.tutor))
-	}
-	// Sato's tutor is taken out of the course and given to nobody.
-	c.do(t, c.sato, "agent.withdraw", m{"actor_id": c.tutor, "course_id": c.course})
-	c.do(t, c.admin, "actor.set_owner", m{"actor_id": c.tutor, "owner_actor_id": nil})
-	if n := count(c.tutor); n != 0 {
-		t.Fatalf("%d rows of the tutor's memory outlived its change of owner", n)
-	}
-	// The tutor nobody owned, its course archived, is given to Ken.
-	c.do(t, c.admin, "course.archive", m{"course_id": c.course})
-	c.do(t, c.admin, "actor.set_owner", m{"actor_id": c.built.tutor, "owner_actor_id": c.ken})
-	if n := count(c.built.tutor); n != 0 {
-		t.Fatalf("%d rows of the unowned tutor's memory outlived its new owner", n)
-	}
-	if n := count(c.helper); n != 1 {
-		t.Fatalf("Yuki's helper lost what it keeps: %d", n)
 	}
 }
