@@ -31,6 +31,11 @@ const (
 	GradePosted       = "grade.posted"
 	GradeRegraded     = "grade.regraded"
 	GradeTotalUpdated = "grade.total_updated"
+	// A person put a number in place of a total worked out, took it away, or
+	// wrote a comment on a total.
+	GradeTotalOverridden      = "grade.total_overridden"
+	GradeTotalOverrideCleared = "grade.total_override_cleared"
+	GradeTotalCommented       = "grade.total_commented"
 
 	// A conversation's news is its two participants' and nobody else's
 	// (docs/schema.md §2.8). Its subject is the conversation, and its

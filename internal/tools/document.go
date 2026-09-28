@@ -453,7 +453,7 @@ func documentCreate(d Deps) tool.Tool {
 		Name: "document.create",
 		Description: "Create a document. Material, instructions and rubrics are versioned and start unpublished — students " +
 			"see nothing until document.publish. A submission file is attached to a draft submission, and a feedback file " +
-			"to a grade; those have exactly one version and are given their content here.",
+			"to a grade, a computed total included; those have exactly one version and are given their content here.",
 		Kind: tool.Write, Gate: anyDocumentWrite,
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/documents"},
 		Resolve: func(ctx context.Context, q dbq.Querier, in DocumentCreateIn) (tool.Target, error) {
@@ -524,11 +524,11 @@ func documentCreate(d Deps) tool.Tool {
 				if err != nil {
 					return DocumentCreateOut{}, err
 				}
+				// A computed total takes feedback files as an entered grade does:
+				// whoever posts may say something about it (grade.comment_total),
+				// and the totals written for it later carry them on.
 				if g.SupersededBy != nil {
 					return DocumentCreateOut{}, apperr.Conflicts("that grade has been replaced; attach feedback to the grade that replaced it")
-				}
-				if g.Origin != "entered" {
-					return DocumentCreateOut{}, apperr.Precondition("a computed total is arithmetic, not a judgement; feedback goes on the grades beneath it")
 				}
 				ev.Type, ev.StudentMemberID, ev.AssignmentID = EventFeedbackFileAdded, &g.StudentMemberID, g.AssignmentID
 			}

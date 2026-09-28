@@ -301,6 +301,7 @@ the nearest one, and the choice is recorded here so that it is a decision and no
 | Taking back one's own proposal, or one's own agent's, while nobody has decided it (`action.withdraw`) | `perm_document_read` | the most basic permission a seated member holds; that the proposal is the caller's own, or their own agent's, is what decides, as `action.list_mine` shows only the caller's own |
 | Closing a conversation (`conversation.close`), retracting a message (`conversation.retract`), listing and reading conversations (`conversation.list`, `.get`, `.messages`) | `perm_document_read` | the most basic permission a seated member holds; the conversation decides who may: its two participants, and whoever decides actions for its opener (§2.8) |
 | Regrading | the lower of `perm_grade_submit` and `perm_grade_post` | it writes a grade and makes it visible in one step |
+| Overriding a total, taking the override off, commenting on a total (`grade.override_total`, `.clear_override`, `.comment_total`) | the lower of `perm_grade_submit` and `perm_grade_post` | as a regrade: it writes a total and makes it visible in one step |
 | Course settings, status, department, first instructor | `platform_role`, or an appointment at or above the course's department (§2.10) | outside the course by definition |
 | The course's title and description, from a seat in it (`course.update_details`) | `perm_member_manage` | its instructors run the course and name it; its code, section, term, department and status stay with its administrators |
 
@@ -587,6 +588,8 @@ posted grades):
   `drop_lowest` of them.
 - Work with no posted grade is left out and the rest re-normalised — a "grade so far", marked
   incomplete. `treat_ungraded_as_zero` counts it as zero instead, for final grades.
+- A rolled-up component whose total a person has overridden (§2.7) counts, in everything above
+  it, as the override, complete; its own result is still what the scheme works out.
 - A score is a score out of the points possible when it was given, so once any grade has been
   entered for an assignment or a directly graded component — a draft as much as a posted one —
   a change of its `points_possible` says what becomes of them (`existing_grades`): `rescale`
@@ -933,6 +936,22 @@ serves HW3, the midterm, the assignments bucket and the course total.
   it is complete, or any line of its working, a weight changed since included — and nothing
   when nothing has. So does a change of what graded work is worth or where it counts (§2.3),
   at once.
+- **A total may be overridden** (`grade.override_total`): a person's score for it, out of 100,
+  with a reason, made from a seat that may regrade, on a rolled-up component — the course total
+  included — once a total has been written there (`no_total` otherwise; a component graded
+  directly is regraded instead, `graded_directly`). It is a new snapshot, the old superseded,
+  whose `score` stays what the scheme works out, with `override_score`, `override_reason`,
+  `override_by_member_id` and `overridden_at` beside it, so both are shown: the student sees the
+  override and when it was made, those who grade also who made it and why, and
+  `gradebook.get` gives `override_percent` beside the `percent` worked out. Above it, the
+  override counts in its place (`gradecalc`, where a line of the working says `overridden`),
+  and what is above is written again at once. Every total written for it afterwards, by a
+  post, a regrade or a change of the scheme, carries the override on, and its comment and
+  feedback files: working the number out again never quietly takes a person's decision away.
+  `grade.clear_override` takes it off, the same way, and the history keeps it. A total takes
+  feedback as an entered grade does: a comment (`grade.comment_total`, empty to take it away)
+  and feedback files (`document.create`), which, like feedback on any posted grade, are a
+  release.
 - **`breakdown`** holds per-criterion detail for submission grades:
   `[{criterion, points, max, comment}]`. The rubric is prose the model reads; the breakdown is
   its output. Structured criteria tables were dropped as a second copy of the rubric.
@@ -1494,10 +1513,11 @@ that reads which credential the call came with.
   to the assignment, an event naming it takes it before the event-stream lock, never under it
   (`events.Flush`), and news of instructions or a rubric reads which assignments are published
   under the same lock, so it is never filed under one unpublished meanwhile.
-- Grade computation, and writing a `computed` snapshot only on post. A student's totals have
-  one writer at a time, which reads the scheme and the scores as they stand once it is that
-  writer: a post that reaches a student after a weight has changed does not write their totals
-  over under the old one.
+- Grade computation, and writing a `computed` snapshot only on post, on a change of the scheme
+  under graded work, and on an override. A student's totals have one writer at a time, which
+  reads the scheme, the scores and the overrides as they stand once it is that writer: a post
+  that reaches a student after a weight has changed does not write their totals over under
+  the old one. A total written again carries on its override, comment and feedback files.
 - Once a grade has been entered for an assignment or a directly graded component, a draft as
   much as a posted one, a change of its `points_possible` says what becomes of it (§2.3) and
   carries every live grade across, even when a grade and the change come at the same moment:

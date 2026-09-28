@@ -231,6 +231,13 @@ WHERE s.course_id = $1 AND g.student_member_id = $2
   AND g.origin = 'entered' AND g.posted_at IS NOT NULL AND g.superseded_by IS NULL
 ORDER BY s.assignment_id, s.attempt DESC;
 
+-- name: ListLiveTotalOverrides :many
+-- The student's totals a person has overridden, and with what, out of 100.
+SELECT component_id, override_score
+FROM grade
+WHERE student_member_id = $1 AND origin = 'computed' AND override_score IS NOT NULL
+  AND posted_at IS NOT NULL AND superseded_by IS NULL;
+
 -- name: ListLiveComponentScores :many
 SELECT component_id, score
 FROM grade

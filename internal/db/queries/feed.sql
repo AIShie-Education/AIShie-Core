@@ -6,7 +6,8 @@
 --     limited to listed assignments does not see it at all.
 SELECT g.id, g.student_member_id, g.submission_id, g.component_id, s.assignment_id, g.origin, g.score,
        g.feedback, g.breakdown, g.rubric_version_id, g.grader_member_id, g.created_by_action_id,
-       g.posted_at, g.posted_by_member_id, g.superseded_by, g.created_at
+       g.posted_at, g.posted_by_member_id, g.superseded_by, g.created_at,
+       g.override_score, g.override_reason, g.override_by_member_id, g.overridden_at
 FROM grade g
 JOIN course_member sm ON sm.id = g.student_member_id
 LEFT JOIN submission s ON s.id = g.submission_id
@@ -29,7 +30,8 @@ LIMIT sqlc.arg(max_rows);
 -- name: GetGradeFull :one
 SELECT g.id, g.student_member_id, g.submission_id, g.component_id, s.assignment_id, g.origin, g.score,
        g.feedback, g.breakdown, g.rubric_version_id, g.grader_member_id, g.created_by_action_id,
-       g.posted_at, g.posted_by_member_id, g.superseded_by, g.created_at
+       g.posted_at, g.posted_by_member_id, g.superseded_by, g.created_at,
+       g.override_score, g.override_reason, g.override_by_member_id, g.overridden_at
 FROM grade g
 JOIN course_member sm ON sm.id = g.student_member_id
 LEFT JOIN submission s ON s.id = g.submission_id

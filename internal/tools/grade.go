@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -22,7 +23,8 @@ import (
 )
 
 func gradeTools(d Deps) []tool.Tool {
-	return []tool.Tool{gradeSubmit(d), gradePost(), gradeRegrade(d), gradebookGet()}
+	return []tool.Tool{gradeSubmit(d), gradePost(), gradeRegrade(d), gradebookGet(),
+		gradeOverrideTotal(), gradeClearOverride(), gradeCommentTotal()}
 }
 
 // FeedbackFile is a file returned with a grade: a marked-up script, a
@@ -839,7 +841,7 @@ func checkPostable(ctx context.Context, q dbq.Querier, rows []dbq.GetGradesInCou
 		targets[key] = g.ID
 		switch {
 		case g.Origin != "entered":
-			return apperr.Precondition("grade %s is a computed total; totals are written by posting, not posted", g.ID)
+			return apperr.Precondition("grade %s is a computed total; totals are written by posting, not posted, and overridden with grade.override_total", g.ID)
 		case g.SupersededBy != nil:
 			return apperr.Conflicts("grade %s has been replaced by a newer draft", g.ID)
 		case g.PostedAt != nil:
@@ -899,7 +901,7 @@ func gradeRegrade(d Deps) tool.Tool {
 	check := func(g dbq.GetGradesInCourseRow) error {
 		switch {
 		case g.Origin != "entered":
-			return apperr.Precondition("a computed total is not regraded; regrade what is beneath it")
+			return apperr.Precondition("a computed total is not regraded; regrade what is beneath it, or override the total with grade.override_total")
 		case g.PostedAt == nil:
 			return apperr.Precondition("the grade is still a draft; submit a new draft instead")
 		case g.SupersededBy != nil:
@@ -1036,7 +1038,9 @@ type GradebookGetIn struct {
 type GradebookLine struct {
 	ComponentID uuid.UUID        `json:"component_id"`
 	Name        string           `json:"name"`
-	Percent     *decimal.Decimal `json:"percent" jsonschema:"out of 100; null when nothing beneath it has a posted grade"`
+	Percent     *decimal.Decimal `json:"percent" jsonschema:"out of 100, as the scheme works it out; null when nothing beneath it has a posted grade"`
+	// A person's override of the total, beside what the scheme works out.
+	OverridePercent *decimal.Decimal `json:"override_percent,omitempty" jsonschema:"out of 100: a person's override of this total, which counts in its place in everything rolled up above it"`
 	gradecalc.Result
 }
 
@@ -1049,7 +1053,8 @@ func gradebookGet() tool.Tool {
 	return tool.Define(tool.Spec[GradebookGetIn, GradebookGetOut]{
 		Name: "gradebook.get",
 		Description: "One student's rolled-up grades, computed now from posted grades: every component of the " +
-			"course with its percentage and the working behind it. Nothing is stored by reading this.",
+			"course with its percentage and the working behind it, and, beside a total a person has overridden, the " +
+			"override, which counts in its place in everything above it. Nothing is stored by reading this.",
 		Kind: tool.Read,
 		Gate: tool.Gate{Perms: []domain.Perm{domain.PermGradeRead}},
 		HTTP: tool.Route{Method: "GET", Pattern: "/v1/courses/{course_id}/gradebook/{student_member_id}"},
@@ -1086,6 +1091,10 @@ func gradebookGet() tool.Tool {
 					pct := gradecalc.Percent(*f)
 					line.Percent = &pct
 				}
+				if f, ok := scores.Override[c.ID]; ok {
+					pct := gradecalc.Percent(f)
+					line.OverridePercent = &pct
+				}
 				out.Components = append(out.Components, line)
 				for _, ch := range c.Children {
 					walk(ch)
@@ -1107,4 +1116,229 @@ func dedupe(in []uuid.UUID) []uuid.UUID {
 		}
 	}
 	return out
+}
+
+// ---------------------------------------------------------------------------
+// A total a person overrides, or comments on
+// ---------------------------------------------------------------------------
+
+// TotalIn names one student's total on one rolled-up component.
+type TotalIn struct {
+	tool.InCourse
+	StudentMemberID uuid.UUID `json:"student_member_id"`
+	ComponentID     uuid.UUID `json:"component_id" jsonschema:"a component rolled up from what is beneath it, the course total included; a component graded directly is regraded instead"`
+}
+
+// resolveTotal: a total belongs to its student and to no single assignment,
+// like a grade on a component (step 5's extra case).
+func resolveTotal(ctx context.Context, q dbq.Querier, in TotalIn) (tool.Target, error) {
+	if _, err := q.GetComponentInCourse(ctx, dbq.GetComponentInCourseParams{ID: in.ComponentID, CourseID: in.CourseID}); errors.Is(err, pgx.ErrNoRows) {
+		return tool.Target{}, apperr.Missing("no such grade component in this course")
+	} else if err != nil {
+		return tool.Target{}, err
+	}
+	if _, err := q.GetRosterEntry(ctx, dbq.GetRosterEntryParams{ID: in.StudentMemberID, CourseID: in.CourseID}); errors.Is(err, pgx.ErrNoRows) {
+		return tool.Target{}, apperr.Missing("no such member in this course")
+	} else if err != nil {
+		return tool.Target{}, err
+	}
+	return tool.Target{CourseID: in.CourseID, Type: "grade_component", ID: &in.ComponentID,
+		Scope: authz.Target{StudentMemberIDs: []uuid.UUID{in.StudentMemberID}, SpansAssignments: true}}, nil
+}
+
+// liveTotal takes the student's totals, as every writer of them does, and
+// reads the one on the component as it stands under that: it must be there
+// to be overridden or commented on.
+func liveTotal(ctx context.Context, ec *tool.ExecCtx, in TotalIn) (dbq.GetLiveComputedGradeRow, error) {
+	if err := ec.Q.LockStudentTotals(ctx, dbq.LockStudentTotalsParams{CourseID: in.CourseID, StudentMemberID: in.StudentMemberID}); err != nil {
+		return dbq.GetLiveComputedGradeRow{}, err
+	}
+	c, err := ec.Q.GetComponentInCourse(ctx, dbq.GetComponentInCourseParams{ID: in.ComponentID, CourseID: in.CourseID})
+	if err != nil {
+		return dbq.GetLiveComputedGradeRow{}, err
+	}
+	if c.PointsPossible.Valid {
+		return dbq.GetLiveComputedGradeRow{}, apperr.Precondition("%q is graded directly: regrade its grade instead", c.Name).With("reason", "graded_directly")
+	}
+	live, err := ec.Q.GetLiveComputedGrade(ctx, dbq.GetLiveComputedGradeParams{ComponentID: &in.ComponentID, StudentMemberID: in.StudentMemberID})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return live, apperr.Precondition("no total has been written down here for this student yet: one is written when a grade beneath it is posted").
+			With("reason", "no_total")
+	}
+	return live, err
+}
+
+// rewriteTotal writes the live total again as it is but for what change
+// does to the copy, superseding it with history, its feedback files carried
+// on; the copy is made by the caller's action and posted now.
+func rewriteTotal(ctx context.Context, ec *tool.ExecCtx, in TotalIn, live dbq.GetLiveComputedGradeRow, change func(*dbq.InsertGradeParams)) (uuid.UUID, error) {
+	id := ids.New()
+	if n, err := ec.Q.SupersedeGrade(ctx, dbq.SupersedeGradeParams{ID: live.ID, NewID: &id}); err != nil {
+		return uuid.Nil, err
+	} else if n == 0 {
+		return uuid.Nil, apperr.Conflicts("the student's totals were written by someone else just now; try again")
+	}
+	row := dbq.InsertGradeParams{
+		ID: id, StudentMemberID: in.StudentMemberID, ComponentID: &in.ComponentID, Origin: "computed",
+		Score: live.Score, Feedback: live.Feedback, Breakdown: live.Breakdown,
+		GraderMemberID: ec.Member.ID, CreatedByActionID: ec.ActionID,
+		PostedAt: &ec.Now, PostedByMemberID: &ec.Member.ID, CreatedAt: ec.Now,
+		OverrideScore: live.OverrideScore, OverrideReason: live.OverrideReason,
+		OverrideByMemberID: live.OverrideByMemberID, OverriddenAt: live.OverriddenAt,
+	}
+	change(&row)
+	if err := ec.Q.InsertGrade(ctx, row); err != nil {
+		return uuid.Nil, err
+	}
+	return id, ec.Q.MoveFeedbackFiles(ctx, dbq.MoveFeedbackFilesParams{OldGradeID: &live.ID, NewGradeID: &id})
+}
+
+type GradeOverrideTotalIn struct {
+	TotalIn
+	Score  decimal.Decimal `json:"score" jsonschema:"out of 100, as a total's own score is"`
+	Reason string          `json:"reason" jsonschema:"why, 1 to 500 characters: shown to those who grade, and kept"`
+}
+
+type TotalOut struct {
+	GradeID   uuid.UUID `json:"grade_id" jsonschema:"the total as it stands now"`
+	Changed   bool      `json:"changed" jsonschema:"false when the total already said this: nothing was done"`
+	Snapshots int       `json:"snapshots" jsonschema:"how many totals above it were written down again"`
+}
+
+// gradeOverrideTotal puts a person's number in place of a total worked out.
+// The total's own score stays what the scheme works out, beside the override,
+// and every total written for it afterwards — a grade beneath posted, the
+// scheme changed — carries the override on, so working the number out again
+// never quietly takes a person's decision away; only grade.clear_override
+// does. Above it, the override is what counts.
+func gradeOverrideTotal() tool.Tool {
+	return tool.Define(tool.Spec[GradeOverrideTotalIn, TotalOut]{
+		Name: "grade.override_total",
+		Description: "Override one student's total on a rolled-up component, the course total included, with a score out of " +
+			"100 and a reason. The total worked out stays beside the override, and every total written for it later carries " +
+			"the override on; in everything rolled up above it, the override counts in its place, and those totals are " +
+			"written again now. A total is overridden once something beneath it has been posted. Like a regrade it writes " +
+			"a grade and makes it visible at once, so it takes grade_submit and grade_post and runs at the lower of the " +
+			"two; a total spans assignments, so it needs an assignment scope of the whole course. The reason and who made " +
+			"the override are shown to those who grade. Overriding with what is already there changes nothing.",
+		Kind: tool.Write,
+		Gate: tool.Gate{Perms: []domain.Perm{domain.PermGradeSubmit, domain.PermGradePost}},
+		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/gradebook/{student_member_id}/totals/{component_id}/override"},
+		Resolve: func(ctx context.Context, q dbq.Querier, in GradeOverrideTotalIn) (tool.Target, error) {
+			return resolveTotal(ctx, q, in.TotalIn)
+		},
+		Execute: func(ctx context.Context, ec *tool.ExecCtx, in GradeOverrideTotalIn) (TotalOut, error) {
+			reason := strings.TrimSpace(in.Reason)
+			switch {
+			case in.Score.IsNegative():
+				return TotalOut{}, apperr.Invalid("score cannot be negative")
+			case reason == "" || utf8.RuneCountInString(reason) > 500:
+				return TotalOut{}, apperr.Invalid("reason is 1 to 500 characters")
+			}
+			live, err := liveTotal(ctx, ec, in.TotalIn)
+			if err != nil {
+				return TotalOut{}, err
+			}
+			if live.OverrideScore.Valid && live.OverrideScore.Decimal.Equal(in.Score) && live.OverrideReason != nil && *live.OverrideReason == reason {
+				return TotalOut{GradeID: live.ID}, nil
+			}
+			id, err := rewriteTotal(ctx, ec, in.TotalIn, live, func(row *dbq.InsertGradeParams) {
+				row.OverrideScore = decimal.NullDecimal{Decimal: in.Score, Valid: true}
+				row.OverrideReason, row.OverrideByMemberID, row.OverriddenAt = &reason, &ec.Member.ID, &ec.Now
+			})
+			if err != nil {
+				return TotalOut{}, err
+			}
+			ec.Emit(events.Event{Type: events.GradeTotalOverridden, CourseID: &in.CourseID, SubjectType: "grade", SubjectID: &id,
+				StudentMemberID: &in.StudentMemberID, Payload: map[string]any{"component_id": in.ComponentID, "replaces": live.ID}})
+			return totalsAbove(ctx, ec, in.TotalIn)
+		},
+	})
+}
+
+// totalsAbove writes down again what is rolled up above a total a person has
+// just changed, and says where the total stands.
+func totalsAbove(ctx context.Context, ec *tool.ExecCtx, in TotalIn) (TotalOut, error) {
+	n, err := snapshot(ctx, ec, in.CourseID, map[uuid.UUID][]uuid.UUID{in.StudentMemberID: {in.ComponentID}}, gradecalc.Policy{})
+	if err != nil {
+		return TotalOut{}, err
+	}
+	live, err := ec.Q.GetLiveComputedGrade(ctx, dbq.GetLiveComputedGradeParams{ComponentID: &in.ComponentID, StudentMemberID: in.StudentMemberID})
+	return TotalOut{GradeID: live.ID, Changed: true, Snapshots: n}, err
+}
+
+func gradeClearOverride() tool.Tool {
+	return tool.Define(tool.Spec[TotalIn, TotalOut]{
+		Name: "grade.clear_override",
+		Description: "Take a person's override off one student's total: the total worked out counts again, and what is " +
+			"rolled up above it is written again now. The override stays on record in the total's history. Gated as " +
+			"grade.override_total is. A total with no override is left as it is.",
+		Kind: tool.Write,
+		Gate: tool.Gate{Perms: []domain.Perm{domain.PermGradeSubmit, domain.PermGradePost}},
+		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/gradebook/{student_member_id}/totals/{component_id}/clear-override"},
+		Resolve: func(ctx context.Context, q dbq.Querier, in TotalIn) (tool.Target, error) {
+			return resolveTotal(ctx, q, in)
+		},
+		Execute: func(ctx context.Context, ec *tool.ExecCtx, in TotalIn) (TotalOut, error) {
+			live, err := liveTotal(ctx, ec, in)
+			if err != nil {
+				return TotalOut{}, err
+			}
+			if !live.OverrideScore.Valid {
+				return TotalOut{GradeID: live.ID}, nil
+			}
+			id, err := rewriteTotal(ctx, ec, in, live, func(row *dbq.InsertGradeParams) {
+				row.OverrideScore, row.OverrideReason, row.OverrideByMemberID, row.OverriddenAt = decimal.NullDecimal{}, nil, nil, nil
+			})
+			if err != nil {
+				return TotalOut{}, err
+			}
+			ec.Emit(events.Event{Type: events.GradeTotalOverrideCleared, CourseID: &in.CourseID, SubjectType: "grade", SubjectID: &id,
+				StudentMemberID: &in.StudentMemberID, Payload: map[string]any{"component_id": in.ComponentID, "replaces": live.ID}})
+			return totalsAbove(ctx, ec, in)
+		},
+	})
+}
+
+type GradeCommentTotalIn struct {
+	TotalIn
+	Feedback string `json:"feedback" jsonschema:"what the student is told about this total; empty takes a comment away"`
+}
+
+// gradeCommentTotal gives a total what an entered grade has: feedback for the
+// student. A comment is a release, as feedback on a posted grade is, so it is
+// gated as a regrade is; the totals written for it later carry it on.
+func gradeCommentTotal() tool.Tool {
+	return tool.Define(tool.Spec[GradeCommentTotalIn, TotalOut]{
+		Name: "grade.comment_total",
+		Description: "Write feedback for a student on one of their totals on a rolled-up component, the course total " +
+			"included, or take it away with an empty one. The student reads it with the total; totals written for it later " +
+			"carry it on. Feedback files go on a total too, with document.create. Gated as grade.override_total is.",
+		Kind: tool.Write,
+		Gate: tool.Gate{Perms: []domain.Perm{domain.PermGradeSubmit, domain.PermGradePost}},
+		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/gradebook/{student_member_id}/totals/{component_id}/comment"},
+		Resolve: func(ctx context.Context, q dbq.Querier, in GradeCommentTotalIn) (tool.Target, error) {
+			return resolveTotal(ctx, q, in.TotalIn)
+		},
+		Execute: func(ctx context.Context, ec *tool.ExecCtx, in GradeCommentTotalIn) (TotalOut, error) {
+			live, err := liveTotal(ctx, ec, in.TotalIn)
+			if err != nil {
+				return TotalOut{}, err
+			}
+			var feedback *string
+			if strings.TrimSpace(in.Feedback) != "" {
+				feedback = &in.Feedback
+			}
+			if (feedback == nil && live.Feedback == nil) || (feedback != nil && live.Feedback != nil && *feedback == *live.Feedback) {
+				return TotalOut{GradeID: live.ID}, nil
+			}
+			id, err := rewriteTotal(ctx, ec, in.TotalIn, live, func(row *dbq.InsertGradeParams) { row.Feedback = feedback })
+			if err != nil {
+				return TotalOut{}, err
+			}
+			ec.Emit(events.Event{Type: events.GradeTotalCommented, CourseID: &in.CourseID, SubjectType: "grade", SubjectID: &id,
+				StudentMemberID: &in.StudentMemberID, Payload: map[string]any{"component_id": in.ComponentID, "replaces": live.ID}})
+			return TotalOut{GradeID: id, Changed: true}, nil
+		},
+	})
 }

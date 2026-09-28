@@ -60,9 +60,19 @@ func loadTree(ctx context.Context, q dbq.Querier, courseID uuid.UUID) (*gradecal
 	return root, names, nil
 }
 
-// loadScores collects one student's grades that count: live, posted, entered.
+// loadScores collects one student's grades that count: live, posted, entered;
+// and the overrides a person put in place of their totals, which count above
+// them.
 func loadScores(ctx context.Context, q dbq.Querier, courseID, student uuid.UUID) (gradecalc.Scores, error) {
-	s := gradecalc.Scores{Assignment: map[uuid.UUID]decimal.Decimal{}, Component: map[uuid.UUID]decimal.Decimal{}}
+	s := gradecalc.Scores{Assignment: map[uuid.UUID]decimal.Decimal{}, Component: map[uuid.UUID]decimal.Decimal{},
+		Override: map[uuid.UUID]decimal.Decimal{}}
+	overrides, err := q.ListLiveTotalOverrides(ctx, student)
+	if err != nil {
+		return s, err
+	}
+	for _, r := range overrides {
+		s.Override[*r.ComponentID] = r.OverrideScore.Decimal.Div(decimal.NewFromInt(100))
+	}
 	as, err := q.ListLiveAssignmentScores(ctx, dbq.ListLiveAssignmentScoresParams{CourseID: courseID, StudentMemberID: student})
 	if err != nil {
 		return s, err

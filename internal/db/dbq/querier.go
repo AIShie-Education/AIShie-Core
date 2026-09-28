@@ -433,6 +433,8 @@ type Querier interface {
 	// wait for: the call waits instead for the principal, and then finds it
 	// removed.
 	ListLiveDelegatesOf(ctx context.Context, principalMemberID *uuid.UUID) ([]uuid.UUID, error)
+	// The student's totals a person has overridden, and with what, out of 100.
+	ListLiveTotalOverrides(ctx context.Context, studentMemberID uuid.UUID) ([]ListLiveTotalOverridesRow, error)
 	ListMembers(ctx context.Context, arg ListMembersParams) ([]ListMembersRow, error)
 	ListMembershipsForActor(ctx context.Context, actorID uuid.UUID) ([]ListMembershipsForActorRow, error)
 	// A page of one bucket in one status, by id: newest first, after the last

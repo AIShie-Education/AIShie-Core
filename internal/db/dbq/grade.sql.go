@@ -560,6 +560,39 @@ func (q *Queries) ListLiveComponentScores(ctx context.Context, studentMemberID u
 	return items, nil
 }
 
+const listLiveTotalOverrides = `-- name: ListLiveTotalOverrides :many
+SELECT component_id, override_score
+FROM grade
+WHERE student_member_id = $1 AND origin = 'computed' AND override_score IS NOT NULL
+  AND posted_at IS NOT NULL AND superseded_by IS NULL
+`
+
+type ListLiveTotalOverridesRow struct {
+	ComponentID   *uuid.UUID
+	OverrideScore decimal.NullDecimal
+}
+
+// The student's totals a person has overridden, and with what, out of 100.
+func (q *Queries) ListLiveTotalOverrides(ctx context.Context, studentMemberID uuid.UUID) ([]ListLiveTotalOverridesRow, error) {
+	rows, err := q.db.Query(ctx, listLiveTotalOverrides, studentMemberID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListLiveTotalOverridesRow
+	for rows.Next() {
+		var i ListLiveTotalOverridesRow
+		if err := rows.Scan(&i.ComponentID, &i.OverrideScore); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listStudentsGradedBeneath = `-- name: ListStudentsGradedBeneath :many
 WITH RECURSIVE sub(component_id) AS (
     SELECT gc.id FROM grade_component gc WHERE gc.id = $1
