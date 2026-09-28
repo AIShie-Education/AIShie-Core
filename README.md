@@ -492,3 +492,7 @@ and `seed` with the new image, replaces the container, and waits for
 running it day to day are in [docs/deploying.md](docs/deploying.md). How to cut
 a release, and the repository settings this needs, are in
 [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## License
+
+AIShie Core is source-available under the [Elastic License 2.0](LICENSE) (ELv2). You may use, copy, change and redistribute it on the terms in LICENSE, which include that you may not offer it to others as a hosted or managed service.
