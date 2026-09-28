@@ -13,22 +13,6 @@ import (
 	"github.com/shopspring/decimal"
 )
 
-const assignmentHasLiveGrades = `-- name: AssignmentHasLiveGrades :one
-SELECT EXISTS (
-    SELECT 1 FROM grade g JOIN submission s ON s.id = g.submission_id
-    WHERE s.assignment_id = $1 AND g.origin = 'entered' AND g.superseded_by IS NULL
-)
-`
-
-// Entered and not replaced: a draft waiting to be posted counts, since what it
-// was entered against would change under it just the same.
-func (q *Queries) AssignmentHasLiveGrades(ctx context.Context, assignmentID uuid.UUID) (bool, error) {
-	row := q.db.QueryRow(ctx, assignmentHasLiveGrades, assignmentID)
-	var exists bool
-	err := row.Scan(&exists)
-	return exists, err
-}
-
 const assignmentHasSubmissions = `-- name: AssignmentHasSubmissions :one
 SELECT EXISTS (SELECT 1 FROM submission WHERE assignment_id = $1)
 `

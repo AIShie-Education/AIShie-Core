@@ -18,6 +18,9 @@
 //   - Whatever has no grade yet is left out and the rest re-normalised, which
 //     gives a "grade so far". Result.Complete says whether anything was left
 //     out. Policy.UngradedAsZero counts it as zero instead, for final grades.
+//   - A rolled-up component a person has overridden counts, in whatever is
+//     rolled up above it, as the override, complete; its own Result is still
+//     what the scheme works out, so that both can be shown.
 package gradecalc
 
 import (
@@ -52,6 +55,9 @@ type Scores struct {
 	Assignment map[uuid.UUID]decimal.Decimal
 	// Component holds grades entered directly on a component.
 	Component map[uuid.UUID]decimal.Decimal
+	// Override holds, per rolled-up component, the fraction a person put in
+	// place of the one worked out: what counts for it above it.
+	Override map[uuid.UUID]decimal.Decimal
 }
 
 type Policy struct {
@@ -76,6 +82,9 @@ type Item struct {
 	// Weight is the child's weight, or the assignment's points.
 	Weight  decimal.Decimal `json:"weight"`
 	Dropped bool            `json:"dropped,omitempty"`
+	// Overridden says Fraction is a person's override of the child's total,
+	// not what the scheme works out for it.
+	Overridden bool `json:"overridden,omitempty"`
 }
 
 const (
@@ -93,7 +102,8 @@ func (r Result) Same(o Result) bool {
 	}
 	for i, a := range r.Items {
 		b := o.Items[i]
-		if a.ID != b.ID || a.Kind != b.Kind || !sameFraction(a.Fraction, b.Fraction) || !a.Weight.Equal(b.Weight) || a.Dropped != b.Dropped {
+		if a.ID != b.ID || a.Kind != b.Kind || !sameFraction(a.Fraction, b.Fraction) || !a.Weight.Equal(b.Weight) ||
+			a.Dropped != b.Dropped || a.Overridden != b.Overridden {
 			return false
 		}
 	}
@@ -218,6 +228,10 @@ func parent(c *Component, s Scores, p Policy, out map[uuid.UUID]Result) Result {
 	for _, ch := range c.Children {
 		cr := compute(ch, s, p, out)
 		item := Item{ID: ch.ID, Kind: KindComponent, Weight: ch.Weight, Fraction: cr.Fraction}
+		if f, ok := s.Override[ch.ID]; ok && ch.PointsPossible == nil {
+			item.Fraction, item.Overridden = &f, true
+			cr = Result{Fraction: &f, Complete: true}
+		}
 		if ch.Weight.IsZero() {
 			// Shown in the working, counts for nothing, and its gaps are not
 			// this component's gaps.

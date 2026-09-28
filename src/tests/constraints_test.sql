@@ -618,6 +618,48 @@ SELECT pg_temp.fails('published pointer cannot name another document''s version'
     WHERE id = '00000000-0000-0000-0000-0000000000e1' $q$);
 SELECT pg_temp.fails('versions are append-only', '23001', $q$
     UPDATE document_version SET body_md = 'rewritten' WHERE id = '00000000-0000-0000-0000-0000000000f1' $q$);
+SELECT pg_temp.fails('a version is never deleted', '23001', $q$
+    DELETE FROM document_version WHERE id = '00000000-0000-0000-0000-0000000000f2' $q$);
+SELECT pg_temp.fails('a purge says who made it and why', '23514', $q$
+    UPDATE document_version SET storage_key = NULL, purged_at = now() WHERE id = '00000000-0000-0000-0000-0000000000f2' $q$);
+SELECT pg_temp.fails('a purge takes the file and not only the date', '23001', $q$
+    UPDATE document_version SET purged_at = now(), purged_by_actor_id = '00000000-0000-0000-0000-000000000032',
+                                purge_reason = 'personal data' WHERE id = '00000000-0000-0000-0000-0000000000f2' $q$);
+SELECT pg_temp.fails('nor does it move the version', '23001', $q$
+    UPDATE document_version SET storage_key = NULL, seq = 9, purged_at = now(),
+                                purged_by_actor_id = '00000000-0000-0000-0000-000000000032', purge_reason = 'personal data'
+    WHERE id = '00000000-0000-0000-0000-0000000000f2' $q$);
+SELECT pg_temp.ok('a version is purged: its file goes, what it was and who purged it stay', $q$
+    UPDATE document_version SET storage_key = NULL, purged_at = now(),
+                                purged_by_actor_id = '00000000-0000-0000-0000-000000000032', purge_reason = 'personal data'
+    WHERE id = '00000000-0000-0000-0000-0000000000f2';
+    DO $chk$
+    BEGIN
+        IF NOT EXISTS (SELECT 1 FROM document_version WHERE id = '00000000-0000-0000-0000-0000000000f2'
+                       AND seq = 1 AND content_type = 'application/pdf' AND byte_size = 1024 AND storage_key IS NULL) THEN
+            RAISE EXCEPTION 'the tombstone does not say what was there';
+        END IF;
+    END $chk$ $q$);
+SELECT pg_temp.fails('a purged version is purged once', '23001', $q$
+    UPDATE document_version SET purge_reason = 'something else' WHERE id = '00000000-0000-0000-0000-0000000000f2' $q$);
+SELECT pg_temp.fails('a purged version holds nothing of what it held', '23514', $q$
+    INSERT INTO document_version (document_id, seq, body_md, author_member_id, purged_at, purged_by_actor_id, purge_reason)
+    VALUES ('00000000-0000-0000-0000-0000000000e2', 2, 'still here', '00000000-0000-0000-0000-000000000051',
+            now(), '00000000-0000-0000-0000-000000000032', 'personal data') $q$);
+SELECT pg_temp.fails('a document is purged only once it is archived', '23514', $q$
+    UPDATE document SET purged_at = now(), purged_by_actor_id = '00000000-0000-0000-0000-000000000032', purge_reason = 'personal data'
+    WHERE id = '00000000-0000-0000-0000-0000000000e2' $q$);
+SELECT pg_temp.ok('a document is purged, archived', $q$
+    UPDATE document SET status = 'archived', purged_at = now(), purged_by_actor_id = '00000000-0000-0000-0000-000000000032',
+                        purge_reason = 'personal data'
+    WHERE id = '00000000-0000-0000-0000-0000000000e2' $q$);
+SELECT pg_temp.fails('a purged document stays archived', '23514', $q$
+    UPDATE document SET status = 'active' WHERE id = '00000000-0000-0000-0000-0000000000e2' $q$);
+SELECT pg_temp.fails('and stays purged, as it was purged', '23001', $q$
+    UPDATE document SET purged_at = NULL, purged_by_actor_id = NULL, purge_reason = NULL
+    WHERE id = '00000000-0000-0000-0000-0000000000e2' $q$);
+SELECT pg_temp.ok('a purged document may still be renamed', $q$
+    UPDATE document SET title = 'Removed' WHERE id = '00000000-0000-0000-0000-0000000000e2' $q$);
 SELECT pg_temp.fails('submission document needs its submission', '23514', $q$
     INSERT INTO document (course_id, kind, title) VALUES ('00000000-0000-0000-0000-000000000041', 'submission', 'essay.pdf') $q$);
 
@@ -640,6 +682,10 @@ SELECT pg_temp.ok('submitted file is a document owned by the submission', $q$
 SELECT pg_temp.fails('material cannot carry a submission owner', '23514', $q$
     INSERT INTO document (course_id, kind, title, submission_id)
     VALUES ('00000000-0000-0000-0000-000000000041', 'material', 'x', '00000000-0000-0000-0000-0000000000a1') $q$);
+SELECT pg_temp.fails('a submitted file is never purged', '23514', $q$
+    INSERT INTO document (course_id, kind, title, submission_id, status, purged_at, purged_by_actor_id, purge_reason)
+    VALUES ('00000000-0000-0000-0000-000000000041', 'submission', 'essay.pdf', '00000000-0000-0000-0000-0000000000a1',
+            'archived', now(), '00000000-0000-0000-0000-000000000032', 'personal data') $q$);
 
 -- Submission freeze ----------------------------------------------------------
 SELECT pg_temp.ok('draft body can be edited', $q$
@@ -843,6 +889,36 @@ SELECT pg_temp.ok('posted course total is a computed snapshot', $q$
     VALUES ('00000000-0000-0000-0000-000000000052', '00000000-0000-0000-0000-000000000061', 'computed', 71.5,
             '00000000-0000-0000-0000-000000000051', '00000000-0000-0000-0000-0000000000b1', now(),
             '00000000-0000-0000-0000-000000000051') $q$);
+SELECT pg_temp.fails('an override of a total says who made it, when and why', '23514', $q$
+    INSERT INTO grade (student_member_id, component_id, origin, score, grader_member_id, created_by_action_id,
+                       posted_at, posted_by_member_id, override_score)
+    VALUES ('00000000-0000-0000-0000-000000000058', '00000000-0000-0000-0000-000000000061', 'computed', 71.5,
+            '00000000-0000-0000-0000-000000000051', '00000000-0000-0000-0000-0000000000b1', now(),
+            '00000000-0000-0000-0000-000000000051', 75) $q$);
+SELECT pg_temp.fails('only a computed total is overridden', '23514', $q$
+    INSERT INTO grade (student_member_id, component_id, origin, score, grader_member_id, created_by_action_id,
+                       override_score, override_reason, override_by_member_id, overridden_at)
+    VALUES ('00000000-0000-0000-0000-000000000058', '00000000-0000-0000-0000-000000000064', 'entered', 60,
+            '00000000-0000-0000-0000-000000000051', '00000000-0000-0000-0000-0000000000b1',
+            65, 'generous', '00000000-0000-0000-0000-000000000051', now()) $q$);
+SELECT pg_temp.fails('an override is not negative', '23514', $q$
+    INSERT INTO grade (student_member_id, component_id, origin, score, grader_member_id, created_by_action_id,
+                       posted_at, posted_by_member_id, override_score, override_reason, override_by_member_id, overridden_at)
+    VALUES ('00000000-0000-0000-0000-000000000058', '00000000-0000-0000-0000-000000000061', 'computed', 71.5,
+            '00000000-0000-0000-0000-000000000051', '00000000-0000-0000-0000-0000000000b1', now(),
+            '00000000-0000-0000-0000-000000000051', -1, 'harsh', '00000000-0000-0000-0000-000000000051', now()) $q$);
+SELECT pg_temp.fails('an override has a reason of some length', '23514', $q$
+    INSERT INTO grade (student_member_id, component_id, origin, score, grader_member_id, created_by_action_id,
+                       posted_at, posted_by_member_id, override_score, override_reason, override_by_member_id, overridden_at)
+    VALUES ('00000000-0000-0000-0000-000000000058', '00000000-0000-0000-0000-000000000061', 'computed', 71.5,
+            '00000000-0000-0000-0000-000000000051', '00000000-0000-0000-0000-0000000000b1', now(),
+            '00000000-0000-0000-0000-000000000051', 75, '', '00000000-0000-0000-0000-000000000051', now()) $q$);
+SELECT pg_temp.ok('a computed total with an override beside it', $q$
+    INSERT INTO grade (student_member_id, component_id, origin, score, grader_member_id, created_by_action_id,
+                       posted_at, posted_by_member_id, override_score, override_reason, override_by_member_id, overridden_at)
+    VALUES ('00000000-0000-0000-0000-000000000058', '00000000-0000-0000-0000-000000000061', 'computed', 71.5,
+            '00000000-0000-0000-0000-000000000051', '00000000-0000-0000-0000-0000000000b1', now(),
+            '00000000-0000-0000-0000-000000000051', 75, 'the lab work was strong', '00000000-0000-0000-0000-000000000051', now()) $q$);
 SELECT pg_temp.ok('feedback file is a document owned by the grade', $q$
     INSERT INTO document (course_id, kind, title, grade_id)
     VALUES ('00000000-0000-0000-0000-000000000041', 'feedback', 'comments.pdf', '00000000-0000-0000-0000-0000000000d2') $q$);

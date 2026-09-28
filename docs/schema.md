@@ -244,13 +244,27 @@ an agent seated in ten courses has ten, each with its own permissions and scope.
 `assistant`, so they never appear on the roster or receive a grade — but so can a human
 teaching assistant. Role is not read by authorization.
 
+A seat's role changes (`member.set_role`, gated by `perm_member_manage` like every change to a
+seat, never on one's own and never on a delegate's, which is always `assistant`: its
+principal's agent, on no roster; and, by a delegate that manages members, neither on its
+principal's seat nor on its principal's other agents', `not_your_principal`, below). It is not a grant and changes nothing a seat may do, since
+nothing that authorizes reads it: its levels and reach stay as they are, to be changed with
+`member.update_perms` and `member.rescope`. What reads role reads it as it goes. A student
+made a TA keeps what they handed in and every grade and total they were given, readable as
+before, and work already handed in may still be graded and regraded; from then on they are off
+the roster — not listed as a student, not marked missing when a due date passes, handing in
+nothing new, given no new grade on a component — and other seats' lists that name them are
+kept as they are. Someone made a student is on the roster, hands work in, and may be listed in
+others' scope. Giving a seat the role it has changes nothing (`changed: false`); a change emits
+`member.role_changed`, from and to.
+
 **Permissions are columns.** One `autonomy_level` column per action type:
 
 | Column | Gates | Scoped |
 |---|---|---|
 | `perm_document_read` | published material and instructions | |
 | `perm_document_read_draft` | unpublished versions | |
-| `perm_document_write` | new versions, publishing, archiving | |
+| `perm_document_write` | new versions, publishing, renaming, archiving and bringing back | |
 | `perm_rubric_read` | rubric documents | |
 | `perm_assignment_write` | creating, editing, publishing assignments | |
 | `perm_submission_read` | reading submissions | student, assignment |
@@ -275,6 +289,7 @@ the nearest one, and the choice is recorded here so that it is a decision and no
 | Operation | Gated by | Why |
 |---|---|---|
 | Editing the grading scheme (`component.*`) | `perm_assignment_write` | the scheme is where assignments hang, and is set up by whoever sets them up |
+| Changing what graded work is worth, saying what becomes of its grades (`existing_grades` on `assignment.update`, `component.update`) | the lowest of `perm_assignment_write`, `perm_grade_submit` and `perm_grade_post` | it writes grades again and posts them, as a regrade does |
 | Reading assignments, the course, the event feed | `perm_document_read` | the most basic permission a seated member holds; what the feed *shows* is decided per event |
 | Reading the grading scheme | `perm_grade_read` | |
 | Correcting lateness (`submission.set_lateness`) | `perm_grade_submit` | not `perm_submission_write`, or a student could un-late themselves |
@@ -286,7 +301,11 @@ the nearest one, and the choice is recorded here so that it is a decision and no
 | Taking back one's own proposal, or one's own agent's, while nobody has decided it (`action.withdraw`) | `perm_document_read` | the most basic permission a seated member holds; that the proposal is the caller's own, or their own agent's, is what decides, as `action.list_mine` shows only the caller's own |
 | Closing a conversation (`conversation.close`), retracting a message (`conversation.retract`), listing and reading conversations (`conversation.list`, `.get`, `.messages`) | `perm_document_read` | the most basic permission a seated member holds; the conversation decides who may: its two participants, and whoever decides actions for its opener (§2.8) |
 | Regrading | the lower of `perm_grade_submit` and `perm_grade_post` | it writes a grade and makes it visible in one step |
+| Undoing `treat_ungraded_as_zero` (`grade.undo_ungraded_as_zero`) | `perm_grade_post` | the undo of posting as final, with the same reach: every student it is about, over the whole course |
+| Overriding a total, taking the override off, commenting on a total (`grade.override_total`, `.clear_override`, `.comment_total`) | the lower of `perm_grade_submit` and `perm_grade_post` | as a regrade: it writes a total and makes it visible in one step |
 | Course settings, status, department, first instructor | `platform_role`, or an appointment at or above the course's department (§2.10) | outside the course by definition |
+| Purging a document or a version (`document.purge`) | `platform_role`, or an appointment at or above the course's department (§2.10) | removing data is not a seat's to do, and must be possible in an archived course |
+| The course's title and description, from a seat in it (`course.update_details`) | `perm_member_manage` | its instructors run the course and name it; its code, section, term, department and status stay with its administrators |
 
 An unposted grade, and a superseded one, is visible only to a member holding `perm_grade_submit`
 or `perm_grade_post`; everyone else sees live posted grades. That is the rule for students,
@@ -571,14 +590,39 @@ posted grades):
   `drop_lowest` of them.
 - Work with no posted grade is left out and the rest re-normalised — a "grade so far", marked
   incomplete. `treat_ungraded_as_zero` counts it as zero instead, for final grades.
-- A score is a score out of the points possible when it was given: once any grade has been
+- A rolled-up component whose total a person has overridden (§2.7) counts, in everything above
+  it, as the override, complete; its own result is still what the scheme works out.
+- A score is a score out of the points possible when it was given, so once any grade has been
   entered for an assignment or a directly graded component — a draft as much as a posted one —
-  its `points_possible` and its place in the tree no longer change. A proposed grade carries
-  the points possible it was proposed out of, and is refused on approval if the work has been
-  rescaled while it waited.
-- Final is final. The policy a snapshot was worked out under travels with it (`breakdown`
-  carries `ungraded_as_zero`), and once a student's totals have been written with ungraded
-  work counted as zero, every later post or regrade beneath them keeps counting it so.
+  a change of its `points_possible` says what becomes of them (`existing_grades`): `rescale`
+  writes each score again in proportion, to four decimal places, in a new row that supersedes
+  the old as a regrade does — a posted grade posted, a draft a draft, its feedback, breakdown,
+  rubric and feedback files carried on, a score the conversion leaves as it was left alone —
+  and `keep_scores` leaves each score as it is, out of the new points, refused if a score
+  within the old points would be above the new ones. Work worth nothing has nothing to rescale
+  from. Saying it is changing grades, and takes `perm_grade_submit` and `perm_grade_post` as
+  well as `perm_assignment_write`, at the lowest of the three. Graded work also moves in the
+  tree: an assignment to another bucket or out of the grade, a component under another parent.
+  Either change rewrites at once every posted total it changes, where the work was and where
+  it is, for every student who has one, and so must reach all of them over the whole course
+  (student scope, and an assignment scope of `all`), checked again as it is carried out. A
+  component graded directly stays so once a grade is entered on it, since its grades would
+  otherwise sit on a bucket beside the totals written there. A proposed grade carries the
+  points possible it was proposed out of, and is refused on approval if the work has been
+  rescaled while it waited. A weight or a `drop_lowest` changed does not rewrite posted totals:
+  the next post or regrade beneath them does.
+- A total left with nothing beneath it to go on — its work moved away, ungraded work no longer
+  counted as zero — is written again as having none (`no_total`: score 0, a working whose
+  fraction is null), rather than go on showing what it last did.
+- Final stays final until it is undone. The policy a snapshot was worked out under travels with
+  it (`breakdown` carries `ungraded_as_zero`), and once a student's totals have been written
+  with ungraded work counted as zero, every later post or regrade beneath them keeps counting
+  it so. `grade.undo_ungraded_as_zero`, for one student or for every student whose totals
+  count it so, gated as posting as final is (`perm_grade_post`, over every student it is
+  about, with an assignment scope of the whole course), writes each of their totals again at
+  once as a grade so far, under the student's totals lock, the final ones kept as history;
+  from then on posts and regrades leave ungraded work out again, until someone posts as final
+  again. Grades themselves are not touched.
 - A draft is as old as the call that made it. An approved proposal replaces the drafts that
   were there when it was proposed, and fails — rather than silently overwriting — if a newer
   draft has been entered for the same work since.
@@ -589,20 +633,27 @@ posted grades):
 document(id, course_id→course, kind [material|instructions|rubric|submission|feedback], title,
          submission_id null→submission, grade_id null→grade,
          published_version_id null→document_version, sort_order, status [active|archived],
-         created_at)
+         created_at, purged_at null, purged_by_actor_id null→actor, purge_reason null)
     composite FK (published_version_id, id) → document_version(id, document_id)
-    check: submission_id set ⇔ kind = 'submission';  grade_id set ⇔ kind = 'feedback'
+    check: submission_id set ⇔ kind = 'submission';  grade_id set ⇔ kind = 'feedback';
+           purged: all three purge columns, archived, material, instructions or a rubric,
+           a reason of 1..500 characters
+    trigger: a purged document stays purged, as it was purged
 
 document_version(id, document_id→document, seq, body_md null,
                  storage_key null, content_type null, byte_size null, checksum null,
                  author_member_id→course_member, created_at,
+                 purged_at null, purged_by_actor_id null→actor, purge_reason null,
                  unique(document_id, seq))
-    check: body_md or storage_key present
+    check: body_md or storage_key present, or purged;  purged: all three purge columns,
+           no body_md, storage_key or checksum, a reason of 1..500 characters
+    trigger: append-only, but for being purged, once
 ```
 
 **Everything readable is a document**, and a version is text, a file in object storage, or
 both. The model reads files directly, so there is no extracted-text step and no separate file
-table. Versions are append-only; an edit is `seq + 1`.
+table. Versions are append-only; an edit is `seq + 1`. The one exception is a purge (below),
+which empties a version and leaves a tombstone in its place.
 
 Two ways to attach a document, chosen by shape:
 
@@ -647,8 +698,37 @@ script for whoever opens it. The storage key is made by the server and is ungues
 the uploader says goes into it.
 
 Once a submission is handed in, its files are frozen with it. The trigger guards the
-`submission` row; that nothing is added to or archived from its documents afterwards is an
-application rule.
+`submission` row; that nothing is added to, archived from, renamed or brought back among its
+documents afterwards is an application rule.
+
+**What a document is called, and whether it is archived, change.** `document.update` renames a
+document or moves it in its list (`sort_order`), for whoever may write that kind of document —
+a feedback file on a posted grade with `perm_grade_post` as well, a submitted file only while
+its submission is a draft. It touches no version, so an archived or a purged document may be
+renamed too: a title that named what was purged, say. `document.unarchive` undoes
+`document.archive`, for whoever may archive it: the document is in lists and editable again,
+and its published version read again, which for feedback on a posted grade is a release again.
+Each is news under the document's own names (`document.updated`, `document.unarchived`, and
+their `_unreleased` forms for instructions and a rubric), or its owner's for an owned file
+(`submission.file_updated`, `.file_unarchived`, `grade.feedback_updated`, `.feedback_unarchived`).
+
+**What was uploaded by mistake is purged.** `document.purge` removes a version of a course's
+material, instructions or a rubric, or the whole document — personal data attached by mistake,
+say. It is an administrator's, from outside the course, as removing data is not something a
+seat's permissions reach (the Admin gate, §2.10): a platform administrator anywhere, a
+department administrator in the courses of the departments they cover; and, unlike every
+other write but opening the course again, it is done in an archived course too. Its text, its file and the file's checksum go, the file
+deleted from storage; the version keeps its place, author, date, content type and size, with
+who purged it, when and why (`purged_at`, `purged_by_actor_id`, `purge_reason`), and reads so
+to anyone who reads it. A purged document is archived for good — nothing is added to it or
+brought back — and the version list and `document.list` say when it was purged. What pinned a
+purged version still names it: a submission handed in under it reads the tombstone as what it
+was told, a grade its rubric the same, and neither the work nor the grade changes. A published
+version purged stays the published one, now a tombstone, until another is published; a purged
+version is never published again. A submitted file and a feedback file are their submission's
+and grade's, archived with them and never purged. The file is deleted last, once the rows say
+it is gone; if the call then fails to commit, the file is gone and the rows still name it, and
+the call made again with its key purges them, deleting what is gone already being no error.
 
 ### 2.5 Assignments and submissions
 
@@ -868,10 +948,13 @@ grade(id, student_member_id→course_member,
       grader_member_id→course_member, created_by_action_id→action,
       posted_at null, posted_by_member_id null→course_member,
       superseded_by null→grade, created_at,
+      override_score null, override_reason null, override_by_member_id null→course_member,
+      overridden_at null,
       unique(id, student_member_id))
     composite FK (submission_id, student_member_id) → submission(id, student_member_id)
     composite FK (superseded_by, student_member_id) → grade(id, student_member_id)  deferred
-    check: exactly one of submission_id, component_id
+    check: exactly one of submission_id, component_id;  an override: all four override
+           columns, on a computed total, not negative, a reason of 1..500 characters
 
     unique(submission_id)                    where posted_at is not null and superseded_by is null
     unique(component_id, student_member_id)  where posted_at is not null and superseded_by is null
@@ -889,7 +972,24 @@ serves HW3, the midterm, the assignments bucket and the course total.
   when a lower grade changes later; updating it is a regrade, with history. A post or regrade
   beneath a snapshot writes a new one when anything it shows has changed — the number, whether
   it is complete, or any line of its working, a weight changed since included — and nothing
-  when nothing has.
+  when nothing has. So does a change of what graded work is worth or where it counts (§2.3),
+  at once.
+- **A total may be overridden** (`grade.override_total`): a person's score for it, out of 100,
+  with a reason, made from a seat that may regrade, on a rolled-up component — the course total
+  included — once a total has been written there (`no_total` otherwise; a component graded
+  directly is regraded instead, `graded_directly`). It is a new snapshot, the old superseded,
+  whose `score` stays what the scheme works out, with `override_score`, `override_reason`,
+  `override_by_member_id` and `overridden_at` beside it, so both are shown: the student sees the
+  override and when it was made, those who grade also who made it and why, and
+  `gradebook.get` gives `override_percent` beside the `percent` worked out. Above it, the
+  override counts in its place (`gradecalc`, where a line of the working says `overridden`),
+  and what is above is written again at once. Every total written for it afterwards, by a
+  post, a regrade or a change of the scheme, carries the override on, and its comment and
+  feedback files: working the number out again never quietly takes a person's decision away.
+  `grade.clear_override` takes it off, the same way, and the history keeps it. A total takes
+  feedback as an entered grade does: a comment (`grade.comment_total`, empty to take it away)
+  and feedback files (`document.create`), which, like feedback on any posted grade, are a
+  release.
 - **`breakdown`** holds per-criterion detail for submission grades:
   `[{criterion, points, max, comment}]`. The rubric is prose the model reads; the breakdown is
   its output. Structured criteria tables were dropped as a second copy of the rubric.
@@ -1278,12 +1378,16 @@ course's feed.
 **The courses beneath an appointment are its holder's to manage, from outside.** A department
 administrator does to the courses of every department they cover what a platform administrator
 does to any course: `course.create`, `.update`, `.activate`, `.archive`, `.seat_instructor`
-and `.move`, the Admin gate taking the course's department as what the call is about.
+and `.move`, and `document.purge` of what was uploaded to it by mistake (§2.4), the Admin gate
+taking the course's department as what the call is about.
 `course.list` shows them those courses and no others. A course moves only to a department the
 mover covers as well; it is held while it moves, and where it is then must still be the
 mover's, so that one moved out of their reach meanwhile is not taken back. None of this
 reaches inside a course: an administrator who wants to work in one is seated there as anyone
 is, by seating themselves (`course.seat_instructor`), which is recorded like any seating.
+The course's title and description are also its instructors' to change from inside it
+(`course.update_details`, §2.2); the rest of what `course.update` and the others change is
+not.
 
 **People, for a department administrator, are found by their whole email and invited new.**
 `actor.lookup_by_email` answers an exact address, in any case, with who the person is, whether
@@ -1324,7 +1428,9 @@ grade on a component, a course total, a whole gradebook — is within scope only
 `assignment_scope = 'all'`. Otherwise "names no assignment" would mean "skips the check", and
 a grader listed for HW3 alone could read the class's midterm. Posting or regrading with
 `treat_ungraded_as_zero` is such a target too, whatever the grades in it: it decides how every
-other assignment counts in the course total, for good.
+other assignment counts in the course total, until it is undone, and undoing it is such a
+target as well. So is a change of what graded work is worth or where it counts, which rewrites
+the totals of every student who has one (§2.3).
 
 Steps 1–3 run before the target is looked up, and the lookup happens only for a caller who
 passed them. A non-member probing ids gets the same recorded denial whether or not the id
@@ -1379,7 +1485,9 @@ that reads which credential the call came with.
 | A session credential has a lookup prefix and an expiry | CHECKs on `credential` |
 | An invitation has a lookup prefix and an expiry, and an actor has one live invitation at most | CHECKs and a partial unique index on `credential` |
 | No credential is written for the system actor | trigger on `credential` |
-| `document_version` and `event` are append-only | triggers |
+| `event` is append-only; `document_version` is too, but for being purged once: its text, file and checksum emptied, who, when and why recorded, nothing else changed | triggers |
+| A purge says who, when and why; a purged document is material, instructions or a rubric, archived, and stays purged as it was purged | CHECKs and trigger `document_purge_kept` on `document`, CHECKs on `document_version` |
+| An override of a total is on a computed grade, not negative, and says who, when and why | CHECKs on `grade` |
 | A submitted submission never changes | trigger |
 | Owner columns match `document.kind`; a version has content; SSO rows carry an identity | CHECKs |
 | Emails are unique regardless of case | unique index on `lower(email)` |
@@ -1445,14 +1553,20 @@ that reads which credential the call came with.
   to the assignment, an event naming it takes it before the event-stream lock, never under it
   (`events.Flush`), and news of instructions or a rubric reads which assignments are published
   under the same lock, so it is never filed under one unpublished meanwhile.
-- Grade computation, and writing a `computed` snapshot only on post. A student's totals have
-  one writer at a time, which reads the scheme and the scores as they stand once it is that
-  writer: a post that reaches a student after a weight has changed does not write their totals
-  over under the old one.
+- Grade computation, and writing a `computed` snapshot only on post, on a change of the scheme
+  under graded work, and on an override. A student's totals have one writer at a time, which
+  reads the scheme, the scores and the overrides as they stand once it is that writer: a post
+  that reaches a student after a weight has changed does not write their totals over under
+  the old one. A total written again carries on its override, comment and feedback files.
 - Once a grade has been entered for an assignment or a directly graded component, a draft as
-  much as a posted one, its `points_possible` and its place in the tree stay as they are
-  (§2.3), even when the grade and the change come at the same moment; a proposed grade is
-  carried out only against the points possible it was proposed out of.
+  much as a posted one, a change of its `points_possible` says what becomes of it (§2.3) and
+  carries every live grade across, even when a grade and the change come at the same moment:
+  the change holds the work (the assignment's row, or the tree lock for a component) and then
+  its grades, and `grade.submit` and `grade.regrade` hold the work before they check a score
+  against it, so a grade entered first is found and carried, and one entered second is checked
+  against the new points. A proposed grade is carried out only against the points possible it
+  was proposed out of. A change that moves graded work in the scheme, or changes its points,
+  rewrites the posted totals it changes, and reaches every student who has one.
 - A draft is as old as the call that made it (§2.3), a draft written by an approved proposal
   included: an approval replaces only what came before the proposal.
 - A grade's `rubric_version_id` is the rubric its grader was shown (§2.4): for a proposal, the
@@ -1460,9 +1574,12 @@ that reads which credential the call came with.
   it is approved. A call that says there is no rubric is refused if one is published.
 - A hand-in approved later counts from when it was asked for, and only if the draft still
   holds what was asked to be handed in (§2.5).
-- Nothing is added to or archived from a handed-in submission's files (§2.4): the state is
-  read under the submission's lock, so a file that comes during the hand-in waits for it and
-  is then refused.
+- Nothing is added to, archived from, renamed or brought back among a handed-in submission's
+  files (§2.4): the state is read under the submission's lock, so a file that comes during
+  the hand-in waits for it and is then refused.
+- A purge (§2.4) is of material, instructions or a rubric, by an administrator covering the
+  course, under the document's lock; the file is deleted from storage after the rows are
+  emptied, and a purged version is never published.
 - The component tree is acyclic beyond the self-loop the CHECK blocks.
 - Cancelling pending proposals when a member is removed or expires.
 - Nobody hands out more than they hold (§2.2): any change that widens a seat is measured as
@@ -1550,6 +1667,9 @@ that reads which credential the call came with.
   agent declares it; its owner switches it off and never on.
 - `member.update_perms_bulk` changes every seat of the role but the caller's, each through the
   rule for one seat, all or none.
+- A seat's role changes by `member.set_role` alone, which changes nothing else on the seat,
+  refuses the caller's own seat, a delegate caller's principal's and its principal's other
+  agents' (`not_your_principal`), and a delegate's, which stays `assistant`.
 - A proposal is withdrawn only by its proposer, or by the owner of the agent that proposed it,
   and only while nobody has decided it.
 - Nobody gains through a conversation more than they hold (§2.8): a member addresses only a

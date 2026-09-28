@@ -16,7 +16,8 @@ import (
 const getGradeFull = `-- name: GetGradeFull :one
 SELECT g.id, g.student_member_id, g.submission_id, g.component_id, s.assignment_id, g.origin, g.score,
        g.feedback, g.breakdown, g.rubric_version_id, g.grader_member_id, g.created_by_action_id,
-       g.posted_at, g.posted_by_member_id, g.superseded_by, g.created_at
+       g.posted_at, g.posted_by_member_id, g.superseded_by, g.created_at,
+       g.override_score, g.override_reason, g.override_by_member_id, g.overridden_at
 FROM grade g
 JOIN course_member sm ON sm.id = g.student_member_id
 LEFT JOIN submission s ON s.id = g.submission_id
@@ -29,22 +30,26 @@ type GetGradeFullParams struct {
 }
 
 type GetGradeFullRow struct {
-	ID                uuid.UUID
-	StudentMemberID   uuid.UUID
-	SubmissionID      *uuid.UUID
-	ComponentID       *uuid.UUID
-	AssignmentID      *uuid.UUID
-	Origin            string
-	Score             decimal.Decimal
-	Feedback          *string
-	Breakdown         []byte
-	RubricVersionID   *uuid.UUID
-	GraderMemberID    uuid.UUID
-	CreatedByActionID uuid.UUID
-	PostedAt          *time.Time
-	PostedByMemberID  *uuid.UUID
-	SupersededBy      *uuid.UUID
-	CreatedAt         time.Time
+	ID                 uuid.UUID
+	StudentMemberID    uuid.UUID
+	SubmissionID       *uuid.UUID
+	ComponentID        *uuid.UUID
+	AssignmentID       *uuid.UUID
+	Origin             string
+	Score              decimal.Decimal
+	Feedback           *string
+	Breakdown          []byte
+	RubricVersionID    *uuid.UUID
+	GraderMemberID     uuid.UUID
+	CreatedByActionID  uuid.UUID
+	PostedAt           *time.Time
+	PostedByMemberID   *uuid.UUID
+	SupersededBy       *uuid.UUID
+	CreatedAt          time.Time
+	OverrideScore      decimal.NullDecimal
+	OverrideReason     *string
+	OverrideByMemberID *uuid.UUID
+	OverriddenAt       *time.Time
 }
 
 func (q *Queries) GetGradeFull(ctx context.Context, arg GetGradeFullParams) (GetGradeFullRow, error) {
@@ -67,6 +72,10 @@ func (q *Queries) GetGradeFull(ctx context.Context, arg GetGradeFullParams) (Get
 		&i.PostedByMemberID,
 		&i.SupersededBy,
 		&i.CreatedAt,
+		&i.OverrideScore,
+		&i.OverrideReason,
+		&i.OverrideByMemberID,
+		&i.OverriddenAt,
 	)
 	return i, err
 }
@@ -182,7 +191,8 @@ func (q *Queries) ListEvents(ctx context.Context, arg ListEventsParams) ([]ListE
 const listGrades = `-- name: ListGrades :many
 SELECT g.id, g.student_member_id, g.submission_id, g.component_id, s.assignment_id, g.origin, g.score,
        g.feedback, g.breakdown, g.rubric_version_id, g.grader_member_id, g.created_by_action_id,
-       g.posted_at, g.posted_by_member_id, g.superseded_by, g.created_at
+       g.posted_at, g.posted_by_member_id, g.superseded_by, g.created_at,
+       g.override_score, g.override_reason, g.override_by_member_id, g.overridden_at
 FROM grade g
 JOIN course_member sm ON sm.id = g.student_member_id
 LEFT JOIN submission s ON s.id = g.submission_id
@@ -219,22 +229,26 @@ type ListGradesParams struct {
 }
 
 type ListGradesRow struct {
-	ID                uuid.UUID
-	StudentMemberID   uuid.UUID
-	SubmissionID      *uuid.UUID
-	ComponentID       *uuid.UUID
-	AssignmentID      *uuid.UUID
-	Origin            string
-	Score             decimal.Decimal
-	Feedback          *string
-	Breakdown         []byte
-	RubricVersionID   *uuid.UUID
-	GraderMemberID    uuid.UUID
-	CreatedByActionID uuid.UUID
-	PostedAt          *time.Time
-	PostedByMemberID  *uuid.UUID
-	SupersededBy      *uuid.UUID
-	CreatedAt         time.Time
+	ID                 uuid.UUID
+	StudentMemberID    uuid.UUID
+	SubmissionID       *uuid.UUID
+	ComponentID        *uuid.UUID
+	AssignmentID       *uuid.UUID
+	Origin             string
+	Score              decimal.Decimal
+	Feedback           *string
+	Breakdown          []byte
+	RubricVersionID    *uuid.UUID
+	GraderMemberID     uuid.UUID
+	CreatedByActionID  uuid.UUID
+	PostedAt           *time.Time
+	PostedByMemberID   *uuid.UUID
+	SupersededBy       *uuid.UUID
+	CreatedAt          time.Time
+	OverrideScore      decimal.NullDecimal
+	OverrideReason     *string
+	OverrideByMemberID *uuid.UUID
+	OverriddenAt       *time.Time
 }
 
 // Scope in SQL. Two more rules ride along:
@@ -281,6 +295,10 @@ func (q *Queries) ListGrades(ctx context.Context, arg ListGradesParams) ([]ListG
 			&i.PostedByMemberID,
 			&i.SupersededBy,
 			&i.CreatedAt,
+			&i.OverrideScore,
+			&i.OverrideReason,
+			&i.OverrideByMemberID,
+			&i.OverriddenAt,
 		); err != nil {
 			return nil, err
 		}

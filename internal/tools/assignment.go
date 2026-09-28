@@ -281,62 +281,149 @@ type AssignmentUpdateIn struct {
 	AssignmentBody
 	ClearDueAt     bool `json:"clear_due_at,omitempty"`
 	ClearComponent bool `json:"clear_component,omitempty" jsonschema:"take it out of the grade"`
+	// ExistingGrades says what becomes of the grades already entered when
+	// what the work is worth changes.
+	ExistingGrades *string `json:"existing_grades,omitempty" jsonschema:"rescale or keep_scores: what becomes of grades already entered when points_possible changes, required once any has been. rescale converts each score in proportion (45 of 50 becomes 90 of 100) in a new grade that replaces it, the old one kept; keep_scores leaves each score as it is, out of the new points. Either rewrites the totals it changes, and needs grade_submit and grade_post as well"`
+}
+
+// SchemeChangeOut is what a change to the grading scheme did to the grades
+// and totals beneath it.
+type SchemeChangeOut struct {
+	OK        bool `json:"ok"`
+	Rescaled  int  `json:"rescaled" jsonschema:"how many grades were written again in the new points"`
+	Snapshots int  `json:"snapshots" jsonschema:"how many posted totals were written down again"`
+}
+
+// updated is what the assignment will be once in is applied to a.
+func (in AssignmentUpdateIn) updated(a dbq.GetAssignmentInCourseRow) dbq.GetAssignmentInCourseRow {
+	in.applyTo(&a)
+	if in.ClearDueAt {
+		a.DueAt = nil
+	}
+	if in.ClearComponent {
+		a.ComponentID = nil
+	}
+	return a
+}
+
+// movesInScheme reports whether a change is to what the work is worth or
+// where it counts.
+func movesInScheme(before, after dbq.GetAssignmentInCourseRow) (points, place bool) {
+	return !after.PointsPossible.Equal(before.PointsPossible), !sameID(after.ComponentID, before.ComponentID)
 }
 
 func assignmentUpdate() tool.Tool {
-	return tool.Define(tool.Spec[AssignmentUpdateIn, OK]{
+	return tool.Define(tool.Spec[AssignmentUpdateIn, SchemeChangeOut]{
 		Name: "assignment.update",
-		Description: "Change an assignment. Once any grade has been entered for it, what it is worth and where it counts " +
-			"are fixed: a score is a score out of the points possible when it was given.",
+		Description: "Change an assignment. What it is worth and where it counts may change after grades are entered for " +
+			"it: a change of points says what becomes of them (existing_grades: rescale or keep_scores), and needs " +
+			"grade_submit and grade_post as well; moving it to another component, or out of the grade, needs nothing more. " +
+			"Either rewrites, at once, the posted totals it changes, with history, and so must reach every student who has " +
+			"one, over the whole course. A grade proposed out of the old points is refused when it is approved.",
 		Kind: tool.Write, Gate: writeAssignments,
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/assignments/{assignment_id}"},
 		Resolve: func(ctx context.Context, q dbq.Querier, in AssignmentUpdateIn) (tool.Target, error) {
-			return assignmentTarget(ctx, q, in.CourseID, in.AssignmentID)
+			t, err := assignmentTarget(ctx, q, in.CourseID, in.AssignmentID)
+			if err != nil {
+				return t, err
+			}
+			if err := checkExistingGrades(in.ExistingGrades); err != nil {
+				return t, err
+			}
+			// Saying what becomes of grades is changing them: it takes what
+			// entering and posting them takes, as a regrade does.
+			if in.ExistingGrades != nil {
+				t.Perms = []domain.Perm{domain.PermAssignmentWrite, domain.PermGradeSubmit, domain.PermGradePost}
+			}
+			a, err := q.GetAssignmentInCourse(ctx, dbq.GetAssignmentInCourseParams{ID: in.AssignmentID, CourseID: in.CourseID})
+			if err != nil {
+				return t, err
+			}
+			if points, place := movesInScheme(a, in.updated(a)); points || place {
+				graded, err := q.ListStudentsGradedOnAssignment(ctx, a.ID)
+				if err != nil {
+					return t, err
+				}
+				if len(graded) > 0 {
+					reach, err := schemeScope(ctx, q, in.CourseID, graded)
+					if err != nil {
+						return t, err
+					}
+					t.Scope.StudentMemberIDs, t.Scope.SpansAssignments = reach.StudentMemberIDs, true
+				}
+			}
+			return t, nil
 		},
-		Execute: func(ctx context.Context, ec *tool.ExecCtx, in AssignmentUpdateIn) (OK, error) {
+		Execute: func(ctx context.Context, ec *tool.ExecCtx, in AssignmentUpdateIn) (SchemeChangeOut, error) {
 			// Read under the row's lock. Every column is written back, and a
 			// copy read before another change committed would quietly undo
 			// it: a rename made alongside a new due date would put the old
 			// due date back, with both calls reporting success. The row is
 			// locked before checkAssignment takes the component-tree lock,
-			// and lockAssignment says why that order is safe.
-			a, err := lockAssignment(ctx, ec.Q, in.CourseID, in.AssignmentID)
+			// and lockAssignment says why that order is safe. Nobody enters
+			// a grade for it meanwhile: grade.submit holds the row FOR SHARE.
+			before, err := lockAssignment(ctx, ec.Q, in.CourseID, in.AssignmentID)
 			if err != nil {
-				return OK{}, err
+				return SchemeChangeOut{}, err
 			}
-			before := a
-			in.applyTo(&a)
-			if in.ClearDueAt {
-				a.DueAt = nil
+			a := in.updated(before)
+			points, place := movesInScheme(before, a)
+			var graded []dbq.LockLiveEnteredGradesOfAssignmentRow
+			if points || place {
+				if graded, err = ec.Q.LockLiveEnteredGradesOfAssignment(ctx, a.ID); err != nil {
+					return SchemeChangeOut{}, err
+				}
 			}
-			if in.ClearComponent {
-				a.ComponentID = nil
+			// A score is a score out of the points possible at the time it
+			// was given. Once any grade has been entered — posted, or a
+			// draft waiting to be — a change of points says what becomes of
+			// it, or a 95 entered out of 100 would be posted out of 50 with
+			// nobody having said so.
+			if points && len(graded) > 0 && in.ExistingGrades == nil {
+				return SchemeChangeOut{}, apperr.Precondition("grades have been entered for this assignment; say what becomes of them when its points change: existing_grades rescale or keep_scores").
+					With("reason", "existing_grades_required")
 			}
-			// A score is a score out of the points possible at the time it was
-			// given. Once any grade has been entered — posted, or a draft
-			// waiting to be — what the assignment is worth, and where it
-			// counts, no longer change: a 95 entered out of 100 would
-			// otherwise be posted out of 50, with nobody having said so.
-			movedInScheme := !a.PointsPossible.Equal(before.PointsPossible) || !sameID(a.ComponentID, before.ComponentID)
-			if movedInScheme {
-				if graded, err := ec.Q.AssignmentHasLiveGrades(ctx, a.ID); err != nil {
-					return OK{}, err
-				} else if graded {
-					return OK{}, apperr.Precondition("grades have been entered for this assignment; its points and component no longer change")
+			if len(graded) > 0 {
+				if err := checkSchemeScope(ctx, ec, in.CourseID, gradedStudents(graded)); err != nil {
+					return SchemeChangeOut{}, err
 				}
 			}
 			if err := checkAssignment(ctx, ec.Q, in.CourseID, a); err != nil {
-				return OK{}, err
+				return SchemeChangeOut{}, err
 			}
 			if err := ec.Q.UpdateAssignment(ctx, dbq.UpdateAssignmentParams{
 				ID: a.ID, ComponentID: a.ComponentID, Title: a.Title, InstructionsDocumentID: a.InstructionsDocumentID,
 				RubricDocumentID: a.RubricDocumentID, PointsPossible: a.PointsPossible, DueAt: a.DueAt,
 			}); err != nil {
-				return OK{}, err
+				return SchemeChangeOut{}, err
+			}
+			out := SchemeChangeOut{OK: true}
+			payload := map[string]any{"due_at_changed": !sameTime(a.DueAt, before.DueAt)}
+			if len(graded) > 0 {
+				if points {
+					if out.Rescaled, err = rebase(ctx, ec, in.CourseID, &a.ID, graded, before.PointsPossible, a.PointsPossible, *in.ExistingGrades); err != nil {
+						return SchemeChangeOut{}, err
+					}
+					payload["existing_grades"], payload["rescaled"] = *in.ExistingGrades, out.Rescaled
+				}
+				// Totals where it counted and where it counts now.
+				items := []uuid.UUID{a.ID}
+				if before.ComponentID != nil {
+					items = append(items, *before.ComponentID)
+				}
+				if out.Snapshots, err = rewriteTotals(ctx, ec, in.CourseID, gradedStudents(graded), items...); err != nil {
+					return SchemeChangeOut{}, err
+				}
+			}
+			if points {
+				payload["points_changed"] = true
+			}
+			if place {
+				payload["component_changed"] = true
 			}
 			ec.Emit(events.Event{Type: EventAssignmentUpdated, CourseID: &in.CourseID, SubjectType: "assignment", SubjectID: &a.ID, AssignmentID: &a.ID,
-				Payload: map[string]any{"due_at_changed": !sameTime(a.DueAt, before.DueAt)}})
-			return OK{OK: true}, nil
+				Payload: payload})
+			return out, nil
 		},
 	})
 }

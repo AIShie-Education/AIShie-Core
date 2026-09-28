@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -33,7 +34,7 @@ import (
 
 func documentTools(d Deps) []tool.Tool {
 	return []tool.Tool{documentUploadURL(d), documentCreate(d), documentAddVersion(d), documentPublish(), documentArchive(),
-		documentList(), documentGet(d), documentVersions()}
+		documentList(), documentGet(d), documentVersions(), documentUpdate(), documentUnarchive(), documentPurge(d)}
 }
 
 const (
@@ -49,6 +50,13 @@ const (
 	EventSubmissionFileArchived = "submission.file_archived"
 	EventFeedbackFileAdded      = "grade.feedback_added"
 	EventFeedbackFileArchived   = "grade.feedback_archived"
+	EventDocumentUpdated        = "document.updated"
+	EventDocumentUnarchived     = "document.unarchived"
+	EventDocumentPurged         = "document.purged"
+	EventSubmissionFileUpdated  = "submission.file_updated"
+	EventSubmissionFileRestored = "submission.file_unarchived"
+	EventFeedbackFileUpdated    = "grade.feedback_updated"
+	EventFeedbackFileRestored   = "grade.feedback_unarchived"
 
 	// What the document events above are called while they are about
 	// instructions or a rubric that no published assignment refers to yet
@@ -58,6 +66,9 @@ const (
 	EventDocumentPublishedUnreleased    = "document.published_unreleased"
 	EventRubricPublishedUnreleased      = "document.rubric_published_unreleased"
 	EventDocumentArchivedUnreleased     = "document.archived_unreleased"
+	EventDocumentUpdatedUnreleased      = "document.updated_unreleased"
+	EventDocumentUnarchivedUnreleased   = "document.unarchived_unreleased"
+	EventDocumentPurgedUnreleased       = "document.purged_unreleased"
 
 	uploadWindow = 15 * time.Minute
 	downloadTTL  = 15 * time.Minute
@@ -151,6 +162,9 @@ var unreleased = map[string]string{
 	EventDocumentPublished:    EventDocumentPublishedUnreleased,
 	EventRubricPublished:      EventRubricPublishedUnreleased,
 	EventDocumentArchived:     EventDocumentArchivedUnreleased,
+	EventDocumentUpdated:      EventDocumentUpdatedUnreleased,
+	EventDocumentUnarchived:   EventDocumentUnarchivedUnreleased,
+	EventDocumentPurged:       EventDocumentPurgedUnreleased,
 }
 
 // emitDocumentEvent emits an event about a document of the given kind.
@@ -453,7 +467,7 @@ func documentCreate(d Deps) tool.Tool {
 		Name: "document.create",
 		Description: "Create a document. Material, instructions and rubrics are versioned and start unpublished — students " +
 			"see nothing until document.publish. A submission file is attached to a draft submission, and a feedback file " +
-			"to a grade; those have exactly one version and are given their content here.",
+			"to a grade, a computed total included; those have exactly one version and are given their content here.",
 		Kind: tool.Write, Gate: anyDocumentWrite,
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/documents"},
 		Resolve: func(ctx context.Context, q dbq.Querier, in DocumentCreateIn) (tool.Target, error) {
@@ -524,11 +538,11 @@ func documentCreate(d Deps) tool.Tool {
 				if err != nil {
 					return DocumentCreateOut{}, err
 				}
+				// A computed total takes feedback files as an entered grade does:
+				// whoever posts may say something about it (grade.comment_total),
+				// and the totals written for it later carry them on.
 				if g.SupersededBy != nil {
 					return DocumentCreateOut{}, apperr.Conflicts("that grade has been replaced; attach feedback to the grade that replaced it")
-				}
-				if g.Origin != "entered" {
-					return DocumentCreateOut{}, apperr.Precondition("a computed total is arithmetic, not a judgement; feedback goes on the grades beneath it")
 				}
 				ev.Type, ev.StudentMemberID, ev.AssignmentID = EventFeedbackFileAdded, &g.StudentMemberID, g.AssignmentID
 			}
@@ -580,7 +594,8 @@ type DocumentVersionOut struct {
 func documentAddVersion(d Deps) tool.Tool {
 	return tool.Define(tool.Spec[DocumentAddVersionIn, DocumentVersionOut]{
 		Name: "document.add_version",
-		Description: "Edit material, instructions or a rubric by adding a version. Versions are never changed or removed. " +
+		Description: "Edit material, instructions or a rubric by adding a version. Versions are never changed or removed, " +
+			"but for an administrator's purge of one uploaded by mistake (document.purge). " +
 			"The new version is a draft until it is published; what students read does not change until then.",
 		Kind: tool.Write, Gate: anyDocumentWrite,
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/documents/{document_id}/versions"},
@@ -703,6 +718,9 @@ func documentPublish() tool.Tool {
 			if doc.PublishedVersionID != nil && *doc.PublishedVersionID == v.ID {
 				return DocumentVersionOut{}, apperr.Conflicts("that version is already the published one")
 			}
+			if v.PurgedAt != nil {
+				return DocumentVersionOut{}, apperr.Precondition("that version was purged and holds nothing to publish").With("reason", "purged")
+			}
 			return DocumentVersionOut{VersionID: v.ID, Seq: v.Seq, Published: true}, publish(ctx, ec, in.CourseID, doc, v.ID)
 		},
 	})
@@ -716,7 +734,8 @@ type DocumentIDIn struct {
 func documentArchive() tool.Tool {
 	return tool.Define(tool.Spec[DocumentIDIn, OK]{
 		Name: "document.archive",
-		Description: "Retire a document. It disappears from lists and can no longer be edited; nothing is deleted, and " +
+		Description: "Retire a document. It disappears from lists and can no longer be edited until it is brought back with " +
+			"document.unarchive; nothing is deleted, and " +
 			"anything pinned to one of its versions still reads it. A submitted file can be archived only while its submission is a draft.",
 		Kind: tool.Write, Gate: anyDocumentWrite,
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/documents/{document_id}/archive"},
@@ -748,21 +767,301 @@ func documentArchive() tool.Tool {
 			if n == 0 {
 				return OK{}, apperr.Conflicts("the document is already archived")
 			}
-			// An owned file's event belongs to its student and assignment, as
-			// its creation did, so that feed scope applies to it and those who
-			// read the submission — not those who read drafts — see it go.
-			ev := events.Event{Type: EventDocumentArchived, CourseID: &in.CourseID, SubjectType: "document", SubjectID: &doc.ID,
-				Payload: map[string]any{"kind": doc.Kind}}
-			switch doc.Kind {
-			case kindSubmission:
-				ev.Type, ev.StudentMemberID, ev.AssignmentID = EventSubmissionFileArchived, doc.SubmissionStudent, doc.SubmissionAssignment
-			case kindFeedback:
-				ev.Type, ev.StudentMemberID, ev.AssignmentID = EventFeedbackFileArchived, doc.GradeStudent, doc.GradeAssignment
-			}
-			if err := emitDocumentEvent(ctx, ec, doc.Kind, ev); err != nil {
+			if err := emitFileEvent(ctx, ec, in.CourseID, doc, EventDocumentArchived, EventSubmissionFileArchived, EventFeedbackFileArchived, nil); err != nil {
 				return OK{}, err
 			}
 			return OK{OK: true}, nil
+		},
+	})
+}
+
+// emitFileEvent emits news of a document under the type for its kind: a
+// course-level document's by its own name, through emitDocumentEvent; an
+// owned file's under its owner's type, and belonging to its student and
+// assignment, as its creation did, so that feed scope applies to it and those
+// who read the submission — not those who read drafts — are told.
+func emitFileEvent(ctx context.Context, ec *tool.ExecCtx, courseID uuid.UUID, doc dbq.GetDocumentWithOwnerRow,
+	courseType, submissionType, feedbackType string, payload map[string]any) error {
+	if payload == nil {
+		payload = map[string]any{}
+	}
+	payload["kind"] = doc.Kind
+	ev := events.Event{Type: courseType, CourseID: &courseID, SubjectType: "document", SubjectID: &doc.ID, Payload: payload}
+	switch doc.Kind {
+	case kindSubmission:
+		ev.Type, ev.StudentMemberID, ev.AssignmentID = submissionType, doc.SubmissionStudent, doc.SubmissionAssignment
+	case kindFeedback:
+		ev.Type, ev.StudentMemberID, ev.AssignmentID = feedbackType, doc.GradeStudent, doc.GradeAssignment
+	}
+	return emitDocumentEvent(ctx, ec, doc.Kind, ev)
+}
+
+// handedIn refuses a change to a submitted file once its submission has
+// been handed in: its files are frozen with it. The state is read under the
+// submission's lock, the one the hand-in takes, as document.create reads it.
+func handedIn(ctx context.Context, ec *tool.ExecCtx, courseID uuid.UUID, doc dbq.GetDocumentWithOwnerRow) error {
+	if doc.SubmissionID == nil {
+		return nil
+	}
+	s, err := ec.Q.GetSubmissionFullForUpdate(ctx, dbq.GetSubmissionFullForUpdateParams{ID: *doc.SubmissionID, CourseID: courseID})
+	if err != nil {
+		return err
+	}
+	if s.State != stateDraft {
+		return apperr.Conflicts("the submission has been handed in; its files no longer change")
+	}
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// document.update, unarchive, purge
+// ---------------------------------------------------------------------------
+
+type DocumentUpdateIn struct {
+	tool.InCourse
+	DocumentID uuid.UUID `json:"document_id"`
+	Title      *string   `json:"title,omitempty"`
+	SortOrder  *int32    `json:"sort_order,omitempty"`
+}
+
+type DocumentChangeOut struct {
+	Changed bool `json:"changed" jsonschema:"false when the document already was so: nothing was done"`
+}
+
+// documentUpdate renames a document or moves it in its list. It is what the
+// document is called, not what it says: its versions are untouched, so an
+// archived or purged document may be renamed too — a title that named what
+// was purged, say. A submitted file keeps its name once handed in, as
+// everything else about it.
+func documentUpdate() tool.Tool {
+	return tool.Define(tool.Spec[DocumentUpdateIn, DocumentChangeOut]{
+		Name: "document.update",
+		Description: "Rename a document, or change its place in the list (sort_order), for whoever may write that kind of " +
+			"document: material, instructions and rubrics with document_write, a submitted file with submission_write while " +
+			"its submission is a draft, a feedback file as its grade is written. Its versions are untouched; an archived or " +
+			"purged document may be renamed as well. Giving what it already is changes nothing (changed: false).",
+		Kind: tool.Write, Gate: anyDocumentWrite,
+		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/documents/{document_id}"},
+		Resolve: func(ctx context.Context, q dbq.Querier, in DocumentUpdateIn) (tool.Target, error) {
+			return documentTarget(ctx, q, in.CourseID, in.DocumentID, writePerm)
+		},
+		Execute: func(ctx context.Context, ec *tool.ExecCtx, in DocumentUpdateIn) (DocumentChangeOut, error) {
+			if in.Title == nil && in.SortOrder == nil {
+				return DocumentChangeOut{}, apperr.Invalid("give title, sort_order or both")
+			}
+			if in.Title != nil && strings.TrimSpace(*in.Title) == "" {
+				return DocumentChangeOut{}, apperr.Invalid("title cannot be empty")
+			}
+			doc, err := loadDocument(ctx, ec.Q, in.CourseID, in.DocumentID)
+			if err != nil {
+				return DocumentChangeOut{}, err
+			}
+			if err := handedIn(ctx, ec, in.CourseID, doc); err != nil {
+				return DocumentChangeOut{}, err
+			}
+			// Under the document's lock, and read again: two renames take
+			// turns, and neither puts back what the other changed.
+			if err := ec.Q.LockDocument(ctx, doc.ID); err != nil {
+				return DocumentChangeOut{}, err
+			}
+			if doc, err = loadDocument(ctx, ec.Q, in.CourseID, in.DocumentID); err != nil {
+				return DocumentChangeOut{}, err
+			}
+			title, order := doc.Title, doc.SortOrder
+			if in.Title != nil {
+				title = *in.Title
+			}
+			if in.SortOrder != nil {
+				order = *in.SortOrder
+			}
+			if title == doc.Title && order == doc.SortOrder {
+				return DocumentChangeOut{}, nil
+			}
+			if err := ec.Q.UpdateDocumentDetails(ctx, dbq.UpdateDocumentDetailsParams{ID: doc.ID, Title: title, SortOrder: order}); err != nil {
+				return DocumentChangeOut{}, err
+			}
+			payload := map[string]any{"title_changed": title != doc.Title, "sort_order_changed": order != doc.SortOrder}
+			return DocumentChangeOut{Changed: true}, emitFileEvent(ctx, ec, in.CourseID, doc,
+				EventDocumentUpdated, EventSubmissionFileUpdated, EventFeedbackFileUpdated, payload)
+		},
+	})
+}
+
+// documentUnarchive is document.archive undone: the document is back in
+// lists and editable, and a published version is read again. For feedback on
+// a posted grade that is a release, as archiving it was a withdrawal, and it
+// takes what that took. A submitted file comes back only while its
+// submission is a draft, as it was archived; a purged document stays
+// archived, with nothing in it to bring back.
+func documentUnarchive() tool.Tool {
+	return tool.Define(tool.Spec[DocumentIDIn, OK]{
+		Name: "document.unarchive",
+		Description: "Bring back an archived document: it is in lists again, can be edited, and its published version is " +
+			"read again by whoever may read that kind of document. For whoever may archive it: feedback on a posted grade " +
+			"takes grade_post as well, and a submitted file comes back only while its submission is a draft. A purged " +
+			"document stays archived.",
+		Kind: tool.Write, Gate: anyDocumentWrite,
+		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/documents/{document_id}/unarchive"},
+		Resolve: func(ctx context.Context, q dbq.Querier, in DocumentIDIn) (tool.Target, error) {
+			return documentTarget(ctx, q, in.CourseID, in.DocumentID, writePerm)
+		},
+		Execute: func(ctx context.Context, ec *tool.ExecCtx, in DocumentIDIn) (OK, error) {
+			doc, err := loadDocument(ctx, ec.Q, in.CourseID, in.DocumentID)
+			if err != nil {
+				return OK{}, err
+			}
+			if err := handedIn(ctx, ec, in.CourseID, doc); err != nil {
+				return OK{}, err
+			}
+			if err := ec.Q.LockDocument(ctx, doc.ID); err != nil {
+				return OK{}, err
+			}
+			if doc, err = loadDocument(ctx, ec.Q, in.CourseID, in.DocumentID); err != nil {
+				return OK{}, err
+			}
+			if doc.PurgedAt != nil {
+				return OK{}, apperr.Precondition("the document was purged, and stays archived").With("reason", "purged")
+			}
+			n, err := ec.Q.SetDocumentStatus(ctx, dbq.SetDocumentStatusParams{ID: doc.ID, Status: "active"})
+			if err != nil {
+				return OK{}, err
+			}
+			if n == 0 {
+				return OK{}, apperr.Conflicts("the document is not archived")
+			}
+			return OK{OK: true}, emitFileEvent(ctx, ec, in.CourseID, doc,
+				EventDocumentUnarchived, EventSubmissionFileRestored, EventFeedbackFileRestored, nil)
+		},
+	})
+}
+
+type DocumentPurgeIn struct {
+	CourseID   uuid.UUID  `json:"course_id"`
+	DocumentID uuid.UUID  `json:"document_id"`
+	VersionID  *uuid.UUID `json:"version_id,omitempty" jsonschema:"one version to purge; every version of the document, and the document with them, if omitted"`
+	Reason     string     `json:"reason" jsonschema:"why, 1 to 500 characters: kept on the tombstone, and shown to whoever reads what was purged"`
+}
+
+type DocumentPurgeOut struct {
+	PurgedVersions int `json:"purged_versions"`
+	FilesRemoved   int `json:"files_removed" jsonschema:"how many files were deleted from storage"`
+}
+
+// documentPurge removes what was uploaded by mistake — personal data, say —
+// from a course's material, instructions or rubrics: a version, or a whole
+// document. Its text and its file go, the file deleted from storage; the
+// version stays as a tombstone, saying who removed it, when and why, so the
+// history shows that something was there. It is an administrator's, from
+// outside the course, as removing data is not something a seat's permissions
+// reach: a platform administrator anywhere, a department administrator in
+// the courses of the departments they cover. It is allowed in an archived
+// course too, where nothing else is written: what must go must go.
+//
+// What pinned a purged version — a submission its instructions, a grade its
+// rubric, the document its published version — still names it, and reads
+// the tombstone; the work and the grade are unchanged. A submitted file and a
+// feedback file are their submission's and grade's, and are not purged here.
+//
+// The file is deleted last, once the rows say it is gone. Should the call
+// then fail to commit, the file is gone and the rows still name it; the call
+// is made again with the same key, and deleting what is gone already is not
+// an error.
+func documentPurge(d Deps) tool.Tool {
+	return tool.Define(tool.Spec[DocumentPurgeIn, DocumentPurgeOut]{
+		Name: "document.purge",
+		Description: "Purge a version of a course's material, instructions or rubric, or the whole document, uploaded by " +
+			"mistake: its text and file are removed, the file deleted from storage, and a tombstone says who removed them, " +
+			"when and why. A purged document is archived for good. Work handed in under a purged version of the " +
+			"instructions still names it and reads the tombstone; grades are untouched. Submitted and feedback files are " +
+			"not purged. For a platform administrator, or a department administrator for the courses of the departments " +
+			"they administer; it works in an archived course too.",
+		Kind: tool.Write, Gate: administrators, OnArchived: true,
+		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/documents/{document_id}/purge"},
+		Resolve: func(ctx context.Context, q dbq.Querier, in DocumentPurgeIn) (tool.Target, error) {
+			t, err := platformCourse(ctx, q, in.CourseID)
+			if err != nil {
+				return t, err
+			}
+			if _, err := loadDocument(ctx, q, in.CourseID, in.DocumentID); err != nil {
+				return tool.Target{}, err
+			}
+			t.Type, t.ID = "document", &in.DocumentID
+			return t, nil
+		},
+		Execute: func(ctx context.Context, ec *tool.ExecCtx, in DocumentPurgeIn) (DocumentPurgeOut, error) {
+			reason := strings.TrimSpace(in.Reason)
+			if reason == "" || utf8.RuneCountInString(reason) > 500 {
+				return DocumentPurgeOut{}, apperr.Invalid("reason is 1 to 500 characters")
+			}
+			// The document's lock, as a new version takes it: nothing is
+			// added to it while it is purged.
+			if err := ec.Q.LockDocument(ctx, in.DocumentID); err != nil {
+				return DocumentPurgeOut{}, err
+			}
+			doc, err := loadDocument(ctx, ec.Q, in.CourseID, in.DocumentID)
+			if err != nil {
+				return DocumentPurgeOut{}, err
+			}
+			if !courseLevel(doc.Kind) {
+				return DocumentPurgeOut{}, apperr.Precondition("a %s file is its %s's, and is archived with it, not purged", doc.Kind, map[string]string{
+					kindSubmission: "submission", kindFeedback: "grade"}[doc.Kind]).With("reason", "owned_file")
+			}
+			if doc.PurgedAt != nil {
+				return DocumentPurgeOut{}, apperr.Conflicts("the document has been purged already").With("reason", "already_purged")
+			}
+			versions, err := ec.Q.ListVersionsToPurge(ctx, doc.ID)
+			if err != nil {
+				return DocumentPurgeOut{}, err
+			}
+			if in.VersionID != nil {
+				v, err := ec.Q.GetVersionOfDocument(ctx, dbq.GetVersionOfDocumentParams{ID: *in.VersionID, DocumentID: doc.ID})
+				if errors.Is(err, pgx.ErrNoRows) {
+					return DocumentPurgeOut{}, apperr.Missing("no such version of this document")
+				}
+				if err != nil {
+					return DocumentPurgeOut{}, err
+				}
+				if v.PurgedAt != nil {
+					return DocumentPurgeOut{}, apperr.Conflicts("that version has been purged already").With("reason", "already_purged")
+				}
+				versions = []dbq.ListVersionsToPurgeRow{{ID: v.ID, StorageKey: v.StorageKey}}
+			}
+			var files []string
+			for _, v := range versions {
+				if v.StorageKey != nil {
+					files = append(files, *v.StorageKey)
+				}
+			}
+			if len(files) > 0 && d.Blob == nil {
+				return DocumentPurgeOut{}, apperr.Precondition("this installation has no file storage configured, so the file cannot be removed")
+			}
+			out := DocumentPurgeOut{}
+			for _, v := range versions {
+				n, err := ec.Q.PurgeVersion(ctx, dbq.PurgeVersionParams{ID: v.ID, PurgedAt: &ec.Now, PurgedByActorID: &ec.Actor.ID, PurgeReason: &reason})
+				if err != nil {
+					return DocumentPurgeOut{}, err
+				}
+				out.PurgedVersions += int(n)
+			}
+			payload := map[string]any{"versions": out.PurgedVersions}
+			if in.VersionID != nil {
+				payload["version_id"] = *in.VersionID
+			} else {
+				if _, err := ec.Q.PurgeDocument(ctx, dbq.PurgeDocumentParams{ID: doc.ID, PurgedAt: &ec.Now, PurgedByActorID: &ec.Actor.ID,
+					PurgeReason: &reason}); err != nil {
+					return DocumentPurgeOut{}, err
+				}
+			}
+			if err := emitFileEvent(ctx, ec, in.CourseID, doc, EventDocumentPurged, "", "", payload); err != nil {
+				return DocumentPurgeOut{}, err
+			}
+			for _, key := range files {
+				if err := d.Blob.Delete(ctx, key); err != nil && !errors.Is(err, blob.ErrNotFound) {
+					return DocumentPurgeOut{}, err
+				}
+				out.FilesRemoved++
+			}
+			return out, nil
 		},
 	})
 }
@@ -779,6 +1078,21 @@ type DocumentSummary struct {
 	SortOrder          int32      `json:"sort_order"`
 	Status             string     `json:"status"`
 	CreatedAt          time.Time  `json:"created_at"`
+	PurgedAt           *time.Time `json:"purged_at,omitempty" jsonschema:"when every version of it was purged: it is archived for good"`
+}
+
+// Purge is the tombstone of what an administrator removed: who, when, why.
+type Purge struct {
+	At        time.Time `json:"at"`
+	ByActorID uuid.UUID `json:"by_actor_id" jsonschema:"the administrator who purged it"`
+	Reason    string    `json:"reason"`
+}
+
+func purgeOf(at *time.Time, by *uuid.UUID, reason *string) *Purge {
+	if at == nil || by == nil || reason == nil {
+		return nil
+	}
+	return &Purge{At: *at, ByActorID: *by, Reason: *reason}
 }
 
 type DocumentListIn struct {
@@ -833,7 +1147,8 @@ func documentList() tool.Tool {
 			out := DocumentListOut{Documents: make([]DocumentSummary, 0, len(rows))}
 			for _, r := range rows {
 				out.Documents = append(out.Documents, DocumentSummary{ID: r.ID, Kind: r.Kind, Title: r.Title,
-					PublishedVersionID: r.PublishedVersionID, SortOrder: r.SortOrder, Status: r.Status, CreatedAt: r.CreatedAt})
+					PublishedVersionID: r.PublishedVersionID, SortOrder: r.SortOrder, Status: r.Status, CreatedAt: r.CreatedAt,
+					PurgedAt: r.PurgedAt})
 			}
 			if len(rows) > 0 && len(rows) == int(in.limit()) {
 				out.Next = &rows[len(rows)-1].ID
@@ -860,12 +1175,14 @@ type VersionView struct {
 	AuthorMemberID uuid.UUID `json:"author_member_id"`
 	CreatedAt      time.Time `json:"created_at"`
 	Published      bool      `json:"published"`
+	Purged         *Purge    `json:"purged,omitempty" jsonschema:"the version was purged: its text and file are gone, and this says who removed them, when and why. Work handed in under it still names it"`
 }
 
 type DocumentGetOut struct {
 	DocumentSummary
 	SubmissionID *uuid.UUID   `json:"submission_id,omitempty"`
 	GradeID      *uuid.UUID   `json:"grade_id,omitempty"`
+	Purged       *Purge       `json:"purged,omitempty" jsonschema:"the whole document was purged: who, when and why"`
 	Version      *VersionView `json:"version,omitempty" jsonschema:"absent when the document has no version the caller may read"`
 }
 
@@ -913,8 +1230,9 @@ func documentGet(d Deps) tool.Tool {
 				return DocumentGetOut{}, apperr.Missing("no such document in this course")
 			}
 			out := DocumentGetOut{SubmissionID: doc.SubmissionID, GradeID: doc.GradeID,
+				Purged: purgeOf(doc.PurgedAt, doc.PurgedByActorID, doc.PurgeReason),
 				DocumentSummary: DocumentSummary{ID: doc.ID, Kind: doc.Kind, Title: doc.Title, PublishedVersionID: doc.PublishedVersionID,
-					SortOrder: doc.SortOrder, Status: doc.Status, CreatedAt: doc.CreatedAt}}
+					SortOrder: doc.SortOrder, Status: doc.Status, CreatedAt: doc.CreatedAt, PurgedAt: doc.PurgedAt}}
 
 			var v dbq.DocumentVersion
 			switch {
@@ -951,7 +1269,8 @@ func documentGet(d Deps) tool.Tool {
 			}
 			view := VersionView{ID: v.ID, Seq: v.Seq, BodyMD: v.BodyMd, ContentType: v.ContentType, ByteSize: v.ByteSize,
 				Checksum: v.Checksum, AuthorMemberID: v.AuthorMemberID, CreatedAt: v.CreatedAt,
-				Published: doc.PublishedVersionID != nil && *doc.PublishedVersionID == v.ID}
+				Published: doc.PublishedVersionID != nil && *doc.PublishedVersionID == v.ID,
+				Purged:    purgeOf(v.PurgedAt, v.PurgedByActorID, v.PurgeReason)}
 			if v.StorageKey != nil && d.Blob != nil {
 				url, err := d.Blob.PresignGet(ctx, *v.StorageKey, downloadTTL)
 				if err != nil {
@@ -966,14 +1285,15 @@ func documentGet(d Deps) tool.Tool {
 }
 
 type VersionSummary struct {
-	ID             uuid.UUID `json:"id"`
-	Seq            int32     `json:"seq"`
-	HasFile        bool      `json:"has_file"`
-	ContentType    *string   `json:"content_type,omitempty"`
-	ByteSize       *int64    `json:"byte_size,omitempty"`
-	AuthorMemberID uuid.UUID `json:"author_member_id"`
-	CreatedAt      time.Time `json:"created_at"`
-	Published      bool      `json:"published"`
+	ID             uuid.UUID  `json:"id"`
+	Seq            int32      `json:"seq"`
+	HasFile        bool       `json:"has_file"`
+	ContentType    *string    `json:"content_type,omitempty"`
+	ByteSize       *int64     `json:"byte_size,omitempty"`
+	AuthorMemberID uuid.UUID  `json:"author_member_id"`
+	CreatedAt      time.Time  `json:"created_at"`
+	Published      bool       `json:"published"`
+	PurgedAt       *time.Time `json:"purged_at,omitempty" jsonschema:"when its text and file were purged; document.get of it says who and why"`
 }
 
 type DocumentVersionsOut struct {
@@ -1035,7 +1355,7 @@ func documentVersions() tool.Tool {
 			for _, r := range rows {
 				out.Versions = append(out.Versions, VersionSummary{ID: r.ID, Seq: r.Seq, HasFile: r.HasFile, ContentType: r.ContentType,
 					ByteSize: r.ByteSize, AuthorMemberID: r.AuthorMemberID, CreatedAt: r.CreatedAt,
-					Published: doc.PublishedVersionID != nil && *doc.PublishedVersionID == r.ID})
+					Published: doc.PublishedVersionID != nil && *doc.PublishedVersionID == r.ID, PurgedAt: r.PurgedAt})
 			}
 			return out, err
 		},

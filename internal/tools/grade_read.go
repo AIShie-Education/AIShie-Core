@@ -39,6 +39,20 @@ type GradeView struct {
 	SupersededBy      *uuid.UUID      `json:"superseded_by,omitempty"`
 	CreatedAt         time.Time       `json:"created_at"`
 	FeedbackFiles     []FileRef       `json:"feedback_files,omitempty" jsonschema:"read each with document.get"`
+	// A computed total that has lost everything beneath it: work moved away,
+	// ungraded work no longer counted as zero.
+	NoTotal bool `json:"no_total,omitempty" jsonschema:"for a computed total: nothing beneath it counts any more, so it has no value, and its score of 0 means nothing"`
+	// A person's number for a computed total, beside the one worked out.
+	Override *TotalOverride `json:"override,omitempty" jsonschema:"for a computed total, a person's number in place of the score worked out, which stays beside it; it is what counts in everything rolled up above"`
+}
+
+// TotalOverride is what a person put in place of a total worked out. Who and
+// why are for those who grade.
+type TotalOverride struct {
+	Score      decimal.Decimal `json:"score" jsonschema:"out of 100, as the total's own score is"`
+	Reason     *string         `json:"reason,omitempty" jsonschema:"why; for members who grade"`
+	ByMemberID *uuid.UUID      `json:"by_member_id,omitempty" jsonschema:"who; for members who grade"`
+	At         time.Time       `json:"at"`
 }
 
 // FileRef points at an owned document: a submitted file, a feedback file.
@@ -60,7 +74,26 @@ func viewGrade(g dbq.GetGradeFullRow) GradeView {
 	return GradeView{ID: g.ID, StudentMemberID: g.StudentMemberID, SubmissionID: g.SubmissionID, ComponentID: g.ComponentID,
 		AssignmentID: g.AssignmentID, Origin: g.Origin, Score: g.Score, Feedback: g.Feedback, Breakdown: g.Breakdown,
 		RubricVersionID: g.RubricVersionID, GraderMemberID: g.GraderMemberID, CreatedByActionID: g.CreatedByActionID,
-		State: state, PostedAt: g.PostedAt, SupersededBy: g.SupersededBy, CreatedAt: g.CreatedAt}
+		State: state, PostedAt: g.PostedAt, SupersededBy: g.SupersededBy, CreatedAt: g.CreatedAt,
+		NoTotal: g.Origin == "computed" && voidTotal(g.Breakdown), Override: viewOverride(g)}
+}
+
+func viewOverride(g dbq.GetGradeFullRow) *TotalOverride {
+	if !g.OverrideScore.Valid || g.OverriddenAt == nil {
+		return nil
+	}
+	return &TotalOverride{Score: g.OverrideScore.Decimal, Reason: g.OverrideReason, ByMemberID: g.OverrideByMemberID, At: *g.OverriddenAt}
+}
+
+// forReader leaves out of a grade what only those who grade are told: who
+// overrode a total and why.
+func forReader(v GradeView, m *domain.Member) GradeView {
+	if v.Override != nil && !seesDrafts(m) {
+		o := *v.Override
+		o.Reason, o.ByMemberID = nil, nil
+		v.Override = &o
+	}
+	return v
 }
 
 // seesDrafts: drafts and history are for those who grade. Everyone else sees
@@ -101,7 +134,7 @@ func gradeList() tool.Tool {
 			})
 			out := GradeListOut{Grades: make([]GradeView, 0, len(rows))}
 			for _, r := range rows {
-				out.Grades = append(out.Grades, viewGrade(dbq.GetGradeFullRow(r)))
+				out.Grades = append(out.Grades, forReader(viewGrade(dbq.GetGradeFullRow(r)), rc.Member))
 			}
 			if len(rows) > 0 && len(rows) == int(in.limit()) {
 				out.Next = &rows[len(rows)-1].ID
@@ -147,7 +180,7 @@ func gradeGet() tool.Tool {
 				// To a student an unposted grade does not exist yet.
 				return GradeView{}, apperr.Missing("no such grade in this course")
 			}
-			v := viewGrade(g)
+			v := forReader(viewGrade(g), rc.Member)
 			files, err := rc.Q.ListGradeDocuments(ctx, &g.ID)
 			for _, f := range files {
 				v.FeedbackFiles = append(v.FeedbackFiles, FileRef{DocumentID: f.ID, Title: f.Title})

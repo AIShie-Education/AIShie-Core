@@ -41,6 +41,8 @@ const (
 	EventResumed  = "member.resumed"
 	EventRemoved  = "member.removed"
 	EventRescoped = "member.rescoped"
+	// A seat's roster role changed: payload from and to.
+	EventRoleChanged = "member.role_changed"
 )
 
 // Remove retires a membership: status becomes 'removed', the row and all its

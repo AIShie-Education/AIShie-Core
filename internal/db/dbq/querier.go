@@ -28,9 +28,6 @@ type Querier interface {
 	// latest message is there already. Asked under the conversation's row lock,
 	// which every message is written under.
 	AnsweredSince(ctx context.Context, arg AnsweredSinceParams) (bool, error)
-	// Entered and not replaced: a draft waiting to be posted counts, since what it
-	// was entered against would change under it just the same.
-	AssignmentHasLiveGrades(ctx context.Context, assignmentID uuid.UUID) (bool, error)
 	// Any row at all: a draft, a hand-in, a 'missing' placeholder.
 	AssignmentHasSubmissions(ctx context.Context, assignmentID uuid.UUID) (bool, error)
 	CancelProposal(ctx context.Context, arg CancelProposalParams) (int64, error)
@@ -45,12 +42,8 @@ type Querier interface {
 	// removals whose seats share conversations take them in one order.
 	CloseConversationsOf(ctx context.Context, memberIds []uuid.UUID) ([]uuid.UUID, error)
 	ComponentHasGrades(ctx context.Context, componentID *uuid.UUID) (bool, error)
-	ComponentHasLiveGrades(ctx context.Context, componentID *uuid.UUID) (bool, error)
 	// Any origin: an entered grade, or a total written down when it was a parent.
 	ComponentHasLivePostedGrades(ctx context.Context, componentID *uuid.UUID) (bool, error)
-	// Any entered grade, live, on the component, on a component beneath it, or
-	// on a submission to an assignment beneath it.
-	ComponentSubtreeHasLiveGrades(ctx context.Context, componentID uuid.UUID) (bool, error)
 	// What the views show of each conversation: its two participants, whether a
 	// reply to the opener's newest message waits for a decision, that message,
 	// and when a message in it was last retracted. last_seen_at is an agent's:
@@ -204,6 +197,9 @@ type Querier interface {
 	GetJoinLinkByPrefix(ctx context.Context, tokenPrefix string) (GetJoinLinkByPrefixRow, error)
 	GetJoinLinkInCourse(ctx context.Context, arg GetJoinLinkInCourseParams) (CourseJoinLink, error)
 	GetLatestVersion(ctx context.Context, documentID uuid.UUID) (DocumentVersion, error)
+	// A total as it stands, with what a person has given it besides the number
+	// worked out: an override and a comment, which a total written again carries
+	// on.
 	GetLiveComputedGrade(ctx context.Context, arg GetLiveComputedGradeParams) (GetLiveComputedGradeRow, error)
 	// A seat comes with its principal, when it is a delegate's: the principal's
 	// standing, scope and levels cap the delegate's (domain.Member). The three
@@ -437,6 +433,10 @@ type Querier interface {
 	// wait for: the call waits instead for the principal, and then finds it
 	// removed.
 	ListLiveDelegatesOf(ctx context.Context, principalMemberID *uuid.UUID) ([]uuid.UUID, error)
+	// Where the student has a total written down.
+	ListLiveTotalComponents(ctx context.Context, studentMemberID uuid.UUID) ([]*uuid.UUID, error)
+	// The student's totals a person has overridden, and with what, out of 100.
+	ListLiveTotalOverrides(ctx context.Context, studentMemberID uuid.UUID) ([]ListLiveTotalOverridesRow, error)
 	ListMembers(ctx context.Context, arg ListMembersParams) ([]ListMembersRow, error)
 	ListMembershipsForActor(ctx context.Context, actorID uuid.UUID) ([]ListMembershipsForActorRow, error)
 	// A page of one bucket in one status, by id: newest first, after the last
@@ -511,6 +511,16 @@ type Querier interface {
 	ListStaleProposals(ctx context.Context, arg ListStaleProposalsParams) ([]ListStaleProposalsRow, error)
 	ListStudentScope(ctx context.Context, memberID uuid.UUID) ([]uuid.UUID, error)
 	ListStudentScopesOf(ctx context.Context, memberIds []uuid.UUID) ([]MemberStudentScope, error)
+	// The students of the course with a total written down counting ungraded
+	// work as zero.
+	ListStudentsCountedAsZero(ctx context.Context, courseID uuid.UUID) ([]uuid.UUID, error)
+	// The students with a live grade entered on the component, on one beneath it,
+	// or on a submission to an assignment beneath it.
+	ListStudentsGradedBeneath(ctx context.Context, componentID uuid.UUID) ([]uuid.UUID, error)
+	// The students with a live grade entered on the assignment, a draft or posted.
+	ListStudentsGradedOnAssignment(ctx context.Context, assignmentID uuid.UUID) ([]uuid.UUID, error)
+	// Every student of the course who has a total written down.
+	ListStudentsWithLiveTotals(ctx context.Context, courseID uuid.UUID) ([]uuid.UUID, error)
 	// Current students of the course with no submission row at all for the
 	// assignment: not a draft, not a hand-in, not an earlier 'missing'. A paused
 	// student is one: the seat carries on when resumed, and the sweep does not
@@ -520,6 +530,8 @@ type Querier interface {
 	ListSubmissions(ctx context.Context, arg ListSubmissionsParams) ([]ListSubmissionsRow, error)
 	ListTerms(ctx context.Context) ([]Term, error)
 	ListVersions(ctx context.Context, documentID uuid.UUID) ([]ListVersionsRow, error)
+	// The versions of a document not purged yet, and the file each holds.
+	ListVersionsToPurge(ctx context.Context, documentID uuid.UUID) ([]ListVersionsToPurgeRow, error)
 	LiveAppointment(ctx context.Context, arg LiveAppointmentParams) (DepartmentAdmin, error)
 	LiveComponentGradeExists(ctx context.Context, arg LiveComponentGradeExistsParams) (bool, error)
 	LiveSubmissionGradeExists(ctx context.Context, submissionID *uuid.UUID) (bool, error)
@@ -543,6 +555,11 @@ type Querier interface {
 	// take turns and each sees where the other left it. A call in the course
 	// takes KEY SHARE on the row through a foreign key, and does not wait.
 	LockCourseDept(ctx context.Context, id uuid.UUID) (uuid.UUID, error)
+	// A course's title and description, held until a change to them is written:
+	// NO KEY UPDATE, so that two changes take turns and neither puts back what
+	// the other changed, while calls in the course, which take the row KEY
+	// SHARE through their foreign keys, do not wait.
+	LockCourseDetails(ctx context.Context, id uuid.UUID) (LockCourseDetailsRow, error)
 	// The same, for a write made by that authority. The appointment is held
 	// FOR SHARE to the end of the call. Ending it is an UPDATE, which waits for
 	// the call, or the call waits for it and then, reading the row again, finds
@@ -575,6 +592,11 @@ type Querier interface {
 	// for. NO KEY UPDATE: a seat that names the link takes KEY SHARE on it
 	// through its foreign key, which this leaves alone.
 	LockJoinLink(ctx context.Context, id uuid.UUID) (CourseJoinLink, error)
+	// Every live grade entered on the assignment's submissions, draft or posted,
+	// held in id order, as grade.post holds the drafts it posts.
+	LockLiveEnteredGradesOfAssignment(ctx context.Context, assignmentID uuid.UUID) ([]LockLiveEnteredGradesOfAssignmentRow, error)
+	// Every live grade entered directly on the component, draft or posted.
+	LockLiveEnteredGradesOfComponent(ctx context.Context, componentID *uuid.UUID) ([]LockLiveEnteredGradesOfComponentRow, error)
 	// The same, for a call that writes, and the first row that call locks: the
 	// caller's own seat, KEY SHARE, to the end of the call. It blocks only what
 	// locks the seat FOR UPDATE — a change to it, its removal, the expiry sweep —
@@ -645,6 +667,9 @@ type Querier interface {
 	MaxVersionSeq(ctx context.Context, documentID uuid.UUID) (int32, error)
 	// Whether an agent's owner lets it keep memory: no row is yes.
 	MemoryEnabled(ctx context.Context, holderActorID uuid.UUID) (bool, error)
+	// A grade's feedback files go with it when it is written again without
+	// being graded again: a total worked out anew, a score rescaled.
+	MoveFeedbackFiles(ctx context.Context, arg MoveFeedbackFilesParams) error
 	// The departments an actor is appointed to administer now.
 	MyAppointments(ctx context.Context, actorID uuid.UUID) ([]MyAppointmentsRow, error)
 	NewestComponentDraftAt(ctx context.Context, arg NewestComponentDraftAtParams) (time.Time, error)
@@ -659,6 +684,11 @@ type Querier interface {
 	// and must not (tools.notYourPrincipals). Asked before anything is locked.
 	PrincipalsSeatsHaveRole(ctx context.Context, arg PrincipalsSeatsHaveRoleParams) (bool, error)
 	PublishAssignment(ctx context.Context, arg PublishAssignmentParams) (int64, error)
+	// Archived for good, saying who purged it, when and why.
+	PurgeDocument(ctx context.Context, arg PurgeDocumentParams) (int64, error)
+	// Its text, its file and the file's checksum go; the rest stays, with who,
+	// when and why. The one change a version takes (document_version_guarded).
+	PurgeVersion(ctx context.Context, arg PurgeVersionParams) (int64, error)
 	ReactivateActor(ctx context.Context, id uuid.UUID) (int64, error)
 	// Only a suspension the owner made: one an administrator made, or one made
 	// before this was recorded, is an administrator's to lift.
@@ -712,6 +742,8 @@ type Querier interface {
 	SetDocumentStatus(ctx context.Context, arg SetDocumentStatusParams) (int64, error)
 	SetMemberExpiry(ctx context.Context, arg SetMemberExpiryParams) error
 	SetMemberPerms(ctx context.Context, arg SetMemberPermsParams) error
+	// A fact of the roster; nothing that authorizes reads it.
+	SetMemberRole(ctx context.Context, arg SetMemberRoleParams) error
 	SetMemberScopeKinds(ctx context.Context, arg SetMemberScopeKindsParams) error
 	SetMemberStatus(ctx context.Context, arg SetMemberStatusParams) (int64, error)
 	SetPublishedVersion(ctx context.Context, arg SetPublishedVersionParams) error
@@ -753,6 +785,7 @@ type Querier interface {
 	// to all three.
 	SiteChatOf(ctx context.Context, arg SiteChatOfParams) ([]SiteChatOfRow, error)
 	StorageKeyInUse(ctx context.Context, storageKey *string) (bool, error)
+	StudentCountedAsZero(ctx context.Context, studentMemberID uuid.UUID) (bool, error)
 	// A grade entered, or proposed and not yet decided: either way, one is on its
 	// way for exactly this work.
 	SubmissionHasGrades(ctx context.Context, submissionID *uuid.UUID) (bool, error)
@@ -788,6 +821,7 @@ type Querier interface {
 	UpdateAssignment(ctx context.Context, arg UpdateAssignmentParams) error
 	UpdateComponent(ctx context.Context, arg UpdateComponentParams) error
 	UpdateCourse(ctx context.Context, arg UpdateCourseParams) error
+	UpdateDocumentDetails(ctx context.Context, arg UpdateDocumentDetailsParams) error
 	// A change to an entry's text, tags or pin, which moves its version on.
 	// Given a version, only that version is changed: no row comes back if it
 	// has moved on since (0 changes whatever it is).

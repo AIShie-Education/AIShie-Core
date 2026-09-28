@@ -110,6 +110,40 @@ func TestUngradedAsZero(t *testing.T) {
 	}
 }
 
+// An overridden bucket counts above it as its override, complete, while its
+// own result is still what the scheme works out; a component graded
+// directly is not overridden, its grade is.
+func TestAnOverrideCountsAboveIt(t *testing.T) {
+	s := Scores{
+		Assignment: map[uuid.UUID]decimal.Decimal{id(13): d("80")},
+		Component:  map[uuid.UUID]decimal.Decimal{id(3): d("70")},
+		Override:   map[uuid.UUID]decimal.Decimal{id(2): d("0.9"), id(3): d("1")},
+	}
+	got := Compute(course(), s, Policy{})
+	wantFraction(t, got[id(2)], "0.8") // worked out: HW3 alone, 80/100
+	// (40×0.9 + 30×0.7) / 70: the bucket's override, the exam's own grade.
+	wantFraction(t, got[id(1)], "0.814286")
+	items := got[id(1)].Items
+	if !items[0].Overridden || !items[0].Fraction.Equal(d("0.9")) || items[1].Overridden {
+		t.Fatalf("the working does not say which line is an override: %+v", items)
+	}
+	if got[id(1)].Complete {
+		t.Error("the total is complete though the second exam is ungraded")
+	}
+	// The same numbers with and without the override are not the same
+	// working: a total written down before it is written again after.
+	plain := Compute(course(), Scores{Assignment: s.Assignment, Component: s.Component}, Policy{})
+	if plain[id(1)].Same(got[id(1)]) {
+		t.Error("a working with an override is the same as one without")
+	}
+	// Nothing beneath it: the override is still what counts above it.
+	only := Compute(course(), Scores{Override: map[uuid.UUID]decimal.Decimal{id(2): d("0.5")}}, Policy{})
+	if only[id(2)].Fraction != nil {
+		t.Error("the bucket worked out something from nothing")
+	}
+	wantFraction(t, only[id(1)], "0.5")
+}
+
 func TestNothingGraded(t *testing.T) {
 	got := Compute(course(), Scores{}, Policy{})
 	for cid, r := range got {

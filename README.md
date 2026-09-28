@@ -39,17 +39,27 @@ In place so far:
   and never in the action log;
 - files: versioned documents with publish-by-pointer, uploads and downloads
   by short-lived URL (this server's disk, or any S3-compatible store), and
-  feedback files that travel with a grade through a proposal.
+  feedback files that travel with a grade through a proposal; documents are
+  renamed and brought back from the archive, and what was uploaded by
+  mistake is purged by an administrator, leaving a tombstone;
+- records that can be corrected, with their history kept: a seat's roster
+  role, what graded work is worth and where it counts (its grades rescaled or
+  kept, the totals following), a computed total overridden beside the number
+  worked out, and final grades' treating ungraded work as zero undone.
 
 `make e2e` runs the real binary against a scratch database and, with nothing
 but `curl`, builds the worked example from docs/schema.md §5 from an empty
 installation: an agent grades an essay, a person approves it, the student
-sees the grade; then, once its runtime says it answers in the site, the
-student asks the instructor's tutor agent a question, and it answers; another
-agent of the instructor's, given `member_manage`, seats a student with its own
-token and is refused on the instructor's seat; the instructor shows a join
-link, through which a new student registers and a registered one joins, and
-which seats nobody once revoked; Core vouches for the instructor to an agent runtime, and the
+sees the grade; the instructor renames the course, halves the assignment's
+points with the grade rescaled, overrides the student's total and takes the
+override off, renames the slides and brings them back from the archive, and
+makes the student a TA and a student again; then, once its runtime says it
+answers in the site, the student asks the instructor's tutor agent a
+question, and it answers; another agent of the instructor's, given
+`member_manage`, seats a student with its own token and is refused on the
+instructor's seat; the instructor shows a join link, through which a new
+student registers and a registered one joins, and which seats nobody once
+revoked; Core vouches for the instructor to an agent runtime, and the
 key it publishes checks the assertion; last, the sign-in page is told whether
 to offer single sign-on, with it off and then, against a stand-in provider,
 on.

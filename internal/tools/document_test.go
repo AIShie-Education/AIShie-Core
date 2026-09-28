@@ -608,12 +608,21 @@ func TestFeedbackOnAPostedGradeIsARelease(t *testing.T) {
 	// Sato may do both.
 	b.do(t, b.sato, "document.create", m{"course_id": b.course, "kind": "feedback", "title": "P.S.", "grade_id": gradeID, "body_md": "see me"})
 
-	// A total is worked out, not given; nothing hangs from it.
+	// A total is posted as it is written: feedback on it is a release too,
+	// for whoever may post, and not for the TA.
 	var computed uuid.UUID
-	if err := b.Pool.QueryRow(t.Context(), `SELECT id FROM grade WHERE origin = 'computed' AND student_member_id = $1 LIMIT 1`, b.yukiM).Scan(&computed); err != nil {
+	if err := b.Pool.QueryRow(t.Context(), `SELECT id FROM grade WHERE origin = 'computed' AND student_member_id = $1 AND component_id = $2
+		AND superseded_by IS NULL`, b.yukiM, b.total).Scan(&computed); err != nil {
 		t.Fatal(err)
 	}
-	b.try(t, b.sato, "document.create", m{"course_id": b.course, "kind": "feedback", "title": "x", "grade_id": computed, "body_md": "x"}, apperr.FailedPrecondition)
+	onTotal := m{"course_id": b.course, "kind": "feedback", "title": "On your total", "grade_id": computed, "body_md": "A strong term."}
+	if out := b.MustCall(ta, "document.create", onTotal, "ta-total"); out.Status != domain.StatusDenied {
+		t.Fatalf("feedback on a total by someone who cannot post: %+v", out)
+	}
+	b.do(t, b.sato, "document.create", onTotal)
+	if g := testkit.Result[tools.GradeView](t, b.do(t, b.yuki, "grade.get", m{"course_id": b.course, "grade_id": computed})); len(g.FeedbackFiles) != 1 {
+		t.Fatalf("Yuki sees %d feedback files on her total, want one", len(g.FeedbackFiles))
+	}
 }
 
 // Archiving withdraws a document. A student who kept its id — it was in the

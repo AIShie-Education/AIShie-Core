@@ -38,6 +38,9 @@ var visibility = map[string][]domain.Perm{
 	events.GradePosted:       {domain.PermGradeRead},
 	events.GradeRegraded:     {domain.PermGradeRead},
 	events.GradeTotalUpdated: {domain.PermGradeRead},
+	// A total overridden, cleared or commented on is posted, as the total is.
+	events.GradeTotalOverridden: {domain.PermGradeRead}, events.GradeTotalOverrideCleared: {domain.PermGradeRead},
+	events.GradeTotalCommented: {domain.PermGradeRead}, events.GradeUngradedAsZeroUndone: {domain.PermGradeRead},
 
 	EventSubmissionSubmitted: {domain.PermSubmissionRead},
 	EventSubmissionLateness:  {domain.PermSubmissionRead},
@@ -57,6 +60,7 @@ var visibility = map[string][]domain.Perm{
 	members.EventAdded: {domain.PermMemberRead}, members.EventUpdated: {domain.PermMemberRead},
 	members.EventPaused: {domain.PermMemberRead}, members.EventResumed: {domain.PermMemberRead},
 	members.EventRemoved: {domain.PermMemberRead}, members.EventRescoped: {domain.PermMemberRead},
+	members.EventRoleChanged: {domain.PermMemberRead},
 
 	// A join link is a way into the course, for whoever holds it: news of
 	// one is for those who make, list and revoke them (member_invite), and
@@ -76,6 +80,12 @@ var visibility = map[string][]domain.Perm{
 	EventDocumentPublished: {domain.PermDocumentRead}, EventRubricPublished: {domain.PermRubricRead},
 	EventSubmissionFileAdded: {domain.PermSubmissionRead}, EventSubmissionFileArchived: {domain.PermSubmissionRead},
 	EventFeedbackFileAdded: {domain.PermGradeSubmit, domain.PermGradePost}, EventFeedbackFileArchived: {domain.PermGradeSubmit, domain.PermGradePost},
+	// Renamed, restored and purged, as archived: for those who read drafts;
+	// an owned file's, as its archiving is.
+	EventDocumentUpdated: {domain.PermDocumentReadDraft}, EventDocumentUnarchived: {domain.PermDocumentReadDraft},
+	EventDocumentPurged:        {domain.PermDocumentReadDraft},
+	EventSubmissionFileUpdated: {domain.PermSubmissionRead}, EventSubmissionFileRestored: {domain.PermSubmissionRead},
+	EventFeedbackFileUpdated: {domain.PermGradeSubmit, domain.PermGradePost}, EventFeedbackFileRestored: {domain.PermGradeSubmit, domain.PermGradePost},
 
 	// Instructions and a rubric are their assignment's. News of them is filed
 	// under each published assignment that refers to them, for scope to
@@ -84,7 +94,8 @@ var visibility = map[string][]domain.Perm{
 	// for those who would be told the news by its own name.
 	EventDocumentCreatedUnreleased: {domain.PermAssignmentWrite}, EventDocumentVersionAddedUnreleased: {domain.PermAssignmentWrite},
 	EventDocumentPublishedUnreleased: {domain.PermAssignmentWrite}, EventRubricPublishedUnreleased: {domain.PermAssignmentWrite},
-	EventDocumentArchivedUnreleased: {domain.PermAssignmentWrite},
+	EventDocumentArchivedUnreleased: {domain.PermAssignmentWrite}, EventDocumentUpdatedUnreleased: {domain.PermAssignmentWrite},
+	EventDocumentUnarchivedUnreleased: {domain.PermAssignmentWrite}, EventDocumentPurgedUnreleased: {domain.PermAssignmentWrite},
 
 	// A conversation's news is for its two participants and nobody else,
 	// whoever holds what: event.list shows it by the participant rule

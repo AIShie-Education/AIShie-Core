@@ -75,6 +75,10 @@ SELECT assignment_id FROM member_assignment_scope WHERE member_id = $1 ORDER BY 
 -- name: SetMemberStatus :execrows
 UPDATE course_member SET status = $2 WHERE id = $1 AND status = sqlc.arg(from_status);
 
+-- name: SetMemberRole :exec
+-- A fact of the roster; nothing that authorizes reads it.
+UPDATE course_member SET role = $2 WHERE id = $1;
+
 -- name: SetMemberPerms :exec
 UPDATE course_member SET
     perm_document_read = $2, perm_document_read_draft = $3, perm_document_write = $4, perm_rubric_read = $5,
