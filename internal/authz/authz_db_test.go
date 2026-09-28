@@ -408,3 +408,71 @@ func TestSeatForSaysWhetherASeatCounts(t *testing.T) {
 		t.Fatalf("no such course: %v", err)
 	}
 }
+
+// An administrator's Admin-gated write holds the appointment it relies on,
+// the nearest, to its end: ending that appointment waits for the write. A
+// read holds nothing, and a platform administrator relies on no appointment.
+func TestAnAdministratorsWriteHoldsTheAppointmentItReliesOn(t *testing.T) {
+	w := testkit.NewDeptTree(t)
+	ctx := context.Background()
+	held := func(appointment uuid.UUID) bool {
+		t.Helper()
+		_, err := w.Pool.Exec(ctx, `SELECT 1 FROM department_admin WHERE id = $1 FOR UPDATE NOWAIT`, appointment)
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "55P03" {
+			return true
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		return false
+	}
+	within := func(actor uuid.UUID, write bool, dept uuid.UUID, check func(*domain.Authority, bool)) {
+		t.Helper()
+		tx, err := w.Pool.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = tx.Rollback(ctx) }()
+		a, err := authz.LoadActor(ctx, dbq.New(tx), actor)
+		if err != nil {
+			t.Fatal(err)
+		}
+		scope, d := authz.Admin(a, write)
+		if !d.Level.Allowed() {
+			t.Fatalf("%v is no administrator: %+v", actor, d)
+		}
+		auth, ok, err := scope.Covers(ctx, dbq.New(tx), dept)
+		if err != nil {
+			t.Fatal(err)
+		}
+		check(auth, ok)
+	}
+
+	within(w.Bob, true, w.D, func(auth *domain.Authority, ok bool) {
+		if !ok || auth.AppointmentID != w.BobS || auth.DeptID != w.S {
+			t.Fatalf("Bob on AI: %+v %v", auth, ok)
+		}
+		if !held(w.BobS) {
+			t.Fatal("a write does not hold the appointment it relies on")
+		}
+		if held(w.ChanS) || held(w.AdaF) {
+			t.Fatal("a write holds an appointment it does not rely on")
+		}
+	})
+	within(w.Bob, false, w.D, func(_ *domain.Authority, ok bool) {
+		if !ok || held(w.BobS) {
+			t.Fatalf("a read: covered %v, and holds the appointment", ok)
+		}
+	})
+	within(w.Bob, true, w.S2, func(auth *domain.Authority, ok bool) {
+		if ok || auth != nil {
+			t.Fatalf("Bob on Design, a sibling of his: %+v %v", auth, ok)
+		}
+	})
+	within(w.Admin, true, w.S3, func(auth *domain.Authority, ok bool) {
+		if !ok || auth != nil {
+			t.Fatalf("a platform administrator: %+v %v", auth, ok)
+		}
+	})
+}

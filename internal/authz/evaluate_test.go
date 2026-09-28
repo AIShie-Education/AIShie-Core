@@ -1,6 +1,7 @@
 package authz
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -105,6 +106,51 @@ func TestPlatform(t *testing.T) {
 				t.Fatalf("got %s, want %s", got.Level, c.want)
 			}
 		})
+	}
+}
+
+// The Admin gate's first steps: a platform role goes anywhere; an
+// appointment goes on, to be held to what it covers; nothing else goes.
+func TestAdmin(t *testing.T) {
+	root := domain.Actor{Status: domain.ActorActive, PlatformRole: domain.PlatformRoot}
+	admin := domain.Actor{Status: domain.ActorActive, PlatformRole: domain.PlatformAdmin, Administers: true}
+	appointed := domain.Actor{Status: domain.ActorActive, Administers: true}
+	nobody := domain.Actor{Status: domain.ActorActive}
+	gone := domain.Actor{Status: domain.ActorSuspended, Administers: true}
+	goneRoot := domain.Actor{Status: domain.ActorSuspended, PlatformRole: domain.PlatformRoot}
+
+	cases := []struct {
+		name     string
+		actor    domain.Actor
+		want     domain.Level
+		reason   Reason
+		platform bool
+	}{
+		{"root", root, domain.Autonomous, ReasonNone, true},
+		{"an admin, appointed too, goes as an admin", admin, domain.Autonomous, ReasonNone, true},
+		{"a department administrator goes on", appointed, domain.Autonomous, ReasonNone, false},
+		{"anyone else is told a platform role is needed", nobody, domain.Denied, ReasonPlatformRole, false},
+		{"a suspended administrator", gone, domain.Denied, ReasonActorNotActive, false},
+		{"a suspended root", goneRoot, domain.Denied, ReasonActorNotActive, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			scope, d := Admin(c.actor, true)
+			if d.Level != c.want || d.Reason != c.reason || scope.Platform != c.platform {
+				t.Fatalf("got %s (%q), platform %v; want %s (%q), platform %v", d.Level, d.Reason, scope.Platform, c.want, c.reason, c.platform)
+			}
+			if !d.Level.Allowed() && scope != (AdminScope{}) {
+				t.Fatalf("a denied caller is given a scope: %+v", scope)
+			}
+		})
+	}
+}
+
+// The zero scope, every call's but an Admin-gated one's, covers nothing.
+func TestTheZeroAdminScopeCoversNothing(t *testing.T) {
+	auth, ok, err := AdminScope{}.Covers(context.Background(), nil, uuid.New())
+	if ok || auth != nil || err != nil {
+		t.Fatalf("covers: %v %+v %v", ok, auth, err)
 	}
 }
 

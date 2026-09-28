@@ -28,7 +28,7 @@ func platformTools() []tool.Tool {
 	return []tool.Tool{
 		actorRegister(), actorGet(), actorList(), actorUpdate(), actorSuspend(), actorReactivate(), actorSetOwner(),
 		actorIssueToken(), actorListCredentials(), actorRevokeCredential(), actorInvite(), actorLinkSSO(),
-		termCreate(), termList(), departmentCreate(), departmentList(),
+		termCreate(), termList(),
 		presetList(), presetCreate(), presetUpdate(),
 	}
 }
@@ -37,6 +37,12 @@ func platformTools() []tool.Tool {
 // admin, act on a holder of a platform role — is checked inside the tool,
 // because it depends on the arguments and not on the tool.
 var admins = tool.Gate{Platform: []string{domain.PlatformRoot, domain.PlatformAdmin}}
+
+// administrators gates what a platform administrator may do anywhere, and a
+// department administrator within the departments they cover: the tool's
+// Resolve names the department the call is about (tool.Target.DeptID).
+// Nothing inside a course is gated by it.
+var administrators = tool.Gate{Admin: true}
 
 const (
 	EventActorRegistered        = "actor.registered"
@@ -751,7 +757,7 @@ func tokenExpiry(label string, days *int, now time.Time) (*time.Time, error) {
 }
 
 // ---------------------------------------------------------------------------
-// term.*, department.*
+// term.*
 // ---------------------------------------------------------------------------
 
 type TermCreateIn struct {
@@ -812,54 +818,6 @@ func termList() tool.Tool {
 			for _, r := range rows {
 				out.Terms = append(out.Terms, TermView{ID: r.ID, Name: r.Name,
 					StartsOn: r.StartsOn.Format(time.DateOnly), EndsOn: r.EndsOn.Format(time.DateOnly)})
-			}
-			return out, err
-		},
-	})
-}
-
-type NameIn struct {
-	Name string `json:"name"`
-}
-
-func departmentCreate() tool.Tool {
-	return tool.Define(tool.Spec[NameIn, IDOut]{
-		Name:        "department.create",
-		Description: "Create a department. Departments group courses and may define their own permission presets; they play no part in authorization.",
-		Kind:        tool.Write, Gate: admins,
-		HTTP:    tool.Route{Method: "POST", Pattern: "/v1/departments"},
-		Resolve: noTarget[NameIn]("department"),
-		Execute: func(ctx context.Context, ec *tool.ExecCtx, in NameIn) (IDOut, error) {
-			if strings.TrimSpace(in.Name) == "" {
-				return IDOut{}, apperr.Invalid("name is required")
-			}
-			id := ids.New()
-			return IDOut{ID: id}, ec.Q.InsertDepartment(ctx, dbq.InsertDepartmentParams{ID: id, Name: in.Name, CreatedAt: ec.Now})
-		},
-	})
-}
-
-type DepartmentView struct {
-	ID   uuid.UUID `json:"id"`
-	Name string    `json:"name"`
-}
-
-type DepartmentListOut struct {
-	Departments []DepartmentView `json:"departments"`
-}
-
-func departmentList() tool.Tool {
-	return tool.Define(tool.Spec[Empty, DepartmentListOut]{
-		Name:        "department.list",
-		Description: "Every department, by name. Any signed-in actor may read this.",
-		Kind:        tool.Read, Gate: self,
-		HTTP:    tool.Route{Method: "GET", Pattern: "/v1/departments"},
-		Resolve: noTarget[Empty]("department"),
-		Query: func(ctx context.Context, rc *tool.ReadCtx, _ Empty) (DepartmentListOut, error) {
-			rows, err := rc.Q.ListDepartments(ctx)
-			out := DepartmentListOut{Departments: make([]DepartmentView, 0, len(rows))}
-			for _, r := range rows {
-				out.Departments = append(out.Departments, DepartmentView{ID: r.ID, Name: r.Name})
 			}
 			return out, err
 		},

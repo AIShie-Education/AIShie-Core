@@ -417,6 +417,46 @@ func TestAnAgentGradesAnEssayOverMCP(t *testing.T) {
 	}
 }
 
+// A tree is built and staffed over MCP as over REST: the same tools behind
+// the same gate. An agent administers nothing, and is told so.
+func TestATreeIsBuiltAndStaffedOverMCP(t *testing.T) {
+	f := serve(t, 0)
+	c := f.c
+	root := f.connect(t, f.token(t, c.Root))
+	made, _ := call(t, root, "department_create", m{"name": "Engineering", "idempotency_key": "eng"})
+	var eng struct {
+		ID uuid.UUID `json:"id"`
+	}
+	if made.Status != "executed" || json.Unmarshal(made.Result, &eng) != nil {
+		t.Fatalf("department_create: %+v", made)
+	}
+	if env, _ := call(t, root, "department_add_admin", m{"dept_id": eng.ID, "actor_id": c.Sato, "idempotency_key": "sato"}); env.Status != "executed" {
+		t.Fatalf("department_add_admin: %+v", env)
+	}
+
+	sato := f.connect(t, f.token(t, c.Sato))
+	if env, _ := call(t, sato, "department_create", m{"name": "Software", "parent_id": eng.ID, "idempotency_key": "sw"}); env.Status != "executed" {
+		t.Fatalf("beneath his appointment: %+v", env)
+	}
+	if env, res := call(t, sato, "department_create", m{"name": "Law", "idempotency_key": "law"}); env.Status != "denied" || !res.IsError ||
+		env.Error.Details["reason"] != "platform_role_required" {
+		t.Fatalf("at the top: %+v", env)
+	}
+	if tree, _ := call(t, sato, "department_list_tree", nil); tree.Status != "executed" ||
+		!strings.Contains(string(tree.Result), `"name":"Software","parent_id":"`+eng.ID.String()+`","depth":2,"administers":true,"manages":true`) {
+		t.Fatalf("department_list_tree: %+v %s", tree, tree.Result)
+	}
+
+	grader := f.connect(t, f.token(t, c.Grader))
+	if env, _ := call(t, grader, "department_create", m{"name": "Bots", "parent_id": eng.ID, "idempotency_key": "bots"}); env.Status != "denied" ||
+		env.Error.Details["reason"] != "platform_role_required" {
+		t.Fatalf("an agent: %+v", env)
+	}
+	if tree, _ := call(t, grader, "department_list_tree", nil); tree.Status != "executed" || strings.Contains(string(tree.Result), `true`) {
+		t.Fatalf("an agent's tree: %+v %s", tree, tree.Result)
+	}
+}
+
 func TestErrorsAModelCanCorrect(t *testing.T) {
 	f := serve(t, 1)
 	c, yuki := f.c, f.c.Students[0]

@@ -207,31 +207,36 @@ func (q *Queries) GetActionInCourseForUpdate(ctx context.Context, arg GetActionI
 
 const insertAction = `-- name: InsertAction :execrows
 INSERT INTO action (id, actor_id, course_id, member_id, action_type, target_type, target_id,
-                    payload, payload_hash, idempotency_key, authz_result, status, result, created_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+                    payload, payload_hash, idempotency_key, authz_result, status, result, created_at,
+                    authority, authority_dept_id)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
 ON CONFLICT (actor_id, idempotency_key) DO NOTHING
 `
 
 type InsertActionParams struct {
-	ID             uuid.UUID
-	ActorID        uuid.UUID
-	CourseID       *uuid.UUID
-	MemberID       *uuid.UUID
-	ActionType     string
-	TargetType     string
-	TargetID       *uuid.UUID
-	Payload        []byte
-	PayloadHash    string
-	IdempotencyKey string
-	AuthzResult    AutonomyLevel
-	Status         string
-	Result         []byte
-	CreatedAt      time.Time
+	ID              uuid.UUID
+	ActorID         uuid.UUID
+	CourseID        *uuid.UUID
+	MemberID        *uuid.UUID
+	ActionType      string
+	TargetType      string
+	TargetID        *uuid.UUID
+	Payload         []byte
+	PayloadHash     string
+	IdempotencyKey  string
+	AuthzResult     AutonomyLevel
+	Status          string
+	Result          []byte
+	CreatedAt       time.Time
+	Authority       *string
+	AuthorityDeptID *uuid.UUID
 }
 
 // Zero rows means another call with the same key got there first; the caller
 // then reads that row and replays it. ON CONFLICT waits for an in-flight
 // transaction holding the key, so two simultaneous calls cannot both act.
+// authority and authority_dept_id are the capacity a call outside any course
+// was allowed in; null for a seat's call, one's own account's, and a denial.
 func (q *Queries) InsertAction(ctx context.Context, arg InsertActionParams) (int64, error) {
 	result, err := q.db.Exec(ctx, insertAction,
 		arg.ID,
@@ -248,6 +253,8 @@ func (q *Queries) InsertAction(ctx context.Context, arg InsertActionParams) (int
 		arg.Status,
 		arg.Result,
 		arg.CreatedAt,
+		arg.Authority,
+		arg.AuthorityDeptID,
 	)
 	if err != nil {
 		return 0, err

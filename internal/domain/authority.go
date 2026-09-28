@@ -7,6 +7,15 @@ import "github.com/google/uuid"
 // number; a test compares them.
 const MaxDepartmentDepth = 8
 
+// The capacities a call outside any course is allowed in, as
+// action.authority records them: a platform role, or a department
+// administrator's appointment. A call made from a seat, or on one's own
+// account, is made in neither.
+const (
+	AuthorityPlatform   = "platform"
+	AuthorityDepartment = "department"
+)
+
 // Authority is a department administrator's authority over what a call is
 // about, found on the call: their appointment at its department, or at the
 // nearest department above it. It reaches the departments beneath the

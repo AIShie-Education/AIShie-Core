@@ -261,6 +261,8 @@ type Querier interface {
 	// Zero rows means another call with the same key got there first; the caller
 	// then reads that row and replays it. ON CONFLICT waits for an in-flight
 	// transaction holding the key, so two simultaneous calls cannot both act.
+	// authority and authority_dept_id are the capacity a call outside any course
+	// was allowed in; null for a seat's call, one's own account's, and a denial.
 	InsertAction(ctx context.Context, arg InsertActionParams) (int64, error)
 	InsertActor(ctx context.Context, arg InsertActorParams) error
 	// The partial unique index department_admin_one_live refuses a second live
@@ -533,7 +535,7 @@ type Querier interface {
 	// the call, or the call waits for it and then, reading the row again, finds
 	// it ended. A department row is never locked here.
 	LockDepartmentAuthority(ctx context.Context, arg LockDepartmentAuthorityParams) (LockDepartmentAuthorityRow, error)
-	// The department tree and its administrators (docs/schema.md §2.9).
+	// The department tree and its administrators (docs/schema.md §2.10).
 	//
 	// The tree is an adjacency list, walked with recursive CTEs. Every walk
 	// stops at 16 levels, twice what the trigger department_tree_valid allows,

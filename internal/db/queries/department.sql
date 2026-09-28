@@ -1,4 +1,4 @@
--- The department tree and its administrators (docs/schema.md §2.9).
+-- The department tree and its administrators (docs/schema.md §2.10).
 --
 -- The tree is an adjacency list, walked with recursive CTEs. Every walk
 -- stops at 16 levels, twice what the trigger department_tree_valid allows,

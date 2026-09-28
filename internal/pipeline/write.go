@@ -162,6 +162,11 @@ func (p *Pipeline) write(ctx context.Context, tx pgx.Tx, caller Caller, t tool.T
 	if a.decision.Member != nil {
 		row.MemberID = &a.decision.Member.ID
 	}
+	if level.Allowed() {
+		// The capacity it was allowed in. A denied call was allowed in none,
+		// whatever the caller holds.
+		row.Authority, row.AuthorityDeptID = a.authority, a.authorityDept
+	}
 	n, err := q.InsertAction(ctx, row)
 	if err != nil {
 		return Outcome{}, fmt.Errorf("record action: %w", err)
@@ -197,7 +202,7 @@ func (p *Pipeline) write(ctx context.Context, tx pgx.Tx, caller Caller, t tool.T
 	// Execute.
 	res, err := savepoint(ctx, tx, func(sp pgx.Tx) (any, error) {
 		return t.Execute(ctx, &tool.ExecCtx{
-			Tx: sp, Q: dbq.New(sp), Actor: actor, Member: a.decision.Member,
+			Tx: sp, Q: dbq.New(sp), Actor: actor, Member: a.decision.Member, Admin: a.admin,
 			ActionID: actionID, Now: now, ActionCreatedAt: now, Emit: stamp(buf, actionID),
 		}, in)
 	})

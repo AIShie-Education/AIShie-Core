@@ -13,9 +13,12 @@ SELECT pg_advisory_xact_lock(hashtextextended('action-key:' || sqlc.arg(actor_id
 -- Zero rows means another call with the same key got there first; the caller
 -- then reads that row and replays it. ON CONFLICT waits for an in-flight
 -- transaction holding the key, so two simultaneous calls cannot both act.
+-- authority and authority_dept_id are the capacity a call outside any course
+-- was allowed in; null for a seat's call, one's own account's, and a denial.
 INSERT INTO action (id, actor_id, course_id, member_id, action_type, target_type, target_id,
-                    payload, payload_hash, idempotency_key, authz_result, status, result, created_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+                    payload, payload_hash, idempotency_key, authz_result, status, result, created_at,
+                    authority, authority_dept_id)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
 ON CONFLICT (actor_id, idempotency_key) DO NOTHING;
 
 -- name: MarkActionExecuted :exec

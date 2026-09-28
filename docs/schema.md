@@ -59,7 +59,7 @@ seating the first instructor.
 ```
 term(id, name, starts_on, ends_on)
 
-department(id, name, parent_id null→department, created_at)   -- a tree of them (§2.9)
+department(id, name, parent_id null→department, created_at)   -- a tree of them (§2.10)
     check: parent_id ≠ id
     trigger: no department under itself or under one beneath it; at most 8 levels
 
@@ -524,7 +524,7 @@ or approved its escalation.
 
 `authority` says in what capacity a call outside any course was allowed, when it was not the
 caller's own account's: by a platform role, or by a department administrator's appointment,
-whose department `authority_dept_id` names (§2.9).
+whose department `authority_dept_id` names (§2.10).
 
 `unique(actor_id, idempotency_key)` is not optional. A tool call retried after a timeout would
 otherwise post a second grade silently at 3am.
@@ -985,6 +985,29 @@ makes them, like anyone else, and with none they are nobody there. `domain.Actor
 whether an actor holds any live appointment (`administers`, one probe of an index per call), so
 that only an administrator's calls look further for the one they rely on.
 
+**The Admin gate** (`tool.Gate.Admin`) is for what a platform administrator may do anywhere and
+a department administrator within what they cover. It is decided in two steps. Before the
+target is looked up, a platform role is allowed and an actor who holds an appointment goes on;
+anyone else is refused `platform_role_required`, recorded, and learns nothing from the ids they
+sent. Once the tool's `Resolve` has named the department the call is about, a department
+administrator must cover it, else `department_out_of_scope`; one that names none is at the top
+of the tree, a platform administrator's alone. The appointment relied on is looked up on every
+call and never kept: a write holds it `FOR SHARE` to its end, so ending it waits for the calls
+in flight that rely on it, and the next call finds it ended. The action records the capacity:
+`authority = 'platform'` for a platform role (the Platform gate's calls too), `'department'`
+with `authority_dept_id` the appointment's department for an appointment.
+
+**What is beneath an appointment is its holder's to shape and staff.** A department
+administrator creates departments under any department they cover (`department.create`, which
+takes the tree lock), and appoints and removes the administrators of a department only when
+they cover the department *above* it (`department.add_admin`, `.remove_admin`). So nobody
+staffs their own appointment's department or any above it: nobody widens their own reach,
+removes a fellow administrator, or removes whoever is above them. Every appointment says who
+made it. `department.list_tree` gives everyone the tree, with what the caller may do at each
+department; `department.list_admins` gives the administrators of a department, and those above
+it, to whoever covers it; `me.get` lists the caller's own appointments. The events
+(`department.created`, `.admin_added`, `.admin_removed`) are in no course's feed.
+
 ## 3. Authorization
 
 ```
@@ -1028,7 +1051,11 @@ removes its delegates. Every path that takes both therefore meets the other at t
 first.
 
 Platform-level operations (`course.create`, `actor.register`, seating the first instructor)
-check `actor.platform_role` instead. That is the only place it is read.
+check `actor.platform_role` instead. That is the only place it is read. The operations a
+department's administrators share with platform administrators (§2.10) are gated by either: a
+platform role, anywhere, or an appointment at or above the department the call is about, looked
+up only for an actor who holds one, and only once the call has said which department it is
+about. Both are recorded on the action (`authority`), and neither reaches inside a course.
 
 ## 4. Invariants
 
@@ -1229,6 +1256,12 @@ check `actor.platform_role` instead. That is the only place it is read.
 - A bucket's limits, an agent's total and its rate of writes are counted one write at a time,
   under an advisory lock on the holder and the bucket; the same text again is the entry already
   there.
+- A department administrator acts only on what an appointment of theirs covers (§2.10), and
+  staffs only the departments strictly beneath one: nobody appoints or removes the
+  administrators of their own department or one above it, and a department at the top is a
+  platform administrator's alone. Their appointment is looked up on every call, never kept;
+  a write holds it `FOR SHARE`, so ending it waits for the calls that rely on it and every
+  call after finds it ended.
 - `actor.kind` and `course_member.role` are never read by authorization.
 
 ## 5. Worked example: an agent grades an essay

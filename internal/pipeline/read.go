@@ -31,7 +31,7 @@ func (p *Pipeline) invokeRead(ctx context.Context, caller Caller, t tool.Tool, i
 		return Outcome{Status: domain.StatusDenied, Error: denial(a.decision.Reason)}, nil
 	}
 
-	rc := &tool.ReadCtx{Q: q, Actor: actor, Member: a.decision.Member, Now: now}
+	rc := &tool.ReadCtx{Q: q, Actor: actor, Member: a.decision.Member, Admin: a.admin, Now: now}
 	if a.decision.Member != nil {
 		rc.Scope = authz.FilterFor(a.decision.Member)
 	}

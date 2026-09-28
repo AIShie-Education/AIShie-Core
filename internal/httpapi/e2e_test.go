@@ -381,6 +381,59 @@ func TestBrowserSession(t *testing.T) {
 
 // A person an administrator registered chooses their password through an
 // invitation, in the browser, and is signed in.
+// docs/schema.md §2.10 over REST: root builds a tree and appoints an
+// administrator in it, who makes a department beneath the appointment,
+// staffs it, and is refused what is not theirs, until the appointment ends.
+func TestATreeIsBuiltAndStaffedOverHTTP(t *testing.T) {
+	a := newAPI(t, 1)
+	c := a.c
+	root, sato := a.tokenFor(c.Root), a.tokenFor(c.Sato)
+	yuki := c.Students[0].Actor
+	post := func(token, path string, body m, key string, want int) response {
+		t.Helper()
+		res := a.do(nil, "POST", path, token, body, "Idempotency-Key", key)
+		if res.Status != want {
+			t.Fatalf("POST %s: %d %s, want %d", path, res.Status, res.Raw, want)
+		}
+		return res
+	}
+
+	eng := post(root, "/v1/departments", m{"name": "Engineering"}, "eng", 200).str("result", "id")
+	sw := post(root, "/v1/departments", m{"name": "Software", "parent_id": eng}, "sw", 200).str("result", "id")
+	post(root, "/v1/departments/"+sw+"/admins", m{"actor_id": c.Sato}, "sato-sw", 200)
+	if admins := a.do(nil, "GET", "/v1/departments/"+sw+"/admins", root, nil); admins.Status != 200 ||
+		!strings.Contains(admins.Raw, `"display_name":"Sato"`) || !strings.Contains(admins.Raw, `"appointed_by_name":"root"`) {
+		t.Fatalf("department.list_admins: %d %s", admins.Status, admins.Raw)
+	}
+	if me := a.do(nil, "GET", "/v1/me", sato, nil); me.Status != 200 || !strings.Contains(me.Raw, `"administers":[{"dept_id":"`+sw+`","name":"Software"`) {
+		t.Fatalf("me.get: %d %s", me.Status, me.Raw)
+	}
+
+	// Beneath the appointment Sato makes departments and staffs them.
+	ai := post(sato, "/v1/departments", m{"name": "AI", "parent_id": sw}, "ai", 200).str("result", "id")
+	post(sato, "/v1/departments/"+ai+"/admins", m{"actor_id": yuki}, "yuki-ai", 200)
+	tree := a.do(nil, "GET", "/v1/departments/tree?root_id="+eng, sato, nil)
+	if tree.Status != 200 || !strings.Contains(tree.Raw, `"id":"`+ai+`","name":"AI","parent_id":"`+sw+`","depth":3,"administers":true,"manages":true`) ||
+		!strings.Contains(tree.Raw, `"id":"`+sw+`","name":"Software","parent_id":"`+eng+`","depth":2,"administers":true,"manages":false,"appointed":true`) {
+		t.Fatalf("department.list_tree: %d %s", tree.Status, tree.Raw)
+	}
+	// Not his own department's staff, not at the top, and nothing of a platform administrator's.
+	if own := post(sato, "/v1/departments/"+sw+"/admins", m{"actor_id": yuki}, "yuki-sw", 403); own.str("error", "details", "reason") != "department_out_of_scope" || own.str("action_id") == "" {
+		t.Fatalf("his own department's staff: %s", own.Raw)
+	}
+	if top := post(sato, "/v1/departments", m{"name": "Law"}, "law", 403); top.str("error", "details", "reason") != "platform_role_required" {
+		t.Fatalf("at the top: %s", top.Raw)
+	}
+	if actors := a.do(nil, "GET", "/v1/actors", sato, nil); actors.Status != 403 || actors.str("error", "details", "reason") != "platform_role_required" {
+		t.Fatalf("the directory: %d %s", actors.Status, actors.Raw)
+	}
+
+	post(root, "/v1/departments/"+sw+"/admins/"+c.Sato.String()+"/remove", m{}, "end-sato", 200)
+	if late := post(sato, "/v1/departments", m{"name": "Vision", "parent_id": ai}, "vision", 403); late.str("error", "details", "reason") != "platform_role_required" {
+		t.Fatalf("after the appointment ended: %s", late.Raw)
+	}
+}
+
 func TestInvitationOverHTTP(t *testing.T) {
 	a := newAPI(t, 0)
 	c := a.c

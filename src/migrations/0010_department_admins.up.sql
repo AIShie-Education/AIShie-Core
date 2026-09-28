@@ -4,7 +4,7 @@
 -- administrator manages courses: from outside them. An administrator of a
 -- department holds nothing inside its courses; one who wants to work in a
 -- course is seated there like anyone else. Design reference: docs/schema.md
--- §2.1, §2.9. PostgreSQL 13+.
+-- §2.1, §2.10. PostgreSQL 13+.
 --
 -- The previous release keeps working while this goes in. Every column is new
 -- and nullable, and nothing it writes is refused: it knows no tree, so every

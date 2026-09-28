@@ -63,7 +63,7 @@ func buildOn(t *testing.T, p *testkit.Platform) *built {
 	b.grader, b.tutor = register("agent", "grader-v2"), register("agent", "tutor")
 
 	b.term = testkit.Result[tools.IDOut](t, b.do(t, b.admin, "term.create", m{"name": "2026 Autumn", "starts_on": "2026-09-01", "ends_on": "2026-12-20"})).ID
-	b.dept = testkit.Result[tools.IDOut](t, b.do(t, b.admin, "department.create", m{"name": "Computing"})).ID
+	b.dept = testkit.Result[tools.IDOut](t, b.do(t, b.admin, "department.create", m{"name": "Computer Science"})).ID
 	made := testkit.Result[tools.CourseCreateOut](t, b.do(t, b.admin, "course.create",
 		m{"dept_id": b.dept, "term_id": b.term, "code": "CS101", "section": "A", "title": "Introduction to Computing"}))
 	b.course, b.total = made.CourseID, made.RootComponentID
