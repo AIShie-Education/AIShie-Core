@@ -19,16 +19,13 @@ import (
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/apperr"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/db/dbq"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/domain"
+	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/signing"
 )
 
 // assertionKeyInfo is the HKDF info under which the assertion key is derived
 // from SIGNING_KEY. It keeps the derived key apart from every other use of
 // SIGNING_KEY; a new version of it is a new key.
 const assertionKeyInfo = "aishiteru/runtime-assertion/v1"
-
-// minSigningKeyLen is the shortest SIGNING_KEY a key is derived from: the
-// shortest the server takes at all (signing.MinKeyLen).
-const minSigningKeyLen = 32
 
 // ErrNoAssertionKey means neither ASSERTION_KEY nor SIGNING_KEY is set, so
 // this server has no key to make assertions with.
@@ -48,8 +45,9 @@ func AssertionKey(seed []byte, signingKey string) (ed25519.PrivateKey, error) {
 		}
 		return ed25519.NewKeyFromSeed(seed), nil
 	case signingKey != "":
-		if len(signingKey) < minSigningKeyLen {
-			return nil, fmt.Errorf("SIGNING_KEY: at least %d characters are needed to derive the assertion key from", minSigningKeyLen)
+		// The shortest key the server takes at all.
+		if len(signingKey) < signing.MinKeyLen {
+			return nil, fmt.Errorf("SIGNING_KEY: at least %d characters are needed to derive the assertion key from", signing.MinKeyLen)
 		}
 		derived, err := hkdf.Key(sha256.New, []byte(signingKey), nil, assertionKeyInfo, ed25519.SeedSize)
 		if err != nil {

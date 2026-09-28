@@ -82,6 +82,8 @@ never seated in a course, and no token is issued for it and no identity linked t
 its authority cannot be borrowed. The database takes no credential for it, and a token it was
 given before migration 0004 authenticates nobody. Those refusals read `kind`; nothing that
 grants does. So do the refusals of ownership below: only a person owns, only an agent is owned.
+So does one refusal outside the database: Core vouches for nobody but a person to a service
+that hosts agents (`POST /v1/auth/assertion`, README), and an agent's token asks in vain.
 
 **An agent a person owns acts only as that person's delegate.** `owner_actor_id` names the
 person. Every seat of the agent that is not removed is a *delegate seat*, whose principal is the
