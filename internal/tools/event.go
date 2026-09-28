@@ -60,6 +60,7 @@ var visibility = map[string][]domain.Perm{
 
 	EventCourseCreated: {domain.PermDocumentRead}, EventCourseUpdated: {domain.PermDocumentRead},
 	EventCourseActivated: {domain.PermDocumentRead}, EventCourseArchived: {domain.PermDocumentRead},
+	EventCourseMoved: {domain.PermDocumentRead},
 
 	// A draft of course material is for those who read drafts; publishing is
 	// for everyone who reads that kind of document.

@@ -21,13 +21,16 @@ import (
 
 // Platform tools are the few operations outside any course. They check
 // actor.platform_role and nothing else: there is no ladder here, an admin may
-// or may not. Everything inside a course is governed by membership instead —
-// an admin who wants to grade has to be seated like anyone else.
+// or may not. Those a department's administrators share are gated by the
+// administrators gate instead, which lets them within what they administer.
+// Everything inside a course is governed by membership — an admin who wants
+// to grade has to be seated like anyone else, and so does a department's.
 
 func platformTools() []tool.Tool {
 	return []tool.Tool{
 		actorRegister(), actorGet(), actorList(), actorUpdate(), actorSuspend(), actorReactivate(), actorSetOwner(),
 		actorIssueToken(), actorListCredentials(), actorRevokeCredential(), actorInvite(), actorLinkSSO(),
+		actorLookupByEmail(), actorInviteNew(),
 		termCreate(), termList(),
 		presetList(), presetCreate(), presetUpdate(),
 	}
@@ -640,26 +643,25 @@ func actorInvite() tool.Tool {
 			"Taken up by someone who has a password already, it replaces that password. It is withdrawn when the " +
 			"person sets a password some other way, and when their email changes. " +
 			"The person needs an email, which is what they will sign in with (actor.update gives one). " +
-			"An agent is given a token instead (actor.issue_token).",
-		Kind: tool.Write, Gate: admins,
+			"An agent is given a token instead (actor.issue_token). A department administrator invites only a person who " +
+			"has never been able to sign in and holds nothing beyond the departments they administer: no platform role, " +
+			"no appointment, no agent, and seats only in those departments' courses; otherwise invite_not_allowed says " +
+			"why. That is asked again when the invitation is taken up, and it is refused if it no longer holds.",
+		Kind: tool.Write, Gate: administrators,
 		HTTP:      tool.Route{Method: "POST", Pattern: "/v1/actors/{actor_id}/invite"},
 		SecretOut: []string{"token"},
 		Resolve: func(ctx context.Context, q dbq.Querier, in ActorInviteIn) (tool.Target, error) {
-			return resolveActor(ctx, q, ActorIDIn{ActorID: in.ActorID})
+			target, err := resolveActor(ctx, q, ActorIDIn{ActorID: in.ActorID})
+			target.AnyDept = true
+			return target, err
 		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in ActorInviteIn) (ActorInviteOut, error) {
-			// Setting someone's password is taking over their account, so it
-			// is held to the rule for issuing them a token; and nobody
-			// invites themselves, who can set their own password.
-			if err := mayActOn(ctx, ec, in.ActorID); err != nil {
+			if err := mayInvite(ctx, ec, in.ActorID); err != nil {
 				return ActorInviteOut{}, err
 			}
-			days := defaultInviteDays
-			if in.ExpiresInDays != nil {
-				days = *in.ExpiresInDays
-			}
-			if days < 1 || days > maxInviteDays {
-				return ActorInviteOut{}, apperr.Invalid("expires_in_days must be between 1 and %d", maxInviteDays)
+			expires, err := inviteExpiry(in.ExpiresInDays, ec.Now)
+			if err != nil {
+				return ActorInviteOut{}, err
 			}
 			a, err := ec.Q.GetActor(ctx, in.ActorID)
 			if err != nil {
@@ -674,13 +676,183 @@ func actorInvite() tool.Tool {
 			case a.Status != domain.ActorActive:
 				return ActorInviteOut{}, apperr.Precondition("the actor is suspended: reactivate them first")
 			}
-			expires := ec.Now.AddDate(0, 0, days)
-			tok, _, err := auth.IssueInvite(ctx, ec.Q, in.ActorID, "invited by "+ec.Actor.DisplayName, expires, ec.Now)
+			tok, _, err := auth.IssueInvite(ctx, ec.Q, in.ActorID, &ec.Actor.ID, "invited by "+ec.Actor.DisplayName, expires, ec.Now)
 			if err != nil {
 				return ActorInviteOut{}, err
 			}
 			ec.Emit(events.Event{Type: EventActorInvited, SubjectType: "actor", SubjectID: &in.ActorID})
 			return ActorInviteOut{Token: tok.Full, Email: *a.Email, ExpiresAt: expires}, nil
+		},
+	})
+}
+
+// inviteExpiry is when an invitation made now expires: in days, 7 unless
+// the caller says otherwise, and at most 30.
+func inviteExpiry(days *int, now time.Time) (time.Time, error) {
+	d := defaultInviteDays
+	if days != nil {
+		d = *days
+	}
+	if d < 1 || d > maxInviteDays {
+		return time.Time{}, apperr.Invalid("expires_in_days must be between 1 and %d", maxInviteDays)
+	}
+	return now.AddDate(0, 0, d), nil
+}
+
+// mayInvite: setting someone's password is taking over their account, and
+// nobody invites themselves, who can set their own. A platform administrator
+// is held to the rule for issuing the person a token (mayActOn). A department
+// administrator is held to the rule for their invitations
+// (auth.InviteRefusal), which leaves the account nothing beyond what they
+// administer already, and is refused invite_not_allowed, saying which clause
+// failed.
+func mayInvite(ctx context.Context, ec *tool.ExecCtx, target uuid.UUID) error {
+	if ec.Admin.Platform {
+		return mayActOn(ctx, ec, target)
+	}
+	if target == ec.Actor.ID {
+		return apperr.Forbid("not on your own account")
+	}
+	facts, err := ec.Q.InvitableBy(ctx, dbq.InvitableByParams{IssuerID: ec.Actor.ID, ActorID: target})
+	if err != nil {
+		return err
+	}
+	if why := auth.InviteRefusal(facts); why != "" {
+		return apperr.Forbid("you invite only someone who has never signed in and holds nothing beyond the departments "+
+			"you administer; a platform administrator can invite them").With("reason", "invite_not_allowed").With("why", why)
+	}
+	return nil
+}
+
+type ActorLookupIn struct {
+	Email string `json:"email" jsonschema:"the whole address, in any case"`
+}
+
+// ActorLookupOut is all an exact lookup says of a person: nothing of their
+// email, which the caller typed, their platform role, credentials, seats or
+// owner.
+type ActorLookupOut struct {
+	ActorID         uuid.UUID  `json:"actor_id"`
+	DisplayName     string     `json:"display_name"`
+	Kind            string     `json:"kind" jsonschema:"human or agent; for display only"`
+	Status          string     `json:"status" jsonschema:"active or suspended"`
+	CanSignIn       bool       `json:"can_sign_in" jsonschema:"they have a password or a linked identity"`
+	InviteExpiresAt *time.Time `json:"invite_expires_at,omitempty" jsonschema:"an invitation not yet taken up expires then, which may have passed"`
+	Invitable       bool       `json:"invitable" jsonschema:"you may invite them (again) with actor.invite"`
+}
+
+func actorLookupByEmail() tool.Tool {
+	return tool.Define(tool.Spec[ActorLookupIn, ActorLookupOut]{
+		Name: "actor.lookup_by_email",
+		Description: "Find the person a whole email address belongs to, to seat them as a course's instructor or appoint " +
+			"them a department's administrator. The whole address must match, in any case; there is no partial search, " +
+			"and nobody is listed. It says who they are, whether they can sign in yet, and whether you may invite them " +
+			"again. For platform and department administrators.",
+		Kind: tool.Read, Gate: administrators,
+		HTTP: tool.Route{Method: "GET", Pattern: "/v1/actor-lookup"},
+		Resolve: func(context.Context, dbq.Querier, ActorLookupIn) (tool.Target, error) {
+			return tool.Target{Type: "actor", AnyDept: true}, nil
+		},
+		Query: func(ctx context.Context, rc *tool.ReadCtx, in ActorLookupIn) (ActorLookupOut, error) {
+			email := strings.TrimSpace(in.Email)
+			if email == "" {
+				return ActorLookupOut{}, apperr.Invalid("email is required")
+			}
+			a, err := rc.Q.LookupActorByEmail(ctx, email)
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ActorLookupOut{}, apperr.Missing("nobody is registered with that email")
+			} else if err != nil {
+				return ActorLookupOut{}, err
+			}
+			out := ActorLookupOut{ActorID: a.ID, DisplayName: a.DisplayName, Kind: a.Kind, Status: a.Status,
+				CanSignIn: a.HasPassword || a.HasSso, InviteExpiresAt: a.InviteExpiresAt}
+			// Whether actor.invite would take them, by the caller's rule, as
+			// it stands now: nobody themselves, nor anyone suspended.
+			if a.ID == rc.Actor.ID || a.Status != domain.ActorActive {
+				return out, nil
+			}
+			if rc.Admin.Platform {
+				switch err := mayReach(ctx, rc.Q, rc.Actor, a.ID); {
+				case err == nil:
+					out.Invitable = true
+				case !apperr.Is(err, apperr.Forbidden):
+					return ActorLookupOut{}, err
+				}
+				return out, nil
+			}
+			facts, err := rc.Q.InvitableBy(ctx, dbq.InvitableByParams{IssuerID: rc.Actor.ID, ActorID: a.ID})
+			if err != nil {
+				return ActorLookupOut{}, err
+			}
+			out.Invitable = auth.InviteRefusal(facts) == ""
+			return out, nil
+		},
+	})
+}
+
+type ActorInviteNewIn struct {
+	DisplayName   string `json:"display_name"`
+	Email         string `json:"email"`
+	ExpiresInDays *int   `json:"expires_in_days,omitempty" jsonschema:"default 7, at most 30"`
+}
+
+type ActorInviteNewOut struct {
+	ActorID   uuid.UUID `json:"actor_id"`
+	Token     string    `json:"token" jsonschema:"what the invitation link carries; shown once, and a replay of this call comes back without it"`
+	Email     string    `json:"email" jsonschema:"what the person will sign in with"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
+func actorInviteNew() tool.Tool {
+	return tool.Define(tool.Spec[ActorInviteNewIn, ActorInviteNewOut]{
+		Name: "actor.invite_new",
+		Description: "Register a new person and invite them to choose their password, in one step: what a department " +
+			"administrator does for someone who is not registered yet, before seating them. The token is for the front " +
+			"end's page that takes invitations (POST /v1/auth/invite); hand the link to the person yourself, since AIShie " +
+			"sends no email. It works once, until it expires (7 days by default, at most 30). An email that is already " +
+			"registered is refused with that person's actor_id: seat them instead. An invitation a department " +
+			"administrator made is honoured only while everything the person holds is still within what that " +
+			"administrator administers.",
+		Kind: tool.Write, Gate: administrators,
+		HTTP:      tool.Route{Method: "POST", Pattern: "/v1/actor-invitations"},
+		SecretOut: []string{"token"},
+		Resolve: func(context.Context, dbq.Querier, ActorInviteNewIn) (tool.Target, error) {
+			return tool.Target{Type: "actor", AnyDept: true}, nil
+		},
+		Execute: func(ctx context.Context, ec *tool.ExecCtx, in ActorInviteNewIn) (ActorInviteNewOut, error) {
+			name, email := strings.TrimSpace(in.DisplayName), strings.TrimSpace(in.Email)
+			switch {
+			case name == "" || email == "":
+				return ActorInviteNewOut{}, apperr.Invalid("display_name and email are required")
+			case !strings.Contains(email, "@"):
+				return ActorInviteNewOut{}, apperr.Invalid("email must be an email address")
+			}
+			expires, err := inviteExpiry(in.ExpiresInDays, ec.Now)
+			if err != nil {
+				return ActorInviteNewOut{}, err
+			}
+			// Two at once for one address meet at actor_email_key, and the
+			// second is a conflict.
+			switch taken, err := ec.Q.GetActorByEmail(ctx, email); {
+			case err == nil:
+				return ActorInviteNewOut{}, apperr.Conflicts("that email is already registered: seat that person instead").
+					With("reason", "email_taken").With("actor_id", taken.ID)
+			case !errors.Is(err, pgx.ErrNoRows):
+				return ActorInviteNewOut{}, err
+			}
+			id := ids.New()
+			if err := ec.Q.InsertActor(ctx, dbq.InsertActorParams{
+				ID: id, Kind: "human", DisplayName: name, Email: &email, CreatedByActorID: &ec.Actor.ID, CreatedAt: ec.Now,
+			}); err != nil {
+				return ActorInviteNewOut{}, err
+			}
+			tok, _, err := auth.IssueInvite(ctx, ec.Q, id, &ec.Actor.ID, "invited by "+ec.Actor.DisplayName, expires, ec.Now)
+			if err != nil {
+				return ActorInviteNewOut{}, err
+			}
+			ec.Emit(events.Event{Type: EventActorRegistered, SubjectType: "actor", SubjectID: &id})
+			ec.Emit(events.Event{Type: EventActorInvited, SubjectType: "actor", SubjectID: &id})
+			return ActorInviteNewOut{ActorID: id, Token: tok.Full, Email: email, ExpiresAt: expires}, nil
 		},
 	})
 }

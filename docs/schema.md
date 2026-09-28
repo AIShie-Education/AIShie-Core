@@ -84,7 +84,8 @@ course(id, dept_id→department, term_id→term, code, section = '', title, desc
 
 `actor.kind` is for display and audit. **Nothing branches on it.** What an actor may do is
 entirely on its `course_member` rows; `platform_role` covers the few operations outside any
-course. The one exception is `kind = 'system'`, the actor the background sweeps run as: it is
+course, and a department's administrators share some of them within their departments (§2.10).
+The one exception is `kind = 'system'`, the actor the background sweeps run as: it is
 never seated in a course, and no token is issued for it and no identity linked to it, so that
 its authority cannot be borrowed. The database takes no credential for it, and a token it was
 given before migration 0004 authenticates nobody. Those refusals read `kind`; nothing that
@@ -122,7 +123,9 @@ later suspension is never taken for the owner's.
 
 `created_by_actor_id` is the delegation chain: root (seeded at install, the only null) creates
 admins, an admin creates a course and seats its first instructor, the instructor adds everyone
-else. Roster syncs run as a `kind = 'system'` actor so the chain has no gaps.
+else. A department's administrator may stand where the admin does, for the courses of their
+departments, and registers the people they invite there (`actor.invite_new`). Roster syncs run
+as a `kind = 'system'` actor so the chain has no gaps.
 
 Root and the system actor are created by `aishiterud bootstrap`, once. It is the one state
 change with no `action` row: there is no actor yet for it to be an action of. The operator's
@@ -143,9 +146,12 @@ way revokes it too, and so does a change of email: it went to the old one.
 
 `issued_by_actor_id` says who issued an API token: the actor themself
 (`credential.issue_token`), an administrator (`actor.issue_token`), or an agent's owner
-(`agent.issue_token`). It is null for the other kinds, for a token made on the command line
-(`aishiterud bootstrap`, `aishiterud token issue`), and for a token issued by a release older
-than migration 0006, including one that release issues while it still runs after the migration.
+(`agent.issue_token`); and who issued an invitation (`actor.invite`, `actor.invite_new`), which
+is asked again when it is taken up (§2.10). It is null for the other kinds, for a token made on
+the command line (`aishiterud bootstrap`, `aishiterud token issue`), for a token issued by a
+release older than migration 0006, including one that release issues while it still runs after
+the migration, and for an invitation made before its issuer was recorded, which is taken for a
+platform administrator's, as every invitation then was.
 An administrator lists an actor's credentials with `actor.list_credentials` and revokes one with
 `actor.revoke_credential`, so that a token that leaks is revoked alone rather than by suspending
 its agent. Both are held to the rule for acting on an actor: only root reaches the credentials
@@ -234,7 +240,7 @@ the nearest one, and the choice is recorded here so that it is a decision and no
 | Taking back one's own proposal while nobody has decided it (`action.withdraw`) | `perm_document_read` | the most basic permission a seated member holds; that the proposal is the caller's own is what decides, as `action.list_mine` shows only the caller's own |
 | Closing a conversation (`conversation.close`), retracting a message (`conversation.retract`), listing and reading conversations (`conversation.list`, `.get`, `.messages`) | `perm_document_read` | the most basic permission a seated member holds; the conversation decides who may: its two participants, and whoever decides actions for its opener (§2.8) |
 | Regrading | the lower of `perm_grade_submit` and `perm_grade_post` | it writes a grade and makes it visible in one step |
-| Course settings, status, first instructor | `platform_role` | outside the course by definition |
+| Course settings, status, department, first instructor | `platform_role`, or an appointment at or above the course's department (§2.10) | outside the course by definition |
 
 An unposted grade, and a superseded one, is visible only to a member holding `perm_grade_submit`
 or `perm_grade_post`; everyone else sees live posted grades. That is the rule for students,
@@ -1018,6 +1024,29 @@ it, to whoever covers it; `me.get` lists the caller's own appointments. The even
 (`department.created`, `.updated`, `.moved`, `.admin_added`, `.admin_removed`) are in no
 course's feed.
 
+**The courses beneath an appointment are its holder's to manage, from outside.** A department
+administrator does to the courses of every department they cover what a platform administrator
+does to any course: `course.create`, `.update`, `.activate`, `.archive`, `.seat_instructor`
+and `.move`, the Admin gate taking the course's department as what the call is about.
+`course.list` shows them those courses and no others. A course moves only to a department the
+mover covers as well; it is held while it moves, and where it is then must still be the
+mover's, so that one moved out of their reach meanwhile is not taken back. None of this
+reaches inside a course: an administrator who wants to work in one is seated there as anyone
+is, by seating themselves (`course.seat_instructor`), which is recorded like any seating.
+
+**People, for a department administrator, are found by their whole email and invited new.**
+`actor.lookup_by_email` answers an exact address, in any case, with who the person is, whether
+they can sign in, and whether the caller may invite them: never their email, role, seats,
+credentials or owner, and there is no partial search. `actor.invite_new` registers a person and
+invites them in one step. Since whoever holds an invitation can sign in as the person it is for,
+a department administrator invites again (`actor.invite`) only a person whose account reaches
+nothing beyond what they administer: who has never been able to sign in, holds no platform role
+and no appointment, owns no agent, and is seated only in courses they administer
+(`invite_not_allowed`, saying which). Taking an invitation up asks its issuer again, under the
+invitation's lock: an active platform administrator, or an active department administrator the
+rule still lets make it; otherwise it is refused as an expired one is. Everything else about
+accounts stays with platform administrators.
+
 ## 3. Authorization
 
 ```
@@ -1060,12 +1089,13 @@ its principal's KEY SHARE before it; and removing a principal holds it FOR UPDAT
 removes its delegates. Every path that takes both therefore meets the other at the principal
 first.
 
-Platform-level operations (`course.create`, `actor.register`, seating the first instructor)
-check `actor.platform_role` instead. That is the only place it is read. The operations a
-department's administrators share with platform administrators (§2.10) are gated by either: a
-platform role, anywhere, or an appointment at or above the department the call is about, looked
-up only for an actor who holds one, and only once the call has said which department it is
-about. Both are recorded on the action (`authority`), and neither reaches inside a course.
+Platform-level operations (`actor.register`, terms, presets) check `actor.platform_role`
+instead. That is the only place it is read. The operations a department's administrators share
+with platform administrators (§2.10: `course.create`, seating the first instructor, the tree)
+are gated by either: a platform role, anywhere, or an appointment at or above the department the
+call is about, looked up only for an actor who holds one, and only once the call has said which
+department it is about. Both are recorded on the action (`authority`), and neither reaches inside a course. For
+a course, what the call is about is the course's department.
 
 ## 4. Invariants
 
@@ -1273,6 +1303,8 @@ about. Both are recorded on the action (`authority`), and neither reaches inside
   administrator's alone. Their appointment is looked up on every call, never kept;
   a write holds it `FOR SHARE`, so ending it waits for the calls that rely on it and every
   call after finds it ended.
+- A department administrator's invitation opens an account that reaches nothing beyond what
+  they administer, when it is made and again when it is taken up (§2.10).
 - `actor.kind` and `course_member.role` are never read by authorization.
 
 ## 5. Worked example: an agent grades an essay

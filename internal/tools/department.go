@@ -125,7 +125,8 @@ func departmentCreate() tool.Tool {
 		Description: "Create a department, at the top of the tree or under another. A department administrator creates " +
 			"departments under any department they administer, at any depth; one at the top is a platform administrator's. " +
 			"The tree is at most 8 levels deep, and sibling names are unique in any case. The administrators of a department " +
-			"administer every department beneath it too. Departments group courses and may define their own permission presets.",
+			"administer every department beneath it too, and the courses in all of them. Departments group courses and may " +
+			"define their own permission presets.",
 		Kind: tool.Write, Gate: administrators,
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/departments"},
 		Resolve: func(ctx context.Context, q dbq.Querier, in DepartmentCreateIn) (tool.Target, error) {
@@ -355,7 +356,7 @@ type DepartmentNode struct {
 	Name        string     `json:"name"`
 	ParentID    *uuid.UUID `json:"parent_id,omitempty"`
 	Depth       int        `json:"depth" jsonschema:"1 at the top of the tree"`
-	Administers bool       `json:"administers" jsonschema:"you administer it: an appointment of yours is at it or above it, or you are a platform administrator"`
+	Administers bool       `json:"administers" jsonschema:"you administer it, and its courses are yours to manage: an appointment of yours is at it or above it, or you are a platform administrator"`
 	Manages     bool       `json:"manages" jsonschema:"you may rename it, move it and appoint or remove its administrators: an appointment of yours is above it, or you are a platform administrator"`
 	Appointed   bool       `json:"appointed" jsonschema:"you are appointed at this department itself"`
 	CourseCount *int       `json:"course_count,omitempty" jsonschema:"courses directly in it, archived ones included; only where you administer it"`
@@ -371,9 +372,10 @@ func departmentListTree() tool.Tool {
 	return tool.Define(tool.Spec[DepartmentTreeIn, DepartmentTreeOut]{
 		Name: "department.list_tree",
 		Description: "The departments as a tree, each before those beneath it, siblings by name, with what you may do with " +
-			"each: whether you administer it, and whether you may rename it, move it and appoint and remove its " +
-			"administrators (an appointment of yours is above it). Course and administrator counts are given where you " +
-			"administer. Any signed-in actor may read this; to someone who administers nothing, every flag is false.",
+			"each: whether you administer it (its courses are yours to manage), and whether you may rename it, move it and " +
+			"appoint and remove its administrators (an appointment of yours is above it). Course and administrator counts " +
+			"are given where you administer. Any signed-in actor may read this; to someone who administers nothing, every " +
+			"flag is false.",
 		Kind: tool.Read, Gate: self,
 		HTTP: tool.Route{Method: "GET", Pattern: "/v1/departments/tree"},
 		Resolve: func(ctx context.Context, q dbq.Querier, in DepartmentTreeIn) (tool.Target, error) {
@@ -441,7 +443,7 @@ func departmentListTree() tool.Tool {
 
 type DepartmentAdminIn struct {
 	DeptID  uuid.UUID `json:"dept_id"`
-	ActorID uuid.UUID `json:"actor_id" jsonschema:"the person"`
+	ActorID uuid.UUID `json:"actor_id" jsonschema:"the person: actor.lookup_by_email finds them by their whole email"`
 }
 
 // staffing is the target of a change to a department's administrators: whoever
@@ -464,11 +466,13 @@ func departmentAddAdmin() tool.Tool {
 	return tool.Define(tool.Spec[DepartmentAdminIn, DepartmentAddAdminOut]{
 		Name: "department.add_admin",
 		Description: "Make a person an administrator of a department. They then administer it and every department beneath " +
-			"it: they create departments there, and rename and move those beneath it and appoint their administrators. An " +
-			"administrator of a department appoints the administrators of the departments beneath it, never of their own or " +
-			"of one above; a platform administrator appoints anywhere, and alone at the top of the tree. Only a person can be " +
-			"one, never an agent, and nobody appoints themselves. An appointment gives no seat in any course, and nothing " +
-			"inside one.",
+			"it: they create, change, open, archive, list and move the courses there and seat their instructors, as a " +
+			"platform administrator does; they find people by their whole email and invite new ones; and they create " +
+			"departments there, and rename and move those beneath it and appoint their administrators. An administrator of " +
+			"a department appoints the administrators of the departments beneath it, never of their own or of one above; a " +
+			"platform administrator appoints anywhere, and alone at the top of the tree. Only a person can be one, never an " +
+			"agent, and nobody appoints themselves. An appointment gives no seat in any course, and nothing inside one: an " +
+			"administrator who wants to work in a course is seated there like anyone else.",
 		Kind: tool.Write, Gate: administrators,
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/departments/{dept_id}/admins"},
 		Resolve: func(ctx context.Context, q dbq.Querier, in DepartmentAdminIn) (tool.Target, error) {

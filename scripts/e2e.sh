@@ -5,7 +5,9 @@
 # actors, create and open the course, seat the instructor, set up grading,
 # publish an assignment, hand in work, have an agent grade it, approve, post;
 # and have the instructor's own tutor agent answer the student's question.
-# Then Core vouches for the instructor to an agent runtime, and the key it
+# Then a department's administrator, invited and appointed by root, makes a
+# course beneath her appointment and seats its instructor, found by their
+# email. Then Core vouches for the instructor to an agent runtime, and the key it
 # publishes checks what it says, before and after a restart. Last, the sign-in
 # page is told how a person signs in: by password alone, and then, restarted
 # with single sign-on against a stand-in provider, by that too, under its name.
@@ -218,6 +220,43 @@ CALL="{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name
 [ "$(json "$WORK/body" 'd["result"]["structuredContent"]["replayed"]')" = True ] || fail "not a replay"
 echo "  grade_submit over MCP with REST's idempotency key replays REST's action: one tool layer"
 N=$((N + 3))
+
+step "Root makes Engineering with Software beneath it, and invites Ada, new, who takes it up; root appoints her at Engineering"
+call 200 POST /v1/departments "$ROOT" '{"name":"Engineering"}'
+ENG=$(json "$WORK/body" 'd["result"]["id"]')
+call 200 POST /v1/departments "$ROOT" "{\"name\":\"Software\",\"parent_id\":\"$ENG\"}"
+call 200 POST /v1/actor-invitations "$ROOT" '{"display_name":"Ada","email":"ada@example.edu"}'
+ADA_ID=$(json "$WORK/body" 'd["result"]["actor_id"]')
+INVITE=$(json "$WORK/body" 'd["result"]["token"]')
+# Taken up as the front end's page takes it: the password goes in, a session comes back as a cookie.
+N=$((N + 1))
+[ "$(curl -s -o "$WORK/body" -D "$WORK/headers" -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
+  -d "{\"token\":\"$INVITE\",\"password\":\"adas own password\"}" "$BASE/v1/auth/invite")" = 200 ] ||
+  fail "Ada could not take up the invitation: $(cat "$WORK/body")"
+ADA=$(sed -n 's/^[Ss]et-[Cc]ookie: ais_session=\([^;]*\).*/\1/p' "$WORK/headers" | tr -d '\r')
+[ -n "$ADA" ] || fail "taking up the invitation set no session: $(cat "$WORK/headers")"
+printf '  %-4s %-62s %s\n' POST /v1/auth/invite 200
+call 200 POST "/v1/departments/$ENG/admins" "$ROOT" "{\"actor_id\":\"$ADA_ID\"}"
+
+step "Ada makes Design beneath Engineering and a course in it"
+call 200 POST /v1/departments "$ADA" "{\"name\":\"Design\",\"parent_id\":\"$ENG\"}"
+DESIGN=$(json "$WORK/body" 'd["result"]["id"]')
+call 200 POST /v1/courses "$ADA" "{\"dept_id\":\"$DESIGN\",\"term_id\":\"$TERM\",\"code\":\"DES101\",\"title\":\"Drawing\"}"
+DES101=$(json "$WORK/body" 'd["result"]["course_id"]')
+[ "$(json "$WORK/body" 'd["status"]')" = executed ] || fail "the course was not made"
+
+step "Ada finds its instructor by their whole email and seats them; the directory is not hers"
+call 200 POST /v1/actors "$ADMIN" '{"kind":"human","display_name":"Mori","email":"mori@example.edu"}'
+MORI_ID=$(json "$WORK/body" 'd["result"]["actor_id"]')
+call 404 GET "/v1/actor-lookup?email=mori" "$ADA"
+call 200 GET "/v1/actor-lookup?email=MORI%40example.edu" "$ADA"
+[ "$(json "$WORK/body" 'd["result"]["actor_id"]')" = "$MORI_ID" ] || fail "the lookup found someone else: $(cat "$WORK/body")"
+grep -q 'example.edu' "$WORK/body" && fail "the lookup shows an email: $(cat "$WORK/body")"
+call 200 POST "/v1/courses/$DES101/instructors" "$ADA" "{\"actor_id\":\"$MORI_ID\"}"
+call 403 GET /v1/actors "$ADA"
+[ "$(json "$WORK/body" 'd["error"]["details"]["reason"]')" = platform_role_required ] || fail "refused, but not for want of a platform role: $(cat "$WORK/body")"
+call 403 POST "$C" "$ADA" '{"title":"Not hers"}' # CS101 is in Computing, outside her appointment
+[ "$(json "$WORK/body" 'd["error"]["details"]["reason"]')" = department_out_of_scope ] || fail "CS101 refused, but not as out of her reach: $(cat "$WORK/body")"
 
 step "Core vouches for Sato to the agent runtime; the key it publishes checks what it says"
 # jwt PART EXPR — evaluate EXPR against the decoded header (0) or claims (1) of $ASSERTION as d.

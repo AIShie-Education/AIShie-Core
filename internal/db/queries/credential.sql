@@ -75,8 +75,8 @@ WHERE actor_id = $1 AND kind = 'invite' AND revoked_at IS NULL;
 -- An invitation, found by its prefix before its hash is checked, and locked:
 -- it is used once, and two tries at it take turns. Revoked and expired rows
 -- are returned too, as GetCredentialByPrefix returns them. The actor comes
--- with it.
-SELECT c.id, c.actor_id, c.secret_hash, c.expires_at, c.revoked_at,
+-- with it, and who issued it: null for one made before that was recorded.
+SELECT c.id, c.actor_id, c.secret_hash, c.expires_at, c.revoked_at, c.issued_by_actor_id,
        a.kind AS actor_kind, a.status AS actor_status, a.email AS actor_email
 FROM credential c
 JOIN actor a ON a.id = c.actor_id
