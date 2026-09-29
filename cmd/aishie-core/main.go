@@ -56,7 +56,7 @@ Usage:
   aishie-core version                print build information
 
 Environment:
-  DATABASE_URL      default postgres:///aishiteru (local unix socket)
+  DATABASE_URL      default postgres:///aishie (local unix socket)
   HTTP_ADDR         default :8080
   SHUTDOWN_GRACE    default 15s
   PROPOSAL_TTL      default 336h (14 days); 0 disables expiry
@@ -321,7 +321,7 @@ func openBlobStore(ctx context.Context, cfg config.Config, signer *blob.Signer) 
 		if err != nil {
 			return nil, err
 		}
-		if _, err := s.Stat(ctx, "aishiteru-startup-probe"); err != nil && !errors.Is(err, blob.ErrNotFound) {
+		if _, err := s.Stat(ctx, "aishie-startup-probe"); err != nil && !errors.Is(err, blob.ErrNotFound) {
 			return nil, fmt.Errorf("the S3 bucket is not reachable: %w", err)
 		}
 		return s, nil

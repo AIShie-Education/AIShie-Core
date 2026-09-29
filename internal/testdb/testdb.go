@@ -82,7 +82,7 @@ func create(t testing.TB, fromTemplate bool) (*pgxpool.Pool, string) {
 	}
 	defer admin.Close(ctx)
 
-	name := "aishiteru_t_" + randomSuffix()
+	name := "aishie_t_" + randomSuffix()
 	stmt := "CREATE DATABASE " + pgx.Identifier{name}.Sanitize()
 	if fromTemplate {
 		tmpl, err := ensureTemplate(ctx, admin, adminURL)
@@ -120,7 +120,7 @@ func buildTemplate(ctx context.Context, admin *pgx.Conn, adminURL string) (strin
 	if err != nil {
 		return "", err
 	}
-	name := "aishiteru_tmpl_" + sum
+	name := "aishie_tmpl_" + sum
 
 	if _, err := admin.Exec(ctx, "SELECT pg_advisory_lock($1)", int64(templateLockKey)); err != nil {
 		return "", fmt.Errorf("template lock: %w", err)

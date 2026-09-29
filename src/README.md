@@ -156,15 +156,15 @@ PostgreSQL 13 or newer. No extensions, no elevated privileges.
 ## Apply and roll back
 
 ```
-createdb aishiteru
-for f in migrations/*.up.sql; do psql -v ON_ERROR_STOP=1 -d aishiteru -f "$f"; done
-psql -v ON_ERROR_STOP=1 -d aishiteru -f seed/presets.sql
+createdb aishie
+for f in migrations/*.up.sql; do psql -v ON_ERROR_STOP=1 -d aishie -f "$f"; done
+psql -v ON_ERROR_STOP=1 -d aishie -f seed/presets.sql
 ```
 
 Roll back in reverse order, newest first:
 
 ```
-for f in $(ls -r migrations/*.down.sql); do psql -v ON_ERROR_STOP=1 -d aishiteru -f "$f"; done
+for f in $(ls -r migrations/*.down.sql); do psql -v ON_ERROR_STOP=1 -d aishie -f "$f"; done
 ```
 
 The seed is policy, not schema: it inserts the built-in presets and leaves
@@ -178,9 +178,9 @@ aborted".
 Or, with the server binary (`make build` at the repository root):
 
 ```
-createdb aishiteru
-DATABASE_URL=postgres:///aishiteru bin/aishie-core migrate up
-DATABASE_URL=postgres:///aishiteru bin/aishie-core seed
+createdb aishie
+DATABASE_URL=postgres:///aishie bin/aishie-core migrate up
+DATABASE_URL=postgres:///aishie bin/aishie-core seed
 ```
 
 `aishie-core` records the applied version in a `schema_migrations` table; psql
@@ -204,10 +204,10 @@ Use a throwaway database: the test runs in one transaction and rolls back,
 but its fixtures use fixed ids.
 
 ```
-createdb aishiteru_test
-for f in migrations/*.up.sql; do psql -v ON_ERROR_STOP=1 -d aishiteru_test -f "$f"; done
-psql -X -d aishiteru_test -f tests/constraints_test.sql
-dropdb aishiteru_test
+createdb aishie_test
+for f in migrations/*.up.sql; do psql -v ON_ERROR_STOP=1 -d aishie_test -f "$f"; done
+psql -X -d aishie_test -f tests/constraints_test.sql
+dropdb aishie_test
 ```
 
 Each check prints `PASS`. The first failure stops the run with `FAIL` and the

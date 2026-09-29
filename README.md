@@ -151,7 +151,7 @@ one in Docker (see the comment at the top of `docker-compose.yml`).
 ## Run
 
 ```
-createdb aishiteru
+createdb aishie
 make build
 bin/aishie-core migrate up
 bin/aishie-core seed

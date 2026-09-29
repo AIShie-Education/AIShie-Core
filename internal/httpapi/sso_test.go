@@ -42,7 +42,7 @@ type fakeIdP struct {
 }
 
 const (
-	clientID     = "aishiteru"
+	clientID     = "aishie"
 	clientSecret = "s3cret-for-the-token-endpoint"
 )
 

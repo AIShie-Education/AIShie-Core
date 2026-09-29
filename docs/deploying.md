@@ -266,7 +266,7 @@ Run all of these as root on the server.
   `proxy_read_timeout` is 60 s by default, an AWS load balancer's idle
   timeout 60 s, Cloudflare's 100 s). Each server keeps one database
   connection of its own listening for what every server commits
-  (`LISTEN aishiteru_wake`), so `DATABASE_URL` must reach PostgreSQL itself
+  (`LISTEN aishie_wake`), so `DATABASE_URL` must reach PostgreSQL itself
   or a pooler in session mode: a pooler in transaction mode loses what it
   listens for, and calls then wait out their time. `LONG_POLL_WAITERS`
   (1000) bounds the calls waiting at once in a server, and

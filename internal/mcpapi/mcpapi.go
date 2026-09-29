@@ -479,7 +479,7 @@ func limited(d Deps, next http.Handler) http.Handler {
 }
 
 func newServer(d Deps) *mcp.Server {
-	server := mcp.NewServer(&mcp.Implementation{Name: "aishiteru-core", Title: "AIshiteru Core", Version: version.Version},
+	server := mcp.NewServer(&mcp.Implementation{Name: "aishie-core", Title: "AIshie Core", Version: version.Version},
 		&mcp.ServerOptions{Instructions: instructions(d.Memory), Capabilities: &mcp.ServerCapabilities{
 			// Tools, and no more. Their list does not change while the
 			// server runs, and nothing is pushed from here to say so if it

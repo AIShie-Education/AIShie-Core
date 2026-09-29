@@ -57,6 +57,8 @@ func TestTheAssertionKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	// HKDF-SHA256 (RFC 5869) with no salt, worked out here with HMAC alone.
+	// Compatibility: the info keeps the name from before the rename to AIshie
+	// (assertionKeyInfo), so that the key stays the same.
 	prk := hmacSHA256(make([]byte, sha256.Size), []byte(testSigningKey))
 	okm := hmacSHA256(prk, append([]byte("aishiteru/runtime-assertion/v1"), 1))
 	if !derived.Equal(ed25519.NewKeyFromSeed(okm)) {

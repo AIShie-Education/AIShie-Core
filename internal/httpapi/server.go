@@ -745,7 +745,7 @@ func (s *server) writeError(w http.ResponseWriter, r *http.Request, err error) {
 		e = &apperr.Error{Code: "internal", Message: "something went wrong on our side; the call can be retried with the same idempotency key"}
 	}
 	if e.Code == apperr.Unauthenticated {
-		w.Header().Set("WWW-Authenticate", `Bearer realm="aishiteru"`)
+		w.Header().Set("WWW-Authenticate", `Bearer realm="aishie"`)
 	}
 	// A tool that bounds its own rate and records nothing (an ephemeral
 	// write, conversation.draft) refuses a call too soon as an error.

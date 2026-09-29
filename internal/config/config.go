@@ -156,7 +156,7 @@ const (
 
 func FromEnv() (Config, error) {
 	c := Config{
-		DatabaseURL:   env("DATABASE_URL", "postgres:///aishiteru"),
+		DatabaseURL:   env("DATABASE_URL", "postgres:///aishie"),
 		HTTPAddr:      env("HTTP_ADDR", ":8080"),
 		ShutdownGrace: 15 * time.Second,
 	}

@@ -4,10 +4,10 @@
 -- statement runs inside one transaction that is rolled back at the end, but
 -- the fixtures use fixed ids, so do not point this at a database with data.
 --
---   createdb aishiteru_test
---   for f in migrations/*.up.sql; do psql -v ON_ERROR_STOP=1 -d aishiteru_test -f "$f"; done
---   psql -X -d aishiteru_test -f tests/constraints_test.sql
---   dropdb aishiteru_test
+--   createdb aishie_test
+--   for f in migrations/*.up.sql; do psql -v ON_ERROR_STOP=1 -d aishie_test -f "$f"; done
+--   psql -X -d aishie_test -f tests/constraints_test.sql
+--   dropdb aishie_test
 --
 -- or `make db-test-sql` at the repository root, which does all of it.
 --

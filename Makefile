@@ -21,7 +21,7 @@ TEST_DATABASE_URL ?= postgres:///postgres
 export TEST_DATABASE_URL
 
 # The psql suite takes its connection from the usual PG* variables.
-SQLTEST_DB := aishiteru_sqltest_$(shell echo $$$$)
+SQLTEST_DB := aishie_sqltest_$(shell echo $$$$)
 PSQL       := psql -X -q -v ON_ERROR_STOP=1
 
 .PHONY: help
@@ -150,6 +150,8 @@ clean: ## remove build output
 	rm -rf bin dist cover.out
 
 .PHONY: clean-testdb
+# Compatibility: aishiteru_ is the test databases' prefix from before the
+# rename to AIshie; this drops those left behind as well.
 clean-testdb: ## drop cached test templates and any stray test databases
-	@psql -X -At -d postgres -c "SELECT datname FROM pg_database WHERE datname ~ '^aishiteru_(tmpl|t|sqltest)_'" \
+	@psql -X -At -d postgres -c "SELECT datname FROM pg_database WHERE datname ~ '^(aishie|aishiteru)_(tmpl|t|sqltest)_'" \
 		| while read -r d; do echo "drop $$d"; dropdb --if-exists --force "$$d"; done

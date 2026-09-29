@@ -27,7 +27,7 @@ func TestS3Store(t *testing.T) {
 		t.Skip("S3_TEST_ENDPOINT is not set")
 	}
 	ctx := context.Background()
-	s, err := NewS3Store(S3Config{Endpoint: endpoint, Bucket: "aishiteru-test", Region: "us-east-1",
+	s, err := NewS3Store(S3Config{Endpoint: endpoint, Bucket: "aishie-test", Region: "us-east-1",
 		AccessKey: os.Getenv("S3_TEST_ACCESS_KEY"), SecretKey: os.Getenv("S3_TEST_SECRET_KEY")})
 	if err != nil {
 		t.Fatal(err)
@@ -177,7 +177,7 @@ func TestS3StoreListingStoppedPartWayLeavesNothingRunning(t *testing.T) {
 		t.Skip("S3_TEST_ENDPOINT is not set")
 	}
 	ctx := context.Background()
-	s, err := NewS3Store(S3Config{Endpoint: endpoint, Bucket: "aishiteru-test", Region: "us-east-1",
+	s, err := NewS3Store(S3Config{Endpoint: endpoint, Bucket: "aishie-test", Region: "us-east-1",
 		AccessKey: os.Getenv("S3_TEST_ACCESS_KEY"), SecretKey: os.Getenv("S3_TEST_SECRET_KEY")})
 	if err != nil {
 		t.Fatal(err)
@@ -226,7 +226,7 @@ func TestS3StoreListingCancelledSaysSo(t *testing.T) {
 	if endpoint == "" {
 		t.Skip("S3_TEST_ENDPOINT is not set")
 	}
-	s, err := NewS3Store(S3Config{Endpoint: endpoint, Bucket: "aishiteru-test", Region: "us-east-1",
+	s, err := NewS3Store(S3Config{Endpoint: endpoint, Bucket: "aishie-test", Region: "us-east-1",
 		AccessKey: os.Getenv("S3_TEST_ACCESS_KEY"), SecretKey: os.Getenv("S3_TEST_SECRET_KEY")})
 	if err != nil {
 		t.Fatal(err)

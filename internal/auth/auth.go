@@ -662,7 +662,7 @@ func Bootstrap(ctx context.Context, pool *pgxpool.Pool, in BootstrapInput) (Boot
 	err = db.InTx(ctx, pool, func(tx pgx.Tx) error {
 		q := dbq.New(tx)
 		// Serialise concurrent bootstraps; the count below is then reliable.
-		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('aishiteru.bootstrap'))`); err != nil {
+		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('aishie.bootstrap'))`); err != nil {
 			return err
 		}
 		n, err := q.CountRootActors(ctx)

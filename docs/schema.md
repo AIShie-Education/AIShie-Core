@@ -1019,7 +1019,7 @@ the call as it always was. A call that finds nothing new (an empty inbox; no mes
 see) waits up to `wait_s`, holding no transaction and no connection, until something it would
 read is committed. It then reads again, authorized again as the first time, and answers if it
 finds something; if not, it waits on. When its time is up it reads once more and answers with
-that. Whatever flushes events also calls `pg_notify('aishiteru_wake', …)` in the same
+that. Whatever flushes events also calls `pg_notify('aishie_wake', …)` in the same
 transaction (`events.Flush`, query `NotifyWake`), once for each course, event type, and
 conversation or proposal, at the newest `seq`: `course_id`, `kind` (the event type) and
 `seq`, and, for news of a conversation or of a proposal whose target is one, `conversation_id`,
@@ -1443,7 +1443,7 @@ owner where they decide actions without anyone's confirmation (`tool.Spec.OwnerJ
 Everyone else who reads the conversation — its opener, and staff who oversee the opener and
 would not decide the answer — sees what the opener sees: the steps, and `text_hidden: true`.
 Whoever may not read the conversation finds no draft, as they find no conversation. Each write
-kept, and an attempt's end, notifies `aishiteru_wake` in its transaction, kind
+kept, and an attempt's end, notifies `aishie_wake` in its transaction, kind
 `conversation.draft` at `seq` 0, since it is in no feed (§2.6, Waiting for news); it wakes only
 a reader of the conversation that watches its draft: `conversation.messages` given
 `seen_draft_version`, the draft's version as it last read it, 0 for none, answers as soon as the

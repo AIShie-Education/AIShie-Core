@@ -25,6 +25,11 @@ import (
 // assertionKeyInfo is the HKDF info under which the assertion key is derived
 // from SIGNING_KEY. It keeps the derived key apart from every other use of
 // SIGNING_KEY; a new version of it is a new key.
+//
+// Compatibility: it keeps the product's name from before the rename to
+// AIshie on purpose. Another info would be another key, and every service
+// that checks assertions against the key it was given (CORE_ASSERTION_KEY in
+// the runtime) would refuse them all.
 const assertionKeyInfo = "aishiteru/runtime-assertion/v1"
 
 // ErrNoAssertionKey means neither ASSERTION_KEY nor SIGNING_KEY is set, so

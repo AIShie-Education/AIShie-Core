@@ -26,7 +26,7 @@ import (
 )
 
 // Channel is the channel Core notifies and listens on.
-const Channel = "aishiteru_wake"
+const Channel = "aishie_wake"
 
 // Note is one notification: news of kind, the type of the event that told
 // it, at seq in a course's feed. News of a conversation, and of a proposal to

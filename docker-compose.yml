@@ -1,6 +1,6 @@
 # Optional. For machines without a local PostgreSQL: `make dev-db`, then
 #
-#   export DATABASE_URL=postgres://postgres:postgres@localhost:5432/aishiteru?sslmode=disable
+#   export DATABASE_URL=postgres://postgres:postgres@localhost:5432/aishie?sslmode=disable
 #   export TEST_DATABASE_URL=postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable
 #
 # For the S3 tests, MinIO is not here: it no longer publishes an image anyone
@@ -11,7 +11,7 @@ services:
     image: postgres:18
     environment:
       POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: aishiteru
+      POSTGRES_DB: aishie
     ports: ["5432:5432"]
     volumes: ["pgdata:/var/lib/postgresql"]
     healthcheck:
