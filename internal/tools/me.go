@@ -364,12 +364,21 @@ func credentialSetPassword() tool.Tool {
 		Description: "Set or replace the caller's own password. The previous password stops working at once. It is the one " +
 			"call a person whose password someone else set (member.reset_password) may make: every other is refused " +
 			"(password_change_required) until they have set their own here, which may not be the one they were given " +
-			"(password_unchanged).",
+			"(password_unchanged). For people only: an agent holds API tokens and no password (agents_use_api_tokens).",
 		Kind: tool.Write, Gate: self, SetsOwnPassword: true,
 		HTTP:     tool.Route{Method: "POST", Pattern: "/v1/me/password"},
 		SecretIn: []string{"password"},
 		Resolve:  noTarget[SetPasswordIn]("credential"),
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in SetPasswordIn) (OK, error) {
+			// A refusal that reads kind, as the database's does: an agent
+			// never signs in, and a password would be a way to.
+			me, err := ec.Q.GetActor(ctx, ec.Actor.ID)
+			if err != nil {
+				return OK{}, err
+			}
+			if err := auth.MaySignIn(me.Kind); err != nil {
+				return OK{}, err
+			}
 			if ec.Actor.PasswordChangeRequired {
 				// Only then is the hash worth its cost: whoever set the
 				// temporary one knows it, and it must not become theirs.

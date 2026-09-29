@@ -740,10 +740,9 @@ func TestPeopleAreListedCorrectedAndInvited(t *testing.T) {
 	b.do(t, b.admin, "actor.update", m{"actor_id": b.admin, "display_name": "Admin Office"})
 	b.try(t, b.admin, "actor.update", m{"actor_id": b.Root, "display_name": "Not root"}, apperr.Forbidden)
 
-	// The invitation. What an actor is is not read, only the email they
-	// would sign in with: an agent registered without one is refused as a
-	// person would be.
-	b.try(t, b.admin, "actor.invite", m{"actor_id": b.grader}, apperr.FailedPrecondition)
+	// The invitation: for a person, never an agent, which holds tokens and
+	// never signs in (agents_use_api_tokens).
+	b.try(t, b.admin, "actor.invite", m{"actor_id": b.grader}, apperr.Forbidden)
 	b.try(t, b.admin, "actor.invite", m{"actor_id": b.admin}, apperr.Forbidden) // not yourself
 	b.try(t, b.admin, "actor.invite", m{"actor_id": b.Root}, apperr.Forbidden)  // root is root's
 	b.try(t, b.admin, "actor.invite", m{"actor_id": b.yuki, "expires_in_days": 31}, apperr.InvalidArgument)

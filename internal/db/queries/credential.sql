@@ -43,8 +43,7 @@ VALUES (sqlc.arg(id), sqlc.arg(actor_id), 'password', sqlc.arg(secret_hash), sql
         sqlc.arg(issued_by_actor_id), true);
 
 -- name: RevokeSessions :execrows
--- Signs an actor out everywhere: every browser session they have. Their API
--- tokens are left as they are.
+-- Signs a person out everywhere: every browser session they have.
 UPDATE credential SET revoked_at = $2
 WHERE actor_id = $1 AND kind = 'session' AND revoked_at IS NULL;
 
@@ -77,8 +76,9 @@ WHERE c.actor_id = $1
 ORDER BY c.created_at DESC, c.id;
 
 -- name: GetSSOCredential :one
--- The account an identity provider's subject is linked to, if any.
-SELECT c.id, c.actor_id, c.revoked_at, a.status AS actor_status
+-- The account an identity provider's subject is linked to, if any, and its
+-- kind, read to refuse: an agent does not sign in so.
+SELECT c.id, c.actor_id, c.revoked_at, a.status AS actor_status, a.kind AS actor_kind
 FROM credential c
 JOIN actor a ON a.id = c.actor_id
 WHERE c.kind = 'sso' AND c.provider = $1 AND c.subject = $2;

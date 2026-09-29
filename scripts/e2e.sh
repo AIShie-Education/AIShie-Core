@@ -182,11 +182,15 @@ person "$ADMIN" Ken;   KEN_ID=$ACTOR_ID
 person "$ADMIN" Hana;  HANA=$TOKEN
 person "$ADMIN" Ren;   REN=$TOKEN
 agent grader-v2;       GRADER_ID=$ACTOR_ID; GRADER=$TOKEN
-# Nobody gives a person a token.
+# Nobody gives a person a token, and an agent is invited to nothing.
 call 403 POST "/v1/actors/$SATO_ID/tokens" "$ADMIN" '{"label":"e2e"}'
 [ "$(reason)" = api_tokens_are_for_agents ] || fail "refused, but not as a person's token: $(cat "$WORK/body")"
 call 403 POST "/v1/actors/$ADMIN_ID/tokens" "$ROOT" '{"label":"e2e"}'
 call 403 POST /v1/me/credentials/tokens "$SATO" '{"label":"my script"}'
+call 403 POST "/v1/actors/$GRADER_ID/invite" "$ADMIN"
+[ "$(reason)" = agents_use_api_tokens ] || fail "refused, but not as an agent's invitation: $(cat "$WORK/body")"
+call 403 POST /v1/me/password "$GRADER" '{"password":"the graders password"}'
+[ "$(reason)" = agents_use_api_tokens ] || fail "refused, but not as an agent's password: $(cat "$WORK/body")"
 call 200 GET /v1/me/credentials "$GRADER"
 [ "$(json "$WORK/body" '[c["kind"] for c in d["result"]["credentials"]]')" = "['api_token']" ] || fail "the grader holds more than its token: $(cat "$WORK/body")"
 

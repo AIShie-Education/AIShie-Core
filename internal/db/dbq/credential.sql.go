@@ -138,7 +138,7 @@ func (q *Queries) GetPasswordCredential(ctx context.Context, actorID uuid.UUID) 
 }
 
 const getSSOCredential = `-- name: GetSSOCredential :one
-SELECT c.id, c.actor_id, c.revoked_at, a.status AS actor_status
+SELECT c.id, c.actor_id, c.revoked_at, a.status AS actor_status, a.kind AS actor_kind
 FROM credential c
 JOIN actor a ON a.id = c.actor_id
 WHERE c.kind = 'sso' AND c.provider = $1 AND c.subject = $2
@@ -154,9 +154,11 @@ type GetSSOCredentialRow struct {
 	ActorID     uuid.UUID
 	RevokedAt   *time.Time
 	ActorStatus string
+	ActorKind   string
 }
 
-// The account an identity provider's subject is linked to, if any.
+// The account an identity provider's subject is linked to, if any, and its
+// kind, read to refuse: an agent does not sign in so.
 func (q *Queries) GetSSOCredential(ctx context.Context, arg GetSSOCredentialParams) (GetSSOCredentialRow, error) {
 	row := q.db.QueryRow(ctx, getSSOCredential, arg.Provider, arg.Subject)
 	var i GetSSOCredentialRow
@@ -165,6 +167,7 @@ func (q *Queries) GetSSOCredential(ctx context.Context, arg GetSSOCredentialPara
 		&i.ActorID,
 		&i.RevokedAt,
 		&i.ActorStatus,
+		&i.ActorKind,
 	)
 	return i, err
 }
@@ -398,8 +401,7 @@ type RevokeSessionsParams struct {
 	RevokedAt *time.Time
 }
 
-// Signs an actor out everywhere: every browser session they have. Their API
-// tokens are left as they are.
+// Signs a person out everywhere: every browser session they have.
 func (q *Queries) RevokeSessions(ctx context.Context, arg RevokeSessionsParams) (int64, error) {
 	result, err := q.db.Exec(ctx, revokeSessions, arg.ActorID, arg.RevokedAt)
 	if err != nil {

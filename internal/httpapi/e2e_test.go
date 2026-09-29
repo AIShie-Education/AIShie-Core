@@ -227,7 +227,8 @@ func TestSiteChatIsDeclaredWithTheTokenOfTheCall(t *testing.T) {
 
 // A person asks for an API token in vain, of their own or from an
 // administrator: 403. One from before migration 0017 revoked them opens
-// nothing, 401, and says why. People sign in, and agents hold tokens.
+// nothing, 401, and says why; so does an agent's password at sign-in.
+// People sign in, and agents hold tokens.
 func TestTokensAreForAgentsAndSigningInForPeople(t *testing.T) {
 	a := newAPI(t, 0)
 	c := a.c
@@ -245,18 +246,33 @@ func TestTokensAreForAgentsAndSigningInForPeople(t *testing.T) {
 		t.Fatalf("root's token for an agent: %d %s", agents.Status, agents.Raw)
 	}
 
-	// What the release before could leave: a token of Sato's.
+	// What the release before could leave: a token of Sato's, and a
+	// password of the grader's, which has an email to sign in with.
 	tok, err := auth.NewToken()
 	if err != nil {
 		t.Fatal(err)
 	}
+	hash, err := auth.HashPassword("the grader's password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.Exec(`UPDATE actor SET email = 'grader@example.edu' WHERE id = $1`, c.Grader)
 	c.Exec(`ALTER TABLE credential DISABLE TRIGGER credential_fits_actor_kind`)
 	c.Exec(`INSERT INTO credential (actor_id, kind, secret_hash, token_prefix) VALUES ($1, 'api_token', $2, $3)`, c.Sato, tok.Hash, tok.Prefix)
+	c.Exec(`INSERT INTO credential (actor_id, kind, secret_hash) VALUES ($1, 'password', $2)`, c.Grader, hash)
 	c.Exec(`ALTER TABLE credential ENABLE TRIGGER credential_fits_actor_kind`)
 	me := a.do(nil, "GET", "/v1/me", tok.Full, nil)
 	if me.Status != http.StatusUnauthorized || me.str("error", "details", "reason") != "api_tokens_are_for_agents" ||
 		me.Header.Get("WWW-Authenticate") == "" || !strings.Contains(me.str("error", "message"), "sign") {
 		t.Fatalf("Sato's token: %d %s", me.Status, me.Raw)
+	}
+	login := a.do(nil, "POST", "/v1/auth/login", "", m{"login": "grader@example.edu", "password": "the grader's password"})
+	if login.Status != http.StatusUnauthorized || login.str("error", "details", "reason") != "agents_use_api_tokens" ||
+		login.Header.Get("Set-Cookie") != "" {
+		t.Fatalf("the grader signing in: %d %s", login.Status, login.Raw)
+	}
+	if n := c.Count(`SELECT count(*) FROM credential WHERE actor_id = $1 AND kind = 'session'`, c.Grader); n != 0 {
+		t.Fatal("the grader was given a session")
 	}
 }
 

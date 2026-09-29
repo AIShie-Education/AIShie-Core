@@ -15,8 +15,9 @@ import (
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/tools"
 )
 
-// People sign in and hold no API token (docs/schema.md §2.1). Each tool that
-// would give them one refuses, whoever asks, saying so in details.reason.
+// People sign in and hold no API token; agents hold API tokens and nothing
+// else (docs/schema.md §2.1). Each tool that would give the wrong one
+// refuses, whoever asks, saying which rule in details.reason.
 
 // session signs actor in, as a password or single sign-on does, and returns
 // the session's credential.
@@ -75,4 +76,41 @@ func TestAPersonIsIssuedNoToken(t *testing.T) {
 	if !strings.HasPrefix(tok.Token, "ais_") {
 		t.Fatalf("the owner's agent's token: %+v", tok)
 	}
+}
+
+func TestAnAgentIsGivenNoWayToSignIn(t *testing.T) {
+	b := build(t)
+	b.do(t, b.admin, "actor.update", m{"actor_id": b.grader, "email": "grader@example.edu"})
+	bot := b.agent(t, b.yuki, "Yuki's helper")
+
+	// No invitation, whoever invites it, and with an email to sign in with.
+	refusedFor(t, "an administrator inviting an agent", b.MustCall(b.admin, "actor.invite", m{"actor_id": b.grader}, "inv-admin"),
+		auth.ReasonAgentsUseTokens)
+	refusedFor(t, "root inviting an agent", b.MustCall(b.Root, "actor.invite", m{"actor_id": b.grader}, "inv-root"),
+		auth.ReasonAgentsUseTokens)
+	// No identity at a provider.
+	refusedFor(t, "an agent's identity linked", b.MustCall(b.admin, "actor.link_sso",
+		m{"actor_id": b.grader, "provider": "polyu-adfs", "subject": "grader@example.edu"}, "sso"), auth.ReasonAgentsUseTokens)
+	// No password of its own, whoever owns it.
+	for name, agent := range map[string]uuid.UUID{"an agent nobody owns": b.grader, "an agent Yuki owns": bot} {
+		refusedFor(t, name+" setting a password", b.MustCall(agent, "credential.set_password",
+			m{"password": "an agent's password"}, "pw-"+agent.String()), auth.ReasonAgentsUseTokens)
+	}
+	if n := b.Count(`SELECT count(*) FROM credential WHERE actor_id IN ($1, $2) AND kind <> 'api_token'`, b.grader, bot); n != 0 {
+		t.Fatalf("the agents were given %d credentials other than tokens", n)
+	}
+	// Found by its email, it is not one to invite.
+	found := testkit.Result[tools.ActorLookupOut](t, b.do(t, b.admin, "actor.lookup_by_email", m{"email": "grader@example.edu"}))
+	if found.ActorID != b.grader || found.Invitable || found.CanSignIn {
+		t.Fatalf("the agent, looked up: %+v", found)
+	}
+
+	// A person is invited, linked, and sets a password, as ever.
+	b.do(t, b.admin, "actor.update", m{"actor_id": b.yuki, "email": "yuki@example.edu"})
+	if found := testkit.Result[tools.ActorLookupOut](t, b.do(t, b.admin, "actor.lookup_by_email", m{"email": "yuki@example.edu"})); !found.Invitable {
+		t.Fatalf("Yuki, looked up: %+v", found)
+	}
+	b.do(t, b.admin, "actor.invite", m{"actor_id": b.yuki})
+	b.do(t, b.admin, "actor.link_sso", m{"actor_id": b.yuki, "provider": "polyu-adfs", "subject": "yuki@example.edu"})
+	b.do(t, b.yuki, "credential.set_password", m{"password": "yukis own password"})
 }

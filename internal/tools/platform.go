@@ -151,7 +151,7 @@ func actorRegister() tool.Tool {
 // reads it.
 func givenLoginID(ctx context.Context, q *dbq.Queries, kind, given string, actor uuid.UUID) (string, error) {
 	if kind != "human" {
-		return "", apperr.Invalid("only a person has a login ID: an agent signs in with a token")
+		return "", apperr.Invalid("only a person has a login ID: an agent never signs in, and holds a token instead")
 	}
 	id, err := auth.LoginID("login_id", given)
 	if err != nil {
@@ -643,7 +643,8 @@ func actorInvite() tool.Tool {
 			"Taken up by someone who has a password already, it replaces that password. It is withdrawn when the " +
 			"person sets a password some other way, and when their email changes. " +
 			"The person needs an email or a login ID, which is what they will sign in with (actor.update gives either). " +
-			"An agent is given a token instead (actor.issue_token). A department administrator invites only a person who " +
+			"An agent is refused (agents_use_api_tokens): it is given a token instead (actor.issue_token). A department " +
+			"administrator invites only a person who " +
 			"has never been able to sign in and holds nothing beyond the departments they administer: no platform role, " +
 			"no appointment, no agent, and seats only in those departments' courses; otherwise invite_not_allowed says " +
 			"why. That is asked again when the invitation is taken up, and it is refused if it no longer holds.",
@@ -656,6 +657,16 @@ func actorInvite() tool.Tool {
 			return target, err
 		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in ActorInviteIn) (ActorInviteOut, error) {
+			a, err := ec.Q.GetActor(ctx, in.ActorID)
+			if err != nil {
+				return ActorInviteOut{}, err
+			}
+			// An agent is given a token, never a password, whoever would
+			// invite it: a refusal that reads kind, as the database's does,
+			// asked before anything about the caller's reach.
+			if err := auth.MaySignIn(a.Kind); err != nil {
+				return ActorInviteOut{}, err
+			}
 			if err := mayInvite(ctx, ec, in.ActorID); err != nil {
 				return ActorInviteOut{}, err
 			}
@@ -663,13 +674,6 @@ func actorInvite() tool.Tool {
 			if err != nil {
 				return ActorInviteOut{}, err
 			}
-			a, err := ec.Q.GetActor(ctx, in.ActorID)
-			if err != nil {
-				return ActorInviteOut{}, err
-			}
-			// An agent needs no password: it is given a token. That is the
-			// front end's to steer by, not a rule here, which reads the email
-			// or the login ID the actor would sign in with, and not their kind.
 			switch {
 			case a.Email == nil && a.LoginID == nil:
 				return ActorInviteOut{}, apperr.Precondition("the actor has neither an email nor a login ID to sign in with: " +
@@ -740,7 +744,7 @@ type ActorLookupOut struct {
 	Status          string     `json:"status" jsonschema:"active or suspended"`
 	CanSignIn       bool       `json:"can_sign_in" jsonschema:"they have a password or a linked identity"`
 	InviteExpiresAt *time.Time `json:"invite_expires_at,omitempty" jsonschema:"an invitation not yet taken up expires then, which may have passed"`
-	Invitable       bool       `json:"invitable" jsonschema:"you may invite them (again) with actor.invite"`
+	Invitable       bool       `json:"invitable" jsonschema:"you may invite them (again) with actor.invite; never an agent, which is given a token instead"`
 }
 
 func actorLookupByEmail() tool.Tool {
@@ -770,8 +774,9 @@ func actorLookupByEmail() tool.Tool {
 			out := ActorLookupOut{ActorID: a.ID, DisplayName: a.DisplayName, Kind: a.Kind, Status: a.Status,
 				CanSignIn: a.HasPassword || a.HasSso, InviteExpiresAt: a.InviteExpiresAt}
 			// Whether actor.invite would take them, by the caller's rule, as
-			// it stands now: nobody themselves, nor anyone suspended.
-			if a.ID == rc.Actor.ID || a.Status != domain.ActorActive {
+			// it stands now: nobody themselves, nor anyone suspended, nor an
+			// agent.
+			if a.ID == rc.Actor.ID || a.Status != domain.ActorActive || auth.MaySignIn(a.Kind) != nil {
 				return out, nil
 			}
 			if rc.Admin.Platform {
@@ -875,7 +880,8 @@ func actorLinkSSO() tool.Tool {
 		Name: "actor.link_sso",
 		Description: "Let a registered person sign in through the identity provider, by linking their account there to their " +
 			"actor here. Accounts are not created on first sign-in: until this is done, someone the provider vouches for is " +
-			"still nobody here. One identity links to one actor.",
+			"still nobody here. One identity links to one actor. An agent is refused (agents_use_api_tokens): it never " +
+			"signs in, and is given a token instead (actor.issue_token).",
 		Kind: tool.Write, Gate: admins,
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/actors/{actor_id}/sso"},
 		Resolve: func(ctx context.Context, q dbq.Querier, in ActorLinkSSOIn) (tool.Target, error) {
@@ -885,6 +891,13 @@ func actorLinkSSO() tool.Tool {
 			provider, subject := strings.TrimSpace(in.Provider), auth.NormalizeSubject(in.Subject)
 			if provider == "" || subject == "" {
 				return CredentialIDOut{}, apperr.Invalid("provider and subject are required")
+			}
+			a, err := ec.Q.GetActor(ctx, in.ActorID)
+			if err != nil {
+				return CredentialIDOut{}, err
+			}
+			if err := auth.MaySignIn(a.Kind); err != nil {
+				return CredentialIDOut{}, err
 			}
 			// Linking an identity is handing over the keys to the account, so
 			// it is held to the rule for acting on it.

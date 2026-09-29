@@ -318,6 +318,69 @@ func TestAPersonsTokenAuthenticatesNobody(t *testing.T) {
 	}
 }
 
+// An agent holds API tokens only: it is given no password, invitation or
+// identity at a provider, the database refusing each however it is
+// written; and one it holds from before migration 0017 revoked them signs
+// it in nowhere.
+func TestAnAgentDoesNotSignIn(t *testing.T) {
+	pool := testdb.New(t)
+	ctx := context.Background()
+	q := dbq.New(pool)
+	res := bootstrap(t, pool)
+	agent, _ := newAgent(t, pool, res.RootID)
+	if _, err := pool.Exec(ctx, `UPDATE actor SET email = 'grader@example.edu' WHERE id = $1`, agent); err != nil {
+		t.Fatal(err)
+	}
+	var pgErr *pgconn.PgError
+	refusedByTheDatabase := func(what string, err error) {
+		t.Helper()
+		if !errors.As(err, &pgErr) || pgErr.Code != "23514" {
+			t.Errorf("%s for an agent: %v, want the database's refusal", what, err)
+		}
+	}
+	refusedByTheDatabase("a password", auth.SetPassword(ctx, q, agent, "the agent's password", time.Now()))
+	_, _, err := auth.IssueInvite(ctx, q, agent, &res.RootID, "test", time.Now().Add(time.Hour), time.Now())
+	refusedByTheDatabase("an invitation", err)
+	_, err = pool.Exec(ctx, `INSERT INTO credential (actor_id, kind, provider, subject) VALUES ($1, 'sso', 'polyu-adfs', 'grader@example.edu')`, agent)
+	refusedByTheDatabase("an identity", err)
+
+	// What the release before could give it.
+	hash, err := auth.HashPassword("the agent's password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	inv, err := auth.NewInvite()
+	if err != nil {
+		t.Fatal(err)
+	}
+	withoutTheGuard(t, pool, `INSERT INTO credential (actor_id, kind, secret_hash) VALUES ($1, 'password', $2)`, agent, hash)
+	withoutTheGuard(t, pool, `INSERT INTO credential (actor_id, kind, secret_hash, token_prefix, expires_at)
+		VALUES ($1, 'invite', $2, $3, now() + interval '1 day')`, agent, inv.Hash, inv.Prefix)
+	withoutTheGuard(t, pool, `INSERT INTO credential (actor_id, kind, provider, subject) VALUES ($1, 'sso', 'polyu-adfs', 'grader@example.edu')`, agent)
+
+	a := auth.NewAuthenticator(pool, time.Hour)
+	_, err = a.Login(ctx, "grader@example.edu", "the agent's password")
+	if !apperr.Is(err, apperr.Unauthenticated) || reason(err) != auth.ReasonAgentsUseTokens {
+		t.Fatalf("an agent signing in with its password: %v", err)
+	}
+	_, wrong := a.Login(ctx, "grader@example.edu", "not the agent's password")
+	_, noSuch := a.Login(ctx, "nobody@example.edu", "not the agent's password")
+	if wrong == nil || noSuch == nil || wrong.Error() != noSuch.Error() {
+		t.Fatalf("a wrong password for an agent: %v; for nobody: %v", wrong, noSuch)
+	}
+	_, err = a.SignInWithIdentity(ctx, auth.Identity{Provider: "polyu-adfs", Subject: "grader@example.edu"})
+	if !apperr.Is(err, apperr.Forbidden) || reason(err) != auth.ReasonAgentsUseTokens {
+		t.Fatalf("an agent signing in through the identity provider: %v", err)
+	}
+	if _, err := a.AcceptInvite(ctx, inv.Full, "the agent's new password"); !apperr.Is(err, apperr.Unauthenticated) {
+		t.Fatalf("an agent's invitation taken up: %v", err)
+	}
+	var sessions int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM credential WHERE actor_id = $1 AND kind = 'session'`, agent).Scan(&sessions); err != nil || sessions != 0 {
+		t.Fatalf("the agent holds %d sessions (%v)", sessions, err)
+	}
+}
+
 // A credential notes when it was last used, for its holder's list of tokens,
 // and writes that at most once a minute however busy it is.
 func TestAUseIsNotedAtMostOnceAMinute(t *testing.T) {

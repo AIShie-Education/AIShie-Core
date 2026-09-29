@@ -116,28 +116,32 @@ func (q *Queries) GetActor(ctx context.Context, id uuid.UUID) (Actor, error) {
 }
 
 const getActorByEmail = `-- name: GetActorByEmail :one
-SELECT id, status FROM actor WHERE lower(email) = lower($1)
+SELECT id, status, kind FROM actor WHERE lower(email) = lower($1)
 `
 
 type GetActorByEmailRow struct {
 	ID     uuid.UUID
 	Status string
+	Kind   string
 }
 
+// The actor an email belongs to, in any case. Its kind comes with it, read to
+// refuse, never to grant: an agent does not sign in with a password.
 func (q *Queries) GetActorByEmail(ctx context.Context, lower string) (GetActorByEmailRow, error) {
 	row := q.db.QueryRow(ctx, getActorByEmail, lower)
 	var i GetActorByEmailRow
-	err := row.Scan(&i.ID, &i.Status)
+	err := row.Scan(&i.ID, &i.Status, &i.Kind)
 	return i, err
 }
 
 const getActorByLoginID = `-- name: GetActorByLoginID :one
-SELECT id, status FROM actor WHERE lower(login_id) = lower($1)
+SELECT id, status, kind FROM actor WHERE lower(login_id) = lower($1)
 `
 
 type GetActorByLoginIDRow struct {
 	ID     uuid.UUID
 	Status string
+	Kind   string
 }
 
 // A person by their login ID, in any case, as GetActorByEmail finds one by
@@ -145,7 +149,7 @@ type GetActorByLoginIDRow struct {
 func (q *Queries) GetActorByLoginID(ctx context.Context, lower string) (GetActorByLoginIDRow, error) {
 	row := q.db.QueryRow(ctx, getActorByLoginID, lower)
 	var i GetActorByLoginIDRow
-	err := row.Scan(&i.ID, &i.Status)
+	err := row.Scan(&i.ID, &i.Status, &i.Kind)
 	return i, err
 }
 

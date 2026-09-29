@@ -73,5 +73,10 @@ func (a *Authenticator) SignInWithIdentity(ctx context.Context, id Identity) (Se
 		// registered, which is all an outsider needs to know.
 		return Session{}, errNotRegistered
 	}
+	// An agent's link, from before migration 0017 revoked them: an agent
+	// holds API tokens only, and never signs in.
+	if cred.ActorKind == "agent" {
+		return Session{}, ErrAgentsUseTokens
+	}
 	return a.StartSession(ctx, cred.ActorID, "sso: "+id.Provider)
 }

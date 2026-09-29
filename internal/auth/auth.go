@@ -33,18 +33,26 @@ const (
 
 // Who holds which credential (docs/schema.md §2.1). A person signs in, with
 // a password or through single sign-on, and is given a session for it; for
-// tools and scripts they use one of their agents. Only an agent holds an API
-// token, and the system actor holds none at all. The database holds the same
-// (credential_fits_actor_kind, migration 0017). A refusal says which rule in
-// error.details.reason.
+// tools and scripts they use one of their agents. An agent holds API tokens
+// and nothing else: no password, no invitation, no identity at a provider,
+// and so never a session. The system actor holds none at all. The database
+// holds the same (credential_fits_actor_kind, migration 0017). Each refusal
+// says which rule in error.details.reason.
 const (
 	// ReasonTokensForAgents refuses a person an API token, and a person's
 	// API token when it is presented.
 	ReasonTokensForAgents = "api_tokens_are_for_agents" //nolint:gosec // a reason code, not a credential
+	// ReasonAgentsUseTokens refuses an agent a password, an invitation or
+	// an identity at a provider, and a sign-in by any of them.
+	ReasonAgentsUseTokens = "agents_use_api_tokens" //nolint:gosec // a reason code, not a credential
 )
 
-const tokensForAgents = "API tokens are for agents: a person signs in with a password or single sign-on, and uses one of " +
-	"their agents for tools and scripts (agent.create, then agent.issue_token)"
+const (
+	tokensForAgents = "API tokens are for agents: a person signs in with a password or single sign-on, and uses one of " +
+		"their agents for tools and scripts (agent.create, then agent.issue_token)"
+	agentsUseTokens = "an agent holds API tokens only: it is given no password, no invitation and no single sign-on, and " +
+		"never signs in; issue it a token instead (agent.issue_token, actor.issue_token)"
+)
 
 var (
 	// ErrTokensForAgents refuses to issue a person an API token, whoever asks.
@@ -53,6 +61,12 @@ var (
 	// credential: one from before migration 0017 revoked them, or written
 	// since past the database's refusal.
 	errTokenOfAPerson = apperr.New(apperr.Unauthenticated, tokensForAgents).With("reason", ReasonTokensForAgents)
+	// ErrAgentsUseTokens refuses to give an agent a password, an invitation
+	// or an identity at a provider, whoever asks.
+	ErrAgentsUseTokens = apperr.Forbid(agentsUseTokens).With("reason", ReasonAgentsUseTokens)
+	// errAgentSignsIn refuses an agent's sign-in with a password it holds
+	// from before migration 0017 revoked them.
+	errAgentSignsIn = apperr.New(apperr.Unauthenticated, agentsUseTokens).With("reason", ReasonAgentsUseTokens)
 )
 
 // MayHoldToken says whether an actor of the given kind may be issued an API
@@ -68,6 +82,17 @@ func MayHoldToken(kind string) error {
 		return apperr.Forbid("the system actor is never issued a token")
 	}
 	return ErrTokensForAgents
+}
+
+// MaySignIn says whether an actor of the given kind may be given a way to
+// sign in: a password, an invitation to choose one, or an identity at a
+// provider. A person may; an agent is refused ErrAgentsUseTokens. The
+// system actor is refused by whatever reaches it first, as ever.
+func MaySignIn(kind string) error {
+	if kind == "agent" {
+		return ErrAgentsUseTokens
+	}
+	return nil
 }
 
 // Principal is an authenticated caller: which actor, by which credential.
@@ -209,6 +234,12 @@ func (a *Authenticator) Login(ctx context.Context, name, password string) (Sessi
 	if !ok || !known || actor.Status != domain.ActorActive {
 		return Session{}, errBadLogin
 	}
+	// An agent's password, from before migration 0017 revoked them, is
+	// refused once it is known to be right: whoever gave it is no guesser,
+	// and is told that an agent is given a token instead.
+	if actor.Kind == "agent" {
+		return Session{}, errAgentSignsIn
+	}
 	label := "password login"
 	if mustChange {
 		label = "password login, with a temporary password"
@@ -289,9 +320,11 @@ func IssueToken(ctx context.Context, q *dbq.Queries, actorID uuid.UUID, issuedBy
 	return tok, id, nil
 }
 
-// SetPassword replaces an actor's password. Older passwords are revoked, not
+// SetPassword replaces a person's password. Older passwords are revoked, not
 // deleted: the row says when each stopped working. So is an invitation
-// waiting: it was for choosing a password, and one has been chosen.
+// waiting: it was for choosing a password, and one has been chosen. Who may
+// have one is the caller's to ask (MaySignIn); the database refuses one for
+// an agent or the system actor.
 func SetPassword(ctx context.Context, q *dbq.Queries, actorID uuid.UUID, password string, now time.Time) error {
 	hash, err := HashNewPassword(password)
 	if err != nil {
@@ -394,11 +427,12 @@ func RegisterPerson(ctx context.Context, q *dbq.Queries, p NewPerson, now time.T
 	return id, nil
 }
 
-// IssueInvite makes an invitation for an actor to set their password, and
+// IssueInvite makes an invitation for a person to set their password, and
 // revokes the one they had: only the newest works. Who may be invited is the
-// tool's to decide (actor.invite, actor.invite_new); the database holds the
-// one live invitation, and refuses one for the system actor. Setting a
-// password, by the invitation or otherwise, revokes it (SetPassword).
+// tool's to decide (actor.invite, actor.invite_new), a person only
+// (MaySignIn); the database holds the one live invitation, and refuses one
+// for an agent or the system actor. Setting a password, by the invitation or
+// otherwise, revokes it (SetPassword).
 // issuedBy is who made it, and is asked again when it is taken up
 // (AcceptInvite).
 func IssueInvite(ctx context.Context, q *dbq.Queries, actorID uuid.UUID, issuedBy *uuid.UUID, label string, expiresAt, now time.Time) (Token, uuid.UUID, error) {
@@ -530,11 +564,12 @@ func (a *Authenticator) AcceptInvite(ctx context.Context, presented, password st
 		case inv.SecretHash == nil || !tokenMatches(presented, *inv.SecretHash),
 			inv.RevokedAt != nil,
 			inv.ExpiresAt == nil || !inv.ExpiresAt.After(a.now()),
-			// Only an actor with a sign-in name, an email or a login ID, is
-			// invited (actor.invite), and a suspension since then holds. The
-			// system actor is refused as Authenticate refuses it, though it
-			// holds no credential.
-			inv.ActorKind == "system", inv.ActorStatus != domain.ActorActive, inv.ActorEmail == nil && inv.ActorLoginID == nil:
+			// Only a person with a sign-in name, an email or a login ID, is
+			// invited (actor.invite), and a suspension since then holds. An
+			// agent's, from before migration 0017 revoked them, is refused
+			// with the rest, and so is the system actor's, though it holds
+			// no credential.
+			inv.ActorKind != "human", inv.ActorStatus != domain.ActorActive, inv.ActorEmail == nil && inv.ActorLoginID == nil:
 			return inv, errBadInvite
 		}
 		// Asked again in the transaction that takes it up, under the
