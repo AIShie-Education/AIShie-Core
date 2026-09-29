@@ -141,6 +141,15 @@ func TestDefineRefusesMalformedTools(t *testing.T) {
 		"platform gate, course input": func(s *tool.Spec[in, out]) { s.Gate = tool.Gate{Platform: []string{"admin"}} },
 		"admin gate, course input":    func(s *tool.Spec[in, out]) { s.Gate = tool.Gate{Admin: true} },
 		"read with execute":           func(s *tool.Spec[in, out]) { s.Kind = tool.Read },
+		"an unknown kind":             func(s *tool.Spec[in, out]) { s.Kind = tool.Ephemeral + 1 },
+		"ephemeral with a pin": func(s *tool.Spec[in, out]) {
+			s.Kind, s.Pin = tool.Ephemeral, func(_ context.Context, _ dbq.Querier, _ *domain.Member, _ time.Time, i in) (in, error) { return i, nil }
+		},
+		"ephemeral with a validation": func(s *tool.Spec[in, out]) {
+			s.Kind, s.Validate = tool.Ephemeral, func(context.Context, dbq.Querier, *domain.Member, in) error { return nil }
+		},
+		"ephemeral and internal":  func(s *tool.Spec[in, out]) { s.Kind, s.Internal = tool.Ephemeral, true },
+		"ephemeral with a secret": func(s *tool.Spec[in, out]) { s.Kind, s.SecretIn = tool.Ephemeral, []string{"score"} },
 		"own agents with any": func(s *tool.Spec[in, out]) {
 			s.Gate.Any, s.Gate.OwnAgents = true, func(context.Context, dbq.Querier, domain.Actor, *domain.Member, tool.Target, time.Time) (domain.Level, error) {
 				return domain.Denied, nil
@@ -198,6 +207,23 @@ func TestDefineTakesTheAdminGateAlone(t *testing.T) {
 			breakIt(&s)
 			tool.Define(s)
 		})
+	}
+}
+
+// An Ephemeral tool is declared as a Write is, with Execute; nothing about
+// proposals or the action log applies to it, and it is offered by both
+// adapters.
+func TestDefineTakesAnEphemeralTool(t *testing.T) {
+	s := valid()
+	s.Kind = tool.Ephemeral
+	tl := tool.Define(s)
+	if tl.Kind != tool.Ephemeral || tl.Execute == nil || tl.Query != nil {
+		t.Fatalf("defined: %+v", tl)
+	}
+	r := tool.NewRegistry()
+	r.Register(tl)
+	if len(r.Exposed()) != 1 {
+		t.Fatal("an ephemeral tool is not offered")
 	}
 }
 

@@ -546,6 +546,40 @@ func TestStaleSessionsAreDeleted(t *testing.T) {
 	}
 }
 
+// An answer's draft nobody has written for tools.DraftTTL is no draft to
+// whoever reads it, and the sweep deletes it, recording nothing: a draft is
+// no record. One written since stays.
+func TestStaleDraftsAreDeleted(t *testing.T) {
+	f := setup(t, 2)
+	conversation := func(s testkit.Student) uuid.UUID {
+		t.Helper()
+		var id uuid.UUID
+		if err := f.Pool.QueryRow(context.Background(), `INSERT INTO conversation (id, course_id, opener_member_id, respondent_member_id)
+			VALUES (gen_random_uuid(), $1, $2, $3) RETURNING id`, f.Course, s.Member, f.GraderM).Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	stale, fresh := conversation(f.Students[0]), conversation(f.Students[1])
+	draft := `INSERT INTO conversation_draft (conversation_id, course_id, attempt, version, body, updated_at) VALUES ($1, $2, 'a1', 3, 'So far', $3)`
+	f.Exec(draft, stale, f.Course, f.now.Add(-tools.DraftTTL-time.Second))
+	f.Exec(draft, fresh, f.Course, f.now.Add(-tools.DraftTTL+time.Second))
+	actions := f.Count(`SELECT count(*) FROM action`)
+
+	if rep := f.sweep(t); rep.DraftsDeleted != 1 {
+		t.Fatalf("%+v, want the stale draft deleted", rep)
+	}
+	if n := f.Count(`SELECT count(*) FROM conversation_draft WHERE conversation_id = $1`, fresh); n != 1 {
+		t.Fatal("a draft written since was deleted")
+	}
+	if n := f.Count(`SELECT count(*) FROM conversation_draft`); n != 1 {
+		t.Fatal("the stale draft was kept")
+	}
+	if n := f.Count(`SELECT count(*) FROM action`); n != actions {
+		t.Fatal("deleting a draft was recorded as an action")
+	}
+}
+
 // A file is uploaded first and attached afterwards, so some never are. They
 // are removed — but never one that a version points at, and never one that a
 // proposal still waiting for its decision may yet attach.

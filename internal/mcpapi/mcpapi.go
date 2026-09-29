@@ -458,7 +458,9 @@ func refuse(w http.ResponseWriter, status int, id jsonrpc.ID, code int64, messag
 
 // limited refuses an actor that is calling too fast, before anything is
 // attempted or recorded. It is what stops an agent stuck in a loop from
-// writing a denied action per iteration for as long as it likes.
+// writing a denied action per iteration for as long as it likes. A call of
+// an ephemeral tool (conversation_draft) that is carried out is given back
+// once it is (handle): the tool bounds its own rate.
 func limited(d Deps, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if info := sdkauth.TokenInfoFromContext(r.Context()); info != nil {
@@ -505,8 +507,9 @@ func newServer(d Deps) *mcp.Server {
 			Annotations: &mcp.ToolAnnotations{
 				ReadOnlyHint: readOnly,
 				// True of every write, and guaranteed rather than hinted:
-				// that is what the idempotency key is for.
-				IdempotentHint: true,
+				// that is what the idempotency key is for. An ephemeral
+				// write takes no key, and nothing replays it.
+				IdempotentHint: t.Kind != tool.Ephemeral,
 				OpenWorldHint:  &closed,
 			},
 		}, handle(d, t))
@@ -520,13 +523,14 @@ func newServer(d Deps) *mcp.Server {
 // is the adapter's business, the action type is not.
 func ToolName(registryName string) string { return strings.ReplaceAll(registryName, ".", "_") }
 
-// inputSchema is the tool's own schema; for a Write, plus the idempotency key.
+// inputSchema is the tool's own schema; for a Write, plus the idempotency
+// key. A Read and an Ephemeral write take none.
 func inputSchema(t tool.Tool) json.RawMessage {
 	raw, err := json.Marshal(t.InputSchema)
 	if err != nil {
 		panic(fmt.Sprintf("mcpapi: %s: input schema: %v", t.Name, err))
 	}
-	if t.Kind == tool.Read {
+	if t.Kind != tool.Write {
 		return raw
 	}
 	var s map[string]any
@@ -612,6 +616,12 @@ func handle(d Deps, t tool.Tool) mcp.ToolHandler {
 			defer done()
 		}
 		out, err := d.Pipeline.Invoke(ctx, caller, t.Name, args, key)
+		if err == nil && t.Kind == tool.Ephemeral && out.Status == domain.StatusExecuted {
+			// An ephemeral write carried out is not what the limit counts:
+			// it bounds its own rate (tool.Ephemeral). One refused counts
+			// as any call does.
+			d.Calls.Refund(req.Extra.TokenInfo.UserID)
+		}
 		if err != nil {
 			e, ok := apperr.As(err)
 			if !ok {

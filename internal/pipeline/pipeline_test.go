@@ -297,6 +297,64 @@ func TestExecuteFailures(t *testing.T) {
 	}
 }
 
+// An ephemeral write is authorized as a write is and carried out at once,
+// recorded nowhere: no action, whatever becomes of it, and no key needed.
+// What it wrote is undone whole when it fails, the caller's fault or ours;
+// a denial is answered as a read's is; an archived course takes none.
+func TestAnEphemeralWriteIsNoAction(t *testing.T) {
+	c := testkit.NewCS101(t, 1)
+	c.P.Registry().Register(tool.Define(tool.Spec[courseProbeIn, probeOut]{
+		Name: "probe.scribble", Kind: tool.Ephemeral, Gate: tool.Gate{Perms: []domain.Perm{domain.PermGradeSubmit}},
+		Resolve: func(_ context.Context, _ dbq.Querier, in courseProbeIn) (tool.Target, error) {
+			return tool.Target{CourseID: in.CourseID}, nil
+		},
+		Execute: func(ctx context.Context, ec *tool.ExecCtx, in courseProbeIn) (probeOut, error) {
+			if ec.ActionID != uuid.Nil || ec.Emit != nil || ec.Member == nil {
+				return probeOut{}, errors.New("an ephemeral write was run as an action")
+			}
+			if _, err := ec.Tx.Exec(ctx, `INSERT INTO department (name) VALUES ('written by probe')`); err != nil {
+				return probeOut{}, err
+			}
+			switch in.Mode {
+			case "caller-fault":
+				return probeOut{}, apperr.Precondition("no")
+			case "our-fault":
+				return probeOut{}, errors.New("disk on fire")
+			}
+			return probeOut{OK: true}, nil
+		},
+	}))
+	written := func() int { return c.Count(`SELECT count(*) FROM department WHERE name = 'written by probe'`) }
+	actions := c.Count(`SELECT count(*) FROM action`)
+	args := func(mode string) m { return m{"course_id": c.Course, "mode": mode} }
+
+	if out := c.MustCall(c.Sato, "probe.scribble", args("ok"), ""); out.Status != domain.StatusExecuted || out.ActionID != nil || written() != 1 {
+		t.Fatalf("ok: %+v, %d rows", out, written())
+	}
+	if _, err := c.Call(c.Sato, "probe.scribble", args("caller-fault"), ""); !apperr.Is(err, apperr.FailedPrecondition) || written() != 1 {
+		t.Fatalf("caller-fault: %v, %d rows", err, written())
+	}
+	if _, err := c.Call(c.Sato, "probe.scribble", args("our-fault"), ""); err == nil || apperr.Is(err, apperr.FailedPrecondition) || written() != 1 {
+		t.Fatalf("our-fault: %v, %d rows", err, written())
+	}
+	out := c.MustCall(c.Students[0].Actor, "probe.scribble", args("ok"), "")
+	if out.Status != domain.StatusDenied || out.ActionID != nil || reason(out) != "permission_denied" || written() != 1 {
+		t.Fatalf("a student: %+v, %d rows", out, written())
+	}
+	c.Exec(`UPDATE course SET status = 'archived' WHERE id = $1`, c.Course)
+	if out := c.MustCall(c.Sato, "probe.scribble", args("ok"), ""); out.Status != domain.StatusDenied || reason(out) != "course_archived" {
+		t.Fatalf("an archived course: %+v", out)
+	}
+	if n := c.Count(`SELECT count(*) FROM action`); n != actions {
+		t.Fatalf("%d actions recorded for ephemeral writes", n-actions)
+	}
+}
+
+type courseProbeIn struct {
+	tool.InCourse
+	Mode string `json:"mode"`
+}
+
 type secretIn struct {
 	Label    string `json:"label"`
 	Password string `json:"password"`

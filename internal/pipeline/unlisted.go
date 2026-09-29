@@ -38,10 +38,7 @@ func (p *Pipeline) InvokeUnlisted(ctx context.Context, caller Caller, name strin
 	if err != nil {
 		return Outcome{}, err
 	}
-	if t.Kind == tool.Read {
-		return p.invokeRead(ctx, caller, t, in)
-	}
-	return p.invokeWrite(ctx, caller, t, in, rawArgs, idempotencyKey)
+	return p.invoke(ctx, caller, t, in, rawArgs, idempotencyKey)
 }
 
 // NewActor is the caller of a call made with InvokeAsNew, made in the call's

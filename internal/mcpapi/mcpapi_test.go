@@ -613,6 +613,10 @@ func TestToolsListIsTheRegistry(t *testing.T) {
 			t.Errorf("%s is not offered over MCP", name)
 		}
 	}
+	// A runtime writes an answer's draft where it answers.
+	if listed[mcpapi.ToolName("conversation.draft")] == nil {
+		t.Error("conversation.draft is not offered over MCP")
+	}
 	// What several model APIs accept as a tool name.
 	valid := regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`)
 	for _, reg := range exposed {
@@ -638,12 +642,14 @@ func TestToolsListIsTheRegistry(t *testing.T) {
 		for _, r := range in.Required {
 			required = required || r == mcpapi.IdempotencyKey
 		}
-		write := reg.Kind == tool.Write
+		// A write takes a key; a read and an ephemeral write take none, and
+		// only a read reads only.
+		write, read := reg.Kind == tool.Write, reg.Kind == tool.Read
 		if hasKey != write || required != write {
 			t.Errorf("%s: write=%v but idempotency_key present=%v required=%v", tl.Name, write, hasKey, required)
 		}
-		if tl.Annotations == nil || tl.Annotations.ReadOnlyHint == write {
-			t.Errorf("%s: readOnlyHint is wrong", tl.Name)
+		if tl.Annotations == nil || tl.Annotations.ReadOnlyHint != read || tl.Annotations.IdempotentHint != (reg.Kind != tool.Ephemeral) {
+			t.Errorf("%s: readOnlyHint or idempotentHint is wrong", tl.Name)
 		}
 		if tl.OutputSchema == nil {
 			t.Errorf("%s: no output schema", tl.Name)

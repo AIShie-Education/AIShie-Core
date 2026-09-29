@@ -44,11 +44,23 @@ func init() {
 // A Write is an action: it is recorded before it happens, denied attempts
 // included, needs an idempotency key, and may become a proposal. A Read is
 // authorized, scope included, and leaves no action row.
+//
+// An Ephemeral tool changes state that is not worth an action: short-lived,
+// written many times a second, and lost without harm, as an answer's draft
+// is while it is written (conversation.draft). It is authorized as a Write
+// is, scope included, its caller's seat held and an archived course refused,
+// and is then carried out at once, in a transaction of its own, whatever
+// level above denied its caller holds: nothing it does waits for anyone. It
+// is recorded nowhere: no action row, no idempotency key, no proposal, no
+// event. A call of one that is carried out is not counted against its
+// caller's rate limit (the adapters give it back), so the tool bounds its
+// own rate.
 type Kind int
 
 const (
 	Read Kind = iota
 	Write
+	Ephemeral
 )
 
 // Gate says who may call a tool. Exactly one of Perms, Platform, Admin and
@@ -139,6 +151,10 @@ type Route struct {
 // ExecCtx is what a Write tool runs with. Everything it does goes through Tx,
 // inside a savepoint: if the tool returns an error, all of it is undone and
 // the attempt is recorded as failed.
+//
+// An Ephemeral tool runs with it too, in a transaction of its own that an
+// error undoes whole, with no action: ActionID is uuid.Nil and Emit is nil,
+// since nothing it does is recorded or in the feed.
 type ExecCtx struct {
 	Tx pgx.Tx
 	Q  *dbq.Queries
@@ -240,9 +256,11 @@ type Spec[In, Out any] struct {
 	// queued as a proposal, by the member m proposing it, and now is when
 	// that is; what it returns is the payload stored with it. It may refuse
 	// the call instead, for what could not wait as long as a proposal may:
-	// an upload too old to outlast it.
+	// an upload too old to outlast it. It runs in the call's transaction,
+	// so it may also clear, as it succeeds, what the proposal takes the
+	// place of: conversation.answer's draft.
 	Pin func(ctx context.Context, q dbq.Querier, m *domain.Member, now time.Time, in In) (In, error)
-	// Execute is set for a Write, Query for a Read.
+	// Execute is set for a Write and an Ephemeral tool, Query for a Read.
 	Execute func(ctx context.Context, ec *ExecCtx, in In) (Out, error)
 	Query   func(ctx context.Context, rc *ReadCtx, in In) (Out, error)
 	// Wait, for a Read whose input embeds CanWait, is what a call that asks
@@ -407,6 +425,17 @@ func Define[In, Out any](s Spec[In, Out]) Tool {
 		if s.Query == nil || s.Execute != nil || s.Validate != nil {
 			fail("a Read tool has Query, and neither Execute nor Validate")
 		}
+	case Ephemeral:
+		// Nothing of it is recorded, proposed or replayed, so nothing that
+		// is about those applies; and nothing but a caller makes one.
+		if s.Execute == nil || s.Query != nil || s.Validate != nil || s.Pin != nil {
+			fail("an Ephemeral tool has Execute, and neither Query, Validate nor Pin")
+		}
+		if s.Internal || s.Unlisted || len(s.SecretIn) > 0 || len(s.SecretOut) > 0 {
+			fail("an Ephemeral tool is neither Internal nor Unlisted, and records no secret to keep out")
+		}
+	default:
+		fail("unknown kind %d", s.Kind)
 	}
 	if s.Resolve == nil {
 		fail("Resolve is required")

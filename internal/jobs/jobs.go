@@ -1,7 +1,8 @@
 // Package jobs runs the background sweeps: proposals that have waited too
 // long, memberships past their expiry, delegates' seats whose principal has
-// gone, assignments whose due date has passed, sessions long dead, uploaded
-// files that nothing came to point at.
+// gone, assignments whose due date has passed, sessions long dead, answers'
+// drafts nobody writes any more, uploaded files that nothing came to point
+// at.
 //
 // Nothing here is what makes the system correct. authorize() ignores an
 // expired member from the instant of expiry, and approving a stale proposal
@@ -104,7 +105,7 @@ func (r *Runner) Run(ctx context.Context) {
 		} else if rep.Ran && rep.total() > 0 {
 			r.log.Info("swept", "proposals_expired", rep.ProposalsExpired, "members_expired", rep.MembersExpired, "orphans_removed", rep.OrphansRemoved,
 				"assignments_closed", rep.AssignmentsClosed, "submissions_missing", rep.SubmissionsMissing, "sessions_deleted", rep.SessionsDeleted,
-				"orphan_files_removed", rep.OrphanFilesRemoved)
+				"drafts_deleted", rep.DraftsDeleted, "orphan_files_removed", rep.OrphanFilesRemoved)
 		}
 		select {
 		case <-ctx.Done():
@@ -124,11 +125,15 @@ type Report struct {
 	AssignmentsClosed  int
 	SubmissionsMissing int
 	SessionsDeleted    int64
+	// DraftsDeleted counts answers' drafts nobody has written for
+	// tools.DraftTTL, which reads leave out already.
+	DraftsDeleted      int64
 	OrphanFilesRemoved int
 }
 
 func (r Report) total() int64 {
-	return int64(r.ProposalsExpired+r.MembersExpired+r.OrphansRemoved+r.AssignmentsClosed+r.SubmissionsMissing+r.OrphanFilesRemoved) + r.SessionsDeleted
+	return int64(r.ProposalsExpired+r.MembersExpired+r.OrphansRemoved+r.AssignmentsClosed+r.SubmissionsMissing+r.OrphanFilesRemoved) +
+		r.SessionsDeleted + r.DraftsDeleted
 }
 
 // Sweep does one round of everything, if no other instance is doing so.
@@ -226,6 +231,11 @@ func (r *Runner) Sweep(ctx context.Context) (Report, error) {
 	stale := now.Add(-sessionRetention)
 	if rep.SessionsDeleted, err = q.DeleteStaleSessions(ctx, &stale); err != nil {
 		return rep, fmt.Errorf("stale sessions: %w", err)
+	}
+	// A draft is no record, and its deletion no action, as a session's is
+	// not: one nobody wrote for a while is gone already to whoever reads it.
+	if rep.DraftsDeleted, err = q.DeleteStaleDrafts(ctx, now.Add(-tools.DraftTTL)); err != nil {
+		return rep, fmt.Errorf("stale drafts: %w", err)
 	}
 	if rep.OrphanFilesRemoved, err = r.sweepBlobs(ctx, now); err != nil {
 		return rep, fmt.Errorf("orphan files: %w", err)

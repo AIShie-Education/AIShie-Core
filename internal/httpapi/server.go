@@ -14,7 +14,8 @@
 //
 // An answer with no top-level action_id records nothing, whatever its
 // status: among them every 401 and 429, a 400 or 404 from before the tool
-// runs, a 403 from the cross-origin guard, a 405, a 500, and every read. A
+// runs, a 403 from the cross-origin guard, a 405, a 500, every read, and
+// every ephemeral write (conversation.draft), which takes no key. A
 // key used for another call is a 409 idempotency_conflict naming the earlier
 // action in error.details.action_id, and records nothing either.
 package httpapi
@@ -299,6 +300,12 @@ func (s *server) callTool(t tool.Tool) func(http.ResponseWriter, *http.Request) 
 		p := r.Context().Value(callerKey{}).(auth.Principal)
 		out, err := s.Pipeline.Invoke(r.Context(), pipeline.Caller{ActorID: p.ActorID, CredentialID: p.CredentialID}, t.Name, args,
 			r.Header.Get(HeaderIdempotencyKey))
+		if err == nil && t.Kind == tool.Ephemeral && out.Status == domain.StatusExecuted {
+			// An ephemeral write carried out is not what the limit counts:
+			// it bounds its own rate (tool.Ephemeral). One refused counts
+			// as any call does.
+			s.Calls.Refund(p.ActorID.String())
+		}
 		if err != nil {
 			s.writeError(w, r, err)
 			return
@@ -336,8 +343,13 @@ func (s *server) listTools(w http.ResponseWriter, _ *http.Request) {
 	}
 	for _, t := range s.Pipeline.Registry().Exposed() {
 		kind := "read"
-		if t.Kind == tool.Write {
+		switch t.Kind {
+		case tool.Write:
 			kind = "write"
+		case tool.Ephemeral:
+			// It changes state, as a write does, but is no action: it
+			// takes no Idempotency-Key and is recorded nowhere.
+			kind = "ephemeral"
 		}
 		out.Tools = append(out.Tools, toolInfo{
 			Name: t.Name, Description: t.Description, Kind: kind,
@@ -662,15 +674,22 @@ func writeOutcome(w http.ResponseWriter, out pipeline.Outcome) {
 	// A call refused for coming too often after it was attempted — an agent
 	// writing to its memory faster than it may — is recorded, and says when
 	// to try again as a call that was never attempted does.
-	if out.Error != nil && out.Error.Code == apperr.RateLimited {
-		switch secs := out.Error.Details["retry_after_seconds"].(type) {
-		case int:
-			w.Header().Set("Retry-After", strconv.Itoa(secs))
-		case float64: // as a replay reads it back
-			w.Header().Set("Retry-After", strconv.Itoa(int(secs)))
-		}
-	}
+	retryAfter(w, out.Error)
 	writeJSON(w, outcomeStatus(out), out)
+}
+
+// retryAfter says in Retry-After when a call refused for coming too often
+// may be made again, as its error's retry_after_seconds says.
+func retryAfter(w http.ResponseWriter, e *apperr.Error) {
+	if e == nil || e.Code != apperr.RateLimited {
+		return
+	}
+	switch secs := e.Details["retry_after_seconds"].(type) {
+	case int:
+		w.Header().Set("Retry-After", strconv.Itoa(secs))
+	case float64: // as a replay reads it back
+		w.Header().Set("Retry-After", strconv.Itoa(int(secs)))
+	}
 }
 
 func outcomeStatus(out pipeline.Outcome) int {
@@ -728,5 +747,8 @@ func (s *server) writeError(w http.ResponseWriter, r *http.Request, err error) {
 	if e.Code == apperr.Unauthenticated {
 		w.Header().Set("WWW-Authenticate", `Bearer realm="aishiteru"`)
 	}
+	// A tool that bounds its own rate and records nothing (an ephemeral
+	// write, conversation.draft) refuses a call too soon as an error.
+	retryAfter(w, e)
 	writeJSON(w, codeStatus(e.Code), errorBody{Error: e})
 }

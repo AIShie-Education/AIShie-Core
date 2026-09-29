@@ -38,8 +38,11 @@ func TestAWaiterIsWokenByItsNewsAlone(t *testing.T) {
 	inbox := wake.Filter{CourseID: course, RespondentMemberID: seat, Kinds: []string{"conversation.message_posted"}}
 	reader := wake.Filter{CourseID: course, ConversationID: conversation}
 	feed := wake.Filter{CourseID: course}
+	watching := wake.Filter{CourseID: course, ConversationID: conversation, Drafts: true}
 	posted := wake.Note{CourseID: course, Kind: "conversation.message_posted", Seq: 7, ConversationID: conversation,
 		OpenerMemberID: uuid.New(), RespondentMemberID: seat}
+	drafted := wake.Note{CourseID: course, Kind: wake.KindDraft, ConversationID: conversation, OpenerMemberID: posted.OpenerMemberID,
+		RespondentMemberID: seat}
 
 	cases := []struct {
 		name string
@@ -57,6 +60,14 @@ func TestAWaiterIsWokenByItsNewsAlone(t *testing.T) {
 		{"news that names no conversation", reader, wake.Note{CourseID: course, Kind: "grade.posted", Seq: 8}, false},
 		{"anything in the course, for its feed", feed, wake.Note{CourseID: course, Kind: "grade.posted", Seq: 8}, true},
 		{"another course's feed", feed, wake.Note{CourseID: other, Kind: "grade.posted", Seq: 8}, false},
+		// A draft is written many times a second, and wakes only whoever
+		// watches it.
+		{"a draft, for a reader that watches drafts", watching, drafted, true},
+		{"a message, for a reader that watches drafts", watching, posted, true},
+		{"a draft of another conversation", watching, func() wake.Note { n := drafted; n.ConversationID = uuid.New(); return n }(), false},
+		{"a draft, for a reader that does not watch drafts", reader, drafted, false},
+		{"a draft, for the course's feed", feed, drafted, false},
+		{"a draft, for the respondent's inbox", inbox, drafted, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -33,6 +33,9 @@ const Channel = "aishiteru_wake"
 // write in one, names the conversation and its two participants; other news
 // leaves them zero. What it holds is ids, never content, and it is well
 // under the 8000 bytes a notification may carry.
+//
+// News of an answer's draft (KindDraft) is told by no event: it is in no
+// feed, and its seq is 0.
 type Note struct {
 	CourseID           uuid.UUID `json:"course_id"`
 	Kind               string    `json:"kind"`
@@ -42,20 +45,30 @@ type Note struct {
 	RespondentMemberID uuid.UUID `json:"respondent_member_id"`
 }
 
+// KindDraft is the kind of the news that an answer's draft was written, or
+// ended (conversation.draft). It comes many times a second while an answer
+// is written, and wakes only a call that asks for it (Filter.Drafts).
+const KindDraft = "conversation.draft"
+
 // Filter is the news a waiting call is woken by: of its course, and, where
 // they are set, of one conversation, of conversations addressed to one seat,
 // and of some kinds alone. A zero field, or no kinds, asks nothing of it.
+// News of a draft wakes only a filter that says Drafts: a reader of the
+// conversation that shows its draft as it is written.
 type Filter struct {
 	CourseID           uuid.UUID
 	ConversationID     uuid.UUID
 	RespondentMemberID uuid.UUID
 	Kinds              []string
+	Drafts             bool
 }
 
 // Matches says whether n is news f waits for.
 func (f Filter) Matches(n Note) bool {
 	switch {
 	case n.CourseID != f.CourseID:
+		return false
+	case n.Kind == KindDraft && !f.Drafts:
 		return false
 	case f.ConversationID != uuid.Nil && n.ConversationID != f.ConversationID:
 		return false

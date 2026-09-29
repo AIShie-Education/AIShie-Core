@@ -1230,6 +1230,69 @@ SELECT pg_temp.fails('and never back', '23001', $q$
 SELECT pg_temp.fails('whose place it is never changes', '23001', $q$
     UPDATE conversation_read SET member_id = '00000000-0000-0000-0000-000000000053'
      WHERE conversation_id = '00000000-0000-0000-0000-0000000000c1' AND member_id = '00000000-0000-0000-0000-000000000052' $q$);
+-- An answer's draft: one per conversation, in its course, kept unlogged,
+-- and held to the shape the application writes it in.
+SELECT pg_temp.ok('drafts are kept in an unlogged table', $q$
+    DO $d$ BEGIN
+        IF (SELECT relpersistence FROM pg_class WHERE relname = 'conversation_draft' AND relkind = 'r') IS DISTINCT FROM 'u' THEN
+            RAISE EXCEPTION 'conversation_draft is not unlogged';
+        END IF;
+    END $d$ $q$);
+SELECT pg_temp.ok('a conversation has a draft: an attempt, its version, the text so far and its steps', $q$
+    INSERT INTO conversation_draft (conversation_id, course_id, attempt, version, body, steps)
+    VALUES ('00000000-0000-0000-0000-0000000000c1', '00000000-0000-0000-0000-000000000041', 'a1', 1, 'So far',
+            '[{"kind":"reading_document","target":"HW3","state":"done"},{"kind":"writing","state":"running"}]') $q$);
+SELECT pg_temp.fails('one draft to a conversation', '23505', $q$
+    INSERT INTO conversation_draft (conversation_id, course_id, attempt, version)
+    VALUES ('00000000-0000-0000-0000-0000000000c1', '00000000-0000-0000-0000-000000000041', 'a2', 1) $q$);
+SELECT pg_temp.fails('a draft is in its conversation''s course', '23503', $q$
+    UPDATE conversation_draft SET course_id = '00000000-0000-0000-0000-000000000042'
+     WHERE conversation_id = '00000000-0000-0000-0000-0000000000c1' $q$);
+SELECT pg_temp.fails('a draft names its attempt', '23514', $q$
+    UPDATE conversation_draft SET attempt = '' WHERE conversation_id = '00000000-0000-0000-0000-0000000000c1' $q$);
+SELECT pg_temp.fails('in 64 characters at most', '23514', $q$
+    UPDATE conversation_draft SET attempt = repeat('a', 65) WHERE conversation_id = '00000000-0000-0000-0000-0000000000c1' $q$);
+SELECT pg_temp.fails('a draft''s version is 1 or more', '23514', $q$
+    UPDATE conversation_draft SET version = 0 WHERE conversation_id = '00000000-0000-0000-0000-0000000000c1' $q$);
+SELECT pg_temp.fails('its text is 20000 characters at most', '23514', $q$
+    UPDATE conversation_draft SET body = repeat('x', 20001) WHERE conversation_id = '00000000-0000-0000-0000-0000000000c1' $q$);
+SELECT pg_temp.ok('20000 are taken', $q$
+    UPDATE conversation_draft SET body = repeat('x', 20000) WHERE conversation_id = '00000000-0000-0000-0000-0000000000c1' $q$);
+SELECT pg_temp.fails('its steps are a list', '23514', $q$
+    UPDATE conversation_draft SET steps = '{"kind":"thinking","state":"running"}'
+     WHERE conversation_id = '00000000-0000-0000-0000-0000000000c1' $q$);
+SELECT pg_temp.fails('of 20 steps at most', '23514', $q$
+    UPDATE conversation_draft SET steps = (SELECT jsonb_agg('{"kind":"thinking","state":"done"}'::jsonb) FROM generate_series(1, 21))
+     WHERE conversation_id = '00000000-0000-0000-0000-0000000000c1' $q$);
+SELECT pg_temp.ok('20 are taken', $q$
+    UPDATE conversation_draft SET steps = (SELECT jsonb_agg('{"kind":"thinking","state":"done"}'::jsonb) FROM generate_series(1, 20))
+     WHERE conversation_id = '00000000-0000-0000-0000-0000000000c1' $q$);
+SELECT pg_temp.fails('a step is of a kind there is', '23514', $q$
+    UPDATE conversation_draft SET steps = '[{"kind":"dreaming","state":"running"}]'
+     WHERE conversation_id = '00000000-0000-0000-0000-0000000000c1' $q$);
+SELECT pg_temp.fails('and running or done', '23514', $q$
+    UPDATE conversation_draft SET steps = '[{"kind":"thinking"}]'
+     WHERE conversation_id = '00000000-0000-0000-0000-0000000000c1' $q$);
+SELECT pg_temp.fails('and nothing else', '23514', $q$
+    UPDATE conversation_draft SET steps = '[{"kind":"thinking","state":"done","body":"Ken''s grades"}]'
+     WHERE conversation_id = '00000000-0000-0000-0000-0000000000c1' $q$);
+SELECT pg_temp.fails('a step is an object', '23514', $q$
+    UPDATE conversation_draft SET steps = '["thinking"]' WHERE conversation_id = '00000000-0000-0000-0000-0000000000c1' $q$);
+SELECT pg_temp.fails('what a step is about is text', '23514', $q$
+    UPDATE conversation_draft SET steps = '[{"kind":"tool","target":42,"state":"done"}]'
+     WHERE conversation_id = '00000000-0000-0000-0000-0000000000c1' $q$);
+SELECT pg_temp.fails('of 120 characters at most', '23514', $q$
+    UPDATE conversation_draft SET steps = jsonb_build_array(jsonb_build_object('kind', 'tool', 'state', 'done', 'target', repeat('x', 121)))
+     WHERE conversation_id = '00000000-0000-0000-0000-0000000000c1' $q$);
+SELECT pg_temp.ok('120 are taken', $q$
+    UPDATE conversation_draft SET steps = jsonb_build_array(jsonb_build_object('kind', 'tool', 'state', 'done', 'target', repeat('x', 120)))
+     WHERE conversation_id = '00000000-0000-0000-0000-0000000000c1' $q$);
+SELECT pg_temp.fails('an attempt that is over keeps no text', '23514', $q$
+    UPDATE conversation_draft SET done = true WHERE conversation_id = '00000000-0000-0000-0000-0000000000c1' $q$);
+SELECT pg_temp.ok('an attempt that is over keeps nothing but its end', $q$
+    UPDATE conversation_draft SET done = true, body = NULL, steps = '[]' WHERE conversation_id = '00000000-0000-0000-0000-0000000000c1' $q$);
+SELECT pg_temp.ok('a draft is deleted', $q$
+    DELETE FROM conversation_draft WHERE conversation_id = '00000000-0000-0000-0000-0000000000c1' $q$);
 -- Conversations are between a person and an agent: a person answers none.
 SELECT pg_temp.fails('a conversation''s respondent is an agent''s seat, never a person''s', '23514', $q$
     INSERT INTO conversation (course_id, opener_member_id, respondent_member_id)
