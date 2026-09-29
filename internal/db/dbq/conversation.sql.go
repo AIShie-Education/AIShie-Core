@@ -728,11 +728,11 @@ WHERE m.course_id = $1 AND m.id <> $3
   AND m.perm_conversation_answer <> 'denied' AND a.status = 'active'
   AND (m.principal_member_id IS NULL OR m.principal_member_id = $3
        OR (m.answers_course AND p.perm_member_manage <> 'denied'))
-  AND (a.kind <> 'agent'
-       OR ((a.owner_actor_id IS NULL OR EXISTS (SELECT 1 FROM actor o WHERE o.id = a.owner_actor_id AND o.status = 'active'))
-           AND EXISTS (SELECT 1 FROM credential sc
-                        WHERE sc.id = a.site_chat_credential_id AND sc.actor_id = a.id AND sc.revoked_at IS NULL
-                          AND (sc.expires_at IS NULL OR sc.expires_at > $2))))
+  AND a.kind = 'agent'
+  AND (a.owner_actor_id IS NULL OR EXISTS (SELECT 1 FROM actor o WHERE o.id = a.owner_actor_id AND o.status = 'active'))
+  AND EXISTS (SELECT 1 FROM credential sc
+               WHERE sc.id = a.site_chat_credential_id AND sc.actor_id = a.id AND sc.revoked_at IS NULL
+                 AND (sc.expires_at IS NULL OR sc.expires_at > $2))
 ORDER BY m.id
 LIMIT $4
 `
@@ -755,17 +755,18 @@ type ListRespondentCandidatesRow struct {
 	LastSeenAt        *time.Time
 }
 
-// The seats that might answer a caller: live, held by an active actor, with
-// conversation_answer not denied on the row, and, for a delegate, either the
-// caller's own or one that answers the course, whose principal's row holds
-// member_manage. An agent's seat only while the agent takes conversations in
+// The seats that might answer a caller: agents' seats, live, held by an
+// active actor, with conversation_answer not denied on the row, and, for a
+// delegate, either the caller's own or one that answers the course, whose
+// principal's row holds member_manage. Never a person's: conversations are
+// with agents. An agent's seat only while the agent takes conversations in
 // the site (docs/schema.md §2.8), by the rule of SiteChatOf, its status
 // asked above: one operated from an external tool is asked there, not here.
 // kind is read to leave out, never to let in. Which of them the caller may
 // address is decided in Go (tools.addressing), which this only narrows to
 // what it could accept: every student's own agent answers, and only its
-// principal. Unpaged: what is left is a course's agents and staff, and the
-// caller's own agents, a handful; max_rows bounds them anyway.
+// principal. Unpaged: what is left is a course's agents, and the caller's
+// own agents, a handful; max_rows bounds them anyway.
 func (q *Queries) ListRespondentCandidates(ctx context.Context, arg ListRespondentCandidatesParams) ([]ListRespondentCandidatesRow, error) {
 	rows, err := q.db.Query(ctx, listRespondentCandidates,
 		arg.CourseID,

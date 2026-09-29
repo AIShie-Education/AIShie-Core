@@ -30,6 +30,37 @@ type authorized struct {
 	// from a seat, or on one's own account, has none.
 	authority     *string
 	authorityDept *uuid.UUID
+	// refused is what a denied call is told, where its gate knows more than
+	// the permission that denied it (tool.Gate.Refusal); nil for the plain
+	// denial of decision.Reason.
+	refused *apperr.Error
+}
+
+// refusal is what a denied call is told.
+func (a authorized) refusal() *apperr.Error {
+	if a.refused != nil {
+		return a.refused
+	}
+	return denial(a.decision.Reason)
+}
+
+// explain asks a gate that knows why a seat its permissions deny is refused
+// (tool.Gate.Refusal), and records what it says: the refusal, and its reason
+// in place of permission_denied. It changes nothing else.
+func (a *authorized) explain(ctx context.Context, q dbq.Querier, t tool.Tool, actor domain.Actor) error {
+	if t.Gate.Refusal == nil || a.decision.Reason != authz.ReasonPermDenied || a.decision.Member == nil {
+		return nil
+	}
+	e, err := t.Gate.Refusal(ctx, q, actor, a.decision.Member)
+	if err != nil || e == nil {
+		return err
+	}
+	why, _ := e.Details["reason"].(string)
+	if why == "" {
+		return fmt.Errorf("%s: its gate's refusal gives no reason", t.Name)
+	}
+	a.refused, a.decision.Reason = e, authz.Reason(why)
+	return nil
 }
 
 // authorize runs a tool's gate for one call.
@@ -94,7 +125,7 @@ func (p *Pipeline) authorize(ctx context.Context, q dbq.Querier, t tool.Tool, in
 		owner := t.Gate.OwnAgents != nil && a.decision.Member != nil && a.decision.Level < domain.Autonomous &&
 			(a.decision.Level.Allowed() || a.decision.Reason == authz.ReasonPermDenied)
 		if !a.decision.Level.Allowed() && !owner {
-			return a, nil
+			return a, a.explain(ctx, q, t, actor)
 		}
 		target, err := t.Resolve(ctx, q, in)
 		if err == nil && target.CourseID != cid {

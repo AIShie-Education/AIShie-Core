@@ -345,6 +345,17 @@ call 200 GET "$C/conversations/$CONV/messages" "$YUKI"
 [ "$(json "$WORK/body" 'd["result"]["messages"][-1]["body"]')" = "An essay with a thesis." ] || fail "Yuki does not see the answer"
 call 404 GET "$C/conversations/$CONV" "$GRADER" # nobody else's to read
 
+step "Conversations are with agents: Sato is offered to nobody, asked nothing and answers nothing, and his seat says why"
+call 200 GET "$C/conversations/respondents" "$YUKI"
+json "$WORK/body" '"'"$SATO_M"'" not in [r["member_id"] for r in d["result"]["respondents"]] and all(r["kind"] == "agent" for r in d["result"]["respondents"]) or sys.exit("a person is offered as a respondent")' >/dev/null
+call 403 POST "$C/conversations" "$YUKI" "{\"respondent_member_id\":\"$SATO_M\",\"body\":\"When is the exam?\"}"
+[ "$(reason)" = conversations_are_with_agents ] || fail "refused, but not as a person: $(cat "$WORK/body")"
+call 403 POST "$C/conversations/$CONV/answer" "$SATO" "{\"in_reply_to_message_id\":\"$QUESTION\",\"body\":\"On Friday.\"}"
+[ "$(reason)" = conversations_are_with_agents ] || fail "a person's answer refused, but not as a person's: $(cat "$WORK/body")"
+call 200 GET "$C/members/$SATO_M" "$SATO"
+[ "$(json "$WORK/body" 'd["result"]["perms"]["conversation_answer"], d["result"]["perm_ceilings"]["conversation_answer"], d["result"]["perm_ceiling_reasons"]["conversation_answer"]')" = "denied denied conversations_are_with_agents" ] ||
+  fail "Sato's seat says he answers: $(cat "$WORK/body")"
+
 step "Sato switches the tutor's site chat off: Yuki asks it nothing more and still reads what it said; only its runtime switches it on"
 call 200 POST "/v1/me/agents/$TUTOR_ID" "$SATO" '{"site_chat":false}'
 call 422 POST "$C/conversations/$CONV/ask" "$YUKI" '{"body":"And how long should it be?"}'

@@ -248,16 +248,18 @@ func TestAnAgentOperatedFromOutsideIsNotAskedInTheSite(t *testing.T) {
 	b.do(t, b.yuki, "conversation.retract", m{"course_id": b.course, "message_id": second})
 	b.do(t, b.yuki, "conversation.close", m{"course_id": b.course, "conversation_id": conv})
 
-	// A person answers in the site as ever: Mori, a TA who answers, whom
-	// Sato may address.
+	// A person answers nothing, in the site or anywhere: Mori, a TA, is not
+	// seated answering, is offered to nobody, and is asked nothing, since
+	// conversations are with agents.
 	mori := testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", m{"kind": "human", "display_name": "Mori"})).ActorID
-	moriM := testkit.Result[tools.MemberIDOut](t, b.do(t, b.sato, "member.add", m{"course_id": b.course, "actor_id": mori, "preset": "ta",
-		"perms": m{"conversation_answer": "autonomous"}})).MemberID
-	if _, ok := b.respondents(t, b.sato)[moriM]; !ok {
-		t.Fatal("a person who answers is not offered")
+	aboveCeiling(t, "seating a person to answer", b.MustCall(b.sato, "member.add", m{"course_id": b.course, "actor_id": mori, "preset": "ta",
+		"perms": m{"conversation_answer": "autonomous"}}, "mori-answers"), "conversation_answer", "conversations_are_with_agents")
+	moriM := testkit.Result[tools.MemberIDOut](t, b.do(t, b.sato, "member.add", m{"course_id": b.course, "actor_id": mori, "preset": "ta"})).MemberID
+	if _, ok := b.respondents(t, b.sato)[moriM]; ok {
+		t.Fatal("a person is offered as a respondent")
 	}
-	asked, question := b.open(t, b.sato, moriM, "Can you mark HW3 by Friday?")
-	b.do(t, mori, "conversation.answer", answerArgs(b, asked, question, "Yes."))
+	withAgents(t, "asking a person", b.MustCall(b.sato, "conversation.open",
+		m{"course_id": b.course, "respondent_member_id": moriM, "body": "Can you mark HW3 by Friday?"}, "ask-mori"))
 }
 
 // Its owner's word, or a suspension, takes an agent out of the site's

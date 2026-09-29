@@ -778,11 +778,12 @@ func TestAQuestionIsAnsweredOnce(t *testing.T) {
 }
 
 // The answers of a course tutor its instructor owns are that instructor's
-// party's: the queues list them, and say whose they are to decide. The
-// instructor decides them where they would answer without anyone's
-// confirmation themselves; where their own answers wait for one, someone
+// party's: the queues list them, and say whose they are to decide. No person
+// answers a conversation, so the instructor is measured for them by what
+// judging an answer is: they decide them where they decide actions without
+// anyone's confirmation; where their own decisions wait for one, someone
 // else decides the tutor's.
-func TestAnInstructorsOwnTutorIsDecidedByThemOnlyWhereTheyAnswerFreely(t *testing.T) {
+func TestAnInstructorsOwnTutorIsDecidedByThemOnlyWhereTheyDecideFreely(t *testing.T) {
 	c := newCast(t)
 	b := c.built
 	b.do(t, b.sato, "member.update_perms", m{"course_id": b.course, "member_id": c.courseTutor, "perms": m{"conversation_answer": "confirm_required"}})
@@ -802,20 +803,32 @@ func TestAnInstructorsOwnTutorIsDecidedByThemOnlyWhereTheyAnswerFreely(t *testin
 	if v := queue()[*request.ActionID]; v == nil || !*v {
 		t.Fatalf("Ken's request, as Sato's queue lists it: %v", v)
 	}
-
-	// Sato's own answers wait for a confirmation: his tutor's are not his.
-	b.Exec(`UPDATE course_member SET perm_conversation_answer = 'confirm_required' WHERE id = $1`, b.satoM)
-	if v := queue()[*answer.ActionID]; v == nil || *v {
-		t.Fatalf("Sato's own tutor's answer, as his queue lists it while his own answers wait: %v", v)
-	}
-	d := b.MustCall(b.sato, "action.decide", m{"course_id": b.course, "action_id": answer.ActionID, "decision": "approve"}, "decide")
-	if d.Status != domain.StatusFailed || d.Error.Code != apperr.Forbidden || d.Error.Details["reason"] != "owner_not_autonomous" {
-		t.Fatalf("Sato deciding his own tutor's answer while his own answers wait: %+v", d)
-	}
-
-	// He answers without anyone again: the tutor's answer is his to decide,
-	// and approved, it is posted, the record saying its owner approved it.
+	// Sato answers nothing himself, whatever his row is told, and it makes
+	// no difference to this.
 	b.Exec(`UPDATE course_member SET perm_conversation_answer = 'autonomous' WHERE id = $1`, b.satoM)
+	if n := b.Count(`SELECT count(*) FROM course_member WHERE id = $1 AND perm_conversation_answer = 'denied'`, b.satoM); n != 1 {
+		t.Fatal("a person's seat was written answering conversations")
+	}
+	if v := queue()[*answer.ActionID]; v == nil || !*v {
+		t.Fatalf("Sato's own tutor's answer, as his queue lists it while he decides freely: %v", v)
+	}
+
+	// Sato's own decisions wait for a confirmation: his tutor's answers are
+	// not his, and a decision of his about one is itself a proposal.
+	b.Exec(`UPDATE course_member SET perm_action_decide = 'confirm_required' WHERE id = $1`, b.satoM)
+	if v := queue()[*answer.ActionID]; v == nil || *v {
+		t.Fatalf("Sato's own tutor's answer, as his queue lists it while his own decisions wait: %v", v)
+	}
+	if d := b.MustCall(b.sato, "action.decide", m{"course_id": b.course, "action_id": answer.ActionID, "decision": "approve"}, "decide"); d.Status != domain.StatusProposed {
+		t.Fatalf("Sato deciding his own tutor's answer while his own decisions wait: %+v", d)
+	}
+	if n := b.Count(`SELECT count(*) FROM conversation_message WHERE conversation_id = $1`, conv); n != 1 {
+		t.Fatal("the answer was posted on a decision that waits for a confirmation")
+	}
+
+	// He decides without anyone again: the tutor's answer is his to decide,
+	// and approved, it is posted, the record saying its owner approved it.
+	b.Exec(`UPDATE course_member SET perm_action_decide = 'autonomous' WHERE id = $1`, b.satoM)
 	if v := queue()[*answer.ActionID]; v == nil || !*v {
 		t.Fatalf("Sato's own tutor's answer, as his queue lists it: %v", v)
 	}

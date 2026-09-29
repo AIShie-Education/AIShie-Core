@@ -82,11 +82,24 @@ type Gate struct {
 	// denial Perms gave, recorded as ever, and a target that is not found
 	// for such a caller is that denial too: it learns nothing of ids.
 	OwnAgents OwnAgentsFunc
+	// Refusal, with Perms, says why a caller whom Perms deny is refused,
+	// where the tool knows a reason that tells more than the permission:
+	// asked only once Perms have denied a seat that counts
+	// (permission_denied), it returns the refusal to give in its place, whose
+	// details carry the reason, or nil to leave it as it is. It never allows
+	// anything, so it may read what authorization does not, actor.kind among
+	// it: a person answering in a conversation is told that conversations are
+	// with agents.
+	Refusal RefusalFunc
 }
 
 // OwnAgentsFunc says what caller, from seat, may do about target because it
 // concerns their own agents: domain.Denied for nothing.
 type OwnAgentsFunc func(ctx context.Context, q dbq.Querier, caller domain.Actor, seat *domain.Member, target Target, now time.Time) (domain.Level, error)
+
+// RefusalFunc says why caller, from seat, is refused a call its permissions
+// deny, or nil for permission_denied.
+type RefusalFunc func(ctx context.Context, q dbq.Querier, caller domain.Actor, seat *domain.Member) (*apperr.Error, error)
 
 func (g Gate) CourseScoped() bool { return len(g.Perms) > 0 }
 
@@ -197,6 +210,13 @@ type Spec[In, Out any] struct {
 	// else set may call before they have set their own: setting it. Every
 	// other call of theirs is refused (password_change_required).
 	SetsOwnPassword bool
+	// OwnerJudgedBy, for a tool whose Perms no person holds, is what an
+	// agent's owner is measured by in their place when they judge an action
+	// of this tool their agent made (pipeline ownerJudges): they decide it,
+	// or review it, where they hold these at autonomous. A person answers no
+	// conversation, so an owner is measured for their agent's answers by
+	// what judging them is, action_decide.
+	OwnerJudgedBy []domain.Perm
 	// SecretIn and SecretOut name top-level fields that must never be
 	// stored: they are removed from the recorded payload and from the
 	// recorded result. A SecretIn field still counts in the payload hash, as
@@ -238,8 +258,10 @@ type Tool struct {
 	OnArchived  bool
 	// SetsOwnPassword is Spec.SetsOwnPassword.
 	SetsOwnPassword bool
-	SecretIn        []string
-	SecretOut       []string
+	// OwnerJudgedBy is Spec.OwnerJudgedBy.
+	OwnerJudgedBy []domain.Perm
+	SecretIn      []string
+	SecretOut     []string
 
 	InputSchema  *jsonschema.Schema
 	OutputSchema *jsonschema.Schema
@@ -325,6 +347,17 @@ func Define[In, Out any](s Spec[In, Out]) Tool {
 	if s.Gate.OwnAgents != nil && (!s.Gate.CourseScoped() || s.Gate.Any) {
 		fail("Gate.OwnAgents goes with Gate.Perms, and not with Gate.Any")
 	}
+	if s.Gate.Refusal != nil && !s.Gate.CourseScoped() {
+		fail("Gate.Refusal goes with Gate.Perms")
+	}
+	for _, p := range s.OwnerJudgedBy {
+		if !p.Valid() {
+			fail("unknown permission %q in OwnerJudgedBy", p)
+		}
+	}
+	if len(s.OwnerJudgedBy) > 0 && (s.Kind != Write || !s.Gate.CourseScoped()) {
+		fail("OwnerJudgedBy is for a Write gated by course permissions")
+	}
 	switch s.Kind {
 	case Write:
 		if s.Execute == nil || s.Query != nil {
@@ -366,7 +399,7 @@ func Define[In, Out any](s Spec[In, Out]) Tool {
 	t := Tool{
 		Name: s.Name, Description: s.Description, Kind: s.Kind, Gate: s.Gate, HTTP: s.HTTP,
 		Internal: s.Internal, Unlisted: s.Unlisted, OnArchived: s.OnArchived, SetsOwnPassword: s.SetsOwnPassword,
-		SecretIn: s.SecretIn, SecretOut: s.SecretOut,
+		OwnerJudgedBy: s.OwnerJudgedBy, SecretIn: s.SecretIn, SecretOut: s.SecretOut,
 		InputSchema: inSchema, OutputSchema: outSchema,
 	}
 	t.Decode = func(raw []byte) (any, error) {

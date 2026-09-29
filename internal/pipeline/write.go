@@ -107,7 +107,7 @@ func (p *Pipeline) write(ctx context.Context, tx pgx.Tx, caller Caller, t tool.T
 	var failure *apperr.Error
 	switch {
 	case !level.Allowed():
-		failure = denial(a.decision.Reason)
+		failure = a.refusal()
 	case t.Validate != nil:
 		if err := validate(ctx, tx, t, a.decision.Member, in); err != nil {
 			if !final && transient(err) {

@@ -21,9 +21,12 @@ import (
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/tool"
 )
 
-// A conversation is one member asking one other member questions, and that
-// member answering them: a student and the course's tutor agent, a person
-// and their own agent. docs/schema.md §2.8.
+// A conversation is one member asking an agent seated in the course
+// questions, and the agent answering them: a student and the course's tutor
+// agent, a person and their own agent. docs/schema.md §2.8. It is never
+// between two people, who talk to each other elsewhere: a person answers
+// none (domain.CeilingConversationsAreWithAgents), is offered as nobody's
+// respondent and is refused as one, and the database holds both.
 //
 // Nobody gains through a conversation more than they hold. A member may
 // address a respondent only if the respondent can see and do nothing the
@@ -44,8 +47,8 @@ import (
 // An agent is asked in the site only while what runs it says it answers
 // there (me.site_chat): one operated from an external tool is not offered,
 // and a new question to it is refused, since nothing here would ever answer
-// it (answersElsewhere). That is asked of a new question alone, never of an
-// answer or a read, and never of a person.
+// it (askable). That is asked of a new question alone, never of an answer
+// or a read.
 //
 // Every message is an action, and its payload holds what was written: the
 // action log shows it to whoever decides actions in the course, unscoped, as
@@ -69,8 +72,10 @@ const (
 )
 
 var (
-	asks    = tool.Gate{Perms: []domain.Perm{domain.PermConversationAsk}}
-	answers = tool.Gate{Perms: []domain.Perm{domain.PermConversationAnswer}}
+	asks = tool.Gate{Perms: []domain.Perm{domain.PermConversationAsk}}
+	// A person holds no conversation_answer (domain.Ceiling), and is told
+	// why when they try: conversations are with agents.
+	answers = tool.Gate{Perms: []domain.Perm{domain.PermConversationAnswer}, Refusal: personAnswersNothing}
 	// Closing, retracting and reading a conversation borrow
 	// perm_document_read, the most basic permission a seated member holds
 	// (docs/schema.md §2.2): who may is decided by the conversation — its
@@ -447,27 +452,53 @@ func notAddressable(prefix, why string) error {
 var errAnswersElsewhere = apperr.Precondition("that agent takes no conversations in the site: it is operated from an external tool, and acts there").
 	With("reason", "agent_answers_elsewhere")
 
-// answersElsewhere refuses a respondent that is an agent which takes no
-// conversations in the site now (docs/schema.md §2.8; the rule is SQL's,
-// SiteChatOf). A person is asked in the site as ever. It is asked of a new
-// question only, conversation.open's and conversation.ask's, never of an
-// answer or a read: what an agent was asked stays readable and answerable.
-// It reads kind to refuse, as the refusals of ownership do; nothing that
-// grants reads it.
-func answersElsewhere(ctx context.Context, q dbq.Querier, now time.Time, respondent *domain.Member) error {
+// errWithAgents refuses a person where only an agent may be: as a
+// conversation's respondent, and answering in one. The reason is the
+// ceiling's that denies a person conversation_answer, so that a front end
+// says one thing of all three.
+var errWithAgents = apperr.Forbid("conversations are between a person and an agent: a person answers none, and is asked "+
+	"nothing here; people talk to people elsewhere").With("reason", string(domain.CeilingConversationsAreWithAgents))
+
+// personAnswersNothing is the answering tools' refusal of a person
+// (tool.Gate.Refusal): a person's seat holds conversation_answer at denied,
+// as the database writes every person's, and they are told why. It reads
+// kind to refuse, as the refusals of ownership do; nothing that grants
+// reads it.
+func personAnswersNothing(ctx context.Context, q dbq.Querier, caller domain.Actor, _ *domain.Member) (*apperr.Error, error) {
+	a, err := q.GetActor(ctx, caller.ID)
+	if err != nil || isAgent(a.Kind) {
+		return nil, err
+	}
+	return errWithAgents, nil
+}
+
+// askable says whether a respondent is one a new question may be put to,
+// as far as what it is goes (docs/schema.md §2.8): an agent, since
+// conversations are with agents (errWithAgents), and one that takes
+// conversations in the site now (errAnswersElsewhere; the rule is SQL's,
+// SiteChatOf). It is asked of a new question only, conversation.open's and
+// conversation.ask's, never of an answer or a read: what an agent was asked
+// stays readable and answerable. It reads kind to refuse, as the refusals of
+// ownership do; nothing that grants reads it. The two refusals are returned
+// apart, since whom the caller may address is asked between them.
+func askable(ctx context.Context, q dbq.Querier, now time.Time, respondent *domain.Member) (notAgent, elsewhere error, err error) {
 	chat, err := siteChatOf(ctx, q, now, []uuid.UUID{respondent.ActorID})
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
-	if c := chat[respondent.ActorID]; c.Agent && !c.SiteChat {
-		return errAnswersElsewhere
+	c := chat[respondent.ActorID]
+	if !c.Agent {
+		return errWithAgents, nil, nil
 	}
-	return nil
+	if !c.SiteChat {
+		return nil, errAnswersElsewhere, nil
+	}
+	return nil, nil, nil
 }
 
 type ConversationOpenIn struct {
 	tool.InCourse
-	RespondentMemberID uuid.UUID `json:"respondent_member_id" jsonschema:"whom to ask: one of conversation.respondents"`
+	RespondentMemberID uuid.UUID `json:"respondent_member_id" jsonschema:"the agent to ask: one of conversation.respondents"`
 	Title              *string   `json:"title,omitempty" jsonschema:"at most 200 characters"`
 	Body               *string   `json:"body,omitempty" jsonschema:"the first question, if you have it now; at most 20000 characters"`
 }
@@ -479,8 +510,9 @@ type ConversationOpenOut struct {
 
 // checkOpen is conversation.open's rule without writing anything: for a
 // proposal, when it is queued; for a call, when it runs, with the
-// respondent's seat held. Whom one may address comes first, and only then
-// whether that one, an agent, is asked here at all.
+// respondent's seat held. A person is refused first, as nobody's to ask;
+// then whom one may address; and only then whether that agent is asked here
+// at all.
 func checkOpen(ctx context.Context, q dbq.Querier, m, respondent *domain.Member, now time.Time, in ConversationOpenIn) error {
 	if _, err := optionalText("title", in.Title, maxTitleChars); err != nil {
 		return err
@@ -490,6 +522,13 @@ func checkOpen(ctx context.Context, q dbq.Querier, m, respondent *domain.Member,
 			return err
 		}
 	}
+	notAgent, elsewhere, err := askable(ctx, q, now, respondent)
+	switch {
+	case err != nil:
+		return err
+	case notAgent != nil:
+		return notAgent
+	}
 	why, err := newAddressing(q, now).refusal(ctx, m, respondent)
 	if err != nil {
 		return err
@@ -497,19 +536,20 @@ func checkOpen(ctx context.Context, q dbq.Querier, m, respondent *domain.Member,
 	if why != "" {
 		return notAddressable("you may not address that member", why)
 	}
-	return answersElsewhere(ctx, q, now, respondent)
+	return elsewhere
 }
 
 func conversationOpen() tool.Tool {
 	return tool.Define(tool.Spec[ConversationOpenIn, ConversationOpenOut]{
 		Name: "conversation.open",
-		Description: "Start a conversation with one member of the course — the course's tutor agent, your own agent — and, " +
-			"if you give body, ask the first question. You may address only someone who can see and do nothing you cannot, " +
-			"or your own agent, and an agent only while what runs it answers in the site (agent_answers_elsewhere otherwise: " +
-			"it is operated from an external tool): conversation.respondents lists them. Keep asking with conversation.ask; " +
-			"answers come back as messages (conversation.messages). Both of you, and course staff who decide actions for " +
-			"you, can read it; and a respondent that answers others too, such as the course's tutor, may repeat to them " +
-			"what you write.",
+		Description: "Start a conversation with an agent seated in the course — the course's tutor agent, your own agent — " +
+			"and, if you give body, ask the first question. Conversations are between a person and an agent: a person is " +
+			"nobody's respondent (conversations_are_with_agents); people talk to people elsewhere. You may address only " +
+			"an agent that can see and do nothing you cannot, or your own agent, and only while what runs it answers in " +
+			"the site (agent_answers_elsewhere otherwise: it is operated from an external tool): conversation.respondents " +
+			"lists them. Keep asking with conversation.ask; answers come back as messages (conversation.messages). Both " +
+			"of you, and course staff who decide actions for you, can read it; and an agent that answers others too, such " +
+			"as the course's tutor, may repeat to them what you write.",
 		Kind: tool.Write, Gate: asks,
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/conversations"},
 		Resolve: func(ctx context.Context, q dbq.Querier, in ConversationOpenIn) (tool.Target, error) {
@@ -571,8 +611,9 @@ type MessageIDOut struct {
 }
 
 // checkAsk is conversation.ask's rule: the caller opened the conversation,
-// it is open, the caller may still address its respondent, and the
-// respondent, if an agent, still takes conversations in the site.
+// it is open, its respondent is an agent (every conversation with a person
+// was closed by migration 0018, and the database opens none), the caller
+// may still address it, and it still takes conversations in the site.
 func checkAsk(ctx context.Context, q dbq.Querier, m, respondent *domain.Member, now time.Time, c dbq.Conversation, body string) error {
 	if c.OpenerMemberID != m.ID {
 		return errNotOpener
@@ -583,6 +624,13 @@ func checkAsk(ctx context.Context, q dbq.Querier, m, respondent *domain.Member, 
 	if err := checkBody(body); err != nil {
 		return err
 	}
+	notAgent, elsewhere, err := askable(ctx, q, now, respondent)
+	switch {
+	case err != nil:
+		return err
+	case notAgent != nil:
+		return notAgent
+	}
 	why, err := newAddressing(q, now).refusal(ctx, m, respondent)
 	if err != nil {
 		return err
@@ -590,7 +638,7 @@ func checkAsk(ctx context.Context, q dbq.Querier, m, respondent *domain.Member, 
 	if why != "" {
 		return notAddressable("the respondent is no longer available to you; start a new conversation with someone who is", why)
 	}
-	return answersElsewhere(ctx, q, now, respondent)
+	return elsewhere
 }
 
 func conversationAsk() tool.Tool {
@@ -703,15 +751,20 @@ func newerQuestion(ctx context.Context, q dbq.Querier, c dbq.Conversation, answe
 func conversationAnswer() tool.Tool {
 	return tool.Define(tool.Spec[ConversationAnswerIn, MessageIDOut]{
 		Name: ToolConversationAnswer,
-		Description: "Answer in a conversation addressed to you (conversation.inbox lists those waiting), replying to the " +
-			"opener's latest message, whose id you give as in_reply_to_message_id. It is refused as a conflict, with a reason: " +
+		Description: "Answer, as an agent, in a conversation addressed to you (conversation.inbox lists those waiting), " +
+			"replying to the opener's latest message, whose id you give as in_reply_to_message_id. A person answers none, " +
+			"and is refused (conversations_are_with_agents). It is refused as a conflict, with a reason: " +
 			"moved_on if the opener has written again since (read the new message and answer that), already_answered if that " +
 			"message has its answer, answer_pending if an answer of yours to it waits for approval, closed if the conversation " +
 			"is. Your level of conversation_answer decides whether an answer is posted at once, posted and reviewed after, or " +
 			"waits for a person's approval; one that waits is checked again when approved, and refused then if the " +
 			"conversation has moved on. An answer that failed or was rejected may be written again, under a new idempotency key.",
 		Kind: tool.Write, Gate: answers,
-		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/conversations/{conversation_id}/answer"},
+		// Its owner judges an agent's answer where they decide actions
+		// here without anyone's confirmation: no person answers, so that
+		// is what judging an answer is.
+		OwnerJudgedBy: []domain.Perm{domain.PermActionDecide},
+		HTTP:          tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/conversations/{conversation_id}/answer"},
 		Resolve: func(ctx context.Context, q dbq.Querier, in ConversationAnswerIn) (tool.Target, error) {
 			return conversationTarget(ctx, q, in.CourseID, in.ConversationID)
 		},
@@ -766,6 +819,11 @@ func conversationAnswer() tool.Tool {
 	})
 }
 
+// ClosedWithAPerson is why migration 0018 closed every conversation open
+// with a person as its respondent: conversations are with agents. It is the
+// closed_reason of each, and the reason of its conversation.closed event.
+const ClosedWithAPerson = string(domain.CeilingConversationsAreWithAgents)
+
 type ConversationCloseIn struct {
 	tool.InCourse
 	ConversationID uuid.UUID `json:"conversation_id"`
@@ -797,10 +855,14 @@ func conversationClose() tool.Tool {
 			if err != nil {
 				return OK{}, err
 			}
-			// What the system writes when a seat is removed is not a
-			// participant's to write: it would read as the other one leaving.
+			// What the system writes when a seat is removed, or when it
+			// closed the conversations people were asked in, is not a
+			// participant's to write: it would read as the system's doing.
 			if reason != nil && strings.EqualFold(*reason, members.ConversationSeatRemoved) {
 				return OK{}, apperr.Invalid("%q is what closing a removed seat's conversations says; give another reason", *reason)
+			}
+			if reason != nil && strings.EqualFold(*reason, ClosedWithAPerson) {
+				return OK{}, apperr.Invalid("%q is what closing the conversations people were asked in says; give another reason", *reason)
 			}
 			n, err := ec.Q.CloseConversation(ctx, dbq.CloseConversationParams{ID: c.ID, Reason: reason})
 			if err != nil {
@@ -911,7 +973,7 @@ type ConversationView struct {
 	ID           uuid.UUID `json:"id"`
 	Title        *string   `json:"title,omitempty"`
 	Status       string    `json:"status" jsonschema:"open or closed"`
-	ClosedReason *string   `json:"closed_reason,omitempty" jsonschema:"why it was closed: what its closer said, or seat_removed"`
+	ClosedReason *string   `json:"closed_reason,omitempty" jsonschema:"why it was closed: what its closer said; seat_removed, when a participant's seat was removed; conversations_are_with_agents, when its respondent was a person, as no conversation's is any more"`
 	State        string    `json:"state" jsonschema:"awaiting_answer: the opener wrote last; reply_pending_approval: an answer waits for a person's approval; answered: the respondent wrote last, or nothing has been asked yet; closed"`
 	// PendingReplyActionID is the answer that waits for approval, when one
 	// does.
@@ -981,11 +1043,11 @@ func seatStatus(status string, expires *time.Time, now time.Time) string {
 	return status
 }
 
-// RespondentView is a member the caller may address.
+// RespondentView is an agent the caller may address.
 type RespondentView struct {
 	MemberID      uuid.UUID  `json:"member_id"`
 	DisplayName   string     `json:"display_name"`
-	Kind          string     `json:"kind" jsonschema:"human or agent; for display only"`
+	Kind          string     `json:"kind" jsonschema:"agent: a person is nobody's respondent; for display only"`
 	Role          string     `json:"role" jsonschema:"roster fact, for display"`
 	IsMyDelegate  bool       `json:"is_my_delegate" jsonschema:"your own agent, seated as your delegate"`
 	AnswersCourse bool       `json:"answers_course" jsonschema:"an agent seated to answer the course, not its owner alone: it answers other members as well, and may repeat to them what it is told"`
@@ -1006,10 +1068,11 @@ const maxRespondentCandidates = 500
 func conversationRespondents() tool.Tool {
 	return tool.Define(tool.Spec[tool.InCourse, RespondentsOut]{
 		Name: "conversation.respondents",
-		Description: "Whom you may start a conversation with here: members who answer questions and can see and do nothing " +
-			"you cannot — the course's tutor agent, say — and your own agents, an agent only while what runs it answers in " +
-			"the site. Each says how its answers arrive, whether it answers others too (answers_course: it may repeat to them " +
-			"what you write), and, for an agent, when it was last seen.",
+		Description: "The agents you may start a conversation with here: agents that answer questions and can see and do " +
+			"nothing you cannot — the course's tutor agent, say — and your own agents, each only while what runs it " +
+			"answers in the site. Never a person: conversations are with agents, and people talk to people elsewhere. " +
+			"Each says how its answers arrive, whether it answers others too (answers_course: it may repeat to them what " +
+			"you write), and when it was last seen.",
 		Kind: tool.Read, Gate: asks,
 		HTTP: tool.Route{Method: "GET", Pattern: "/v1/courses/{course_id}/conversations/respondents"},
 		Resolve: func(_ context.Context, _ dbq.Querier, in tool.InCourse) (tool.Target, error) {

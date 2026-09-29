@@ -277,14 +277,26 @@ func TestPermCatalogueMatchesColumns(t *testing.T) {
 }
 
 // Every permission in the catalogue is actually read off the row. A preset
-// that is autonomous everywhere must come back autonomous everywhere.
+// that is autonomous everywhere must come back autonomous everywhere, as far
+// as its seat may hold it: a person answers no conversation, which the
+// database writes on the row, so conversation_answer is read off the tutor
+// agent's, which the tutor preset gives it autonomous.
 func TestEveryPermIsLoaded(t *testing.T) {
 	c := newCS101(t)
 	for _, p := range domain.AllPerms {
-		d, err := authz.ForActor(context.Background(), c.w.Q, c.sato, c.course, []domain.Perm{p}, false, time.Now())
-		if err != nil || d.Level != domain.Autonomous {
-			t.Errorf("%s: instructor got %s (%v), want autonomous", p, d.Level, err)
+		who, name := c.sato, "instructor"
+		if p == domain.PermConversationAnswer {
+			who, name = c.tutor, "tutor"
 		}
+		d, err := authz.ForActor(context.Background(), c.w.Q, who, c.course, []domain.Perm{p}, false, time.Now())
+		if err != nil || d.Level != domain.Autonomous {
+			t.Errorf("%s: %s got %s (%v), want autonomous", p, name, d.Level, err)
+		}
+	}
+	// The instructor's own row says denied, whatever the preset said.
+	d, err := authz.ForActor(context.Background(), c.w.Q, c.sato, c.course, []domain.Perm{domain.PermConversationAnswer}, false, time.Now())
+	if err != nil || d.Level != domain.Denied {
+		t.Errorf("conversation_answer: the instructor, a person, got %s (%v), want denied", d.Level, err)
 	}
 }
 

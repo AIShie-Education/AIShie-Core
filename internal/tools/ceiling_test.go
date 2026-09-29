@@ -43,7 +43,11 @@ func TestAnAgentDecidesAndReviewsOnlyByProposal(t *testing.T) {
 		v.PermCeilings["grade_post"] != "autonomous" || len(v.PermCeilingReasons) != 1 {
 		t.Fatalf("the triage agent's seat: %+v", v)
 	}
-	if a := b.memberView(t, aideM); a.Perms["action_decide"] != "autonomous" || a.PermCeilings["action_decide"] != "autonomous" || len(a.PermCeilingReasons) != 0 {
+	// A person answers no conversation, whatever the preset says: that is
+	// the one ceiling of theirs below autonomous.
+	if a := b.memberView(t, aideM); a.Perms["action_decide"] != "autonomous" || a.PermCeilings["action_decide"] != "autonomous" ||
+		a.Perms["conversation_answer"] != "denied" || len(a.PermCeilingReasons) != 1 ||
+		a.PermCeilingReasons["conversation_answer"] != "conversations_are_with_agents" {
 		t.Fatalf("a person seated as an assistant: %+v", a)
 	}
 

@@ -93,19 +93,28 @@ func (ps permSet) exceeds(granter *domain.Member) (domain.Perm, bool) {
 }
 
 // grantable is the most of p a granter may hand out: what it holds
-// (domain.Member.Perm), with one exception. A delegate never brings agents
+// (domain.Member.Perm), with two exceptions. A delegate never brings agents
 // of its own, and so holds no agent_delegate; but a student it seats may
 // still ask to bring theirs, as the student preset says, with an
 // instructor's approval. That is the principal's to give, and so the
 // delegate's to give for it, no higher than the principal holds it: a
 // delegate that manages members, or hands out join links, seats students as
-// its principal would.
+// its principal would. And no person holds conversation_answer
+// (domain.Ceiling): conversations are with agents. An agent's answers are
+// judged by whoever decides actions, so conversation_answer is handed out
+// as far as the granter decides actions, or answers itself, whichever is
+// more: an instructor seats the course's tutor agent answering on its own
+// as they did when they answered themselves, and a TA, who decides nothing,
+// gives no agent answers.
 func grantable(g *domain.Member, p domain.Perm) domain.Level {
-	if p == domain.PermAgentDelegate && g.PrincipalID != nil {
+	switch {
+	case p == domain.PermAgentDelegate && g.PrincipalID != nil:
 		if g.Principal == nil {
 			return domain.Denied
 		}
 		return g.Principal.Perm(p)
+	case p == domain.PermConversationAnswer:
+		return max(g.Perm(p), g.Perm(domain.PermActionDecide))
 	}
 	return g.Perm(p)
 }

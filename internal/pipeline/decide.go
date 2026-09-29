@@ -287,8 +287,10 @@ func sameParty(ctx context.Context, q *dbq.Queries, a, b uuid.UUID) (bool, error
 // confirmation. That is their own authorization for the very same call, as
 // authorize() would give it them from that seat if they made it now: every
 // permission that gates it held at autonomous, and its target within their
-// reach. Where their own level is lower, the course has someone check them
-// too, and so their agent: someone outside the party decides it. It is the
+// reach; for a tool whose permission no person holds, what the tool says
+// they are measured by instead (tool.Spec.OwnerJudgedBy: for an answer,
+// action_decide). Where their own level is lower, the course has someone
+// check them too, and so their agent: someone outside the party decides it. It is the
 // one case in which a party judges its own, and only at no remove: nobody
 // else of the party — the agent itself, its sibling — and nobody judging an
 // action of the party through a decision about it (judgesOwn) is let by it.
@@ -307,6 +309,11 @@ func (p *Pipeline) ownerJudges(ctx context.Context, q dbq.Querier, actor domain.
 	t, ok := p.reg.Get(a.ActionType)
 	if !ok {
 		return true, false, nil
+	}
+	if len(t.OwnerJudgedBy) > 0 {
+		// A permission no person holds, conversation_answer: the owner is
+		// measured by what judging it is instead (tool.Spec.OwnerJudgedBy).
+		t.Gate.Perms, t.Gate.Any, t.Gate.OwnAgents = t.OwnerJudgedBy, false, nil
 	}
 	args, err := t.Decode(a.Payload)
 	if err != nil {
