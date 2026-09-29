@@ -607,7 +607,7 @@ func TestToolsListIsTheRegistry(t *testing.T) {
 	}
 	// A person's chat panel reads over REST, and what it reads is offered
 	// over MCP as well, as every tool is.
-	for _, name := range []string{"me.conversations"} {
+	for _, name := range []string{"me.conversations", "conversation.mark_read"} {
 		if listed[mcpapi.ToolName(name)] == nil {
 			t.Errorf("%s is not offered over MCP", name)
 		}

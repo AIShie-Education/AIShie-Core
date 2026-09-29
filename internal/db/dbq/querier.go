@@ -328,6 +328,9 @@ type Querier interface {
 	// the departments the issuer administers, and beneath them, as ListCourses
 	// finds those.
 	InvitableBy(ctx context.Context, arg InvitableByParams) (InvitableByRow, error)
+	// The seq of a conversation's newest message, 0 while it has none; with at,
+	// of the newest written at or before it.
+	LastMessageSeq(ctx context.Context, arg LastMessageSeqParams) (int32, error)
 	// The opener's newest message: the one an answer is to answer.
 	LatestOpenerMessage(ctx context.Context, conversationID uuid.UUID) (LatestOpenerMessageRow, error)
 	// exclude_types leaves out whole action types: a chat's messages from a
@@ -701,9 +704,13 @@ type Querier interface {
 	LookupActorForSeating(ctx context.Context, arg LookupActorForSeatingParams) (LookupActorForSeatingRow, error)
 	MarkActionExecuted(ctx context.Context, arg MarkActionExecutedParams) error
 	MarkActionFailed(ctx context.Context, arg MarkActionFailedParams) error
+	// A participant has read a conversation up to a seq, now: its place moves
+	// forward to it, and never back.
+	MarkConversationRead(ctx context.Context, arg MarkConversationReadParams) (int32, error)
 	MaxVersionSeq(ctx context.Context, documentID uuid.UUID) (int32, error)
 	// Whether an agent's owner lets it keep memory: no row is yes.
 	MemoryEnabled(ctx context.Context, holderActorID uuid.UUID) (bool, error)
+	MessageSeqIn(ctx context.Context, arg MessageSeqInParams) (int32, error)
 	// A grade's feedback files go with it when it is written again without
 	// being graded again: a total worked out anew, a score rescaled.
 	MoveFeedbackFiles(ctx context.Context, arg MoveFeedbackFilesParams) error
@@ -861,6 +868,11 @@ type Querier interface {
 	TouchCredential(ctx context.Context, arg TouchCredentialParams) error
 	TryJobLock(ctx context.Context, key int64) (bool, error)
 	UnpublishAssignment(ctx context.Context, id uuid.UUID) (int64, error)
+	// Of the given conversations, those in which one of the given seats takes
+	// part and the other participant has written, and not retracted, a message
+	// after the last that seat has read (conversation_read; none read, with no
+	// row).
+	UnreadAmong(ctx context.Context, arg UnreadAmongParams) ([]uuid.UUID, error)
 	// A null leaves the value as it is. An email an administrator gives is one
 	// they vouch for, as every email was before join links: one a person typed
 	// registering through a link (email_verified false) is theirs no longer. So

@@ -274,3 +274,40 @@ SELECT member_id, student_member_id FROM member_student_scope WHERE member_id = 
 
 -- name: ListAssignmentScopesOf :many
 SELECT member_id, assignment_id FROM member_assignment_scope WHERE member_id = ANY(sqlc.arg(member_ids)::uuid[]);
+
+-- name: LastMessageSeq :one
+-- The seq of a conversation's newest message, 0 while it has none; with at,
+-- of the newest written at or before it.
+SELECT coalesce(max(m.seq), 0)::int AS seq
+FROM conversation_message m
+WHERE m.conversation_id = sqlc.arg(conversation_id) AND (sqlc.narg(at)::timestamptz IS NULL OR m.created_at <= sqlc.narg(at));
+
+-- name: MessageSeqIn :one
+SELECT m.seq FROM conversation_message m WHERE m.id = sqlc.arg(id) AND m.conversation_id = sqlc.arg(conversation_id);
+
+-- name: MarkConversationRead :one
+-- A participant has read a conversation up to a seq, now: its place moves
+-- forward to it, and never back.
+INSERT INTO conversation_read (conversation_id, course_id, member_id, last_read_seq, read_at)
+VALUES (sqlc.arg(conversation_id), sqlc.arg(course_id), sqlc.arg(member_id), sqlc.arg(seq), sqlc.arg(at))
+ON CONFLICT (conversation_id, member_id) DO UPDATE
+   SET last_read_seq = greatest(conversation_read.last_read_seq, EXCLUDED.last_read_seq), read_at = EXCLUDED.read_at
+RETURNING last_read_seq;
+
+-- name: UnreadAmong :many
+-- Of the given conversations, those in which one of the given seats takes
+-- part and the other participant has written, and not retracted, a message
+-- after the last that seat has read (conversation_read; none read, with no
+-- row).
+SELECT c.id
+FROM conversation c
+CROSS JOIN LATERAL (
+    SELECT CASE WHEN c.opener_member_id = ANY(sqlc.arg(member_ids)::uuid[]) THEN c.opener_member_id
+                ELSE c.respondent_member_id END AS reader) p
+LEFT JOIN conversation_read r ON r.conversation_id = c.id AND r.member_id = p.reader
+WHERE c.id = ANY(sqlc.arg(ids)::uuid[])
+  AND (c.opener_member_id = ANY(sqlc.arg(member_ids)::uuid[]) OR c.respondent_member_id = ANY(sqlc.arg(member_ids)::uuid[]))
+  AND EXISTS (SELECT 1 FROM conversation_message m
+               WHERE m.conversation_id = c.id AND m.author_member_id <> p.reader
+                 AND m.seq > coalesce(r.last_read_seq, 0)
+                 AND NOT EXISTS (SELECT 1 FROM conversation_message_retraction x WHERE x.message_id = m.id));

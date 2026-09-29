@@ -297,6 +297,7 @@ type MyConversation struct {
 	ClosedReason   *string                  `json:"closed_reason,omitempty" jsonschema:"as conversation.get says"`
 	CreatedAt      time.Time                `json:"created_at"`
 	LastActivityAt time.Time                `json:"last_activity_at" jsonschema:"its last message, or its opening while it has none; the list's order, newest first"`
+	Unread         bool                     `json:"unread" jsonschema:"whether the agent has written, and not retracted, anything since you last marked it read (conversation.mark_read)"`
 	MayAsk         bool                     `json:"may_ask" jsonschema:"whether you may ask in its course now: your seat there holds conversation_ask, and the course is not archived. Whether this conversation takes another question is its state's, and its agent's (conversation.ask says why not)"`
 }
 
@@ -385,7 +386,8 @@ func meConversations() tool.Tool {
 		Name: "me.conversations",
 		Description: "Your conversations with agents, as the one who asked, in every course you are seated in (or in " +
 			"course_id's), the newest activity first, for a chat panel: each with its course, its agent, its state as " +
-			"conversation.get says it, when it was last active, and whether you may ask in its course now. It lists what conversation.list " +
+			"conversation.get says it, when it was last active, whether the agent has written since you last read it " +
+			"(unread; conversation.mark_read), and whether you may ask in its course now. It lists what conversation.list " +
 			"lists of yours in each course: nothing from a seat that is removed, paused or expired. Page with after = the " +
 			"next of the page before.",
 		Kind: tool.Read, Gate: self,
@@ -428,6 +430,10 @@ func meConversations() tool.Tool {
 			for _, v := range views {
 				byID[v.ID] = v
 			}
+			unread, err := unreadAmong(ctx, rc.Q, arg.MemberIds, ids)
+			if err != nil {
+				return out, err
+			}
 			for _, r := range rows { // newest first, not the views' order
 				v, ok := byID[r.ID]
 				if !ok {
@@ -439,7 +445,7 @@ func meConversations() tool.Tool {
 					Respondent: MyConversationRespondent{MemberID: v.Respondent.MemberID, ActorID: v.respondentActor,
 						DisplayName: v.Respondent.DisplayName, Kind: v.Respondent.Kind},
 					Title: v.Title, Status: v.Status, State: v.State, ClosedReason: v.ClosedReason, CreatedAt: v.CreatedAt,
-					LastActivityAt: r.LastActivityAt, MayAsk: seat.mayAsk,
+					LastActivityAt: r.LastActivityAt, Unread: unread[r.ID], MayAsk: seat.mayAsk,
 				})
 			}
 			if len(rows) == limit {

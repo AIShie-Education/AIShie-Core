@@ -356,12 +356,20 @@ call 200 GET "$C/members/$SATO_M" "$SATO"
 [ "$(json "$WORK/body" 'd["result"]["perms"]["conversation_answer"], d["result"]["perm_ceilings"]["conversation_answer"], d["result"]["perm_ceiling_reasons"]["conversation_answer"]')" = "denied denied conversations_are_with_agents" ] ||
   fail "Sato's seat says he answers: $(cat "$WORK/body")"
 
-step "Yuki's chat panel lists her conversations with agents in every course, the newest first"
+step "Yuki's chat panel lists her conversations with agents in every course, the newest first, saying what she has not read"
 call 200 GET /v1/me/conversations "$YUKI"
 [ "$(json "$WORK/body" 'len(d["result"]["conversations"]), d["result"]["conversations"][0]["conversation_id"] == "'"$CONV"'"')" = "1 True" ] ||
   fail "Yuki's conversations: $(cat "$WORK/body")"
-[ "$(json "$WORK/body" '*(lambda c: (c["course"]["code"], c["respondent"]["member_id"] == "'"$TUTOR_M"'", c["respondent"]["actor_id"] == "'"$TUTOR_ID"'", c["respondent"]["kind"], c["state"], c["may_ask"]))(d["result"]["conversations"][0])')" = "CS101 True True agent answered True" ] ||
+[ "$(json "$WORK/body" '*(lambda c: (c["course"]["code"], c["respondent"]["member_id"] == "'"$TUTOR_M"'", c["respondent"]["actor_id"] == "'"$TUTOR_ID"'", c["respondent"]["kind"], c["state"], c["unread"], c["may_ask"]))(d["result"]["conversations"][0])')" = "CS101 True True agent answered True True" ] ||
   fail "Yuki's conversation with the tutor, as her panel shows it: $(cat "$WORK/body")"
+# She reads the answer: it is unread no more, wherever she looks.
+call 200 POST "$C/conversations/$CONV/read" "$YUKI"
+[ "$(json "$WORK/body" 'd["result"]["read_up_to_seq"], d["result"]["unread"]')" = "2 False" ] || fail "marking it read: $(cat "$WORK/body")"
+call 200 GET /v1/me/conversations "$YUKI"
+[ "$(json "$WORK/body" 'd["result"]["conversations"][0]["unread"]')" = False ] || fail "still unread in her panel: $(cat "$WORK/body")"
+call 200 GET "$C/conversations/$CONV" "$YUKI"
+[ "$(json "$WORK/body" 'd["result"]["unread"]')" = False ] || fail "still unread in the conversation: $(cat "$WORK/body")"
+call 404 POST "$C/conversations/$CONV/read" "$GRADER" # nobody else's to read, nor to mark read
 call 200 GET "/v1/me/conversations?course_id=$COURSE&limit=1" "$YUKI"
 [ "$(json "$WORK/body" 'len(d["result"]["conversations"]), d["result"].get("next") is not None')" = "1 True" ] || fail "a page of one: $(cat "$WORK/body")"
 call 200 GET "/v1/me/conversations?limit=1&after=$(json "$WORK/body" 'd["result"]["next"]')" "$YUKI"

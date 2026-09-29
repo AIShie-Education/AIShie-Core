@@ -1,18 +1,20 @@
 -- AIshiteru Core — after 0018_conversations_with_agents.down.sql, in `make db-test-sql`
 --
--- The refusals are gone, and with them nothing else: the conversations the
--- up closed stay closed, the proposals it cancelled stay cancelled, and the
--- seats and presets it lowered stay lowered. The release before this one may
--- open a conversation with a person again, and give a person
--- conversation_answer again.
+-- The refusals are gone, and what everyone had read, and with them nothing
+-- else: the conversations the up closed stay closed, the proposals it
+-- cancelled stay cancelled, and the seats and presets it lowered stay
+-- lowered. The release before this one may open a conversation with a
+-- person again, and give a person conversation_answer again.
 
 \set ON_ERROR_STOP 1
 \set QUIET 1
 DO $chk$
 BEGIN
     IF EXISTS (SELECT 1 FROM pg_trigger WHERE tgname IN ('conversation_respondent_is_agent', 'course_member_person_ceiling'))
-       OR EXISTS (SELECT 1 FROM pg_proc WHERE proname IN ('conversation_check_respondent', 'course_member_person_answers_nothing')) THEN
-        RAISE EXCEPTION 'FAIL  0018 down: a trigger or its function is still there';
+       OR EXISTS (SELECT 1 FROM pg_proc WHERE proname IN ('conversation_check_respondent', 'course_member_person_answers_nothing',
+                                                          'conversation_read_check'))
+       OR EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'conversation_read') THEN
+        RAISE EXCEPTION 'FAIL  0018 down: a trigger, a function or the read state is still there';
     END IF;
     IF (SELECT count(*) FROM conversation WHERE status = 'closed' AND closed_reason = 'conversations_are_with_agents'
         AND id IN ('00000000-0000-0000-0018-0000000000c1', '00000000-0000-0000-0018-0000000000c2',

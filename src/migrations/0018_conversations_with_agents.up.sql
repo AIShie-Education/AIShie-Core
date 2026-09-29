@@ -30,6 +30,13 @@
 --     the feed (conversation.closed, and action.cancelled for what was
 --     cancelled). It stays readable, as every closed conversation does.
 --
+-- Each participant's place in a conversation is kept from now on: how far
+-- they have read it (conversation_read, written by conversation.mark_read),
+-- so that the views say whether the other has written since. What was
+-- written before there was such a place counts as read by both, once,
+-- here: nobody can say otherwise, and a panel that lit up with every answer
+-- ever given would say nothing.
+--
 -- From now on the database refuses a conversation whose respondent is a
 -- person's seat, and writes a person's seat that is not removed with
 -- conversation_answer denied, whatever it is told: cut down, not refused,
@@ -129,6 +136,70 @@ $$;
 CREATE TRIGGER conversation_respondent_is_agent
     BEFORE INSERT ON conversation
     FOR EACH ROW EXECUTE FUNCTION conversation_check_respondent();
+
+-- ---------------------------------------------------------------------------
+-- conversation_read: how far each participant has read
+-- ---------------------------------------------------------------------------
+
+-- One row per participant who has marked a conversation read: the seq of
+-- the last message they have read, and when they last did. A participant
+-- with no row has read nothing. It moves forward only: marking an earlier
+-- message read leaves it where it is. The conversation's own row is not
+-- touched, since a closed conversation stays as it is and is still read,
+-- and marking it read does not wait for the messages written in it.
+CREATE TABLE conversation_read (
+    conversation_id uuid        NOT NULL,
+    course_id       uuid        NOT NULL,
+    member_id       uuid        NOT NULL,
+    last_read_seq   integer     NOT NULL,
+    read_at         timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (conversation_id, member_id),
+    FOREIGN KEY (conversation_id, course_id) REFERENCES conversation (id, course_id),
+    FOREIGN KEY (course_id, member_id)       REFERENCES course_member (course_id, id),
+    CONSTRAINT conversation_read_seq_valid CHECK (last_read_seq >= 0)
+);
+
+-- Only a participant has a place; whose it is never changes, and it goes
+-- forward only.
+CREATE FUNCTION conversation_read_check() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE
+    c conversation;
+BEGIN
+    IF TG_OP = 'UPDATE' THEN
+        IF NEW.conversation_id <> OLD.conversation_id OR NEW.member_id <> OLD.member_id OR NEW.course_id <> OLD.course_id THEN
+            RAISE EXCEPTION 'conversation_read %/%: whose place it is never changes', OLD.conversation_id, OLD.member_id
+                USING ERRCODE = 'restrict_violation';
+        END IF;
+        IF NEW.last_read_seq < OLD.last_read_seq THEN
+            RAISE EXCEPTION 'conversation_read %/%: reading goes forward only', OLD.conversation_id, OLD.member_id
+                USING ERRCODE = 'restrict_violation';
+        END IF;
+        RETURN NEW;
+    END IF;
+    SELECT * INTO c FROM conversation WHERE id = NEW.conversation_id;
+    IF NOT FOUND THEN
+        RETURN NEW; -- the foreign key says so
+    END IF;
+    IF NEW.member_id NOT IN (c.opener_member_id, c.respondent_member_id) THEN
+        RAISE EXCEPTION 'conversation_read: % takes no part in conversation %', NEW.member_id, c.id
+            USING ERRCODE = 'check_violation';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER conversation_read_guarded
+    BEFORE INSERT OR UPDATE ON conversation_read
+    FOR EACH ROW EXECUTE FUNCTION conversation_read_check();
+
+-- What was written before counts as read, by both participants.
+INSERT INTO conversation_read (conversation_id, course_id, member_id, last_read_seq)
+SELECT c.id, c.course_id, p.member_id, w.last_seq
+  FROM conversation c
+  JOIN (SELECT conversation_id, max(seq) AS last_seq FROM conversation_message GROUP BY conversation_id) w
+    ON w.conversation_id = c.id
+ CROSS JOIN LATERAL (VALUES (c.opener_member_id), (c.respondent_member_id)) p (member_id);
 
 -- ---------------------------------------------------------------------------
 -- The feed: the participants are told

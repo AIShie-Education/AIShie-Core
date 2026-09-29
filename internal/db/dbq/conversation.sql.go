@@ -397,6 +397,26 @@ func (q *Queries) InsertRetraction(ctx context.Context, arg InsertRetractionPara
 	return result.RowsAffected(), nil
 }
 
+const lastMessageSeq = `-- name: LastMessageSeq :one
+SELECT coalesce(max(m.seq), 0)::int AS seq
+FROM conversation_message m
+WHERE m.conversation_id = $1 AND ($2::timestamptz IS NULL OR m.created_at <= $2)
+`
+
+type LastMessageSeqParams struct {
+	ConversationID uuid.UUID
+	At             *time.Time
+}
+
+// The seq of a conversation's newest message, 0 while it has none; with at,
+// of the newest written at or before it.
+func (q *Queries) LastMessageSeq(ctx context.Context, arg LastMessageSeqParams) (int32, error) {
+	row := q.db.QueryRow(ctx, lastMessageSeq, arg.ConversationID, arg.At)
+	var seq int32
+	err := row.Scan(&seq)
+	return seq, err
+}
+
 const latestOpenerMessage = `-- name: LatestOpenerMessage :one
 SELECT m.id, m.seq
 FROM conversation_message m
@@ -881,6 +901,53 @@ func (q *Queries) ListStudentScopesOf(ctx context.Context, memberIds []uuid.UUID
 	return items, nil
 }
 
+const markConversationRead = `-- name: MarkConversationRead :one
+INSERT INTO conversation_read (conversation_id, course_id, member_id, last_read_seq, read_at)
+VALUES ($1, $2, $3, $4, $5)
+ON CONFLICT (conversation_id, member_id) DO UPDATE
+   SET last_read_seq = greatest(conversation_read.last_read_seq, EXCLUDED.last_read_seq), read_at = EXCLUDED.read_at
+RETURNING last_read_seq
+`
+
+type MarkConversationReadParams struct {
+	ConversationID uuid.UUID
+	CourseID       uuid.UUID
+	MemberID       uuid.UUID
+	Seq            int32
+	At             time.Time
+}
+
+// A participant has read a conversation up to a seq, now: its place moves
+// forward to it, and never back.
+func (q *Queries) MarkConversationRead(ctx context.Context, arg MarkConversationReadParams) (int32, error) {
+	row := q.db.QueryRow(ctx, markConversationRead,
+		arg.ConversationID,
+		arg.CourseID,
+		arg.MemberID,
+		arg.Seq,
+		arg.At,
+	)
+	var last_read_seq int32
+	err := row.Scan(&last_read_seq)
+	return last_read_seq, err
+}
+
+const messageSeqIn = `-- name: MessageSeqIn :one
+SELECT m.seq FROM conversation_message m WHERE m.id = $1 AND m.conversation_id = $2
+`
+
+type MessageSeqInParams struct {
+	ID             uuid.UUID
+	ConversationID uuid.UUID
+}
+
+func (q *Queries) MessageSeqIn(ctx context.Context, arg MessageSeqInParams) (int32, error) {
+	row := q.db.QueryRow(ctx, messageSeqIn, arg.ID, arg.ConversationID)
+	var seq int32
+	err := row.Scan(&seq)
+	return seq, err
+}
+
 const touchConversation = `-- name: TouchConversation :execrows
 UPDATE conversation SET last_message_at = $1, last_author_member_id = $2
 WHERE id = $3 AND status = 'open'
@@ -902,4 +969,48 @@ func (q *Queries) TouchConversation(ctx context.Context, arg TouchConversationPa
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+const unreadAmong = `-- name: UnreadAmong :many
+SELECT c.id
+FROM conversation c
+CROSS JOIN LATERAL (
+    SELECT CASE WHEN c.opener_member_id = ANY($1::uuid[]) THEN c.opener_member_id
+                ELSE c.respondent_member_id END AS reader) p
+LEFT JOIN conversation_read r ON r.conversation_id = c.id AND r.member_id = p.reader
+WHERE c.id = ANY($2::uuid[])
+  AND (c.opener_member_id = ANY($1::uuid[]) OR c.respondent_member_id = ANY($1::uuid[]))
+  AND EXISTS (SELECT 1 FROM conversation_message m
+               WHERE m.conversation_id = c.id AND m.author_member_id <> p.reader
+                 AND m.seq > coalesce(r.last_read_seq, 0)
+                 AND NOT EXISTS (SELECT 1 FROM conversation_message_retraction x WHERE x.message_id = m.id))
+`
+
+type UnreadAmongParams struct {
+	MemberIds []uuid.UUID
+	Ids       []uuid.UUID
+}
+
+// Of the given conversations, those in which one of the given seats takes
+// part and the other participant has written, and not retracted, a message
+// after the last that seat has read (conversation_read; none read, with no
+// row).
+func (q *Queries) UnreadAmong(ctx context.Context, arg UnreadAmongParams) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, unreadAmong, arg.MemberIds, arg.Ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }

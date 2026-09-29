@@ -1205,6 +1205,31 @@ SELECT pg_temp.fails('nobody writes in a closed conversation', '23514', $q$
             '00000000-0000-0000-0000-000000000052', 'One more thing', '00000000-0000-0000-0000-0000000000b1') $q$);
 SELECT pg_temp.fails('a closed conversation stays closed', '23001', $q$
     UPDATE conversation SET status = 'open', closed_reason = NULL WHERE id = '00000000-0000-0000-0000-0000000000c1' $q$);
+-- How far each participant has read a conversation: a participant's, forward only.
+SELECT pg_temp.ok('a participant keeps a place in a conversation, closed or not', $q$
+    INSERT INTO conversation_read (conversation_id, course_id, member_id, last_read_seq)
+    VALUES ('00000000-0000-0000-0000-0000000000c1', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000000052', 1) $q$);
+SELECT pg_temp.fails('one place each', '23505', $q$
+    INSERT INTO conversation_read (conversation_id, course_id, member_id, last_read_seq)
+    VALUES ('00000000-0000-0000-0000-0000000000c1', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000000052', 2) $q$);
+SELECT pg_temp.fails('only a participant keeps one', '23514', $q$
+    INSERT INTO conversation_read (conversation_id, course_id, member_id, last_read_seq)
+    VALUES ('00000000-0000-0000-0000-0000000000c1', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000000051', 1) $q$);
+SELECT pg_temp.fails('a place is in the conversation''s course', '23503', $q$
+    INSERT INTO conversation_read (conversation_id, course_id, member_id, last_read_seq)
+    VALUES ('00000000-0000-0000-0000-0000000000c1', '00000000-0000-0000-0000-000000000042', '00000000-0000-0000-0000-000000000053', 1) $q$);
+SELECT pg_temp.fails('a place is no earlier than nothing read', '23514', $q$
+    INSERT INTO conversation_read (conversation_id, course_id, member_id, last_read_seq)
+    VALUES ('00000000-0000-0000-0000-0000000000c1', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000000053', -1) $q$);
+SELECT pg_temp.ok('a place moves forward', $q$
+    UPDATE conversation_read SET last_read_seq = 2, read_at = now()
+     WHERE conversation_id = '00000000-0000-0000-0000-0000000000c1' AND member_id = '00000000-0000-0000-0000-000000000052' $q$);
+SELECT pg_temp.fails('and never back', '23001', $q$
+    UPDATE conversation_read SET last_read_seq = 1
+     WHERE conversation_id = '00000000-0000-0000-0000-0000000000c1' AND member_id = '00000000-0000-0000-0000-000000000052' $q$);
+SELECT pg_temp.fails('whose place it is never changes', '23001', $q$
+    UPDATE conversation_read SET member_id = '00000000-0000-0000-0000-000000000053'
+     WHERE conversation_id = '00000000-0000-0000-0000-0000000000c1' AND member_id = '00000000-0000-0000-0000-000000000052' $q$);
 -- Conversations are between a person and an agent: a person answers none.
 SELECT pg_temp.fails('a conversation''s respondent is an agent''s seat, never a person''s', '23514', $q$
     INSERT INTO conversation (course_id, opener_member_id, respondent_member_id)

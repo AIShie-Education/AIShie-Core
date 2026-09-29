@@ -57,8 +57,8 @@ import (
 
 func conversationTools() []tool.Tool {
 	return []tool.Tool{conversationRespondents(), conversationOpen(), conversationAsk(), conversationAnswer(),
-		conversationClose(), conversationRetract(), conversationList(), conversationGet(), conversationMessages(),
-		conversationInbox()}
+		conversationClose(), conversationRetract(), conversationMarkRead(), conversationList(), conversationGet(),
+		conversationMessages(), conversationInbox()}
 }
 
 // ToolConversationAnswer is the answer's action type, which the views look
@@ -939,6 +939,85 @@ func conversationRetract() tool.Tool {
 	})
 }
 
+type ConversationMarkReadIn struct {
+	tool.InCourse
+	ConversationID uuid.UUID  `json:"conversation_id"`
+	UpToMessageID  *uuid.UUID `json:"up_to_message_id,omitempty" jsonschema:"read up to and including this message of the conversation's; by default, every message in it now"`
+	UpTo           *time.Time `json:"up_to,omitempty" jsonschema:"read every message written at or before this time; give this or up_to_message_id, not both"`
+}
+
+type ConversationMarkReadOut struct {
+	ReadUpToSeq int32 `json:"read_up_to_seq" jsonschema:"the seq of the last message you have read, now: it never goes back, so marking an earlier message read leaves it where it was; 0 for none"`
+	Unread      bool  `json:"unread" jsonschema:"whether the other participant has written, and not retracted, anything after it"`
+}
+
+// conversationMarkRead is gated by perm_document_read, borrowed
+// (docs/schema.md §2.2), as reading a conversation is: who may mark it read
+// is one of its two participants, while they may read it (mayRead). It is a
+// write like any other, recorded, under an idempotency key, and changes
+// nothing but the caller's own place in the conversation, which only goes
+// forward: the same call made twice leaves it where the first did. It emits
+// no event: it is news to nobody else.
+func conversationMarkRead() tool.Tool {
+	return tool.Define(tool.Spec[ConversationMarkReadIn, ConversationMarkReadOut]{
+		Name: "conversation.mark_read",
+		Description: "Say you have read a conversation you take part in: every message in it now, or up to a message " +
+			"(up_to_message_id) or a time (up_to). What you have read only goes forward. conversation.list, " +
+			"conversation.get and me.conversations then say it is unread only once the other has written again. It " +
+			"changes nothing else, and tells nobody.",
+		Kind: tool.Write, Gate: converses,
+		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/conversations/{conversation_id}/read"},
+		Resolve: func(ctx context.Context, q dbq.Querier, in ConversationMarkReadIn) (tool.Target, error) {
+			return conversationTarget(ctx, q, in.CourseID, in.ConversationID)
+		},
+		Validate: func(_ context.Context, _ dbq.Querier, _ *domain.Member, in ConversationMarkReadIn) error {
+			if in.UpToMessageID != nil && in.UpTo != nil {
+				return apperr.Invalid("give up_to_message_id or up_to, not both")
+			}
+			return nil
+		},
+		Execute: func(ctx context.Context, ec *tool.ExecCtx, in ConversationMarkReadIn) (ConversationMarkReadOut, error) {
+			c, err := findConversation(ctx, ec.Q, in.CourseID, in.ConversationID)
+			if err != nil {
+				return ConversationMarkReadOut{}, err
+			}
+			ok, err := newAddressing(ec.Q, ec.Now).mayRead(ctx, ec.Member, c)
+			if err != nil {
+				return ConversationMarkReadOut{}, err
+			}
+			if !ok {
+				return ConversationMarkReadOut{}, errNoConversation
+			}
+			if ec.Member.ID != c.OpenerMemberID && ec.Member.ID != c.RespondentMemberID {
+				return ConversationMarkReadOut{}, apperr.Forbid("only the two who take part in a conversation mark it read; "+
+					"overseeing it keeps no place in it").With("reason", "not_a_participant")
+			}
+			var seq int32
+			switch {
+			case in.UpToMessageID != nil:
+				seq, err = ec.Q.MessageSeqIn(ctx, dbq.MessageSeqInParams{ID: *in.UpToMessageID, ConversationID: c.ID})
+				if errors.Is(err, pgx.ErrNoRows) {
+					return ConversationMarkReadOut{}, apperr.Invalid("up_to_message_id must name a message of this conversation's").
+						With("field", "up_to_message_id")
+				}
+			default:
+				seq, err = ec.Q.LastMessageSeq(ctx, dbq.LastMessageSeqParams{ConversationID: c.ID, At: in.UpTo})
+			}
+			if err != nil {
+				return ConversationMarkReadOut{}, err
+			}
+			out := ConversationMarkReadOut{}
+			if out.ReadUpToSeq, err = ec.Q.MarkConversationRead(ctx, dbq.MarkConversationReadParams{ConversationID: c.ID,
+				CourseID: c.CourseID, MemberID: ec.Member.ID, Seq: seq, At: ec.Now}); err != nil {
+				return ConversationMarkReadOut{}, err
+			}
+			unread, err := unreadAmong(ctx, ec.Q, []uuid.UUID{ec.Member.ID}, []uuid.UUID{c.ID})
+			out.Unread = unread[c.ID]
+			return out, err
+		},
+	})
+}
+
 // ---------------------------------------------------------------------------
 // Reading
 // ---------------------------------------------------------------------------
@@ -985,6 +1064,9 @@ type ConversationView struct {
 	LastAuthorMemberID    *uuid.UUID             `json:"last_author_member_id,omitempty"`
 	LatestOpenerMessageID *uuid.UUID             `json:"latest_opener_message_id,omitempty" jsonschema:"what an answer replies to"`
 	LastRetractedAt       *time.Time             `json:"last_retracted_at,omitempty" jsonschema:"when a message in it was last retracted: a retraction adds no message, so a reader polling with after_seq reads the messages again when this changes"`
+	// Unread is said by conversation.list and conversation.get to one who
+	// takes part in it, of the other's messages (withUnread).
+	Unread *bool `json:"unread,omitempty" jsonschema:"in conversation.list and conversation.get, when you take part in it: whether the other participant has written, and not retracted, anything since you last marked it read (conversation.mark_read); absent otherwise"`
 	// respondentActor is the respondent's actor, for me.conversations,
 	// which names it; the other views do not.
 	respondentActor uuid.UUID
@@ -1038,6 +1120,40 @@ func conversationViews(ctx context.Context, q dbq.Querier, now time.Time, list [
 		out = append(out, v)
 	}
 	return out, nil
+}
+
+// unreadAmong is which of the given conversations the given seats take
+// part in and have not read all the other participant wrote: one statement.
+func unreadAmong(ctx context.Context, q dbq.Querier, seats, list []uuid.UUID) (map[uuid.UUID]bool, error) {
+	out := map[uuid.UUID]bool{}
+	if len(seats) == 0 || len(list) == 0 {
+		return out, nil
+	}
+	ids, err := q.UnreadAmong(ctx, dbq.UnreadAmongParams{MemberIds: seats, Ids: list})
+	for _, id := range ids {
+		out[id] = true
+	}
+	return out, err
+}
+
+// withUnread says in each view in which m takes part whether it has read
+// all the other participant wrote; a view m oversees says nothing of it.
+func withUnread(ctx context.Context, q dbq.Querier, m *domain.Member, views []ConversationView) error {
+	list := make([]uuid.UUID, 0, len(views))
+	for _, v := range views {
+		list = append(list, v.ID)
+	}
+	unread, err := unreadAmong(ctx, q, []uuid.UUID{m.ID}, list)
+	if err != nil {
+		return err
+	}
+	for i, v := range views {
+		if v.Opener.MemberID == m.ID || v.Respondent.MemberID == m.ID {
+			u := unread[v.ID]
+			views[i].Unread = &u
+		}
+	}
+	return nil
 }
 
 func seatStatus(status string, expires *time.Time, now time.Time) string {
@@ -1148,7 +1264,8 @@ func conversationList() tool.Tool {
 	return tool.Define(tool.Spec[ConversationListIn, ConversationListOut]{
 		Name: "conversation.list",
 		Description: "Conversations in this course, oldest first, without what was written: those you started, those " +
-			"addressed to you, and, if you decide actions here, those opened by the members within your student scope.",
+			"addressed to you, and, if you decide actions here, those opened by the members within your student scope. " +
+			"Each you take part in says whether the other has written since you last read it (unread; conversation.mark_read).",
 		Kind: tool.Read, Gate: converses,
 		HTTP: tool.Route{Method: "GET", Pattern: "/v1/courses/{course_id}/conversations"},
 		Resolve: func(_ context.Context, _ dbq.Querier, in ConversationListIn) (tool.Target, error) {
@@ -1178,11 +1295,17 @@ func conversationList() tool.Tool {
 				return ConversationListOut{}, err
 			}
 			views, err := conversationViews(ctx, rc.Q, rc.Now, list)
+			if err != nil {
+				return ConversationListOut{}, err
+			}
+			if err := withUnread(ctx, rc.Q, rc.Member, views); err != nil {
+				return ConversationListOut{}, err
+			}
 			out := ConversationListOut{Conversations: views}
 			if len(list) > 0 && len(list) == int(in.limit()) {
 				out.Next = &list[len(list)-1]
 			}
-			return out, err
+			return out, nil
 		},
 	})
 }
@@ -1252,8 +1375,9 @@ func conversationView(ctx context.Context, rc *tool.ReadCtx, id uuid.UUID) (Conv
 func conversationGet() tool.Tool {
 	return tool.Define(tool.Spec[ConversationIDIn, ConversationGetOut]{
 		Name: "conversation.get",
-		Description: "One conversation: who takes part, what state it is in, whether an answer waits for approval, and the " +
-			"opener's latest message, which an answer replies to. Its opener may always read it; its respondent while the " +
+		Description: "One conversation: who takes part, what state it is in, whether an answer waits for approval, the " +
+			"opener's latest message, which an answer replies to, and, if you take part, whether the other has written since " +
+			"you last read it (unread; conversation.mark_read). Its opener may always read it; its respondent while the " +
 			"opener may still address it; and course staff who decide actions for the opener.",
 		Kind: tool.Read, Gate: converses,
 		HTTP: tool.Route{Method: "GET", Pattern: "/v1/courses/{course_id}/conversations/{conversation_id}"},
@@ -1265,7 +1389,14 @@ func conversationGet() tool.Tool {
 				return ConversationGetOut{}, err
 			}
 			v, err := conversationView(ctx, rc, in.ConversationID)
-			return ConversationGetOut{ConversationView: v, VisibleTo: visibleTo(v)}, err
+			if err != nil {
+				return ConversationGetOut{}, err
+			}
+			views := []ConversationView{v}
+			if err := withUnread(ctx, rc.Q, rc.Member, views); err != nil {
+				return ConversationGetOut{}, err
+			}
+			return ConversationGetOut{ConversationView: views[0], VisibleTo: visibleTo(views[0])}, nil
 		},
 	})
 }

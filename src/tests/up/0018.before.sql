@@ -2,11 +2,12 @@
 --
 -- What the migration finds: a course in which people answer conversations
 -- beside an agent. An instructor who answers, a TA who answers by proposal,
--- a student asking each of them and the course's tutor agent, a seat
--- removed while it answered; answers and a question waiting for approval in
--- the conversations with people, one waiting in the tutor's, and
--- conversations waiting to be opened with a person and with the tutor; and
--- presets for people that give conversation_answer, beside one for agents.
+-- a student asking each of them and the course's tutor agent, twice, once
+-- with nothing asked yet, and a seat removed while it answered; answers and
+-- a question waiting for approval in the conversations with people, one
+-- waiting in the tutor's, and conversations waiting to be opened with a
+-- person and with the tutor; and presets for people that give
+-- conversation_answer, beside one for agents. Nobody's read state yet.
 -- Committed, so that the migration runs over it; it stays, for the redo and
 -- the downs after it (tests/down/0018.*), and the downs after that drop it
 -- with everything else.
@@ -92,7 +93,8 @@ INSERT INTO action (id, actor_id, course_id, member_id, action_type, target_type
      '{}', repeat('0', 64), 'up18-ba', 'confirm_required', 'proposed');
 
 -- Conversations: c1 Wei asks Lin · c2 Wei asks Ho · c3 Wei asks the tutor · c4 Wei asked Lin, closed · c5 Old
--- was asked, and his seat was removed before 0008's removals closed anything
+-- was asked, and his seat was removed before 0008's removals closed anything · c6 Wei opened one with the
+-- tutor and has asked nothing yet
 INSERT INTO conversation (id, course_id, opener_member_id, respondent_member_id, last_message_at, last_author_member_id) VALUES
     ('00000000-0000-0000-0018-0000000000c1', '00000000-0000-0000-0018-000000000041', '00000000-0000-0000-0018-000000000053',
      '00000000-0000-0000-0018-000000000051', now(), '00000000-0000-0000-0018-000000000053'),
@@ -104,6 +106,9 @@ INSERT INTO conversation (id, course_id, opener_member_id, respondent_member_id,
      '00000000-0000-0000-0018-000000000051', now(), '00000000-0000-0000-0018-000000000053'),
     ('00000000-0000-0000-0018-0000000000c5', '00000000-0000-0000-0018-000000000041', '00000000-0000-0000-0018-000000000053',
      '00000000-0000-0000-0018-000000000054', now(), '00000000-0000-0000-0018-000000000053');
+INSERT INTO conversation (id, course_id, opener_member_id, respondent_member_id) VALUES
+    ('00000000-0000-0000-0018-0000000000c6', '00000000-0000-0000-0018-000000000041', '00000000-0000-0000-0018-000000000053',
+     '00000000-0000-0000-0018-000000000056');
 INSERT INTO conversation_message (id, conversation_id, course_id, seq, author_member_id, body, created_by_action_id) VALUES
     ('00000000-0000-0000-0018-000000000c11', '00000000-0000-0000-0018-0000000000c1', '00000000-0000-0000-0018-000000000041', 1,
      '00000000-0000-0000-0018-000000000053', 'When is the skills lab?', '00000000-0000-0000-0018-0000000000b1'),

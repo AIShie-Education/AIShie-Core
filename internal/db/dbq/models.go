@@ -151,6 +151,14 @@ type ConversationMessageRetraction struct {
 	CreatedAt           time.Time
 }
 
+type ConversationRead struct {
+	ConversationID uuid.UUID
+	CourseID       uuid.UUID
+	MemberID       uuid.UUID
+	LastReadSeq    int32
+	ReadAt         time.Time
+}
+
 type Course struct {
 	ID                 uuid.UUID
 	DeptID             uuid.UUID

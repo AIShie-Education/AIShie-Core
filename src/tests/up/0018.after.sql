@@ -3,10 +3,11 @@
 -- Every person's seat that is not removed answers nothing, and every preset
 -- for people; the removed seat, the agent's seat and the preset for agents
 -- are as they were. Every conversation open with a person is closed, saying
--- why, and its participants are told so in the feed; the one with the
--- tutor stays open, and the one closed before keeps its reason. What waited
--- for approval and could only fail is cancelled, saying why, and nothing
--- else is. And the database holds the rule from now on.
+-- why, and its participants are told so in the feed; those with the tutor
+-- stay open, and the one closed before keeps its reason. What waited for
+-- approval and could only fail is cancelled, saying why, and nothing else
+-- is. What was written before counts as read by both participants. And the
+-- database holds the rule from now on.
 
 \set ON_ERROR_STOP 1
 \set QUIET 1
@@ -36,7 +37,8 @@ BEGIN
      WHERE (id IN ('00000000-0000-0000-0018-0000000000c1', '00000000-0000-0000-0018-0000000000c2',
                    '00000000-0000-0000-0018-0000000000c5')
             AND (status, closed_reason) IS DISTINCT FROM ('closed', 'conversations_are_with_agents'))
-        OR (id = '00000000-0000-0000-0018-0000000000c3' AND (status, closed_reason) IS DISTINCT FROM ('open', NULL))
+        OR (id IN ('00000000-0000-0000-0018-0000000000c3', '00000000-0000-0000-0018-0000000000c6')
+            AND (status, closed_reason) IS DISTINCT FROM ('open', NULL))
         OR (id = '00000000-0000-0000-0018-0000000000c4' AND (status, closed_reason) IS DISTINCT FROM ('closed', 'Thanks!'));
     IF wrong IS NOT NULL THEN
         RAISE EXCEPTION 'FAIL  0018 up: conversations: %', wrong;
@@ -69,9 +71,22 @@ BEGIN
         RAISE EXCEPTION 'FAIL  0018 up: the proposals cancelled are not in the feed, once each, or others are';
     END IF;
 
+    -- What was written before counts as read, by both participants of
+    -- every conversation with a message in it, closed or not; the one with
+    -- none has no place for either.
+    IF (SELECT count(*) FROM conversation_read r JOIN conversation c ON c.id = r.conversation_id
+         WHERE c.course_id = '00000000-0000-0000-0018-000000000041' AND r.last_read_seq = 1
+           AND r.member_id IN (c.opener_member_id, c.respondent_member_id)
+           AND c.id IN ('00000000-0000-0000-0018-0000000000c1', '00000000-0000-0000-0018-0000000000c2',
+                        '00000000-0000-0000-0018-0000000000c3', '00000000-0000-0000-0018-0000000000c4',
+                        '00000000-0000-0000-0018-0000000000c5')) <> 10
+       OR (SELECT count(*) FROM conversation_read WHERE course_id = '00000000-0000-0000-0018-000000000041') <> 10 THEN
+        RAISE EXCEPTION 'FAIL  0018 up: what was written before is not read by both participants, or something else is';
+    END IF;
+
     IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'conversation_respondent_is_agent')
        OR NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'course_member_person_ceiling') THEN
         RAISE EXCEPTION 'FAIL  0018 up: no trigger holds the rule';
     END IF;
 END $chk$;
-\echo 'PASS  0018 up closes the conversations with people, saying so, cancels what could only fail, lowers people''s seats and presets, and nothing else'
+\echo 'PASS  0018 up closes the conversations with people, saying so, cancels what could only fail, lowers people''s seats and presets, counts what was written as read, and nothing else'
