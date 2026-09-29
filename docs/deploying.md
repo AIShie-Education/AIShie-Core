@@ -354,6 +354,15 @@ Run all of these as root on the server.
   it would seat answering is seated answering nothing, and a person it would
   let be asked is refused as not addressable. Going down drops the refusals
   and the read state, and reopens and raises nothing.
+- **Migration 0019, answers' drafts:** while an agent's runtime writes an
+  answer, it streams a draft of it (`conversation.draft`), which the
+  conversation shows until the answer replaces it. Drafts are kept in an
+  UNLOGGED table, `conversation_draft`: written many times a second without
+  WAL, so a standby or a restored base backup has none, and a crash of the
+  database empties it; nothing is lost that the next write does not bring
+  back. It needs nothing of the operator. The previous release, while the
+  migration goes in, writes and reads no draft, and a draft it leaves behind
+  when it answers is read as none after two minutes and swept.
 - **Migration 0013, `member_invite`:** the permission that makes a course's
   join links. Every seat a person holds got it at its level of
   `member_manage`, and every seat an agent holds got it `denied`, whatever it
@@ -455,7 +464,8 @@ Two servers behind a load balancer need more than this set-up gives:
 - `TRUSTED_PROXIES` set to the load balancer's addresses;
 - a load balancer that lets a request run 40 seconds or more, for long
   polls, which need nothing else: each server hears what every other
-  commits;
+  commits, answers' drafts included; like the rate limit, the bound on a
+  conversation's drafts (ten writes a second) is each server's;
 - the database on a server of its own.
 
 `aishiteru-deploy` and the Deploy workflow handle one server per
