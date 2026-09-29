@@ -89,10 +89,14 @@ The scripts in [`deploy/`](../deploy) do the work:
    aishiteru-deploy ghcr.io/aishie-education/aishie-core:sha-de4f548
    ```
 
-4. Create the first administrator. `bootstrap` prints the administrator's API
-   token once, so keep it in a password manager. Then restart, so that the
-   background jobs start: they run as the system actor, which `bootstrap`
-   creates.
+4. Create the first administrator, root, with a password and the email it
+   signs in with (or `--login-id`, a staff number, instead or as well).
+   `bootstrap` prints no API token: people hold none. It prints root's and the
+   system actor's ids on standard error, and nothing on standard output; sign
+   in at the site with that email and password, and keep the password in a
+   password manager. Without a password, or an email or login ID, it creates
+   nothing. Then restart, so that the background jobs start: they run as the
+   system actor, which `bootstrap` creates.
 
    ```
    read -rsp 'Password (10 characters or more): ' PW; echo
@@ -234,23 +238,34 @@ Run all of these as root on the server.
   password by their instructor instead (`member.reset_password`).
   Each invitation needs an `Idempotency-Key` of its own. Sent again with the
   same key, the call answers what it answered then, without the token; for
-  another person, it is refused.
+  another person, it is refused. An agent is never invited
+  (`agents_use_api_tokens`). To do it with curl, sign in first: the session
+  the cookie carries serves as a bearer token for as long as it lasts, twelve
+  hours by default. (A password with a `"` or a `\` in it must be escaped
+  for JSON first.)
 
   ```
+  read -rsp 'Password: ' PW; echo
+  SESSION=$(printf '{"login":"you@example.edu","password":"%s"}' "$PW" |
+    curl -s -o /dev/null -D - -H 'Content-Type: application/json' --data @- https://lms-staging.example.edu/v1/auth/login |
+    sed -n 's/^[Ss]et-[Cc]ookie: ais_session=\([^;]*\).*/\1/p' | tr -d '\r'); unset PW
   curl -X POST https://lms-staging.example.edu/v1/actors/<actor_id>/invite \
-    -H "Authorization: Bearer $ADMIN_TOKEN" -H "Idempotency-Key: invite-<actor_id>-$(date +%s)" \
+    -H "Authorization: Bearer $SESSION" -H "Idempotency-Key: invite-<actor_id>-$(date +%s)" \
     -H 'Content-Type: application/json' -d '{}'
   ```
 
   `GET /v1/actors?search=<a piece of the name, email or login ID>` finds someone's
   `actor_id`, and says whether they have a password yet.
-- **An agent's token:** register the agent with the administrator's token,
-  then issue its token by the id that comes back. `--actor` with your own
-  email issues a token for you.
+- **An agent's token:** register the agent, signed in as above, then issue
+  its token by the id that comes back. Only an agent is issued one: `--actor`
+  with a person's id or email is refused (`api_tokens_are_for_agents`), as
+  `credential.issue_token` and `actor.issue_token` refuse one for a person.
+  A person who wants a script uses one of their agents instead: `agent.create`,
+  `member.add_delegate` into the course, `agent.issue_token`.
 
   ```
   curl -X POST https://lms-staging.example.edu/v1/actors \
-    -H "Authorization: Bearer $ADMIN_TOKEN" -H "Idempotency-Key: register-grader-bot" \
+    -H "Authorization: Bearer $SESSION" -H "Idempotency-Key: register-grader-bot" \
     -H 'Content-Type: application/json' -d '{"kind":"agent","display_name":"grader-bot"}'
   aishiterud token issue --actor <result.actor_id> --label grader-bot --days 90
   ```
@@ -285,6 +300,24 @@ Run all of these as root on the server.
   `conversation_ask`), nor, for a TA, a tutor, until an instructor raises
   its levels with `member.update_perms`. A roster-sync agent seated as an
   assistant is the likely case.
+- **Migration 0017, API tokens for agents only:** people sign in, with a
+  password or single sign-on, and hold no API token; agents hold API tokens
+  and nothing else. The migration revokes every API token a person holds,
+  root's from `bootstrap` among them, and every password, invitation,
+  single sign-on link and session an agent holds; agents' tokens and people's
+  passwords, sessions, identities and invitations stay. From then on the
+  database refuses to write either kind, and a person's old token is answered
+  `401` with `api_tokens_are_for_agents`. So before deploying it, make sure
+  root can sign in: with root's token, while it still works, give root an
+  email or login ID if it has none (`actor.update`) and a password
+  (`credential.set_password`), and sign in with them once; give
+  any script that calls with a person's token an agent of that person's, and
+  its own token (`agent.issue_token`), or, if it does what only an
+  administrator may, an agent registered for it and issued a token
+  (`actor.register`, `aishiterud token issue`). The previous release, while
+  the migration goes in, fails having changed nothing when it would issue a
+  person a token or give an agent a password. Going down drops the refusal
+  and brings nothing back: the tokens stay revoked.
 - **Migration 0013, `member_invite`:** the permission that makes a course's
   join links. Every seat a person holds got it at its level of
   `member_manage`, and every seat an agent holds got it `denied`, whatever it

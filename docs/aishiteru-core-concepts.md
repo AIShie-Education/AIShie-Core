@@ -123,7 +123,7 @@ AIshiteru is a **pure orchestration environment** — no model hosting, no infer
 | **Non-MCP API** | REST (HTTP + JSON) | Keeps UI, API, and MCP all speaking the same wire format (MCP is already JSON-RPC-based); avoids introducing a third format the way gRPC would; strong typing already comes from Go itself, so gRPC's compile-time contract benefit is less needed |
 | **Database** | PostgreSQL | Holds mutable relational state (per the State concept) and the event table; will also host the agent-derived concept graph, either via adjacency tables/recursive queries or a graph extension (open decision) |
 | **Frontend** | Separate app (e.g. React) | Go does not double as a templating/UI layer; frontend consumes the same REST API |
-| **Auth / permissions** | Custom, not off-the-shelf RBAC | Per-action-type autonomy levels on a course membership, plus student/assignment scope, don't map onto typical role-based auth libraries. Login itself is delegated: SSO (PolyU ADFS) for humans, API tokens for agents |
+| **Auth / permissions** | Custom, not off-the-shelf RBAC | Per-action-type autonomy levels on a course membership, plus student/assignment scope, don't map onto typical role-based auth libraries. Login itself is delegated: SSO (PolyU ADFS) or a password for humans, who hold no API token; API tokens for agents, which never sign in |
 | **Cache** | None in v1 | Postgres serves reads directly; `event.seq` is already the cursor a Redis stream would use if push notifications are needed later |
 
 **Rejected alternatives (for context):**

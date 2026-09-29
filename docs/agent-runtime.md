@@ -144,7 +144,7 @@ rejected, cancelled). That is safe: Core refuses a second answer to a message
 
 | Tool | Use |
 |---|---|
-| `me_get` | Checks the token and returns the agent's actor: `id`, `kind`, `display_name`, `status`, and `owner_actor_id`, the person who owns it. `owner_actor_id` is absent for an agent nobody owns (one an administrator registered without an owner), and for a person, whose own token the runtime refuses anyway (`kind` is not `agent`). It names the owner while the owner is suspended too; Core gives a suspended person no assertion (§5.1), so they cannot connect the agent meanwhile. An agent's owner is fixed when it is registered and never changes (schema.md §2.1), so the owner a stored token's agent names is the one it named when the token was taken. |
+| `me_get` | Checks the token and returns the agent's actor: `id`, `kind`, `display_name`, `status`, and `owner_actor_id`, the person who owns it. `owner_actor_id` is absent for an agent nobody owns (one an administrator registered without an owner), and for a person, who holds no API token (Core refuses one from before, `api_tokens_are_for_agents`), and whose session the runtime refuses anyway (`kind` is not `agent`). It names the owner while the owner is suspended too; Core gives a suspended person no assertion (§5.1), so they cannot connect the agent meanwhile. An agent's owner is fixed when it is registered and never changes (schema.md §2.1), so the owner a stored token's agent names is the one it named when the token was taken. |
 | `me_memberships` | Every seat: `member_id`, `course_id`, `code`, `section`, `title`, `course_status`, `role`, `status`, `expires_at`, `student_scope`, `assignment_scope`, `principal_member_id`, `perms` (permission to level, a delegate's capped by its principal's, all `denied` while the seat does not count), `answers_course`, and `perm_ceilings` with `perm_ceiling_reasons`: the most each permission of the seat could ever be, and why where that is below `autonomous` (an agent's `action_decide` is `confirm_required` at most: its decisions and reviews are proposals). Work only in active seats of courses not archived whose `perms.conversation_answer` is not denied. |
 | `me_site_chat` | `{on: true}` when the runtime starts the agent, with the token it runs it with, and `{on: false}` when it stops: until then people in the site are not offered the agent, and `conversation.open` and `conversation.ask` addressed to it are refused `failed_precondition`, `agent_answers_elsewhere`. Returns `site_chat`, whether it holds now (false while the owner is suspended). It holds only while that token works: revoked or expired, it ends by itself, and a new token must declare it again. The owner may end it (`agent.update` with `site_chat: false`), never start it; the runtime starts it again on its next start. A person's token is refused, `not_an_agent`. Conversations already open are unaffected: the agent answers them, and they stay readable. |
 
@@ -643,13 +643,14 @@ toolset is fine: the agent answers from the conversation alone.
 | School administrator | Core's assertion with `platform_role` `root` or `admin` | school keys, the model list and prices, global quotas, audit |
 
 People sign in to Core, however Core lets them (password, invitation, single
-sign-on, a pasted token), and Core vouches for them to the runtime. The
+sign-on), and Core vouches for them to the runtime. People hold no API token
+in Core; only agents do. The
 runtime is no identity provider's client and never sees Core's session
 cookie: the proxy in front of it strips `Cookie`.
 
 - **Asking.** The web front end, signed in to Core, calls
   `POST <core>/v1/auth/assertion` with `{"audience": "<the runtime's
-  audience>"}` and its session cookie or bearer token. The audience is an
+  audience>"}` and its session, as the cookie or as a bearer token. The audience is an
   absolute URL, such as `https://lms.example.edu/runtime`, and must be one of
   Core's `RUNTIME_AUDIENCES`. The answer is `{"assertion": "eyJ…",
   "expires_at": "…"}`, with `Cache-Control: no-store`. The front end sends
@@ -672,7 +673,7 @@ cookie: the proxy in front of it strips `Cookie`.
   number, which they sign in with) and `platform_role` when there are any,
   and `sid` (the id of the Core credential it was asked with). It lasts
   `ASSERTION_TTL` (5 minutes by default, at most 15), and never past the
-  session or token it was asked with.
+  session it was asked with.
 - **Checking.** The runtime accepts `alg` `EdDSA` and nothing else, against
   the JSON Web Key Set at `GET <core>/v1/auth/keys` (public; cache it for the
   five minutes its `Cache-Control` says, and fetch it again on a `kid` it does
@@ -696,7 +697,9 @@ never to show it again. The owner picks a model and key (an own key is tested
 with a one-token call), the runtime says the agent answers in the site
 (`me_site_chat`, §2.3), and polling starts. The runtime takes the token only
 from the agent's owner: `me_get`'s `owner_actor_id` must be the person signed
-in. It refuses a token whose `kind` is not `agent` (never a person's own), and
+in. It refuses a token whose `kind` is not `agent`, which Core no longer
+issues to anyone and answers `401` (`api_tokens_are_for_agents`) if one from
+before is presented, and
 leaves an agent nobody owns to the runtime's administrators. An agent's owner
 never changes in Core, so the owner checked when the token was taken stays
 its owner for as long as the token works.
