@@ -191,7 +191,7 @@ The events that matter carry ids, never text:
 | `conversation_answer` | `course_id`, `conversation_id`, `in_reply_to_message_id`, `body`, `idempotency_key` | `body` is 1 to 20,000 characters of Markdown. `in_reply_to_message_id` must be the opener's newest message. Returns `message_id`. Posted or proposed, it deletes the conversation's draft. |
 | `conversation_draft` | `course_id`, `conversation_id`, `attempt` (1 to 64 characters), `version` (1 or more), `text` (at most 20,000 characters), `steps` (at most 20 `{kind, target, state}`), `done`; no `idempotency_key` | `{stored, version}`. The answer being written, for whoever reads the conversation to watch (§2.8). An ephemeral write: recorded nowhere, never proposed, and not counted against the rate limit when carried out; at most 10 a second per conversation. The respondent's alone, while the conversation is `awaiting_answer`: `not_the_respondent`, `conversation_not_awaiting`, `not_addressable` otherwise. |
 | `conversation_close` | `course_id`, `conversation_id`, `reason` (≤ 500 characters) | Either participant closes. The runtime closes only as §2.4 says. A reason that reads as the system's (`seat_removed`, `conversations_are_with_agents`) is refused. |
-| `conversation_retract` | `course_id`, `message_id`, `reason` | The author retracts, or staff overseeing the opener; the runtime only when the owner asks. |
+| `conversation_retract` | `course_id`, `message_id`, `reason` | The author retracts, or staff overseeing the opener; the runtime only when the owner asks. Retracting the opener's latest message withdraws the question: the conversation is `answered`, an answer to it is refused `moved_on`, and its draft is gone. |
 | `action_list_mine` | `course_id`, `exclude_types`, `after`, `limit` | The agent's own actions, oldest first, with `status` and `result`: a proposal's fate and a rejection's reason. Keep its `after` cursor. (`action_get` needs `action_decide`.) |
 
 **Read tools for the model**, where the seat allows (§4): `course_get`,
@@ -208,7 +208,7 @@ The events that matter carry ids, never text:
 | `executed`, `review_state: pending` | Posted; staff review it afterwards. | The same; a retraction may follow. |
 | `proposed` | The level is `confirm_required`: the answer waits for a person, and the inbox leaves the conversation out. | Keep the `action_id`; watch `event_list` for its outcome. Never send it again under a new key. |
 | `denied` | The seat may not answer now: its level was lowered, or it or its principal was paused. | Stop polling the course until `me_memberships` changes; tell the owner. |
-| `failed`, `conflict`, `moved_on` | The opener wrote again meanwhile. | Answer `details.latest_opener_message_id`, under its own key. |
+| `failed`, `conflict`, `moved_on` | The opener wrote again meanwhile (`details.latest_opener_message_id` names the newest message), or withdrew the question, retracting it (no message named). | Read the conversation again: if it is `awaiting_answer`, answer its `latest_opener_message_id`, under its own key; otherwise leave it. |
 | `failed`, `conflict`, `already_answered` or `answer_pending` | That message is answered, or an answer waits. | Leave it. |
 | `failed`, `conflict`, `closed` | Closed, by a participant or a seat's removal. | Drop it. |
 | `failed`, `forbidden`, `not_addressable` | The opener may no longer address the agent. | Drop it; read `me_memberships` again. |
@@ -291,6 +291,7 @@ Runtime:
     → executed, message_id M2
  8. release X; C is hot for 120 s; update memory(D, X)
 Had Yuki written M3 during step 6, step 7 would be moved_on: back to 5, key "answer:X:M3:1".
+Had she retracted M1 ("stop") instead, step 7 would be moved_on naming no message: release X.
 ```
 
 ### 2.7 A course tutor answers students
@@ -352,15 +353,17 @@ the agent's message in progress.
   with the same attempt and version: if the first arrived, the second is passed
   over. `stored: false` says a newer draft is kept; nothing to do. 409
   `conversation_not_awaiting` says the conversation waits for no answer now
-  (answered, an answer waiting for approval, closed): write no more drafts
-  for it. A draft write that Core carries out costs nothing of the agent's
-  rate limit (§2.5).
+  (answered, its question withdrawn, an answer waiting for approval, closed):
+  write no more drafts for it. A draft write that Core carries out costs
+  nothing of the agent's rate limit (§2.5).
 - **Ending it.** Posting the answer, or its being proposed, deletes the draft
   in Core, in the same transaction: send nothing. Giving up — a budget spent,
   an error, a question overtaken (`moved_on`) — send `done: true` at a version
-  no lower than the last. A new attempt replaces the draft anyway. A draft not
-  written for 120 seconds is gone to its readers: a worker waiting on a slow
-  tool writes its steps again within a minute.
+  no lower than the last. A question withdrawn (retracted by the opener, which
+  `moved_on` naming no message says) takes its draft with it, in the
+  retraction's transaction: send nothing more. A new attempt replaces the
+  draft anyway. A draft not written for 120 seconds is gone to its readers: a
+  worker waiting on a slow tool writes its steps again within a minute.
 - **Two workers at once** (§7.4) write under their own attempts, and the last
   write wins; the answer is posted once whichever it is.
 
@@ -877,7 +880,10 @@ token for one party, nor approves for the owner.
   it from caches and memory and show it as `[message retracted]`. When
   `last_retracted_at` changes, read the conversation again: a retraction adds
   no message for `after_seq` to find. If it was the agent's own answer, note
-  in that conversation's notes not to repeat it, and tell the owner.
+  in that conversation's notes not to repeat it, and tell the owner. If it was
+  the opener's latest message, the question is withdrawn and the conversation
+  waits for no answer: stop the answer under way, which Core would refuse
+  (`moved_on`).
 
 ## 7. Budgets, latency, concurrency
 
@@ -977,7 +983,8 @@ limit, and put answers before polling, and polling before events.
   key `answer:X:M1:1`: the second gets `idempotency_conflict` or a replay.
   Under different attempts the second is refused as `already_answered` or
   `answer_pending`. A worker that finds the conversation moved on answers the
-  newer message under its own key. Nothing is posted twice.
+  newer message under its own key, or, the question withdrawn, leaves it.
+  Nothing is posted twice.
 
 ## 8. Observability, testing, deployment
 
