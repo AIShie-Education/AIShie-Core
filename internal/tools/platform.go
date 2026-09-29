@@ -10,13 +10,13 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/apperr"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/auth"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/db/dbq"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/domain"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/events"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/ids"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/tool"
+	"github.com/AIShie-Education/AIShie-Core/internal/apperr"
+	"github.com/AIShie-Education/AIShie-Core/internal/auth"
+	"github.com/AIShie-Education/AIShie-Core/internal/db/dbq"
+	"github.com/AIShie-Education/AIShie-Core/internal/domain"
+	"github.com/AIShie-Education/AIShie-Core/internal/events"
+	"github.com/AIShie-Education/AIShie-Core/internal/ids"
+	"github.com/AIShie-Education/AIShie-Core/internal/tool"
 )
 
 // Platform tools are the few operations outside any course. They check
@@ -816,7 +816,7 @@ func actorInviteNew() tool.Tool {
 		Name: "actor.invite_new",
 		Description: "Register a new person and invite them to choose their password, in one step: what a department " +
 			"administrator does for someone who is not registered yet, before seating them. The token is for the front " +
-			"end's page that takes invitations (POST /v1/auth/invite); hand the link to the person yourself, since AIShie " +
+			"end's page that takes invitations (POST /v1/auth/invite); hand the link to the person yourself, since AIshie " +
 			"sends no email. It works once, until it expires (7 days by default, at most 30). An email that is already " +
 			"registered is refused with that person's actor_id: seat them instead. An invitation a department " +
 			"administrator made is honoured only while everything the person holds is still within what that " +

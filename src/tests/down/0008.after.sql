@@ -1,4 +1,4 @@
--- AIshiteru Core — after 0008_conversations.down.sql, in `make db-test-sql`
+-- AIshie Core — after 0008_conversations.down.sql, in `make db-test-sql`
 --
 -- The conversation tables are gone; the answer that waited is cancelled as a
 -- decision cancels a proposal whose tool is gone; the action that wrote the

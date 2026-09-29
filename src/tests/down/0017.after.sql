@@ -1,4 +1,4 @@
--- AIshiteru Core — after 0017_api_tokens_for_agents.down.sql, in `make db-test-sql`
+-- AIshie Core — after 0017_api_tokens_for_agents.down.sql, in `make db-test-sql`
 --
 -- The refusal is gone, and with it nothing else: what the up revoked stays
 -- revoked, and every credential live before the down is live after it. The

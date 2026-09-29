@@ -1,4 +1,4 @@
--- AIshiteru Core — before 0019_conversation_drafts.down.sql, in `make db-test-sql`
+-- AIshie Core — before 0019_conversation_drafts.down.sql, in `make db-test-sql`
 --
 -- What the down migration has to deal with: an answer being written in the
 -- tutor's conversation of tests/up/0018, its draft kept. Committed, so that

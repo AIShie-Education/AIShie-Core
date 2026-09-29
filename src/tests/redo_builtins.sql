@@ -1,4 +1,4 @@
--- AIshiteru Core — after the newest migrations went down and up again, in
+-- AIshie Core — after the newest migrations went down and up again, in
 -- `make db-test-sql`
 --
 -- A down may leave rows standing that the schema before it holds — 0007's

@@ -1,4 +1,4 @@
--- AIshiteru Core — before 0009_memory.down.sql, in `make db-test-sql`
+-- AIshie Core — before 0009_memory.down.sql, in `make db-test-sql`
 --
 -- What the down migration has to deal with: a tutor's memory of a student
 -- who asked it, a proposal to the course's shared memory, the owner's switch

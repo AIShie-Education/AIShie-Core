@@ -36,14 +36,14 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/apperr"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/auth"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/blob"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/domain"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/pipeline"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/ratelimit"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/signing"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/tool"
+	"github.com/AIShie-Education/AIShie-Core/internal/apperr"
+	"github.com/AIShie-Education/AIShie-Core/internal/auth"
+	"github.com/AIShie-Education/AIShie-Core/internal/blob"
+	"github.com/AIShie-Education/AIShie-Core/internal/domain"
+	"github.com/AIShie-Education/AIShie-Core/internal/pipeline"
+	"github.com/AIShie-Education/AIShie-Core/internal/ratelimit"
+	"github.com/AIShie-Education/AIShie-Core/internal/signing"
+	"github.com/AIShie-Education/AIShie-Core/internal/tool"
 )
 
 const (
@@ -745,7 +745,7 @@ func (s *server) writeError(w http.ResponseWriter, r *http.Request, err error) {
 		e = &apperr.Error{Code: "internal", Message: "something went wrong on our side; the call can be retried with the same idempotency key"}
 	}
 	if e.Code == apperr.Unauthenticated {
-		w.Header().Set("WWW-Authenticate", `Bearer realm="aishiteru"`)
+		w.Header().Set("WWW-Authenticate", `Bearer realm="aishie"`)
 	}
 	// A tool that bounds its own rate and records nothing (an ephemeral
 	// write, conversation.draft) refuses a call too soon as an error.

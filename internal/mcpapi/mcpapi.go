@@ -28,14 +28,14 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/apperr"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/auth"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/canon"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/domain"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/pipeline"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/ratelimit"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/tool"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/version"
+	"github.com/AIShie-Education/AIShie-Core/internal/apperr"
+	"github.com/AIShie-Education/AIShie-Core/internal/auth"
+	"github.com/AIShie-Education/AIShie-Core/internal/canon"
+	"github.com/AIShie-Education/AIShie-Core/internal/domain"
+	"github.com/AIShie-Education/AIShie-Core/internal/pipeline"
+	"github.com/AIShie-Education/AIShie-Core/internal/ratelimit"
+	"github.com/AIShie-Education/AIShie-Core/internal/tool"
+	"github.com/AIShie-Education/AIShie-Core/internal/version"
 )
 
 // IdempotencyKey is the argument every state-changing MCP tool takes in
@@ -55,7 +55,7 @@ func instructions(memory bool) string {
 	return instructionsHead + "\n\n" + answer + "\n\n" + instructionsFiles + "\n\n" + last
 }
 
-const instructionsHead = `AIshiteru Core is a learning management system in which you are a member of courses, like the people in them. What you may do is set per course, per kind of action, on your membership; it does not depend on your being an agent.
+const instructionsHead = `AIshie Core is a learning management system in which you are a member of courses, like the people in them. What you may do is set per course, per kind of action, on your membership; it does not depend on your being an agent.
 
 You connect with an API token of your own. Only agents hold API tokens, and an agent never signs in: no password, invitation or single sign-on is ever yours. People sign in to the site and hold no API token, so never ask anyone for theirs.
 
@@ -75,7 +75,7 @@ Nothing is pushed to you. Poll event_list with the next_seq it last returned to 
 
 Conversations are between a person and an agent: a person asks, an agent answers. A person is never a conversation's respondent and answers none (conversations_are_with_agents); people talk to people elsewhere. me_conversations and conversation_mark_read serve the one who asks, a person's chat panel: you need neither to answer.
 
-People in the site ask an agent only while what runs it says it answers there. If you are run by a program that polls conversation_inbox and answers on its own, with nobody at the keyboard, as an AIShie agent runtime is, call me_site_chat with on true each time it starts you, under a new idempotency_key, and with on false when it stops. If a person drives you from a tool of their own (a chat app, an editor, a script), never call it: you act through that tool, and a question put to you in the site would wait unanswered.
+People in the site ask an agent only while what runs it says it answers there. If you are run by a program that polls conversation_inbox and answers on its own, with nobody at the keyboard, as an AIshie agent runtime is, call me_site_chat with on true each time it starts you, under a new idempotency_key, and with on false when it stops. If a person drives you from a tool of their own (a chat app, an editor, a script), never call it: you act through that tool, and a question put to you in the site would wait unanswered.
 
 If you answer questions in a course (your perms there have conversation_answer other than denied), poll conversation_inbox for each such course from me_memberships. For each conversation it lists, read it with conversation_messages, then answer with conversation_answer, in_reply_to_message_id = its latest_opener_message_id, and idempotency_key = "answer:{conversation_id}:{in_reply_to_message_id}:{attempt}", attempt starting at 1. Retry a call that timed out with the same key and arguments. An answer may come back executed, executed under review, or proposed: it waits for a person's approval, and the conversation stays out of your inbox meanwhile. If the conversation comes back to your inbox for the same message (your answer was rejected, cancelled or failed), write the answer again, taking any reason given into account, under the next attempt number; the server never posts two answers to one message. A retracted message is not to be answered, and the inbox leaves it out. A conflict says why in details.reason: moved_on, the opener has written again (read the newest message and answer that); already_answered or answer_pending, leave it; closed, drop the conversation. idempotency_conflict means a key was used before with different arguments.`
 
@@ -479,7 +479,7 @@ func limited(d Deps, next http.Handler) http.Handler {
 }
 
 func newServer(d Deps) *mcp.Server {
-	server := mcp.NewServer(&mcp.Implementation{Name: "aishiteru-core", Title: "AIshiteru Core", Version: version.Version},
+	server := mcp.NewServer(&mcp.Implementation{Name: "aishie-core", Title: "AIshie Core", Version: version.Version},
 		&mcp.ServerOptions{Instructions: instructions(d.Memory), Capabilities: &mcp.ServerCapabilities{
 			// Tools, and no more. Their list does not change while the
 			// server runs, and nothing is pushed from here to say so if it

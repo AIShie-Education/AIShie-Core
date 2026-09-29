@@ -1,6 +1,6 @@
-# AIshiteru — Core Data Schema
+# AIshie — Core Data Schema
 
-Derived from [aishiteru-core-concepts.md](./aishiteru-core-concepts.md). Notation is compact
+Derived from [aishie-core-concepts.md](./aishie-core-concepts.md). Notation is compact
 pseudo-DDL, not migration SQL: `→` marks a foreign key, `null` marks a nullable column, `[a|b]`
 lists the values a text column may hold. The migration in `src/migrations` is the authority on
 exact types and constraints.
@@ -197,11 +197,11 @@ else. A department's administrator may stand where the admin does, for the cours
 departments, and registers the people they invite there (`actor.invite_new`). Roster syncs run
 as a `kind = 'system'` actor so the chain has no gaps.
 
-Root and the system actor are created by `aishiterud bootstrap`, once. Root is given a
+Root and the system actor are created by `aishie-core bootstrap`, once. Root is given a
 password, read from standard input, and an email or a login ID to sign in with, and no API
 token: it signs in as anyone does. Without a password or a name to sign in with, bootstrap
 creates nothing. It is the one state change with no `action` row: there is no actor yet for it
-to be an action of. The operator's `aishiterud token issue` is likewise outside the log — it is
+to be an action of. The operator's `aishie-core token issue` is likewise outside the log — it is
 how a newly registered agent, which never signs in, gets its first token — and needs the
 database access that already implies everything. Like the tools, it refuses the system actor,
 and a person.
@@ -221,7 +221,7 @@ who has an email or a login ID to sign in with.
 **People sign in; API tokens are for agents.** A person holds passwords, identities at a
 provider, invitations and the sessions signing in with them makes, and never an API token: for
 tools and scripts they use one of their agents, which holds a token of its own and never more
-than their seat. `credential.issue_token` for a person, `actor.issue_token` and `aishiterud token
+than their seat. `credential.issue_token` for a person, `actor.issue_token` and `aishie-core token
 issue` for one are refused (`api_tokens_are_for_agents`), whoever asks. An agent holds API tokens
 and nothing else: it is given no password (`credential.set_password`), no invitation
 (`actor.invite`; `actor.invite_new` registers people only) and no identity at a provider
@@ -253,7 +253,7 @@ password as it takes any.
 (`agent.issue_token`); who issued an invitation (`actor.invite`, `actor.invite_new`), which
 is asked again when it is taken up (§2.10); and who set a temporary password
 (`member.reset_password`). It is null for the other kinds, for a token made on
-the command line (`aishiterud token issue`, and root's by `aishiterud bootstrap` before migration
+the command line (`aishie-core token issue`, and root's by `aishie-core bootstrap` before migration
 0017), for a token issued by a
 release older than migration 0006, including one that release issues while it still runs after
 the migration, and for an invitation made before its issuer was recorded, which is taken for a
@@ -1019,14 +1019,14 @@ the call as it always was. A call that finds nothing new (an empty inbox; no mes
 see) waits up to `wait_s`, holding no transaction and no connection, until something it would
 read is committed. It then reads again, authorized again as the first time, and answers if it
 finds something; if not, it waits on. When its time is up it reads once more and answers with
-that. Whatever flushes events also calls `pg_notify('aishiteru_wake', …)` in the same
+that. Whatever flushes events also calls `pg_notify('aishie_wake', …)` in the same
 transaction (`events.Flush`, query `NotifyWake`), once for each course, event type, and
 conversation or proposal, at the newest `seq`: `course_id`, `kind` (the event type) and
 `seq`, and, for news of a conversation or of a proposal whose target is one, `conversation_id`,
 `opener_member_id` and `respondent_member_id`. That is a few hundred bytes, well under the 8000
 a notification may carry. PostgreSQL delivers it when the transaction commits, never when it
 rolls back, to every instance listening. Each instance keeps one connection of its own on the
-channel (`wake.Listener`, `application_name` `aishiterud wake`). The listener reconnects with
+channel (`wake.Listener`, `application_name` `aishie-core wake`). The listener reconnects with
 backoff, and each time it listens again it wakes every waiting call, since it heard nothing
 meanwhile. It hands each notification to the calls waiting in its process (`wake.Hub`). An
 inbox is woken by news, in its course, of a message or a decided proposal in a conversation
@@ -1293,7 +1293,7 @@ may.
 
 **Site chat: which agents answer in the site.** An agent answers only if something runs it that
 polls `conversation.inbox` and answers on its own:
-an agent runtime, AIShie's or a school's own. An assistant a person drives from a tool of their
+an agent runtime, AIshie's or a school's own. An assistant a person drives from a tool of their
 own — a chat app, an editor, a script, over MCP — acts only while that person uses it and never
 polls, so a question put to it in the site would wait for good. So the program that runs an
 agent says that it answers: `me.site_chat` with `on: true`, which records the credential the
@@ -1443,7 +1443,7 @@ owner where they decide actions without anyone's confirmation (`tool.Spec.OwnerJ
 Everyone else who reads the conversation — its opener, and staff who oversee the opener and
 would not decide the answer — sees what the opener sees: the steps, and `text_hidden: true`.
 Whoever may not read the conversation finds no draft, as they find no conversation. Each write
-kept, and an attempt's end, notifies `aishiteru_wake` in its transaction, kind
+kept, and an attempt's end, notifies `aishie_wake` in its transaction, kind
 `conversation.draft` at `seq` 0, since it is in no feed (§2.6, Waiting for news); it wakes only
 a reader of the conversation that watches its draft: `conversation.messages` given
 `seen_draft_version`, the draft's version as it last read it, 0 for none, answers as soon as the

@@ -6,7 +6,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	dbfiles "github.com/AIShiteru-LMS/AIShiteru-Core/src"
+	dbfiles "github.com/AIShie-Education/AIShie-Core/src"
 )
 
 // Seed inserts the built-in permission presets. It is safe to re-run: the

@@ -31,15 +31,15 @@
 # with single sign-on against a stand-in provider, by that too, under its name.
 #
 #   make e2e            (builds first)
-#   scripts/e2e.sh      (expects bin/aishiterud)
+#   scripts/e2e.sh      (expects bin/aishie-core)
 #
 # Uses the PG* environment for createdb/dropdb, like `make db-test-sql`.
 set -euo pipefail
 
-BIN=${BIN:-bin/aishiterud}
+BIN=${BIN:-bin/aishie-core}
 PORT=${PORT:-18099}
 IDP_PORT=${IDP_PORT:-18098}
-DB="aishiteru_e2e_$$"
+DB="aishie_e2e_$$"
 BASE="http://127.0.0.1:$PORT"
 WORK=$(mktemp -d)
 SERVER_PID=""
@@ -690,7 +690,7 @@ python3 -m http.server "$IDP_PORT" --bind 127.0.0.1 --directory "$WORK/idp" >"$W
 IDP_PID=$!
 for _ in $(seq 1 50); do curl -sf "$ISSUER/.well-known/openid-configuration" >/dev/null 2>&1 && break; sleep 0.1; done
 curl -sf "$ISSUER/.well-known/openid-configuration" >/dev/null || fail "the stand-in provider did not come up: $(cat "$WORK/idp.log")"
-export OIDC_ISSUER="$ISSUER" OIDC_CLIENT_ID=aishiteru-e2e OIDC_DISPLAY_NAME="PolyU NetID"
+export OIDC_ISSUER="$ISSUER" OIDC_CLIENT_ID=aishie-e2e OIDC_DISPLAY_NAME="PolyU NetID"
 # A name the button cannot show as it is, and the server does not start.
 OIDC_DISPLAY_NAME=$'PolyU\tNetID' "$BIN" serve 2>"$WORK/refused.log" && fail "a server with a tab in OIDC_DISPLAY_NAME started"
 grep -q 'OIDC_DISPLAY_NAME' "$WORK/refused.log" || fail "refused, but not for the name: $(cat "$WORK/refused.log")"

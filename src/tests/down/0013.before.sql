@@ -1,4 +1,4 @@
--- AIshiteru Core — before 0013_member_invite.down.sql, in `make db-test-sql`
+-- AIshie Core — before 0013_member_invite.down.sql, in `make db-test-sql`
 --
 -- What the down migration has to deal with: a course whose instructor hands
 -- out join links (member_invite), with a link made, and a department's own

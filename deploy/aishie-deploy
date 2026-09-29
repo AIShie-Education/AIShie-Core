@@ -1,9 +1,9 @@
 #!/bin/sh
-# Deploys an image of AIShiteru Core to this server: the first start, an
+# Deploys an image of AIshie Core to this server: the first start, an
 # upgrade and a rollback alike. Run as root, by hand or by the Deploy workflow
 # over SSH (docs/deploying.md):
 #
-#   aishiteru-deploy ghcr.io/aishie-education/aishie-core:0.2.0
+#   aishie-deploy ghcr.io/aishie-education/aishie-core:0.2.0
 #
 # In order: back up the database, `migrate up` and `seed` with the new image,
 # replace the container, and wait until /healthz reports the new version and
@@ -12,21 +12,47 @@
 # never reports healthy, the version before is started again.
 #
 # The paths below are the ones deploy/setup-server.sh creates. The variables
-# that override them are for deploy/aishiteru-deploy_test.sh.
+# that override them are for deploy/aishie-deploy_test.sh.
 set -eu
 # The lock, the log and the backups are root's alone.
 umask 077
 
-ENV_FILE=${AISHITERU_ENV_FILE:-/etc/aishiteru/aishiteru.env}
-DATA_DIR=${AISHITERU_DATA_DIR:-/srv/aishiteru/data}
-BACKUP_DIR=${AISHITERU_BACKUP_DIR:-/var/backups/aishiteru}
-LOG_FILE=${AISHITERU_LOG_FILE:-/var/log/aishiteru-deploy.log}
-LOCK_FILE=${AISHITERU_LOCK_FILE:-/run/aishiteru-deploy.lock}
-HEALTH_TRIES=${AISHITERU_HEALTH_TRIES:-30}
+die() { echo "aishie-deploy: $*" >&2; exit 1; }
+
+# setting VAR DEFAULT: the value of AISHIE_VAR, or DEFAULT when that is unset
+# or empty.
+setting() {
+  eval "new=\${AISHIE_$1:-} old=\${AISHITERU_$1:-}"
+  # Compatibility: before the rename to AIshie these variables were
+  # AISHITERU_*. The old name is still taken, with a warning, while the new
+  # one is unset.
+  if [ -z "$new" ] && [ -n "$old" ]; then
+    echo "aishie-deploy: AISHITERU_$1 is deprecated: set AISHIE_$1 instead" >&2
+    new=$old
+  fi
+  printf '%s\n' "${new:-$2}"
+}
+
+# The name of this server's installation: of its configuration, data and
+# backup directories, its database and its container.
+NAME=${AISHIE_NAME:-}
+if [ -z "$NAME" ]; then
+  NAME=aishie
+  # Compatibility: a server set up before the rename to AIshie goes on by its
+  # old name, aishiteru, which its /etc/aishiteru shows (docs/deploying.md, A
+  # server set up before the rename).
+  [ -e /etc/aishie ] || [ ! -e /etc/aishiteru ] || NAME=aishiteru
+fi
+case $NAME in *[!a-z0-9_]*) die "not a name: $NAME" ;; esac
+
+ENV_FILE=$(setting ENV_FILE "/etc/$NAME/$NAME.env")
+DATA_DIR=$(setting DATA_DIR "/srv/$NAME/data")
+BACKUP_DIR=$(setting BACKUP_DIR "/var/backups/$NAME")
+LOG_FILE=$(setting LOG_FILE "/var/log/$NAME-deploy.log")
+LOCK_FILE=$(setting LOCK_FILE "/run/$NAME-deploy.lock")
+HEALTH_TRIES=$(setting HEALTH_TRIES 30)
 REPO=ghcr.io/aishie-education/aishie-core
 KEEP_BACKUPS=10
-
-die() { echo "aishiteru-deploy: $*" >&2; exit 1; }
 
 IMG=${1:-}
 # The image comes from the command line, or from SSH_ORIGINAL_COMMAND when
@@ -34,9 +60,9 @@ IMG=${1:-}
 # and nothing that is not part of such a name.
 case $IMG in
   "$REPO":* | "$REPO"@sha256:*) ;;
-  *) echo "usage: aishiteru-deploy $REPO:TAG (or @sha256:DIGEST)" >&2; exit 2 ;;
+  *) echo "usage: aishie-deploy $REPO:TAG (or @sha256:DIGEST)" >&2; exit 2 ;;
 esac
-case $IMG in *[!A-Za-z0-9._:@/-]*) echo "aishiteru-deploy: not an image name: $IMG" >&2; exit 2 ;; esac
+case $IMG in *[!A-Za-z0-9._:@/-]*) echo "aishie-deploy: not an image name: $IMG" >&2; exit 2 ;; esac
 [ -r "$ENV_FILE" ] || die "$ENV_FILE is missing: see deploy/setup-server.sh"
 
 # One deploy at a time on this server, by hand or from GitHub. /run, unlike
@@ -58,7 +84,7 @@ esac
 # way; this way the migration finishes, and only this script stops.
 run() { docker run --rm --sig-proxy=false --network host --env-file "$ENV_FILE" "$IMG" "$@"; }
 start() {
-  docker run -d --name aishiteru --restart unless-stopped --stop-timeout 20 \
+  docker run -d --name "$NAME" --restart unless-stopped --stop-timeout 20 \
     --log-opt max-size=20m --log-opt max-file=5 \
     --network host --env-file "$ENV_FILE" -v "$DATA_DIR":/data "$1" >/dev/null
 }
@@ -79,7 +105,7 @@ docker pull "$IMG" || die "could not pull $IMG (is this server logged in to ghcr
 
 backup=$BACKUP_DIR/deploy-$(date -u +%Y%m%d-%H%M%S).dump
 # Under another name until it is whole: a dump cut short is not a backup.
-runuser -u postgres -- pg_dump -Fc -f "$backup.part" aishiteru ||
+runuser -u postgres -- pg_dump -Fc -f "$backup.part" "$NAME" ||
   { rm -f "$backup.part"; die "the database backup failed; nothing was changed"; }
 mv "$backup.part" "$backup"
 echo "database backed up: $backup"
@@ -95,28 +121,28 @@ ver=${want%% *}
 commit=$(commit_of "$want")
 if [ -z "$ver" ] || [ -z "$commit" ]; then die "cannot read the version of $IMG: $want"; fi
 
-prev=$(docker inspect -f '{{.Config.Image}}' aishiteru 2>/dev/null || true)
-prev_id=$(docker inspect -f '{{.Image}}' aishiteru 2>/dev/null || true)
+prev=$(docker inspect -f '{{.Config.Image}}' "$NAME" 2>/dev/null || true)
+prev_id=$(docker inspect -f '{{.Image}}' "$NAME" 2>/dev/null || true)
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) ${prev:-none} -> $IMG" >> "$LOG_FILE"
 if [ -n "$prev" ]; then
-  docker stop aishiteru >/dev/null
-  docker rm aishiteru >/dev/null
+  docker stop "$NAME" >/dev/null
+  docker rm "$NAME" >/dev/null
 fi
 start "$IMG"
 
 if ! healthy "$ver" "$commit"; then
-  echo "aishiteru-deploy: $want did not report healthy within $((HEALTH_TRIES * 2)) seconds. Its last log lines:" >&2
-  docker logs --tail 30 aishiteru >&2 2>&1 || true
+  echo "aishie-deploy: $want did not report healthy within $((HEALTH_TRIES * 2)) seconds. Its last log lines:" >&2
+  docker logs --tail 30 "$NAME" >&2 2>&1 || true
   # The schema is one the version before works with (CONTRIBUTING.md,
   # Migrations), so it can take over again: if it is another image, not the
   # same one by another name, and with the env file as it is now.
   if [ -n "$prev" ] && [ "$prev_id" != "$(docker image inspect -f '{{.Id}}' "$IMG" 2>/dev/null || true)" ]; then
-    docker rm -f aishiteru >/dev/null
+    docker rm -f "$NAME" >/dev/null
     start "$prev"
     echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) $IMG -> $prev (not healthy: rolled back)" >> "$LOG_FILE"
     back=$(version_of "$prev")
     healthy "${back%% *}" "$(commit_of "$back")" ||
-      die "started $prev again, but it did not report healthy either: most likely the env file (docker logs aishiteru)"
+      die "started $prev again, but it did not report healthy either: most likely the env file (docker logs $NAME)"
     die "rolled back: $prev is running again"
   fi
   die "the version before was ${prev:-none}: see docs/deploying.md, The new version did not report healthy"

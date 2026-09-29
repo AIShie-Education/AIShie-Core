@@ -1,4 +1,4 @@
--- AIshiteru Core — after 0019_conversation_drafts.down.sql, in `make db-test-sql`
+-- AIshie Core — after 0019_conversation_drafts.down.sql, in `make db-test-sql`
 --
 -- The drafts are gone, and with them nothing else: the conversation whose
 -- answer was being written stays as it was, its messages with it. The

@@ -1,4 +1,4 @@
--- AIshiteru Core — after 0012_join_links.down.sql, in `make db-test-sql`
+-- AIshie Core — after 0012_join_links.down.sql, in `make db-test-sql`
 --
 -- The links are gone, and which seat came through which, and whose email
 -- nobody vouches for; the person who registered through a link stays, with

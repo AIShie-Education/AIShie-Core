@@ -1,4 +1,4 @@
--- AIshiteru Core — after 0018_conversations_with_agents.down.sql, in `make db-test-sql`
+-- AIshie Core — after 0018_conversations_with_agents.down.sql, in `make db-test-sql`
 --
 -- The refusals are gone, and what everyone had read, and with them nothing
 -- else: the conversations the up closed stay closed, the proposals it

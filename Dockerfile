@@ -14,15 +14,15 @@ RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath \
     -ldflags "-s -w \
-      -X github.com/AIShiteru-LMS/AIShiteru-Core/internal/version.Version=${VERSION} \
-      -X github.com/AIShiteru-LMS/AIShiteru-Core/internal/version.Commit=${COMMIT} \
-      -X github.com/AIShiteru-LMS/AIShiteru-Core/internal/version.Date=${DATE}" \
-    -o /out/aishiterud ./cmd/aishiterud
+      -X github.com/AIShie-Education/AIShie-Core/internal/version.Version=${VERSION} \
+      -X github.com/AIShie-Education/AIShie-Core/internal/version.Commit=${COMMIT} \
+      -X github.com/AIShie-Education/AIShie-Core/internal/version.Date=${DATE}" \
+    -o /out/aishie-core ./cmd/aishie-core
 
 # Migrations and the seed are embedded in the binary, so the image is just the
 # binary: no shell, no package manager, not root.
 FROM gcr.io/distroless/static-debian12:nonroot
-COPY --from=build /out/aishiterud /usr/local/bin/aishiterud
+COPY --from=build /out/aishie-core /usr/local/bin/aishie-core
 EXPOSE 8080
-ENTRYPOINT ["/usr/local/bin/aishiterud"]
+ENTRYPOINT ["/usr/local/bin/aishie-core"]
 CMD ["serve"]

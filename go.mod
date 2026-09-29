@@ -1,4 +1,4 @@
-module github.com/AIShiteru-LMS/AIShiteru-Core
+module github.com/AIShie-Education/AIShie-Core
 
 go 1.27.1
 

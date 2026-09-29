@@ -1,4 +1,4 @@
--- AIshiteru Core — before 0011_site_chat.down.sql, in `make db-test-sql`
+-- AIshie Core — before 0011_site_chat.down.sql, in `make db-test-sql`
 --
 -- What the down migration has to deal with: an agent whose runtime declared
 -- site chat with a token of its own. Committed, so that the down migration

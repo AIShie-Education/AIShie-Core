@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/domain"
+	"github.com/AIShie-Education/AIShie-Core/internal/domain"
 )
 
 // The trigger that keeps the department tree shallow writes its limit as a

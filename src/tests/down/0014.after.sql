@@ -1,4 +1,4 @@
--- AIshiteru Core — after 0014_agent_owner_and_decisions.down.sql, in `make db-test-sql`
+-- AIshie Core — after 0014_agent_owner_and_decisions.down.sql, in `make db-test-sql`
 --
 -- The two refusals are gone, and with them nothing else: both agents keep
 -- their owners and their seats the levels they had, and the release before

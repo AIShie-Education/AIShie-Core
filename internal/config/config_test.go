@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/memory"
+	"github.com/AIShie-Education/AIShie-Core/internal/memory"
 )
 
 func TestFromEnv(t *testing.T) {
@@ -86,7 +86,7 @@ func TestOIDCDisplayName(t *testing.T) {
 	sso := func(t *testing.T, on bool) {
 		if on {
 			t.Setenv("OIDC_ISSUER", "https://adfs.example.edu/adfs")
-			t.Setenv("OIDC_CLIENT_ID", "aishiteru")
+			t.Setenv("OIDC_CLIENT_ID", "aishie")
 			t.Setenv("SIGNING_KEY", "an installation's signing key, 32+ characters long")
 		}
 	}

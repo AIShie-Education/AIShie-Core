@@ -3,7 +3,7 @@ package pipeline
 import (
 	"testing"
 
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/domain"
+	"github.com/AIShie-Education/AIShie-Core/internal/domain"
 )
 
 func TestStatusTable(t *testing.T) {

@@ -6,7 +6,7 @@ import (
 	"testing"
 	"unicode/utf8"
 
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/memory"
+	"github.com/AIShie-Education/AIShie-Core/internal/memory"
 )
 
 // Words of scripts written with spaces are words; Chinese, Japanese and

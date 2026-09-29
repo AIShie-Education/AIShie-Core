@@ -1,4 +1,4 @@
--- AIshiteru Core — after 0017_api_tokens_for_agents.up.sql, in `make db-test-sql`
+-- AIshie Core — after 0017_api_tokens_for_agents.up.sql, in `make db-test-sql`
 --
 -- Every API token a person held is revoked, root's from bootstrap among
 -- them, and one revoked already keeps the date it was; every password,

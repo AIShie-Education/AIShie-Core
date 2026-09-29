@@ -1,0 +1,21 @@
+#!/bin/sh
+# Runs a one-off aishie-core command with the image that is running, e.g.
+#
+#   aishie-core migrate version
+#   aishie-core token issue --actor AGENT_ID --label grader-bot --days 90
+set -eu
+# The name of this server's installation, as in aishie-deploy.
+NAME=aishie
+# Compatibility: a server set up before the rename to AIshie goes on by its
+# old name, aishiteru (docs/deploying.md, A server set up before the rename).
+[ -e /etc/aishie ] || [ ! -e /etc/aishiteru ] || NAME=aishiteru
+ENV_FILE=${AISHIE_ENV_FILE:-}
+if [ -z "$ENV_FILE" ] && [ -n "${AISHITERU_ENV_FILE:-}" ]; then
+  # Compatibility: the variable's name before the rename to AIshie.
+  echo "aishie-core: AISHITERU_ENV_FILE is deprecated: set AISHIE_ENV_FILE instead" >&2
+  ENV_FILE=$AISHITERU_ENV_FILE
+fi
+ENV_FILE=${ENV_FILE:-/etc/$NAME/$NAME.env}
+img=$(docker inspect -f '{{.Config.Image}}' "$NAME" 2>/dev/null) ||
+  { echo "aishie-core: no container named $NAME; deploy one with aishie-deploy first" >&2; exit 1; }
+exec docker run --rm -i --network host --env-file "$ENV_FILE" "$img" "$@"

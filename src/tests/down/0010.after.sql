@@ -1,4 +1,4 @@
--- AIshiteru Core — after 0010_department_admins.down.sql, in `make db-test-sql`
+-- AIshie Core — after 0010_department_admins.down.sql, in `make db-test-sql`
 --
 -- The appointments, the tree and the capacity on actions are gone; the
 -- departments stay, each at the top now, and so does the action, as history.

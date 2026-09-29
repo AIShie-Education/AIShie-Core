@@ -7,7 +7,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/apperr"
+	"github.com/AIShie-Education/AIShie-Core/internal/apperr"
 )
 
 // CheckText holds an entry's text to what memory keeps, and returns it as it

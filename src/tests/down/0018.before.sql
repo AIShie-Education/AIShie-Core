@@ -1,4 +1,4 @@
--- AIshiteru Core — before 0018_conversations_with_agents.down.sql, in `make db-test-sql`
+-- AIshie Core — before 0018_conversations_with_agents.down.sql, in `make db-test-sql`
 --
 -- What the down migration has to deal with: the course of tests/up/0018,
 -- its conversations with people closed and its people answering nothing.

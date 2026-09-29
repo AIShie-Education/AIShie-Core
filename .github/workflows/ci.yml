@@ -186,10 +186,10 @@ jobs:
         with:
           go-version-file: go.mod
       - run: make build
-      - run: ./bin/aishiterud version
+      - run: ./bin/aishie-core version
       # Proves the Dockerfile still builds. Nothing is pushed from CI.
       - run: make docker
-      - run: docker run --rm aishiteru-core:dev version
+      - run: docker run --rm aishie-core:dev version
 
   vuln:
     runs-on: ubuntu-24.04

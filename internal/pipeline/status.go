@@ -1,6 +1,6 @@
 package pipeline
 
-import "github.com/AIShiteru-LMS/AIShiteru-Core/internal/domain"
+import "github.com/AIShie-Education/AIShie-Core/internal/domain"
 
 // The life of an action, by how it was authorized:
 //

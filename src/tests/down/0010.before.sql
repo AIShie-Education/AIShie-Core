@@ -1,4 +1,4 @@
--- AIshiteru Core — before 0010_department_admins.down.sql, in `make db-test-sql`
+-- AIshie Core — before 0010_department_admins.down.sql, in `make db-test-sql`
 --
 -- What the down migration has to deal with: a tree three levels deep, an
 -- appointment in force beside one that has ended, and an action recorded as

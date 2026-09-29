@@ -17,8 +17,8 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/memory"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/wake"
+	"github.com/AIShie-Education/AIShie-Core/internal/memory"
+	"github.com/AIShie-Education/AIShie-Core/internal/wake"
 )
 
 type Config struct {
@@ -156,7 +156,7 @@ const (
 
 func FromEnv() (Config, error) {
 	c := Config{
-		DatabaseURL:   env("DATABASE_URL", "postgres:///aishiteru"),
+		DatabaseURL:   env("DATABASE_URL", "postgres:///aishie"),
 		HTTPAddr:      env("HTTP_ADDR", ":8080"),
 		ShutdownGrace: 15 * time.Second,
 	}

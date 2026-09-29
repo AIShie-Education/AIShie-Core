@@ -2,16 +2,16 @@
 # share the Dockerfile CI already proves builds.
 version: 2
 
-project_name: aishiterud
+project_name: aishie-core
 
 before:
   hooks:
     - go mod download
 
 builds:
-  - id: aishiterud
-    main: ./cmd/aishiterud
-    binary: aishiterud
+  - id: aishie-core
+    main: ./cmd/aishie-core
+    binary: aishie-core
     env: [CGO_ENABLED=0]
     goos: [linux, darwin]
     goarch: [amd64, arm64]
@@ -20,9 +20,9 @@ builds:
     # last two in), and the version as `make build` has it: v1.2.3, not 1.2.3.
     ldflags:
       - -s -w
-      - -X github.com/AIShiteru-LMS/AIShiteru-Core/internal/version.Version={{ if .IsSnapshot }}{{ .Version }}{{ else }}{{ .Tag }}{{ end }}
-      - -X github.com/AIShiteru-LMS/AIShiteru-Core/internal/version.Commit={{ or (index .Env "SHORT_COMMIT") .ShortCommit }}
-      - -X github.com/AIShiteru-LMS/AIShiteru-Core/internal/version.Date={{ or (index .Env "COMMIT_DATE") .CommitDate }}
+      - -X github.com/AIShie-Education/AIShie-Core/internal/version.Version={{ if .IsSnapshot }}{{ .Version }}{{ else }}{{ .Tag }}{{ end }}
+      - -X github.com/AIShie-Education/AIShie-Core/internal/version.Commit={{ or (index .Env "SHORT_COMMIT") .ShortCommit }}
+      - -X github.com/AIShie-Education/AIShie-Core/internal/version.Date={{ or (index .Env "COMMIT_DATE") .CommitDate }}
     mod_timestamp: "{{ .CommitTimestamp }}" # reproducible: the same commit gives the same bytes
 
 archives:
@@ -37,7 +37,7 @@ changelog:
   use: git
   sort: asc
   groups:
-    - { title: "Schema — run `aishiterud migrate up` before starting this version", regexp: '(?i)migration', order: 0 }
+    - { title: "Schema — run `aishie-core migrate up` before starting this version", regexp: '(?i)migration', order: 0 }
     - { title: Changes, order: 999 }
   filters:
     exclude: ['^Merge ']
@@ -51,4 +51,4 @@ release:
 
     `serve` never migrates on its own. If this version carries new migrations
     (the release workflow lists them below when it does), run
-    `aishiterud migrate up` before starting it.
+    `aishie-core migrate up` before starting it.

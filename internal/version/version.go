@@ -9,7 +9,7 @@ var (
 	Date    = "unknown"
 )
 
-// String is the one-line form printed by `aishiterud version`.
+// String is the one-line form printed by `aishie-core version`.
 func String() string {
 	return Version + " (" + Commit + ", " + Date + ")"
 }

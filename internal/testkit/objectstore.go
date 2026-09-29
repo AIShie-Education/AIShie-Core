@@ -4,7 +4,7 @@ import (
 	"context"
 	"io"
 
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/blob"
+	"github.com/AIShie-Education/AIShie-Core/internal/blob"
 )
 
 // ObjectStore behaves like S3 in the two ways that matter to the tool layer

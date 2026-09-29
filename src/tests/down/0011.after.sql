@@ -1,4 +1,4 @@
--- AIshiteru Core — after 0011_site_chat.down.sql, in `make db-test-sql`
+-- AIshie Core — after 0011_site_chat.down.sql, in `make db-test-sql`
 --
 -- Which credential declared site chat is gone, and the key it was held by;
 -- the agent and its token stay, the token still live.

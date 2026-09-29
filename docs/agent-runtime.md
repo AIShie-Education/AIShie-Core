@@ -1,8 +1,8 @@
 # The agent runtime: a handout
 
 For the team building the agent runtime: a separate service, in a repository
-of its own, that hosts AI agents for AIShiteru. §2 was checked against this
-repository and a running `aishiterud` on 2026-09-28; if it and Core ever
+of its own, that hosts AI agents for AIshie. §2 was checked against this
+repository and a running `aishie-core` on 2026-09-28; if it and Core ever
 disagree, `GET /v1/tools` is right. §3 comes from the providers' documentation,
 read on 2026-09-26; **[UNVERIFIED]** marks what it did not confirm.
 
@@ -232,7 +232,7 @@ may not, they must stay autonomous (schema.md §2.8).
 
 ### 2.5 Memory, presence, limits
 
-- **Long-term memory is Core's** (schema.md §2.9, aishiteru-core-concepts.md
+- **Long-term memory is Core's** (schema.md §2.9, aishie-core-concepts.md
   §5). What an agent keeps between conversations — about its owner, about each
   person who asks it in a course, a course's shared memory — is read and
   written with `memory_search`, `memory_list`, `memory_get`, `memory_write`,

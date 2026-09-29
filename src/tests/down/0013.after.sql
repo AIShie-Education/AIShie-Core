@@ -1,4 +1,4 @@
--- AIshiteru Core — after 0013_member_invite.down.sql, in `make db-test-sql`
+-- AIshie Core — after 0013_member_invite.down.sql, in `make db-test-sql`
 --
 -- member_invite is gone from both tables; the seat, the preset and the link
 -- stay, the seat still managing members.

@@ -9,14 +9,14 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/apperr"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/authz"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/db/dbq"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/domain"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/events"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/ids"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/members"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/tool"
+	"github.com/AIShie-Education/AIShie-Core/internal/apperr"
+	"github.com/AIShie-Education/AIShie-Core/internal/authz"
+	"github.com/AIShie-Education/AIShie-Core/internal/db/dbq"
+	"github.com/AIShie-Education/AIShie-Core/internal/domain"
+	"github.com/AIShie-Education/AIShie-Core/internal/events"
+	"github.com/AIShie-Education/AIShie-Core/internal/ids"
+	"github.com/AIShie-Education/AIShie-Core/internal/members"
+	"github.com/AIShie-Education/AIShie-Core/internal/tool"
 )
 
 func courseTools() []tool.Tool {
@@ -291,7 +291,7 @@ func courseSeatInstructor() tool.Tool {
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in SeatInstructorIn) (MemberIDOut, error) {
 			preset, err := ec.Q.GetBuiltinPresetByName(ctx, "instructor")
 			if err != nil {
-				return MemberIDOut{}, apperr.Precondition("the built-in instructor preset is missing; run `aishiterud seed`")
+				return MemberIDOut{}, apperr.Precondition("the built-in instructor preset is missing; run `aishie-core seed`")
 			}
 			id, err := seat(ctx, ec, seating{
 				courseID: in.CourseID, actorID: in.ActorID, preset: &preset, perms: presetPerms(preset),

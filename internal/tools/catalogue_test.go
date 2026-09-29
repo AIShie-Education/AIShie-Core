@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/testkit"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/tool"
+	"github.com/AIShie-Education/AIShie-Core/internal/testkit"
+	"github.com/AIShie-Education/AIShie-Core/internal/tool"
 )
 
 // Both adapters are generated from the registry, so what every tool must get

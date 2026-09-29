@@ -13,7 +13,7 @@ import (
 	"github.com/golang-migrate/migrate/v4/source/iofs"
 	_ "github.com/jackc/pgx/v5/stdlib" // registers the "pgx" database/sql driver
 
-	dbfiles "github.com/AIShiteru-LMS/AIShiteru-Core/src"
+	dbfiles "github.com/AIShie-Education/AIShie-Core/src"
 )
 
 // Migrator applies the migrations embedded in the binary. Each file carries

@@ -11,10 +11,10 @@ import (
 
 	"github.com/google/jsonschema-go/jsonschema"
 
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/apperr"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/auth"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/canon"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/tool"
+	"github.com/AIShie-Education/AIShie-Core/internal/apperr"
+	"github.com/AIShie-Education/AIShie-Core/internal/auth"
+	"github.com/AIShie-Education/AIShie-Core/internal/canon"
+	"github.com/AIShie-Education/AIShie-Core/internal/tool"
 )
 
 func contextWith(ctx context.Context, p auth.Principal) context.Context {

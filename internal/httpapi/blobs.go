@@ -9,8 +9,8 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/apperr"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/blob"
+	"github.com/AIShie-Education/AIShie-Core/internal/apperr"
+	"github.com/AIShie-Education/AIShie-Core/internal/blob"
 )
 
 // These two routes exist only when files are kept on this server's own disk.

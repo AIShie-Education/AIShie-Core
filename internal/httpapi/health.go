@@ -6,8 +6,8 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/db"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/version"
+	"github.com/AIShie-Education/AIShie-Core/internal/db"
+	"github.com/AIShie-Education/AIShie-Core/internal/version"
 )
 
 type healthResponse struct {
@@ -44,7 +44,7 @@ func (s *server) healthz(w http.ResponseWriter, r *http.Request) {
 	case dirty:
 		resp.Status, resp.Error, code = "unavailable", "schema is dirty", http.StatusServiceUnavailable
 	case v < s.LatestSchema:
-		resp.Status, resp.Error, code = "unavailable", "the schema is behind this binary; run `aishiterud migrate up`", http.StatusServiceUnavailable
+		resp.Status, resp.Error, code = "unavailable", "the schema is behind this binary; run `aishie-core migrate up`", http.StatusServiceUnavailable
 	}
 
 	w.Header().Set("Content-Type", "application/json")
