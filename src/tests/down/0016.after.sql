@@ -1,4 +1,4 @@
--- AIshiteru Core — after 0016_login_ids.down.sql, in `make db-test-sql`
+-- AIshie Core — after 0016_login_ids.down.sql, in `make db-test-sql`
 --
 -- The login IDs are gone, and whether anyone vouched for them, and which
 -- password is temporary; the people stay, with their emails, and the student

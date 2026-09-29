@@ -1,4 +1,4 @@
--- AIshiteru Core — built-in permission presets
+-- AIshie Core — built-in permission presets
 --
 -- Policy, not schema: what a student, instructor, TA, observer, tutor agent,
 -- grading agent, a person's own agent or a course's question-answering agent

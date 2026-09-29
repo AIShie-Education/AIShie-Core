@@ -1,4 +1,4 @@
--- AIshiteru Core — after 0015_flexible_records.down.sql, in `make db-test-sql`
+-- AIshie Core — after 0015_flexible_records.down.sql, in `make db-test-sql`
 --
 -- The override and the tombstone are gone, and versions are append-only
 -- again; the total stays as it was worked out, and the purged version stays,

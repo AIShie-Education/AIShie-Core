@@ -1,4 +1,4 @@
--- AIshiteru Core — after 0009_memory.down.sql, in `make db-test-sql`
+-- AIshie Core — after 0009_memory.down.sql, in `make db-test-sql`
 --
 -- The memory tables are gone, and every entry with them; the action that
 -- wrote one stays, as history, and never held its text.

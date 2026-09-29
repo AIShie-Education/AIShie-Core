@@ -1,4 +1,4 @@
-// Command aishie-core is the AIshiteru Core server and its operator tooling.
+// Command aishie-core is the AIshie Core server and its operator tooling.
 package main
 
 import (
@@ -37,7 +37,7 @@ import (
 	"github.com/AIShie-Education/AIShie-Core/internal/wake"
 )
 
-const usage = `aishie-core — AIshiteru Core
+const usage = `aishie-core — AIshie Core
 
 Usage:
   aishie-core serve                  run the HTTP server

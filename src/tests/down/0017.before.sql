@@ -1,4 +1,4 @@
--- AIshiteru Core — before 0017_api_tokens_for_agents.down.sql, in `make db-test-sql`
+-- AIshie Core — before 0017_api_tokens_for_agents.down.sql, in `make db-test-sql`
 --
 -- What the down migration has to deal with: a person who signs in, with a
 -- password and a session; an agent with its token; and, from before the up

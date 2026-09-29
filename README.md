@@ -1,11 +1,11 @@
-# AIShiteru-Core
+# AIshie Core
 
 An agent-centered LMS where AI agents are primary actors, not bolted-on
 features. Core is pure orchestration — state, events and one tool surface that
 humans (REST) and agents (MCP) both call. It hosts no models and never dials
 out to an agent.
 
-- Why it is shaped this way: [docs/aishiteru-core-concepts.md](docs/aishiteru-core-concepts.md)
+- Why it is shaped this way: [docs/aishie-core-concepts.md](docs/aishie-core-concepts.md)
 - The data model and `authorize()`: [docs/schema.md](docs/schema.md)
 - The SQL layer, runnable with plain `psql`: [src/README.md](src/README.md)
 
@@ -553,4 +553,4 @@ a release, and the repository settings this needs, are in
 
 ## License
 
-AIShie Core is copyright 2026 XIE Hanming, and source-available under the [Elastic License 2.0](LICENSE) (ELv2), governed by the laws of Hong Kong. You may use, copy, change and redistribute it on the terms in LICENSE, which include that you may not offer it to others as a hosted or managed service.
+AIshie Core is copyright 2026 XIE Hanming, and source-available under the [Elastic License 2.0](LICENSE) (ELv2), governed by the laws of Hong Kong. You may use, copy, change and redistribute it on the terms in LICENSE, which include that you may not offer it to others as a hosted or managed service.

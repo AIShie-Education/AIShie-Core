@@ -1,4 +1,4 @@
--- AIshiteru Core — before 0017_api_tokens_for_agents.up.sql, in `make db-test-sql`
+-- AIshie Core — before 0017_api_tokens_for_agents.up.sql, in `make db-test-sql`
 --
 -- What the migration finds: people with API tokens beside their passwords,
 -- sessions, identities and invitations, root among them with the token

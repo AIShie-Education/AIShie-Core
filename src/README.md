@@ -1,8 +1,8 @@
 # src
 
-Database schema for AIshiteru Core.
+Database schema for AIshie Core.
 
-- Design intent: [../docs/aishiteru-core-concepts.md](../docs/aishiteru-core-concepts.md)
+- Design intent: [../docs/aishie-core-concepts.md](../docs/aishie-core-concepts.md)
 - Data model: [../docs/schema.md](../docs/schema.md)
 
 ## Layout

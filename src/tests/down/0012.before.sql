@@ -1,4 +1,4 @@
--- AIshiteru Core — before 0012_join_links.down.sql, in `make db-test-sql`
+-- AIshie Core — before 0012_join_links.down.sql, in `make db-test-sql`
 --
 -- What the down migration has to deal with: a course with two join links,
 -- one live and one revoked; a person who registered through the live one,

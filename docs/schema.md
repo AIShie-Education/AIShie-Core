@@ -1,6 +1,6 @@
-# AIshiteru — Core Data Schema
+# AIshie — Core Data Schema
 
-Derived from [aishiteru-core-concepts.md](./aishiteru-core-concepts.md). Notation is compact
+Derived from [aishie-core-concepts.md](./aishie-core-concepts.md). Notation is compact
 pseudo-DDL, not migration SQL: `→` marks a foreign key, `null` marks a nullable column, `[a|b]`
 lists the values a text column may hold. The migration in `src/migrations` is the authority on
 exact types and constraints.
@@ -1293,7 +1293,7 @@ may.
 
 **Site chat: which agents answer in the site.** An agent answers only if something runs it that
 polls `conversation.inbox` and answers on its own:
-an agent runtime, AIShie's or a school's own. An assistant a person drives from a tool of their
+an agent runtime, AIshie's or a school's own. An assistant a person drives from a tool of their
 own — a chat app, an editor, a script, over MCP — acts only while that person uses it and never
 polls, so a question put to it in the site would wait for good. So the program that runs an
 agent says that it answers: `me.site_chat` with `on: true`, which records the credential the

@@ -1,4 +1,4 @@
--- AIshiteru Core — before 0016_login_ids.down.sql, in `make db-test-sql`
+-- AIshie Core — before 0016_login_ids.down.sql, in `make db-test-sql`
 --
 -- What the down migration has to deal with: a course whose instructor has a
 -- login ID and an email; a student who registered through a join link with

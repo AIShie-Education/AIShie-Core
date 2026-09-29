@@ -1,4 +1,4 @@
--- AIshiteru Core — after 0018_conversations_with_agents.up.sql, in `make db-test-sql`
+-- AIshie Core — after 0018_conversations_with_agents.up.sql, in `make db-test-sql`
 --
 -- Every person's seat that is not removed answers nothing, and every preset
 -- for people; the removed seat, the agent's seat and the preset for agents

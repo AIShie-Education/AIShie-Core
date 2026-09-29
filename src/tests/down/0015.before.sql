@@ -1,4 +1,4 @@
--- AIshiteru Core — before 0015_flexible_records.down.sql, in `make db-test-sql`
+-- AIshie Core — before 0015_flexible_records.down.sql, in `make db-test-sql`
 --
 -- What the down migration has to deal with: a course total overridden, and
 -- lecture notes with one version purged and one left as it was. Committed,

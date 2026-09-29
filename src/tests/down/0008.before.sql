@@ -1,4 +1,4 @@
--- AIshiteru Core — before 0008_conversations.down.sql, in `make db-test-sql`
+-- AIshie Core — before 0008_conversations.down.sql, in `make db-test-sql`
 --
 -- What the down migration has to deal with: a conversation with a message in
 -- it, and an answer waiting for a decision. Committed, so that the down

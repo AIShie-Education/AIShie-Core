@@ -1,4 +1,4 @@
--- AIshiteru Core — database-enforced rule tests
+-- AIshie Core — database-enforced rule tests
 --
 -- Run against a throwaway database that has the migrations applied. Every
 -- statement runs inside one transaction that is rolled back at the end, but

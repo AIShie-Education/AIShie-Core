@@ -1,4 +1,4 @@
--- AIshiteru Core — after 0007_agent_ownership.down.sql, in `make db-test-sql`
+-- AIshie Core — after 0007_agent_ownership.down.sql, in `make db-test-sql`
 --
 -- The delegate seat is removed and its proposal cancelled as a removal
 -- cancels one; the agent has lost its owner and the token its owner issued;

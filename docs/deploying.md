@@ -1,4 +1,4 @@
-# Deploying AIShiteru Core
+# Deploying AIshie Core
 
 One server per environment: staging first, production when staging has
 earned it. On each server, [Caddy](https://caddyserver.com) serves HTTPS and
@@ -129,9 +129,9 @@ nightly job, which it writes again as `/etc/cron.d/aishie-backup`. Deploy's
 SSH key stays as it is, and runs `aishie-deploy` from then on: the secret in
 GitHub does not change.
 
-Everything else keeps its old name, with the data in it: `aishie-deploy`,
-`aishie-core` and the nightly backup find `/etc/aishiteru` and use
-`aishiteru` wherever this document says `aishie`, in `docker logs -f
+Everything else keeps its old name, with the data in it: `aishie-deploy` and
+`aishie-core` find `/etc/aishiteru` and, like the nightly job, use
+`aishiteru` wherever this document says `aishie`, as in `docker logs -f
 aishiteru`, `/var/backups/aishiteru` and the database's name. Until the
 server has been set up again, the Deploy workflow keeps running the old
 `aishiteru-deploy`, which works as it did. The variables that move the

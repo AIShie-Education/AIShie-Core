@@ -1,4 +1,4 @@
--- AIshiteru Core — before 0018_conversations_with_agents.up.sql, in `make db-test-sql`
+-- AIshie Core — before 0018_conversations_with_agents.up.sql, in `make db-test-sql`
 --
 -- What the migration finds: a course in which people answer conversations
 -- beside an agent. An instructor who answers, a TA who answers by proposal,

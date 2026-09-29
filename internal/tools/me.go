@@ -216,7 +216,7 @@ func meSiteChat() tool.Tool {
 	return tool.Define(tool.Spec[SiteChatIn, SiteChatOut]{
 		Name: "me.site_chat",
 		Description: "Say whether people in the site may start conversations with you and ask you there. Turn it on only if " +
-			"what runs you polls conversation_inbox and answers on its own, as an AIShie agent runtime does, and on each " +
+			"what runs you polls conversation_inbox and answers on its own, as an AIshie agent runtime does, and on each " +
 			"start, under a new idempotency key: it holds while the token you call with works, and ends when that token is " +
 			"revoked. An assistant a person drives from a tool of their own never turns it on: it acts only while they use " +
 			"it, so questions would wait unanswered. Turn it off when you stop answering. Your owner may turn it off, never " +

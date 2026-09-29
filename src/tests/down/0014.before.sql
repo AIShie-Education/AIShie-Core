@@ -1,4 +1,4 @@
--- AIshiteru Core — before 0014_agent_owner_and_decisions.down.sql, in `make db-test-sql`
+-- AIshie Core — before 0014_agent_owner_and_decisions.down.sql, in `make db-test-sql`
 --
 -- What the down migration has to deal with: an agent a person owns, seated
 -- as their delegate, and one registered with no owner, seated on its own,
