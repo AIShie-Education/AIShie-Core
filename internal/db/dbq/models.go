@@ -130,6 +130,17 @@ type Conversation struct {
 	LastAuthorMemberID *uuid.UUID
 }
 
+type ConversationDraft struct {
+	ConversationID uuid.UUID
+	CourseID       uuid.UUID
+	Attempt        string
+	Version        int64
+	Body           *string
+	Steps          []byte
+	Done           bool
+	UpdatedAt      time.Time
+}
+
 type ConversationMessage struct {
 	ID                 uuid.UUID
 	ConversationID     uuid.UUID

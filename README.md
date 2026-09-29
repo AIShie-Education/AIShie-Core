@@ -35,7 +35,10 @@ In place so far:
   talk to people elsewhere; nobody may ask an agent that can see or do more
   than they can, nor one unless what runs it says it answers in the site; a
   person's conversations in every course are one list, newest first, saying
-  what they have not read yet;
+  what they have not read yet; while an agent writes an answer, whoever reads
+  the conversation watches it come — what the agent is doing, and the text
+  where the answer would be shown — through a draft that is no action and
+  that the answer, posted, replaces;
 - agents' memory, kept in Core whatever runs the agent (off unless
   `MEMORY=on`): about its owner, about each person who asks it in a course,
   reached only through that person's conversation, and a course's shared
@@ -61,7 +64,8 @@ points with the grade rescaled, overrides the student's total and takes the
 override off, renames the slides and brings them back from the archive, and
 makes the student a TA and a student again; then, once its runtime says it
 answers in the site, the student asks the instructor's tutor agent a
-question, and it answers, and she is refused the instructor as a respondent,
+question, watches its answer's draft come, waiting on the conversation, and
+it answers, and she is refused the instructor as a respondent,
 as he is refused answering; her chat panel lists the conversation, unread
 until she marks it read; another agent of the instructor's, given
 `member_manage`, seats a student with its own token and is refused on the
@@ -418,7 +422,12 @@ agent has written since they last marked it read (`conversation.mark_read`),
 and waits on the one open with `conversation.messages`, `after_seq` and
 `wait_s`, which answers as soon as the agent writes or the conversation's state
 changes (`seen_state`, the state it last read, catches a change between two
-calls);
+calls), and, given `seen_draft_version`, as soon as the answer's draft changes:
+while the agent's runtime writes an answer, it streams a draft of it
+(`conversation.draft`: what it is doing, and the text so far), which the
+conversation shows as `draft` until the answer replaces it, its text to the
+asker only where the agent answers without approval, and otherwise to whoever
+would approve the answer;
 whoever decides actions lists one agent's conversations with
 `conversation.list` and `respondent_member_id`. What is written is readable
 by the two participants, by course staff who decide actions for the one who
@@ -466,7 +475,9 @@ says what the runtime checks.
 ### The API in one paragraph
 
 Every route is a tool, and `GET /v1/tools` lists them. A tool that changes
-state is a `POST` and needs an `Idempotency-Key` header: send the same key
+state is a `POST` and needs an `Idempotency-Key` header, all but
+`conversation.draft`, an answer's draft while it is written, which is listed
+as `ephemeral`, takes none and records nothing: send the same key
 with the same body again and you get the first answer back
 (`Idempotency-Replayed: true`) with nothing done twice; send it with a
 different body and you get `409 idempotency_conflict`. The response says what
@@ -480,7 +491,9 @@ replayed says what has become of it: `202` while it waits, `200` executed,
 top-level `action_id` recorded nothing, whatever its status: among them every
 `401` and every other `429`, a `400` or `404` for a call that was never attempted, a `403`
 for a browser's `POST` from another origin not in `TRUSTED_ORIGINS`, a `405`,
-a `500`, and every read; `429` carries `Retry-After`. A
+a `500`, every read, and every draft, whose writes are bounded per
+conversation, ten a second, then `429`, and cost nothing of the rate limit
+when they are carried out; `429` carries `Retry-After`. A
 `409 idempotency_conflict` names the earlier action in
 `error.details.action_id` and records nothing either, so a call corrected
 after a recorded failure needs a new key. Every answer, including the one for

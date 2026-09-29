@@ -44,6 +44,12 @@ type Querier interface {
 	ComponentHasGrades(ctx context.Context, componentID *uuid.UUID) (bool, error)
 	// Any origin: an entered grade, or a total written down when it was a parent.
 	ComponentHasLivePostedGrades(ctx context.Context, componentID *uuid.UUID) (bool, error)
+	// Whether a conversation stands awaiting_answer, as the views say
+	// (tools.conversationViews): open, the opener wrote last, and no answer of
+	// the respondent's to the opener's newest message waits for a decision.
+	// Asked after LockConversationForDraft, so that what that lock waited for
+	// is seen.
+	ConversationAwaitsAnswer(ctx context.Context, id uuid.UUID) (bool, error)
 	// What the views show of each conversation: its two participants, whether a
 	// reply to the opener's newest message waits for a decision, that message,
 	// and when a message in it was last retracted. last_seen_at is an agent's:
@@ -80,7 +86,15 @@ type Querier interface {
 	CourseCodeTaken(ctx context.Context, arg CourseCodeTakenParams) (bool, error)
 	// Courses directly in each department, archived ones included.
 	CourseCountsByDept(ctx context.Context) ([]CourseCountsByDeptRow, error)
+	// The respondent's answer is posted, or proposed, or the conversation
+	// closed: in the same transaction, its draft is gone.
+	DeleteDraft(ctx context.Context, conversationID uuid.UUID) error
+	// DeleteDraft for the conversations a removal of seats closed.
+	DeleteDrafts(ctx context.Context, conversationIds []uuid.UUID) error
 	DeleteMemory(ctx context.Context, arg DeleteMemoryParams) (int64, error)
+	// The sweep: drafts nobody has written for a while, which reads leave out
+	// already. The table is a row per conversation being answered, and scanned.
+	DeleteStaleDrafts(ctx context.Context, staleBefore time.Time) (int64, error)
 	// A session is a credential with a short life. Long after it has expired it
 	// says nothing the action log does not, so it is the one kind of row that is
 	// actually deleted.
@@ -99,6 +113,9 @@ type Querier interface {
 	// document as its instructions or rubric. A delegate's scope is its
 	// principal's too.
 	DocumentInUseByPublishedAssignment(ctx context.Context, arg DocumentInUseByPublishedAssignmentParams) (bool, error)
+	// The version of the draft kept, as a reader finds it (GetDraft), for a
+	// write passed over: 0 for none, one gone stale, or an attempt's end.
+	DraftVersion(ctx context.Context, arg DraftVersionParams) (int64, error)
 	EmailTaken(ctx context.Context, lower string) (bool, error)
 	EmailTakenByAnother(ctx context.Context, arg EmailTakenByAnotherParams) (bool, error)
 	// Zero rows: it had ended already. An Admin-gated write by the appointee
@@ -191,6 +208,9 @@ type Querier interface {
 	// A document and, when it is owned, whose it is: a submitted file belongs to
 	// its submission's student and assignment; a feedback file to its grade's.
 	GetDocumentWithOwner(ctx context.Context, arg GetDocumentWithOwnerParams) (GetDocumentWithOwnerRow, error)
+	// The draft of a conversation, if there is one: written since fresh_after,
+	// and not the end of its attempt.
+	GetDraft(ctx context.Context, arg GetDraftParams) (GetDraftRow, error)
 	GetGradeFull(ctx context.Context, arg GetGradeFullParams) (GetGradeFullRow, error)
 	// Grades by id, with the assignment each belongs to (null for a component
 	// grade). A grade's course is its student's course.
@@ -585,6 +605,23 @@ type Querier interface {
 	// ShareAssignments), since unpublishing takes the stream lock last.
 	LockAssignmentForUnpublish(ctx context.Context, arg LockAssignmentForUnpublishParams) (LockAssignmentForUnpublishRow, error)
 	LockComponentGradeTarget(ctx context.Context, arg LockComponentGradeTargetParams) error
+	// Proposing an answer takes the conversation as writing a message does,
+	// FOR NO KEY UPDATE, so that a draft being written waits for the proposal,
+	// and finds the answer waiting for approval, or the proposal waits for the
+	// draft and deletes it (DeleteDraft).
+	LockConversationForAnswer(ctx context.Context, id uuid.UUID) error
+	// An answer's draft while it is written (docs/schema.md §2.8, Drafts): one
+	// row per conversation in an UNLOGGED table, written by conversation.draft,
+	// which records no action. A row written before fresh_after, or stale_before,
+	// is no draft: reads leave it out, a write replaces it whatever it held, and
+	// the sweep deletes it.
+	// The conversation a draft is written in, held FOR SHARE until the write
+	// ends: writing a message (TouchConversation), closing it, and proposing an
+	// answer in it (LockConversationForAnswer) each take a lock this waits for,
+	// or that waits for it. So a draft written after the answer is posted,
+	// proposed or the conversation closed, finds it so (ConversationAwaitsAnswer,
+	// asked after this), and one written before is deleted with them.
+	LockConversationForDraft(ctx context.Context, arg LockConversationForDraftParams) (LockConversationForDraftRow, error)
 	// Taken before changing the tree's shape, so that two moves cannot each
 	// check for a cycle and then create one between them.
 	LockCourseComponents(ctx context.Context, courseID uuid.UUID) error
@@ -751,6 +788,16 @@ type Querier interface {
 	// Its text, its file and the file's checksum go; the rest stays, with who,
 	// when and why. The one change a version takes (document_version_guarded).
 	PurgeVersion(ctx context.Context, arg PurgeVersionParams) (int64, error)
+	// Writes a draft if it is newer than the one kept, and returns its version;
+	// no row when it is passed over. Newer is: none kept, or one gone stale; one of another attempt,
+	// which a new attempt replaces, unless this is the end (done) of an attempt
+	// that is not the one kept; or, of the same attempt, not ended, a higher
+	// version, or for its end, not a lower one. The end of an attempt keeps
+	// the row, empty, so that a write of it that comes late is passed over.
+	// body and steps given null keep what the same attempt had, and are none
+	// for a new one. Under the row's lock, so that two writes at once are
+	// ordered by it.
+	PutDraft(ctx context.Context, arg PutDraftParams) (int64, error)
 	ReactivateActor(ctx context.Context, id uuid.UUID) (int64, error)
 	// Only a suspension the owner made: one an administrator made, or one made
 	// before this was recorded, is an administrator's to lift.

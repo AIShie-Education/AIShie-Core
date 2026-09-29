@@ -17,7 +17,9 @@ exact types and constraints.
   migration. The only enum is `autonomy_level`, because it must be ordered.
 - **Deletion**: status columns, not hard deletes. Foreign keys default to `NO ACTION`. Memory
   (§2.9) is the one thing Core deletes rather than retires: what a person asks to be forgotten
-  is gone, and so is what a retention period ends. No other row points at it.
+  is gone, and so is what a retention period ends. No other row points at it. An answer's
+  draft (§2.8) is no record at all: kept in an unlogged table while the answer is written, and
+  deleted once it is there.
 - **Who did it**: inside a course, points at `course_member`, so a record carries the role it
   was made under and stays distinct when the same actor is removed and re-added. Creation and
   adding point at `actor`, because the creator may not be a member (an admin, or the system).
@@ -960,7 +962,9 @@ failed, denied or cancelled action and `{"decision": …}` for a rejected one; w
 is follows from `status`, never from the shape of `result`.
 
 **Only state changes are actions.** A read passes `authorize()`, scope included, and writes
-no `action` row: the log stays a record of attempts to change something.
+no `action` row: the log stays a record of attempts to change something. One change is no
+action either: an answer's draft while it is written (§2.8), written many times a second and
+lost without harm, whose write is ephemeral: authorized as a write is, and recorded nowhere.
 
 **A proposal is re-authorized when it is approved, and does not wait forever.** Approval
 re-runs `authorize()` for the *proposer* — against the very `course_member` row the proposal
@@ -1034,8 +1038,10 @@ wait its time and never an answer. A wait is one call to the rate limit. A call 
 `LONG_POLL_WAITERS_PER_ACTOR` of one actor's (16), answers at once, as does one on a server
 shutting down. A wait ends when its client goes. `conversation.messages` also takes
 `seen_state`, the state its reader last saw: a conversation now in another state answers at
-once, though nothing was written, so that a change between two calls is not missed. Drafts
-of an answer, when they are streamed, will reach their readers by the same wake-up.
+once, though nothing was written, so that a change between two calls is not missed. An
+answer's draft reaches its readers by the same wake-up (§2.8): each write kept notifies kind
+`conversation.draft` at `seq` 0, which wakes only a reader of the conversation that gives
+`seen_draft_version`, never an inbox or a feed.
 
 `student_member_id` and `assignment_id` say whose the event is, so that the feed is
 scope-filtered in SQL exactly as `authorize()` filters a target: null means the event belongs
@@ -1198,6 +1204,14 @@ conversation_read(conversation_id, course_id, member_id, last_read_seq, read_at,
                   (course_id, member_id) → course_member
     check: last_read_seq ≥ 0
     trigger: a participant's; whose it is never changes; last_read_seq never goes back
+
+conversation_draft(conversation_id, course_id, attempt, version, body null, steps jsonb,
+                   done, updated_at, primary key (conversation_id))          UNLOGGED
+    composite FK (conversation_id, course_id) → conversation(id, course_id)
+    check: attempt 1..64 characters;  version ≥ 1;  body ≤ 20000 characters;
+           steps a list of at most 20 {kind, target?, state}: kind one of eight, state
+           [running|done], target text of at most 120 characters, nothing else;
+           an attempt's end (done) keeps no body and no steps
 ```
 
 A conversation is one member asking an agent seated in the course questions, and the agent
@@ -1379,6 +1393,62 @@ memberships, and the conversations read in SQL for those seats alone.
 conversations addressed to that seat: with `as` `overseer`, one agent's conversations with the
 members the caller decides actions for, open or closed, paged by id, as an agent's page in a
 course shows them. It narrows whatever the caller may list, so anyone may give it.
+
+**An answer while it is written: its draft.** While a runtime writes an answer, it says what it
+is doing and, as the model writes it, the text so far (`conversation.draft`), so that whoever
+reads the conversation watches the answer come; the answer, posted, takes its place. A draft is
+not a record, and writing it is no action: it is an *ephemeral* write (`tool.Ephemeral`),
+authorized as a write is — the caller's seat held, an archived course refused — and carried out
+at once, at any level above `denied`, recording nothing: no action row, no idempotency key, no
+proposal, no event. Only the conversation's respondent writes it, while the conversation is
+`awaiting_answer` and its opener may still address the respondent, as for the answer itself
+(`not_the_respondent`, `conversation_not_awaiting`, `not_addressable`); a person, who answers
+nothing, is denied as for an answer. Each write names the runtime's `attempt` at the answer (1
+to 64 characters) and a `version` rising within it, and replaces the draft whole: `steps`,
+every step so far, each `{kind, target?, state}` — `thinking`, `reading_document`,
+`listing_documents`, `reading_assignment`, `reading_submission`, `searching_memory`, `writing`
+or `tool`; `running` or `done`; what it is about as plain text on one line, at most 120
+characters — and `text`, the whole answer so far, at most 20,000 characters; either left out,
+the attempt keeps what it had. A write that is not newer than the draft kept is passed over
+(`stored: false`): a lower or the same version of the attempt, anything of an attempt that is
+over, or the end of an attempt other than the one kept. Another attempt replaces the draft
+whole, and so does any write over a draft nobody has written for 120 seconds. `done` ends the
+attempt, given up or finished, at a version no lower than its last: the draft is gone to its
+readers, and its row is kept, empty, so that a write of the attempt that arrives late is passed
+over. So writes that arrive out of order undo nothing.
+
+It is kept in an UNLOGGED table, one row per conversation, the last write winning: no WAL, so
+nothing of it on a standby, and a crash of the server empties it, which loses nothing the next
+write does not bring back. The answer's own transaction deletes it, `conversation.answer`
+posting the answer or proposing it, and so does closing the conversation, by a participant or by
+a seat's removal. Proposing an answer takes the conversation `FOR NO KEY UPDATE`, as writing a
+message does, and a draft's write takes it `FOR SHARE` before it asks whether the conversation
+still waits: so a draft written while the answer is posted or proposed, or the conversation
+closed, waits for it and is refused, and the answer, or the close, made while a draft is written
+waits for the draft and deletes it. A draft nobody has written for 120 seconds is none: reads
+leave it out, and the sweep deletes it, recording nothing, as it deletes a dead session. A
+conversation's draft is written at most 10 times a second, in each instance (`rate_limited`,
+reason `draft_rate`, with `retry_after_seconds`), counted once the caller is known to be its
+respondent, so that nobody else spends it; a write carried out costs its caller nothing of their
+own rate limit, and one refused counts as any call does.
+
+`conversation.get` and `conversation.messages` return it as `draft`, null for none, while the
+conversation is `awaiting_answer`: its `attempt`, `version`, `updated_at` and `steps`, and
+`text` or `text_hidden`. Who sees its text is who would see the answer. While the respondent's
+`conversation_answer` is `autonomous`, its answers are posted as they are written, and whoever
+reads the conversation sees the text. Otherwise the text is shown to the respondent, who writes
+it, and to whoever would decide the answer once it is proposed (`action.decide`): who holds
+`perm_action_decide` and is not of the respondent's party (four eyes, §2.6), and the respondent's
+owner where they decide actions without anyone's confirmation (`tool.Spec.OwnerJudgedBy`).
+Everyone else who reads the conversation — its opener, and staff who oversee the opener and
+would not decide the answer — sees what the opener sees: the steps, and `text_hidden: true`.
+Whoever may not read the conversation finds no draft, as they find no conversation. Each write
+kept, and an attempt's end, notifies `aishiteru_wake` in its transaction, kind
+`conversation.draft` at `seq` 0, since it is in no feed (§2.6, Waiting for news); it wakes only
+a reader of the conversation that watches its draft: `conversation.messages` given
+`seen_draft_version`, the draft's version as it last read it, 0 for none, answers as soon as the
+draft is another, or appears or goes, as well as for the rest. Without it, a draft wakes nobody,
+nor does it wake an inbox or a feed.
 
 **Its news is its participants'.** `conversation.opened`, `.message_posted`, `.closed` and
 `.message_retracted` are filed under the conversation (`subject_type = 'conversation'`), name
@@ -1700,6 +1770,11 @@ takes no site chat is refused as a rule of the domain (`failed_precondition`), r
 other failure. `me.site_chat` is on the caller's own account (the Self gate), and is the one tool
 that reads which credential the call came with.
 
+An ephemeral write (`conversation.draft`, §2.8) goes through `authorize()` as a write does: step
+1 refuses it in an archived course, and its caller's seat is held until it ends. Any level above
+`denied` carries it out at once, since there is nothing to propose; what the level of the
+respondent's `conversation_answer` decides is who is shown its text.
+
 ## 4. Invariants
 
 **Enforced by the database.** These hold whatever application code does.
@@ -1752,6 +1827,7 @@ that reads which credential the call came with.
 | A message and its retraction are in their conversation's course; one message at each `seq`; a message is retracted once | composite FKs, `unique(conversation_id, seq)`, primary key on `conversation_message_retraction` |
 | Every message and retraction names its action | `created_by_action_id NOT NULL` |
 | `conversation_message` and `conversation_message_retraction` are append-only | triggers |
+| An answer's draft is one per conversation, in its course; its attempt, version, text and steps are held to their shape, and an attempt's end keeps nothing | primary key, composite FK and CHECKs on `conversation_draft` |
 | Memory is held by agents, owner memory is about the agent's owner, and each seat an entry names is its actor's, in the entry's course | trigger `memory_entry_guarded`, composite FKs on `memory_entry` |
 | Each scope of memory has its shape: owner memory in no seat, asker memory in both, shared memory in the agent's seat and about nobody; only shared memory is proposed or rejected | `memory_shape_valid` |
 | A live entry has 1..1000 characters of text and its hash; a rejected one has neither | `memory_body_valid` |
@@ -1961,6 +2037,18 @@ that reads which credential the call came with.
 - A call writing in a conversation takes its caller's seat, then the other participant's
   and its principal's, then the conversation: a removal, which holds the seat and then
   closes its conversations, waits for it or is waited for.
+- An answer's draft (§2.8) is written by the conversation's respondent alone, while the
+  conversation waits for its answer and its opener may still address the respondent, asked
+  under the conversation's lock `FOR SHARE`; posting or proposing the answer, which takes that
+  lock `FOR NO KEY UPDATE` first, and closing the conversation delete it in their own
+  transaction. A write not newer than the draft kept is passed over; one nobody has written
+  for 120 seconds is read as none, replaced by any write and swept.
+- A draft's text is shown only where the answer would be: to whoever reads the conversation
+  while the respondent answers without approval (`autonomous`); otherwise to the respondent
+  and to whoever would decide the answer, anyone else being shown its steps and
+  `text_hidden`. It is written nowhere but `conversation_draft`, recorded as no action, and
+  bounded to 10 writes a second per conversation, which do not count against the caller's
+  rate limit when they are carried out.
 - Removing a seat closes its open conversations, a delegate's with its principal's.
 - A message is retracted by its author, or by whoever decides actions for the opener.
 - News of a conversation reaches its two participants and nobody else (`event.list`).
@@ -2031,9 +2119,9 @@ garbage in the grades, full record in the log.
 - **A course tutor reaching the asker's own work.** The course's tutor reads nobody's work,
   which is what puts it within every student's seat. Widening its reach for one conversation
   to the asker's own submissions and grades, and no one else's, is deferred.
-- **Token streaming.** An answer arrives whole, as one message; nothing is streamed while it
-  is written. A draft would reach a reader waiting on the conversation by the same wake-up as
-  a message does (§2.6, Waiting for news).
+- **Pushing an answer as it is written.** An answer's draft (§2.8) reaches a reader that
+  long-polls the conversation, by the same wake-up as a message; nothing is pushed over a
+  stream of its own (server-sent events, WebSocket), and a draft is in no feed.
 - **Agents that belong to no one person.** An agent is owned by a person or by nobody; a course's
   or a department's own agent is seated as an ordinary member, or as its instructor's delegate
   (`course_tutor`). Agents do not own agents, and a delegate brings in no delegate of its own.

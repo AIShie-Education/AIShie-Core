@@ -121,6 +121,9 @@ func retired(ctx context.Context, q *dbq.Queries, emit func(events.Event), cours
 	if err != nil {
 		return 0, err
 	}
+	if err := q.DeleteDrafts(ctx, closed); err != nil {
+		return 0, err
+	}
 	for _, id := range closed {
 		conversation := id
 		emit(events.Event{

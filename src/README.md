@@ -109,6 +109,12 @@ src/
     0018_conversations_with_agents.down.sql
                          drops the triggers and the read state; what the up
                          closed, cancelled and lowered stays so
+    0019_conversation_drafts.up.sql
+                         an answer's draft while it is written: one row per
+                         conversation, UNLOGGED, its attempt, version, text
+                         and steps held to their shape
+    0019_conversation_drafts.down.sql
+                         drops the drafts; nothing else is touched
     0013_member_invite.down.sql
                          drops it from both tables
     0014_agent_owner_and_decisions.up.sql

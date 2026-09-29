@@ -3,6 +3,8 @@
 //
 //	decode and validate the arguments      (bad input: an error, nothing recorded)
 //	a Read:  authorize, scope included → run the query.  No action row.
+//	an Ephemeral write: authorize as a Write → carry it out at once, in a
+//	         transaction of its own.  No action row, no key, no proposal.
 //	a Write: canonicalize and hash the arguments
 //	         same key seen before? → replay it, or refuse if the content differs
 //	         authorize: steps 1–3, resolve the target, steps 4–5
@@ -154,8 +156,16 @@ func (p *Pipeline) Invoke(ctx context.Context, caller Caller, name string, rawAr
 	if err != nil {
 		return Outcome{}, err
 	}
-	if t.Kind == tool.Read {
+	return p.invoke(ctx, caller, t, in, rawArgs, idempotencyKey)
+}
+
+// invoke takes a decoded call down the road of its tool's kind.
+func (p *Pipeline) invoke(ctx context.Context, caller Caller, t tool.Tool, in any, rawArgs []byte, idempotencyKey string) (Outcome, error) {
+	switch t.Kind {
+	case tool.Read:
 		return p.invokeRead(ctx, caller, t, in)
+	case tool.Ephemeral:
+		return p.invokeEphemeral(ctx, caller, t, in)
 	}
 	return p.invokeWrite(ctx, caller, t, in, rawArgs, idempotencyKey)
 }

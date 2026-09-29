@@ -22,6 +22,10 @@ read on 2026-09-26; **[UNVERIFIED]** marks what it did not confirm.
   (§2.3), and an agent nothing has declared is asked nothing in the site.
 - Core's permissions decide what an agent may do and whether a person must
   confirm it. The runtime only narrows further: allowlists, budgets, quotas.
+- While a worker writes an answer, the runtime streams its draft to whoever
+  reads the conversation (`conversation_draft`, §2.8): what it is doing, and
+  the text so far, which Core shows where the answer would be shown. That
+  tool is the runtime's and never a model's.
 - The runtime reaches the mainstream LLM APIs through one internal format and
   a few adapters (§3): OpenAI-compatible Chat first, then Anthropic Messages,
   Gemini, OpenAI Responses and Bedrock Converse.
@@ -182,9 +186,10 @@ The events that matter carry ids, never text:
 
 | Tool | Input | Notes |
 |---|---|---|
-| `conversation_messages` | `course_id`, `conversation_id`, `after_seq` or `before_seq`, `limit` (default 50, at most 200), `wait_s` (0 to 25, default 0, not with `before_seq`), `seen_state` | `conversation` (the view below), `messages[]`, `more`. A message has `id`, `seq`, `author_member_id`, `in_reply_to_message_id`, `body`, `created_at`; a retracted one has no `body` but `retracted: {at, by_member_id, reason}`. `after_seq` reads on; `before_seq`, or neither, gives the newest; both oldest first. With `wait_s`, a call that finds no message after `after_seq`, and the conversation standing as it did (`state`, `pending_reply_action_id`, `last_retracted_at`, `closed_reason`), waits for one of them to change; `seen_state`, the `state` last read, answers at once if the state has changed since. |
-| `conversation_get` | `course_id`, `conversation_id` | The view: `status`, `state` (`awaiting_answer`, `reply_pending_approval`, `answered`, `closed`), `pending_reply_action_id`, `opener`, `respondent` (with `answer_level`), `latest_opener_message_id`, `last_retracted_at`, `visible_to`. |
-| `conversation_answer` | `course_id`, `conversation_id`, `in_reply_to_message_id`, `body`, `idempotency_key` | `body` is 1 to 20,000 characters of Markdown. `in_reply_to_message_id` must be the opener's newest message. Returns `message_id`. |
+| `conversation_messages` | `course_id`, `conversation_id`, `after_seq` or `before_seq`, `limit` (default 50, at most 200), `wait_s` (0 to 25, default 0, not with `before_seq`), `seen_state`, `seen_draft_version` | `conversation` (the view below), `messages[]`, `more`, `draft` (§2.8; null for none). A message has `id`, `seq`, `author_member_id`, `in_reply_to_message_id`, `body`, `created_at`; a retracted one has no `body` but `retracted: {at, by_member_id, reason}`. `after_seq` reads on; `before_seq`, or neither, gives the newest; both oldest first. With `wait_s`, a call that finds no message after `after_seq`, and the conversation standing as it did (`state`, `pending_reply_action_id`, `last_retracted_at`, `closed_reason`), waits for one of them to change; `seen_state`, the `state` last read, answers at once if the state has changed since; `seen_draft_version`, the draft's `version` last read (0 for none), answers as soon as the draft is another, a front end's long poll; without it a draft wakes nothing. |
+| `conversation_get` | `course_id`, `conversation_id` | The view: `status`, `state` (`awaiting_answer`, `reply_pending_approval`, `answered`, `closed`), `pending_reply_action_id`, `opener`, `respondent` (with `answer_level`), `latest_opener_message_id`, `last_retracted_at`, `visible_to`, and `draft` (§2.8). |
+| `conversation_answer` | `course_id`, `conversation_id`, `in_reply_to_message_id`, `body`, `idempotency_key` | `body` is 1 to 20,000 characters of Markdown. `in_reply_to_message_id` must be the opener's newest message. Returns `message_id`. Posted or proposed, it deletes the conversation's draft. |
+| `conversation_draft` | `course_id`, `conversation_id`, `attempt` (1 to 64 characters), `version` (1 or more), `text` (at most 20,000 characters), `steps` (at most 20 `{kind, target, state}`), `done`; no `idempotency_key` | `{stored, version}`. The answer being written, for whoever reads the conversation to watch (§2.8). An ephemeral write: recorded nowhere, never proposed, and not counted against the rate limit when carried out; at most 10 a second per conversation. The respondent's alone, while the conversation is `awaiting_answer`: `not_the_respondent`, `conversation_not_awaiting`, `not_addressable` otherwise. |
 | `conversation_close` | `course_id`, `conversation_id`, `reason` (≤ 500 characters) | Either participant closes. The runtime closes only as §2.4 says. A reason that reads as the system's (`seat_removed`, `conversations_are_with_agents`) is refused. |
 | `conversation_retract` | `course_id`, `message_id`, `reason` | The author retracts, or staff overseeing the opener; the runtime only when the owner asks. |
 | `action_list_mine` | `course_id`, `exclude_types`, `after`, `limit` | The agent's own actions, oldest first, with `status` and `result`: a proposal's fate and a rejection's reason. Keep its `after` cursor. (`action_get` needs `action_decide`.) |
@@ -258,7 +263,10 @@ may not, they must stay autonomous (schema.md §2.8).
   site chat ends with it, whatever else happens.
 - **Rate limit.** 600 calls a minute per actor, burst 100, by default
   (`RATE_LIMIT_PER_MINUTE`, `RATE_LIMIT_BURST`); reads count, and MCP and REST
-  share it. §7.3 spends it.
+  share it. §7.3 spends it. A draft write that Core carries out is given back
+  (`conversation_draft`, §2.8): drafts have their own bound, 10 writes a
+  second per conversation. One refused counts, and an actor whose allowance is
+  spent has its drafts refused too.
 
 ### 2.6 A student asks their own agent
 
@@ -298,6 +306,63 @@ tools are `course_get`, `document_list`, `document_get`, `assignment_list` and
 `assignment_get`. At `confirm_required` the answer is proposed and followed
 through `event_list` (§2.4). T reads nobody's work, and its prompt says so:
 "ask them to paste the relevant part".
+
+### 2.8 Streaming an answer's draft
+
+While a worker writes an answer, the runtime tells whoever reads the
+conversation what it is doing and, where they may see it, the answer as the
+model writes it: `conversation_draft`. Core shows it as the conversation's
+`draft` (schema.md §2.8), and the answer, posted, takes its place; a front end
+long-polls `conversation_messages` with `seen_draft_version` and renders it as
+the agent's message in progress.
+
+- **Only where Core has it.** Stream drafts only when the live catalogue lists
+  `conversation_draft` (`tools/list`); against an older Core the answer is
+  posted as before, and nothing else changes.
+- **Never a model's.** The runtime writes drafts; no model calls
+  `conversation_draft`. Name it in the built-in deny list (§6.1), which applies
+  whatever `allow` says, so that nothing a model is told can write what people
+  watch.
+- **What it sends.** `course_id`, `conversation_id`, `attempt`, `version`, and
+  any of `text`, `steps` and `done`; no `idempotency_key`, since nothing is
+  recorded. `attempt` names this attempt at the answer, 1 to 64 characters:
+  `{in_reply_to_message_id}:{attempt}` does. `version` counts the attempt's
+  writes from 1. `text` is the whole answer so far, never a delta, at most
+  20,000 characters; `steps` the whole list, at most 20 (keep the last 20).
+  Either left out keeps what the attempt has.
+- **Steps from what the model does.** A round starting is `thinking`; each tool
+  call its kind: `document_get` is `reading_document`, with the document's
+  title as `target` when the runtime knows it; `document_list`
+  `listing_documents`; `assignment_get` `reading_assignment`; `submission_get`
+  `reading_submission`; `memory_search` `searching_memory`; anything else
+  `tool`. Each is `running`, then `done` when it ends; `writing` while the
+  model writes text. A `target` is plain text on one line, at most 120
+  characters, and is shown with the steps to whoever reads the conversation,
+  even where the text is not: a title, never content.
+- **Text as it streams.** Where the adapter streams (at least `openai_chat`,
+  for DeepSeek, OpenAI, Qwen and the rest, and `anthropic`), send the current
+  round's text so far at most every 300 ms or so, coalesced, the whole of it
+  each time. Send it whatever the agent's level: Core decides who sees it. The
+  opener sees the text only while the agent's `conversation_answer` is
+  `autonomous`; otherwise only the agent and whoever would approve the answer
+  do, and the opener sees the steps and `text_hidden`.
+- **Best effort.** A draft write never holds up or fails the answer: make it
+  off the answer's path. On 429 (`rate_limited`, `draft_rate`: at most 10
+  writes a second per conversation) drop it. Retry a failed one at most once,
+  with the same attempt and version: if the first arrived, the second is passed
+  over. `stored: false` says a newer draft is kept; nothing to do. 409
+  `conversation_not_awaiting` says the conversation waits for no answer now
+  (answered, an answer waiting for approval, closed): write no more drafts
+  for it. A draft write that Core carries out costs nothing of the agent's
+  rate limit (§2.5).
+- **Ending it.** Posting the answer, or its being proposed, deletes the draft
+  in Core, in the same transaction: send nothing. Giving up — a budget spent,
+  an error, a question overtaken (`moved_on`) — send `done: true` at a version
+  no lower than the last. A new attempt replaces the draft anyway. A draft not
+  written for 120 seconds is gone to its readers: a worker waiting on a slow
+  tool writes its steps again within a minute.
+- **Two workers at once** (§7.4) write under their own attempts, and the last
+  write wins; the answer is posted once whichever it is.
 
 ## 3. Providers
 
@@ -771,7 +836,9 @@ its owner for as long as the token works.
 
 **Never offered to a model** in M1 and M2: `agent_*`, `credential_*`,
 `actor_*`, `member_*`, `action_decide`, `action_review`, `action_withdraw`,
-`conversation_*` and `me_site_chat` (the runtime calls those itself), `preset_*`,
+`conversation_*` and `me_site_chat` (the runtime calls those itself;
+`conversation_draft` above all, which writes what people watch and records
+nothing: name it in the built-in list, whatever pattern matches it), `preset_*`,
 `course_create`, `course_update`, `term_*`, `department_*`,
 `document_upload_url`, and every write. M3 opens particular writes to
 particular workflows (§9).
@@ -891,7 +958,8 @@ minute on idle inboxes, and as many again if it long-polls their events too,
 where polling every 10 s spent 60 on inboxes alone. Against an older Core, at
 the defaults, with `max_rate_share` 0.3, an agent's polling has 180 calls a
 minute: `inbox interval per course ≥ courses × 60 / (180 − event and seat calls
-per minute)`. An agent in 10 courses may poll each every 4 s or so, so the idle
+per minute)`. Drafts cost nothing of it: a draft write Core carries out is given
+back, so an answer streamed at three writes a second is still k + 2 calls. An agent in 10 courses may poll each every 4 s or so, so the idle
 10 s is well within it. An answer costs about k + 2 calls (messages, k tool
 calls, the answer); at k = 4 the remaining 420 a minute allow some 70 answers a
 minute. An exam-time rush may need a second tutor (its own allowance) or a

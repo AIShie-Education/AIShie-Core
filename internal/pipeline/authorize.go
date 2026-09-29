@@ -83,7 +83,8 @@ func (a *authorized) explain(ctx context.Context, q dbq.Querier, t tool.Tool, ac
 // that is refused, as a suspended actor's is at step 1: approving a proposal
 // they made before is someone else's call, re-authorized against their seat.
 func (p *Pipeline) authorize(ctx context.Context, q dbq.Querier, t tool.Tool, in any, actor domain.Actor, asMember *uuid.UUID, now time.Time) (authorized, error) {
-	write := t.Kind == tool.Write
+	// An Ephemeral tool changes state, and is authorized as a Write is.
+	write := t.Kind != tool.Read
 	a := authorized{target: tool.Target{Type: noun(t.Name)}}
 	if asMember == nil && actor.PasswordChangeRequired && !t.SetsOwnPassword {
 		a.decision = authz.Decision{Level: domain.Denied, Reason: authz.ReasonPasswordChangeRequired}

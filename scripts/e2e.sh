@@ -11,7 +11,8 @@
 # bring back the slides, and make the student a TA and a student again;
 # and have the instructor's own tutor agent answer the student's question,
 # once its runtime says it answers in the site, its inbox and her
-# conversation each waiting to hear what comes next, and be asked nothing
+# conversation each waiting to hear what comes next, the answer's draft
+# reaching her while it is written, and be asked nothing
 # more once he switches that off; and have another agent of his, given member_manage,
 # seat a student with its own token, and be refused on his seat, and his own
 # assistant propose an assignment he may make without anyone's confirmation,
@@ -354,7 +355,7 @@ call 422 POST "$C/conversations" "$YUKI" "{\"respondent_member_id\":\"$TUTOR_M\"
 call 200 GET "/v1/me/agents/$TUTOR_ID" "$SATO"
 [ "$(json "$WORK/body" 'd["result"]["site_chat"]')" = False ] || fail "Sato is told the tutor takes conversations in the site"
 
-step "Its runtime says, with its token, that it answers in the site; Yuki asks it; its inbox, waiting, hears the question, it answers, and Yuki, waiting, reads the answer"
+step "Its runtime says, with its token, that it answers in the site; Yuki asks it; its inbox, waiting, hears the question; Yuki, waiting, watches the answer's draft come, and reads the answer"
 call 200 POST /v1/me/site-chat "$TUTOR" '{"on":true}'
 [ "$(json "$WORK/body" 'd["result"]["site_chat"]')" = True ] || fail "the runtime's declaration did not hold: $(cat "$WORK/body")"
 call 200 GET "/v1/me/agents/$TUTOR_ID" "$SATO"
@@ -368,11 +369,23 @@ call 200 POST "$C/conversations" "$YUKI" "{\"respondent_member_id\":\"$TUTOR_M\"
 CONV=$(json "$WORK/body" 'd["result"]["conversation_id"]')
 heard 200
 QUESTION=$(json "$WORK/body" 'd["result"]["conversations"][0]["latest_opener_message_id"]')
-wait_on "$C/conversations/$CONV/messages?after_seq=1&wait_s=20&seen_state=awaiting_answer" "$YUKI"
+# The runtime writes the answer's draft as the model writes it: recorded
+# nowhere, and shown to Yuki at once, since the tutor answers without approval.
+wait_on "$C/conversations/$CONV/messages?after_seq=1&wait_s=20&seen_state=awaiting_answer&seen_draft_version=0" "$YUKI"
+call 200 POST "$C/conversations/$CONV/draft" "$TUTOR" '{"attempt":"a1","version":1,"text":"An essay","steps":[{"kind":"reading_assignment","target":"HW3","state":"done"},{"kind":"writing","state":"running"}]}'
+[ "$(json "$WORK/body" 'd["result"]["stored"], d["result"]["version"], "action_id" in d')" = "True 1 False" ] || fail "the draft: $(cat "$WORK/body")"
+heard 200
+[ "$(json "$WORK/body" '*(lambda x: (x["version"], x["text"], x["steps"][0]["target"], x["steps"][1]["state"]))(d["result"]["draft"])')" = "1 An essay HW3 running" ] ||
+  fail "Yuki does not see the draft: $(cat "$WORK/body")"
+call 403 POST "$C/conversations/$CONV/draft" "$YUKI" '{"attempt":"a1","version":2,"text":"Mine"}'
+[ "$(reason)" = conversations_are_with_agents ] || fail "Yuki writing the tutor's draft, refused, but not as a person: $(cat "$WORK/body")"
+wait_on "$C/conversations/$CONV/messages?after_seq=1&wait_s=20&seen_state=awaiting_answer&seen_draft_version=1" "$YUKI"
 KEY="answer:$CONV:$QUESTION:1" call 200 POST "$C/conversations/$CONV/answer" "$TUTOR" "{\"in_reply_to_message_id\":\"$QUESTION\",\"body\":\"An essay with a thesis.\"}"
 heard 200
-[ "$(json "$WORK/body" 'd["result"]["messages"][-1]["body"], d["result"]["conversation"]["state"]')" = "An essay with a thesis. answered" ] ||
-  fail "Yuki does not see the answer: $(cat "$WORK/body")"
+[ "$(json "$WORK/body" 'd["result"]["messages"][-1]["body"], d["result"]["conversation"]["state"], d["result"]["draft"]')" = "An essay with a thesis. answered None" ] ||
+  fail "Yuki does not see the answer in its draft's place: $(cat "$WORK/body")"
+call 409 POST "$C/conversations/$CONV/draft" "$TUTOR" '{"attempt":"a1","version":2}'
+[ "$(reason)" = conversation_not_awaiting ] || fail "a draft after the answer, refused, but not as waiting for none: $(cat "$WORK/body")"
 call 404 GET "$C/conversations/$CONV" "$GRADER" # nobody else's to read
 
 step "Conversations are with agents: Sato is offered to nobody, asked nothing and answers nothing, and his seat says why"

@@ -11,6 +11,7 @@ import (
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/blob"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/memory"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/pipeline"
+	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/ratelimit"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/tool"
 )
 
@@ -38,6 +39,10 @@ type Deps struct {
 	// by default, and every memory tool refuses), and its limits, a zero
 	// one its default.
 	Memory memory.Config
+	// Drafts bounds how often one conversation's draft is written
+	// (conversation.draft), in this process, keyed by the conversation.
+	// Nil means DraftWritesPerSecond, in bursts of as many.
+	Drafts *ratelimit.Limiter
 }
 
 // DefaultMaxUploadBytes is 50 MiB: a scanned exam script, not a video.
@@ -56,6 +61,9 @@ func RegisterAll(reg *tool.Registry, d Deps) {
 		// A random key: fine for one process, until it restarts.
 		d.Uploads, _ = blob.NewSigner("")
 	}
+	if d.Drafts == nil {
+		d.Drafts = ratelimit.New(60*DraftWritesPerSecond, DraftWritesPerSecond)
+	}
 	reg.Register(meTools()...)
 	reg.Register(agentTools(d)...)
 	reg.Register(platformTools()...)
@@ -70,7 +78,7 @@ func RegisterAll(reg *tool.Registry, d Deps) {
 	reg.Register(gradeTools(d)...)
 	reg.Register(gradeReadTools()...)
 	reg.Register(actionTools(d)...)
-	reg.Register(conversationTools()...)
+	reg.Register(conversationTools(d)...)
 	reg.Register(memoryTools(d)...)
 	reg.Register(eventTools()...)
 	reg.Register(systemTools()...)
