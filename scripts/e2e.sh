@@ -10,8 +10,9 @@
 # the grade rescaled, override and restore the student's total, rename and
 # bring back the slides, and make the student a TA and a student again;
 # and have the instructor's own tutor agent answer the student's question,
-# once its runtime says it answers in the site, and be asked nothing more once
-# he switches that off; and have another agent of his, given member_manage,
+# once its runtime says it answers in the site, its inbox and her
+# conversation each waiting to hear what comes next, and be asked nothing
+# more once he switches that off; and have another agent of his, given member_manage,
 # seat a student with its own token, and be refused on his seat, and his own
 # assistant propose an assignment he may make without anyone's confirmation,
 # which he then approves himself. Then he shows a join link: a new student
@@ -73,6 +74,30 @@ call() {
   # A join link's token is a credential of sorts: what is printed leaves it
   # out, as the server's request log does.
   printf '  %-4s %-62s %s\n' "$method" "$(printf '%s' "$path" | sed -E 's/aisjoin_[A-Za-z0-9_-]+/…/')" "$got"
+}
+
+# wait_on PATH TOKEN — a GET that waits for news (wait_s), in the background,
+# checked not to have answered half a second later; heard WANT — its answer,
+# which must come within two seconds of what it waits for, which the caller
+# has just done, left in $WORK/body.
+wait_on() {
+  N=$((N + 1))
+  WAIT_PATH=$1
+  curl -s -o "$WORK/waited" -w '%{http_code}' -H "Authorization: Bearer $2" "$BASE$1" >"$WORK/waited.status" &
+  WAIT_PID=$!
+  sleep 0.5
+  kill -0 "$WAIT_PID" 2>/dev/null || fail "GET $1 answered with nothing yet to wait for: $(cat "$WORK/waited")"
+}
+heard() {
+  local since=$(($(date +%s%N) / 1000000))
+  wait "$WAIT_PID" || fail "GET $WAIT_PATH failed"
+  local ms=$(($(date +%s%N) / 1000000 - since)) got
+  got=$(cat "$WORK/waited.status")
+  [ "$got" = "$1" ] || fail "GET $WAIT_PATH → $got, want $1: $(cat "$WORK/waited")"
+  [ "$ms" -le 2000 ] || fail "GET $WAIT_PATH answered $ms ms after what it waited for"
+  cp "$WORK/waited" "$WORK/body"
+  printf '  %-4s %-62s %s, %d ms after
+' GET "$WAIT_PATH" "$got" "$ms"
 }
 
 # reason — the reason the last refusal gave, from $WORK/body.
@@ -329,20 +354,25 @@ call 422 POST "$C/conversations" "$YUKI" "{\"respondent_member_id\":\"$TUTOR_M\"
 call 200 GET "/v1/me/agents/$TUTOR_ID" "$SATO"
 [ "$(json "$WORK/body" 'd["result"]["site_chat"]')" = False ] || fail "Sato is told the tutor takes conversations in the site"
 
-step "Its runtime says, with its token, that it answers in the site; Yuki asks it; it finds the question in its inbox and answers"
+step "Its runtime says, with its token, that it answers in the site; Yuki asks it; its inbox, waiting, hears the question, it answers, and Yuki, waiting, reads the answer"
 call 200 POST /v1/me/site-chat "$TUTOR" '{"on":true}'
 [ "$(json "$WORK/body" 'd["result"]["site_chat"]')" = True ] || fail "the runtime's declaration did not hold: $(cat "$WORK/body")"
 call 200 GET "/v1/me/agents/$TUTOR_ID" "$SATO"
 [ "$(json "$WORK/body" 'd["result"]["site_chat"]')" = True ] || fail "Sato is not told the tutor takes conversations in the site"
 call 200 GET "$C/conversations/respondents" "$YUKI"
 json "$WORK/body" '"'"$TUTOR_M"'" in [r["member_id"] for r in d["result"]["respondents"]] or sys.exit("the tutor is not offered to Yuki")' >/dev/null
+call 200 GET "$C/conversations/inbox" "$TUTOR"
+[ "$(json "$WORK/body" 'len(d["result"]["conversations"])')" = 0 ] || fail "the tutor's inbox before anyone asked: $(cat "$WORK/body")"
+wait_on "$C/conversations/inbox?wait_s=20" "$TUTOR"
 call 200 POST "$C/conversations" "$YUKI" "{\"respondent_member_id\":\"$TUTOR_M\",\"body\":\"What does HW3 ask for?\"}"
 CONV=$(json "$WORK/body" 'd["result"]["conversation_id"]')
-call 200 GET "$C/conversations/inbox" "$TUTOR"
+heard 200
 QUESTION=$(json "$WORK/body" 'd["result"]["conversations"][0]["latest_opener_message_id"]')
+wait_on "$C/conversations/$CONV/messages?after_seq=1&wait_s=20&seen_state=awaiting_answer" "$YUKI"
 KEY="answer:$CONV:$QUESTION:1" call 200 POST "$C/conversations/$CONV/answer" "$TUTOR" "{\"in_reply_to_message_id\":\"$QUESTION\",\"body\":\"An essay with a thesis.\"}"
-call 200 GET "$C/conversations/$CONV/messages" "$YUKI"
-[ "$(json "$WORK/body" 'd["result"]["messages"][-1]["body"]')" = "An essay with a thesis." ] || fail "Yuki does not see the answer"
+heard 200
+[ "$(json "$WORK/body" 'd["result"]["messages"][-1]["body"], d["result"]["conversation"]["state"]')" = "An essay with a thesis. answered" ] ||
+  fail "Yuki does not see the answer: $(cat "$WORK/body")"
 call 404 GET "$C/conversations/$CONV" "$GRADER" # nobody else's to read
 
 step "Conversations are with agents: Sato is offered to nobody, asked nothing and answers nothing, and his seat says why"

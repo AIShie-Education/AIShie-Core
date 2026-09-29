@@ -18,6 +18,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/memory"
+	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/wake"
 )
 
 type Config struct {
@@ -57,6 +58,11 @@ type Config struct {
 	// JoinRegistrationsPerMinute bounds registrations through one join link.
 	// Zero turns a limit off.
 	CallsPerMinute, CallsBurst, SignInsPerMinute, JoinRegistrationsPerMinute int
+
+	// LongPollWaiters bounds the calls waiting for news at once (wait_s) in
+	// this instance, and LongPollWaitersPerActor those of one actor. A call
+	// past either answers at once. Zero lets none wait.
+	LongPollWaiters, LongPollWaitersPerActor int
 
 	// Jobs turns the background sweeps on. Every instance may leave it on: only
 	// one sweeps at a time. JobsInterval is how often a sweep is attempted.
@@ -184,8 +190,10 @@ func FromEnv() (Config, error) {
 	}
 	c.CookieSameSite = env("COOKIE_SAMESITE", "lax")
 	c.CallsPerMinute, c.CallsBurst, c.SignInsPerMinute, c.JoinRegistrationsPerMinute = 600, 100, 10, 60
+	c.LongPollWaiters, c.LongPollWaitersPerActor = wake.DefaultMaxWaiters, wake.DefaultMaxPerActor
 	for key, dst := range map[string]*int{"RATE_LIMIT_PER_MINUTE": &c.CallsPerMinute, "RATE_LIMIT_BURST": &c.CallsBurst,
-		"SIGN_IN_ATTEMPTS_PER_MINUTE": &c.SignInsPerMinute, "JOIN_REGISTRATIONS_PER_MINUTE": &c.JoinRegistrationsPerMinute} {
+		"SIGN_IN_ATTEMPTS_PER_MINUTE": &c.SignInsPerMinute, "JOIN_REGISTRATIONS_PER_MINUTE": &c.JoinRegistrationsPerMinute,
+		"LONG_POLL_WAITERS": &c.LongPollWaiters, "LONG_POLL_WAITERS_PER_ACTOR": &c.LongPollWaitersPerActor} {
 		if v := os.Getenv(key); v != "" {
 			n, err := strconv.Atoi(v)
 			if err != nil || n < 0 {

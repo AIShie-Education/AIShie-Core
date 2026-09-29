@@ -158,7 +158,33 @@ func NewHandler(d Deps) http.Handler {
 		return info, nil
 	}
 	// An API token need not expire; it is revoked instead.
-	return sdkauth.RequireBearerToken(verify, &sdkauth.RequireBearerTokenOptions{AllowMissingExpiration: true})(limited(d, screened(bounded(handler))))
+	return sdkauth.RequireBearerToken(verify, &sdkauth.RequireBearerTokenOptions{AllowMissingExpiration: true})(limited(d, screened(bounded(requested(handler)))))
+}
+
+// requestKey carries the context of the HTTP request a call came in. The
+// SDK does not end a call when its request ends: it waits for the call to
+// finish, though the client has gone.
+type requestKey struct{}
+
+// requested lets a call see its request's context (untilGone).
+func requested(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), requestKey{}, r.Context())))
+	})
+}
+
+// untilGone is ctx, ended as well when the HTTP request the call came in
+// ends: its client has gone, or the server has given up on it. A read that
+// waits for news (wait_s) stops waiting then. A write is left to finish, as
+// it always was: its caller retries under the same key.
+func untilGone(ctx context.Context) (context.Context, context.CancelFunc) {
+	req, ok := ctx.Value(requestKey{}).(context.Context)
+	if !ok {
+		return ctx, func() {}
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	stop := context.AfterFunc(req, cancel)
+	return ctx, func() { stop(); cancel() }
 }
 
 // maxBody is the most one request may carry. It is the SDK's own default,
@@ -580,11 +606,18 @@ func handle(d Deps, t tool.Tool) mcp.ToolHandler {
 		if err != nil {
 			return failed(apperr.Invalid("%v", err)), nil
 		}
+		if t.Kind == tool.Read {
+			var done context.CancelFunc
+			ctx, done = untilGone(ctx)
+			defer done()
+		}
 		out, err := d.Pipeline.Invoke(ctx, caller, t.Name, args, key)
 		if err != nil {
 			e, ok := apperr.As(err)
 			if !ok {
-				d.Log.Error("internal error", "tool", t.Name, "err", err)
+				if ctx.Err() == nil { // not a read whose client left
+					d.Log.Error("internal error", "tool", t.Name, "err", err)
+				}
 				e = &apperr.Error{Code: "internal", Message: "something went wrong on our side; retry with the same idempotency_key"}
 			}
 			return failed(e), nil

@@ -357,7 +357,8 @@ such as `grader` or `tutor`), and point its MCP client at
 registry's with the dot turned to an underscore (`grade_submit`). Every tool
 that changes something takes an `idempotency_key` argument. A result whose
 status is `proposed` is not an error: the action waits for a person, and the
-agent learns the decision by polling `event_list`. The server's MCP
+agent learns the decision from `event_list`, which it may long-poll (`wait_s`,
+below). The server's MCP
 instructions tell a connecting model all of this. One HTTP request carries
 one call: JSON-RPC batches are refused, since the rate limit counts requests.
 
@@ -396,8 +397,11 @@ person uses it, so it is not offered in the site, and a question to it there is
 refused (`agent_answers_elsewhere`). Its owner may switch it off
 (`agent.update`), never on.
 
-An agent that answers questions polls `conversation_inbox` in each course
-where it may (its `conversation_answer` in `me_memberships`), reads each
+An agent that answers questions long-polls `conversation_inbox` in each course
+where it may (its `conversation_answer` in `me_memberships`): with `wait_s`, up
+to 25 seconds, an empty inbox waits for a question and answers as soon as one
+is asked, through any instance of the server, and the agent calls it again at
+once. It reads each
 waiting conversation with `conversation_messages`, and answers with
 `conversation_answer`, naming the question it answers
 (`in_reply_to_message_id`, the conversation's `latest_opener_message_id`). An
@@ -410,7 +414,11 @@ nobody's respondent and answers nothing (`conversations_are_with_agents`),
 and a person's seat holds `conversation_answer` at `denied`. A person's chat
 panel reads `me.conversations` (`GET /v1/me/conversations`): their
 conversations in every course, newest activity first, each saying whether the
-agent has written since they last marked it read (`conversation.mark_read`);
+agent has written since they last marked it read (`conversation.mark_read`),
+and waits on the one open with `conversation.messages`, `after_seq` and
+`wait_s`, which answers as soon as the agent writes or the conversation's state
+changes (`seen_state`, the state it last read, catches a change between two
+calls);
 whoever decides actions lists one agent's conversations with
 `conversation.list` and `respondent_member_id`. What is written is readable
 by the two participants, by course staff who decide actions for the one who

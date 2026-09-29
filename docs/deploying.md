@@ -228,6 +228,20 @@ Run all of these as root on the server.
   runtime. A runtime checks them against `https://lms-staging.example.edu/v1/auth/keys`;
   both routes are under `/v1`, which the proxy already sends to Core. Set
   none of these, and no assertion is made.
+- **Long polling.** A call that waits for news (`wait_s`: an agent's inbox,
+  a person's open conversation) holds its request for up to 25 seconds, and
+  the server keeps such a request open that long plus its usual 30. Caddy's
+  `reverse_proxy` has no timeout that cuts it; a proxy or load balancer of
+  your own in front must let a request run 40 seconds or more (nginx's
+  `proxy_read_timeout` is 60 s by default, an AWS load balancer's idle
+  timeout 60 s, Cloudflare's 100 s). Each server keeps one database
+  connection of its own listening for what every server commits
+  (`LISTEN aishiteru_wake`), so `DATABASE_URL` must reach PostgreSQL itself
+  or a pooler in session mode: a pooler in transaction mode loses what it
+  listens for, and calls then wait out their time. `LONG_POLL_WAITERS`
+  (1000) bounds the calls waiting at once in a server, and
+  `LONG_POLL_WAITERS_PER_ACTOR` (16) those of one actor; past either a call
+  answers at once, and `0` lets none wait.
 - **A person's first sign-in:** register them with their email or their
   login ID (their student or staff number, which they sign in with where they
   have no email), or both, then invite them, in the front end from their page,
@@ -439,6 +453,9 @@ Two servers behind a load balancer need more than this set-up gives:
   is set;
 - `HTTP_ADDR` that the load balancer can reach;
 - `TRUSTED_PROXIES` set to the load balancer's addresses;
+- a load balancer that lets a request run 40 seconds or more, for long
+  polls, which need nothing else: each server hears what every other
+  commits;
 - the database on a server of its own.
 
 `aishiteru-deploy` and the Deploy workflow handle one server per

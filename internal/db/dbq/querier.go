@@ -298,7 +298,7 @@ type Querier interface {
 	InsertDepartment(ctx context.Context, arg InsertDepartmentParams) error
 	InsertDocument(ctx context.Context, arg InsertDocumentParams) error
 	InsertDocumentVersion(ctx context.Context, arg InsertDocumentVersionParams) error
-	InsertEvent(ctx context.Context, arg InsertEventParams) error
+	InsertEvent(ctx context.Context, arg InsertEventParams) (int64, error)
 	InsertGrade(ctx context.Context, arg InsertGradeParams) error
 	InsertJoinLink(ctx context.Context, arg InsertJoinLinkParams) error
 	InsertMember(ctx context.Context, arg InsertMemberParams) error
@@ -416,7 +416,6 @@ type Querier interface {
 	//   * for a delegate, both again with its principal's scope ("all" for any
 	//     other seat).
 	ListEvents(ctx context.Context, arg ListEventsParams) ([]ListEventsRow, error)
-	ListEventsForAction(ctx context.Context, actionID *uuid.UUID) ([]ListEventsForActionRow, error)
 	// Not only open courses: a draft course takes writes, and its seats expire.
 	ListExpiredMembers(ctx context.Context, arg ListExpiredMembersParams) ([]ListExpiredMembersRow, error)
 	ListGradeDocuments(ctx context.Context, gradeID *uuid.UUID) ([]ListGradeDocumentsRow, error)
@@ -720,6 +719,15 @@ type Querier interface {
 	MyAppointments(ctx context.Context, actorID uuid.UUID) ([]MyAppointmentsRow, error)
 	NewestComponentDraftAt(ctx context.Context, arg NewestComponentDraftAtParams) (time.Time, error)
 	NewestSubmissionDraftAt(ctx context.Context, submissionID *uuid.UUID) (time.Time, error)
+	// Tells every Core listening on the channel (package wake) what this
+	// transaction wrote, once it commits: PostgreSQL sends a notification only
+	// then, and never for a transaction, or a savepoint, rolled back. One per row
+	// given: a course, the type of the event, its seq, and, for news of a
+	// conversation (conversation_ids) or of a proposal to write in one
+	// (action_ids, whose target is the conversation), the conversation and its
+	// two participants. The nil UUID stands for none. Each is a few hundred
+	// bytes, well under the 8000 a notification may carry.
+	NotifyWake(ctx context.Context, arg NotifyWakeParams) error
 	// Whether the actor owns an agent that holds, or held, a seat in the
 	// course: whose queues of their own agents' actions they may read there.
 	OwnsAgentSeatedIn(ctx context.Context, arg OwnsAgentSeatedInParams) (bool, error)

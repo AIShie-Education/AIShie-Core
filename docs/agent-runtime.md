@@ -14,7 +14,8 @@ read on 2026-09-26; **[UNVERIFIED]** marks what it did not confirm.
   runs it (§2.5).
 - The runtime connects in to Core as each agent it hosts, with that agent's
   token, over MCP at `https://<core>/mcp`. Core pushes nothing: the runtime
-  polls `conversation_inbox` for questions and `event_list` for outcomes. A
+  long-polls `conversation_inbox` for questions (`wait_s`: a call waits until
+  one is asked) and reads `event_list` for outcomes (§7.2). A
   generic MCP client with an agent token answers nobody, since it acts only
   while a person types. So the site offers people only agents whose runtime
   says it answers: the runtime calls `me_site_chat` when it starts an agent
@@ -39,7 +40,7 @@ read on 2026-09-26; **[UNVERIFIED]** marks what it did not confirm.
 | Working notes on one conversation | never stored | keyed on the seat's `member_id`, then per `conversation_id` |
 | Conversation transcript | `conversation_message`, append-only | reads it; caches only |
 | Turns, tool calls, tokens, wall clock | only pause, removal and `expires_at` | every budget (§7) |
-| Finding work | offers `conversation_inbox` and `event_list` | polls them |
+| Finding work | offers `conversation_inbox` and `event_list`, each a long poll with `wait_s` | long-polls them (§7.2) |
 | Whether people in the site may ask the agent | records the token that said so; holds it while that token works and the agent and its owner are active | says so with `me_site_chat` on each start, and unsays it on stopping |
 | Rate limit | 600 calls a minute per actor, burst 100, by default | stays well under it (§7.3) |
 
@@ -152,8 +153,8 @@ rejected, cancelled). That is safe: Core refuses a second answer to a message
 
 | Tool | Input | Output |
 |---|---|---|
-| `conversation_inbox` | `course_id`, `limit` (default 20, at most 100) | `conversations[]`, longest waiting first: open, the opener wrote last and has not retracted it, the opener still able to address the agent, and no answer to that message waiting for approval. Each row carries `latest_opener_message_id`, what an answer replies to. |
-| `event_list` | `course_id`, `since_seq` (0 for the start), `limit` (default 100, at most 500) | `events[]`, `next_seq` (it moves on over events the caller may not see), `more`. Keep one cursor per seat. |
+| `conversation_inbox` | `course_id`, `limit` (default 20, at most 100), `wait_s` (0 to 25, default 0) | `conversations[]`, longest waiting first: open, the opener wrote last and has not retracted it, the opener still able to address the agent, and no answer to that message waiting for approval. Each row carries `latest_opener_message_id`, what an answer replies to. With `wait_s`, an empty inbox waits up to that many seconds for a question, and answers within about 0.1 s of one being asked (§7.2). |
+| `event_list` | `course_id`, `since_seq` (0 for the start), `limit` (default 100, at most 500), `wait_s` (0 to 25, default 0) | `events[]`, `next_seq` (it moves on over events the caller may not see), `more`. Keep one cursor per seat. With `wait_s`, a call that finds nothing waits up to that many seconds for an event the caller may see. |
 
 Conversations are between a person and an agent: a person asks, an agent
 answers. A person is nobody's respondent and answers none
@@ -181,7 +182,7 @@ The events that matter carry ids, never text:
 
 | Tool | Input | Notes |
 |---|---|---|
-| `conversation_messages` | `course_id`, `conversation_id`, `after_seq` or `before_seq`, `limit` (default 50, at most 200) | `conversation` (the view below), `messages[]`, `more`. A message has `id`, `seq`, `author_member_id`, `in_reply_to_message_id`, `body`, `created_at`; a retracted one has no `body` but `retracted: {at, by_member_id, reason}`. `after_seq` reads on; `before_seq`, or neither, gives the newest; both oldest first. |
+| `conversation_messages` | `course_id`, `conversation_id`, `after_seq` or `before_seq`, `limit` (default 50, at most 200), `wait_s` (0 to 25, default 0, not with `before_seq`), `seen_state` | `conversation` (the view below), `messages[]`, `more`. A message has `id`, `seq`, `author_member_id`, `in_reply_to_message_id`, `body`, `created_at`; a retracted one has no `body` but `retracted: {at, by_member_id, reason}`. `after_seq` reads on; `before_seq`, or neither, gives the newest; both oldest first. With `wait_s`, a call that finds no message after `after_seq`, and the conversation standing as it did (`state`, `pending_reply_action_id`, `last_retracted_at`, `closed_reason`), waits for one of them to change; `seen_state`, the `state` last read, answers at once if the state has changed since. |
 | `conversation_get` | `course_id`, `conversation_id` | The view: `status`, `state` (`awaiting_answer`, `reply_pending_approval`, `answered`, `closed`), `pending_reply_action_id`, `opener`, `respondent` (with `answer_level`), `latest_opener_message_id`, `last_retracted_at`, `visible_to`. |
 | `conversation_answer` | `course_id`, `conversation_id`, `in_reply_to_message_id`, `body`, `idempotency_key` | `body` is 1 to 20,000 characters of Markdown. `in_reply_to_message_id` must be the opener's newest message. Returns `message_id`. |
 | `conversation_close` | `course_id`, `conversation_id`, `reason` (≤ 500 characters) | Either participant closes. The runtime closes only as §2.4 says. A reason that reads as the system's (`seat_removed`, `conversations_are_with_agents`) is refused. |
@@ -271,9 +272,10 @@ Runtime:
     false, perms {conversation_answer, document_read, submission_read, grade_read: autonomous …}}];
     me_site_chat{on: true, idempotency_key "site_chat:on:<start id>"} → site_chat true
  2. toolset(D) = the read tools D's perms allow ∩ the allowlist
- 3. conversation_inbox{C} every 2–10 s, jittered → []
+ 3. conversation_inbox{C, wait_s 25} → [] after 25 s; again at once, and it waits
     Yuki: conversation.open{respondent_member_id D, body "Why did I lose marks on HW3?"} → X, M1
- 4. conversation_inbox{C} → [{id X, latest_opener_message_id M1, opener {member_id P}}]
+ 4. the waiting conversation_inbox{C, wait_s 25} answers within about 0.1 s
+    → [{id X, latest_opener_message_id M1, opener {member_id P}}]
  5. lease X; conversation_messages{C, X, limit 30} → [M1]
  6. prompt = system + seat facts + memory(D, X) + history; the loop calls assignment_list,
     grade_list, submission_get (course_id set by the runtime), then writes text
@@ -601,6 +603,7 @@ agent:
     per_agent_day: {usd: 20.00, answers: 2000}
     per_asker_day: {answers: 30, usd: 0.40}   # keyed on (course_id, opener member_id)
   polling:
+    inbox_wait_s: 25               # long poll (wait_s); the schedule below only against a Core without it
     inbox_hot_s: 2                 # for hot_window_s after activity
     hot_window_s: 120
     inbox_idle_s: 10
@@ -834,30 +837,59 @@ person's (pause, removal, `expires_at`, a closed conversation, which come back
 `on_budget_text`: a claimed message always ends answered or with a recorded
 reason.
 
-### 7.2 Polling and latency
+### 7.2 Finding work and latency
 
-Core has no long poll, no push and no inbox across courses, so the runtime
-polls each course.
+Core pushes nothing and has no inbox across courses, but its reads long-poll
+(schema.md §2.6, Waiting for news): `conversation_inbox`, `event_list` and
+`conversation_messages` take `wait_s`, 0 to 25 seconds. A call that finds
+nothing new waits until something it would read is committed, through any
+instance of Core, and answers within about 0.1 s of it; or answers, with
+nothing, when `wait_s` is up. So the runtime keeps one call waiting per seat,
+and needs no schedule while Core has `wait_s`.
 
-- **Inbox**, per seat: every 2 s for 120 s after activity (students ask
-  follow-ups), otherwise every 10 s, backing off ×1.5 per empty poll to 30 s;
-  every interval jittered ±25 %, first polls spread out.
-- **Events**: every 45 s per seat, and after a `proposed` answer at once, then
-  after 5, 15 and 45 s. **Seats**: every 300 s, and on any `forbidden`,
-  `not_found` or `denied`.
+- **Inbox**, per seat: `conversation_inbox{course_id, wait_s: 25}`, made again
+  at once each time it answers, with conversations or without.
+- **An empty answer well before `wait_s`**, in under half of it, means Core
+  did not wait: the agent has as many calls waiting as Core lets one actor
+  (`LONG_POLL_WAITERS_PER_ACTOR`, 16 by default), the instance as many as it
+  lets wait in all (`LONG_POLL_WAITERS`, 1000), or it is shutting down. Wait
+  as the schedule below says before the next call. An agent seated in more
+  than 16 courses long-polls 16 inboxes and polls the rest on the schedule;
+  so does the runtime whenever a long poll keeps coming back early.
+- **Events**, per seat: `event_list{since_seq, wait_s: 25}` while a proposal
+  of the agent's waits for a decision, which then arrives within about 0.1 s;
+  otherwise every 45 s, or long-polled too while the agent has waits to spare
+  (they count against the same 16). **Seats**: every 300 s, and on any
+  `forbidden`, `not_found` or `denied`.
+- **Timeouts**: give a call with `wait_s` a client timeout of `wait_s` plus
+  15 s or so. Core holds its end open for the wait, and the stack's Caddy has
+  no timeout that would cut it; a proxy of the school's own must allow a
+  request 40 s or more. A call cut short is made again: a read has no key.
+- **An older Core**, without `wait_s`: `tools/list` shows no `wait_s` in
+  `conversation_inbox`'s input schema, and a call with it is refused
+  `invalid_argument`. Poll on the schedule instead. Inbox: every 2 s for 120 s
+  after activity (students ask follow-ups), otherwise every 10 s, backing off
+  ×1.5 per empty poll to 30 s; every interval jittered ±25 %, first polls
+  spread out. Events: every 45 s per seat, and after a `proposed` answer at
+  once, then after 5, 15 and 45 s.
 - **429**: sleep `Retry-After` plus jitter, and halve that agent's polling for
   5 minutes. **5xx or network errors**: back off 1, 2, 4 … 60 s, full jitter.
 
 | Measure (autonomous answers, provider outages aside) | Target |
 |---|---|
-| Noticing: question written → claimed | p95 ≤ 3 s hot, ≤ 13 s idle |
+| Noticing: question written → claimed | p95 ≤ 1 s with `wait_s`; against an older Core, ≤ 3 s hot, ≤ 13 s idle |
 | Answering: claimed → `conversation_answer` returns, at most 2 tool calls | p50 ≤ 10 s, p95 ≤ 30 s |
-| As the student sees it (the frontend polls every 3 s) | p50 ≤ 15 s, p95 ≤ 45 s |
+| As the student sees it (the frontend long-polls `conversation_messages` with `after_seq`, `wait_s` and `seen_state`) | p50 ≤ 11 s, p95 ≤ 32 s |
 | Wall clock per answer | 90 s, configurable |
 
 ### 7.3 Spending the rate limit
 
-At the defaults, with `max_rate_share` 0.3, an agent's polling has 180 calls a
+A call that waits is one call to the rate limit, however long it waits. A long
+poll costs one call per `wait_s` while nothing happens, and one more for each
+thing that does: an agent in 10 courses spends 10 × 60 / 25 = 24 calls a
+minute on idle inboxes, and as many again if it long-polls their events too,
+where polling every 10 s spent 60 on inboxes alone. Against an older Core, at
+the defaults, with `max_rate_share` 0.3, an agent's polling has 180 calls a
 minute: `inbox interval per course ≥ courses × 60 / (180 − event and seat calls
 per minute)`. An agent in 10 courses may poll each every 4 s or so, so the idle
 10 s is well within it. An answer costs about k + 2 calls (messages, k tool
@@ -870,7 +902,8 @@ limit, and put answers before polling, and polling before events.
 
 - One worker per conversation, under a lease of the wall clock plus 30 s; one
   poller per seat across the cluster (a lease or an advisory lock), or N
-  replicas spend the limit N times.
+  replicas spend the limit N times, and hold N long polls per seat against
+  the agent's 16.
 - At most 8 answers at once per agent and 4 per course; the rest wait.
 - Duplicates meet in Core. Two workers answering M1 as attempt 1 share the
   key `answer:X:M1:1`: the second gets `idempotency_conflict` or a replay.
@@ -954,8 +987,8 @@ one static binary. TypeScript (`@modelcontextprotocol/client` 2.1.0) or Python
 Settled, and written into §1 and §2: the protocol revisions Core takes, the
 refusals' `details.reason`, where a rejection's reason is kept, and, in the
 frontend, the two-minute presence window and how replies render links and
-images. Settled since: who owns the agent (1 below). Still open, none
-blocking M1: 2 to 4.
+images. Settled since: who owns the agent (1 below), and long polling (4).
+Still open, none blocking M1: 2, 3, and one inbox across courses (4).
 
 1. **Who owns the agent.** Settled. `me_get` names the agent's owner in
    `owner_actor_id` (§2.3), and the runtime compares it with the person
@@ -965,6 +998,7 @@ blocking M1: 2 to 4.
 3. **A rejection's reason.** `action.rejected` carries none and `action_get`
    needs `action_decide`, so the runtime pages `action_list_mine`. Proposed:
    `action_get` open to an action's own actor.
-4. **Finding work.** A long poll on `event_list` or `conversation_inbox`, or
-   one inbox across courses, would divide polling by the courses an agent sits
-   in. Until then, §7.2 and §7.3 stand.
+4. **Finding work.** Settled in part: `conversation_inbox`, `event_list` and
+   `conversation_messages` long-poll with `wait_s` (§7.2). One inbox across
+   courses, which would take one call per agent rather than one per seat, is
+   still open.

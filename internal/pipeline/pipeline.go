@@ -43,6 +43,7 @@ import (
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/domain"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/signing"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/tool"
+	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/wake"
 )
 
 type Config struct {
@@ -56,6 +57,9 @@ type Config struct {
 	// database. It must be the same on every instance, or a retry landing
 	// elsewhere reads as a conflict; nil makes one for this process alone.
 	Secrets *signing.Signer
+	// Wake is where a Read that can wait (wait_s) waits for news, which a
+	// wake.Listener feeds. Nil means no call waits: each answers at once.
+	Wake *wake.Hub
 }
 
 // DefaultProposalTTL is two weeks: long enough to survive a holiday, short

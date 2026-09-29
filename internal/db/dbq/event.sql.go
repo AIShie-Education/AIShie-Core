@@ -7,14 +7,14 @@ package dbq
 
 import (
 	"context"
-	"time"
 
 	"github.com/google/uuid"
 )
 
-const insertEvent = `-- name: InsertEvent :exec
+const insertEvent = `-- name: InsertEvent :one
 INSERT INTO event (type, course_id, action_id, subject_type, subject_id, student_member_id, assignment_id, payload)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+RETURNING seq
 `
 
 type InsertEventParams struct {
@@ -28,8 +28,8 @@ type InsertEventParams struct {
 	Payload         []byte
 }
 
-func (q *Queries) InsertEvent(ctx context.Context, arg InsertEventParams) error {
-	_, err := q.db.Exec(ctx, insertEvent,
+func (q *Queries) InsertEvent(ctx context.Context, arg InsertEventParams) (int64, error) {
+	row := q.db.QueryRow(ctx, insertEvent,
 		arg.Type,
 		arg.CourseID,
 		arg.ActionID,
@@ -39,58 +39,9 @@ func (q *Queries) InsertEvent(ctx context.Context, arg InsertEventParams) error 
 		arg.AssignmentID,
 		arg.Payload,
 	)
-	return err
-}
-
-const listEventsForAction = `-- name: ListEventsForAction :many
-SELECT seq, type, course_id, action_id, subject_type, subject_id, student_member_id, assignment_id, payload, occurred_at
-FROM event
-WHERE action_id = $1
-ORDER BY seq
-`
-
-type ListEventsForActionRow struct {
-	Seq             int64
-	Type            string
-	CourseID        *uuid.UUID
-	ActionID        *uuid.UUID
-	SubjectType     string
-	SubjectID       *uuid.UUID
-	StudentMemberID *uuid.UUID
-	AssignmentID    *uuid.UUID
-	Payload         []byte
-	OccurredAt      time.Time
-}
-
-func (q *Queries) ListEventsForAction(ctx context.Context, actionID *uuid.UUID) ([]ListEventsForActionRow, error) {
-	rows, err := q.db.Query(ctx, listEventsForAction, actionID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var items []ListEventsForActionRow
-	for rows.Next() {
-		var i ListEventsForActionRow
-		if err := rows.Scan(
-			&i.Seq,
-			&i.Type,
-			&i.CourseID,
-			&i.ActionID,
-			&i.SubjectType,
-			&i.SubjectID,
-			&i.StudentMemberID,
-			&i.AssignmentID,
-			&i.Payload,
-			&i.OccurredAt,
-		); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
+	var seq int64
+	err := row.Scan(&seq)
+	return seq, err
 }
 
 const lockEventStream = `-- name: LockEventStream :exec
@@ -105,5 +56,50 @@ type LockEventStreamParams struct {
 // Held until the transaction ends. See events.Flush for why.
 func (q *Queries) LockEventStream(ctx context.Context, arg LockEventStreamParams) error {
 	_, err := q.db.Exec(ctx, lockEventStream, arg.Namespace, arg.Stream)
+	return err
+}
+
+const notifyWake = `-- name: NotifyWake :exec
+SELECT pg_notify($1::text, json_strip_nulls(json_build_object(
+         'course_id', k.course_id, 'kind', t.kind, 'seq', s.seq,
+         'conversation_id', c.id, 'opener_member_id', c.opener_member_id,
+         'respondent_member_id', c.respondent_member_id))::text)
+FROM unnest($2::uuid[]) WITH ORDINALITY AS k(course_id, n)
+JOIN unnest($3::text[]) WITH ORDINALITY AS t(kind, n) ON t.n = k.n
+JOIN unnest($4::bigint[]) WITH ORDINALITY AS s(seq, n) ON s.n = k.n
+JOIN unnest($5::uuid[]) WITH ORDINALITY AS v(conversation_id, n) ON v.n = k.n
+JOIN unnest($6::uuid[]) WITH ORDINALITY AS x(action_id, n) ON x.n = k.n
+LEFT JOIN action a ON a.id = x.action_id AND a.target_type = 'conversation'
+LEFT JOIN conversation c
+       ON c.id = coalesce(nullif(v.conversation_id, '00000000-0000-0000-0000-000000000000'::uuid), a.target_id)
+ORDER BY k.n
+`
+
+type NotifyWakeParams struct {
+	Channel         string
+	CourseIds       []uuid.UUID
+	Kinds           []string
+	Seqs            []int64
+	ConversationIds []uuid.UUID
+	ActionIds       []uuid.UUID
+}
+
+// Tells every Core listening on the channel (package wake) what this
+// transaction wrote, once it commits: PostgreSQL sends a notification only
+// then, and never for a transaction, or a savepoint, rolled back. One per row
+// given: a course, the type of the event, its seq, and, for news of a
+// conversation (conversation_ids) or of a proposal to write in one
+// (action_ids, whose target is the conversation), the conversation and its
+// two participants. The nil UUID stands for none. Each is a few hundred
+// bytes, well under the 8000 a notification may carry.
+func (q *Queries) NotifyWake(ctx context.Context, arg NotifyWakeParams) error {
+	_, err := q.db.Exec(ctx, notifyWake,
+		arg.Channel,
+		arg.CourseIds,
+		arg.Kinds,
+		arg.Seqs,
+		arg.ConversationIds,
+		arg.ActionIds,
+	)
 	return err
 }

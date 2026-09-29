@@ -34,6 +34,7 @@ import (
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/tool"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/tools"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/version"
+	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/wake"
 )
 
 const usage = `aishiterud — AIshiteru Core
@@ -61,6 +62,9 @@ Environment:
   PROPOSAL_TTL      default 336h (14 days); 0 disables expiry
   RATE_LIMIT_PER_MINUTE        default 600 calls per actor per instance; 0 for no limit
   RATE_LIMIT_BURST             default 100
+  LONG_POLL_WAITERS            default 1000; the calls that may wait for news at once (wait_s) per instance;
+                               0 lets none wait, and each answers at once
+  LONG_POLL_WAITERS_PER_ACTOR  default 16; of them, one actor's
   SIGN_IN_ATTEMPTS_PER_MINUTE  default 10, per address (an IPv6 /64 counts as one) and per email or login ID;
                                a sign-in that succeeds is not counted against its address;
                                registrations through a join link count with an address's sign-ins
@@ -180,8 +184,19 @@ func serve(cfg config.Config) error {
 		return err
 	}
 
+	// Calls that wait for news (wait_s) wait in hub, which a connection of
+	// its own, listening, keeps told of what every instance commits.
+	hub := wake.NewHub(wake.Config{MaxWaiters: cfg.LongPollWaiters, MaxPerActor: cfg.LongPollWaitersPerActor})
+	listenDone := make(chan struct{})
+	if cfg.LongPollWaiters > 0 && cfg.LongPollWaitersPerActor > 0 {
+		listener := wake.NewListener(pool.Config().ConnConfig, hub, log)
+		go func() { defer close(listenDone); listener.Run(ctx) }()
+	} else {
+		close(listenDone)
+	}
+
 	reg := tool.NewRegistry()
-	pl := pipeline.New(pool, reg, pipeline.Config{ProposalTTL: cfg.ProposalTTL, Secrets: signatures})
+	pl := pipeline.New(pool, reg, pipeline.Config{ProposalTTL: cfg.ProposalTTL, Secrets: signatures, Wake: hub})
 	tools.RegisterAll(reg, tools.Deps{Pipeline: pl, Blob: store, Uploads: signer, MaxUploadBytes: cfg.MaxUploadBytes,
 		DisableAgentSelfService: !cfg.AgentSelfService, MaxAgentsPerOwner: cfg.AgentMaxPerOwner, Memory: cfg.Memory})
 
@@ -236,10 +251,13 @@ func serve(cfg config.Config) error {
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       2 * time.Minute,
 	}
+	// Shutting down, the server waits for every request in flight: those
+	// waiting for news answer at once, with what they read.
+	srv.RegisterOnShutdown(hub.Shutdown)
 	errc := make(chan error, 1)
 	go func() { errc <- srv.ListenAndServe() }()
 	log.Info("listening", "addr", cfg.HTTPAddr, "blob_store", cfg.BlobStore, "version", version.Version, "schema_latest", latest, "tools", len(reg.Exposed()),
-		"memory", cfg.Memory.Enabled)
+		"memory", cfg.Memory.Enabled, "long_poll_waiters", cfg.LongPollWaiters, "long_poll_waiters_per_actor", cfg.LongPollWaitersPerActor)
 	if asserter != nil {
 		// The key's id is public, and says which key a runtime should find
 		// at /v1/auth/keys.
@@ -258,10 +276,13 @@ func serve(cfg config.Config) error {
 		return fmt.Errorf("shutdown: %w", err)
 	}
 	// Let a sweep in flight finish its current step and hand its lock back
-	// before the pool closes underneath it.
-	select {
-	case <-jobsDone:
-	case <-shutdownCtx.Done():
+	// before the pool closes underneath it; and the listener let go of its
+	// connection.
+	for _, done := range []chan struct{}{jobsDone, listenDone} {
+		select {
+		case <-done:
+		case <-shutdownCtx.Done():
+		}
 	}
 	return nil
 }
