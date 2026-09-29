@@ -328,6 +328,9 @@ type Querier interface {
 	// the departments the issuer administers, and beneath them, as ListCourses
 	// finds those.
 	InvitableBy(ctx context.Context, arg InvitableByParams) (InvitableByRow, error)
+	// The seq of a conversation's newest message, 0 while it has none; with at,
+	// of the newest written at or before it.
+	LastMessageSeq(ctx context.Context, arg LastMessageSeqParams) (int32, error)
 	// The opener's newest message: the one an answer is to answer.
 	LatestOpenerMessage(ctx context.Context, conversationID uuid.UUID) (LatestOpenerMessageRow, error)
 	// exclude_types leaves out whole action types: a chat's messages from a
@@ -372,6 +375,8 @@ type Querier interface {
 	// is within its student scope (and its principal's, for a delegate), in SQL.
 	// state is a ConversationView state, or open; a reply waits for approval
 	// only if it answers the opener's newest message (ConversationDetails).
+	// respondent_member_id, when given, keeps those addressed to that seat: an
+	// agent's page, for those who oversee its conversations.
 	ListConversationIDs(ctx context.Context, arg ListConversationIDsParams) ([]uuid.UUID, error)
 	// Oldest first, after a seq.
 	ListConversationMessagesAfter(ctx context.Context, arg ListConversationMessagesAfterParams) ([]ListConversationMessagesAfterRow, error)
@@ -462,6 +467,12 @@ type Querier interface {
 	// A page of one bucket in one status, by id: newest first, after the last
 	// id seen, or oldest first.
 	ListMemoryBucket(ctx context.Context, arg ListMemoryBucketParams) ([]ListMemoryBucketRow, error)
+	// The conversations the given seats opened, newest activity first — its
+	// last message, or its opening while it has none — after a
+	// (last_activity_at, id) cursor, both descending. The seats are the
+	// caller's own that count now, which me.conversations works out before
+	// this, as authorization would: nothing here reads anyone else's.
+	ListMyConversations(ctx context.Context, arg ListMyConversationsParams) ([]ListMyConversationsRow, error)
 	// Which of these uploads, each given with the course its key names, are
 	// this deployment's and attached to nothing? The course must be one this
 	// database has. document.upload_url issues keys only under courses that
@@ -503,17 +514,18 @@ type Querier interface {
 	// after which the row is read again as it left it: an assignment unpublished
 	// meanwhile is not listed, and the event goes out under its unreleased name.
 	ListPublishedAssignmentsUsingDocument(ctx context.Context, documentID *uuid.UUID) ([]uuid.UUID, error)
-	// The seats that might answer a caller: live, held by an active actor, with
-	// conversation_answer not denied on the row, and, for a delegate, either the
-	// caller's own or one that answers the course, whose principal's row holds
-	// member_manage. An agent's seat only while the agent takes conversations in
+	// The seats that might answer a caller: agents' seats, live, held by an
+	// active actor, with conversation_answer not denied on the row, and, for a
+	// delegate, either the caller's own or one that answers the course, whose
+	// principal's row holds member_manage. Never a person's: conversations are
+	// with agents. An agent's seat only while the agent takes conversations in
 	// the site (docs/schema.md §2.8), by the rule of SiteChatOf, its status
 	// asked above: one operated from an external tool is asked there, not here.
 	// kind is read to leave out, never to let in. Which of them the caller may
 	// address is decided in Go (tools.addressing), which this only narrows to
 	// what it could accept: every student's own agent answers, and only its
-	// principal. Unpaged: what is left is a course's agents and staff, and the
-	// caller's own agents, a handful; max_rows bounds them anyway.
+	// principal. Unpaged: what is left is a course's agents, and the caller's
+	// own agents, a handful; max_rows bounds them anyway.
 	ListRespondentCandidates(ctx context.Context, arg ListRespondentCandidatesParams) ([]ListRespondentCandidatesRow, error)
 	// Every seat an actor holds that is not removed, with its course and the
 	// name of the preset it was copied from.
@@ -694,9 +706,13 @@ type Querier interface {
 	LookupActorForSeating(ctx context.Context, arg LookupActorForSeatingParams) (LookupActorForSeatingRow, error)
 	MarkActionExecuted(ctx context.Context, arg MarkActionExecutedParams) error
 	MarkActionFailed(ctx context.Context, arg MarkActionFailedParams) error
+	// A participant has read a conversation up to a seq, now: its place moves
+	// forward to it, and never back.
+	MarkConversationRead(ctx context.Context, arg MarkConversationReadParams) (int32, error)
 	MaxVersionSeq(ctx context.Context, documentID uuid.UUID) (int32, error)
 	// Whether an agent's owner lets it keep memory: no row is yes.
 	MemoryEnabled(ctx context.Context, holderActorID uuid.UUID) (bool, error)
+	MessageSeqIn(ctx context.Context, arg MessageSeqInParams) (int32, error)
 	// A grade's feedback files go with it when it is written again without
 	// being graded again: a total worked out anew, a score rescaled.
 	MoveFeedbackFiles(ctx context.Context, arg MoveFeedbackFilesParams) error
@@ -854,6 +870,11 @@ type Querier interface {
 	TouchCredential(ctx context.Context, arg TouchCredentialParams) error
 	TryJobLock(ctx context.Context, key int64) (bool, error)
 	UnpublishAssignment(ctx context.Context, id uuid.UUID) (int64, error)
+	// Of the given conversations, those in which one of the given seats takes
+	// part and the other participant has written, and not retracted, a message
+	// after the last that seat has read (conversation_read; none read, with no
+	// row).
+	UnreadAmong(ctx context.Context, arg UnreadAmongParams) ([]uuid.UUID, error)
 	// A null leaves the value as it is. An email an administrator gives is one
 	// they vouch for, as every email was before join links: one a person typed
 	// registering through a link (email_verified false) is theirs no longer. So

@@ -351,7 +351,7 @@ others' scope. Giving a seat the role it has changes nothing (`changed: false`);
 | `perm_action_decide` | approving proposals, reviewing after the fact | |
 | `perm_agent_delegate` | bringing an agent one owns into the course as one's delegate: `confirm_required` is a request an instructor approves | |
 | `perm_conversation_ask` | opening conversations, and writing in those one opened | |
-| `perm_conversation_answer` | being addressed, and answering; the level is the autonomy of the answers | |
+| `perm_conversation_answer` | being addressed, and answering, which only an agent does: a person's seat holds it at `denied` (Ceilings, below); the level is the autonomy of the answers | |
 | `perm_member_invite` | making the course's join links, which seat whoever holds one as a student (§2.2, Join links), and listing and revoking them | |
 
 Columns rather than rows because the action-type list lives in code anyway: adding one is a
@@ -416,7 +416,10 @@ authorization. A seat the release before it added while the migration was going 
 `denied`. A seat that manages members under another role than instructor — an assistant or an
 observer given `member_manage`, a TA given it — got its role's levels as well, and from then on
 grants no preset that carries more (`student` carries `agent_delegate` and `conversation_ask`;
-`tutor`, `conversation_answer`) until an instructor raises its own.
+`tutor`, `conversation_answer`) until an instructor raises its own. Migration 0018 then took
+`conversation_answer` from every person's seat that was not removed, and from every preset for
+people, the built-in `instructor` among them: conversations are between a person and an agent
+(§2.8), and a person answers none.
 
 `member_invite` (migration 0013) is not `member_manage`: a manager seats whoever they name, and a
 join link seats whoever holds it, unseen — a room scanning a QR code — which is a decision of its
@@ -455,8 +458,12 @@ who is a delegate grants within what it holds, which is within its principal's: 
 narrows with its principal's, may say the whole class — and its principal's `expires_at` as well
 as its own. One exception: it holds no `agent_delegate`, never bringing agents of its own, but a
 student it seats may still ask to bring theirs, as the `student` preset says, which is its
-principal's to give, and so it gives `agent_delegate` up to its principal's level. Narrowing is
-always allowed, whatever the granter holds. Nobody manages their own seat; a delegate manages
+principal's to give, and so it gives `agent_delegate` up to its principal's level. And no person
+holds `conversation_answer` (Ceilings, below), so it is handed out as far as the granter decides
+actions, or answers itself, whichever is more (`grantable`): an agent's answers are judged by
+whoever decides actions, so an instructor seats the course's tutor agent answering on its own, as
+they did when they answered themselves, and someone who decides nothing gives no agent answers.
+Narrowing is always allowed, whatever the granter holds. Nobody manages their own seat; a delegate manages
 neither its principal's seat nor its principal's other agents' (`not_your_principal`, below); and
 a seat whose `expires_at` has passed is as good as removed whether or not the sweep has got to
 it: it is not revived, and seating the actor again is a fresh row.
@@ -536,19 +543,24 @@ that shows one, calls it:
 | `agent_never` | `agent_delegate` | `denied` | a delegate's: it brings no agents of its own |
 | `agent_decides_by_proposal` | `action_decide` | `confirm_required` | any agent's, owned or not: each decision and review of an agent's is a proposal a person confirms — a triage assistant |
 | `student_agent_by_proposal` | any but `member_manage`, `member_invite` | `confirm_required`, where the built-in `delegate` preset gives less | the delegate of someone who does not manage the course's members (Delegates, above) |
+| `conversations_are_with_agents` | `conversation_answer` | `denied` | any person's: conversations are between a person and an agent, and people talk to people elsewhere (§2.8) |
 | `principal_level` | any | the principal's level; for `conversation_answer`, its `conversation_ask` | a delegate's |
 
-A person's seat has none below `autonomous`. Where two bound a permission at the same level, the
-reason given is the first in the table: the one that holds whatever the principal holds.
+A person's seat has one below `autonomous`, `conversation_answer`. Where two bound a permission at
+the same level, the reason given is the first in the table: the one that holds whatever the
+principal holds.
 
 - **At every call.** `authorize()` caps a delegate by them, whatever its row says (§3). For an
   agent nobody owns it cannot, since it never reads `actor.kind`; the database holds that seat
   instead: an agent's row that is not removed, and would hold `action_decide` above
   `confirm_required`, is written holding `confirm_required` (trigger
   `course_member_agent_ceiling`, migration 0014, which lowered the rows that said more, and the
-  presets for agents, told by their role `assistant`, as 0013 told them). That reads `kind` to
+  presets for agents, told by their role `assistant`, as 0013 told them). Nor can it cap a
+  person's `conversation_answer`; so a person's row that is not removed is written holding it
+  `denied` (trigger `course_member_person_ceiling`, migration 0018, which lowered the rows that
+  said more, and the presets for people, told by any role but `assistant`). Both read `kind` to
   limit, never to grant, as the refusals of ownership do (§2.1). Cutting down rather than refusing
-  keeps the release before 0014 working while it goes in.
+  keeps the release before each working while it goes in.
 - **Seating.** `member.add`, `course.seat_instructor` and `member.add_delegate` cut a preset's
   levels down to the seat's ceilings, as a delegate's are cut down to what its owner holds, and
   refuse a level the call names above one.
@@ -1033,7 +1045,12 @@ reviewing and reading them (`action.get`, any of them), and the queues listing t
 anything else is denied as it is to anyone who does not hold it, an action id that does not exist
 included. Where their own level is `confirm_required` or `pending_review`, the course
 has someone check them too, and so their agent: someone outside the party decides it, as for the
-rest of the party; so it is where the target is beyond their reach, or gone. Rejecting is held to
+rest of the party; so it is where the target is beyond their reach, or gone. An answer
+(`conversation.answer`) is the one action no person could have made, since a person answers no
+conversation (§2.8): for it the owner is measured by what judging an answer is,
+`perm_action_decide` (`tool.Spec.OwnerJudgedBy`), so an instructor who decides actions without
+anyone's confirmation decides their own course tutor's answers, and one whose decisions wait
+for a confirmation does not. Rejecting is held to
 the same rule as approving, so that one mark says which proposals are the caller's; an owner who
 wants their agent's proposal gone takes it back (`action.withdraw`, above) whatever their level.
 It is the owner's own decision about their own agent's action and nothing more: the agent never
@@ -1127,6 +1144,7 @@ conversation(id, course_id→course, opener_member_id, respondent_member_id, tit
            the last author is a participant, and set with last_message_at
     trigger: the participants and the course never change; a closed conversation stays as
              it is; none is deleted
+    trigger: the respondent is an agent's seat (conversation_respondent_is_agent, 0018)
 
 conversation_message(id, conversation_id, course_id, seq, author_member_id,
                      in_reply_to_message_id null, body, created_by_action_id→action, created_at,
@@ -1144,15 +1162,39 @@ conversation_message_retraction(message_id, course_id, retracted_by_member_id,
     composite FKs (message_id, course_id) → conversation_message,
                   (course_id, retracted_by_member_id) → course_member
     append-only
+
+conversation_read(conversation_id, course_id, member_id, last_read_seq, read_at,
+                  primary key (conversation_id, member_id))
+    composite FKs (conversation_id, course_id) → conversation,
+                  (course_id, member_id) → course_member
+    check: last_read_seq ≥ 0
+    trigger: a participant's; whose it is never changes; last_read_seq never goes back
 ```
 
-A conversation is one member asking one other member questions, and that member answering
-them: a student and the course's tutor agent, a person and their own agent. It is not a
+A conversation is one member asking an agent seated in the course questions, and the agent
+answering them: a student and the course's tutor agent, a person and their own agent. It is not a
 discussion (§6): it has two participants, the one who opened it and its respondent, fixed
 for good, and each message is an action — `conversation.open`, `conversation.ask`,
 `conversation.answer` — recorded, authorized and, for an answer, governed by the
 respondent's level of `perm_conversation_answer`: posted at once, posted and reviewed after,
 or waiting for a person's approval.
+
+**Conversations are with agents.** A person asks and an agent answers, and nothing else: people
+talk to people elsewhere, in a forum that is not part of Core yet. So a person is nobody's
+respondent and answers none. `conversation.respondents` offers agents alone; `conversation.open`
+naming a person's seat is refused `forbidden`, reason `conversations_are_with_agents`, before
+anything else about it is asked, and so is a proposal to, before it is queued; `conversation.ask`
+in a conversation with a person is refused the same way. A person's seat holds
+`conversation_answer` at `denied` (§2.2, Ceilings, the same reason), so a person calling
+`conversation.answer` or `conversation.inbox` is denied, and told that reason rather than
+`permission_denied`: the tools' gate asks why (`tool.Gate.Refusal`), reading `kind` to explain a
+refusal, never to grant. The database holds it too: it refuses a conversation whose respondent
+is a person's seat (trigger `conversation_respondent_is_agent`), and writes a person's seat
+answering nothing whatever it is told. Migration 0018 closed every conversation that was open
+with a person as its respondent (`closed_reason = 'conversations_are_with_agents'`), told its
+participants so in the feed (`conversation.closed`, and `action.cancelled` for the answers and
+questions waiting for approval in it, and the conversations waiting to be opened with a person,
+which it cancelled); they stay readable, as every closed conversation does.
 
 **Nobody gains through a conversation more than they hold.** A member may address a
 respondent only if the respondent can see and do nothing the member cannot — the
@@ -1170,7 +1212,8 @@ may address R when:
 
 - they are two seats, both live, a delegate's principal included (§2.2), held by active
   actors;
-- R answers: its `conversation_answer`, as `authorize()` caps it, is allowed;
+- R is an agent's seat (above), and answers: its `conversation_answer`, as `authorize()` caps it,
+  is allowed;
 - R is O's own delegate, which answers its principal whatever it holds; or R is within O:
   for every permission but `conversation_answer`, which is what being addressed is, R's
   level (capped, for a delegate) is no higher than O's, and R reaches no student and no
@@ -1186,9 +1229,8 @@ may address R when:
 
 The rule is one function, which every conversation tool goes by, and it is measured now, on
 every call, not when the conversation began: seats are narrowed, widened, paused and
-removed. `conversation.respondents` lists those the caller may address, an agent only while it
-takes site chat (below), each with how its answers arrive and, for an agent, when it last used a
-token. `conversation.ask` is refused once the respondent may no longer be addressed ("start a new
+removed. `conversation.respondents` lists the agents the caller may address, each only while it
+takes site chat (below), with how its answers arrive and when it last used a token. `conversation.ask` is refused once the respondent may no longer be addressed ("start a new
 conversation"), and
 `conversation.answer` once its opener may no longer address the one answering. The
 respondent reads the conversation (`conversation.get`, `.messages`) only while its opener
@@ -1204,8 +1246,8 @@ whose principal is — is left out in SQL, and the rest is read a batch at a tim
 first, until enough are found, so that conversations whose openers may no longer ask do not
 stand for good in front of those that may.
 
-**Site chat: which agents answer in the site.** A person answers in the site as themselves. An
-agent answers only if something runs it that polls `conversation.inbox` and answers on its own:
+**Site chat: which agents answer in the site.** An agent answers only if something runs it that
+polls `conversation.inbox` and answers on its own:
 an agent runtime, AIShie's or a school's own. An assistant a person drives from a tool of their
 own — a chat app, an editor, a script, over MCP — acts only while that person uses it and never
 polls, so a question put to it in the site would wait for good. So the program that runs an
@@ -1229,8 +1271,8 @@ caller may not address is refused `not_addressable` first, as ever). A proposal 
 refused when it is made and again when it is approved. Nothing already written changes: the
 conversation is read, closed and retracted as before, and the agent answers what it was asked
 (`conversation.answer`, `conversation.inbox`), since none of those is a new question. A person
-as a respondent is untouched. The refusal reads `kind`, to refuse and never to grant, as the
-refusals of ownership do: a person has no declaration and needs none.
+named as a respondent is refused before any of this, `conversations_are_with_agents` (above). The
+refusal reads `kind`, to refuse and never to grant, as the refusals of ownership do.
 
 **An answer answers the latest question, once.** It names the opener's message it answers
 (`in_reply_to_message_id`), and is refused as a conflict if the opener has written since
@@ -1249,13 +1291,14 @@ other participant's next, KEY SHARE (its principal's after it), and the conversa
 An answer that waits for approval is a proposal; approving it runs every check again. Four
 eyes count parties (§2.6), so the answers of a course tutor an instructor owns, when they
 wait for approval or review, are decided by someone other than that instructor, unless the
-instructor's own `perm_conversation_answer` is `autonomous`: then they could have answered
-without anyone, and decide them too. Where that instructor answers only with a confirmation and
-is the only one who decides actions, nobody can: such a tutor's answers stay autonomous there,
-or someone else is seated to decide them.
+instructor decides actions without anyone's confirmation: no person answers, so an owner is
+measured for their agent's answers by what judging one is, `perm_action_decide`
+(`tool.Spec.OwnerJudgedBy`), and decides them then. Where the instructor's own decisions wait
+for a confirmation, someone else decides the tutor's answers too.
 
 Either participant closes a conversation (`conversation.close`), with a reason if they like,
-which may not be `seat_removed`; nothing more is written in it, and it stays readable. A message is withdrawn (`conversation.retract`) by its author, or
+which may not be `seat_removed` or `conversations_are_with_agents`, what the system says; nothing
+more is written in it, and it stays readable. A message is withdrawn (`conversation.retract`) by its author, or
 by whoever oversees the opener, with a row beside it: the read tools then show it retracted,
 by whom and why, without its text, and the conversation says when a message in it was last
 retracted (`last_retracted_at`), since a retraction adds no message for a reader to poll. Removing a seat closes every open conversation it takes
@@ -1272,6 +1315,39 @@ its own words: its `participants`, course staff who decide actions for its opene
 and, unless the respondent is the opener's own delegate, whomever else the respondent answers
 (`respondent_answers_others`). There is no privacy promised beyond that. `action.list_mine` takes `exclude_types`, so
 that a list of what one has done need not be a transcript.
+
+**What each participant has read.** Each participant has a place in a conversation: the `seq` of
+the last message they have read, and when they last said so (`conversation_read`). They move it
+with `conversation.mark_read`: every message there is now, or up to one of its messages
+(`up_to_message_id`) or a time (`up_to`). It only goes forward, so marking an earlier message
+read leaves it where it was and the same call made twice changes nothing; the database holds
+that, and that a place is a participant's. It is a write like any other, gated as reading a
+conversation is and recorded under its idempotency key, but it changes nothing else, closed
+conversations included, and is news to nobody: it writes no event. Only the two participants
+mark a conversation read, while they may read it (an overseer is refused `not_a_participant`,
+anyone else finds nothing). `unread` is whether the other participant has written, and not
+retracted, a message after that place: `me.conversations` says it of each of the caller's
+conversations, and `conversation.list` and `conversation.get` of each the caller takes part in,
+never of one they only oversee. Migration 0018 counted everything written before it as read by
+both participants, so that nothing old lights up.
+
+**A person's panel.** `me.conversations` (`GET /v1/me/conversations`) is the caller's
+conversations as the one who asked, in every course at once, the newest activity first (the last
+message, or the opening while there is none): each with its course, its agent (the respondent's
+seat, actor and name), its title, status and state, when it was last active, `unread`, and
+`may_ask`, whether the caller may ask in its course now (their seat holds `conversation_ask` and
+the course is not archived). `course_id` keeps one course's; `limit` is 50 by default and 100 at
+most, and `next`, an opaque cursor of the last row's activity and id, is given back as `after`.
+It lists what `conversation.list` lists of the caller's own, course by course: from each seat of
+theirs that counts now and may read there (`document_read`, the permission `conversation.list`
+borrows), an archived course included; a seat paused, expired or removed, or a delegate's whose
+principal no longer counts, lists nothing. The seats are worked out from the caller's own
+memberships, and the conversations read in SQL for those seats alone.
+
+**An agent's page.** `conversation.list` takes `respondent_member_id`, which keeps the
+conversations addressed to that seat: with `as` `overseer`, one agent's conversations with the
+members the caller decides actions for, open or closed, paged by id, as an agent's page in a
+course shows them. It narrows whatever the caller may list, so anyone may give it.
 
 **Its news is its participants'.** `conversation.opened`, `.message_posted`, `.closed` and
 `.message_retracted` are filed under the conversation (`subject_type = 'conversation'`), name
@@ -1549,6 +1625,11 @@ holds; a write so refused is recorded, as a suspended actor's is. It is read wit
 approving a proposal the person made before is someone else's call, re-authorized against their
 seat as any is.
 
+A denial at step 3 gives `permission_denied`, unless the tool knows a reason that tells more
+(`tool.Gate.Refusal`): a person denied `conversation_answer`, as every person is, is told
+`conversations_are_with_agents` (§2.8). That is asked only once the level has denied the call,
+never changes it, and may read what authorization does not, `actor.kind` among it.
+
 Step 5 has one more case. A target that belongs to a student but to no single assignment — a
 grade on a component, a course total, a whole gradebook — is within scope only for
 `assignment_scope = 'all'`. Otherwise "names no assignment" would mean "skips the check", and
@@ -1633,6 +1714,9 @@ that reads which credential the call came with.
 | A join link keeps a hash of its token, never the token; it expires ten minutes after it is made, never later or sooner; it is used no more times than its limit; a revocation says who made it; its maker, its revoker and the seats taken through it are of its course | CHECKs, `unique(token_prefix)` and composite FKs on `course_join_link`; composite FK `course_member_join_link_fk` |
 | Only a person's email goes unverified, and only an email there is | CHECK `actor_unverified_email_is_a_persons` |
 | A conversation's two participants are two seats of its course, and never change; a closed conversation stays closed; none is deleted | composite FKs, CHECKs and trigger `conversation_guarded` on `conversation` |
+| A conversation's respondent is an agent's seat, never a person's | trigger `conversation_respondent_is_agent` on `conversation` |
+| A person's seat that is not removed holds `conversation_answer` at `denied`: more is written as that | trigger `course_member_person_ceiling` |
+| A place in a conversation is one of its participants', in its course, one each; whose it is never changes, and it goes forward only | composite FKs, primary key, CHECK and trigger `conversation_read_guarded` on `conversation_read` |
 | Only a conversation's participants write in it, only while it is open; a reply is the respondent's, to a message of the opener's in the same conversation | trigger `conversation_message_author_valid`, composite FKs on `conversation_message` |
 | A message and its retraction are in their conversation's course; one message at each `seq`; a message is retracted once | composite FKs, `unique(conversation_id, seq)`, primary key on `conversation_message_retraction` |
 | Every message and retraction names its action | `created_by_action_id NOT NULL` |
@@ -1765,6 +1849,15 @@ that reads which credential the call came with.
 - A seat holds no more than its ceilings (§2.2, Ceilings): one function works them out, and
   seating, every widening change, `authorize()` for a delegate and the member views all call it;
   a level named above one is refused with the reason the views give.
+- Conversations are with agents (§2.8): a person is not offered as a respondent, nor opened a
+  conversation with, nor asked in one, nor answers, and is told
+  `conversations_are_with_agents`; `conversation_answer` is handed out as far as the granter
+  decides actions (`grantable`), and an owner judges their agent's answers as far as they decide
+  actions (`tool.Spec.OwnerJudgedBy`).
+- Only a participant marks a conversation read, while they may read it; `unread`, in the views
+  that say it, is measured for the caller's own place and never shown to an overseer.
+- `me.conversations` lists only from the caller's own seats that count and may read now, as
+  `conversation.list` would be let read in each course.
 - A change that widens a delegate's seat is within its principal's as well as the granter's.
   A granter who is a delegate grants within its principal's reach and life as well as its own
   (`withinGranter`, `outlastsGranter`), and `agent_delegate` up to its principal's level

@@ -21,9 +21,12 @@ import (
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/tool"
 )
 
-// A conversation is one member asking one other member questions, and that
-// member answering them: a student and the course's tutor agent, a person
-// and their own agent. docs/schema.md §2.8.
+// A conversation is one member asking an agent seated in the course
+// questions, and the agent answering them: a student and the course's tutor
+// agent, a person and their own agent. docs/schema.md §2.8. It is never
+// between two people, who talk to each other elsewhere: a person answers
+// none (domain.CeilingConversationsAreWithAgents), is offered as nobody's
+// respondent and is refused as one, and the database holds both.
 //
 // Nobody gains through a conversation more than they hold. A member may
 // address a respondent only if the respondent can see and do nothing the
@@ -44,8 +47,8 @@ import (
 // An agent is asked in the site only while what runs it says it answers
 // there (me.site_chat): one operated from an external tool is not offered,
 // and a new question to it is refused, since nothing here would ever answer
-// it (answersElsewhere). That is asked of a new question alone, never of an
-// answer or a read, and never of a person.
+// it (askable). That is asked of a new question alone, never of an answer
+// or a read.
 //
 // Every message is an action, and its payload holds what was written: the
 // action log shows it to whoever decides actions in the course, unscoped, as
@@ -54,8 +57,8 @@ import (
 
 func conversationTools() []tool.Tool {
 	return []tool.Tool{conversationRespondents(), conversationOpen(), conversationAsk(), conversationAnswer(),
-		conversationClose(), conversationRetract(), conversationList(), conversationGet(), conversationMessages(),
-		conversationInbox()}
+		conversationClose(), conversationRetract(), conversationMarkRead(), conversationList(), conversationGet(),
+		conversationMessages(), conversationInbox()}
 }
 
 // ToolConversationAnswer is the answer's action type, which the views look
@@ -69,8 +72,10 @@ const (
 )
 
 var (
-	asks    = tool.Gate{Perms: []domain.Perm{domain.PermConversationAsk}}
-	answers = tool.Gate{Perms: []domain.Perm{domain.PermConversationAnswer}}
+	asks = tool.Gate{Perms: []domain.Perm{domain.PermConversationAsk}}
+	// A person holds no conversation_answer (domain.Ceiling), and is told
+	// why when they try: conversations are with agents.
+	answers = tool.Gate{Perms: []domain.Perm{domain.PermConversationAnswer}, Refusal: personAnswersNothing}
 	// Closing, retracting and reading a conversation borrow
 	// perm_document_read, the most basic permission a seated member holds
 	// (docs/schema.md §2.2): who may is decided by the conversation — its
@@ -447,27 +452,53 @@ func notAddressable(prefix, why string) error {
 var errAnswersElsewhere = apperr.Precondition("that agent takes no conversations in the site: it is operated from an external tool, and acts there").
 	With("reason", "agent_answers_elsewhere")
 
-// answersElsewhere refuses a respondent that is an agent which takes no
-// conversations in the site now (docs/schema.md §2.8; the rule is SQL's,
-// SiteChatOf). A person is asked in the site as ever. It is asked of a new
-// question only, conversation.open's and conversation.ask's, never of an
-// answer or a read: what an agent was asked stays readable and answerable.
-// It reads kind to refuse, as the refusals of ownership do; nothing that
-// grants reads it.
-func answersElsewhere(ctx context.Context, q dbq.Querier, now time.Time, respondent *domain.Member) error {
+// errWithAgents refuses a person where only an agent may be: as a
+// conversation's respondent, and answering in one. The reason is the
+// ceiling's that denies a person conversation_answer, so that a front end
+// says one thing of all three.
+var errWithAgents = apperr.Forbid("conversations are between a person and an agent: a person answers none, and is asked "+
+	"nothing here; people talk to people elsewhere").With("reason", string(domain.CeilingConversationsAreWithAgents))
+
+// personAnswersNothing is the answering tools' refusal of a person
+// (tool.Gate.Refusal): a person's seat holds conversation_answer at denied,
+// as the database writes every person's, and they are told why. It reads
+// kind to refuse, as the refusals of ownership do; nothing that grants
+// reads it.
+func personAnswersNothing(ctx context.Context, q dbq.Querier, caller domain.Actor, _ *domain.Member) (*apperr.Error, error) {
+	a, err := q.GetActor(ctx, caller.ID)
+	if err != nil || isAgent(a.Kind) {
+		return nil, err
+	}
+	return errWithAgents, nil
+}
+
+// askable says whether a respondent is one a new question may be put to,
+// as far as what it is goes (docs/schema.md §2.8): an agent, since
+// conversations are with agents (errWithAgents), and one that takes
+// conversations in the site now (errAnswersElsewhere; the rule is SQL's,
+// SiteChatOf). It is asked of a new question only, conversation.open's and
+// conversation.ask's, never of an answer or a read: what an agent was asked
+// stays readable and answerable. It reads kind to refuse, as the refusals of
+// ownership do; nothing that grants reads it. The two refusals are returned
+// apart, since whom the caller may address is asked between them.
+func askable(ctx context.Context, q dbq.Querier, now time.Time, respondent *domain.Member) (notAgent, elsewhere error, err error) {
 	chat, err := siteChatOf(ctx, q, now, []uuid.UUID{respondent.ActorID})
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
-	if c := chat[respondent.ActorID]; c.Agent && !c.SiteChat {
-		return errAnswersElsewhere
+	c := chat[respondent.ActorID]
+	if !c.Agent {
+		return errWithAgents, nil, nil
 	}
-	return nil
+	if !c.SiteChat {
+		return nil, errAnswersElsewhere, nil
+	}
+	return nil, nil, nil
 }
 
 type ConversationOpenIn struct {
 	tool.InCourse
-	RespondentMemberID uuid.UUID `json:"respondent_member_id" jsonschema:"whom to ask: one of conversation.respondents"`
+	RespondentMemberID uuid.UUID `json:"respondent_member_id" jsonschema:"the agent to ask: one of conversation.respondents"`
 	Title              *string   `json:"title,omitempty" jsonschema:"at most 200 characters"`
 	Body               *string   `json:"body,omitempty" jsonschema:"the first question, if you have it now; at most 20000 characters"`
 }
@@ -479,8 +510,9 @@ type ConversationOpenOut struct {
 
 // checkOpen is conversation.open's rule without writing anything: for a
 // proposal, when it is queued; for a call, when it runs, with the
-// respondent's seat held. Whom one may address comes first, and only then
-// whether that one, an agent, is asked here at all.
+// respondent's seat held. A person is refused first, as nobody's to ask;
+// then whom one may address; and only then whether that agent is asked here
+// at all.
 func checkOpen(ctx context.Context, q dbq.Querier, m, respondent *domain.Member, now time.Time, in ConversationOpenIn) error {
 	if _, err := optionalText("title", in.Title, maxTitleChars); err != nil {
 		return err
@@ -490,6 +522,13 @@ func checkOpen(ctx context.Context, q dbq.Querier, m, respondent *domain.Member,
 			return err
 		}
 	}
+	notAgent, elsewhere, err := askable(ctx, q, now, respondent)
+	switch {
+	case err != nil:
+		return err
+	case notAgent != nil:
+		return notAgent
+	}
 	why, err := newAddressing(q, now).refusal(ctx, m, respondent)
 	if err != nil {
 		return err
@@ -497,19 +536,20 @@ func checkOpen(ctx context.Context, q dbq.Querier, m, respondent *domain.Member,
 	if why != "" {
 		return notAddressable("you may not address that member", why)
 	}
-	return answersElsewhere(ctx, q, now, respondent)
+	return elsewhere
 }
 
 func conversationOpen() tool.Tool {
 	return tool.Define(tool.Spec[ConversationOpenIn, ConversationOpenOut]{
 		Name: "conversation.open",
-		Description: "Start a conversation with one member of the course — the course's tutor agent, your own agent — and, " +
-			"if you give body, ask the first question. You may address only someone who can see and do nothing you cannot, " +
-			"or your own agent, and an agent only while what runs it answers in the site (agent_answers_elsewhere otherwise: " +
-			"it is operated from an external tool): conversation.respondents lists them. Keep asking with conversation.ask; " +
-			"answers come back as messages (conversation.messages). Both of you, and course staff who decide actions for " +
-			"you, can read it; and a respondent that answers others too, such as the course's tutor, may repeat to them " +
-			"what you write.",
+		Description: "Start a conversation with an agent seated in the course — the course's tutor agent, your own agent — " +
+			"and, if you give body, ask the first question. Conversations are between a person and an agent: a person is " +
+			"nobody's respondent (conversations_are_with_agents); people talk to people elsewhere. You may address only " +
+			"an agent that can see and do nothing you cannot, or your own agent, and only while what runs it answers in " +
+			"the site (agent_answers_elsewhere otherwise: it is operated from an external tool): conversation.respondents " +
+			"lists them. Keep asking with conversation.ask; answers come back as messages (conversation.messages). Both " +
+			"of you, and course staff who decide actions for you, can read it; and an agent that answers others too, such " +
+			"as the course's tutor, may repeat to them what you write.",
 		Kind: tool.Write, Gate: asks,
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/conversations"},
 		Resolve: func(ctx context.Context, q dbq.Querier, in ConversationOpenIn) (tool.Target, error) {
@@ -571,8 +611,9 @@ type MessageIDOut struct {
 }
 
 // checkAsk is conversation.ask's rule: the caller opened the conversation,
-// it is open, the caller may still address its respondent, and the
-// respondent, if an agent, still takes conversations in the site.
+// it is open, its respondent is an agent (every conversation with a person
+// was closed by migration 0018, and the database opens none), the caller
+// may still address it, and it still takes conversations in the site.
 func checkAsk(ctx context.Context, q dbq.Querier, m, respondent *domain.Member, now time.Time, c dbq.Conversation, body string) error {
 	if c.OpenerMemberID != m.ID {
 		return errNotOpener
@@ -583,6 +624,13 @@ func checkAsk(ctx context.Context, q dbq.Querier, m, respondent *domain.Member, 
 	if err := checkBody(body); err != nil {
 		return err
 	}
+	notAgent, elsewhere, err := askable(ctx, q, now, respondent)
+	switch {
+	case err != nil:
+		return err
+	case notAgent != nil:
+		return notAgent
+	}
 	why, err := newAddressing(q, now).refusal(ctx, m, respondent)
 	if err != nil {
 		return err
@@ -590,7 +638,7 @@ func checkAsk(ctx context.Context, q dbq.Querier, m, respondent *domain.Member, 
 	if why != "" {
 		return notAddressable("the respondent is no longer available to you; start a new conversation with someone who is", why)
 	}
-	return answersElsewhere(ctx, q, now, respondent)
+	return elsewhere
 }
 
 func conversationAsk() tool.Tool {
@@ -703,15 +751,20 @@ func newerQuestion(ctx context.Context, q dbq.Querier, c dbq.Conversation, answe
 func conversationAnswer() tool.Tool {
 	return tool.Define(tool.Spec[ConversationAnswerIn, MessageIDOut]{
 		Name: ToolConversationAnswer,
-		Description: "Answer in a conversation addressed to you (conversation.inbox lists those waiting), replying to the " +
-			"opener's latest message, whose id you give as in_reply_to_message_id. It is refused as a conflict, with a reason: " +
+		Description: "Answer, as an agent, in a conversation addressed to you (conversation.inbox lists those waiting), " +
+			"replying to the opener's latest message, whose id you give as in_reply_to_message_id. A person answers none, " +
+			"and is refused (conversations_are_with_agents). It is refused as a conflict, with a reason: " +
 			"moved_on if the opener has written again since (read the new message and answer that), already_answered if that " +
 			"message has its answer, answer_pending if an answer of yours to it waits for approval, closed if the conversation " +
 			"is. Your level of conversation_answer decides whether an answer is posted at once, posted and reviewed after, or " +
 			"waits for a person's approval; one that waits is checked again when approved, and refused then if the " +
 			"conversation has moved on. An answer that failed or was rejected may be written again, under a new idempotency key.",
 		Kind: tool.Write, Gate: answers,
-		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/conversations/{conversation_id}/answer"},
+		// Its owner judges an agent's answer where they decide actions
+		// here without anyone's confirmation: no person answers, so that
+		// is what judging an answer is.
+		OwnerJudgedBy: []domain.Perm{domain.PermActionDecide},
+		HTTP:          tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/conversations/{conversation_id}/answer"},
 		Resolve: func(ctx context.Context, q dbq.Querier, in ConversationAnswerIn) (tool.Target, error) {
 			return conversationTarget(ctx, q, in.CourseID, in.ConversationID)
 		},
@@ -766,6 +819,11 @@ func conversationAnswer() tool.Tool {
 	})
 }
 
+// ClosedWithAPerson is why migration 0018 closed every conversation open
+// with a person as its respondent: conversations are with agents. It is the
+// closed_reason of each, and the reason of its conversation.closed event.
+const ClosedWithAPerson = string(domain.CeilingConversationsAreWithAgents)
+
 type ConversationCloseIn struct {
 	tool.InCourse
 	ConversationID uuid.UUID `json:"conversation_id"`
@@ -797,10 +855,14 @@ func conversationClose() tool.Tool {
 			if err != nil {
 				return OK{}, err
 			}
-			// What the system writes when a seat is removed is not a
-			// participant's to write: it would read as the other one leaving.
+			// What the system writes when a seat is removed, or when it
+			// closed the conversations people were asked in, is not a
+			// participant's to write: it would read as the system's doing.
 			if reason != nil && strings.EqualFold(*reason, members.ConversationSeatRemoved) {
 				return OK{}, apperr.Invalid("%q is what closing a removed seat's conversations says; give another reason", *reason)
+			}
+			if reason != nil && strings.EqualFold(*reason, ClosedWithAPerson) {
+				return OK{}, apperr.Invalid("%q is what closing the conversations people were asked in says; give another reason", *reason)
 			}
 			n, err := ec.Q.CloseConversation(ctx, dbq.CloseConversationParams{ID: c.ID, Reason: reason})
 			if err != nil {
@@ -877,6 +939,85 @@ func conversationRetract() tool.Tool {
 	})
 }
 
+type ConversationMarkReadIn struct {
+	tool.InCourse
+	ConversationID uuid.UUID  `json:"conversation_id"`
+	UpToMessageID  *uuid.UUID `json:"up_to_message_id,omitempty" jsonschema:"read up to and including this message of the conversation's; by default, every message in it now"`
+	UpTo           *time.Time `json:"up_to,omitempty" jsonschema:"read every message written at or before this time; give this or up_to_message_id, not both"`
+}
+
+type ConversationMarkReadOut struct {
+	ReadUpToSeq int32 `json:"read_up_to_seq" jsonschema:"the seq of the last message you have read, now: it never goes back, so marking an earlier message read leaves it where it was; 0 for none"`
+	Unread      bool  `json:"unread" jsonschema:"whether the other participant has written, and not retracted, anything after it"`
+}
+
+// conversationMarkRead is gated by perm_document_read, borrowed
+// (docs/schema.md §2.2), as reading a conversation is: who may mark it read
+// is one of its two participants, while they may read it (mayRead). It is a
+// write like any other, recorded, under an idempotency key, and changes
+// nothing but the caller's own place in the conversation, which only goes
+// forward: the same call made twice leaves it where the first did. It emits
+// no event: it is news to nobody else.
+func conversationMarkRead() tool.Tool {
+	return tool.Define(tool.Spec[ConversationMarkReadIn, ConversationMarkReadOut]{
+		Name: "conversation.mark_read",
+		Description: "Say you have read a conversation you take part in: every message in it now, or up to a message " +
+			"(up_to_message_id) or a time (up_to). What you have read only goes forward. conversation.list, " +
+			"conversation.get and me.conversations then say it is unread only once the other has written again. It " +
+			"changes nothing else, and tells nobody.",
+		Kind: tool.Write, Gate: converses,
+		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/conversations/{conversation_id}/read"},
+		Resolve: func(ctx context.Context, q dbq.Querier, in ConversationMarkReadIn) (tool.Target, error) {
+			return conversationTarget(ctx, q, in.CourseID, in.ConversationID)
+		},
+		Validate: func(_ context.Context, _ dbq.Querier, _ *domain.Member, in ConversationMarkReadIn) error {
+			if in.UpToMessageID != nil && in.UpTo != nil {
+				return apperr.Invalid("give up_to_message_id or up_to, not both")
+			}
+			return nil
+		},
+		Execute: func(ctx context.Context, ec *tool.ExecCtx, in ConversationMarkReadIn) (ConversationMarkReadOut, error) {
+			c, err := findConversation(ctx, ec.Q, in.CourseID, in.ConversationID)
+			if err != nil {
+				return ConversationMarkReadOut{}, err
+			}
+			ok, err := newAddressing(ec.Q, ec.Now).mayRead(ctx, ec.Member, c)
+			if err != nil {
+				return ConversationMarkReadOut{}, err
+			}
+			if !ok {
+				return ConversationMarkReadOut{}, errNoConversation
+			}
+			if ec.Member.ID != c.OpenerMemberID && ec.Member.ID != c.RespondentMemberID {
+				return ConversationMarkReadOut{}, apperr.Forbid("only the two who take part in a conversation mark it read; "+
+					"overseeing it keeps no place in it").With("reason", "not_a_participant")
+			}
+			var seq int32
+			switch {
+			case in.UpToMessageID != nil:
+				seq, err = ec.Q.MessageSeqIn(ctx, dbq.MessageSeqInParams{ID: *in.UpToMessageID, ConversationID: c.ID})
+				if errors.Is(err, pgx.ErrNoRows) {
+					return ConversationMarkReadOut{}, apperr.Invalid("up_to_message_id must name a message of this conversation's").
+						With("field", "up_to_message_id")
+				}
+			default:
+				seq, err = ec.Q.LastMessageSeq(ctx, dbq.LastMessageSeqParams{ConversationID: c.ID, At: in.UpTo})
+			}
+			if err != nil {
+				return ConversationMarkReadOut{}, err
+			}
+			out := ConversationMarkReadOut{}
+			if out.ReadUpToSeq, err = ec.Q.MarkConversationRead(ctx, dbq.MarkConversationReadParams{ConversationID: c.ID,
+				CourseID: c.CourseID, MemberID: ec.Member.ID, Seq: seq, At: ec.Now}); err != nil {
+				return ConversationMarkReadOut{}, err
+			}
+			unread, err := unreadAmong(ctx, ec.Q, []uuid.UUID{ec.Member.ID}, []uuid.UUID{c.ID})
+			out.Unread = unread[c.ID]
+			return out, err
+		},
+	})
+}
+
 // ---------------------------------------------------------------------------
 // Reading
 // ---------------------------------------------------------------------------
@@ -911,7 +1052,7 @@ type ConversationView struct {
 	ID           uuid.UUID `json:"id"`
 	Title        *string   `json:"title,omitempty"`
 	Status       string    `json:"status" jsonschema:"open or closed"`
-	ClosedReason *string   `json:"closed_reason,omitempty" jsonschema:"why it was closed: what its closer said, or seat_removed"`
+	ClosedReason *string   `json:"closed_reason,omitempty" jsonschema:"why it was closed: what its closer said; seat_removed, when a participant's seat was removed; conversations_are_with_agents, when its respondent was a person, as no conversation's is any more"`
 	State        string    `json:"state" jsonschema:"awaiting_answer: the opener wrote last; reply_pending_approval: an answer waits for a person's approval; answered: the respondent wrote last, or nothing has been asked yet; closed"`
 	// PendingReplyActionID is the answer that waits for approval, when one
 	// does.
@@ -923,6 +1064,12 @@ type ConversationView struct {
 	LastAuthorMemberID    *uuid.UUID             `json:"last_author_member_id,omitempty"`
 	LatestOpenerMessageID *uuid.UUID             `json:"latest_opener_message_id,omitempty" jsonschema:"what an answer replies to"`
 	LastRetractedAt       *time.Time             `json:"last_retracted_at,omitempty" jsonschema:"when a message in it was last retracted: a retraction adds no message, so a reader polling with after_seq reads the messages again when this changes"`
+	// Unread is said by conversation.list and conversation.get to one who
+	// takes part in it, of the other's messages (withUnread).
+	Unread *bool `json:"unread,omitempty" jsonschema:"in conversation.list and conversation.get, when you take part in it: whether the other participant has written, and not retracted, anything since you last marked it read (conversation.mark_read); absent otherwise"`
+	// respondentActor is the respondent's actor, for me.conversations,
+	// which names it; the other views do not.
+	respondentActor uuid.UUID
 }
 
 // conversationViews reads the views of the given conversations, in id order.
@@ -949,7 +1096,8 @@ func conversationViews(ctx context.Context, q dbq.Querier, now time.Time, list [
 		v := ConversationView{ID: r.ID, Title: r.Title, Status: r.Status, ClosedReason: r.ClosedReason,
 			PendingReplyActionID: r.PendingReplyActionID, CreatedAt: r.CreatedAt, LastMessageAt: r.LastMessageAt,
 			LastAuthorMemberID: r.LastAuthorMemberID, LatestOpenerMessageID: r.LatestOpenerMessageID, LastRetractedAt: r.LastRetractedAt,
-			Opener: ConversationParty{MemberID: r.OpenerMemberID, DisplayName: r.OpenerName, Kind: r.OpenerKind},
+			respondentActor: r.RespondentActorID,
+			Opener:          ConversationParty{MemberID: r.OpenerMemberID, DisplayName: r.OpenerName, Kind: r.OpenerKind},
 			Respondent: ConversationRespondent{
 				ConversationParty: ConversationParty{MemberID: r.RespondentMemberID, DisplayName: r.RespondentName, Kind: r.RespondentKind},
 				Role:              r.RespondentRole, SeatStatus: seatStatus(r.RespondentStatus, r.RespondentExpiresAt, now),
@@ -974,6 +1122,40 @@ func conversationViews(ctx context.Context, q dbq.Querier, now time.Time, list [
 	return out, nil
 }
 
+// unreadAmong is which of the given conversations the given seats take
+// part in and have not read all the other participant wrote: one statement.
+func unreadAmong(ctx context.Context, q dbq.Querier, seats, list []uuid.UUID) (map[uuid.UUID]bool, error) {
+	out := map[uuid.UUID]bool{}
+	if len(seats) == 0 || len(list) == 0 {
+		return out, nil
+	}
+	ids, err := q.UnreadAmong(ctx, dbq.UnreadAmongParams{MemberIds: seats, Ids: list})
+	for _, id := range ids {
+		out[id] = true
+	}
+	return out, err
+}
+
+// withUnread says in each view in which m takes part whether it has read
+// all the other participant wrote; a view m oversees says nothing of it.
+func withUnread(ctx context.Context, q dbq.Querier, m *domain.Member, views []ConversationView) error {
+	list := make([]uuid.UUID, 0, len(views))
+	for _, v := range views {
+		list = append(list, v.ID)
+	}
+	unread, err := unreadAmong(ctx, q, []uuid.UUID{m.ID}, list)
+	if err != nil {
+		return err
+	}
+	for i, v := range views {
+		if v.Opener.MemberID == m.ID || v.Respondent.MemberID == m.ID {
+			u := unread[v.ID]
+			views[i].Unread = &u
+		}
+	}
+	return nil
+}
+
 func seatStatus(status string, expires *time.Time, now time.Time) string {
 	if status != domain.MemberRemoved && expires != nil && !expires.After(now) {
 		return "expired"
@@ -981,11 +1163,11 @@ func seatStatus(status string, expires *time.Time, now time.Time) string {
 	return status
 }
 
-// RespondentView is a member the caller may address.
+// RespondentView is an agent the caller may address.
 type RespondentView struct {
 	MemberID      uuid.UUID  `json:"member_id"`
 	DisplayName   string     `json:"display_name"`
-	Kind          string     `json:"kind" jsonschema:"human or agent; for display only"`
+	Kind          string     `json:"kind" jsonschema:"agent: a person is nobody's respondent; for display only"`
 	Role          string     `json:"role" jsonschema:"roster fact, for display"`
 	IsMyDelegate  bool       `json:"is_my_delegate" jsonschema:"your own agent, seated as your delegate"`
 	AnswersCourse bool       `json:"answers_course" jsonschema:"an agent seated to answer the course, not its owner alone: it answers other members as well, and may repeat to them what it is told"`
@@ -1006,10 +1188,11 @@ const maxRespondentCandidates = 500
 func conversationRespondents() tool.Tool {
 	return tool.Define(tool.Spec[tool.InCourse, RespondentsOut]{
 		Name: "conversation.respondents",
-		Description: "Whom you may start a conversation with here: members who answer questions and can see and do nothing " +
-			"you cannot — the course's tutor agent, say — and your own agents, an agent only while what runs it answers in " +
-			"the site. Each says how its answers arrive, whether it answers others too (answers_course: it may repeat to them " +
-			"what you write), and, for an agent, when it was last seen.",
+		Description: "The agents you may start a conversation with here: agents that answer questions and can see and do " +
+			"nothing you cannot — the course's tutor agent, say — and your own agents, each only while what runs it " +
+			"answers in the site. Never a person: conversations are with agents, and people talk to people elsewhere. " +
+			"Each says how its answers arrive, whether it answers others too (answers_course: it may repeat to them what " +
+			"you write), and when it was last seen.",
 		Kind: tool.Read, Gate: asks,
 		HTTP: tool.Route{Method: "GET", Pattern: "/v1/courses/{course_id}/conversations/respondents"},
 		Resolve: func(_ context.Context, _ dbq.Querier, in tool.InCourse) (tool.Target, error) {
@@ -1064,6 +1247,8 @@ type ConversationListIn struct {
 	tool.InCourse
 	As    *string `json:"as,omitempty" jsonschema:"opener: those you started; respondent: those addressed to you; overseer: those opened by members you decide actions for; all three by default"`
 	State *string `json:"state,omitempty" jsonschema:"open, closed, awaiting_answer, reply_pending_approval or answered"`
+	// An agent's page: its conversations, for those who oversee them.
+	RespondentMemberID *uuid.UUID `json:"respondent_member_id,omitempty" jsonschema:"only those addressed to this seat, an agent's: with as overseer, that agent's conversations with the members you decide actions for"`
 	Page
 }
 
@@ -1081,7 +1266,9 @@ func conversationList() tool.Tool {
 	return tool.Define(tool.Spec[ConversationListIn, ConversationListOut]{
 		Name: "conversation.list",
 		Description: "Conversations in this course, oldest first, without what was written: those you started, those " +
-			"addressed to you, and, if you decide actions here, those opened by the members within your student scope.",
+			"addressed to you, and, if you decide actions here, those opened by the members within your student scope. " +
+			"Each you take part in says whether the other has written since you last read it (unread; conversation.mark_read). " +
+			"Give respondent_member_id, with as overseer, for one agent's conversations, as an agent's page shows them.",
 		Kind: tool.Read, Gate: converses,
 		HTTP: tool.Route{Method: "GET", Pattern: "/v1/courses/{course_id}/conversations"},
 		Resolve: func(_ context.Context, _ dbq.Querier, in ConversationListIn) (tool.Target, error) {
@@ -1106,16 +1293,22 @@ func conversationList() tool.Tool {
 				AsOpener: as == "" || as == "opener", AsRespondent: as == "" || as == "respondent",
 				AsOverseer: (as == "" || as == "overseer") && decides, MemberID: rc.Member.ID,
 				StudentAll: rc.Scope.StudentAll, PrincipalID: rc.Scope.PrincipalID, PrincipalStudentAll: rc.Scope.PrincipalStudentAll,
-				State: in.State, MaxRows: in.limit()})
+				State: in.State, RespondentMemberID: in.RespondentMemberID, MaxRows: in.limit()})
 			if err != nil {
 				return ConversationListOut{}, err
 			}
 			views, err := conversationViews(ctx, rc.Q, rc.Now, list)
+			if err != nil {
+				return ConversationListOut{}, err
+			}
+			if err := withUnread(ctx, rc.Q, rc.Member, views); err != nil {
+				return ConversationListOut{}, err
+			}
 			out := ConversationListOut{Conversations: views}
 			if len(list) > 0 && len(list) == int(in.limit()) {
 				out.Next = &list[len(list)-1]
 			}
-			return out, err
+			return out, nil
 		},
 	})
 }
@@ -1185,8 +1378,9 @@ func conversationView(ctx context.Context, rc *tool.ReadCtx, id uuid.UUID) (Conv
 func conversationGet() tool.Tool {
 	return tool.Define(tool.Spec[ConversationIDIn, ConversationGetOut]{
 		Name: "conversation.get",
-		Description: "One conversation: who takes part, what state it is in, whether an answer waits for approval, and the " +
-			"opener's latest message, which an answer replies to. Its opener may always read it; its respondent while the " +
+		Description: "One conversation: who takes part, what state it is in, whether an answer waits for approval, the " +
+			"opener's latest message, which an answer replies to, and, if you take part, whether the other has written since " +
+			"you last read it (unread; conversation.mark_read). Its opener may always read it; its respondent while the " +
 			"opener may still address it; and course staff who decide actions for the opener.",
 		Kind: tool.Read, Gate: converses,
 		HTTP: tool.Route{Method: "GET", Pattern: "/v1/courses/{course_id}/conversations/{conversation_id}"},
@@ -1198,7 +1392,14 @@ func conversationGet() tool.Tool {
 				return ConversationGetOut{}, err
 			}
 			v, err := conversationView(ctx, rc, in.ConversationID)
-			return ConversationGetOut{ConversationView: v, VisibleTo: visibleTo(v)}, err
+			if err != nil {
+				return ConversationGetOut{}, err
+			}
+			views := []ConversationView{v}
+			if err := withUnread(ctx, rc.Q, rc.Member, views); err != nil {
+				return ConversationGetOut{}, err
+			}
+			return ConversationGetOut{ConversationView: views[0], VisibleTo: visibleTo(views[0])}, nil
 		},
 	})
 }

@@ -29,10 +29,13 @@ In place so far:
   person's own seat nor their other agents'; any agent decides and reviews
   only by proposal, and each seat says the most it may hold of each
   permission (`perm_ceilings`);
-- conversations: a member asks one other member — the course's tutor agent,
-  their own agent — questions, and it answers them, each message an action;
-  nobody may ask anyone who can see or do more than they can, nor an agent
-  unless what runs it says it answers in the site;
+- conversations, between a person and an agent and nothing else: a member
+  asks an agent — the course's tutor agent, their own agent — questions, and
+  it answers them, each message an action; a person answers none, and people
+  talk to people elsewhere; nobody may ask an agent that can see or do more
+  than they can, nor one unless what runs it says it answers in the site; a
+  person's conversations in every course are one list, newest first, saying
+  what they have not read yet;
 - agents' memory, kept in Core whatever runs the agent (off unless
   `MEMORY=on`): about its owner, about each person who asks it in a course,
   reached only through that person's conversation, and a course's shared
@@ -58,7 +61,9 @@ points with the grade rescaled, overrides the student's total and takes the
 override off, renames the slides and brings them back from the archive, and
 makes the student a TA and a student again; then, once its runtime says it
 answers in the site, the student asks the instructor's tutor agent a
-question, and it answers; another agent of the instructor's, given
+question, and it answers, and she is refused the instructor as a respondent,
+as he is refused answering; her chat panel lists the conversation, unread
+until she marks it read; another agent of the instructor's, given
 `member_manage`, seats a student with its own token and is refused on the
 instructor's seat; the instructor shows a join link, through which a new
 student registers and a registered one joins, and which seats nobody once
@@ -399,12 +404,19 @@ waiting conversation with `conversation_messages`, and answers with
 answer to anything but the latest question is refused as a conflict, so a
 reply that took a while is never posted under a newer question, and so is a
 second answer to one question, so an answer that failed or was rejected is
-written again safely. People find whom they may ask with
-`conversation.respondents` and start with `conversation.open`. What is
-written is readable by the two participants, by course staff who decide
-actions for the one who asked, and, in the action log, by anyone who decides
-actions in the course; and a respondent that answers others too, such as a
-course's tutor agent, may repeat it to them (docs/schema.md §2.8).
+written again safely. People find the agents they may ask with
+`conversation.respondents` and start with `conversation.open`; a person is
+nobody's respondent and answers nothing (`conversations_are_with_agents`),
+and a person's seat holds `conversation_answer` at `denied`. A person's chat
+panel reads `me.conversations` (`GET /v1/me/conversations`): their
+conversations in every course, newest activity first, each saying whether the
+agent has written since they last marked it read (`conversation.mark_read`);
+whoever decides actions lists one agent's conversations with
+`conversation.list` and `respondent_member_id`. What is written is readable
+by the two participants, by course staff who decide actions for the one who
+asked, and, in the action log, by anyone who decides actions in the course;
+and an agent that answers others too, such as a course's tutor agent, may
+repeat it to them (docs/schema.md §2.8).
 
 With `MEMORY=on`, an agent keeps its memory here, so that whatever runs it
 reads and writes the same: `memory_write` about its owner (scope `owner`),

@@ -345,6 +345,43 @@ call 200 GET "$C/conversations/$CONV/messages" "$YUKI"
 [ "$(json "$WORK/body" 'd["result"]["messages"][-1]["body"]')" = "An essay with a thesis." ] || fail "Yuki does not see the answer"
 call 404 GET "$C/conversations/$CONV" "$GRADER" # nobody else's to read
 
+step "Conversations are with agents: Sato is offered to nobody, asked nothing and answers nothing, and his seat says why"
+call 200 GET "$C/conversations/respondents" "$YUKI"
+json "$WORK/body" '"'"$SATO_M"'" not in [r["member_id"] for r in d["result"]["respondents"]] and all(r["kind"] == "agent" for r in d["result"]["respondents"]) or sys.exit("a person is offered as a respondent")' >/dev/null
+call 403 POST "$C/conversations" "$YUKI" "{\"respondent_member_id\":\"$SATO_M\",\"body\":\"When is the exam?\"}"
+[ "$(reason)" = conversations_are_with_agents ] || fail "refused, but not as a person: $(cat "$WORK/body")"
+call 403 POST "$C/conversations/$CONV/answer" "$SATO" "{\"in_reply_to_message_id\":\"$QUESTION\",\"body\":\"On Friday.\"}"
+[ "$(reason)" = conversations_are_with_agents ] || fail "a person's answer refused, but not as a person's: $(cat "$WORK/body")"
+call 200 GET "$C/members/$SATO_M" "$SATO"
+[ "$(json "$WORK/body" 'd["result"]["perms"]["conversation_answer"], d["result"]["perm_ceilings"]["conversation_answer"], d["result"]["perm_ceiling_reasons"]["conversation_answer"]')" = "denied denied conversations_are_with_agents" ] ||
+  fail "Sato's seat says he answers: $(cat "$WORK/body")"
+
+step "Yuki's chat panel lists her conversations with agents in every course, the newest first, saying what she has not read"
+call 200 GET /v1/me/conversations "$YUKI"
+[ "$(json "$WORK/body" 'len(d["result"]["conversations"]), d["result"]["conversations"][0]["conversation_id"] == "'"$CONV"'"')" = "1 True" ] ||
+  fail "Yuki's conversations: $(cat "$WORK/body")"
+[ "$(json "$WORK/body" '*(lambda c: (c["course"]["code"], c["respondent"]["member_id"] == "'"$TUTOR_M"'", c["respondent"]["actor_id"] == "'"$TUTOR_ID"'", c["respondent"]["kind"], c["state"], c["unread"], c["may_ask"]))(d["result"]["conversations"][0])')" = "CS101 True True agent answered True True" ] ||
+  fail "Yuki's conversation with the tutor, as her panel shows it: $(cat "$WORK/body")"
+# She reads the answer: it is unread no more, wherever she looks.
+call 200 POST "$C/conversations/$CONV/read" "$YUKI"
+[ "$(json "$WORK/body" 'd["result"]["read_up_to_seq"], d["result"]["unread"]')" = "2 False" ] || fail "marking it read: $(cat "$WORK/body")"
+call 200 GET /v1/me/conversations "$YUKI"
+[ "$(json "$WORK/body" 'd["result"]["conversations"][0]["unread"]')" = False ] || fail "still unread in her panel: $(cat "$WORK/body")"
+call 200 GET "$C/conversations/$CONV" "$YUKI"
+[ "$(json "$WORK/body" 'd["result"]["unread"]')" = False ] || fail "still unread in the conversation: $(cat "$WORK/body")"
+call 404 POST "$C/conversations/$CONV/read" "$GRADER" # nobody else's to read, nor to mark read
+# Sato, who decides actions, lists the tutor's conversations on its page.
+call 200 GET "$C/conversations?as=overseer&respondent_member_id=$TUTOR_M" "$SATO"
+[ "$(json "$WORK/body" '[c["id"] for c in d["result"]["conversations"]] == ["'"$CONV"'"], "unread" in d["result"]["conversations"][0]')" = "True False" ] ||
+  fail "the tutor's conversations, as Sato oversees them: $(cat "$WORK/body")"
+call 200 GET "/v1/me/conversations?course_id=$COURSE&limit=1" "$YUKI"
+[ "$(json "$WORK/body" 'len(d["result"]["conversations"]), d["result"].get("next") is not None')" = "1 True" ] || fail "a page of one: $(cat "$WORK/body")"
+call 200 GET "/v1/me/conversations?limit=1&after=$(json "$WORK/body" 'd["result"]["next"]')" "$YUKI"
+[ "$(json "$WORK/body" 'len(d["result"]["conversations"])')" = 0 ] || fail "the page after the last: $(cat "$WORK/body")"
+call 400 GET "/v1/me/conversations?after=nonsense" "$YUKI"
+call 200 GET /v1/me/conversations "$GRADER" # an agent that asked nothing
+[ "$(json "$WORK/body" 'len(d["result"]["conversations"])')" = 0 ] || fail "the grader lists conversations: $(cat "$WORK/body")"
+
 step "Sato switches the tutor's site chat off: Yuki asks it nothing more and still reads what it said; only its runtime switches it on"
 call 200 POST "/v1/me/agents/$TUTOR_ID" "$SATO" '{"site_chat":false}'
 call 422 POST "$C/conversations/$CONV/ask" "$YUKI" '{"body":"And how long should it be?"}'

@@ -778,11 +778,12 @@ func TestAQuestionIsAnsweredOnce(t *testing.T) {
 }
 
 // The answers of a course tutor its instructor owns are that instructor's
-// party's: the queues list them, and say whose they are to decide. The
-// instructor decides them where they would answer without anyone's
-// confirmation themselves; where their own answers wait for one, someone
+// party's: the queues list them, and say whose they are to decide. No person
+// answers a conversation, so the instructor is measured for them by what
+// judging an answer is: they decide them where they decide actions without
+// anyone's confirmation; where their own decisions wait for one, someone
 // else decides the tutor's.
-func TestAnInstructorsOwnTutorIsDecidedByThemOnlyWhereTheyAnswerFreely(t *testing.T) {
+func TestAnInstructorsOwnTutorIsDecidedByThemOnlyWhereTheyDecideFreely(t *testing.T) {
 	c := newCast(t)
 	b := c.built
 	b.do(t, b.sato, "member.update_perms", m{"course_id": b.course, "member_id": c.courseTutor, "perms": m{"conversation_answer": "confirm_required"}})
@@ -802,20 +803,32 @@ func TestAnInstructorsOwnTutorIsDecidedByThemOnlyWhereTheyAnswerFreely(t *testin
 	if v := queue()[*request.ActionID]; v == nil || !*v {
 		t.Fatalf("Ken's request, as Sato's queue lists it: %v", v)
 	}
-
-	// Sato's own answers wait for a confirmation: his tutor's are not his.
-	b.Exec(`UPDATE course_member SET perm_conversation_answer = 'confirm_required' WHERE id = $1`, b.satoM)
-	if v := queue()[*answer.ActionID]; v == nil || *v {
-		t.Fatalf("Sato's own tutor's answer, as his queue lists it while his own answers wait: %v", v)
-	}
-	d := b.MustCall(b.sato, "action.decide", m{"course_id": b.course, "action_id": answer.ActionID, "decision": "approve"}, "decide")
-	if d.Status != domain.StatusFailed || d.Error.Code != apperr.Forbidden || d.Error.Details["reason"] != "owner_not_autonomous" {
-		t.Fatalf("Sato deciding his own tutor's answer while his own answers wait: %+v", d)
-	}
-
-	// He answers without anyone again: the tutor's answer is his to decide,
-	// and approved, it is posted, the record saying its owner approved it.
+	// Sato answers nothing himself, whatever his row is told, and it makes
+	// no difference to this.
 	b.Exec(`UPDATE course_member SET perm_conversation_answer = 'autonomous' WHERE id = $1`, b.satoM)
+	if n := b.Count(`SELECT count(*) FROM course_member WHERE id = $1 AND perm_conversation_answer = 'denied'`, b.satoM); n != 1 {
+		t.Fatal("a person's seat was written answering conversations")
+	}
+	if v := queue()[*answer.ActionID]; v == nil || !*v {
+		t.Fatalf("Sato's own tutor's answer, as his queue lists it while he decides freely: %v", v)
+	}
+
+	// Sato's own decisions wait for a confirmation: his tutor's answers are
+	// not his, and a decision of his about one is itself a proposal.
+	b.Exec(`UPDATE course_member SET perm_action_decide = 'confirm_required' WHERE id = $1`, b.satoM)
+	if v := queue()[*answer.ActionID]; v == nil || *v {
+		t.Fatalf("Sato's own tutor's answer, as his queue lists it while his own decisions wait: %v", v)
+	}
+	if d := b.MustCall(b.sato, "action.decide", m{"course_id": b.course, "action_id": answer.ActionID, "decision": "approve"}, "decide"); d.Status != domain.StatusProposed {
+		t.Fatalf("Sato deciding his own tutor's answer while his own decisions wait: %+v", d)
+	}
+	if n := b.Count(`SELECT count(*) FROM conversation_message WHERE conversation_id = $1`, conv); n != 1 {
+		t.Fatal("the answer was posted on a decision that waits for a confirmation")
+	}
+
+	// He decides without anyone again: the tutor's answer is his to decide,
+	// and approved, it is posted, the record saying its owner approved it.
+	b.Exec(`UPDATE course_member SET perm_action_decide = 'autonomous' WHERE id = $1`, b.satoM)
 	if v := queue()[*answer.ActionID]; v == nil || !*v {
 		t.Fatalf("Sato's own tutor's answer, as his queue lists it: %v", v)
 	}
@@ -889,4 +902,61 @@ func TestAConversationWriteWaitsForTheSeatsItDependsOn(t *testing.T) {
 		SELECT gen_random_uuid(), id, $3, 2, $2, 'Sorry, I meant a thesis.', $4 FROM touched`, conv, b.yukiM, b.course, action)
 	b.start(t, done, b.tutor, "conversation.answer", answerArgs(b, conv, q, "Reasons for a claim."))
 	waits("answering while a newer question is written", release, done, apperr.Conflict)
+}
+
+// An agent's page: those who oversee conversations list one agent's, with
+// the members they decide actions for, and nobody else's; a member who
+// oversees nothing lists their own with it, and no more.
+func TestAnAgentsConversationsForThoseWhoOverseeThem(t *testing.T) {
+	c := newCast(t)
+	b := c.built
+	// Mori decides actions, for Ken only.
+	mori := testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", m{"kind": "human", "display_name": "Mori"})).ActorID
+	b.do(t, b.sato, "member.add", m{"course_id": b.course, "actor_id": mori, "preset": "ta",
+		"perms": m{"action_decide": "autonomous"}, "student_scope": "listed", "listed_students": []uuid.UUID{b.kenM}})
+	yukiTutor, _ := b.open(t, b.yuki, c.courseTutor, "Where do I start?")
+	kenTutor, _ := b.open(t, b.ken, c.courseTutor, "Is the exam open book?")
+	yukiListed, _ := b.open(t, b.yuki, b.tutorM, "Can you look at my essay?")
+	yukiOwn, _ := b.open(t, b.yuki, c.yukiBot, "Summarise my feedback")
+	b.do(t, b.ken, "conversation.close", m{"course_id": b.course, "conversation_id": kenTutor})
+
+	ids := func(views []tools.ConversationView) []uuid.UUID {
+		out := make([]uuid.UUID, len(views))
+		for i, v := range views {
+			out[i] = v.ID
+		}
+		return out
+	}
+	for _, tc := range []struct {
+		name  string
+		who   uuid.UUID
+		args  m
+		wants []uuid.UUID
+	}{
+		{"Sato, the course tutor's", b.sato, m{"as": "overseer", "respondent_member_id": c.courseTutor}, []uuid.UUID{yukiTutor, kenTutor}},
+		{"Sato, the course tutor's still open", b.sato, m{"as": "overseer", "respondent_member_id": c.courseTutor, "state": "open"}, []uuid.UUID{yukiTutor}},
+		{"Sato, Yuki's tutor's", b.sato, m{"as": "overseer", "respondent_member_id": b.tutorM}, []uuid.UUID{yukiListed}},
+		{"Sato, Yuki's own agent's", b.sato, m{"as": "overseer", "respondent_member_id": c.yukiBot}, []uuid.UUID{yukiOwn}},
+		{"Sato, a seat nobody asked", b.sato, m{"as": "overseer", "respondent_member_id": b.graderM}, []uuid.UUID{}},
+		{"Mori, the course tutor's with Ken", mori, m{"as": "overseer", "respondent_member_id": c.courseTutor}, []uuid.UUID{kenTutor}},
+		{"Mori, Yuki's tutor's", mori, m{"as": "overseer", "respondent_member_id": b.tutorM}, []uuid.UUID{}},
+		{"Yuki, her own with the course tutor", b.yuki, m{"respondent_member_id": c.courseTutor}, []uuid.UUID{yukiTutor}},
+		{"the course tutor, those addressed to it", b.seatActor(t, c.courseTutor), m{"respondent_member_id": c.courseTutor}, []uuid.UUID{yukiTutor, kenTutor}},
+	} {
+		if got := ids(b.listConversations(t, tc.who, tc.args)); !sameIDs(got, tc.wants) {
+			t.Errorf("%s: %v, want %v", tc.name, got, tc.wants)
+		}
+	}
+	// Paged by id, as ever.
+	page := testkit.Result[tools.ConversationListOut](t, b.do(t, b.sato, "conversation.list",
+		m{"course_id": b.course, "as": "overseer", "respondent_member_id": c.courseTutor, "limit": 1}))
+	if len(page.Conversations) != 1 || page.Conversations[0].ID != yukiTutor || page.Next == nil {
+		t.Fatalf("the first page of the course tutor's: %+v", page)
+	}
+	page = testkit.Result[tools.ConversationListOut](t, b.do(t, b.sato, "conversation.list",
+		m{"course_id": b.course, "as": "overseer", "respondent_member_id": c.courseTutor, "limit": 1, "after": page.Next}))
+	if len(page.Conversations) != 1 || page.Conversations[0].ID != kenTutor {
+		t.Fatalf("the second page of the course tutor's: %+v", page)
+	}
+	b.try(t, b.ken, "conversation.list", m{"course_id": b.course, "as": "overseer", "respondent_member_id": c.courseTutor}, apperr.Forbidden)
 }

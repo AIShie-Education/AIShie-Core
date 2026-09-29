@@ -581,7 +581,8 @@ func TestToolsListIsTheRegistry(t *testing.T) {
 	s := f.connect(t, f.token(t, f.c.Grader))
 
 	if got := s.InitializeResult().Instructions; !strings.Contains(got, "idempotency_key") || !strings.Contains(got, "proposed") || !strings.Contains(got, "me_memberships") ||
-		!strings.Contains(got, "conversation_inbox") || !strings.Contains(got, "me_site_chat") {
+		!strings.Contains(got, "conversation_inbox") || !strings.Contains(got, "me_site_chat") ||
+		!strings.Contains(got, "conversations_are_with_agents") {
 		t.Fatalf("the server's instructions do not explain the essentials:\n%s", got)
 	}
 	listed := map[string]*mcp.Tool{}
@@ -604,6 +605,13 @@ func TestToolsListIsTheRegistry(t *testing.T) {
 	}
 	if listed[mcpapi.ToolName("course.join")] != nil {
 		t.Error("course.join is offered over MCP")
+	}
+	// A person's chat panel reads over REST, and what it reads is offered
+	// over MCP as well, as every tool is.
+	for _, name := range []string{"me.conversations", "conversation.mark_read"} {
+		if listed[mcpapi.ToolName(name)] == nil {
+			t.Errorf("%s is not offered over MCP", name)
+		}
 	}
 	// What several model APIs accept as a tool name.
 	valid := regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`)

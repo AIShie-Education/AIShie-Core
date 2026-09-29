@@ -112,6 +112,11 @@ type Assignment struct {
 	CreatedAt              time.Time
 }
 
+type Cancelled struct {
+	ID       uuid.UUID
+	CourseID *uuid.UUID
+}
+
 type Conversation struct {
 	ID                 uuid.UUID
 	CourseID           uuid.UUID
@@ -144,6 +149,14 @@ type ConversationMessageRetraction struct {
 	CreatedByActionID   uuid.UUID
 	Reason              *string
 	CreatedAt           time.Time
+}
+
+type ConversationRead struct {
+	ConversationID uuid.UUID
+	CourseID       uuid.UUID
+	MemberID       uuid.UUID
+	LastReadSeq    int32
+	ReadAt         time.Time
 }
 
 type Course struct {
@@ -426,4 +439,9 @@ type Term struct {
 	Name     string
 	StartsOn time.Time
 	EndsOn   time.Time
+}
+
+type WithAPerson struct {
+	ID       uuid.UUID
+	CourseID uuid.UUID
 }

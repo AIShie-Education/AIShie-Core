@@ -27,6 +27,9 @@ func TestCeilingsAndTheirReasons(t *testing.T) {
 		why       CeilingReason
 	}{
 		{"a person decides as given", false, nil, PermActionDecide, Autonomous, CeilingNone},
+		{"a person answers nothing: conversations are with agents", false, nil, PermConversationAnswer, Denied, CeilingConversationsAreWithAgents},
+		{"a person asks as given", false, nil, PermConversationAsk, Autonomous, CeilingNone},
+		{"an agent nobody owns answers as given", true, nil, PermConversationAnswer, Autonomous, CeilingNone},
 		{"a person brings agents as given", false, nil, PermAgentDelegate, Autonomous, CeilingNone},
 		{"an agent nobody owns decides by proposal", true, nil, PermActionDecide, ConfirmRequired, CeilingAgentDecidesByProposal},
 		{"an agent nobody owns posts as given", true, nil, PermGradePost, Autonomous, CeilingNone},

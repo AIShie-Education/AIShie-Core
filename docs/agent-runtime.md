@@ -58,8 +58,8 @@ read on 2026-09-26; **[UNVERIFIED]** marks what it did not confirm.
 - **Refused.** A JSON-RPC batch (400), an id over 256 bytes (400), and
   `subscriptions/listen` (404, `-32601`).
 - **Tool names** are the registry's with the dot turned to an underscore
-  (`conversation_answer`). There are 123 tools, 48 reads and 75 writes; all
-  match `[a-z_]+`, the longest has 26 characters, and every provider takes
+  (`conversation_answer`). There are 134 tools, 49 reads and 85 writes; all
+  match `[a-z_]+`, the longest has 27 characters, and every provider takes
   them as they are (§3.7).
 - **REST.** `GET /v1/tools` (no token needed) lists each tool's `name`,
   `description`, `kind`, `method`, `path`, `input_schema` and
@@ -155,6 +155,15 @@ rejected, cancelled). That is safe: Core refuses a second answer to a message
 | `conversation_inbox` | `course_id`, `limit` (default 20, at most 100) | `conversations[]`, longest waiting first: open, the opener wrote last and has not retracted it, the opener still able to address the agent, and no answer to that message waiting for approval. Each row carries `latest_opener_message_id`, what an answer replies to. |
 | `event_list` | `course_id`, `since_seq` (0 for the start), `limit` (default 100, at most 500) | `events[]`, `next_seq` (it moves on over events the caller may not see), `more`. Keep one cursor per seat. |
 
+Conversations are between a person and an agent: a person asks, an agent
+answers. A person is nobody's respondent and answers none
+(`conversations_are_with_agents`), so every conversation in an agent's inbox
+was opened by someone who asked it, and the agent is always its respondent.
+A person's chat panel reads `me_conversations` and marks what they have read
+with `conversation_mark_read`; `conversation_list` and `conversation_get` say
+`unread` to either participant. The runtime needs none of them: it answers
+what the inbox holds. What it reads is unchanged.
+
 The events that matter carry ids, never text:
 - `action.approved`, `action.rejected` and `action.cancelled`, filed under the
   proposal's `action_id`. `action.approved` has `payload.outcome`, `executed`
@@ -175,7 +184,7 @@ The events that matter carry ids, never text:
 | `conversation_messages` | `course_id`, `conversation_id`, `after_seq` or `before_seq`, `limit` (default 50, at most 200) | `conversation` (the view below), `messages[]`, `more`. A message has `id`, `seq`, `author_member_id`, `in_reply_to_message_id`, `body`, `created_at`; a retracted one has no `body` but `retracted: {at, by_member_id, reason}`. `after_seq` reads on; `before_seq`, or neither, gives the newest; both oldest first. |
 | `conversation_get` | `course_id`, `conversation_id` | The view: `status`, `state` (`awaiting_answer`, `reply_pending_approval`, `answered`, `closed`), `pending_reply_action_id`, `opener`, `respondent` (with `answer_level`), `latest_opener_message_id`, `last_retracted_at`, `visible_to`. |
 | `conversation_answer` | `course_id`, `conversation_id`, `in_reply_to_message_id`, `body`, `idempotency_key` | `body` is 1 to 20,000 characters of Markdown. `in_reply_to_message_id` must be the opener's newest message. Returns `message_id`. |
-| `conversation_close` | `course_id`, `conversation_id`, `reason` (≤ 500 characters) | Either participant closes. The runtime closes only as §2.4 says. |
+| `conversation_close` | `course_id`, `conversation_id`, `reason` (≤ 500 characters) | Either participant closes. The runtime closes only as §2.4 says. A reason that reads as the system's (`seat_removed`, `conversations_are_with_agents`) is refused. |
 | `conversation_retract` | `course_id`, `message_id`, `reason` | The author retracts, or staff overseeing the opener; the runtime only when the owner asks. |
 | `action_list_mine` | `course_id`, `exclude_types`, `after`, `limit` | The agent's own actions, oldest first, with `status` and `result`: a proposal's fate and a rejection's reason. Keep its `after` cursor. (`action_get` needs `action_decide`.) |
 
@@ -459,7 +468,7 @@ through a table, never by rewriting strings.
 
 ### 3.8 JSON Schema
 
-**What Core's input schemas hold**, measured over MCP on all 123 tools:
+**What Core's input schemas hold**, measured over MCP when there were 123 tools:
 - Unions: `["null","string"]` ×120, `["null","array"]` ×17, `["null","integer"]`
   ×11, `["null","boolean"]` ×4; and for decimals, which Core takes as numbers
   or strings, `["number","string"]` ×6 and `["null","number","string"]` ×8.

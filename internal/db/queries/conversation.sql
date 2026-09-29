@@ -118,7 +118,8 @@ LIMIT sqlc.arg(max_rows);
 -- since the conversation has moved on.
 SELECT c.id, c.course_id, c.title, c.status, c.closed_reason, c.created_at, c.last_message_at, c.last_author_member_id,
        c.opener_member_id, oa.display_name AS opener_name, oa.kind AS opener_kind,
-       c.respondent_member_id, ra.display_name AS respondent_name, ra.kind AS respondent_kind, r.role AS respondent_role,
+       c.respondent_member_id, r.actor_id AS respondent_actor_id, ra.display_name AS respondent_name, ra.kind AS respondent_kind,
+       r.role AS respondent_role,
        r.status AS respondent_status, r.expires_at AS respondent_expires_at,
        r.principal_member_id AS respondent_principal_member_id, own.display_name AS respondent_owner_name,
        seen.last_used_at AS respondent_last_seen_at, pending.id AS pending_reply_action_id,
@@ -158,6 +159,8 @@ ORDER BY c.id;
 -- is within its student scope (and its principal's, for a delegate), in SQL.
 -- state is a ConversationView state, or open; a reply waits for approval
 -- only if it answers the opener's newest message (ConversationDetails).
+-- respondent_member_id, when given, keeps those addressed to that seat: an
+-- agent's page, for those who oversee its conversations.
 SELECT c.id
 FROM conversation c
 WHERE c.course_id = $1 AND c.id > sqlc.arg(after)
@@ -181,7 +184,22 @@ WHERE c.course_id = $1 AND c.id > sqlc.arg(after)
                                 ORDER BY m.seq DESC LIMIT 1)) THEN 'reply_pending_approval'
             WHEN c.last_author_member_id = c.opener_member_id THEN 'awaiting_answer'
             ELSE 'answered' END) )
+  AND (sqlc.narg(respondent_member_id)::uuid IS NULL OR c.respondent_member_id = sqlc.narg(respondent_member_id)::uuid)
 ORDER BY c.id
+LIMIT sqlc.arg(max_rows);
+
+-- name: ListMyConversations :many
+-- The conversations the given seats opened, newest activity first — its
+-- last message, or its opening while it has none — after a
+-- (last_activity_at, id) cursor, both descending. The seats are the
+-- caller's own that count now, which me.conversations works out before
+-- this, as authorization would: nothing here reads anyone else's.
+SELECT c.id, c.opener_member_id, coalesce(c.last_message_at, c.created_at)::timestamptz AS last_activity_at
+FROM conversation c
+WHERE c.opener_member_id = ANY(sqlc.arg(member_ids)::uuid[])
+  AND (sqlc.narg(after_at)::timestamptz IS NULL
+       OR (coalesce(c.last_message_at, c.created_at), c.id) < (sqlc.narg(after_at)::timestamptz, sqlc.narg(after_id)::uuid))
+ORDER BY coalesce(c.last_message_at, c.created_at) DESC, c.id DESC
 LIMIT sqlc.arg(max_rows);
 
 -- name: ListInboxConversationIDs :many
@@ -218,17 +236,18 @@ ORDER BY c.last_message_at, c.id
 LIMIT sqlc.arg(max_rows);
 
 -- name: ListRespondentCandidates :many
--- The seats that might answer a caller: live, held by an active actor, with
--- conversation_answer not denied on the row, and, for a delegate, either the
--- caller's own or one that answers the course, whose principal's row holds
--- member_manage. An agent's seat only while the agent takes conversations in
+-- The seats that might answer a caller: agents' seats, live, held by an
+-- active actor, with conversation_answer not denied on the row, and, for a
+-- delegate, either the caller's own or one that answers the course, whose
+-- principal's row holds member_manage. Never a person's: conversations are
+-- with agents. An agent's seat only while the agent takes conversations in
 -- the site (docs/schema.md §2.8), by the rule of SiteChatOf, its status
 -- asked above: one operated from an external tool is asked there, not here.
 -- kind is read to leave out, never to let in. Which of them the caller may
 -- address is decided in Go (tools.addressing), which this only narrows to
 -- what it could accept: every student's own agent answers, and only its
--- principal. Unpaged: what is left is a course's agents and staff, and the
--- caller's own agents, a handful; max_rows bounds them anyway.
+-- principal. Unpaged: what is left is a course's agents, and the caller's
+-- own agents, a handful; max_rows bounds them anyway.
 SELECT m.id, a.display_name, a.kind, m.role, m.principal_member_id, m.answers_course, own.display_name AS owner_name,
        seen.last_used_at AS last_seen_at
 FROM course_member m
@@ -245,11 +264,11 @@ WHERE m.course_id = $1 AND m.id <> sqlc.arg(caller_member_id)
   AND m.perm_conversation_answer <> 'denied' AND a.status = 'active'
   AND (m.principal_member_id IS NULL OR m.principal_member_id = sqlc.arg(caller_member_id)
        OR (m.answers_course AND p.perm_member_manage <> 'denied'))
-  AND (a.kind <> 'agent'
-       OR ((a.owner_actor_id IS NULL OR EXISTS (SELECT 1 FROM actor o WHERE o.id = a.owner_actor_id AND o.status = 'active'))
-           AND EXISTS (SELECT 1 FROM credential sc
-                        WHERE sc.id = a.site_chat_credential_id AND sc.actor_id = a.id AND sc.revoked_at IS NULL
-                          AND (sc.expires_at IS NULL OR sc.expires_at > sqlc.arg(now)))))
+  AND a.kind = 'agent'
+  AND (a.owner_actor_id IS NULL OR EXISTS (SELECT 1 FROM actor o WHERE o.id = a.owner_actor_id AND o.status = 'active'))
+  AND EXISTS (SELECT 1 FROM credential sc
+               WHERE sc.id = a.site_chat_credential_id AND sc.actor_id = a.id AND sc.revoked_at IS NULL
+                 AND (sc.expires_at IS NULL OR sc.expires_at > sqlc.arg(now)))
 ORDER BY m.id
 LIMIT sqlc.arg(max_rows);
 
@@ -258,3 +277,40 @@ SELECT member_id, student_member_id FROM member_student_scope WHERE member_id = 
 
 -- name: ListAssignmentScopesOf :many
 SELECT member_id, assignment_id FROM member_assignment_scope WHERE member_id = ANY(sqlc.arg(member_ids)::uuid[]);
+
+-- name: LastMessageSeq :one
+-- The seq of a conversation's newest message, 0 while it has none; with at,
+-- of the newest written at or before it.
+SELECT coalesce(max(m.seq), 0)::int AS seq
+FROM conversation_message m
+WHERE m.conversation_id = sqlc.arg(conversation_id) AND (sqlc.narg(at)::timestamptz IS NULL OR m.created_at <= sqlc.narg(at));
+
+-- name: MessageSeqIn :one
+SELECT m.seq FROM conversation_message m WHERE m.id = sqlc.arg(id) AND m.conversation_id = sqlc.arg(conversation_id);
+
+-- name: MarkConversationRead :one
+-- A participant has read a conversation up to a seq, now: its place moves
+-- forward to it, and never back.
+INSERT INTO conversation_read (conversation_id, course_id, member_id, last_read_seq, read_at)
+VALUES (sqlc.arg(conversation_id), sqlc.arg(course_id), sqlc.arg(member_id), sqlc.arg(seq), sqlc.arg(at))
+ON CONFLICT (conversation_id, member_id) DO UPDATE
+   SET last_read_seq = greatest(conversation_read.last_read_seq, EXCLUDED.last_read_seq), read_at = EXCLUDED.read_at
+RETURNING last_read_seq;
+
+-- name: UnreadAmong :many
+-- Of the given conversations, those in which one of the given seats takes
+-- part and the other participant has written, and not retracted, a message
+-- after the last that seat has read (conversation_read; none read, with no
+-- row).
+SELECT c.id
+FROM conversation c
+CROSS JOIN LATERAL (
+    SELECT CASE WHEN c.opener_member_id = ANY(sqlc.arg(member_ids)::uuid[]) THEN c.opener_member_id
+                ELSE c.respondent_member_id END AS reader) p
+LEFT JOIN conversation_read r ON r.conversation_id = c.id AND r.member_id = p.reader
+WHERE c.id = ANY(sqlc.arg(ids)::uuid[])
+  AND (c.opener_member_id = ANY(sqlc.arg(member_ids)::uuid[]) OR c.respondent_member_id = ANY(sqlc.arg(member_ids)::uuid[]))
+  AND EXISTS (SELECT 1 FROM conversation_message m
+               WHERE m.conversation_id = c.id AND m.author_member_id <> p.reader
+                 AND m.seq > coalesce(r.last_read_seq, 0)
+                 AND NOT EXISTS (SELECT 1 FROM conversation_message_retraction x WHERE x.message_id = m.id));

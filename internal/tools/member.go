@@ -395,6 +395,10 @@ func findPreset(ctx context.Context, q dbq.Querier, courseID uuid.UUID, name *st
 // with its principal's, says the whole class.
 func withinGranter(ctx context.Context, q dbq.Querier, g *domain.Member, perms permSet, listsItself bool, studentScope string, students []uuid.UUID, assignmentScope string, assignments []uuid.UUID) error {
 	if p, over := perms.exceeds(g); over {
+		if p == domain.PermConversationAnswer {
+			return apperr.Forbid("%s is given as far as the giver decides actions, or answers itself: you may give it at %s "+
+				"at most, not %s", p, grantable(g, p), perms[p]).With("permission", string(p))
+		}
 		return apperr.Forbid("you hold %s at %s and cannot grant it at %s", p, grantable(g, p), perms[p]).With("permission", string(p))
 	}
 	reaches := []*domain.Member{g}

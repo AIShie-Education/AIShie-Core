@@ -2,7 +2,9 @@ package tools
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -12,13 +14,14 @@ import (
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/auth"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/authz"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/db/dbq"
+	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/domain"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/events"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/tool"
 )
 
 func meTools() []tool.Tool {
-	return []tool.Tool{meGet(), meMemberships(), meSiteChat(), credentialList(), credentialIssueToken(), credentialSetPassword(),
-		credentialRevoke()}
+	return []tool.Tool{meGet(), meMemberships(), meSiteChat(), meConversations(), credentialList(), credentialIssueToken(),
+		credentialSetPassword(), credentialRevoke()}
 }
 
 var self = tool.Gate{Self: true}
@@ -188,7 +191,7 @@ type SiteChatOut struct {
 }
 
 var (
-	errSiteChatNotAgent = apperr.Precondition("site chat is for agents a program runs; a person is asked in the site as themselves").
+	errSiteChatNotAgent = apperr.Precondition("site chat is for agents a program runs; a person asks in the site, and is asked nothing: conversations are with agents").
 				With("reason", "not_an_agent")
 	errSiteChatNoCredential = apperr.Precondition("site chat is declared with the credential the program running you calls with, and this call came with none").
 				With("reason", "no_credential")
@@ -245,6 +248,212 @@ func meSiteChat() tool.Tool {
 				Payload: map[string]any{"site_chat": in.On}})
 			now, err := siteChatOf(ctx, ec.Q, ec.Now, []uuid.UUID{me.ID})
 			return SiteChatOut{SiteChat: now[me.ID].SiteChat}, err
+		},
+	})
+}
+
+// ---------------------------------------------------------------------------
+// me.conversations
+// ---------------------------------------------------------------------------
+
+// me.conversations is the caller's conversations as the one who asks, in
+// every course at once, for a chat panel that is not a course's page: the
+// newest activity first. What it lists is what conversation.list lists of
+// the caller's own, as their opener, course by course: from each seat of
+// theirs that counts now and may read there (document_read, as
+// conversation.list is gated), whatever the course's status, since reading
+// an archived course is allowed. A seat removed, paused, expired, or a
+// delegate's whose principal no longer counts, lists nothing, as it may
+// call nothing; a seat removed has its conversations closed besides.
+
+type MyConversationsIn struct {
+	CourseID *uuid.UUID `json:"course_id,omitempty" jsonschema:"only this course's"`
+	After    *string    `json:"after,omitempty" jsonschema:"next, from the page before: the page after it"`
+	Limit    int        `json:"limit,omitempty" jsonschema:"at most this many; default 50, maximum 100"`
+}
+
+type MyConversationCourse struct {
+	CourseID uuid.UUID `json:"course_id"`
+	Code     string    `json:"code"`
+	Section  string    `json:"section"`
+	Title    string    `json:"title"`
+}
+
+type MyConversationRespondent struct {
+	MemberID    uuid.UUID `json:"member_id" jsonschema:"the agent's seat in the course"`
+	ActorID     uuid.UUID `json:"actor_id" jsonschema:"the agent"`
+	DisplayName string    `json:"display_name"`
+	Kind        string    `json:"kind" jsonschema:"agent; human only for a conversation closed by migration 0018 (closed_reason conversations_are_with_agents), from when a person could be asked"`
+}
+
+type MyConversation struct {
+	ConversationID uuid.UUID                `json:"conversation_id"`
+	MemberID       uuid.UUID                `json:"member_id" jsonschema:"your seat in the course, which opened it"`
+	Course         MyConversationCourse     `json:"course"`
+	Respondent     MyConversationRespondent `json:"respondent" jsonschema:"the agent you asked"`
+	Title          *string                  `json:"title,omitempty"`
+	Status         string                   `json:"status" jsonschema:"open or closed"`
+	State          string                   `json:"state" jsonschema:"as conversation.get says: awaiting_answer, reply_pending_approval, answered or closed"`
+	ClosedReason   *string                  `json:"closed_reason,omitempty" jsonschema:"as conversation.get says"`
+	CreatedAt      time.Time                `json:"created_at"`
+	LastActivityAt time.Time                `json:"last_activity_at" jsonschema:"its last message, or its opening while it has none; the list's order, newest first"`
+	Unread         bool                     `json:"unread" jsonschema:"whether the agent has written, and not retracted, anything since you last marked it read (conversation.mark_read)"`
+	MayAsk         bool                     `json:"may_ask" jsonschema:"whether you may ask in its course now: your seat there holds conversation_ask, and the course is not archived. Whether this conversation takes another question is its state's, and its agent's (conversation.ask says why not)"`
+}
+
+type MyConversationsOut struct {
+	Conversations []MyConversation `json:"conversations"`
+	Next          *string          `json:"next,omitempty" jsonschema:"give it as after for the next page; absent on the last. A conversation that moves while you page, with a new message, moves to the top: read from the top again for the newest"`
+}
+
+const (
+	defaultMyConversations = 50
+	maxMyConversations     = 100
+)
+
+// myCursor is me.conversations' cursor: the last row's activity and id,
+// which the next page reads on from, both descending. It is opaque to the
+// caller.
+func myCursor(at time.Time, id uuid.UUID) string {
+	return base64.RawURLEncoding.EncodeToString([]byte(at.UTC().Format(time.RFC3339Nano) + " " + id.String()))
+}
+
+func parseMyCursor(s string) (time.Time, uuid.UUID, error) {
+	bad := apperr.Invalid("after is not a cursor this tool gave: give next from the page before").With("field", "after")
+	raw, err := base64.RawURLEncoding.DecodeString(s)
+	if err != nil {
+		return time.Time{}, uuid.Nil, bad
+	}
+	at, id, ok := strings.Cut(string(raw), " ")
+	if !ok {
+		return time.Time{}, uuid.Nil, bad
+	}
+	t, err := time.Parse(time.RFC3339Nano, at)
+	if err != nil {
+		return time.Time{}, uuid.Nil, bad
+	}
+	u, err := uuid.Parse(id)
+	if err != nil {
+		return time.Time{}, uuid.Nil, bad
+	}
+	return t, u, nil
+}
+
+// mySeat is a seat of the caller's that lists its conversations, with its
+// course and whether it may ask there now.
+type mySeat struct {
+	course MyConversationCourse
+	mayAsk bool
+}
+
+// mySeats is the caller's seats that may read in their courses now, as
+// conversation.list would be let read in each (authz.Evaluate, document_read,
+// the gate it borrows), in one course only if course is given.
+func mySeats(ctx context.Context, rc *tool.ReadCtx, course *uuid.UUID) (map[uuid.UUID]mySeat, error) {
+	rows, err := rc.Q.ListMembershipsForActor(ctx, rc.Actor.ID)
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]uuid.UUID, 0, len(rows))
+	for _, r := range rows {
+		if course == nil || r.CourseID == *course {
+			ids = append(ids, r.MemberID)
+		}
+	}
+	seats, err := authz.LoadMembers(ctx, rc.Q, ids)
+	if err != nil {
+		return nil, err
+	}
+	out := map[uuid.UUID]mySeat{}
+	for _, r := range rows {
+		m, ok := seats[r.MemberID]
+		if !ok {
+			continue
+		}
+		if !authz.Evaluate(rc.Actor, r.CourseStatus, m, []domain.Perm{domain.PermDocumentRead}, false, rc.Now).Level.Allowed() {
+			continue
+		}
+		out[r.MemberID] = mySeat{
+			course: MyConversationCourse{CourseID: r.CourseID, Code: r.Code, Section: r.Section, Title: r.Title},
+			mayAsk: authz.Evaluate(rc.Actor, r.CourseStatus, m, []domain.Perm{domain.PermConversationAsk}, true, rc.Now).Level.Allowed(),
+		}
+	}
+	return out, nil
+}
+
+func meConversations() tool.Tool {
+	return tool.Define(tool.Spec[MyConversationsIn, MyConversationsOut]{
+		Name: "me.conversations",
+		Description: "Your conversations with agents, as the one who asked, in every course you are seated in (or in " +
+			"course_id's), the newest activity first, for a chat panel: each with its course, its agent, its state as " +
+			"conversation.get says it, when it was last active, whether the agent has written since you last read it " +
+			"(unread; conversation.mark_read), and whether you may ask in its course now. It lists what conversation.list " +
+			"lists of yours in each course: nothing from a seat that is removed, paused or expired. Page with after = the " +
+			"next of the page before.",
+		Kind: tool.Read, Gate: self,
+		HTTP:    tool.Route{Method: "GET", Pattern: "/v1/me/conversations"},
+		Resolve: noTarget[MyConversationsIn]("conversation"),
+		Query: func(ctx context.Context, rc *tool.ReadCtx, in MyConversationsIn) (MyConversationsOut, error) {
+			limit := defaultMyConversations
+			if in.Limit > 0 {
+				limit = min(in.Limit, maxMyConversations)
+			}
+			arg := dbq.ListMyConversationsParams{MaxRows: int32(limit)}
+			if in.After != nil {
+				at, id, err := parseMyCursor(*in.After)
+				if err != nil {
+					return MyConversationsOut{}, err
+				}
+				arg.AfterAt, arg.AfterID = &at, &id
+			}
+			out := MyConversationsOut{Conversations: []MyConversation{}}
+			seats, err := mySeats(ctx, rc, in.CourseID)
+			if err != nil || len(seats) == 0 {
+				return out, err
+			}
+			for id := range seats {
+				arg.MemberIds = append(arg.MemberIds, id)
+			}
+			rows, err := rc.Q.ListMyConversations(ctx, arg)
+			if err != nil {
+				return out, err
+			}
+			ids := make([]uuid.UUID, len(rows))
+			for i, r := range rows {
+				ids[i] = r.ID
+			}
+			views, err := conversationViews(ctx, rc.Q, rc.Now, ids)
+			if err != nil {
+				return out, err
+			}
+			byID := make(map[uuid.UUID]ConversationView, len(views))
+			for _, v := range views {
+				byID[v.ID] = v
+			}
+			unread, err := unreadAmong(ctx, rc.Q, arg.MemberIds, ids)
+			if err != nil {
+				return out, err
+			}
+			for _, r := range rows { // newest first, not the views' order
+				v, ok := byID[r.ID]
+				if !ok {
+					continue
+				}
+				seat := seats[r.OpenerMemberID]
+				out.Conversations = append(out.Conversations, MyConversation{
+					ConversationID: r.ID, MemberID: r.OpenerMemberID, Course: seat.course,
+					Respondent: MyConversationRespondent{MemberID: v.Respondent.MemberID, ActorID: v.respondentActor,
+						DisplayName: v.Respondent.DisplayName, Kind: v.Respondent.Kind},
+					Title: v.Title, Status: v.Status, State: v.State, ClosedReason: v.ClosedReason, CreatedAt: v.CreatedAt,
+					LastActivityAt: r.LastActivityAt, Unread: unread[r.ID], MayAsk: seat.mayAsk,
+				})
+			}
+			if len(rows) == limit {
+				last := rows[len(rows)-1]
+				next := myCursor(last.LastActivityAt, last.ID)
+				out.Next = &next
+			}
+			return out, nil
 		},
 	})
 }

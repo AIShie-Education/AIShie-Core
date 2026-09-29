@@ -6,7 +6,9 @@
 -- built-ins are left as they are, so local edits survive. (Migration 0007
 -- gave the built-ins already seeded their levels of the three permissions it
 -- added; delegate and course_tutor are inserted here alone. Migration 0013
--- gave those seeded their level of member_invite, as it is here.)
+-- gave those seeded their level of member_invite, as it is here, and 0018
+-- denied conversation_answer to those for people, as it is here: a person
+-- answers no conversation.)
 --
 -- Columns, in order:
 --   document_read, document_read_draft, document_write, rubric_read,
@@ -51,12 +53,14 @@ INSERT INTO permission_preset (
      'confirm_required', 'autonomous', 'denied',
      'denied'),
 
+    -- Answers no conversation: conversations are between a person and an
+    -- agent, and people talk to people elsewhere.
     ('instructor', 'Everything, unsupervised',
      'instructor', 'all', 'all',
      'autonomous', 'autonomous', 'autonomous', 'autonomous',
      'autonomous', 'autonomous', 'autonomous', 'autonomous',
      'autonomous', 'autonomous', 'autonomous', 'autonomous', 'autonomous',
-     'autonomous', 'autonomous', 'autonomous',
+     'autonomous', 'autonomous', 'denied',
      -- Hands out join links: a seat for whoever scans one.
      'autonomous'),
 

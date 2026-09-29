@@ -1205,6 +1205,58 @@ SELECT pg_temp.fails('nobody writes in a closed conversation', '23514', $q$
             '00000000-0000-0000-0000-000000000052', 'One more thing', '00000000-0000-0000-0000-0000000000b1') $q$);
 SELECT pg_temp.fails('a closed conversation stays closed', '23001', $q$
     UPDATE conversation SET status = 'open', closed_reason = NULL WHERE id = '00000000-0000-0000-0000-0000000000c1' $q$);
+-- How far each participant has read a conversation: a participant's, forward only.
+SELECT pg_temp.ok('a participant keeps a place in a conversation, closed or not', $q$
+    INSERT INTO conversation_read (conversation_id, course_id, member_id, last_read_seq)
+    VALUES ('00000000-0000-0000-0000-0000000000c1', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000000052', 1) $q$);
+SELECT pg_temp.fails('one place each', '23505', $q$
+    INSERT INTO conversation_read (conversation_id, course_id, member_id, last_read_seq)
+    VALUES ('00000000-0000-0000-0000-0000000000c1', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000000052', 2) $q$);
+SELECT pg_temp.fails('only a participant keeps one', '23514', $q$
+    INSERT INTO conversation_read (conversation_id, course_id, member_id, last_read_seq)
+    VALUES ('00000000-0000-0000-0000-0000000000c1', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000000051', 1) $q$);
+SELECT pg_temp.fails('a place is in the conversation''s course', '23503', $q$
+    INSERT INTO conversation_read (conversation_id, course_id, member_id, last_read_seq)
+    VALUES ('00000000-0000-0000-0000-0000000000c1', '00000000-0000-0000-0000-000000000042', '00000000-0000-0000-0000-000000000053', 1) $q$);
+SELECT pg_temp.fails('a place is no earlier than nothing read', '23514', $q$
+    INSERT INTO conversation_read (conversation_id, course_id, member_id, last_read_seq)
+    VALUES ('00000000-0000-0000-0000-0000000000c1', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000000053', -1) $q$);
+SELECT pg_temp.ok('a place moves forward', $q$
+    UPDATE conversation_read SET last_read_seq = 2, read_at = now()
+     WHERE conversation_id = '00000000-0000-0000-0000-0000000000c1' AND member_id = '00000000-0000-0000-0000-000000000052' $q$);
+SELECT pg_temp.fails('and never back', '23001', $q$
+    UPDATE conversation_read SET last_read_seq = 1
+     WHERE conversation_id = '00000000-0000-0000-0000-0000000000c1' AND member_id = '00000000-0000-0000-0000-000000000052' $q$);
+SELECT pg_temp.fails('whose place it is never changes', '23001', $q$
+    UPDATE conversation_read SET member_id = '00000000-0000-0000-0000-000000000053'
+     WHERE conversation_id = '00000000-0000-0000-0000-0000000000c1' AND member_id = '00000000-0000-0000-0000-000000000052' $q$);
+-- Conversations are between a person and an agent: a person answers none.
+SELECT pg_temp.fails('a conversation''s respondent is an agent''s seat, never a person''s', '23514', $q$
+    INSERT INTO conversation (course_id, opener_member_id, respondent_member_id)
+    VALUES ('00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000000052', '00000000-0000-0000-0000-000000000051') $q$);
+SELECT pg_temp.fails('not even a closed one', '23514', $q$
+    INSERT INTO conversation (course_id, opener_member_id, respondent_member_id, status)
+    VALUES ('00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000000051', '00000000-0000-0000-0000-000000000058', 'closed') $q$);
+SELECT pg_temp.ok('a person''s seat is written answering nothing, whatever it is told; an agent''s as it is told', $q$
+    UPDATE course_member SET perm_conversation_answer = 'autonomous'
+     WHERE id IN ('00000000-0000-0000-0000-000000000052', '00000000-0000-0000-0000-000000000053');
+    DO $chk$
+    BEGIN
+        IF NOT EXISTS (SELECT 1 FROM course_member WHERE id = '00000000-0000-0000-0000-000000000052' AND perm_conversation_answer = 'denied')
+           OR NOT EXISTS (SELECT 1 FROM course_member WHERE id = '00000000-0000-0000-0000-000000000053' AND perm_conversation_answer = 'autonomous') THEN
+            RAISE EXCEPTION 'a person''s seat answers, or an agent''s was not written as it was told';
+        END IF;
+    END $chk$ $q$);
+SELECT pg_temp.ok('a person is seated answering nothing, whatever the row says', $q$
+    INSERT INTO course_member (id, course_id, actor_id, role, added_by_actor_id, student_scope, assignment_scope, perm_conversation_answer)
+    VALUES ('00000000-0000-0000-0000-0000000005c1', '00000000-0000-0000-0000-000000000042', '00000000-0000-0000-0000-000000000032',
+            'ta', '00000000-0000-0000-0000-000000000032', 'all', 'all', 'autonomous');
+    DO $chk$
+    BEGIN
+        IF NOT EXISTS (SELECT 1 FROM course_member WHERE id = '00000000-0000-0000-0000-0000000005c1' AND perm_conversation_answer = 'denied') THEN
+            RAISE EXCEPTION 'a person was seated answering';
+        END IF;
+    END $chk$ $q$);
 
 -- Memory ---------------------------------------------------------------------
 -- 3b Sato's tutor, an agent he owns · 5e its seat in A, his delegate, answering the course
