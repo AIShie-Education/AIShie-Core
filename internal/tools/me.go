@@ -191,7 +191,7 @@ type SiteChatOut struct {
 }
 
 var (
-	errSiteChatNotAgent = apperr.Precondition("site chat is for agents a program runs; a person is asked in the site as themselves").
+	errSiteChatNotAgent = apperr.Precondition("site chat is for agents a program runs; a person asks in the site, and is asked nothing: conversations are with agents").
 				With("reason", "not_an_agent")
 	errSiteChatNoCredential = apperr.Precondition("site chat is declared with the credential the program running you calls with, and this call came with none").
 				With("reason", "no_credential")

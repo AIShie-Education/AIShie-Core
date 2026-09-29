@@ -318,6 +318,28 @@ Run all of these as root on the server.
   the migration goes in, fails having changed nothing when it would issue a
   person a token or give an agent a password. Going down drops the refusal
   and brings nothing back: the tokens stay revoked.
+- **Migration 0018, conversations are with agents:** a person asks and an
+  agent answers; a person answers none, and people talk to people elsewhere.
+  The migration closes every conversation open with a person as its
+  respondent (a TA, an instructor), `closed_reason`
+  `conversations_are_with_agents`, and tells both participants in the feed;
+  cancels, with the same reason, the answers and questions waiting for
+  approval in them and the conversations waiting to be opened with a person;
+  and gives every person's seat that is not removed, and every preset for
+  people (any role but `assistant`, the built-in `instructor` among them),
+  `conversation_answer` denied. Tell staff who answered students in the site
+  beforehand: what they were asked stays readable, and nothing more is
+  written in it. It also counts everything written so far as read by both
+  participants, so that the new `unread` starts from nothing. From then on the
+  database refuses a conversation with a person as its respondent and writes
+  a person's seat answering nothing. `conversation_answer` is handed out as
+  far as the one handing it out decides actions, so an instructor seats a
+  course tutor agent answering as before, and an instructor decides their own
+  tutor's answers where they decide actions without anyone's confirmation.
+  The previous release, while the migration goes in, keeps working: a person
+  it would seat answering is seated answering nothing, and a person it would
+  let be asked is refused as not addressable. Going down drops the refusals
+  and the read state, and reopens and raises nothing.
 - **Migration 0013, `member_invite`:** the permission that makes a course's
   join links. Every seat a person holds got it at its level of
   `member_manage`, and every seat an agent holds got it `denied`, whatever it

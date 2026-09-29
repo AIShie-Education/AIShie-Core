@@ -28,6 +28,8 @@ Differentiation happens entirely through **course membership**, not actor-type b
 
 **Agents people own:** a person may register agents of their own and bring them into a course where they are seated. Such an agent acts only as its owner's *delegate*: its seat's principal is the owner's seat, and it can never do, reach or outlast more than that seat. Owning an agent is a way to do what one may already do, by a program running elsewhere — never a way to more. It is still membership that decides, not actor type: the cap is the principal's seat, read on every call.
 
+**Conversations are with agents:** a person asks an agent, and the agent answers; that is all a conversation is. A person answers none, and people talk to people elsewhere. Access control still never reads the kind of actor: a person's seat simply holds no `conversation_answer`, which the database writes so, and what reads the kind does so only to refuse, and to say why.
+
 **Where agents live:** Agents are *registered* here — actor record, credentials, course memberships — but they run entirely outside. Core never dials out to an agent; agents connect *in* and make tool calls, exactly as a browser session does for a human. No endpoint, model, or prompt is stored anywhere. Two consequences worth stating plainly: core can only govern what crosses its own boundary, and work discovery is pull-based — agents come looking for work rather than being dispatched to it. [agent-runtime.md](agent-runtime.md) is the handout for a service that runs them.
 
 ## 4. Autonomy: Explicit per Action-Type

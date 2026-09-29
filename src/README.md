@@ -98,6 +98,17 @@ src/
                          agent holds; a trigger refusing either from then on
     0017_api_tokens_for_agents.down.sql
                          drops the trigger; what the up revoked stays revoked
+    0018_conversations_with_agents.up.sql
+                         conversations are between a person and an agent:
+                         closes those open with a person, saying why, and
+                         cancels what waited in them; people's seats and
+                         presets answer nothing; triggers refusing a
+                         person as a respondent and writing a person's seat
+                         answering nothing; how far each participant has
+                         read a conversation, what was written so far read
+    0018_conversations_with_agents.down.sql
+                         drops the triggers and the read state; what the up
+                         closed, cancelled and lowered stays so
     0013_member_invite.down.sql
                          drops it from both tables
     0014_agent_owner_and_decisions.up.sql
@@ -205,7 +216,9 @@ the way up, a migration with files in `tests/up/` goes up over the data its
 `.before.sql` commits, and its `.after.sql` checks what became of it: 0017
 over people's tokens, root's from bootstrap among them, and agents'
 passwords, sessions, identities and invitations, beside what it must leave
-alone. The data stays for the rest of the run. On
+alone; 0018 over conversations with people and with an agent, proposals of
+every kind waiting in them, people who answer, a removed seat that did, and
+presets for people and for agents. The data stays for the rest of the run. On
 the way down, a migration with files in `tests/down/` goes down over the data
 its `.before.sql` commits, and its `.after.sql` checks what became of it:
 0007 over a delegate with a proposal waiting and a token, 0008 over a
@@ -217,8 +230,9 @@ through it, 0013 over a seat and a preset that hand out links, 0014
 over an owned agent and one nobody owns, seated deciding by proposal, whose
 owners, and levels, may change again once it is down, and 0016 over login
 IDs, one of them a person's own and unchecked, and a temporary password
-signed in with, and 0017 over a person signed in, an agent's token and what
-the up revoked, which stays revoked.
+signed in with, 0017 over a person signed in, an agent's token and what
+the up revoked, which stays revoked, and 0018 over the conversations it
+closed, the proposals it cancelled and the seats it lowered, which stay so.
 
 ## What the database enforces
 
@@ -261,6 +275,9 @@ MCP, these are the invariants that survive a bug in the tool layer.
 | A delegate's seat is removed with its principal's, whichever release removes it | trigger `course_member_delegates_follow` |
 | Only a delegate's seat answers the course | `course_member_answers_course_is_delegate` |
 | A conversation's two participants are seats of its course and never change; a closed conversation stays closed; none is deleted | composite FKs, `conversation_*` CHECKs, trigger `conversation_guarded` |
+| A conversation's respondent is an agent's seat, never a person's | trigger `conversation_respondent_is_agent` |
+| A person's seat that is not removed holds `conversation_answer` at `denied`: more is written as that | trigger `course_member_person_ceiling` |
+| A place in a conversation is one of its participants', in its course, one each; whose it is never changes, and it goes forward only | composite FKs, primary key, `conversation_read_seq_valid`, trigger `conversation_read_guarded` |
 | Only a conversation's two participants write in it, only while it is open; a reply is the respondent's, to a message of the opener's in the same conversation | trigger `conversation_message_author_valid`, composite FKs on `conversation_message` |
 | A message and its retraction are in their conversation's course; one message at each `seq`, from 1; a message is retracted once | composite FKs, `unique(conversation_id, seq)`, `conversation_message_seq_positive`, primary key of `conversation_message_retraction` |
 | Every message and retraction names its action | `created_by_action_id NOT NULL` |
@@ -303,8 +320,11 @@ The database cannot express these. Each one is a place a bug can hide.
 - **A delegate holds no more than its principal**: levels, reach and life,
   read with the principal on every call and in every list.
 - **Who may address whom** in a conversation (`tools.addressing`): the
-  respondent within the asker's seat, or the asker's own delegate; a delegate
-  answers others only if its seat answers the course.
+  respondent an agent, within the asker's seat, or the asker's own delegate; a
+  delegate answers others only if its seat answers the course. A person is
+  nobody's respondent and answers nothing (`conversations_are_with_agents`).
+- **Read state**: only a participant marks a conversation read, while they
+  may read it, and `unread` is said to participants alone.
 - **Closing a removed seat's conversations**, a delegate's with its
   principal's, and cancelling its proposals.
 - **A token of the system actor's** written before migration 0004 refused
