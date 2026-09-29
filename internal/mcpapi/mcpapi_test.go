@@ -605,6 +605,13 @@ func TestToolsListIsTheRegistry(t *testing.T) {
 	if listed[mcpapi.ToolName("course.join")] != nil {
 		t.Error("course.join is offered over MCP")
 	}
+	// A person's chat panel reads over REST, and what it reads is offered
+	// over MCP as well, as every tool is.
+	for _, name := range []string{"me.conversations"} {
+		if listed[mcpapi.ToolName(name)] == nil {
+			t.Errorf("%s is not offered over MCP", name)
+		}
+	}
 	// What several model APIs accept as a tool name.
 	valid := regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`)
 	for _, reg := range exposed {

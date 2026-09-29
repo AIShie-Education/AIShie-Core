@@ -118,7 +118,8 @@ LIMIT sqlc.arg(max_rows);
 -- since the conversation has moved on.
 SELECT c.id, c.course_id, c.title, c.status, c.closed_reason, c.created_at, c.last_message_at, c.last_author_member_id,
        c.opener_member_id, oa.display_name AS opener_name, oa.kind AS opener_kind,
-       c.respondent_member_id, ra.display_name AS respondent_name, ra.kind AS respondent_kind, r.role AS respondent_role,
+       c.respondent_member_id, r.actor_id AS respondent_actor_id, ra.display_name AS respondent_name, ra.kind AS respondent_kind,
+       r.role AS respondent_role,
        r.status AS respondent_status, r.expires_at AS respondent_expires_at,
        r.principal_member_id AS respondent_principal_member_id, own.display_name AS respondent_owner_name,
        seen.last_used_at AS respondent_last_seen_at, pending.id AS pending_reply_action_id,
@@ -182,6 +183,20 @@ WHERE c.course_id = $1 AND c.id > sqlc.arg(after)
             WHEN c.last_author_member_id = c.opener_member_id THEN 'awaiting_answer'
             ELSE 'answered' END) )
 ORDER BY c.id
+LIMIT sqlc.arg(max_rows);
+
+-- name: ListMyConversations :many
+-- The conversations the given seats opened, newest activity first — its
+-- last message, or its opening while it has none — after a
+-- (last_activity_at, id) cursor, both descending. The seats are the
+-- caller's own that count now, which me.conversations works out before
+-- this, as authorization would: nothing here reads anyone else's.
+SELECT c.id, c.opener_member_id, coalesce(c.last_message_at, c.created_at)::timestamptz AS last_activity_at
+FROM conversation c
+WHERE c.opener_member_id = ANY(sqlc.arg(member_ids)::uuid[])
+  AND (sqlc.narg(after_at)::timestamptz IS NULL
+       OR (coalesce(c.last_message_at, c.created_at), c.id) < (sqlc.narg(after_at)::timestamptz, sqlc.narg(after_id)::uuid))
+ORDER BY coalesce(c.last_message_at, c.created_at) DESC, c.id DESC
 LIMIT sqlc.arg(max_rows);
 
 -- name: ListInboxConversationIDs :many

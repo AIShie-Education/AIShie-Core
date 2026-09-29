@@ -114,7 +114,8 @@ func (q *Queries) CloseConversationsOf(ctx context.Context, memberIds []uuid.UUI
 const conversationDetails = `-- name: ConversationDetails :many
 SELECT c.id, c.course_id, c.title, c.status, c.closed_reason, c.created_at, c.last_message_at, c.last_author_member_id,
        c.opener_member_id, oa.display_name AS opener_name, oa.kind AS opener_kind,
-       c.respondent_member_id, ra.display_name AS respondent_name, ra.kind AS respondent_kind, r.role AS respondent_role,
+       c.respondent_member_id, r.actor_id AS respondent_actor_id, ra.display_name AS respondent_name, ra.kind AS respondent_kind,
+       r.role AS respondent_role,
        r.status AS respondent_status, r.expires_at AS respondent_expires_at,
        r.principal_member_id AS respondent_principal_member_id, own.display_name AS respondent_owner_name,
        seen.last_used_at AS respondent_last_seen_at, pending.id AS pending_reply_action_id,
@@ -167,6 +168,7 @@ type ConversationDetailsRow struct {
 	OpenerName                  string
 	OpenerKind                  string
 	RespondentMemberID          uuid.UUID
+	RespondentActorID           uuid.UUID
 	RespondentName              string
 	RespondentKind              string
 	RespondentRole              string
@@ -208,6 +210,7 @@ func (q *Queries) ConversationDetails(ctx context.Context, arg ConversationDetai
 			&i.OpenerName,
 			&i.OpenerKind,
 			&i.RespondentMemberID,
+			&i.RespondentActorID,
 			&i.RespondentName,
 			&i.RespondentKind,
 			&i.RespondentRole,
@@ -701,6 +704,59 @@ func (q *Queries) ListInboxConversationIDs(ctx context.Context, arg ListInboxCon
 	for rows.Next() {
 		var i ListInboxConversationIDsRow
 		if err := rows.Scan(&i.ID, &i.LastMessageAt); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listMyConversations = `-- name: ListMyConversations :many
+SELECT c.id, c.opener_member_id, coalesce(c.last_message_at, c.created_at)::timestamptz AS last_activity_at
+FROM conversation c
+WHERE c.opener_member_id = ANY($1::uuid[])
+  AND ($2::timestamptz IS NULL
+       OR (coalesce(c.last_message_at, c.created_at), c.id) < ($2::timestamptz, $3::uuid))
+ORDER BY coalesce(c.last_message_at, c.created_at) DESC, c.id DESC
+LIMIT $4
+`
+
+type ListMyConversationsParams struct {
+	MemberIds []uuid.UUID
+	AfterAt   *time.Time
+	AfterID   *uuid.UUID
+	MaxRows   int32
+}
+
+type ListMyConversationsRow struct {
+	ID             uuid.UUID
+	OpenerMemberID uuid.UUID
+	LastActivityAt time.Time
+}
+
+// The conversations the given seats opened, newest activity first — its
+// last message, or its opening while it has none — after a
+// (last_activity_at, id) cursor, both descending. The seats are the
+// caller's own that count now, which me.conversations works out before
+// this, as authorization would: nothing here reads anyone else's.
+func (q *Queries) ListMyConversations(ctx context.Context, arg ListMyConversationsParams) ([]ListMyConversationsRow, error) {
+	rows, err := q.db.Query(ctx, listMyConversations,
+		arg.MemberIds,
+		arg.AfterAt,
+		arg.AfterID,
+		arg.MaxRows,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListMyConversationsRow
+	for rows.Next() {
+		var i ListMyConversationsRow
+		if err := rows.Scan(&i.ID, &i.OpenerMemberID, &i.LastActivityAt); err != nil {
 			return nil, err
 		}
 		items = append(items, i)

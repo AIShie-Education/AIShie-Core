@@ -112,6 +112,11 @@ type Assignment struct {
 	CreatedAt              time.Time
 }
 
+type Cancelled struct {
+	ID       uuid.UUID
+	CourseID *uuid.UUID
+}
+
 type Conversation struct {
 	ID                 uuid.UUID
 	CourseID           uuid.UUID
@@ -426,4 +431,9 @@ type Term struct {
 	Name     string
 	StartsOn time.Time
 	EndsOn   time.Time
+}
+
+type WithAPerson struct {
+	ID       uuid.UUID
+	CourseID uuid.UUID
 }

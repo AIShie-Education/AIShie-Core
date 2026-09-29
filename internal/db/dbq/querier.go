@@ -462,6 +462,12 @@ type Querier interface {
 	// A page of one bucket in one status, by id: newest first, after the last
 	// id seen, or oldest first.
 	ListMemoryBucket(ctx context.Context, arg ListMemoryBucketParams) ([]ListMemoryBucketRow, error)
+	// The conversations the given seats opened, newest activity first — its
+	// last message, or its opening while it has none — after a
+	// (last_activity_at, id) cursor, both descending. The seats are the
+	// caller's own that count now, which me.conversations works out before
+	// this, as authorization would: nothing here reads anyone else's.
+	ListMyConversations(ctx context.Context, arg ListMyConversationsParams) ([]ListMyConversationsRow, error)
 	// Which of these uploads, each given with the course its key names, are
 	// this deployment's and attached to nothing? The course must be one this
 	// database has. document.upload_url issues keys only under courses that

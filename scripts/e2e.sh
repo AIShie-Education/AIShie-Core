@@ -356,6 +356,20 @@ call 200 GET "$C/members/$SATO_M" "$SATO"
 [ "$(json "$WORK/body" 'd["result"]["perms"]["conversation_answer"], d["result"]["perm_ceilings"]["conversation_answer"], d["result"]["perm_ceiling_reasons"]["conversation_answer"]')" = "denied denied conversations_are_with_agents" ] ||
   fail "Sato's seat says he answers: $(cat "$WORK/body")"
 
+step "Yuki's chat panel lists her conversations with agents in every course, the newest first"
+call 200 GET /v1/me/conversations "$YUKI"
+[ "$(json "$WORK/body" 'len(d["result"]["conversations"]), d["result"]["conversations"][0]["conversation_id"] == "'"$CONV"'"')" = "1 True" ] ||
+  fail "Yuki's conversations: $(cat "$WORK/body")"
+[ "$(json "$WORK/body" '*(lambda c: (c["course"]["code"], c["respondent"]["member_id"] == "'"$TUTOR_M"'", c["respondent"]["actor_id"] == "'"$TUTOR_ID"'", c["respondent"]["kind"], c["state"], c["may_ask"]))(d["result"]["conversations"][0])')" = "CS101 True True agent answered True" ] ||
+  fail "Yuki's conversation with the tutor, as her panel shows it: $(cat "$WORK/body")"
+call 200 GET "/v1/me/conversations?course_id=$COURSE&limit=1" "$YUKI"
+[ "$(json "$WORK/body" 'len(d["result"]["conversations"]), d["result"].get("next") is not None')" = "1 True" ] || fail "a page of one: $(cat "$WORK/body")"
+call 200 GET "/v1/me/conversations?limit=1&after=$(json "$WORK/body" 'd["result"]["next"]')" "$YUKI"
+[ "$(json "$WORK/body" 'len(d["result"]["conversations"])')" = 0 ] || fail "the page after the last: $(cat "$WORK/body")"
+call 400 GET "/v1/me/conversations?after=nonsense" "$YUKI"
+call 200 GET /v1/me/conversations "$GRADER" # an agent that asked nothing
+[ "$(json "$WORK/body" 'len(d["result"]["conversations"])')" = 0 ] || fail "the grader lists conversations: $(cat "$WORK/body")"
+
 step "Sato switches the tutor's site chat off: Yuki asks it nothing more and still reads what it said; only its runtime switches it on"
 call 200 POST "/v1/me/agents/$TUTOR_ID" "$SATO" '{"site_chat":false}'
 call 422 POST "$C/conversations/$CONV/ask" "$YUKI" '{"body":"And how long should it be?"}'

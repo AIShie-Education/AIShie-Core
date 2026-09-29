@@ -985,6 +985,9 @@ type ConversationView struct {
 	LastAuthorMemberID    *uuid.UUID             `json:"last_author_member_id,omitempty"`
 	LatestOpenerMessageID *uuid.UUID             `json:"latest_opener_message_id,omitempty" jsonschema:"what an answer replies to"`
 	LastRetractedAt       *time.Time             `json:"last_retracted_at,omitempty" jsonschema:"when a message in it was last retracted: a retraction adds no message, so a reader polling with after_seq reads the messages again when this changes"`
+	// respondentActor is the respondent's actor, for me.conversations,
+	// which names it; the other views do not.
+	respondentActor uuid.UUID
 }
 
 // conversationViews reads the views of the given conversations, in id order.
@@ -1011,7 +1014,8 @@ func conversationViews(ctx context.Context, q dbq.Querier, now time.Time, list [
 		v := ConversationView{ID: r.ID, Title: r.Title, Status: r.Status, ClosedReason: r.ClosedReason,
 			PendingReplyActionID: r.PendingReplyActionID, CreatedAt: r.CreatedAt, LastMessageAt: r.LastMessageAt,
 			LastAuthorMemberID: r.LastAuthorMemberID, LatestOpenerMessageID: r.LatestOpenerMessageID, LastRetractedAt: r.LastRetractedAt,
-			Opener: ConversationParty{MemberID: r.OpenerMemberID, DisplayName: r.OpenerName, Kind: r.OpenerKind},
+			respondentActor: r.RespondentActorID,
+			Opener:          ConversationParty{MemberID: r.OpenerMemberID, DisplayName: r.OpenerName, Kind: r.OpenerKind},
 			Respondent: ConversationRespondent{
 				ConversationParty: ConversationParty{MemberID: r.RespondentMemberID, DisplayName: r.RespondentName, Kind: r.RespondentKind},
 				Role:              r.RespondentRole, SeatStatus: seatStatus(r.RespondentStatus, r.RespondentExpiresAt, now),
