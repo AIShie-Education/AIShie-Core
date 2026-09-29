@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # End to end, from the outside: the real binary, a scratch database, and
-# nothing but curl. It bootstraps an installation and then builds the worked
+# nothing but curl. It bootstraps an installation, root with a password and
+# no token, who signs in, and then builds the worked
 # example from docs/schema.md §5 entirely through the REST API — register the
 # actors, create and open the course, seat the instructor, set up grading,
 # publish an assignment, hand in work, have an agent grade it, approve, post;
@@ -73,6 +74,17 @@ call() {
   printf '  %-4s %-62s %s\n' "$method" "$(printf '%s' "$path" | sed -E 's/aisjoin_[A-Za-z0-9_-]+/…/')" "$got"
 }
 
+# signin WANT BODY — POST /v1/auth/login as the sign-in page does; the session
+# the cookie carries is left in $SESSION, the body in $WORK/body.
+signin() {
+  N=$((N + 1))
+  local got
+  got=$(curl -s -o "$WORK/body" -D "$WORK/headers" -w '%{http_code}' -X POST -H 'Content-Type: application/json' -d "$2" "$BASE/v1/auth/login")
+  [ "$got" = "$1" ] || fail "POST /v1/auth/login → $got, want $1: $(cat "$WORK/body")"
+  SESSION=$(sed -n 's/^[Ss]et-[Cc]ookie: ais_session=\([^;]*\).*/\1/p' "$WORK/headers" | tr -d '\r')
+  printf '  %-4s %-62s %s\n' POST /v1/auth/login "$got"
+}
+
 # ---------------------------------------------------------------------------
 step "A scratch database, migrated and seeded by the binary itself"
 createdb "$DB"
@@ -91,15 +103,20 @@ export RUNTIME_AUDIENCES="$RUNTIME" SIGNING_KEY
 "$BIN" migrate up
 "$BIN" seed
 
-step "bootstrap: the one actor created by nobody"
-# An empty password is refused before anything is made: the bootstrap
-# after it is still the first.
+step "bootstrap: the one actor created by nobody, with a password to sign in with, and no token"
+# An empty password is refused before anything is made, and so is none at
+# all: the bootstrap after them is still the first.
 printf '\n' | "$BIN" bootstrap --name Root --email root@example.edu --password-stdin >/dev/null 2>&1 &&
   fail "bootstrap took an empty password"
-ROOT=$("$BIN" bootstrap --name Root 2>/dev/null)
-[[ $ROOT == ais_* ]] || fail "bootstrap printed no token"
-"$BIN" bootstrap --name Usurper >/dev/null 2>&1 && fail "bootstrap ran twice"
-echo "  root token ${ROOT:0:16}…; an empty password and a second bootstrap are refused"
+"$BIN" bootstrap --name Root --email root@example.edu </dev/null >/dev/null 2>&1 && fail "bootstrap ran with no password"
+OUT=$(printf '%s\n' "roots own password" | "$BIN" bootstrap --name Root --email root@example.edu --password-stdin 2>"$WORK/bootstrap.err") ||
+  fail "bootstrap: $(cat "$WORK/bootstrap.err")"
+[ -z "$OUT" ] || fail "bootstrap printed on standard output"
+grep -q 'ais_' "$WORK/bootstrap.err" && fail "bootstrap printed a token"
+grep -q 'Sign in at your site with root@example.edu and that password' "$WORK/bootstrap.err" || fail "bootstrap did not say how root signs in: $(cat "$WORK/bootstrap.err")"
+printf '%s\n' "another long password" | "$BIN" bootstrap --name Usurper --email usurper@example.edu --password-stdin >/dev/null 2>&1 &&
+  fail "bootstrap ran twice"
+echo "  root made, with a password and no token; no password, an empty one and a second bootstrap are refused"
 
 start() {
   "$BIN" serve 2>>"$WORK/server.log" &
@@ -110,8 +127,10 @@ start() {
 start
 
 # ---------------------------------------------------------------------------
-step "Root makes an admin; the admin registers everyone and gives each a token"
+step "Root signs in with its password; root makes an admin; the admin registers everyone and gives each a token"
 call 401 GET /v1/me "not-a-token"
+signin 200 '{"login":"root@example.edu","password":"roots own password"}'
+ROOT=$SESSION
 call 200 POST /v1/actors "$ROOT" '{"kind":"human","display_name":"Admin","platform_role":"admin"}'
 ADMIN_ID=$(json "$WORK/body" 'd["result"]["actor_id"]')
 call 200 POST "/v1/actors/$ADMIN_ID/tokens" "$ROOT" '{"label":"e2e"}'
@@ -372,17 +391,6 @@ call 200 POST "$C/actions/$HW4_ASK/decide" "$SATO" '{"decision":"approve"}'
 [ "$(json "$WORK/body" 'd["result"]["outcome"], d["result"]["by_owner"]')" = "executed True" ] || fail "the owner's approval: $(cat "$WORK/body")"
 call 200 GET "$C/assignments" "$SATO"
 json "$WORK/body" '"HW4" in [a["title"] for a in d["result"]["assignments"]] or sys.exit("HW4 was not made")' >/dev/null
-
-# signin WANT BODY — POST /v1/auth/login as the sign-in page does; the session
-# the cookie carries is left in $SESSION, the body in $WORK/body.
-signin() {
-  N=$((N + 1))
-  local got
-  got=$(curl -s -o "$WORK/body" -D "$WORK/headers" -w '%{http_code}' -X POST -H 'Content-Type: application/json' -d "$2" "$BASE/v1/auth/login")
-  [ "$got" = "$1" ] || fail "POST /v1/auth/login → $got, want $1: $(cat "$WORK/body")"
-  SESSION=$(sed -n 's/^[Ss]et-[Cc]ookie: ais_session=\([^;]*\).*/\1/p' "$WORK/headers" | tr -d '\r')
-  printf '  %-4s %-62s %s\n' POST /v1/auth/login "$got"
-}
 
 step "Wei, who has no email, registers through a new link with her student number as her login ID, and signs in with it"
 call 200 POST "$C/join-links" "$SATO" '{}'

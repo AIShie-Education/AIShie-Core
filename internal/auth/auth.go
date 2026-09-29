@@ -209,10 +209,10 @@ func (a *Authenticator) Logout(ctx context.Context, p Principal) error {
 }
 
 // IssueToken creates an API token for an actor. It is used by the tools that
-// issue tokens, by bootstrap and by the operator's command line. The system
-// actor is never given one: a token of its would act as the sweeps do, and
-// could take their idempotency keys before them. issuedBy is the actor who
-// asked for it, nil when no actor did (bootstrap, the command line).
+// issue tokens and by the operator's command line. The system actor is never
+// given one: a token of its would act as the sweeps do, and could take their
+// idempotency keys before them. issuedBy is the actor who asked for it, nil
+// when no actor did (the command line).
 func IssueToken(ctx context.Context, q *dbq.Queries, actorID uuid.UUID, issuedBy *uuid.UUID, label string, expiresAt *time.Time, now time.Time) (Token, uuid.UUID, error) {
 	actor, err := q.GetActor(ctx, actorID)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -528,30 +528,56 @@ func (a *Authenticator) AcceptInvite(ctx context.Context, presented, password st
 	return acc, nil
 }
 
-// BootstrapInput describes the first human of an installation.
+// BootstrapInput describes the first person of an installation: root, who
+// signs in like anyone else, with a password, by an email or a login ID or
+// both. Root is given no API token: people hold none.
 type BootstrapInput struct {
 	DisplayName string
 	Email       string
-	Password    string // optional; without it the root signs in with the token
+	LoginID     string
+	Password    string
 }
 
 type BootstrapResult struct {
 	RootID, SystemID uuid.UUID
-	Token            Token
 }
 
 // ErrAlreadyBootstrapped means a root actor exists; bootstrap runs once.
 var ErrAlreadyBootstrapped = errors.New("this installation already has a root actor")
 
-// Bootstrap creates the root actor, the system actor and root's first
-// credential, in one transaction.
+// Bootstrap creates the root actor, with its email or login ID and its
+// password, and the system actor, in one transaction. Without a password, or
+// without a name to sign in with, it creates nothing: root would have no way
+// in, and bootstrap does not run a second time to put that right.
 //
 // Root is the head of the delegation chain and the only actor created by
 // nobody. This is the one state change in the system with no action row:
 // there is no actor yet for it to be an action of.
 func Bootstrap(ctx context.Context, pool *pgxpool.Pool, in BootstrapInput) (BootstrapResult, error) {
 	var res BootstrapResult
-	err := db.InTx(ctx, pool, func(tx pgx.Tx) error {
+	in.DisplayName, in.Email, in.LoginID = strings.TrimSpace(in.DisplayName), strings.TrimSpace(in.Email), strings.TrimSpace(in.LoginID)
+	switch {
+	case in.DisplayName == "":
+		return res, apperr.Invalid("root needs a display name")
+	case in.Email == "" && in.LoginID == "":
+		return res, apperr.Invalid("root needs an email or a login ID to sign in with")
+	case in.Email != "" && !IsEmail(in.Email):
+		return res, apperr.Invalid("the email must be an email address")
+	}
+	if in.LoginID != "" {
+		id, err := LoginID("the login ID", in.LoginID)
+		if err != nil {
+			return res, err
+		}
+		in.LoginID = id
+	}
+	// Hashed before the transaction, so that the hash holds no lock; a
+	// password outside the rules for one creates nothing.
+	hash, err := HashNewPassword(in.Password)
+	if err != nil {
+		return res, err
+	}
+	err = db.InTx(ctx, pool, func(tx pgx.Tx) error {
 		q := dbq.New(tx)
 		// Serialise concurrent bootstraps; the count below is then reliable.
 		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('aishiteru.bootstrap'))`); err != nil {
@@ -567,12 +593,15 @@ func Bootstrap(ctx context.Context, pool *pgxpool.Pool, in BootstrapInput) (Boot
 		now := time.Now()
 		res.RootID, res.SystemID = ids.New(), ids.New()
 		root, system := domain.PlatformRoot, "system"
-		var email *string
+		var email, loginID *string
 		if in.Email != "" {
 			email = &in.Email
 		}
+		if in.LoginID != "" {
+			loginID = &in.LoginID
+		}
 		if err := q.InsertActor(ctx, dbq.InsertActorParams{
-			ID: res.RootID, Kind: "human", DisplayName: in.DisplayName, Email: email, PlatformRole: &root, CreatedAt: now,
+			ID: res.RootID, Kind: "human", DisplayName: in.DisplayName, Email: email, LoginID: loginID, PlatformRole: &root, CreatedAt: now,
 		}); err != nil {
 			return err
 		}
@@ -583,13 +612,7 @@ func Bootstrap(ctx context.Context, pool *pgxpool.Pool, in BootstrapInput) (Boot
 		}); err != nil {
 			return err
 		}
-		if in.Password != "" {
-			if err := SetPassword(ctx, q, res.RootID, in.Password, now); err != nil {
-				return err
-			}
-		}
-		res.Token, _, err = IssueToken(ctx, q, res.RootID, nil, "bootstrap", nil, now)
-		return err
+		return setPasswordHash(ctx, q, res.RootID, hash, now)
 	})
 	return res, err
 }
