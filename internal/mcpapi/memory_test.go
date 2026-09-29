@@ -9,12 +9,12 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/auth"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/db"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/httpapi"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/mcpapi"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/testkit"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/tools"
+	"github.com/AIShie-Education/AIShie-Core/internal/auth"
+	"github.com/AIShie-Education/AIShie-Core/internal/db"
+	"github.com/AIShie-Education/AIShie-Core/internal/httpapi"
+	"github.com/AIShie-Education/AIShie-Core/internal/mcpapi"
+	"github.com/AIShie-Education/AIShie-Core/internal/testkit"
+	"github.com/AIShie-Education/AIShie-Core/internal/tools"
 )
 
 // serveMemory is serve on a server that keeps agents' memory (MEMORY=on).

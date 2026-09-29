@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/httpapi"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/ratelimit"
+	"github.com/AIShie-Education/AIShie-Core/internal/httpapi"
+	"github.com/AIShie-Education/AIShie-Core/internal/ratelimit"
 )
 
 // The sign-in page asks how a person may sign in here, and is told whether

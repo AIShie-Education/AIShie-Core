@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/apperr"
+	"github.com/AIShie-Education/AIShie-Core/internal/apperr"
 )
 
 // Single sign-on, from the browser's side:

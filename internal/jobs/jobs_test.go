@@ -16,15 +16,15 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/apperr"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/blob"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/db/dbq"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/domain"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/jobs"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/pipeline"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/testkit"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/tool"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/tools"
+	"github.com/AIShie-Education/AIShie-Core/internal/apperr"
+	"github.com/AIShie-Education/AIShie-Core/internal/blob"
+	"github.com/AIShie-Education/AIShie-Core/internal/db/dbq"
+	"github.com/AIShie-Education/AIShie-Core/internal/domain"
+	"github.com/AIShie-Education/AIShie-Core/internal/jobs"
+	"github.com/AIShie-Education/AIShie-Core/internal/pipeline"
+	"github.com/AIShie-Education/AIShie-Core/internal/testkit"
+	"github.com/AIShie-Education/AIShie-Core/internal/tool"
+	"github.com/AIShie-Education/AIShie-Core/internal/tools"
 )
 
 type m = map[string]any

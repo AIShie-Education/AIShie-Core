@@ -6,7 +6,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/ids"
+	"github.com/AIShie-Education/AIShie-Core/internal/ids"
 )
 
 // DeptTree is the world the department administrators' tests start from, on

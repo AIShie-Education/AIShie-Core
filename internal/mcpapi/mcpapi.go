@@ -28,14 +28,14 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/apperr"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/auth"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/canon"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/domain"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/pipeline"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/ratelimit"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/tool"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/version"
+	"github.com/AIShie-Education/AIShie-Core/internal/apperr"
+	"github.com/AIShie-Education/AIShie-Core/internal/auth"
+	"github.com/AIShie-Education/AIShie-Core/internal/canon"
+	"github.com/AIShie-Education/AIShie-Core/internal/domain"
+	"github.com/AIShie-Education/AIShie-Core/internal/pipeline"
+	"github.com/AIShie-Education/AIShie-Core/internal/ratelimit"
+	"github.com/AIShie-Education/AIShie-Core/internal/tool"
+	"github.com/AIShie-Education/AIShie-Core/internal/version"
 )
 
 // IdempotencyKey is the argument every state-changing MCP tool takes in

@@ -6,10 +6,10 @@ import (
 	"github.com/google/uuid"
 	"github.com/shopspring/decimal"
 
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/apperr"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/domain"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/testkit"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/tools"
+	"github.com/AIShie-Education/AIShie-Core/internal/apperr"
+	"github.com/AIShie-Education/AIShie-Core/internal/domain"
+	"github.com/AIShie-Education/AIShie-Core/internal/testkit"
+	"github.com/AIShie-Education/AIShie-Core/internal/tools"
 )
 
 // liveGrade is the one live grade entered on a submission, or on a component

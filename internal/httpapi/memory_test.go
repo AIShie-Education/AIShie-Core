@@ -7,11 +7,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/auth"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/db"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/httpapi"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/testkit"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/tools"
+	"github.com/AIShie-Education/AIShie-Core/internal/auth"
+	"github.com/AIShie-Education/AIShie-Core/internal/db"
+	"github.com/AIShie-Education/AIShie-Core/internal/httpapi"
+	"github.com/AIShie-Education/AIShie-Core/internal/testkit"
+	"github.com/AIShie-Education/AIShie-Core/internal/tools"
 )
 
 // An agent that writes to its memory faster than it may is refused with

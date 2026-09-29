@@ -11,8 +11,8 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/httpapi"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/ratelimit"
+	"github.com/AIShie-Education/AIShie-Core/internal/httpapi"
+	"github.com/AIShie-Education/AIShie-Core/internal/ratelimit"
 )
 
 // The join endpoints, over HTTP: the page that opens a join link asks what

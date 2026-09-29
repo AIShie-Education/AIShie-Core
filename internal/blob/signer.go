@@ -6,7 +6,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/signing"
+	"github.com/AIShie-Education/AIShie-Core/internal/signing"
 )
 
 // Signer makes and checks the two kinds of signed token this package uses:

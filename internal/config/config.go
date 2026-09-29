@@ -17,8 +17,8 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/memory"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/wake"
+	"github.com/AIShie-Education/AIShie-Core/internal/memory"
+	"github.com/AIShie-Education/AIShie-Core/internal/wake"
 )
 
 type Config struct {

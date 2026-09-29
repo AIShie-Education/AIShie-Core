@@ -26,8 +26,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/db"
-	dbfiles "github.com/AIShiteru-LMS/AIShiteru-Core/src"
+	"github.com/AIShie-Education/AIShie-Core/internal/db"
+	dbfiles "github.com/AIShie-Education/AIShie-Core/src"
 )
 
 const envURL = "TEST_DATABASE_URL"

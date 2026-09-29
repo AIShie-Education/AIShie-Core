@@ -4,9 +4,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/apperr"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/auth"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/memory"
+	"github.com/AIShie-Education/AIShie-Core/internal/apperr"
+	"github.com/AIShie-Education/AIShie-Core/internal/auth"
+	"github.com/AIShie-Education/AIShie-Core/internal/memory"
 )
 
 // What memory keeps of a text, and what it refuses: empty, too long, a

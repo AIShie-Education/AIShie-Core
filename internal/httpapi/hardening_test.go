@@ -18,13 +18,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/auth"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/db"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/db/dbq"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/httpapi"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/mcpapi"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/ratelimit"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/testkit"
+	"github.com/AIShie-Education/AIShie-Core/internal/auth"
+	"github.com/AIShie-Education/AIShie-Core/internal/db"
+	"github.com/AIShie-Education/AIShie-Core/internal/db/dbq"
+	"github.com/AIShie-Education/AIShie-Core/internal/httpapi"
+	"github.com/AIShie-Education/AIShie-Core/internal/mcpapi"
+	"github.com/AIShie-Education/AIShie-Core/internal/ratelimit"
+	"github.com/AIShie-Education/AIShie-Core/internal/testkit"
 )
 
 // hardened is the API as serve builds it: limits, logging, MCP and all.

@@ -6,8 +6,8 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/db"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/version"
+	"github.com/AIShie-Education/AIShie-Core/internal/db"
+	"github.com/AIShie-Education/AIShie-Core/internal/version"
 )
 
 type healthResponse struct {

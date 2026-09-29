@@ -11,12 +11,12 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/apperr"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/blob"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/domain"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/pipeline"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/testkit"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/tools"
+	"github.com/AIShie-Education/AIShie-Core/internal/apperr"
+	"github.com/AIShie-Education/AIShie-Core/internal/blob"
+	"github.com/AIShie-Education/AIShie-Core/internal/domain"
+	"github.com/AIShie-Education/AIShie-Core/internal/pipeline"
+	"github.com/AIShie-Education/AIShie-Core/internal/testkit"
+	"github.com/AIShie-Education/AIShie-Core/internal/tools"
 )
 
 // upload does what a client does: ask for a URL, PUT the bytes to it, keep

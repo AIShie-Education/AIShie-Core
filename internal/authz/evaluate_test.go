@@ -7,7 +7,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/domain"
+	"github.com/AIShie-Education/AIShie-Core/internal/domain"
 )
 
 // Steps 1–3 as a decision table. No database: Evaluate is pure.

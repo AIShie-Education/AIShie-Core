@@ -8,14 +8,14 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/apperr"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/domain"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/events"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/pipeline"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/testkit"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/tool"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/tools"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/wake"
+	"github.com/AIShie-Education/AIShie-Core/internal/apperr"
+	"github.com/AIShie-Education/AIShie-Core/internal/domain"
+	"github.com/AIShie-Education/AIShie-Core/internal/events"
+	"github.com/AIShie-Education/AIShie-Core/internal/pipeline"
+	"github.com/AIShie-Education/AIShie-Core/internal/testkit"
+	"github.com/AIShie-Education/AIShie-Core/internal/tool"
+	"github.com/AIShie-Education/AIShie-Core/internal/tools"
+	"github.com/AIShie-Education/AIShie-Core/internal/wake"
 )
 
 // Long polling: a read that finds nothing new, asked to wait (wait_s),

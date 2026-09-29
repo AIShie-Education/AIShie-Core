@@ -5,7 +5,7 @@ import (
 	"testing"
 	"unicode/utf8"
 
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/apperr"
+	"github.com/AIShie-Education/AIShie-Core/internal/apperr"
 )
 
 // A message that repeats a megabyte is cut short, between two characters,

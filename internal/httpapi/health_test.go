@@ -6,9 +6,9 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/db"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/httpapi"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/testdb"
+	"github.com/AIShie-Education/AIShie-Core/internal/db"
+	"github.com/AIShie-Education/AIShie-Core/internal/httpapi"
+	"github.com/AIShie-Education/AIShie-Core/internal/testdb"
 )
 
 func get(t *testing.T, h http.Handler, path string) (int, map[string]any) {

@@ -7,9 +7,9 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/blob"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/pipeline"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/wake"
+	"github.com/AIShie-Education/AIShie-Core/internal/blob"
+	"github.com/AIShie-Education/AIShie-Core/internal/pipeline"
+	"github.com/AIShie-Education/AIShie-Core/internal/wake"
 )
 
 // NewPlatformWaking is NewPlatform on a pipeline whose reads may wait for

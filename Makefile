@@ -6,7 +6,7 @@ SHELL       := /bin/bash
 .SHELLFLAGS := -eu -o pipefail -c
 
 BIN     := bin/aishiterud
-PKG     := github.com/AIShiteru-LMS/AIShiteru-Core
+PKG     := github.com/AIShie-Education/AIShie-Core
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 DATE    ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)

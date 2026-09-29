@@ -17,8 +17,8 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/db/dbq"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/wake"
+	"github.com/AIShie-Education/AIShie-Core/internal/db/dbq"
+	"github.com/AIShie-Education/AIShie-Core/internal/wake"
 )
 
 // Event types. The catalogue grows with the tool catalogue.

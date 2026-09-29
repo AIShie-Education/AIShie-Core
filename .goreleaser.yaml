@@ -20,9 +20,9 @@ builds:
     # last two in), and the version as `make build` has it: v1.2.3, not 1.2.3.
     ldflags:
       - -s -w
-      - -X github.com/AIShiteru-LMS/AIShiteru-Core/internal/version.Version={{ if .IsSnapshot }}{{ .Version }}{{ else }}{{ .Tag }}{{ end }}
-      - -X github.com/AIShiteru-LMS/AIShiteru-Core/internal/version.Commit={{ or (index .Env "SHORT_COMMIT") .ShortCommit }}
-      - -X github.com/AIShiteru-LMS/AIShiteru-Core/internal/version.Date={{ or (index .Env "COMMIT_DATE") .CommitDate }}
+      - -X github.com/AIShie-Education/AIShie-Core/internal/version.Version={{ if .IsSnapshot }}{{ .Version }}{{ else }}{{ .Tag }}{{ end }}
+      - -X github.com/AIShie-Education/AIShie-Core/internal/version.Commit={{ or (index .Env "SHORT_COMMIT") .ShortCommit }}
+      - -X github.com/AIShie-Education/AIShie-Core/internal/version.Date={{ or (index .Env "COMMIT_DATE") .CommitDate }}
     mod_timestamp: "{{ .CommitTimestamp }}" # reproducible: the same commit gives the same bytes
 
 archives:

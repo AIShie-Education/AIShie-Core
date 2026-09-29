@@ -8,7 +8,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/wake"
+	"github.com/AIShie-Education/AIShie-Core/internal/wake"
 )
 
 // soon is long enough for a wake-up that is coming to come, and short enough

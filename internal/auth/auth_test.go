@@ -14,11 +14,11 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/apperr"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/auth"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/db/dbq"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/ids"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/testdb"
+	"github.com/AIShie-Education/AIShie-Core/internal/apperr"
+	"github.com/AIShie-Education/AIShie-Core/internal/auth"
+	"github.com/AIShie-Education/AIShie-Core/internal/db/dbq"
+	"github.com/AIShie-Education/AIShie-Core/internal/ids"
+	"github.com/AIShie-Education/AIShie-Core/internal/testdb"
 )
 
 var tokenShape = regexp.MustCompile(`^ais_[a-z2-7]{12}_[A-Za-z0-9_-]{43}$`)

@@ -10,10 +10,10 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/db"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/db/dbq"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/testdb"
-	dbfiles "github.com/AIShiteru-LMS/AIShiteru-Core/src"
+	"github.com/AIShie-Education/AIShie-Core/internal/db"
+	"github.com/AIShie-Education/AIShie-Core/internal/db/dbq"
+	"github.com/AIShie-Education/AIShie-Core/internal/testdb"
+	dbfiles "github.com/AIShie-Education/AIShie-Core/src"
 )
 
 // Every migration must be reversible, and reversing must leave nothing behind

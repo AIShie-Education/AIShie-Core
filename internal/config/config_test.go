@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/memory"
+	"github.com/AIShie-Education/AIShie-Core/internal/memory"
 )
 
 func TestFromEnv(t *testing.T) {

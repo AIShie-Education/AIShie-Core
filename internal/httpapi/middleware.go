@@ -12,9 +12,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/apperr"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/blob"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/wake"
+	"github.com/AIShie-Education/AIShie-Core/internal/apperr"
+	"github.com/AIShie-Education/AIShie-Core/internal/blob"
+	"github.com/AIShie-Education/AIShie-Core/internal/wake"
 )
 
 // tooMany answers a call that came too soon. It was never attempted: nothing

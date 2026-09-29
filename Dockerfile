@@ -14,9 +14,9 @@ RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath \
     -ldflags "-s -w \
-      -X github.com/AIShiteru-LMS/AIShiteru-Core/internal/version.Version=${VERSION} \
-      -X github.com/AIShiteru-LMS/AIShiteru-Core/internal/version.Commit=${COMMIT} \
-      -X github.com/AIShiteru-LMS/AIShiteru-Core/internal/version.Date=${DATE}" \
+      -X github.com/AIShie-Education/AIShie-Core/internal/version.Version=${VERSION} \
+      -X github.com/AIShie-Education/AIShie-Core/internal/version.Commit=${COMMIT} \
+      -X github.com/AIShie-Education/AIShie-Core/internal/version.Date=${DATE}" \
     -o /out/aishiterud ./cmd/aishiterud
 
 # Migrations and the seed are embedded in the binary, so the image is just the

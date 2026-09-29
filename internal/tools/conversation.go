@@ -11,15 +11,15 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/apperr"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/authz"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/db/dbq"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/domain"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/events"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/ids"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/members"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/tool"
-	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/wake"
+	"github.com/AIShie-Education/AIShie-Core/internal/apperr"
+	"github.com/AIShie-Education/AIShie-Core/internal/authz"
+	"github.com/AIShie-Education/AIShie-Core/internal/db/dbq"
+	"github.com/AIShie-Education/AIShie-Core/internal/domain"
+	"github.com/AIShie-Education/AIShie-Core/internal/events"
+	"github.com/AIShie-Education/AIShie-Core/internal/ids"
+	"github.com/AIShie-Education/AIShie-Core/internal/members"
+	"github.com/AIShie-Education/AIShie-Core/internal/tool"
+	"github.com/AIShie-Education/AIShie-Core/internal/wake"
 )
 
 // A conversation is one member asking an agent seated in the course
