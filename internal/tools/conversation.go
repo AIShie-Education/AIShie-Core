@@ -722,18 +722,27 @@ func checkAnswer(ctx context.Context, q dbq.Querier, m, opener *domain.Member, n
 	return err
 }
 
+// errWithdrawn refuses an answer once the opener's latest message is
+// retracted: nothing waits for an answer, so it names no message to answer.
+var errWithdrawn = apperr.Conflicts("the question was withdrawn: nothing waits for an answer now").With("reason", "moved_on")
+
 // newerQuestion refuses an answer to anything but the opener's latest
-// message, and to that message once it is answered: whoever answers answers
-// what was last asked, once. A reply made for an older question — one that
-// waited for approval, or one a slow model wrote — is not given to a
-// conversation that has moved on, and a second reply to one question — a
-// retry under a new key, two proposals both approved — is not posted beside
-// the first. Asked under the conversation's row lock, it is what makes an
-// answer safe to write again after one failed.
+// message, and to that message once it is answered or retracted: whoever
+// answers answers what was last asked, once, while it is still asked. A reply
+// made for an older question — one that waited for approval, or one a slow
+// model wrote — is not given to a conversation that has moved on, nor one to
+// a question its opener withdrew ("stop"), and a second reply to one
+// question — a retry under a new key, two proposals both approved — is not
+// posted beside the first. Asked under the conversation's row lock, which a
+// retraction of the opener's message takes too, it is what makes an answer
+// safe to write again after one failed.
 func newerQuestion(ctx context.Context, q dbq.Querier, c dbq.Conversation, answered uuid.UUID) error {
 	latest, err := q.LatestOpenerMessage(ctx, c.ID)
 	if err != nil {
 		return err
+	}
+	if latest.Retracted {
+		return errWithdrawn
 	}
 	if latest.ID != answered {
 		return apperr.Conflicts("the conversation moved on; answer the latest message").
@@ -755,11 +764,13 @@ func conversationAnswer() tool.Tool {
 		Description: "Answer, as an agent, in a conversation addressed to you (conversation.inbox lists those waiting), " +
 			"replying to the opener's latest message, whose id you give as in_reply_to_message_id. A person answers none, " +
 			"and is refused (conversations_are_with_agents). It is refused as a conflict, with a reason: " +
-			"moved_on if the opener has written again since (read the new message and answer that), already_answered if that " +
-			"message has its answer, answer_pending if an answer of yours to it waits for approval, closed if the conversation " +
-			"is. Your level of conversation_answer decides whether an answer is posted at once, posted and reviewed after, or " +
-			"waits for a person's approval; one that waits is checked again when approved, and refused then if the " +
-			"conversation has moved on. An answer that failed or was rejected may be written again, under a new idempotency key.",
+			"moved_on if the opener has written again since (read the new message and answer that), or has withdrawn " +
+			"(retracted) their latest message, when nothing waits for an answer and no message is named; already_answered " +
+			"if that message has its answer, answer_pending if an answer of yours to it waits for approval, closed if the " +
+			"conversation is. Your level of conversation_answer decides whether an answer is posted at once, posted and " +
+			"reviewed after, or waits for a person's approval; one that waits is checked again when approved, and refused " +
+			"then if the conversation has moved on. An answer that failed or was rejected may be written again, under a new " +
+			"idempotency key.",
 		Kind: tool.Write, Gate: answers,
 		// Its owner judges an agent's answer where they decide actions
 		// here without anyone's confirmation: no person answers, so that
@@ -906,12 +917,23 @@ type ConversationRetractIn struct {
 // oversees the conversation's opener, which the tool checks. A retraction
 // withholds the message from the read tools; the action that wrote it keeps
 // what it said.
+//
+// A message of the opener's is retracted under the conversation's row lock
+// (LockConversationForAnswer), as an answer is posted or proposed under it,
+// so that the two are made one after the other. With the opener's latest
+// message retracted, its question is withdrawn and nothing waits for an
+// answer in the conversation: an answer to it, posted or approved after, is
+// refused (newerQuestion), the views say answered, and its draft is deleted
+// here, in the same transaction.
 func conversationRetract() tool.Tool {
 	return tool.Define(tool.Spec[ConversationRetractIn, OK]{
 		Name: "conversation.retract",
 		Description: "Withdraw a message: its author may, and so may course staff who decide actions for the conversation's " +
 			"opener. The read tools show it as retracted, by whom and why, without its text. The record of the action that " +
-			"wrote it is kept, text and all, for those who decide actions in the course.",
+			"wrote it is kept, text and all, for those who decide actions in the course. Withdrawing the opener's latest " +
+			"message withdraws the question: it is not answered, the conversation waits for no answer (state answered), an " +
+			"answer to it under way or waiting for approval is refused (moved_on), and the answer being written (draft) is " +
+			"gone.",
 		Kind: tool.Write, Gate: converses,
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/conversation-messages/{message_id}/retract"},
 		Resolve: func(ctx context.Context, q dbq.Querier, in ConversationRetractIn) (tool.Target, error) {
@@ -940,6 +962,13 @@ func conversationRetract() tool.Tool {
 			if err != nil {
 				return OK{}, err
 			}
+			conversation := msg.ConversationID
+			asked := msg.AuthorMemberID == msg.OpenerMemberID
+			if asked {
+				if err := ec.Q.LockConversationForAnswer(ctx, conversation); err != nil {
+					return OK{}, err
+				}
+			}
 			n, err := ec.Q.InsertRetraction(ctx, dbq.InsertRetractionParams{MessageID: msg.ID, CourseID: in.CourseID,
 				RetractedByMemberID: ec.Member.ID, CreatedByActionID: ec.ActionID, Reason: reason, CreatedAt: ec.Now})
 			if err != nil {
@@ -948,7 +977,20 @@ func conversationRetract() tool.Tool {
 			if n == 0 {
 				return OK{}, apperr.Conflicts("the message is retracted already")
 			}
-			conversation := msg.ConversationID
+			if asked {
+				// The opener's latest message retracted, the question is
+				// withdrawn and the answer being written to it goes; an
+				// older message retracted leaves the draft as it is.
+				latest, err := ec.Q.LatestOpenerMessage(ctx, conversation)
+				if err != nil {
+					return OK{}, err
+				}
+				if latest.ID == msg.ID {
+					if err := ec.Q.DeleteDraft(ctx, conversation); err != nil {
+						return OK{}, err
+					}
+				}
+			}
 			ec.Emit(events.Event{Type: events.ConversationMessageRetracted, CourseID: &in.CourseID, SubjectType: "conversation", SubjectID: &conversation,
 				Payload: map[string]any{"conversation_id": conversation, "message_id": msg.ID, "by_member_id": ec.Member.ID}})
 			return OK{OK: true}, nil
@@ -1070,7 +1112,7 @@ type ConversationView struct {
 	Title        *string   `json:"title,omitempty"`
 	Status       string    `json:"status" jsonschema:"open or closed"`
 	ClosedReason *string   `json:"closed_reason,omitempty" jsonschema:"why it was closed: what its closer said; seat_removed, when a participant's seat was removed; conversations_are_with_agents, when its respondent was a person, as no conversation's is any more"`
-	State        string    `json:"state" jsonschema:"awaiting_answer: the opener wrote last; reply_pending_approval: an answer waits for a person's approval; answered: the respondent wrote last, or nothing has been asked yet; closed"`
+	State        string    `json:"state" jsonschema:"awaiting_answer: the opener wrote last; reply_pending_approval: an answer waits for a person's approval; answered: the respondent wrote last, or nothing has been asked yet, or the opener withdrew (retracted) what they asked last; closed"`
 	// PendingReplyActionID is the answer that waits for approval, when one
 	// does.
 	PendingReplyActionID  *uuid.UUID             `json:"pending_reply_action_id,omitempty"`
@@ -1127,6 +1169,11 @@ func conversationViews(ctx context.Context, q dbq.Querier, now time.Time, list [
 		switch {
 		case r.Status == StateClosed:
 			v.State = StateClosed
+		case r.LatestOpenerMessageRetracted:
+			// The question is withdrawn, and nothing waits for an answer:
+			// not even one proposed to it, which can never be posted, and
+			// which ConversationDetails leaves out.
+			v.State = StateAnswered
 		case r.PendingReplyActionID != nil:
 			v.State = StateReplyPendingApproval
 		case r.LastAuthorMemberID != nil && *r.LastAuthorMemberID == r.OpenerMemberID:

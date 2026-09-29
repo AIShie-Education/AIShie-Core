@@ -1,6 +1,7 @@
 package tools_test
 
 import (
+	"context"
 	"fmt"
 	"testing"
 	"time"
@@ -458,6 +459,275 @@ func TestRetractingAMessage(t *testing.T) {
 	if n := b.Count(`SELECT count(*) FROM event WHERE payload::text LIKE '%hunter2%' OR payload::text LIKE '%Oops%'`); n != 0 {
 		t.Fatal("what was written reached the feed")
 	}
+}
+
+// stateOf is the state of Yuki's conversation conv as conversation.get says
+// it to her, insisting that conversation.messages and me.conversations say
+// the same, and that conversation.list, filtered by each state, lists it
+// under that one alone.
+func (b *built) stateOf(t *testing.T, conv uuid.UUID) string {
+	t.Helper()
+	got := b.conversation(t, b.yuki, conv).State
+	read := testkit.Result[tools.ConversationMessagesOut](t, b.do(t, b.yuki, "conversation.messages",
+		m{"course_id": b.course, "conversation_id": conv})).Conversation
+	if read.State != got {
+		t.Fatalf("conversation.get says %s, conversation.messages %s", got, read.State)
+	}
+	mine := false
+	for _, c := range b.mine(t, b.yuki, m{}).Conversations {
+		if c.ConversationID == conv {
+			mine = true
+			if c.State != got {
+				t.Fatalf("conversation.get says %s, me.conversations %s", got, c.State)
+			}
+		}
+	}
+	if !mine {
+		t.Fatal("me.conversations leaves the conversation out")
+	}
+	for _, state := range []string{tools.StateAwaitingAnswer, tools.StateReplyPendingApproval, tools.StateAnswered, tools.StateClosed} {
+		listed := false
+		for _, v := range b.listConversations(t, b.yuki, m{"state": state}) {
+			listed = listed || v.ID == conv
+		}
+		if listed != (state == got) {
+			t.Fatalf("conversation.get says %s; listed with state %s: %v", got, state, listed)
+		}
+	}
+	return got
+}
+
+// withdrawn insists that e refuses an answer because its question was
+// withdrawn: a conflict, moved_on, naming no message to answer instead.
+func withdrawn(t *testing.T, e *apperr.Error, what string) {
+	t.Helper()
+	if e == nil || e.Code != apperr.Conflict || e.Details["reason"] != "moved_on" {
+		t.Fatalf("%s: %+v", what, e)
+	}
+	if id, named := e.Details["latest_opener_message_id"]; named {
+		t.Fatalf("%s names %v to answer: %+v", what, id, e)
+	}
+}
+
+// A question its opener withdraws — "stop", conversation.retract of their
+// latest message — waits for no answer: an answer to it is refused as
+// moved_on, naming nothing else to answer; the conversation is answered in
+// every view and filter, out of the inbox, and takes no draft, the one
+// under way gone with the question. Withdrawing an older message changes
+// none of that, whoever withdraws the latest does the same, and asking
+// again makes the conversation wait for an answer again.
+func TestAWithdrawnQuestionWaitsForNoAnswer(t *testing.T) {
+	b := build(t)
+	conv, q := b.open(t, b.yuki, b.tutorM, "Is HW3 due on Friday?")
+	b.draft(t, b.tutor, conv, "a1", 1, m{"text": "Yes"})
+	if s := b.stateOf(t, conv); s != tools.StateAwaitingAnswer {
+		t.Fatalf("the conversation asked: %s", s)
+	}
+	b.do(t, b.yuki, "conversation.retract", m{"course_id": b.course, "message_id": q, "reason": "stop"})
+
+	out := b.MustCall(b.tutor, "conversation.answer", answerArgs(b, conv, q, "Yes, at noon."), "answer:"+conv.String()+":"+q.String()+":1")
+	if out.Status != domain.StatusFailed {
+		t.Fatalf("an answer to a withdrawn question: %+v", out)
+	}
+	withdrawn(t, out.Error, "an answer to a withdrawn question")
+	if n := b.Count(`SELECT count(*) FROM conversation_message WHERE conversation_id = $1`, conv); n != 1 {
+		t.Fatal("an answer to a withdrawn question was posted")
+	}
+	if s := b.stateOf(t, conv); s != tools.StateAnswered {
+		t.Fatalf("the conversation, its question withdrawn: %s", s)
+	}
+	if got := b.conversation(t, b.tutor, conv); got.State != tools.StateAnswered || got.LastRetractedAt == nil {
+		t.Fatalf("the conversation as its respondent reads it: %+v", got)
+	}
+	if in := b.inbox(t, b.tutor); len(in) != 0 {
+		t.Fatalf("a withdrawn question is in the inbox: %+v", in)
+	}
+	if n := b.drafts(t, conv); n != 0 || b.seen(t, b.yuki, conv) != nil {
+		t.Fatal("the draft outlived the question it answered")
+	}
+	wantRefusal(t, b.refused(t, b.tutor, "conversation.draft", draftArgs(b, conv, "a1", 2, m{"text": "Yes, at"})), apperr.Conflict, "conversation_not_awaiting")
+
+	// Asked again, it waits again, and the new question is answered.
+	q2 := b.ask(t, b.yuki, conv, "Sorry: is HW4 due on Friday?")
+	if s := b.stateOf(t, conv); s != tools.StateAwaitingAnswer {
+		t.Fatalf("the conversation asked again: %s", s)
+	}
+	q3 := b.ask(t, b.yuki, conv, "I mean this Friday.")
+	b.draft(t, b.tutor, conv, "a2", 1, m{"text": "No"})
+
+	// An older message withdrawn: the latest still waits, with its draft,
+	// and an answer to the older one is told which to answer.
+	b.do(t, b.yuki, "conversation.retract", m{"course_id": b.course, "message_id": q2})
+	if s := b.stateOf(t, conv); s != tools.StateAwaitingAnswer {
+		t.Fatalf("the conversation, an older message withdrawn: %s", s)
+	}
+	if in := b.inbox(t, b.tutor); len(in) != 1 || in[0].ID != conv || *in[0].LatestOpenerMessageID != q3 {
+		t.Fatalf("the inbox, an older message withdrawn: %+v", in)
+	}
+	if d := b.seen(t, b.yuki, conv); d == nil || d.Attempt != "a2" {
+		t.Fatalf("the draft, an older message withdrawn: %+v", d)
+	}
+	stale := b.MustCall(b.tutor, "conversation.answer", answerArgs(b, conv, q2, "No."), "answer:"+conv.String()+":"+q2.String()+":1")
+	if stale.Status != domain.StatusFailed || reason(stale) != "moved_on" || fmt.Sprint(stale.Error.Details["latest_opener_message_id"]) != q3.String() {
+		t.Fatalf("an answer to an older message, withdrawn: %+v", stale)
+	}
+	b.do(t, b.tutor, "conversation.answer", answerArgs(b, conv, q3, "No, on Monday."))
+	if s := b.stateOf(t, conv); s != tools.StateAnswered {
+		t.Fatalf("the conversation answered: %s", s)
+	}
+
+	// Staff who oversee the opener withdraw her question as she would.
+	q4 := b.ask(t, b.yuki, conv, "My password is hunter2, can you log in for me?")
+	b.do(t, b.sato, "conversation.retract", m{"course_id": b.course, "message_id": q4})
+	out = b.MustCall(b.tutor, "conversation.answer", answerArgs(b, conv, q4, "Please do not share that."), "answer:"+conv.String()+":"+q4.String()+":1")
+	if out.Status != domain.StatusFailed {
+		t.Fatalf("an answer to a question staff withdrew: %+v", out)
+	}
+	withdrawn(t, out.Error, "an answer to a question staff withdrew")
+	if s := b.stateOf(t, conv); s != tools.StateAnswered {
+		t.Fatalf("the conversation, staff having withdrawn its question: %s", s)
+	}
+
+	// Closed wins.
+	b.do(t, b.yuki, "conversation.close", m{"course_id": b.course, "conversation_id": conv})
+	if s := b.stateOf(t, conv); s != tools.StateClosed {
+		t.Fatalf("the conversation closed: %s", s)
+	}
+}
+
+// An answer waiting for approval to a question since withdrawn waits for
+// nothing: the conversation is answered, shows no answer waiting, and
+// approving the answer can only fail, moved_on. Proposed after the
+// withdrawal, it is refused before it is queued.
+func TestAnAnswerProposedToAWithdrawnQuestionIsNeverPosted(t *testing.T) {
+	b := build(t)
+	b.do(t, b.sato, "member.update_perms", m{"course_id": b.course, "member_id": b.tutorM, "perms": m{"conversation_answer": "confirm_required"}})
+	conv, q := b.open(t, b.yuki, b.tutorM, "Is HW3 due on Friday?")
+	proposed := b.MustCall(b.tutor, "conversation.answer", answerArgs(b, conv, q, "Yes, at noon."), "answer:"+conv.String()+":"+q.String()+":1")
+	if proposed.Status != domain.StatusProposed {
+		t.Fatalf("the answer: %+v", proposed)
+	}
+	if s := b.stateOf(t, conv); s != tools.StateReplyPendingApproval {
+		t.Fatalf("the conversation, its answer waiting: %s", s)
+	}
+
+	b.do(t, b.yuki, "conversation.retract", m{"course_id": b.course, "message_id": q})
+	if got := b.conversation(t, b.yuki, conv); got.State != tools.StateAnswered || got.PendingReplyActionID != nil {
+		t.Fatalf("the conversation, the question its answer waits for withdrawn: %+v", got)
+	}
+	if s := b.stateOf(t, conv); s != tools.StateAnswered {
+		t.Fatalf("the conversation, the question its answer waits for withdrawn: %s", s)
+	}
+	d := testkit.Result[pipeline.DecideOut](t, b.do(t, b.sato, "action.decide", m{"course_id": b.course, "action_id": proposed.ActionID, "decision": "approve"}))
+	if d.Outcome != domain.StatusFailed {
+		t.Fatalf("approving an answer to a withdrawn question: %+v", d)
+	}
+	withdrawn(t, d.Error, "approving an answer to a withdrawn question")
+	if n := b.Count(`SELECT count(*) FROM conversation_message WHERE conversation_id = $1`, conv); n != 1 {
+		t.Fatal("an answer to a withdrawn question was posted on approval")
+	}
+
+	late := b.MustCall(b.tutor, "conversation.answer", answerArgs(b, conv, q, "Yes."), "answer:"+conv.String()+":"+q.String()+":2")
+	if late.Status != domain.StatusFailed {
+		t.Fatalf("proposing an answer to a withdrawn question: %+v", late)
+	}
+	withdrawn(t, late.Error, "proposing an answer to a withdrawn question")
+	if n := b.Count(`SELECT count(*) FROM action WHERE action_type = 'conversation.answer' AND status = 'proposed'`); n != 0 {
+		t.Fatalf("%d answers to a withdrawn question wait for approval", n)
+	}
+	if s := b.stateOf(t, conv); s != tools.StateAnswered {
+		t.Fatalf("the conversation after it all: %s", s)
+	}
+}
+
+// A question withdrawn and an answer to it are made one after the other,
+// never across each other: the opener's retraction takes the conversation as
+// writing a message does. So a retraction waits for an answer being posted,
+// and withdraws a question answered already; and an answer, posted or
+// proposed, that comes while the question is being withdrawn waits for the
+// retraction and is refused. Once "stop" is done, no answer to it follows.
+func TestAWithdrawalAndAnAnswerNeverPassEachOther(t *testing.T) {
+	b := build(t)
+	ctx := context.Background()
+
+	// An answer being posted holds the conversation (TouchConversation).
+	conv, q := b.open(t, b.yuki, b.tutorM, "What is a thesis?")
+	release := b.hold(t, `UPDATE conversation SET last_message_at = now(), last_author_member_id = respondent_member_id WHERE id = $1`, conv)
+	done := make(chan pipeline.Outcome, 1)
+	b.start(t, done, b.yuki, "conversation.retract", m{"course_id": b.course, "message_id": q})
+	b.blocked(t, 1, done)
+	if len(done) != 0 {
+		t.Fatalf("the retraction did not wait for the answer being posted: %+v", <-done)
+	}
+	release()
+	select {
+	case out := <-done:
+		if out.Status != domain.StatusExecuted {
+			t.Fatalf("a retraction that waited for an answer: %+v", out)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the retraction never came back")
+	}
+
+	// A retraction under way holds the conversation as LockConversationForAnswer
+	// does, and has written its row: an answer made meanwhile waits for it.
+	during := func(t *testing.T, conv, q uuid.UUID, answer func(done chan pipeline.Outcome)) pipeline.Outcome {
+		t.Helper()
+		var action uuid.UUID
+		if err := b.Pool.QueryRow(ctx, `SELECT created_by_action_id FROM conversation_message WHERE id = $1`, q).Scan(&action); err != nil {
+			t.Fatal(err)
+		}
+		tx, err := b.Pool.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = tx.Rollback(ctx) }()
+		if _, err := tx.Exec(ctx, `SELECT 1 FROM conversation WHERE id = $1 FOR NO KEY UPDATE`, conv); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO conversation_message_retraction (message_id, course_id, retracted_by_member_id, created_by_action_id)
+			VALUES ($1, $2, $3, $4)`, q, b.course, b.yukiM, action); err != nil {
+			t.Fatal(err)
+		}
+		done := make(chan pipeline.Outcome, 1)
+		answer(done)
+		b.blocked(t, 1, done)
+		if err := tx.Commit(ctx); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case out := <-done:
+			return out
+		case <-time.After(10 * time.Second):
+			t.Fatal("the answer never came back")
+		}
+		return pipeline.Outcome{}
+	}
+	t.Run("posted", func(t *testing.T) {
+		conv, q := b.open(t, b.yuki, b.tutorM, "Where do I start?")
+		out := during(t, conv, q, func(done chan pipeline.Outcome) {
+			b.start(t, done, b.tutor, "conversation.answer", answerArgs(b, conv, q, "Chapter one."))
+		})
+		if out.Status != domain.StatusFailed {
+			t.Fatalf("an answer posted while its question was withdrawn: %+v", out)
+		}
+		withdrawn(t, out.Error, "an answer posted while its question was withdrawn")
+		if n := b.Count(`SELECT count(*) FROM conversation_message WHERE conversation_id = $1`, conv); n != 1 {
+			t.Fatal("an answer was posted to a question withdrawn under it")
+		}
+	})
+	t.Run("proposed", func(t *testing.T) {
+		b.do(t, b.sato, "member.update_perms", m{"course_id": b.course, "member_id": b.tutorM, "perms": m{"conversation_answer": "confirm_required"}})
+		defer b.do(t, b.sato, "member.update_perms", m{"course_id": b.course, "member_id": b.tutorM, "perms": m{"conversation_answer": "autonomous"}})
+		conv, q := b.open(t, b.yuki, b.tutorM, "And then?")
+		out := during(t, conv, q, func(done chan pipeline.Outcome) {
+			b.start(t, done, b.tutor, "conversation.answer", answerArgs(b, conv, q, "Chapter two."))
+		})
+		if out.Status != domain.StatusFailed {
+			t.Fatalf("an answer proposed while its question was withdrawn: %+v", out)
+		}
+		withdrawn(t, out.Error, "an answer proposed while its question was withdrawn")
+	})
 }
 
 // A respondent reads a conversation only while its opener may still address

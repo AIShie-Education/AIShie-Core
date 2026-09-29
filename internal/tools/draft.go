@@ -33,8 +33,9 @@ import (
 // event, and it bounds its own rate, per conversation, beside which it costs
 // its caller nothing of theirs. It is kept, one per conversation, in an
 // UNLOGGED table, the last write winning, and is gone once the answer is
-// posted or proposed, the conversation is closed, or its runtime says the
-// attempt is over; one nobody has written for DraftTTL is no draft.
+// posted or proposed, the question is withdrawn (the opener's latest message
+// retracted), the conversation is closed, or its runtime says the attempt is
+// over; one nobody has written for DraftTTL is no draft.
 //
 // Who sees its text is who would see the answer: the opener, and whoever
 // else reads the conversation, while the respondent's answers are posted as
@@ -102,8 +103,8 @@ type DraftView struct {
 var (
 	errNotTheRespondent = apperr.Forbid("only the member a conversation is addressed to writes its answer's draft").
 				With("reason", "not_the_respondent")
-	errNotAwaiting = apperr.Conflicts("the conversation waits for no answer now: it is answered, an answer waits for approval, "+
-		"or it is closed; a draft is written only while it waits").With("reason", "conversation_not_awaiting")
+	errNotAwaiting = apperr.Conflicts("the conversation waits for no answer now: it is answered, its question withdrawn, an "+
+		"answer waits for approval, or it is closed; a draft is written only while it waits").With("reason", "conversation_not_awaiting")
 )
 
 // errDraftTooSoon refuses a draft written faster than DraftWritesPerSecond,
@@ -176,12 +177,12 @@ func conversationDraft(limit *ratelimit.Limiter) tool.Tool {
 			"write replaces the draft whole: steps (thinking, reading_document, ... each running or done) and text, both " +
 			"the whole list and the whole text so far; either left out keeps the attempt's. A write whose attempt and " +
 			"version are not newer than the draft kept is passed over (stored false). done ends the attempt, given up or " +
-			"finished. Posting or proposing the answer, or closing the conversation, clears it; one not written for 120 " +
-			"seconds is gone. Only the respondent writes, while the conversation waits for its answer " +
-			"(not_the_respondent, conversation_not_awaiting). It is recorded nowhere: no action, no idempotency key, " +
-			"never proposed; at most 10 writes a second per conversation (rate_limited), and a write carried out does " +
-			"not count against your rate limit. The text is shown to the opener only while your answers are posted " +
-			"without approval; otherwise to those who would approve them.",
+			"finished. Posting or proposing the answer, the opener withdrawing the question (retracting it), or closing the " +
+			"conversation, clears it; one not written for 120 seconds is gone. Only the respondent writes, while the " +
+			"conversation waits for its answer (not_the_respondent, conversation_not_awaiting). It is recorded nowhere: " +
+			"no action, no idempotency key, never proposed; at most 10 writes a second per conversation (rate_limited), " +
+			"and a write carried out does not count against your rate limit. The text is shown to the opener only while " +
+			"your answers are posted without approval; otherwise to those who would approve them.",
 		Kind: tool.Ephemeral, Gate: answers,
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/conversations/{conversation_id}/draft"},
 		Resolve: func(ctx context.Context, q dbq.Querier, in ConversationDraftIn) (tool.Target, error) {
