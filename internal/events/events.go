@@ -3,7 +3,8 @@
 //
 // A tool does not insert events. It calls Emit on its execution context, the
 // pipeline collects them, and Flush writes them as the last thing the
-// transaction does.
+// transaction does, and notifies whoever waits for a course's news (package
+// wake), which PostgreSQL tells them once the transaction commits.
 package events
 
 import (
@@ -12,10 +13,12 @@ import (
 	"fmt"
 	"hash/fnv"
 	"slices"
+	"strings"
 
 	"github.com/google/uuid"
 
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/db/dbq"
+	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/wake"
 )
 
 // Event types. The catalogue grows with the tool catalogue.
@@ -135,6 +138,7 @@ func Flush(ctx context.Context, q *dbq.Queries, b *Buffer) error {
 			return fmt.Errorf("event stream lock: %w", err)
 		}
 	}
+	var news wakeUps
 	for _, e := range b.events {
 		payload := []byte("{}")
 		if len(e.Payload) > 0 {
@@ -143,7 +147,7 @@ func Flush(ctx context.Context, q *dbq.Queries, b *Buffer) error {
 				return fmt.Errorf("event %s payload: %w", e.Type, err)
 			}
 		}
-		if err := q.InsertEvent(ctx, dbq.InsertEventParams{
+		seq, err := q.InsertEvent(ctx, dbq.InsertEventParams{
 			Type:            e.Type,
 			CourseID:        e.CourseID,
 			ActionID:        e.ActionID,
@@ -152,12 +156,69 @@ func Flush(ctx context.Context, q *dbq.Queries, b *Buffer) error {
 			StudentMemberID: e.StudentMemberID,
 			AssignmentID:    e.AssignmentID,
 			Payload:         payload,
-		}); err != nil {
+		})
+		if err != nil {
 			return fmt.Errorf("insert event %s: %w", e.Type, err)
 		}
+		news.add(e, seq)
+	}
+	if err := news.notify(ctx, q); err != nil {
+		return fmt.Errorf("wake-ups: %w", err)
 	}
 	b.events = nil
 	return nil
+}
+
+// wakeUps is the news one flush tells whoever waits for it (package wake):
+// one notification for each course, type, and conversation or proposal, at
+// the newest seq among its events. A grade posted to forty students is one
+// wake-up, not forty.
+type wakeUps struct {
+	keys []wakeKey
+	seqs map[wakeKey]int64
+}
+
+type wakeKey struct {
+	course, conversation, action uuid.UUID
+	kind                         string
+}
+
+// add counts e in, if it is news of a course. Its conversation is its subject
+// when that is one; a proposal's news names its action, whose target, when
+// that is a conversation, NotifyWake looks up: deciding an answer changes
+// what the conversation waits for.
+func (w *wakeUps) add(e Event, seq int64) {
+	if e.CourseID == nil {
+		return
+	}
+	k := wakeKey{course: *e.CourseID, kind: e.Type}
+	if e.SubjectType == "conversation" && e.SubjectID != nil {
+		k.conversation = *e.SubjectID
+	} else if strings.HasPrefix(e.Type, "action.") && e.ActionID != nil {
+		k.action = *e.ActionID
+	}
+	if w.seqs == nil {
+		w.seqs = map[wakeKey]int64{}
+	}
+	if _, seen := w.seqs[k]; !seen {
+		w.keys = append(w.keys, k)
+	}
+	w.seqs[k] = max(w.seqs[k], seq)
+}
+
+func (w *wakeUps) notify(ctx context.Context, q *dbq.Queries) error {
+	if len(w.keys) == 0 {
+		return nil
+	}
+	arg := dbq.NotifyWakeParams{Channel: wake.Channel}
+	for _, k := range w.keys {
+		arg.CourseIds = append(arg.CourseIds, k.course)
+		arg.Kinds = append(arg.Kinds, k.kind)
+		arg.Seqs = append(arg.Seqs, w.seqs[k])
+		arg.ConversationIds = append(arg.ConversationIds, k.conversation)
+		arg.ActionIds = append(arg.ActionIds, k.action)
+	}
+	return q.NotifyWake(ctx, arg)
 }
 
 // studentSeats returns the distinct students the events name.
