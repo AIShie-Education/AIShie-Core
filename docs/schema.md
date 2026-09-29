@@ -1008,6 +1008,35 @@ what became of what it proposed. `action.approved` carries an `outcome` — `exe
 for one another. News of a conversation is the exception both ways: its two participants see
 it, and nobody else (§2.8). Then scope, per row, as below.
 
+**Waiting for news.** A reader that would poll may wait instead. `conversation.inbox`,
+`conversation.messages` and `event.list` take `wait_s`, 0 to 25 seconds, 0 by default, which is
+the call as it always was. A call that finds nothing new (an empty inbox; no message after
+`after_seq`, the conversation standing as it did; no event after `since_seq` that the caller may
+see) waits up to `wait_s`, holding no transaction and no connection, until something it would
+read is committed. It then reads again, authorized again as the first time, and answers if it
+finds something; if not, it waits on. When its time is up it reads once more and answers with
+that. Whatever flushes events also calls `pg_notify('aishiteru_wake', …)` in the same
+transaction (`events.Flush`, query `NotifyWake`), once for each course, event type, and
+conversation or proposal, at the newest `seq`: `course_id`, `kind` (the event type) and
+`seq`, and, for news of a conversation or of a proposal whose target is one, `conversation_id`,
+`opener_member_id` and `respondent_member_id`. That is a few hundred bytes, well under the 8000
+a notification may carry. PostgreSQL delivers it when the transaction commits, never when it
+rolls back, to every instance listening. Each instance keeps one connection of its own on the
+channel (`wake.Listener`, `application_name` `aishiterud wake`). The listener reconnects with
+backoff, and each time it listens again it wakes every waiting call, since it heard nothing
+meanwhile. It hands each notification to the calls waiting in its process (`wake.Hub`). An
+inbox is woken by news, in its course, of a message or a decided proposal in a conversation
+addressed to the seat. A reader of a conversation is woken by any news of it: a message, a
+retraction, an answer proposed or decided, its closing. A feed is woken by any news of its
+course. A notification says where to look and never what is there, so one that is lost costs a
+wait its time and never an answer. A wait is one call to the rate limit. A call past
+`LONG_POLL_WAITERS` waiting calls in its process (1000), or past
+`LONG_POLL_WAITERS_PER_ACTOR` of one actor's (16), answers at once, as does one on a server
+shutting down. A wait ends when its client goes. `conversation.messages` also takes
+`seen_state`, the state its reader last saw: a conversation now in another state answers at
+once, though nothing was written, so that a change between two calls is not missed. Drafts
+of an answer, when they are streamed, will reach their readers by the same wake-up.
+
 `student_member_id` and `assignment_id` say whose the event is, so that the feed is
 scope-filtered in SQL exactly as `authorize()` filters a target: null means the event belongs
 to no student (or no assignment) and that scope does not apply. They are filled when the
@@ -1241,10 +1270,12 @@ by and to the students they answer for. To anyone else a conversation does not e
 without what was written; `conversation.inbox` those addressed to the caller that wait for
 it: open, the opener spoke last and has not retracted what it last wrote, the opener still
 live and still able to address the caller, and no answer of the caller's to that message
-waiting for approval. What can never count again — an opener removed, paused, suspended, or
-whose principal is — is left out in SQL, and the rest is read a batch at a time, oldest
-first, until enough are found, so that conversations whose openers may no longer ask do not
-stand for good in front of those that may.
+waiting for approval. With `wait_s`, an empty inbox waits for a question (§2.6, Waiting for
+news), and a reader of a conversation for what is written in it next. What can never count
+again — an opener removed, paused, suspended, or whose principal is — is left out in SQL, and
+the rest is read a batch at a time, oldest first, until enough are found, so that
+conversations whose openers may no longer ask do not stand for good in front of those that
+may.
 
 **Site chat: which agents answer in the site.** An agent answers only if something runs it that
 polls `conversation.inbox` and answers on its own:
@@ -1933,6 +1964,9 @@ that reads which credential the call came with.
 - Removing a seat closes its open conversations, a delegate's with its principal's.
 - A message is retracted by its author, or by whoever decides actions for the opener.
 - News of a conversation reaches its two participants and nobody else (`event.list`).
+- A read that waits for news (`wait_s`) holds no transaction or connection while it waits, and
+  is authorized again each time it reads; every event a transaction writes in a course is
+  notified in that transaction, so that a wait is woken on its commit and never on a rollback.
 - Who reaches an agent's memory (§2.9): one function for every memory tool, measured on every
   call from the agent's seats: owner memory while its owner is active, asker memory only through
   a conversation of the asker's that the agent may answer now, shared memory with a live seat and
@@ -1992,16 +2026,14 @@ garbage in the grades, full record in the log.
   `platform_role`.
 - **Embeddings and semantic search** of memory (§2.9): full text and recency in v1.
 - **The concept graph**, quizzes, retention policy.
-- **Waiting for news.** `event.list` and `conversation.inbox` are polled. A long poll, or
-  `LISTEN`/`NOTIFY` behind one, would let an agent answer as soon as it is asked without
-  polling hard; `event.seq` and `last_message_at` are the cursors it would use.
 - **One inbox for every course.** `conversation.inbox` is per course; an agent seated in
-  several polls each (from `me.memberships`).
+  several polls, or long-polls, each (from `me.memberships`).
 - **A course tutor reaching the asker's own work.** The course's tutor reads nobody's work,
   which is what puts it within every student's seat. Widening its reach for one conversation
   to the asker's own submissions and grades, and no one else's, is deferred.
 - **Token streaming.** An answer arrives whole, as one message; nothing is streamed while it
-  is written.
+  is written. A draft would reach a reader waiting on the conversation by the same wake-up as
+  a message does (§2.6, Waiting for news).
 - **Agents that belong to no one person.** An agent is owned by a person or by nobody; a course's
   or a department's own agent is seated as an ordinary member, or as its instructor's delegate
   (`course_tutor`). Agents do not own agents, and a delegate brings in no delegate of its own.
