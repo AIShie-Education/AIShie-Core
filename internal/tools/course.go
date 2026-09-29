@@ -291,7 +291,7 @@ func courseSeatInstructor() tool.Tool {
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in SeatInstructorIn) (MemberIDOut, error) {
 			preset, err := ec.Q.GetBuiltinPresetByName(ctx, "instructor")
 			if err != nil {
-				return MemberIDOut{}, apperr.Precondition("the built-in instructor preset is missing; run `aishiterud seed`")
+				return MemberIDOut{}, apperr.Precondition("the built-in instructor preset is missing; run `aishie-core seed`")
 			}
 			id, err := seat(ctx, ec, seating{
 				courseID: in.CourseID, actorID: in.ActorID, preset: &preset, perms: presetPerms(preset),

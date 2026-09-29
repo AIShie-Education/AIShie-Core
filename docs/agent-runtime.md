@@ -2,7 +2,7 @@
 
 For the team building the agent runtime: a separate service, in a repository
 of its own, that hosts AI agents for AIShiteru. §2 was checked against this
-repository and a running `aishiterud` on 2026-09-28; if it and Core ever
+repository and a running `aishie-core` on 2026-09-28; if it and Core ever
 disagree, `GET /v1/tools` is right. §3 comes from the providers' documentation,
 read on 2026-09-26; **[UNVERIFIED]** marks what it did not confirm.
 

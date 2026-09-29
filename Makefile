@@ -5,7 +5,7 @@
 SHELL       := /bin/bash
 .SHELLFLAGS := -eu -o pipefail -c
 
-BIN     := bin/aishiterud
+BIN     := bin/aishie-core
 PKG     := github.com/AIShie-Education/AIShie-Core
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
@@ -30,7 +30,7 @@ help:
 
 .PHONY: build
 build: ## compile the server into bin/
-	CGO_ENABLED=0 go build -trimpath -ldflags '$(LDFLAGS)' -o $(BIN) ./cmd/aishiterud
+	CGO_ENABLED=0 go build -trimpath -ldflags '$(LDFLAGS)' -o $(BIN) ./cmd/aishie-core
 
 .PHONY: test
 test: ## Go tests, against TEST_DATABASE_URL
@@ -119,8 +119,8 @@ actionlint: ## the GitHub Actions workflows
 .PHONY: script-test
 script-test: ## the tests of scripts/ and deploy/, and shellcheck over deploy/ where it is installed
 	scripts/release-notes_test.sh
-	deploy/aishiteru-deploy_test.sh
-	@if command -v shellcheck >/dev/null; then shellcheck -s sh deploy/aishiteru-deploy deploy/aishiterud deploy/setup-server.sh && shellcheck deploy/aishiteru-deploy_test.sh; else echo "shellcheck is not installed: deploy/ not checked"; fi
+	deploy/aishie-deploy_test.sh
+	@if command -v shellcheck >/dev/null; then shellcheck -s sh deploy/aishie-deploy deploy/aishie-core deploy/setup-server.sh && shellcheck deploy/aishie-deploy_test.sh; else echo "shellcheck is not installed: deploy/ not checked"; fi
 
 .PHONY: sqlc
 sqlc: ## regenerate internal/db/dbq from the SQL
@@ -136,7 +136,7 @@ vuln: ## known vulnerabilities in dependencies
 
 .PHONY: docker
 docker: ## build the image locally; never pushes
-	docker build --build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) --build-arg DATE=$(DATE) -t aishiteru-core:dev .
+	docker build --build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) --build-arg DATE=$(DATE) -t aishie-core:dev .
 
 .PHONY: ci
 ci: lint script-test sqlc-check db-test-sql test e2e ## everything CI runs, except docker, test-s3 and vuln

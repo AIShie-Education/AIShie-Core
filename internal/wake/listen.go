@@ -14,7 +14,7 @@ import (
 
 // ApplicationName is what the listening connection calls itself to the
 // server, as pg_stat_activity shows it.
-const ApplicationName = "aishiterud wake"
+const ApplicationName = "aishie-core wake"
 
 // Listener keeps one connection of its own listening on Channel, and hands
 // each notification to its hub. It is not the pool's: a connection that

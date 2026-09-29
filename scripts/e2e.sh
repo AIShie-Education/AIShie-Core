@@ -31,12 +31,12 @@
 # with single sign-on against a stand-in provider, by that too, under its name.
 #
 #   make e2e            (builds first)
-#   scripts/e2e.sh      (expects bin/aishiterud)
+#   scripts/e2e.sh      (expects bin/aishie-core)
 #
 # Uses the PG* environment for createdb/dropdb, like `make db-test-sql`.
 set -euo pipefail
 
-BIN=${BIN:-bin/aishiterud}
+BIN=${BIN:-bin/aishie-core}
 PORT=${PORT:-18099}
 IDP_PORT=${IDP_PORT:-18098}
 DB="aishiteru_e2e_$$"

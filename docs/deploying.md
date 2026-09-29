@@ -2,19 +2,19 @@
 
 One server per environment: staging first, production when staging has
 earned it. On each server, [Caddy](https://caddyserver.com) serves HTTPS and
-hands requests to the `aishiterud` container on `127.0.0.1:8080`, and
+hands requests to Core's container, `aishie`, on `127.0.0.1:8080`, and
 PostgreSQL runs on the same machine. The files people upload are kept under
-`/srv/aishiteru/data`, and the configuration is in
-`/etc/aishiteru/aishiteru.env`.
+`/srv/aishie/data`, and the configuration is in
+`/etc/aishie/aishie.env`.
 
 The scripts in [`deploy/`](../deploy) do the work:
 
 - `setup-server.sh` sets a server up. Run again, it installs newer copies of
   the other two scripts and leaves everything else as it is.
-- `aishiteru-deploy` puts an image on the server. It is used for the first
+- `aishie-deploy` puts an image on the server. It is used for the first
   start, for every upgrade and for a rollback, by hand or by the Deploy
   workflow.
-- `aishiterud` runs a one-off command with the image that is running.
+- `aishie-core` runs a one-off command with the image that is running.
 
 ## The server
 
@@ -26,7 +26,7 @@ The scripts in [`deploy/`](../deploy) do the work:
   SSH does not go through Cloudflare's proxy.
 - Ports 22 (SSH), 80 and 443 open. The Deploy workflow connects on 22 from
   GitHub's runners, so 22 is open to the internet. The only key it accepts
-  there can run `aishiteru-deploy` and nothing else. Some providers turn ufw
+  there can run `aishie-deploy` and nothing else. Some providers turn ufw
   on in their images (Vultr does); `setup-server.sh` opens the three ports in
   it. A firewall in the provider's console must allow them too.
 - Log in to it with a key, not a password: port 22 is open to everyone.
@@ -86,7 +86,7 @@ The scripts in [`deploy/`](../deploy) do the work:
    publishes `:X.Y.Z`. Production takes only releases.
 
    ```
-   aishiteru-deploy ghcr.io/aishie-education/aishie-core:sha-de4f548
+   aishie-deploy ghcr.io/aishie-education/aishie-core:sha-de4f548
    ```
 
 4. Create the first administrator, root, with a password and the email it
@@ -100,13 +100,43 @@ The scripts in [`deploy/`](../deploy) do the work:
 
    ```
    read -rsp 'Password (10 characters or more): ' PW; echo
-   printf '%s\n' "$PW" | aishiterud bootstrap --name "Your Name" --email you@example.edu --password-stdin; unset PW
-   docker restart aishiteru
+   printf '%s\n' "$PW" | aishie-core bootstrap --name "Your Name" --email you@example.edu --password-stdin; unset PW
+   docker restart aishie
    curl https://lms-staging.example.edu/healthz
    ```
 
 5. The day after, check that the nightly backup ran:
-   `ls -l /var/backups/aishiteru/daily-*`.
+   `ls -l /var/backups/aishie/daily-*`.
+
+These scripts set up a server of Core's own. The
+[AIShie-Deploy](https://github.com/AIShie-Education/AIShie-Deploy)
+repository is another way, the whole of AIshie (Core, the agent runtime and
+the web front end) in one stack updated by its `aishie-update`, and it keeps
+files of its own in `/etc/aishie` and `/var/backups/aishie`: never set up both
+on one server.
+
+### A server set up before the rename
+
+Before AIShiteru became AIshie, `setup-server.sh` installed the scripts as
+`aishiteru-deploy` and `aishiterud`, and named everything else `aishiteru`:
+the env file `/etc/aishiteru/aishiteru.env`, `/srv/aishiteru/data`,
+`/var/backups/aishiteru`, the database, its role and the container. The old
+scripts on such a server go on working until it is set up again. To give it
+the new ones, copy `deploy/` to it and run `setup-server.sh` again, as in step
+1, with the server's name and its environment. It installs `aishie-deploy`
+and `aishie-core` and removes the old scripts, their sudoers rule and the old
+nightly job, which it writes again as `/etc/cron.d/aishie-backup`. Deploy's
+SSH key stays as it is, and runs `aishie-deploy` from then on: the secret in
+GitHub does not change.
+
+Everything else keeps its old name, with the data in it: `aishie-deploy`,
+`aishie-core` and the nightly backup find `/etc/aishiteru` and use
+`aishiteru` wherever this document says `aishie`, in `docker logs -f
+aishiteru`, `/var/backups/aishiteru` and the database's name. Until the
+server has been set up again, the Deploy workflow keeps running the old
+`aishiteru-deploy`, which works as it did. The variables that move the
+scripts' paths, for their tests, are `AISHIE_*` now; the old `AISHITERU_*`
+names are still taken, with a warning.
 
 ## Connecting the Deploy workflow
 
@@ -117,9 +147,9 @@ repository's Settings → Secrets and variables → Actions:
 | --- | --- | --- |
 | Variable | `DEPLOY_TARGET_STAGING` | `deploy@lms-staging.example.edu` |
 | Variable | `DEPLOY_KNOWN_HOSTS_STAGING` | the server's host key line, as printed |
-| Secret | `DEPLOY_SSH_KEY_STAGING` | the whole of `/root/aishiteru-deploy-key` |
+| Secret | `DEPLOY_SSH_KEY_STAGING` | the whole of `/root/aishie-deploy-key` |
 
-Then delete `/root/aishiteru-deploy-key` from the server. The server keeps
+Then delete `/root/aishie-deploy-key` from the server. The server keeps
 only the public half, in `~deploy/.ssh/authorized_keys`.
 
 For production, the names end in `_PRODUCTION`. SSH on a port other than 22
@@ -136,7 +166,7 @@ a Deploy run by hand, still deploys the image it had.) Production is deployed on
 Deploy by hand, from a release's tag
 ([CONTRIBUTING.md](../CONTRIBUTING.md#releasing)).
 
-The key only runs `aishiteru-deploy`, but that script deploys any image of
+The key only runs `aishie-deploy`, but that script deploys any image of
 this repository. Anyone with write access to the repository can run a
 workflow that reads the secret, or copy the key out. They can also push an
 image of their own under this repository's name and deploy it. On GitHub
@@ -145,7 +175,7 @@ access to everything on the servers. When someone loses write access,
 replace the key and delete any package versions they pushed.
 
 To replace the key: on the server, delete `~deploy/.ssh/authorized_keys` and
-any `/root/aishiteru-deploy-key*` left, run `setup-server.sh` again as in step
+any `/root/aishie-deploy-key*` left, run `setup-server.sh` again as in step
 1, with the server's name and its environment, and put the new key it prints
 into the secret it names.
 
@@ -153,17 +183,17 @@ into the secret it names.
 
 Run all of these as root on the server.
 
-- **Logs:** `docker logs -f aishiteru`. Each request is one JSON line, and
+- **Logs:** `docker logs -f aishie`. Each request is one JSON line, and
   Docker keeps the last 100 MB.
 - **What is deployed:** `curl -s 127.0.0.1:8080/healthz` and
-  `aishiterud migrate version`. `/var/log/aishiteru-deploy.log` lists every
+  `aishie-core migrate version`. `/var/log/aishie-deploy.log` lists every
   deploy, from what to what.
-- **Changing the configuration:** edit `/etc/aishiteru/aishiteru.env`, then
+- **Changing the configuration:** edit `/etc/aishie/aishie.env`, then
   deploy the image that is running again. A restart does not re-read the
   file.
 
   ```
-  aishiteru-deploy "$(docker inspect -f '{{.Config.Image}}' aishiteru)"
+  aishie-deploy "$(docker inspect -f '{{.Config.Image}}' aishie)"
   ```
 
   The file is one `NAME=value` per line: no quotes, no `export`, and no
@@ -281,7 +311,7 @@ Run all of these as root on the server.
   curl -X POST https://lms-staging.example.edu/v1/actors \
     -H "Authorization: Bearer $SESSION" -H "Idempotency-Key: register-grader-bot" \
     -H 'Content-Type: application/json' -d '{"kind":"agent","display_name":"grader-bot"}'
-  aishiterud token issue --actor <result.actor_id> --label grader-bot --days 90
+  aishie-core token issue --actor <result.actor_id> --label grader-bot --days 90
   ```
 
   Then an instructor of the course seats it: `member.add`, that is
@@ -328,7 +358,7 @@ Run all of these as root on the server.
   any script that calls with a person's token an agent of that person's, and
   its own token (`agent.issue_token`), or, if it does what only an
   administrator may, an agent registered for it and issued a token
-  (`actor.register`, `aishiterud token issue`). The previous release, while
+  (`actor.register`, `aishie-core token issue`). The previous release, while
   the migration goes in, fails having changed nothing when it would issue a
   person a token or give an agent a password. Going down drops the refusal
   and brings nothing back: the tokens stay revoked.
@@ -381,31 +411,31 @@ Run all of these as root on the server.
 - **Updating the scripts:** when `deploy/` changes, copy it to the server
   again and run `setup-server.sh` as in step 1. It installs the new scripts
   and leaves the rest.
-- **Disk:** after each deploy, `aishiteru-deploy` removes this project's
+- **Disk:** after each deploy, `aishie-deploy` removes this project's
   images that no container uses. A rollback pulls its image again.
 
 ## When something goes wrong
 
 - **A deploy failed before the new version started.** For example, the pull
   was refused or a migration failed. The old version is still running. The
-  last lines of `aishiteru-deploy`'s output, and of the workflow's log, name
+  last lines of `aishie-deploy`'s output, and of the workflow's log, name
   the step and its error.
-- **A migration failed.** `aishiteru-deploy` stops at `migrate up` with the
+- **A migration failed.** `aishie-deploy` stops at `migrate up` with the
   migration's error. The old version keeps serving, but `/healthz` answers
-  503 until this is put right. `aishiterud migrate version` shows
+  503 until this is put right. `aishie-core migrate version` shows
   `schema version N … DIRTY`, N being the migration that failed. Each
   migration runs in one transaction, so a failed one has usually left
   nothing behind. Fix the cause the error names, record the migration before
   it as the last one applied, and deploy again:
 
   ```
-  aishiterud migrate force <N - 1>
-  aishiteru-deploy <the same image>
+  aishie-core migrate force <N - 1>
+  aishie-deploy <the same image>
   ```
 
   If you are not sure what the failed migration left, restore the backup
   instead.
-- **The new version did not report healthy.** `aishiteru-deploy` printed the
+- **The new version did not report healthy.** `aishie-deploy` printed the
   new container's last log lines. If another version was running before, it
   is started again, with the env file as it is now, and the last line says
   whether it came up. If it did not, or if the same image was deployed again
@@ -417,7 +447,7 @@ Run all of these as root on the server.
   restoring a backup.
 
   ```
-  aishiteru-deploy ghcr.io/aishie-education/aishie-core:1.2.2
+  aishie-deploy ghcr.io/aishie-education/aishie-core:1.2.2
   ```
 
   Rolled back past migration 0007, the release before knows nothing of the
@@ -429,18 +459,18 @@ Run all of these as root on the server.
   (`member.list` shows delegates by `principal_member_id`), or remove the
   agent's seat first.
 
-- **Restoring a backup.** `aishiteru-deploy` takes one before every deploy
-  (`/var/backups/aishiteru/deploy-*.dump`, the last ten), and cron takes one
+- **Restoring a backup.** `aishie-deploy` takes one before every deploy
+  (`/var/backups/aishie/deploy-*.dump`, the last ten), and cron takes one
   every night (`daily-1.dump` to `daily-7.dump`). Everything written after
   the backup is lost. Deploy the image that was running when the backup was
-  taken, which `/var/log/aishiteru-deploy.log` tells you:
+  taken, which `/var/log/aishie-deploy.log` tells you:
 
   ```
-  docker stop aishiteru
-  runuser -u postgres -- dropdb aishiteru
-  runuser -u postgres -- createdb -O aishiteru aishiteru
-  runuser -u postgres -- pg_restore --exit-on-error -d aishiteru /var/backups/aishiteru/<file>.dump
-  aishiteru-deploy <the image from then>
+  docker stop aishie
+  runuser -u postgres -- dropdb aishie
+  runuser -u postgres -- createdb -O aishie aishie
+  runuser -u postgres -- pg_restore --exit-on-error -d aishie /var/backups/aishie/<file>.dump
+  aishie-deploy <the image from then>
   ```
 
 ## Backups off the server
@@ -448,9 +478,9 @@ Run all of these as root on the server.
 The backups above sit on the same disk as the database. Copy these somewhere
 else regularly:
 
-- `/var/backups/aishiteru/`, the database;
-- `/srv/aishiteru/data/`, the uploaded files;
-- `/etc/aishiteru/aishiteru.env`, which holds `SIGNING_KEY` (and
+- `/var/backups/aishie/`, the database;
+- `/srv/aishie/data/`, the uploaded files;
+- `/etc/aishie/aishie.env`, which holds `SIGNING_KEY` (and
   `ASSERTION_KEY`, if it is set) and the database password.
 
 ## More than one server per environment
@@ -468,5 +498,5 @@ Two servers behind a load balancer need more than this set-up gives:
   conversation's drafts (ten writes a second) is each server's;
 - the database on a server of its own.
 
-`aishiteru-deploy` and the Deploy workflow handle one server per
+`aishie-deploy` and the Deploy workflow handle one server per
 environment.

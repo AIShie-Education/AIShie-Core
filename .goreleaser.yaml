@@ -2,16 +2,16 @@
 # share the Dockerfile CI already proves builds.
 version: 2
 
-project_name: aishiterud
+project_name: aishie-core
 
 before:
   hooks:
     - go mod download
 
 builds:
-  - id: aishiterud
-    main: ./cmd/aishiterud
-    binary: aishiterud
+  - id: aishie-core
+    main: ./cmd/aishie-core
+    binary: aishie-core
     env: [CGO_ENABLED=0]
     goos: [linux, darwin]
     goarch: [amd64, arm64]
@@ -37,7 +37,7 @@ changelog:
   use: git
   sort: asc
   groups:
-    - { title: "Schema — run `aishiterud migrate up` before starting this version", regexp: '(?i)migration', order: 0 }
+    - { title: "Schema — run `aishie-core migrate up` before starting this version", regexp: '(?i)migration', order: 0 }
     - { title: Changes, order: 999 }
   filters:
     exclude: ['^Merge ']
@@ -51,4 +51,4 @@ release:
 
     `serve` never migrates on its own. If this version carries new migrations
     (the release workflow lists them below when it does), run
-    `aishiterud migrate up` before starting it.
+    `aishie-core migrate up` before starting it.

@@ -146,8 +146,8 @@ src/
 ```
 
 The SQL files are the source of truth and stay runnable with plain `psql`, as
-below. The server embeds the same files, so `aishiterud migrate up` and
-`aishiterud seed` do the same thing without needing the repository.
+below. The server embeds the same files, so `aishie-core migrate up` and
+`aishie-core seed` do the same thing without needing the repository.
 
 ## Requirements
 
@@ -179,20 +179,20 @@ Or, with the server binary (`make build` at the repository root):
 
 ```
 createdb aishiteru
-DATABASE_URL=postgres:///aishiteru bin/aishiterud migrate up
-DATABASE_URL=postgres:///aishiteru bin/aishiterud seed
+DATABASE_URL=postgres:///aishiteru bin/aishie-core migrate up
+DATABASE_URL=postgres:///aishiteru bin/aishie-core seed
 ```
 
-`aishiterud` records the applied version in a `schema_migrations` table; psql
+`aishie-core` records the applied version in a `schema_migrations` table; psql
 does not. A database first built with `psql -f` must be adopted once before
-the binary will manage it: `aishiterud migrate force N`, N being the number of
+the binary will manage it: `aishie-core migrate force N`, N being the number of
 the last migration applied by hand (after the loop above, the highest). Pick
 one way per database and stay with it.
 
-A migration that fails under `aishiterud` leaves its version recorded as
+A migration that fails under `aishie-core` leaves its version recorded as
 dirty. Each file applies whole or not at all, but the flag is also left when
 a file committed and its version was never recorded, so look at the database
-to see which. Fix the cause, then `aishiterud migrate force N`, N being the
+to see which. Fix the cause, then `aishie-core migrate force N`, N being the
 last migration fully applied (0 if none), and `migrate up` again.
 
 File names follow `NNNN_name.up.sql` / `NNNN_name.down.sql`. Every migration

@@ -105,7 +105,7 @@ on.
 ## Layout
 
 ```
-cmd/aishiterud/   the server and its operator commands
+cmd/aishie-core/  the server and its operator commands
 internal/
   domain, apperr, ids, canon   vocabulary, errors, UUID v7, canonical JSON + payload hash
   db                           pool, migrations, queries/*.sql → dbq (sqlc)
@@ -153,10 +153,10 @@ one in Docker (see the comment at the top of `docker-compose.yml`).
 ```
 createdb aishiteru
 make build
-bin/aishiterud migrate up
-bin/aishiterud seed
-bin/aishiterud bootstrap --name "Your Name" --email you@example.edu --password-stdin
-bin/aishiterud serve          # http://localhost:8080
+bin/aishie-core migrate up
+bin/aishie-core seed
+bin/aishie-core bootstrap --name "Your Name" --email you@example.edu --password-stdin
+bin/aishie-core serve          # http://localhost:8080
 ```
 
 `bootstrap` runs once. It creates the root actor, with the password it reads
@@ -182,7 +182,7 @@ person uses one of their agents, which holds an API token of its own
 (`agent.create`, then `agent.issue_token`; below), and does nothing they
 cannot do themselves.
 
-Configuration is environment variables only; `bin/aishiterud help` lists them.
+Configuration is environment variables only; `bin/aishie-core help` lists them.
 Files are kept under `var/blobs` by default (`BLOB_STORE=fs`). For more than
 one instance, or for production, use `BLOB_STORE=s3` with the `S3_*` settings
 and a `SIGNING_KEY` shared by every instance. With S3 an upload URL does not
@@ -202,7 +202,7 @@ directory or bucket: a staging copy whose database was cloned from production
 has production's courses, and each would take the files the other has attached
 since the copy for orphans, and remove them.
 `serve` never migrates on its own. It refuses to start against a schema older
-than the binary (run `aishiterud migrate up` first), and `/healthz` reports
+than the binary (run `aishie-core migrate up` first), and `/healthz` reports
 503 if the schema falls behind or a migration is left half-done.
 
 ### A person's first sign-in
@@ -355,7 +355,7 @@ refuses (`registration_disabled`), and people sign in and then join.
 ### Connecting an agent
 
 Register the agent and give it a token (`actor.register`, `actor.issue_token`,
-or `aishiterud token issue`; only an agent is given one), seat it in a course (`member.add` with a preset
+or `aishie-core token issue`; only an agent is given one), seat it in a course (`member.add` with a preset
 such as `grader` or `tutor`), and point its MCP client at
 `https://<host>/mcp` with `Authorization: Bearer <token>`. Tool names are the
 registry's with the dot turned to an underscore (`grade_submit`). Every tool
@@ -544,7 +544,7 @@ deploy.yml deploys over SSH to a server set up with
 [deploy/setup-server.sh](deploy/setup-server.sh), once the repository has its
 address and key; until then a deploy records itself in the environment and
 says which image is ready. On the server,
-[deploy/aishiteru-deploy](deploy/aishiteru-deploy) backs up, runs `migrate up`
+[deploy/aishie-deploy](deploy/aishie-deploy) backs up, runs `migrate up`
 and `seed` with the new image, replaces the container, and waits for
 `/healthz` to report the new version. Setting a server up, connecting it, and
 running it day to day are in [docs/deploying.md](docs/deploying.md). How to cut

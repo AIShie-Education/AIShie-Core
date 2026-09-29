@@ -1,5 +1,5 @@
 #!/bin/sh
-# Sets up a fresh Ubuntu server (24.04 or later) to run AIShiteru Core.
+# Sets up a fresh Ubuntu server (24.04 or later) to run AIshie Core.
 # Run as root with this directory copied to the server (docs/deploying.md):
 #
 #   sh deploy/setup-server.sh lms-staging.example.edu staging
@@ -8,15 +8,17 @@
 #
 # It installs Docker, PostgreSQL and Caddy; creates the database, the env file
 # with a generated database password and SIGNING_KEY, the data and backup
-# directories and a nightly backup; installs aishiteru-deploy and aishiterud;
+# directories and a nightly backup; installs aishie-deploy and aishie-core;
 # points Caddy at the server for HTTPS; opens ports 80 and 443 in ufw when ufw
 # is on; and makes an SSH user, deploy, that can do one thing: run
-# aishiteru-deploy, for the Deploy workflow.
+# aishie-deploy, for the Deploy workflow.
 #
 # Run again, it installs the scripts in this directory over the old ones and
 # leaves everything else as it is: the env file, the database, Caddy's
-# configuration and deploy's key. That is how a newer aishiteru-deploy reaches
-# the server.
+# configuration and deploy's key. That is how a newer aishie-deploy reaches
+# the server. On a server set up before the rename to AIshie, it also puts
+# aishie-deploy and aishie-core in the place of the scripts' old names, which
+# it removes (docs/deploying.md, A server set up before the rename).
 set -eu
 
 HOST=${1:-}
@@ -28,8 +30,15 @@ case $HOST in '' | *[!A-Za-z0-9.-]* | .* | -*) usage ;; esac
 case $ENVIRONMENT in staging | production) ;; *) usage ;; esac
 [ "$(id -u)" = 0 ] || { echo "run this as root (sudo -i)" >&2; exit 1; }
 here=$(cd "$(dirname "$0")" && pwd)
-ENV_FILE=/etc/aishiteru/aishiteru.env
-KEY=/root/aishiteru-deploy-key
+# The name of this installation: of its configuration, data and backup
+# directories, its database and its container, as in aishie-deploy.
+NAME=aishie
+# Compatibility: a server set up before the rename to AIshie goes on by its
+# old name, aishiteru, which its /etc/aishiteru shows. Its env file, database,
+# directories and container stay as they are.
+[ -e /etc/aishie ] || [ ! -e /etc/aishiteru ] || NAME=aishiteru
+ENV_FILE=/etc/$NAME/$NAME.env
+KEY=/root/aishie-deploy-key
 say() { printf '\n== %s\n' "$*"; }
 systemd() { [ -d /run/systemd/system ]; }
 
@@ -51,21 +60,21 @@ DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=600 install -y -q 
 if systemd; then systemctl enable --now docker postgresql caddy ssh cron; fi
 
 say "Database and $ENV_FILE"
-role=$(runuser -u postgres -- psql -tAc "SELECT 1 FROM pg_roles WHERE rolname = 'aishiteru'")
+role=$(runuser -u postgres -- psql -tAc "SELECT 1 FROM pg_roles WHERE rolname = '$NAME'")
 if [ -e "$ENV_FILE" ]; then
   echo "$ENV_FILE is there already: left as it is"
-  [ "$role" = 1 ] || echo "warning: there is no database role aishiteru; $ENV_FILE may be for another database" >&2
+  [ "$role" = 1 ] || echo "warning: there is no database role $NAME; $ENV_FILE may be for another database" >&2
 elif [ "$role" = 1 ]; then
   cat >&2 <<MSG
-The database role aishiteru exists, but $ENV_FILE does not: an earlier run
+The database role $NAME exists, but $ENV_FILE does not: an earlier run
 stopped half way. If this server holds no data yet, remove them and run this
 again:
 
-  runuser -u postgres -- dropdb --if-exists aishiteru
-  runuser -u postgres -- dropuser aishiteru
+  runuser -u postgres -- dropdb --if-exists $NAME
+  runuser -u postgres -- dropuser $NAME
 
 Otherwise give the role a new password (openssl rand -hex 24), with psql:
-ALTER ROLE aishiteru PASSWORD '...'; and write $ENV_FILE, mode 600, with the
+ALTER ROLE $NAME PASSWORD '...'; and write $ENV_FILE, mode 600, with the
 lines this script writes: DATABASE_URL, HTTP_ADDR, PUBLIC_URL, TRUSTED_PROXIES,
 SIGNING_KEY, BLOB_STORE and BLOB_FS_ROOT (see the script).
 MSG
@@ -73,9 +82,9 @@ MSG
 else
   # Hex only, so that neither the SQL nor the URL needs anything escaped.
   pw=$(openssl rand -hex 24)
-  install -d -m 700 /etc/aishiteru
+  install -d -m 700 "/etc/$NAME"
   (umask 077 && cat > "$ENV_FILE.new" <<ENVEOF)
-DATABASE_URL=postgres://aishiteru:$pw@127.0.0.1:5432/aishiteru
+DATABASE_URL=postgres://$NAME:$pw@127.0.0.1:5432/$NAME
 HTTP_ADDR=127.0.0.1:8080
 PUBLIC_URL=https://$HOST
 TRUSTED_PROXIES=127.0.0.1/32
@@ -85,7 +94,7 @@ BLOB_FS_ROOT=/data/blobs
 ENVEOF
   # On psql's input, not its command line, where anyone could read the
   # password; and kept out of the server's log should the statement fail.
-  printf "SET log_min_error_statement = panic;\nCREATE ROLE aishiteru LOGIN PASSWORD '%s';\nCREATE DATABASE aishiteru OWNER aishiteru;\n" "$pw" |
+  printf "SET log_min_error_statement = panic;\nCREATE ROLE %s LOGIN PASSWORD '%s';\nCREATE DATABASE %s OWNER %s;\n" "$NAME" "$pw" "$NAME" "$NAME" |
     runuser -u postgres -- psql -q -v ON_ERROR_STOP=1
   mv "$ENV_FILE.new" "$ENV_FILE"
   echo "wrote $ENV_FILE (keep a copy somewhere safe: SIGNING_KEY must not change)"
@@ -93,16 +102,20 @@ fi
 
 say "Directories, scripts and the nightly backup"
 # The image runs as user 65532 (distroless nonroot).
-install -d -o 65532 -g 65532 -m 750 /srv/aishiteru/data
-install -d -o postgres -g postgres -m 700 /var/backups/aishiteru
-install -m 755 "$here/aishiteru-deploy" "$here/aishiterud" /usr/local/bin/
-echo "installed aishiteru-deploy and aishiterud in /usr/local/bin"
-cat > /etc/cron.d/aishiteru-backup <<'CRONEOF'
-# AIShiteru Core: a database backup every night, one per weekday (seven kept).
+install -d -o 65532 -g 65532 -m 750 "/srv/$NAME/data"
+install -d -o postgres -g postgres -m 700 "/var/backups/$NAME"
+install -m 755 "$here/aishie-deploy" "$here/aishie-core" /usr/local/bin/
+echo "installed aishie-deploy and aishie-core in /usr/local/bin"
+# NAME is letters alone: nothing in it for cron or the shell to expand.
+sed "s/@NAME@/$NAME/g" > /etc/cron.d/aishie-backup <<'CRONEOF'
+# AIshie Core: a database backup every night, one per weekday (seven kept).
 # A job in /etc/cron.d gets no /usr/sbin, where runuser is, unless it says so.
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
-0 3 * * * root f=/var/backups/aishiteru/daily-$(date +\%u).dump; runuser -u postgres -- pg_dump -Fc -f "$f.part" aishiteru && mv "$f.part" "$f"
+0 3 * * * root f=/var/backups/@NAME@/daily-$(date +\%u).dump; runuser -u postgres -- pg_dump -Fc -f "$f.part" @NAME@ && mv "$f.part" "$f"
 CRONEOF
+# Compatibility: the scripts and the backup as they were named before the
+# rename to AIshie. aishie-deploy, aishie-core and the job above replace them.
+rm -f /usr/local/bin/aishiteru-deploy /usr/local/bin/aishiterud /etc/cron.d/aishiteru-backup
 
 say "Caddy (HTTPS for $HOST)"
 # Caddy's admin API listens on localhost:2019 unless told otherwise, and the
@@ -147,25 +160,34 @@ id deploy >/dev/null 2>&1 || useradd --create-home --shell /bin/sh deploy
 # No password to log in with, and not locked either: a locked account is
 # refused even with a key.
 usermod -p '*' deploy
-sudoers=/etc/sudoers.d/aishiteru-deploy
-printf 'deploy ALL=(root) NOPASSWD: /usr/local/bin/aishiteru-deploy\n' > "$sudoers.new"
+sudoers=/etc/sudoers.d/aishie-deploy
+printf 'deploy ALL=(root) NOPASSWD: /usr/local/bin/aishie-deploy\n' > "$sudoers.new"
 chmod 440 "$sudoers.new"
 visudo -cqf "$sudoers.new" && mv "$sudoers.new" "$sudoers"
 home=$(getent passwd deploy | cut -d: -f6)
 install -d -o deploy -g deploy -m 700 "$home/.ssh"
-if grep -q 'aishiteru-deploy@' "$home/.ssh/authorized_keys" 2>/dev/null; then
+keys=$home/.ssh/authorized_keys
+if grep -q 'aishie-deploy@' "$keys" 2>/dev/null; then
   # The key in GitHub keeps working. To replace it: docs/deploying.md.
   echo "deploy's SSH key is set up already: left as it is"
+elif grep -q 'aishiteru-deploy@' "$keys" 2>/dev/null; then
+  # Compatibility: a key made before the rename to AIshie ran the script by
+  # its old name. The key in GitHub keeps working, and now runs aishie-deploy.
+  sed -i 's#/usr/local/bin/aishiteru-deploy #/usr/local/bin/aishie-deploy #' "$keys"
+  echo "deploy's SSH key is set up already: it now runs aishie-deploy"
 else
-  [ -e "$KEY" ] || ssh-keygen -q -t ed25519 -N '' -C "aishiteru-deploy@$HOST" -f "$KEY"
+  [ -e "$KEY" ] || ssh-keygen -q -t ed25519 -N '' -C "aishie-deploy@$HOST" -f "$KEY"
   # The key can do nothing but this: no shell, no forwarding, and the command
-  # it asks for is only ever the image aishiteru-deploy is given.
+  # it asks for is only ever the image aishie-deploy is given.
   # shellcheck disable=SC2016 # $SSH_ORIGINAL_COMMAND is for sshd to expand
-  printf 'restrict,command="sudo -n /usr/local/bin/aishiteru-deploy \\"$SSH_ORIGINAL_COMMAND\\"" %s\n' "$(cat "$KEY.pub")" > "$home/.ssh/authorized_keys"
-  chown deploy:deploy "$home/.ssh/authorized_keys"
-  chmod 600 "$home/.ssh/authorized_keys"
+  printf 'restrict,command="sudo -n /usr/local/bin/aishie-deploy \\"$SSH_ORIGINAL_COMMAND\\"" %s\n' "$(cat "$KEY.pub")" > "$keys"
+  chown deploy:deploy "$keys"
+  chmod 600 "$keys"
   echo "made deploy's SSH key"
 fi
+# Compatibility: the rule from before the rename to AIshie, for the script's
+# old name, which is gone.
+rm -f /etc/sudoers.d/aishiteru-deploy
 
 upper=$(echo "$ENVIRONMENT" | tr '[:lower:]' '[:upper:]')
 say "Done. What is left"
@@ -174,12 +196,12 @@ cat <<DONE
      docker login ghcr.io -u <GitHub user name>
 2. Start it, with the image of the latest green push to main (the CI run's
    publish / image job, or the package's page, names it), or of a release:
-     aishiteru-deploy ghcr.io/aishie-education/aishie-core:sha-<commit>
+     aishie-deploy ghcr.io/aishie-education/aishie-core:sha-<commit>
 3. Create the first administrator, then restart so the background jobs start.
    It prints no API token: sign in at the site with that email and password.
      read -rsp 'Password (10 characters or more): ' PW; echo
-     printf '%s\n' "\$PW" | aishiterud bootstrap --name "Your Name" --email you@example.edu --password-stdin; unset PW
-     docker restart aishiteru
+     printf '%s\n' "\$PW" | aishie-core bootstrap --name "Your Name" --email you@example.edu --password-stdin; unset PW
+     docker restart $NAME
 4. For the Deploy workflow, in the repository's Settings → Secrets and variables → Actions:
      variable DEPLOY_TARGET_$upper       deploy@$HOST
      variable DEPLOY_KNOWN_HOSTS_$upper  $HOST $(cut -d' ' -f1,2 /etc/ssh/ssh_host_ed25519_key.pub)

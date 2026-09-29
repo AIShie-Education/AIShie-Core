@@ -13,18 +13,18 @@ name: Deploy
 # A deploy target is a server set up with deploy/setup-server.sh
 # (docs/deploying.md). Once the repository variable DEPLOY_TARGET_STAGING (or
 # _PRODUCTION) names it, the deploy job connects to it with SSH, as a user
-# that can do nothing but run deploy/aishiteru-deploy, and hands it the image
+# that can do nothing but run deploy/aishie-deploy, and hands it the image
 # by digest. That script does this, in this order:
 #
 #   1. Back up the database, so that a migration that goes wrong, or a
 #      rollback further than the release before, has somewhere to go back to.
-#   2. `aishiterud migrate up` with the new image. A schema a newer release
+#   2. `aishie-core migrate up` with the new image. A schema a newer release
 #      already migrated is left alone, so this does not stop a rollback to the
 #      release before, which a migration keeps working (CONTRIBUTING.md,
 #      Migrations). It stops here if this fails: the server keeps running the
 #      old image, and the schema stays marked dirty, with /healthz at 503,
 #      until someone puts it right (`migrate force`, or the backup).
-#   3. `aishiterud seed` with the new image, which adds the built-in presets a
+#   3. `aishie-core seed` with the new image, which adds the built-in presets a
 #      release brings and leaves the ones already there as they are.
 #   4. Replace the container with one of the new image.
 #   5. Wait until GET /healthz answers status "ok" with the new version and
@@ -206,7 +206,7 @@ jobs:
           trap 'rm -rf "$dir"' EXIT
           (umask 077 && printf '%s\n' "$SSH_KEY" | tr -d '\r' > "$dir/key")
           printf '%s\n' "$KNOWN_HOSTS" | tr -d '\r' > "$dir/known_hosts"
-          # The server runs aishiteru-deploy with the image, and nothing else.
+          # The server runs aishie-deploy with the image, and nothing else.
           ssh -F /dev/null -i "$dir/key" -o IdentitiesOnly=yes -o BatchMode=yes \
             -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$dir/known_hosts" -o GlobalKnownHostsFile=/dev/null \
             -o ServerAliveInterval=30 -o ServerAliveCountMax=10 \

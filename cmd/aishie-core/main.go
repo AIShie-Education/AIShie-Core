@@ -1,4 +1,4 @@
-// Command aishiterud is the AIshiteru Core server and its operator tooling.
+// Command aishie-core is the AIshiteru Core server and its operator tooling.
 package main
 
 import (
@@ -37,23 +37,23 @@ import (
 	"github.com/AIShie-Education/AIShie-Core/internal/wake"
 )
 
-const usage = `aishiterud — AIshiteru Core
+const usage = `aishie-core — AIshiteru Core
 
 Usage:
-  aishiterud serve                   run the HTTP server
-  aishiterud migrate up              apply every pending migration
-  aishiterud migrate down --yes      revert the last migration (DESTROYS DATA)
-  aishiterud migrate down --all --yes
+  aishie-core serve                  run the HTTP server
+  aishie-core migrate up             apply every pending migration
+  aishie-core migrate down --yes     revert the last migration (DESTROYS DATA)
+  aishie-core migrate down --all --yes
                                      revert every migration (DESTROYS ALL DATA)
-  aishiterud migrate version         print the applied and the embedded version
-  aishiterud migrate force N         record version N (0 for none) without running anything
-  aishiterud seed                    insert the built-in permission presets
-  aishiterud bootstrap --name N --email E|--login-id L --password-stdin
+  aishie-core migrate version        print the applied and the embedded version
+  aishie-core migrate force N        record version N (0 for none) without running anything
+  aishie-core seed                   insert the built-in permission presets
+  aishie-core bootstrap --name N --email E|--login-id L --password-stdin
                                      create the root actor, once, with the password read from
                                      standard input, to sign in with; prints no token
-  aishiterud token issue --actor ID|EMAIL --label L [--days N]
+  aishie-core token issue --actor ID|EMAIL --label L [--days N]
                                      issue an API token for an agent; a person holds none
-  aishiterud version                 print build information
+  aishie-core version                print build information
 
 Environment:
   DATABASE_URL      default postgres:///aishiteru (local unix socket)
@@ -109,7 +109,7 @@ Environment:
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
-		fmt.Fprintln(os.Stderr, "aishiterud:", err)
+		fmt.Fprintln(os.Stderr, "aishie-core:", err)
 		os.Exit(1)
 	}
 }
@@ -167,9 +167,9 @@ func serve(cfg config.Config) error {
 	case err != nil:
 		return fmt.Errorf("read schema version: %w", err)
 	case dirty:
-		return fmt.Errorf("the schema is dirty at version %d: a migration failed half-way; fix it by hand, then `aishiterud migrate force N`, N being the last migration fully applied (0 if none)", have)
+		return fmt.Errorf("the schema is dirty at version %d: a migration failed half-way; fix it by hand, then `aishie-core migrate force N`, N being the last migration fully applied (0 if none)", have)
 	case have < latest:
-		return fmt.Errorf("the schema is at version %d and this binary needs %d; run `aishiterud migrate up` first", have, latest)
+		return fmt.Errorf("the schema is at version %d and this binary needs %d; run `aishie-core migrate up` first", have, latest)
 	case have > latest:
 		log.Warn("the schema is ahead of this binary; fine during a rolling deploy", "schema", have, "binary", latest)
 	}
@@ -206,7 +206,7 @@ func serve(cfg config.Config) error {
 	close(jobsDone)
 	if cfg.Jobs {
 		if system, err := dbq.New(pool).GetSystemActor(ctx); err != nil {
-			log.Warn("background jobs are off: there is no system actor yet; run `aishiterud bootstrap`, then restart")
+			log.Warn("background jobs are off: there is no system actor yet; run `aishie-core bootstrap`, then restart")
 		} else {
 			jobsDone = make(chan struct{})
 			runner := jobs.New(pool, pl, system, jobs.Config{Interval: cfg.JobsInterval, Blob: store}, log)

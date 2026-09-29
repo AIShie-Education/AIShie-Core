@@ -197,11 +197,11 @@ else. A department's administrator may stand where the admin does, for the cours
 departments, and registers the people they invite there (`actor.invite_new`). Roster syncs run
 as a `kind = 'system'` actor so the chain has no gaps.
 
-Root and the system actor are created by `aishiterud bootstrap`, once. Root is given a
+Root and the system actor are created by `aishie-core bootstrap`, once. Root is given a
 password, read from standard input, and an email or a login ID to sign in with, and no API
 token: it signs in as anyone does. Without a password or a name to sign in with, bootstrap
 creates nothing. It is the one state change with no `action` row: there is no actor yet for it
-to be an action of. The operator's `aishiterud token issue` is likewise outside the log — it is
+to be an action of. The operator's `aishie-core token issue` is likewise outside the log — it is
 how a newly registered agent, which never signs in, gets its first token — and needs the
 database access that already implies everything. Like the tools, it refuses the system actor,
 and a person.
@@ -221,7 +221,7 @@ who has an email or a login ID to sign in with.
 **People sign in; API tokens are for agents.** A person holds passwords, identities at a
 provider, invitations and the sessions signing in with them makes, and never an API token: for
 tools and scripts they use one of their agents, which holds a token of its own and never more
-than their seat. `credential.issue_token` for a person, `actor.issue_token` and `aishiterud token
+than their seat. `credential.issue_token` for a person, `actor.issue_token` and `aishie-core token
 issue` for one are refused (`api_tokens_are_for_agents`), whoever asks. An agent holds API tokens
 and nothing else: it is given no password (`credential.set_password`), no invitation
 (`actor.invite`; `actor.invite_new` registers people only) and no identity at a provider
@@ -253,7 +253,7 @@ password as it takes any.
 (`agent.issue_token`); who issued an invitation (`actor.invite`, `actor.invite_new`), which
 is asked again when it is taken up (§2.10); and who set a temporary password
 (`member.reset_password`). It is null for the other kinds, for a token made on
-the command line (`aishiterud token issue`, and root's by `aishiterud bootstrap` before migration
+the command line (`aishie-core token issue`, and root's by `aishie-core bootstrap` before migration
 0017), for a token issued by a
 release older than migration 0006, including one that release issues while it still runs after
 the migration, and for an invitation made before its issuer was recorded, which is taken for a
@@ -1026,7 +1026,7 @@ conversation or proposal, at the newest `seq`: `course_id`, `kind` (the event ty
 `opener_member_id` and `respondent_member_id`. That is a few hundred bytes, well under the 8000
 a notification may carry. PostgreSQL delivers it when the transaction commits, never when it
 rolls back, to every instance listening. Each instance keeps one connection of its own on the
-channel (`wake.Listener`, `application_name` `aishiterud wake`). The listener reconnects with
+channel (`wake.Listener`, `application_name` `aishie-core wake`). The listener reconnects with
 backoff, and each time it listens again it wakes every waiting call, since it heard nothing
 meanwhile. It hands each notification to the calls waiting in its process (`wake.Hub`). An
 inbox is woken by news, in its course, of a message or a decided proposal in a conversation

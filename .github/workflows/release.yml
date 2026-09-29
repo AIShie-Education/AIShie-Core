@@ -117,7 +117,7 @@ jobs:
             {
               echo "## Migrations in this release"
               echo
-              echo "Run \`aishiterud migrate up\` before starting this version${PREV:+ (new since $PREV)}:"
+              echo "Run \`aishie-core migrate up\` before starting this version${PREV:+ (new since $PREV)}:"
               echo
               for m in $MIGRATIONS; do echo "- \`$m\`"; done
             } > "$footer"
