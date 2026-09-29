@@ -127,6 +127,8 @@ type Querier interface {
 	// The whole row, for showing an actor. Authorization uses GetActorForAuthz,
 	// which leaves kind out on purpose.
 	GetActor(ctx context.Context, id uuid.UUID) (Actor, error)
+	// The actor an email belongs to, in any case. Its kind comes with it, read to
+	// refuse, never to grant: an agent does not sign in with a password.
 	GetActorByEmail(ctx context.Context, lower string) (GetActorByEmailRow, error)
 	// A person by their login ID, in any case, as GetActorByEmail finds one by
 	// their email.
@@ -248,7 +250,8 @@ type Querier interface {
 	// Roster facts about a member. This is not authorization: that a grade can
 	// only be given to someone on the roster as a student is a rule about grades.
 	GetRosterEntry(ctx context.Context, arg GetRosterEntryParams) (GetRosterEntryRow, error)
-	// The account an identity provider's subject is linked to, if any.
+	// The account an identity provider's subject is linked to, if any, and its
+	// kind, read to refuse: an agent does not sign in so.
 	GetSSOCredential(ctx context.Context, arg GetSSOCredentialParams) (GetSSOCredentialRow, error)
 	// Which seat a seat is a delegate of, if any. Whose delegate a seat is never
 	// changes, so it may be read before anything is locked.
@@ -743,8 +746,7 @@ type Querier interface {
 	RevokeInvites(ctx context.Context, arg RevokeInvitesParams) error
 	RevokeJoinLink(ctx context.Context, arg RevokeJoinLinkParams) (int64, error)
 	RevokePasswordCredentials(ctx context.Context, arg RevokePasswordCredentialsParams) error
-	// Signs an actor out everywhere: every browser session they have. Their API
-	// tokens are left as they are.
+	// Signs a person out everywhere: every browser session they have.
 	RevokeSessions(ctx context.Context, arg RevokeSessionsParams) (int64, error)
 	// Whether two actors are one party, for four eyes: the same actor, one the
 	// other's owner, or two agents of one owner. An agent acts only as its

@@ -17,8 +17,9 @@ In place so far:
 - `authorize()`, the tool registry, and the action pipeline every call goes
   through — idempotent replay, proposals with re-authorization on approval,
   after-the-fact review, events;
-- authentication (API tokens for agents, password sessions for people) and
-  the REST API, whose routes are generated from the tool registry;
+- authentication (API tokens for agents and nobody else; for people, a
+  session from a password or single sign-on) and the REST API, whose routes
+  are generated from the tool registry;
 - the tool catalogue: actors, terms, departments, presets, courses, members,
   the grading scheme, assignments, submissions, grades, documents, the
   approval and review queues, and the event feed — all scope-filtered in SQL;
@@ -49,7 +50,9 @@ In place so far:
 
 `make e2e` runs the real binary against a scratch database and, with nothing
 but `curl`, builds the worked example from docs/schema.md §5 from an empty
-installation: an agent grades an essay, a person approves it, the student
+installation: root, bootstrapped with a password and no token, signs in; every
+person is invited, chooses a password and signs in with it, every agent is
+given a token, and nobody gives a person one; an agent grades an essay, a person approves it, the student
 sees the grade; the instructor renames the course, halves the assignment's
 points with the grade rescaled, overrides the student's total and takes the
 override off, renames the slides and brings them back from the archive, and
@@ -147,14 +150,28 @@ bin/aishiterud bootstrap --name "Your Name" --email you@example.edu --password-s
 bin/aishiterud serve          # http://localhost:8080
 ```
 
-`bootstrap` runs once. It creates the root actor (and the system actor that
-background jobs run as) and prints root's API token, once:
+`bootstrap` runs once. It creates the root actor, with the password it reads
+from standard input and the email (`--email`) or login ID (`--login-id`) it
+signs in with, and the system actor that background jobs run as. It prints no
+API token: people hold none. On standard error it prints the two actors' ids
+and what root signs in with; on standard output, nothing. Without a password,
+or without an email or a login ID, it creates nothing. Root then signs in like
+anyone else: in the web front end, or with curl, taking the session from the
+cookie that comes back, which serves as a bearer token for as long as it lasts:
 
 ```
-export TOKEN=ais_...
-curl -H "Authorization: Bearer $TOKEN" localhost:8080/v1/me
+read -rsp 'Password: ' PW; echo
+SESSION=$(printf '{"login":"you@example.edu","password":"%s"}' "$PW" |
+  curl -s -o /dev/null -D - -H 'Content-Type: application/json' --data @- localhost:8080/v1/auth/login |
+  sed -n 's/^[Ss]et-[Cc]ookie: ais_session=\([^;]*\).*/\1/p' | tr -d '\r'); unset PW
+curl -H "Authorization: Bearer $SESSION" localhost:8080/v1/me
 curl localhost:8080/v1/tools            # the whole catalogue, with JSON Schemas
 ```
+
+A session lasts `SESSION_TTL` (12 hours by default). For tools and scripts, a
+person uses one of their agents, which holds an API token of its own
+(`agent.create`, then `agent.issue_token`; below), and does nothing they
+cannot do themselves.
 
 Configuration is environment variables only; `bin/aishiterud help` lists them.
 Files are kept under `var/blobs` by default (`BLOB_STORE=fs`). For more than
@@ -202,7 +219,12 @@ ID and that password. An invitation works once, for seven days unless the admini
 gives another number of days (at most thirty), and inviting again replaces
 it; a password set some other way, or a new email, withdraws it. Taken up by
 someone who has a password already, it replaces that password: it is also how
-a forgotten one is reset. An agent is given a token instead (below).
+a forgotten one is reset. A person holds no API token: `credential.issue_token`
+and `actor.issue_token` refuse one for a person (`api_tokens_are_for_agents`),
+whoever asks, and a person's token from before migration 0017, which revoked
+them all, authenticates nobody. An agent is given a token instead (below), and
+never a password, an invitation or single sign-on: each is refused
+(`agents_use_api_tokens`).
 `actor.list` finds anyone registered, by a piece of their name, email or login
 ID, with whether they have a password yet or an invitation waiting, and
 `actor.update` corrects a name, an email or a login ID, or gives one to
@@ -324,7 +346,7 @@ refuses (`registration_disabled`), and people sign in and then join.
 ### Connecting an agent
 
 Register the agent and give it a token (`actor.register`, `actor.issue_token`,
-or `aishiterud token issue`), seat it in a course (`member.add` with a preset
+or `aishiterud token issue`; only an agent is given one), seat it in a course (`member.add` with a preset
 such as `grader` or `tutor`), and point its MCP client at
 `https://<host>/mcp` with `Authorization: Bearer <token>`. Tool names are the
 registry's with the dot turned to an underscore (`grade_submit`). Every tool
@@ -409,7 +431,7 @@ Ed25519 that names the person (`sub`, `kind`, `name`, `email`,
 bearer token. The runtime checks it against `GET /v1/auth/keys`, a JSON Web
 Key Set anyone may read. Only an active person is given one, never an agent,
 and it lasts `ASSERTION_TTL` (5 minutes; 1 to 15) and never past the session
-or token that asked. It is no credential here: Core takes only its own
+that asked. It is no credential here: Core takes only its own
 `ais_` tokens. The request log never carries it, and the answer is not to be
 cached.
 
@@ -443,9 +465,12 @@ a `500`, and every read; `429` carries `Retry-After`. A
 `error.details.action_id` and records nothing either, so a call corrected
 after a recorded failure needs a new key. Every answer, including the one for
 a path that does not exist, is JSON. Agents authenticate with
-`Authorization: Bearer <token>`; browsers sign in at `POST /v1/auth/login` (or
+`Authorization: Bearer <token>`, their API token; people sign in at `POST /v1/auth/login` (or
 through single sign-on, or by taking up an invitation at `POST /v1/auth/invite`)
-and carry a session cookie. Set `TRUSTED_ORIGINS` to
+and carry a session cookie, which may also be sent as a bearer token. A person
+holds no API token: one issued before migration 0017, which revoked them, is
+answered `401` with `api_tokens_are_for_agents`, and an agent's password
+signs it in nowhere (`agents_use_api_tokens`). Set `TRUSTED_ORIGINS` to
 the web front end's origin so that its browser requests are accepted. The
 front end is expected to be same-site with this server (the session cookie is
 `SameSite=Lax`); a front end on another site needs `COOKIE_SAMESITE=none`.

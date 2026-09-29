@@ -345,9 +345,13 @@ func TestADepartmentAdministratorInvitesOnlyWithinReach(t *testing.T) {
 		t.Fatalf("inviting someone who has signed in: %+v", out)
 	}
 
-	// Each clause of the rule, and nobody herself.
+	// Each clause of the rule, and nobody herself. An agent is refused
+	// before any of it, as it is whoever invites it: it holds tokens, and
+	// never signs in.
+	w.fails(w.Ada, "actor.invite", m{"actor_id": w.Robo}, apperr.Forbidden, auth.ReasonAgentsUseTokens)
 	for who, why := range map[uuid.UUID]string{
-		w.Chan: auth.InviteAdministers, w.Lin: auth.InviteOwnsAgents, w.Admin: auth.InvitePlatformRole, w.Robo: auth.InviteNotAPerson,
+		w.Chan: auth.InviteAdministers, w.Lin: auth.InviteOwnsAgents, w.Admin: auth.InvitePlatformRole,
+		w.Actor("system", "system"): auth.InviteNotAPerson,
 	} {
 		if out := w.MustCall(w.Ada, "actor.invite", m{"actor_id": who}, "why-"+who.String()); out.Status != domain.StatusFailed ||
 			out.Error.Code != apperr.Forbidden || out.Error.Details["reason"] != "invite_not_allowed" || out.Error.Details["why"] != why {

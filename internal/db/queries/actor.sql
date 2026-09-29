@@ -19,12 +19,14 @@ WHERE id = $1
 FOR SHARE;
 
 -- name: GetActorByEmail :one
-SELECT id, status FROM actor WHERE lower(email) = lower($1);
+-- The actor an email belongs to, in any case. Its kind comes with it, read to
+-- refuse, never to grant: an agent does not sign in with a password.
+SELECT id, status, kind FROM actor WHERE lower(email) = lower($1);
 
 -- name: GetActorByLoginID :one
 -- A person by their login ID, in any case, as GetActorByEmail finds one by
 -- their email.
-SELECT id, status FROM actor WHERE lower(login_id) = lower($1);
+SELECT id, status, kind FROM actor WHERE lower(login_id) = lower($1);
 
 -- name: InsertActor :exec
 -- A login ID an administrator gives is one they vouch for (login_id_verified,

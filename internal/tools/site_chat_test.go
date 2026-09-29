@@ -106,7 +106,7 @@ func TestWhatRunsAnAgentSaysItTakesConversationsInTheSite(t *testing.T) {
 	if out.Status != domain.StatusFailed || out.Error.Code != apperr.FailedPrecondition || reason(out) != "no_credential" {
 		t.Fatalf("declared with no credential: %+v", out)
 	}
-	yukis := testkit.Result[tools.IssueTokenOut](t, b.do(t, b.yuki, "credential.issue_token", m{"label": "my assistant"})).CredentialID
+	yukis := b.session(t, b.yuki)
 	out = b.runtime(t, b.yuki, yukis, "me.site_chat", m{"on": true})
 	if out.Status != domain.StatusFailed || out.Error.Code != apperr.FailedPrecondition || reason(out) != "not_an_agent" {
 		t.Fatalf("a person declaring site chat: %+v", out)

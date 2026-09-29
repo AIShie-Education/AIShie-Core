@@ -12,6 +12,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/apperr"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/auth"
@@ -76,15 +77,72 @@ func TestPasswordHashing(t *testing.T) {
 	}
 }
 
+// rootPassword is what every test's root signs in with.
+const rootPassword = "a long enough password"
+
+// bootstrap makes root, root@example.edu, and the system actor.
+func bootstrap(t *testing.T, pool *pgxpool.Pool) auth.BootstrapResult {
+	t.Helper()
+	res, err := auth.Bootstrap(context.Background(), pool, auth.BootstrapInput{DisplayName: "Root", Email: "root@example.edu", Password: rootPassword})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return res
+}
+
+// newAgent registers an agent, as root does, and returns it with a token of
+// its own.
+func newAgent(t *testing.T, pool *pgxpool.Pool, root uuid.UUID) (uuid.UUID, auth.Token) {
+	t.Helper()
+	ctx := context.Background()
+	q := dbq.New(pool)
+	agent := ids.New()
+	if err := q.InsertActor(ctx, dbq.InsertActorParams{ID: agent, Kind: "agent", DisplayName: "grader", CreatedByActorID: &root,
+		CreatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	tok, _, err := auth.IssueToken(ctx, q, agent, &root, "runtime", nil, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return agent, tok
+}
+
+// withoutTheGuard writes what the database has refused since migration
+// 0017, as the release before it could.
+func withoutTheGuard(t *testing.T, pool *pgxpool.Pool, sql string, args ...any) {
+	t.Helper()
+	ctx := context.Background()
+	for _, stmt := range []string{`ALTER TABLE credential DISABLE TRIGGER credential_fits_actor_kind`, sql,
+		`ALTER TABLE credential ENABLE TRIGGER credential_fits_actor_kind`} {
+		var a []any
+		if stmt == sql {
+			a = args
+		}
+		if _, err := pool.Exec(ctx, stmt, a...); err != nil {
+			t.Fatalf("%v\n%s", err, stmt)
+		}
+	}
+}
+
+// reason is what an error says in details.reason.
+func reason(err error) string {
+	e, ok := apperr.As(err)
+	if !ok {
+		return ""
+	}
+	r, _ := e.Details["reason"].(string)
+	return r
+}
+
+// Root signs in with the password it was bootstrapped with, and holds no
+// API token: bootstrap makes none. An agent's token authenticates.
 func TestBootstrapAndAuthenticate(t *testing.T) {
 	pool := testdb.New(t)
 	ctx := context.Background()
 	q := dbq.New(pool)
 
-	res, err := auth.Bootstrap(ctx, pool, auth.BootstrapInput{DisplayName: "Root", Email: "root@example.edu", Password: "a long enough password"})
-	if err != nil {
-		t.Fatal(err)
-	}
+	res := bootstrap(t, pool)
 	root, err := q.GetActor(ctx, res.RootID)
 	if err != nil || root.PlatformRole == nil || *root.PlatformRole != "root" || root.CreatedByActorID != nil {
 		t.Fatalf("root actor: %+v %v", root, err)
@@ -93,27 +151,39 @@ func TestBootstrapAndAuthenticate(t *testing.T) {
 	if err != nil || system.Kind != "system" || system.CreatedByActorID == nil || *system.CreatedByActorID != res.RootID {
 		t.Fatalf("system actor: %+v %v", system, err)
 	}
-	if _, err := auth.Bootstrap(ctx, pool, auth.BootstrapInput{DisplayName: "Usurper"}); !errors.Is(err, auth.ErrAlreadyBootstrapped) {
+	var kinds []string
+	if err := pool.QueryRow(ctx, `SELECT array_agg(kind ORDER BY kind) FROM credential WHERE actor_id = $1`, res.RootID).Scan(&kinds); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(kinds, " ") != "password" {
+		t.Fatalf("root holds %v after bootstrap, want its password and nothing else", kinds)
+	}
+	if _, err := auth.Bootstrap(ctx, pool, auth.BootstrapInput{DisplayName: "Usurper", Email: "usurper@example.edu", Password: rootPassword}); !errors.Is(err, auth.ErrAlreadyBootstrapped) {
 		t.Fatalf("second bootstrap: %v", err)
 	}
 
 	a := auth.NewAuthenticator(pool, time.Hour)
-	p, err := a.Authenticate(ctx, res.Token.Full)
-	if err != nil || p.ActorID != res.RootID || p.Kind != auth.KindAPIToken {
-		t.Fatalf("authenticate with the bootstrap token: %+v %v", p, err)
+	sess, err := a.Login(ctx, "root@example.edu", rootPassword)
+	if err != nil || sess.ActorID != res.RootID {
+		t.Fatalf("root signing in: %+v %v", sess, err)
+	}
+	agent, tok := newAgent(t, pool, res.RootID)
+	p, err := a.Authenticate(ctx, tok.Full)
+	if err != nil || p.ActorID != agent || p.Kind != auth.KindAPIToken {
+		t.Fatalf("authenticate with the agent's token: %+v %v", p, err)
 	}
 	// Nothing that is stored is enough to authenticate with.
 	var stored string
 	if err := pool.QueryRow(ctx, `SELECT secret_hash FROM credential WHERE id = $1`, p.CredentialID).Scan(&stored); err != nil {
 		t.Fatal(err)
 	}
-	if stored == res.Token.Full || strings.Contains(stored, res.Token.Full[20:]) {
+	if stored == tok.Full || strings.Contains(stored, tok.Full[20:]) {
 		t.Fatal("the token is stored in the clear")
 	}
 
-	tampered := res.Token.Full[:len(res.Token.Full)-1] + "A"
-	if tampered == res.Token.Full {
-		tampered = res.Token.Full[:len(res.Token.Full)-1] + "B"
+	tampered := tok.Full[:len(tok.Full)-1] + "A"
+	if tampered == tok.Full {
+		tampered = tok.Full[:len(tok.Full)-1] + "B"
 	}
 	for name, presented := range map[string]string{
 		"nothing": "", "not ours": "ghp_abcdefghijklmnop", "right prefix, wrong secret": tampered,
@@ -129,14 +199,185 @@ func TestBootstrapAndAuthenticate(t *testing.T) {
 	if _, err := pool.Exec(ctx, `UPDATE credential SET expires_at = now() - interval '1 second' WHERE id = $1`, p.CredentialID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := a.Authenticate(ctx, res.Token.Full); !apperr.Is(err, apperr.Unauthenticated) {
+	if _, err := a.Authenticate(ctx, tok.Full); !apperr.Is(err, apperr.Unauthenticated) {
 		t.Fatalf("expired token: %v", err)
 	}
 	if _, err := pool.Exec(ctx, `UPDATE credential SET expires_at = NULL, revoked_at = now() WHERE id = $1`, p.CredentialID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := a.Authenticate(ctx, res.Token.Full); !apperr.Is(err, apperr.Unauthenticated) {
+	if _, err := a.Authenticate(ctx, tok.Full); !apperr.Is(err, apperr.Unauthenticated) {
 		t.Fatalf("revoked token: %v", err)
+	}
+}
+
+// Bootstrap makes root with a password and a name to sign in with, or makes
+// nothing: root would have no way in, and it does not run twice. A login ID
+// serves as well as an email.
+func TestBootstrapNeedsAWayToSignIn(t *testing.T) {
+	pool := testdb.New(t)
+	ctx := context.Background()
+	for name, in := range map[string]auth.BootstrapInput{
+		"no password":        {DisplayName: "Root", Email: "root@example.edu"},
+		"a short password":   {DisplayName: "Root", Email: "root@example.edu", Password: "short"},
+		"nothing to sign in": {DisplayName: "Root", Password: rootPassword},
+		"no email":           {DisplayName: "Root", Email: "root.example.edu", Password: rootPassword},
+		"no login ID":        {DisplayName: "Root", LoginID: "root@example.edu", Password: rootPassword},
+		"no name":            {DisplayName: " ", Email: "root@example.edu", Password: rootPassword},
+	} {
+		if _, err := auth.Bootstrap(ctx, pool, in); !apperr.Is(err, apperr.InvalidArgument) {
+			t.Errorf("%s: %v, want invalid_argument", name, err)
+		}
+	}
+	var n int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM actor`).Scan(&n); err != nil || n != 0 {
+		t.Fatalf("%d actors made by bootstraps refused (%v)", n, err)
+	}
+	res, err := auth.Bootstrap(ctx, pool, auth.BootstrapInput{DisplayName: "Root", LoginID: " T0001 ", Password: rootPassword})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess, err := auth.NewAuthenticator(pool, time.Hour).Login(ctx, "t0001", rootPassword)
+	if err != nil || sess.ActorID != res.RootID {
+		t.Fatalf("root signing in with its login ID: %+v %v", sess, err)
+	}
+}
+
+// Nobody issues a person an API token, whoever asks: people sign in. Nor the
+// system actor. An agent is issued one.
+func TestOnlyAnAgentIsIssuedAToken(t *testing.T) {
+	pool := testdb.New(t)
+	ctx := context.Background()
+	q := dbq.New(pool)
+	res := bootstrap(t, pool)
+	agent, _ := newAgent(t, pool, res.RootID)
+	for name, actor := range map[string]uuid.UUID{"root": res.RootID, "the system actor": res.SystemID} {
+		if _, _, err := auth.IssueToken(ctx, q, actor, &res.RootID, "cli", nil, time.Now()); !apperr.Is(err, apperr.Forbidden) {
+			t.Errorf("a token for %s: %v", name, err)
+		}
+	}
+	_, _, err := auth.IssueToken(ctx, q, res.RootID, nil, "cli", nil, time.Now())
+	if reason(err) != auth.ReasonTokensForAgents || !strings.Contains(err.Error(), "signs in with a password or single sign-on") {
+		t.Fatalf("a token for a person: %v", err)
+	}
+	if _, _, err := auth.IssueToken(ctx, q, agent, nil, "cli", nil, time.Now()); err != nil {
+		t.Fatalf("a token for an agent: %v", err)
+	}
+	// The database refuses one however it is written.
+	tok, err := auth.NewToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = pool.Exec(ctx, `INSERT INTO credential (actor_id, kind, secret_hash, token_prefix) VALUES ($1, 'api_token', $2, $3)`,
+		res.RootID, tok.Hash, tok.Prefix)
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) || pgErr.Code != "23514" {
+		t.Fatalf("the database took a token for a person: %v", err)
+	}
+}
+
+// A person's API token, from before migration 0017 revoked them or written
+// since past the database, authenticates nobody, and says why to whoever
+// presents it, who holds the whole of it: revoked or not. A wrong one is
+// refused as any wrong token is.
+func TestAPersonsTokenAuthenticatesNobody(t *testing.T) {
+	pool := testdb.New(t)
+	ctx := context.Background()
+	res := bootstrap(t, pool)
+	a := auth.NewAuthenticator(pool, time.Hour)
+	for _, revoked := range []bool{false, true} {
+		tok, err := auth.NewToken()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var at *time.Time
+		if revoked {
+			now := time.Now()
+			at = &now
+		}
+		withoutTheGuard(t, pool, `INSERT INTO credential (actor_id, kind, secret_hash, token_prefix, label, revoked_at)
+			VALUES ($1, 'api_token', $2, $3, 'bootstrap', $4)`, res.RootID, tok.Hash, tok.Prefix, at)
+		_, err = a.Authenticate(ctx, tok.Full)
+		if !apperr.Is(err, apperr.Unauthenticated) || reason(err) != auth.ReasonTokensForAgents {
+			t.Fatalf("root's token (revoked %v): %v", revoked, err)
+		}
+		wrong := tok.Full[:len(tok.Full)-2] + "AA"
+		if wrong == tok.Full {
+			wrong = tok.Full[:len(tok.Full)-2] + "BB"
+		}
+		if _, err := a.Authenticate(ctx, wrong); !apperr.Is(err, apperr.Unauthenticated) || reason(err) != "" {
+			t.Fatalf("a wrong secret under root's token's prefix: %v", err)
+		}
+	}
+	// A session of theirs is who they are.
+	sess, err := a.Login(ctx, "root@example.edu", rootPassword)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p, err := a.Authenticate(ctx, sess.Token); err != nil || p.ActorID != res.RootID || p.Kind != auth.KindSession {
+		t.Fatalf("root's session: %+v %v", p, err)
+	}
+}
+
+// An agent holds API tokens only: it is given no password, invitation or
+// identity at a provider, the database refusing each however it is
+// written; and one it holds from before migration 0017 revoked them signs
+// it in nowhere.
+func TestAnAgentDoesNotSignIn(t *testing.T) {
+	pool := testdb.New(t)
+	ctx := context.Background()
+	q := dbq.New(pool)
+	res := bootstrap(t, pool)
+	agent, _ := newAgent(t, pool, res.RootID)
+	if _, err := pool.Exec(ctx, `UPDATE actor SET email = 'grader@example.edu' WHERE id = $1`, agent); err != nil {
+		t.Fatal(err)
+	}
+	var pgErr *pgconn.PgError
+	refusedByTheDatabase := func(what string, err error) {
+		t.Helper()
+		if !errors.As(err, &pgErr) || pgErr.Code != "23514" {
+			t.Errorf("%s for an agent: %v, want the database's refusal", what, err)
+		}
+	}
+	refusedByTheDatabase("a password", auth.SetPassword(ctx, q, agent, "the agent's password", time.Now()))
+	_, _, err := auth.IssueInvite(ctx, q, agent, &res.RootID, "test", time.Now().Add(time.Hour), time.Now())
+	refusedByTheDatabase("an invitation", err)
+	_, err = pool.Exec(ctx, `INSERT INTO credential (actor_id, kind, provider, subject) VALUES ($1, 'sso', 'polyu-adfs', 'grader@example.edu')`, agent)
+	refusedByTheDatabase("an identity", err)
+
+	// What the release before could give it.
+	hash, err := auth.HashPassword("the agent's password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	inv, err := auth.NewInvite()
+	if err != nil {
+		t.Fatal(err)
+	}
+	withoutTheGuard(t, pool, `INSERT INTO credential (actor_id, kind, secret_hash) VALUES ($1, 'password', $2)`, agent, hash)
+	withoutTheGuard(t, pool, `INSERT INTO credential (actor_id, kind, secret_hash, token_prefix, expires_at)
+		VALUES ($1, 'invite', $2, $3, now() + interval '1 day')`, agent, inv.Hash, inv.Prefix)
+	withoutTheGuard(t, pool, `INSERT INTO credential (actor_id, kind, provider, subject) VALUES ($1, 'sso', 'polyu-adfs', 'grader@example.edu')`, agent)
+
+	a := auth.NewAuthenticator(pool, time.Hour)
+	_, err = a.Login(ctx, "grader@example.edu", "the agent's password")
+	if !apperr.Is(err, apperr.Unauthenticated) || reason(err) != auth.ReasonAgentsUseTokens {
+		t.Fatalf("an agent signing in with its password: %v", err)
+	}
+	_, wrong := a.Login(ctx, "grader@example.edu", "not the agent's password")
+	_, noSuch := a.Login(ctx, "nobody@example.edu", "not the agent's password")
+	if wrong == nil || noSuch == nil || wrong.Error() != noSuch.Error() {
+		t.Fatalf("a wrong password for an agent: %v; for nobody: %v", wrong, noSuch)
+	}
+	_, err = a.SignInWithIdentity(ctx, auth.Identity{Provider: "polyu-adfs", Subject: "grader@example.edu"})
+	if !apperr.Is(err, apperr.Forbidden) || reason(err) != auth.ReasonAgentsUseTokens {
+		t.Fatalf("an agent signing in through the identity provider: %v", err)
+	}
+	if _, err := a.AcceptInvite(ctx, inv.Full, "the agent's new password"); !apperr.Is(err, apperr.Unauthenticated) {
+		t.Fatalf("an agent's invitation taken up: %v", err)
+	}
+	var sessions int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM credential WHERE actor_id = $1 AND kind = 'session'`, agent).Scan(&sessions); err != nil || sessions != 0 {
+		t.Fatalf("the agent holds %d sessions (%v)", sessions, err)
 	}
 }
 
@@ -145,10 +386,8 @@ func TestBootstrapAndAuthenticate(t *testing.T) {
 func TestAUseIsNotedAtMostOnceAMinute(t *testing.T) {
 	pool := testdb.New(t)
 	ctx := context.Background()
-	res, err := auth.Bootstrap(ctx, pool, auth.BootstrapInput{DisplayName: "Root"})
-	if err != nil {
-		t.Fatal(err)
-	}
+	res := bootstrap(t, pool)
+	_, tok := newAgent(t, pool, res.RootID)
 	a := auth.NewAuthenticator(pool, time.Hour)
 	t0 := time.Now().Truncate(time.Second)
 	for _, step := range []struct {
@@ -159,7 +398,7 @@ func TestAUseIsNotedAtMostOnceAMinute(t *testing.T) {
 		{t0.Add(61 * time.Second), t0.Add(61 * time.Second)},
 	} {
 		a.SetClock(func() time.Time { return step.at })
-		p, err := a.Authenticate(ctx, res.Token.Full)
+		p, err := a.Authenticate(ctx, tok.Full)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -377,14 +616,12 @@ func TestSetPasswordReplacesTheOldOne(t *testing.T) {
 func TestTokensWithUnderscoresInTheSecretAuthenticate(t *testing.T) {
 	pool := testdb.New(t)
 	ctx := context.Background()
-	res, err := auth.Bootstrap(ctx, pool, auth.BootstrapInput{DisplayName: "Root"})
-	if err != nil {
-		t.Fatal(err)
-	}
+	res := bootstrap(t, pool)
+	agent, _ := newAgent(t, pool, res.RootID)
 	a := auth.NewAuthenticator(pool, time.Hour)
 	withUnderscore := 0
 	for range 60 {
-		tok, _, err := auth.IssueToken(ctx, dbq.New(pool), res.RootID, nil, "t", nil, time.Now())
+		tok, _, err := auth.IssueToken(ctx, dbq.New(pool), agent, nil, "t", nil, time.Now())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -406,10 +643,7 @@ func TestTokensWithUnderscoresInTheSecretAuthenticate(t *testing.T) {
 func TestTheSystemActorIsNeverIssuedAToken(t *testing.T) {
 	pool := testdb.New(t)
 	ctx := context.Background()
-	res, err := auth.Bootstrap(ctx, pool, auth.BootstrapInput{DisplayName: "Root"})
-	if err != nil {
-		t.Fatal(err)
-	}
+	res := bootstrap(t, pool)
 	if _, _, err := auth.IssueToken(ctx, dbq.New(pool), res.SystemID, nil, "sweeps", nil, time.Now()); !apperr.Is(err, apperr.Forbidden) {
 		t.Fatalf("a token for the system actor: %v", err)
 	}
@@ -438,10 +672,7 @@ func TestTheSystemActorIsNeverIssuedAToken(t *testing.T) {
 func TestATokenOfTheSystemActorsAuthenticatesNobody(t *testing.T) {
 	pool := testdb.New(t)
 	ctx := context.Background()
-	res, err := auth.Bootstrap(ctx, pool, auth.BootstrapInput{DisplayName: "Root"})
-	if err != nil {
-		t.Fatal(err)
-	}
+	res := bootstrap(t, pool)
 	tok, err := auth.NewToken()
 	if err != nil {
 		t.Fatal(err)
@@ -467,10 +698,8 @@ func TestInvitations(t *testing.T) {
 	pool := testdb.New(t)
 	ctx := context.Background()
 	q := dbq.New(pool)
-	res, err := auth.Bootstrap(ctx, pool, auth.BootstrapInput{DisplayName: "Root", Email: "root@example.edu"})
-	if err != nil {
-		t.Fatal(err)
-	}
+	res := bootstrap(t, pool)
+	_, agentToken := newAgent(t, pool, res.RootID)
 	yuki := uuid.Must(uuid.NewV7())
 	email := "Yuki@example.edu"
 	if err := q.InsertActor(ctx, dbq.InsertActorParams{ID: yuki, Kind: "human", DisplayName: "Yuki", Email: &email,
@@ -499,9 +728,9 @@ func TestInvitations(t *testing.T) {
 		t.Fatalf("invitation %q does not look like aisinv_<prefix>_<secret>", inv)
 	}
 	// It is no bearer token, and a bearer token is no invitation.
-	_, err = a.Authenticate(ctx, inv)
+	_, err := a.Authenticate(ctx, inv)
 	refused("the invitation as a bearer token", err)
-	_, err = a.AcceptInvite(ctx, res.Token.Full, "a long enough password")
+	_, err = a.AcceptInvite(ctx, agentToken.Full, "a long enough password")
 	refused("a token as an invitation", err)
 	forged := []byte(inv)
 	forged[30] ^= 'A' ^ 'B' // 'A' <-> 'B'; anything else becomes a character outside the alphabet

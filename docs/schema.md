@@ -104,6 +104,8 @@ So do those of site chat (§2.8): only an agent declares it, and only an agent t
 refused as a respondent in the site.
 So does one refusal outside the database: Core vouches for nobody but a person to a service
 that hosts agents (`POST /v1/auth/assertion`, README), and an agent's token asks in vain.
+So does the rule for who holds which credential, below: a person signs in and holds no API
+token; an agent holds API tokens and never signs in.
 
 **An agent a person owns acts only as that person's delegate.** `owner_actor_id` names the
 person. Every seat of the agent that is not removed is a *delegate seat*, whose principal is the
@@ -163,7 +165,8 @@ letters and digits of ASCII, dots, hyphens and underscores (`actor_login_id_vali
 never holds an `@` and is never taken for an email, nor an email for it, and never a space, so
 that what is kept is trimmed; unique in any case, as an email is (`actor_login_id_key`). Only a
 person has one (`actor_login_id_is_a_persons`, a CHECK that reads `kind` to refuse, as the
-refusals of ownership do): an agent signs in with a token, and the system actor never signs in.
+refusals of ownership do): an agent never signs in, and holds a token instead, and the system
+actor never signs in.
 The name is neutral on purpose: a student's number and a teacher's are the same kind of thing,
 and neither is chosen by the person, as a user name would be. An administrator gives it and
 corrects it (`actor.register`, `actor.update`), and it can be changed, not removed, as an email;
@@ -192,11 +195,14 @@ else. A department's administrator may stand where the admin does, for the cours
 departments, and registers the people they invite there (`actor.invite_new`). Roster syncs run
 as a `kind = 'system'` actor so the chain has no gaps.
 
-Root and the system actor are created by `aishiterud bootstrap`, once. It is the one state
-change with no `action` row: there is no actor yet for it to be an action of. The operator's
-`aishiterud token issue` is likewise outside the log — it is how a newly registered agent,
-which cannot sign in to ask, gets its first token — and needs the database access that
-already implies everything. Like the tools, it refuses the system actor.
+Root and the system actor are created by `aishiterud bootstrap`, once. Root is given a
+password, read from standard input, and an email or a login ID to sign in with, and no API
+token: it signs in as anyone does. Without a password or a name to sign in with, bootstrap
+creates nothing. It is the one state change with no `action` row: there is no actor yet for it
+to be an action of. The operator's `aishiterud token issue` is likewise outside the log — it is
+how a newly registered agent, which never signs in, gets its first token — and needs the
+database access that already implies everything. Like the tools, it refuses the system actor,
+and a person.
 
 `credential` covers five kinds of the same thing. SSO rows hold no secret — `provider` and
 `subject` identify the account at the identity provider (`polyu-adfs` + UPN). API tokens store a
@@ -210,6 +216,25 @@ and revoked as it is; an actor has one live invitation at most. Setting a passwo
 way revokes it too, and so does a change of email: it went to the old one. A person is invited
 who has an email or a login ID to sign in with.
 
+**People sign in; API tokens are for agents.** A person holds passwords, identities at a
+provider, invitations and the sessions signing in with them makes, and never an API token: for
+tools and scripts they use one of their agents, which holds a token of its own and never more
+than their seat. `credential.issue_token` for a person, `actor.issue_token` and `aishiterud token
+issue` for one are refused (`api_tokens_are_for_agents`), whoever asks. An agent holds API tokens
+and nothing else: it is given no password (`credential.set_password`), no invitation
+(`actor.invite`; `actor.invite_new` registers people only) and no identity at a provider
+(`actor.link_sso`), each refused `agents_use_api_tokens`, and so never signs in and never holds a
+session; one it held from before signs it in nowhere, a password answered `401` and the rest as
+if unknown. The database holds the rule (trigger `credential_fits_actor_kind`, migration 0017,
+reading `kind` to refuse): it refuses a person's API token and an agent's password, invitation,
+identity or session when one is written, and when an update would leave one live that moved to
+another actor, changed kind or had its revocation taken back; revoking one passes. Migration 0017
+revoked what there was: every API token a person held, root's from bootstrap among them, and
+every password, invitation, identity and session an agent held. A person's API token from
+before, revoked or not, authenticates nobody, and is answered `401` with its reason,
+`api_tokens_are_for_agents`: whoever presents it holds the whole secret, and a script left with
+one is told what to do instead.
+
 `must_change` marks a password someone else set: an instructor's reset of a student's
 (`member.reset_password`, §2.2), who issued it (`issued_by_actor_id`, which a password otherwise
 leaves null; the CHECK `credential_must_change_is_an_issued_password` holds both). The sign-in
@@ -221,12 +246,13 @@ every password before. Migration 0016 adds the column, and its CHECK `NOT VALID`
 before it holds false. The release before neither reads nor writes it, and takes a temporary
 password as it takes any.
 
-`issued_by_actor_id` says who issued an API token: the actor themself
+`issued_by_actor_id` says who issued an API token: the agent itself
 (`credential.issue_token`), an administrator (`actor.issue_token`), or an agent's owner
 (`agent.issue_token`); who issued an invitation (`actor.invite`, `actor.invite_new`), which
 is asked again when it is taken up (§2.10); and who set a temporary password
 (`member.reset_password`). It is null for the other kinds, for a token made on
-the command line (`aishiterud bootstrap`, `aishiterud token issue`), for a token issued by a
+the command line (`aishiterud token issue`, and root's by `aishiterud bootstrap` before migration
+0017), for a token issued by a
 release older than migration 0006, including one that release issues while it still runs after
 the migration, and for an invitation made before its issuer was recorded, which is taken for a
 platform administrator's, as every invitation then was.
@@ -645,8 +671,8 @@ It takes the person's row, then the seat, as every tool that changes a seat does
 `FOR UPDATE`, after its principal's KEY SHARE, though a person's seat has none), so that seating
 them elsewhere meanwhile waits for it, or it for that, and counts the seat. It revokes their
 passwords and any invitation, as setting a password does, sets the temporary one, marked
-(`must_change`, `issued_by_actor_id` the caller), and signs them out of every session; their API
-tokens stay, and do nothing until they have set their own. The password is made by Core — four
+(`must_change`, `issued_by_actor_id` the caller), and signs them out of every session, which is
+all a person is signed in with: they hold no API token. The password is made by Core — four
 groups of four characters from an alphabet with nothing that reads as something else, about 79
 bits — and is never stored but as its argon2 hash: the tool names it a secret of its result
 (`SecretOut`), so the action's recorded result leaves it out, a replay comes back without it, and
@@ -1585,6 +1611,7 @@ that reads which credential the call came with.
 | A session credential has a lookup prefix and an expiry | CHECKs on `credential` |
 | An invitation has a lookup prefix and an expiry, and an actor has one live invitation at most | CHECKs and a partial unique index on `credential` |
 | No credential is written for the system actor | trigger on `credential` |
+| A person holds no API token, and an agent nothing but API tokens: none written, moved, changed in kind or brought back live otherwise | trigger `credential_fits_actor_kind` on `credential` |
 | `event` is append-only; `document_version` is too, but for being purged once: its text, file and checksum emptied, who, when and why recorded, nothing else changed | triggers |
 | A purge says who, when and why; a purged document is material, instructions or a rubric, archived, and stays purged as it was purged | CHECKs and trigger `document_purge_kept` on `document`, CHECKs on `document_version` |
 | An override of a total is on a computed grade, not negative, and says who, when and why | CHECKs on `grade` |
@@ -1694,6 +1721,9 @@ that reads which credential the call came with.
   changing a seat waits for the member's calls in flight, or they wait for it and are refused,
   so nothing is proposed from a seat that is being removed.
 - A token the system actor was given before the database refused them authenticates nobody.
+- Nor does a person's API token from before migration 0017, which is answered `401` with
+  `api_tokens_are_for_agents`, revoked or not; and a password an agent held from before signs it
+  in nowhere (`agents_use_api_tokens`), nor does its identity at a provider or its invitation.
 - An invitation is used once: the password is set, the invitation revoked and the session
   started in one transaction, under the invitation's row lock, so of two tries at once one sets
   the password and the other finds it used, and a try that fails half way leaves the invitation

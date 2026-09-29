@@ -2,7 +2,7 @@
 # Runs a one-off aishiterud command with the image that is running, e.g.
 #
 #   aishiterud migrate version
-#   aishiterud token issue --actor ID --label grader-bot --days 90
+#   aishiterud token issue --actor AGENT_ID --label grader-bot --days 90
 set -eu
 ENV_FILE=${AISHITERU_ENV_FILE:-/etc/aishiteru/aishiteru.env}
 img=$(docker inspect -f '{{.Config.Image}}' aishiteru 2>/dev/null) ||

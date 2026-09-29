@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # End to end, from the outside: the real binary, a scratch database, and
-# nothing but curl. It bootstraps an installation and then builds the worked
-# example from docs/schema.md §5 entirely through the REST API — register the
-# actors, create and open the course, seat the instructor, set up grading,
+# nothing but curl. It bootstraps an installation, root with a password and
+# no token, and then builds the worked example from docs/schema.md §5
+# entirely through the REST API — register the actors, each person invited,
+# choosing a password and signing in with it, each agent given a token, and
+# nobody a person a token; create and open the course, seat the instructor, set up grading,
 # publish an assignment, hand in work, have an agent grade it, approve, post;
 # have the instructor rename the course, halve the assignment's points with
 # the grade rescaled, override and restore the student's total, rename and
@@ -73,6 +75,34 @@ call() {
   printf '  %-4s %-62s %s\n' "$method" "$(printf '%s' "$path" | sed -E 's/aisjoin_[A-Za-z0-9_-]+/…/')" "$got"
 }
 
+# reason — the reason the last refusal gave, from $WORK/body.
+reason() { json "$WORK/body" 'd["error"]["details"]["reason"]'; }
+
+# signin WANT BODY — POST /v1/auth/login as the sign-in page does; the session
+# the cookie carries is left in $SESSION, the body in $WORK/body.
+signin() {
+  N=$((N + 1))
+  local got
+  got=$(curl -s -o "$WORK/body" -D "$WORK/headers" -w '%{http_code}' -X POST -H 'Content-Type: application/json' -d "$2" "$BASE/v1/auth/login")
+  [ "$got" = "$1" ] || fail "POST /v1/auth/login → $got, want $1: $(cat "$WORK/body")"
+  SESSION=$(sed -n 's/^[Ss]et-[Cc]ookie: ais_session=\([^;]*\).*/\1/p' "$WORK/headers" | tr -d '\r')
+  printf '  %-4s %-62s %s\n' POST /v1/auth/login "$got"
+}
+
+# accept INVITATION PASSWORD — POST /v1/auth/invite as the front end's page
+# that takes invitations does: the password goes in, a session comes back as
+# a cookie, left in $SESSION.
+accept() {
+  N=$((N + 1))
+  local got
+  got=$(curl -s -o "$WORK/body" -D "$WORK/headers" -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
+    -d "{\"token\":\"$1\",\"password\":\"$2\"}" "$BASE/v1/auth/invite")
+  [ "$got" = 200 ] || fail "POST /v1/auth/invite → $got: $(cat "$WORK/body")"
+  SESSION=$(sed -n 's/^[Ss]et-[Cc]ookie: ais_session=\([^;]*\).*/\1/p' "$WORK/headers" | tr -d '\r')
+  [ -n "$SESSION" ] || fail "taking up the invitation set no session: $(cat "$WORK/headers")"
+  printf '  %-4s %-62s %s\n' POST /v1/auth/invite "$got"
+}
+
 # ---------------------------------------------------------------------------
 step "A scratch database, migrated and seeded by the binary itself"
 createdb "$DB"
@@ -91,15 +121,20 @@ export RUNTIME_AUDIENCES="$RUNTIME" SIGNING_KEY
 "$BIN" migrate up
 "$BIN" seed
 
-step "bootstrap: the one actor created by nobody"
-# An empty password is refused before anything is made: the bootstrap
-# after it is still the first.
+step "bootstrap: the one actor created by nobody, with a password to sign in with, and no token"
+# An empty password is refused before anything is made, and so is none at
+# all: the bootstrap after them is still the first.
 printf '\n' | "$BIN" bootstrap --name Root --email root@example.edu --password-stdin >/dev/null 2>&1 &&
   fail "bootstrap took an empty password"
-ROOT=$("$BIN" bootstrap --name Root 2>/dev/null)
-[[ $ROOT == ais_* ]] || fail "bootstrap printed no token"
-"$BIN" bootstrap --name Usurper >/dev/null 2>&1 && fail "bootstrap ran twice"
-echo "  root token ${ROOT:0:16}…; an empty password and a second bootstrap are refused"
+"$BIN" bootstrap --name Root --email root@example.edu </dev/null >/dev/null 2>&1 && fail "bootstrap ran with no password"
+OUT=$(printf '%s\n' "roots own password" | "$BIN" bootstrap --name Root --email root@example.edu --password-stdin 2>"$WORK/bootstrap.err") ||
+  fail "bootstrap: $(cat "$WORK/bootstrap.err")"
+[ -z "$OUT" ] || fail "bootstrap printed on standard output"
+grep -q 'ais_' "$WORK/bootstrap.err" && fail "bootstrap printed a token"
+grep -q 'Sign in at your site with root@example.edu and that password' "$WORK/bootstrap.err" || fail "bootstrap did not say how root signs in: $(cat "$WORK/bootstrap.err")"
+printf '%s\n' "another long password" | "$BIN" bootstrap --name Usurper --email usurper@example.edu --password-stdin >/dev/null 2>&1 &&
+  fail "bootstrap ran twice"
+echo "  root made, with a password and no token; no password, an empty one and a second bootstrap are refused"
 
 start() {
   "$BIN" serve 2>>"$WORK/server.log" &
@@ -110,25 +145,54 @@ start() {
 start
 
 # ---------------------------------------------------------------------------
-step "Root makes an admin; the admin registers everyone and gives each a token"
+step "Root signs in; root makes an admin, who is invited and signs in; the admin registers everyone, inviting each person and giving each agent a token"
 call 401 GET /v1/me "not-a-token"
-call 200 POST /v1/actors "$ROOT" '{"kind":"human","display_name":"Admin","platform_role":"admin"}'
-ADMIN_ID=$(json "$WORK/body" 'd["result"]["actor_id"]')
-call 200 POST "/v1/actors/$ADMIN_ID/tokens" "$ROOT" '{"label":"e2e"}'
-ADMIN=$(json "$WORK/body" 'd["result"]["token"]')
+signin 200 '{"login":"root@example.edu","password":"roots own password"}'
+ROOT=$SESSION
+call 200 GET /v1/me "$ROOT"
+[ "$(json "$WORK/body" 'd["result"]["platform_role"]')" = root ] || fail "root is not root: $(cat "$WORK/body")"
+call 200 GET /v1/me/credentials "$ROOT"
+[ "$(json "$WORK/body" 'sorted(set(c["kind"] for c in d["result"]["credentials"]))')" = "['password', 'session']" ] ||
+  fail "root holds more than a password and a session: $(cat "$WORK/body")"
+call 403 POST /v1/me/credentials/tokens "$ROOT" '{"label":"cli"}' # a person holds no API token, root included
+[ "$(reason)" = api_tokens_are_for_agents ] || fail "refused, but not as a person's token: $(cat "$WORK/body")"
 
-register() { # KIND NAME → sets ACTOR_ID and TOKEN
-  call 200 POST /v1/actors "$ADMIN" "{\"kind\":\"$1\",\"display_name\":\"$2\"}"
+person() { # BY NAME [MORE_JSON] → sets ACTOR_ID and TOKEN, the session they signed in with
+  local email password invite
+  email="$(printf '%s' "$2" | tr '[:upper:]' '[:lower:]')@example.edu"
+  password="$2's own password"
+  call 200 POST /v1/actors "$1" "{\"kind\":\"human\",\"display_name\":\"$2\",\"email\":\"$email\"${3:+,$3}}"
+  ACTOR_ID=$(json "$WORK/body" 'd["result"]["actor_id"]')
+  call 200 POST "/v1/actors/$ACTOR_ID/invite" "$1"
+  invite=$(json "$WORK/body" 'd["result"]["token"]')
+  accept "$invite" "$password"
+  signin 200 "{\"login\":\"$email\",\"password\":\"$password\"}"
+  TOKEN=$SESSION
+}
+agent() { # NAME → sets ACTOR_ID and TOKEN, the API token the admin gives it
+  call 200 POST /v1/actors "$ADMIN" "{\"kind\":\"agent\",\"display_name\":\"$1\"}"
   ACTOR_ID=$(json "$WORK/body" 'd["result"]["actor_id"]')
   call 200 POST "/v1/actors/$ACTOR_ID/tokens" "$ADMIN" '{"label":"e2e"}'
   TOKEN=$(json "$WORK/body" 'd["result"]["token"]')
 }
-register human Sato;      SATO_ID=$ACTOR_ID;   SATO=$TOKEN
-register human Yuki;      YUKI_ID=$ACTOR_ID;   YUKI=$TOKEN
-register human Ken;       KEN_ID=$ACTOR_ID
-register human Hana;      HANA=$TOKEN
-register human Ren;       REN=$TOKEN
-register agent grader-v2; GRADER_ID=$ACTOR_ID; GRADER=$TOKEN
+person "$ROOT" Admin '"platform_role":"admin"'; ADMIN_ID=$ACTOR_ID; ADMIN=$TOKEN
+person "$ADMIN" Sato;  SATO_ID=$ACTOR_ID; SATO=$TOKEN
+person "$ADMIN" Yuki;  YUKI_ID=$ACTOR_ID; YUKI=$TOKEN
+person "$ADMIN" Ken;   KEN_ID=$ACTOR_ID
+person "$ADMIN" Hana;  HANA=$TOKEN
+person "$ADMIN" Ren;   REN=$TOKEN
+agent grader-v2;       GRADER_ID=$ACTOR_ID; GRADER=$TOKEN
+# Nobody gives a person a token, and an agent is invited to nothing.
+call 403 POST "/v1/actors/$SATO_ID/tokens" "$ADMIN" '{"label":"e2e"}'
+[ "$(reason)" = api_tokens_are_for_agents ] || fail "refused, but not as a person's token: $(cat "$WORK/body")"
+call 403 POST "/v1/actors/$ADMIN_ID/tokens" "$ROOT" '{"label":"e2e"}'
+call 403 POST /v1/me/credentials/tokens "$SATO" '{"label":"my script"}'
+call 403 POST "/v1/actors/$GRADER_ID/invite" "$ADMIN"
+[ "$(reason)" = agents_use_api_tokens ] || fail "refused, but not as an agent's invitation: $(cat "$WORK/body")"
+call 403 POST /v1/me/password "$GRADER" '{"password":"the graders password"}'
+[ "$(reason)" = agents_use_api_tokens ] || fail "refused, but not as an agent's password: $(cat "$WORK/body")"
+call 200 GET /v1/me/credentials "$GRADER"
+[ "$(json "$WORK/body" '[c["kind"] for c in d["result"]["credentials"]]')" = "['api_token']" ] || fail "the grader holds more than its token: $(cat "$WORK/body")"
 
 step "The admin creates CS101, opens it, and seats Sato; from here it is Sato's course"
 call 200 POST /v1/terms "$ADMIN" '{"name":"2026 Autumn","starts_on":"2026-09-01","ends_on":"2026-12-20"}'
@@ -373,17 +437,6 @@ call 200 POST "$C/actions/$HW4_ASK/decide" "$SATO" '{"decision":"approve"}'
 call 200 GET "$C/assignments" "$SATO"
 json "$WORK/body" '"HW4" in [a["title"] for a in d["result"]["assignments"]] or sys.exit("HW4 was not made")' >/dev/null
 
-# signin WANT BODY — POST /v1/auth/login as the sign-in page does; the session
-# the cookie carries is left in $SESSION, the body in $WORK/body.
-signin() {
-  N=$((N + 1))
-  local got
-  got=$(curl -s -o "$WORK/body" -D "$WORK/headers" -w '%{http_code}' -X POST -H 'Content-Type: application/json' -d "$2" "$BASE/v1/auth/login")
-  [ "$got" = "$1" ] || fail "POST /v1/auth/login → $got, want $1: $(cat "$WORK/body")"
-  SESSION=$(sed -n 's/^[Ss]et-[Cc]ookie: ais_session=\([^;]*\).*/\1/p' "$WORK/headers" | tr -d '\r')
-  printf '  %-4s %-62s %s\n' POST /v1/auth/login "$got"
-}
-
 step "Wei, who has no email, registers through a new link with her student number as her login ID, and signs in with it"
 call 200 POST "$C/join-links" "$SATO" '{}'
 JOIN2=$(json "$WORK/body" 'd["result"]["token"]')
@@ -435,7 +488,7 @@ signin 401 "{\"login\":\"20230001\",\"password\":\"$TEMPORARY\"}"
 unset TEMPORARY
 
 step "A TA's password is not Sato's to reset"
-register human Tanaka; TANAKA_ID=$ACTOR_ID
+person "$ADMIN" Tanaka; TANAKA_ID=$ACTOR_ID
 call 200 POST "$C/members" "$SATO" "{\"actor_id\":\"$TANAKA_ID\",\"preset\":\"ta\"}"
 TANAKA_M=$(json "$WORK/body" 'd["result"]["member_id"]')
 call 403 POST "$C/members/$TANAKA_M/reset-password" "$SATO"
@@ -468,13 +521,8 @@ call 200 POST /v1/actor-invitations "$ROOT" '{"display_name":"Ada","email":"ada@
 ADA_ID=$(json "$WORK/body" 'd["result"]["actor_id"]')
 INVITE=$(json "$WORK/body" 'd["result"]["token"]')
 # Taken up as the front end's page takes it: the password goes in, a session comes back as a cookie.
-N=$((N + 1))
-[ "$(curl -s -o "$WORK/body" -D "$WORK/headers" -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
-  -d "{\"token\":\"$INVITE\",\"password\":\"adas own password\"}" "$BASE/v1/auth/invite")" = 200 ] ||
-  fail "Ada could not take up the invitation: $(cat "$WORK/body")"
-ADA=$(sed -n 's/^[Ss]et-[Cc]ookie: ais_session=\([^;]*\).*/\1/p' "$WORK/headers" | tr -d '\r')
-[ -n "$ADA" ] || fail "taking up the invitation set no session: $(cat "$WORK/headers")"
-printf '  %-4s %-62s %s\n' POST /v1/auth/invite 200
+accept "$INVITE" "adas own password"
+ADA=$SESSION
 call 200 POST "/v1/departments/$ENG/admins" "$ROOT" "{\"actor_id\":\"$ADA_ID\"}"
 
 step "Ada makes Design beneath Engineering and a course in it"

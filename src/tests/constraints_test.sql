@@ -148,6 +148,49 @@ SELECT pg_temp.fails('the system actor holds no credential', '23514', $q$
 SELECT pg_temp.fails('a credential is not moved to the system actor', '23514', $q$
     UPDATE credential SET actor_id = '00000000-0000-0000-0000-000000000033' WHERE token_prefix = 'sess-1' $q$);
 
+-- API tokens are for agents; signing in is for people.
+SELECT pg_temp.ok('an agent holds an API token', $q$
+    INSERT INTO credential (actor_id, kind, secret_hash, token_prefix, label)
+    VALUES ('00000000-0000-0000-0000-000000000036', 'api_token', 'h', 'tok-agent-1', 'grader') $q$);
+SELECT pg_temp.fails('a person holds no API token', '23514', $q$
+    INSERT INTO credential (actor_id, kind, secret_hash, token_prefix)
+    VALUES ('00000000-0000-0000-0000-000000000034', 'api_token', 'h', 'tok-person-1') $q$);
+SELECT pg_temp.fails('root neither, as bootstrap once gave it', '23514', $q$
+    INSERT INTO credential (actor_id, kind, secret_hash, token_prefix, label)
+    VALUES ('00000000-0000-0000-0000-000000000031', 'api_token', 'h', 'tok-root-1', 'bootstrap') $q$);
+SELECT pg_temp.fails('not even one written revoked', '23514', $q$
+    INSERT INTO credential (actor_id, kind, secret_hash, token_prefix, revoked_at)
+    VALUES ('00000000-0000-0000-0000-000000000034', 'api_token', 'h', 'tok-person-2', now()) $q$);
+SELECT pg_temp.fails('nor is an agent''s token moved to a person', '23514', $q$
+    UPDATE credential SET actor_id = '00000000-0000-0000-0000-000000000034' WHERE token_prefix = 'tok-agent-1' $q$);
+SELECT pg_temp.fails('nor a person''s session made into one', '23514', $q$
+    UPDATE credential SET kind = 'api_token', expires_at = NULL WHERE token_prefix = 'sess-1' $q$);
+SELECT pg_temp.ok('a person''s token from before the rule is revoked, as the migration revokes it', $q$
+    ALTER TABLE credential DISABLE TRIGGER credential_fits_actor_kind;
+    INSERT INTO credential (actor_id, kind, secret_hash, token_prefix)
+    VALUES ('00000000-0000-0000-0000-000000000034', 'api_token', 'h', 'tok-person-old');
+    ALTER TABLE credential ENABLE TRIGGER credential_fits_actor_kind;
+    UPDATE credential SET revoked_at = now() WHERE token_prefix = 'tok-person-old' $q$);
+SELECT pg_temp.fails('and is not brought back', '23514', $q$
+    UPDATE credential SET revoked_at = NULL WHERE token_prefix = 'tok-person-old' $q$);
+SELECT pg_temp.ok('while it stays revoked, whatever else is done to it passes', $q$
+    UPDATE credential SET revoked_at = revoked_at - interval '1 second', label = 'from before 0017' WHERE token_prefix = 'tok-person-old' $q$);
+SELECT pg_temp.fails('an agent holds no password', '23514', $q$
+    INSERT INTO credential (actor_id, kind, secret_hash) VALUES ('00000000-0000-0000-0000-000000000036', 'password', 'h') $q$);
+SELECT pg_temp.fails('no invitation to choose one', '23514', $q$
+    INSERT INTO credential (actor_id, kind, secret_hash, token_prefix, expires_at)
+    VALUES ('00000000-0000-0000-0000-000000000036', 'invite', 'h', 'inv-agent', now() + interval '7 days') $q$);
+SELECT pg_temp.fails('no identity at a provider', '23514', $q$
+    INSERT INTO credential (actor_id, kind, provider, subject)
+    VALUES ('00000000-0000-0000-0000-000000000036', 'sso', 'polyu-adfs', 'grader@connect.polyu.hk') $q$);
+SELECT pg_temp.fails('and no session, which only signing in makes', '23514', $q$
+    INSERT INTO credential (actor_id, kind, secret_hash, token_prefix, expires_at)
+    VALUES ('00000000-0000-0000-0000-000000000036', 'session', 'h', 'sess-agent', now() + interval '12 hours') $q$);
+SELECT pg_temp.fails('nor is a person''s session moved to an agent', '23514', $q$
+    UPDATE credential SET actor_id = '00000000-0000-0000-0000-000000000036' WHERE token_prefix = 'sess-1' $q$);
+SELECT pg_temp.ok('an agent''s token is revoked as any credential is', $q$
+    UPDATE credential SET revoked_at = now() WHERE token_prefix = 'tok-agent-1' $q$);
+
 -- Login IDs: a person's student or staff number, a sign-in name beside the email.
 SELECT pg_temp.ok('a person has a login ID, as an administrator gives it', $q$
     UPDATE actor SET login_id = 'HNU20230001' WHERE id = '00000000-0000-0000-0000-000000000035' $q$);
@@ -478,10 +521,10 @@ SELECT pg_temp.fails('only a delegate''s seat answers the course', '23514', $q$
     UPDATE course_member SET answers_course = true WHERE id = '00000000-0000-0000-0000-000000000051' $q$);
 
 -- Site chat: which credential of an agent's declared it ------------------------
--- 1c1 the grader's (36) token · 1c2 Sato's (34)
-INSERT INTO credential (id, actor_id, kind, secret_hash, token_prefix) VALUES
-    ('00000000-0000-0000-0000-0000000001c1', '00000000-0000-0000-0000-000000000036', 'api_token', 'h', 'sc-agent'),
-    ('00000000-0000-0000-0000-0000000001c2', '00000000-0000-0000-0000-000000000034', 'api_token', 'h', 'sc-person');
+-- 1c1 the grader's (36) token · 1c2 Sato's (34) session
+INSERT INTO credential (id, actor_id, kind, secret_hash, token_prefix, expires_at) VALUES
+    ('00000000-0000-0000-0000-0000000001c1', '00000000-0000-0000-0000-000000000036', 'api_token', 'h', 'sc-agent', NULL),
+    ('00000000-0000-0000-0000-0000000001c2', '00000000-0000-0000-0000-000000000034', 'session', 'h', 'sc-person', now() + interval '12 hours');
 SELECT pg_temp.ok('an agent declares site chat with a credential of its own', $q$
     UPDATE actor SET site_chat_credential_id = '00000000-0000-0000-0000-0000000001c1' WHERE id = '00000000-0000-0000-0000-000000000036' $q$);
 SELECT pg_temp.fails('not with someone else''s', '23503', $q$
@@ -491,7 +534,7 @@ SELECT pg_temp.fails('nor with one that does not exist', '23503', $q$
 SELECT pg_temp.fails('a person declares no site chat, even with a credential of their own', '23514', $q$
     UPDATE actor SET site_chat_credential_id = '00000000-0000-0000-0000-0000000001c2' WHERE id = '00000000-0000-0000-0000-000000000034' $q$);
 SELECT pg_temp.fails('a credential that declared it is not moved to another actor', '23503', $q$
-    UPDATE credential SET actor_id = '00000000-0000-0000-0000-000000000034' WHERE id = '00000000-0000-0000-0000-0000000001c1' $q$);
+    UPDATE credential SET actor_id = '00000000-0000-0000-0000-000000000038' WHERE id = '00000000-0000-0000-0000-0000000001c1' $q$);
 SELECT pg_temp.ok('revoking it leaves the row as it is: whether it is live is read, not kept', $q$
     UPDATE credential SET revoked_at = now() WHERE id = '00000000-0000-0000-0000-0000000001c1';
     DO $chk$

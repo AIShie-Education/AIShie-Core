@@ -50,6 +50,13 @@ func New(t testing.TB) *pgxpool.Pool {
 	return pool
 }
 
+// NewWithURL is New, along with the database's URL, for tests of what opens
+// a connection of its own: the operator's command line.
+func NewWithURL(t testing.TB) (*pgxpool.Pool, string) {
+	t.Helper()
+	return create(t, true)
+}
+
 // NewEmpty returns a pool on a fresh database with nothing in it, along with
 // its URL, for tests of the migrations themselves.
 func NewEmpty(t testing.TB) (*pgxpool.Pool, string) {

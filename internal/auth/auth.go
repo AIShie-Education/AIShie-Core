@@ -31,6 +31,70 @@ const (
 	DefaultSessionTTL = 12 * time.Hour
 )
 
+// Who holds which credential (docs/schema.md §2.1). A person signs in, with
+// a password or through single sign-on, and is given a session for it; for
+// tools and scripts they use one of their agents. An agent holds API tokens
+// and nothing else: no password, no invitation, no identity at a provider,
+// and so never a session. The system actor holds none at all. The database
+// holds the same (credential_fits_actor_kind, migration 0017). Each refusal
+// says which rule in error.details.reason.
+const (
+	// ReasonTokensForAgents refuses a person an API token, and a person's
+	// API token when it is presented.
+	ReasonTokensForAgents = "api_tokens_are_for_agents" //nolint:gosec // a reason code, not a credential
+	// ReasonAgentsUseTokens refuses an agent a password, an invitation or
+	// an identity at a provider, and a sign-in by any of them.
+	ReasonAgentsUseTokens = "agents_use_api_tokens" //nolint:gosec // a reason code, not a credential
+)
+
+const (
+	tokensForAgents = "API tokens are for agents: a person signs in with a password or single sign-on, and uses one of " +
+		"their agents for tools and scripts (agent.create, then agent.issue_token)"
+	agentsUseTokens = "an agent holds API tokens only: it is given no password, no invitation and no single sign-on, and " +
+		"never signs in; issue it a token instead (agent.issue_token, actor.issue_token)"
+)
+
+var (
+	// ErrTokensForAgents refuses to issue a person an API token, whoever asks.
+	ErrTokensForAgents = apperr.Forbid(tokensForAgents).With("reason", ReasonTokensForAgents)
+	// errTokenOfAPerson refuses a person's API token presented as a
+	// credential: one from before migration 0017 revoked them, or written
+	// since past the database's refusal.
+	errTokenOfAPerson = apperr.New(apperr.Unauthenticated, tokensForAgents).With("reason", ReasonTokensForAgents)
+	// ErrAgentsUseTokens refuses to give an agent a password, an invitation
+	// or an identity at a provider, whoever asks.
+	ErrAgentsUseTokens = apperr.Forbid(agentsUseTokens).With("reason", ReasonAgentsUseTokens)
+	// errAgentSignsIn refuses an agent's sign-in with a password it holds
+	// from before migration 0017 revoked them.
+	errAgentSignsIn = apperr.New(apperr.Unauthenticated, agentsUseTokens).With("reason", ReasonAgentsUseTokens)
+)
+
+// MayHoldToken says whether an actor of the given kind may be issued an API
+// token: an agent may, and nobody else. A person is refused
+// ErrTokensForAgents; the system actor, whose token would act as the sweeps
+// do and could take their idempotency keys before them, is refused too.
+// It reads kind to refuse, never to grant.
+func MayHoldToken(kind string) error {
+	switch kind {
+	case "agent":
+		return nil
+	case "system":
+		return apperr.Forbid("the system actor is never issued a token")
+	}
+	return ErrTokensForAgents
+}
+
+// MaySignIn says whether an actor of the given kind may be given a way to
+// sign in: a password, an invitation to choose one, or an identity at a
+// provider. A person may; an agent is refused ErrAgentsUseTokens. The
+// system actor is refused by whatever reaches it first, as ever.
+func MaySignIn(kind string) error {
+	if kind == "agent" {
+		return ErrAgentsUseTokens
+	}
+	return nil
+}
+
 // Principal is an authenticated caller: which actor, by which credential.
 type Principal struct {
 	ActorID      uuid.UUID
@@ -65,7 +129,12 @@ func (a *Authenticator) SetClock(now func() time.Time) { a.now = now }
 // authenticates and is then denied by step 1 of authorize() on every call,
 // which also puts the attempt in the action log. The system actor is the one
 // exception: it never authenticates, so that a token issued to it before the
-// database refused them lends nobody the sweeps' authority.
+// database refused them lends nobody the sweeps' authority. And a person's
+// API token authenticates nobody either, one issued before migration 0017
+// revoked them or written since past the database: it is refused with its
+// reason, api_tokens_are_for_agents, revoked or not, since whoever presents
+// it holds the whole secret and is no guesser, and a script left with one is
+// told what to do instead.
 func (a *Authenticator) Authenticate(ctx context.Context, presented string) (Principal, error) {
 	prefix, ok := parsePrefix(presented)
 	if !ok {
@@ -83,6 +152,8 @@ func (a *Authenticator) Authenticate(ctx context.Context, presented string) (Pri
 	switch {
 	case cred.SecretHash == nil || !tokenMatches(presented, *cred.SecretHash):
 		return Principal{}, errUnauthenticated
+	case cred.Kind == KindAPIToken && cred.ActorKind == "human":
+		return Principal{}, errTokenOfAPerson
 	case cred.RevokedAt != nil:
 		return Principal{}, errUnauthenticated
 	case cred.ExpiresAt != nil && !cred.ExpiresAt.After(now):
@@ -163,6 +234,12 @@ func (a *Authenticator) Login(ctx context.Context, name, password string) (Sessi
 	if !ok || !known || actor.Status != domain.ActorActive {
 		return Session{}, errBadLogin
 	}
+	// An agent's password, from before migration 0017 revoked them, is
+	// refused once it is known to be right: whoever gave it is no guesser,
+	// and is told that an agent is given a token instead.
+	if actor.Kind == "agent" {
+		return Session{}, errAgentSignsIn
+	}
 	label := "password login"
 	if mustChange {
 		label = "password login, with a temporary password"
@@ -208,11 +285,12 @@ func (a *Authenticator) Logout(ctx context.Context, p Principal) error {
 	return dbq.New(a.pool).RevokeCredentialByID(ctx, dbq.RevokeCredentialByIDParams{ID: p.CredentialID, RevokedAt: &now})
 }
 
-// IssueToken creates an API token for an actor. It is used by the tools that
-// issue tokens, by bootstrap and by the operator's command line. The system
-// actor is never given one: a token of its would act as the sweeps do, and
-// could take their idempotency keys before them. issuedBy is the actor who
-// asked for it, nil when no actor did (bootstrap, the command line).
+// IssueToken creates an API token for an agent. It is used by the tools that
+// issue tokens and by the operator's command line. Nobody else is given one
+// (MayHoldToken): a person signs in instead, and is refused
+// api_tokens_are_for_agents, whoever asks; and the system actor's token would
+// act as the sweeps do. issuedBy is the actor who asked for it, nil when no
+// actor did (the command line).
 func IssueToken(ctx context.Context, q *dbq.Queries, actorID uuid.UUID, issuedBy *uuid.UUID, label string, expiresAt *time.Time, now time.Time) (Token, uuid.UUID, error) {
 	actor, err := q.GetActor(ctx, actorID)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -221,8 +299,8 @@ func IssueToken(ctx context.Context, q *dbq.Queries, actorID uuid.UUID, issuedBy
 	if err != nil {
 		return Token{}, uuid.Nil, err
 	}
-	if actor.Kind == "system" {
-		return Token{}, uuid.Nil, apperr.Forbid("the system actor is never issued a token")
+	if err := MayHoldToken(actor.Kind); err != nil {
+		return Token{}, uuid.Nil, err
 	}
 	tok, err := NewToken()
 	if err != nil {
@@ -242,9 +320,11 @@ func IssueToken(ctx context.Context, q *dbq.Queries, actorID uuid.UUID, issuedBy
 	return tok, id, nil
 }
 
-// SetPassword replaces an actor's password. Older passwords are revoked, not
+// SetPassword replaces a person's password. Older passwords are revoked, not
 // deleted: the row says when each stopped working. So is an invitation
-// waiting: it was for choosing a password, and one has been chosen.
+// waiting: it was for choosing a password, and one has been chosen. Who may
+// have one is the caller's to ask (MaySignIn); the database refuses one for
+// an agent or the system actor.
 func SetPassword(ctx context.Context, q *dbq.Queries, actorID uuid.UUID, password string, now time.Time) error {
 	hash, err := HashNewPassword(password)
 	if err != nil {
@@ -347,11 +427,12 @@ func RegisterPerson(ctx context.Context, q *dbq.Queries, p NewPerson, now time.T
 	return id, nil
 }
 
-// IssueInvite makes an invitation for an actor to set their password, and
+// IssueInvite makes an invitation for a person to set their password, and
 // revokes the one they had: only the newest works. Who may be invited is the
-// tool's to decide (actor.invite, actor.invite_new); the database holds the
-// one live invitation, and refuses one for the system actor. Setting a
-// password, by the invitation or otherwise, revokes it (SetPassword).
+// tool's to decide (actor.invite, actor.invite_new), a person only
+// (MaySignIn); the database holds the one live invitation, and refuses one
+// for an agent or the system actor. Setting a password, by the invitation or
+// otherwise, revokes it (SetPassword).
 // issuedBy is who made it, and is asked again when it is taken up
 // (AcceptInvite).
 func IssueInvite(ctx context.Context, q *dbq.Queries, actorID uuid.UUID, issuedBy *uuid.UUID, label string, expiresAt, now time.Time) (Token, uuid.UUID, error) {
@@ -483,11 +564,12 @@ func (a *Authenticator) AcceptInvite(ctx context.Context, presented, password st
 		case inv.SecretHash == nil || !tokenMatches(presented, *inv.SecretHash),
 			inv.RevokedAt != nil,
 			inv.ExpiresAt == nil || !inv.ExpiresAt.After(a.now()),
-			// Only an actor with a sign-in name, an email or a login ID, is
-			// invited (actor.invite), and a suspension since then holds. The
-			// system actor is refused as Authenticate refuses it, though it
-			// holds no credential.
-			inv.ActorKind == "system", inv.ActorStatus != domain.ActorActive, inv.ActorEmail == nil && inv.ActorLoginID == nil:
+			// Only a person with a sign-in name, an email or a login ID, is
+			// invited (actor.invite), and a suspension since then holds. An
+			// agent's, from before migration 0017 revoked them, is refused
+			// with the rest, and so is the system actor's, though it holds
+			// no credential.
+			inv.ActorKind != "human", inv.ActorStatus != domain.ActorActive, inv.ActorEmail == nil && inv.ActorLoginID == nil:
 			return inv, errBadInvite
 		}
 		// Asked again in the transaction that takes it up, under the
@@ -528,30 +610,56 @@ func (a *Authenticator) AcceptInvite(ctx context.Context, presented, password st
 	return acc, nil
 }
 
-// BootstrapInput describes the first human of an installation.
+// BootstrapInput describes the first person of an installation: root, who
+// signs in like anyone else, with a password, by an email or a login ID or
+// both. Root is given no API token: people hold none.
 type BootstrapInput struct {
 	DisplayName string
 	Email       string
-	Password    string // optional; without it the root signs in with the token
+	LoginID     string
+	Password    string
 }
 
 type BootstrapResult struct {
 	RootID, SystemID uuid.UUID
-	Token            Token
 }
 
 // ErrAlreadyBootstrapped means a root actor exists; bootstrap runs once.
 var ErrAlreadyBootstrapped = errors.New("this installation already has a root actor")
 
-// Bootstrap creates the root actor, the system actor and root's first
-// credential, in one transaction.
+// Bootstrap creates the root actor, with its email or login ID and its
+// password, and the system actor, in one transaction. Without a password, or
+// without a name to sign in with, it creates nothing: root would have no way
+// in, and bootstrap does not run a second time to put that right.
 //
 // Root is the head of the delegation chain and the only actor created by
 // nobody. This is the one state change in the system with no action row:
 // there is no actor yet for it to be an action of.
 func Bootstrap(ctx context.Context, pool *pgxpool.Pool, in BootstrapInput) (BootstrapResult, error) {
 	var res BootstrapResult
-	err := db.InTx(ctx, pool, func(tx pgx.Tx) error {
+	in.DisplayName, in.Email, in.LoginID = strings.TrimSpace(in.DisplayName), strings.TrimSpace(in.Email), strings.TrimSpace(in.LoginID)
+	switch {
+	case in.DisplayName == "":
+		return res, apperr.Invalid("root needs a display name")
+	case in.Email == "" && in.LoginID == "":
+		return res, apperr.Invalid("root needs an email or a login ID to sign in with")
+	case in.Email != "" && !IsEmail(in.Email):
+		return res, apperr.Invalid("the email must be an email address")
+	}
+	if in.LoginID != "" {
+		id, err := LoginID("the login ID", in.LoginID)
+		if err != nil {
+			return res, err
+		}
+		in.LoginID = id
+	}
+	// Hashed before the transaction, so that the hash holds no lock; a
+	// password outside the rules for one creates nothing.
+	hash, err := HashNewPassword(in.Password)
+	if err != nil {
+		return res, err
+	}
+	err = db.InTx(ctx, pool, func(tx pgx.Tx) error {
 		q := dbq.New(tx)
 		// Serialise concurrent bootstraps; the count below is then reliable.
 		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('aishiteru.bootstrap'))`); err != nil {
@@ -567,12 +675,15 @@ func Bootstrap(ctx context.Context, pool *pgxpool.Pool, in BootstrapInput) (Boot
 		now := time.Now()
 		res.RootID, res.SystemID = ids.New(), ids.New()
 		root, system := domain.PlatformRoot, "system"
-		var email *string
+		var email, loginID *string
 		if in.Email != "" {
 			email = &in.Email
 		}
+		if in.LoginID != "" {
+			loginID = &in.LoginID
+		}
 		if err := q.InsertActor(ctx, dbq.InsertActorParams{
-			ID: res.RootID, Kind: "human", DisplayName: in.DisplayName, Email: email, PlatformRole: &root, CreatedAt: now,
+			ID: res.RootID, Kind: "human", DisplayName: in.DisplayName, Email: email, LoginID: loginID, PlatformRole: &root, CreatedAt: now,
 		}); err != nil {
 			return err
 		}
@@ -583,13 +694,7 @@ func Bootstrap(ctx context.Context, pool *pgxpool.Pool, in BootstrapInput) (Boot
 		}); err != nil {
 			return err
 		}
-		if in.Password != "" {
-			if err := SetPassword(ctx, q, res.RootID, in.Password, now); err != nil {
-				return err
-			}
-		}
-		res.Token, _, err = IssueToken(ctx, q, res.RootID, nil, "bootstrap", nil, now)
-		return err
+		return setPasswordHash(ctx, q, res.RootID, hash, now)
 	})
 	return res, err
 }

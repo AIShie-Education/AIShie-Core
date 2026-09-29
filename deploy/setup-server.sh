@@ -175,7 +175,8 @@ cat <<DONE
 2. Start it, with the image of the latest green push to main (the CI run's
    publish / image job, or the package's page, names it), or of a release:
      aishiteru-deploy ghcr.io/aishie-education/aishie-core:sha-<commit>
-3. Create the first administrator, then restart so the background jobs start:
+3. Create the first administrator, then restart so the background jobs start.
+   It prints no API token: sign in at the site with that email and password.
      read -rsp 'Password (10 characters or more): ' PW; echo
      printf '%s\n' "\$PW" | aishiterud bootstrap --name "Your Name" --email you@example.edu --password-stdin; unset PW
      docker restart aishiteru

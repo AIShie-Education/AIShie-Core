@@ -134,8 +134,8 @@ func memberResetPassword() tool.Tool {
 				return MemberResetPasswordOut{}, err
 			}
 			if isAgent(found.ActorKind) || found.PrincipalMemberID != nil {
-				return MemberResetPasswordOut{}, resetForbidden(ResetNotAPerson, "that seat is an agent's, which signs in with "+
-					"a token and has no password")
+				return MemberResetPasswordOut{}, resetForbidden(ResetNotAPerson, "that seat is an agent's, which holds "+
+					"API tokens and never a password")
 			}
 			if found.Role != "student" {
 				return MemberResetPasswordOut{}, resetForbidden(ResetNotAStudent, "that seat is a %s's, not a student's: "+

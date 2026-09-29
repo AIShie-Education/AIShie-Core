@@ -7,6 +7,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -46,10 +47,11 @@ Usage:
   aishiterud migrate version         print the applied and the embedded version
   aishiterud migrate force N         record version N (0 for none) without running anything
   aishiterud seed                    insert the built-in permission presets
-  aishiterud bootstrap --name N [--email E] [--password-stdin]
-                                     create the root actor, once; prints its API token
-  aishiterud token issue --actor ID|EMAIL|LOGIN_ID --label L [--days N]
-                                     issue an API token, e.g. for a newly registered agent
+  aishiterud bootstrap --name N --email E|--login-id L --password-stdin
+                                     create the root actor, once, with the password read from
+                                     standard input, to sign in with; prints no token
+  aishiterud token issue --actor ID|EMAIL --label L [--days N]
+                                     issue an API token for an agent; a person holds none
   aishiterud version                 print build information
 
 Environment:
@@ -125,9 +127,9 @@ func run(args []string) error {
 	case "seed":
 		return seed(cfg)
 	case "bootstrap":
-		return bootstrap(cfg, args[1:])
+		return bootstrap(cfg, args[1:], os.Stdin, os.Stderr)
 	case "token":
-		return token(cfg, args[1:])
+		return token(cfg, args[1:], os.Stdout, os.Stderr)
 	case "version":
 		fmt.Println(version.String())
 		return nil
@@ -398,34 +400,42 @@ func seed(cfg config.Config) error {
 	return nil
 }
 
-// bootstrap creates the first human of an installation. It runs once.
-func bootstrap(cfg config.Config, args []string) error {
+// bootstrap creates the first person of an installation, root, and the
+// system actor. It runs once. Root signs in like anyone else, with a
+// password, read from standard input, and an email or a login ID, and is
+// given no API token: people hold none. It prints nothing on standard
+// output, and on standard error the two actors' ids and what root signs in
+// with.
+func bootstrap(cfg config.Config, args []string, stdin io.Reader, stderr io.Writer) error {
 	fs := flag.NewFlagSet("bootstrap", flag.ContinueOnError)
+	fs.SetOutput(stderr)
 	name := fs.String("name", "", "display name of the root actor (required)")
-	email := fs.String("email", "", "email, needed to sign in with a password")
-	pwStdin := fs.Bool("password-stdin", false, "read a password for root from standard input")
+	email := fs.String("email", "", "root's email, to sign in with (this or --login-id is required)")
+	loginID := fs.String("login-id", "", "root's login ID, such as a staff number, to sign in with")
+	pwStdin := fs.Bool("password-stdin", false, "read root's password from standard input (required)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *name == "" {
+	switch {
+	case fs.NArg() > 0:
+		return fmt.Errorf("bootstrap: unexpected argument %q", fs.Arg(0))
+	case strings.TrimSpace(*name) == "":
 		return errors.New("bootstrap: --name is required")
+	case strings.TrimSpace(*email) == "" && strings.TrimSpace(*loginID) == "":
+		return errors.New("bootstrap: --email or --login-id is required: root signs in with it and a password")
+	case !*pwStdin:
+		return errors.New("bootstrap: --password-stdin is required: root signs in with a password, and is given no API token")
 	}
-	in := auth.BootstrapInput{DisplayName: *name, Email: *email}
-	if *pwStdin {
-		if *email == "" {
-			return errors.New("bootstrap: --password-stdin needs --email to sign in with")
-		}
-		line, err := bufio.NewReader(os.Stdin).ReadString('\n')
-		if err != nil && line == "" {
-			return fmt.Errorf("bootstrap: read password: %w", err)
-		}
-		in.Password = strings.TrimRight(line, "\r\n")
-		// An empty line is not taken as no password: root would be left
-		// without the one it was asked to have, and bootstrap does not run a
-		// second time to put that right.
-		if in.Password == "" {
-			return errors.New("bootstrap: --password-stdin read an empty password; nothing was created")
-		}
+	line, err := bufio.NewReader(stdin).ReadString('\n')
+	if err != nil && line == "" {
+		return fmt.Errorf("bootstrap: read password: %w", err)
+	}
+	password := strings.TrimRight(line, "\r\n")
+	// An empty line is not taken as no password: root would be left with no
+	// way to sign in, and bootstrap does not run a second time to put that
+	// right.
+	if password == "" {
+		return errors.New("bootstrap: --password-stdin read an empty password; nothing was created")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -435,25 +445,32 @@ func bootstrap(cfg config.Config, args []string) error {
 		return err
 	}
 	defer pool.Close()
-	res, err := auth.Bootstrap(ctx, pool, in)
+	res, err := auth.Bootstrap(ctx, pool, auth.BootstrapInput{DisplayName: *name, Email: *email, LoginID: *loginID, Password: password})
 	if err != nil {
-		return err
+		return fmt.Errorf("bootstrap: %w", err)
 	}
-	fmt.Fprintf(os.Stderr, "root actor   %s\nsystem actor %s\n\nAPI token for root, shown once:\n", res.RootID, res.SystemID)
-	fmt.Println(res.Token.Full)
-	return nil
+	signIn := strings.TrimSpace(*email)
+	if signIn == "" {
+		signIn = strings.TrimSpace(*loginID)
+	}
+	_, err = fmt.Fprintf(stderr, "root actor   %s\nsystem actor %s\n\nSign in at your site with %s and that password.\n"+
+		"No API token is made: people sign in, and API tokens are for agents.\n", res.RootID, res.SystemID, signIn)
+	return err
 }
 
-// token issues an API token from the command line. Agents cannot sign in to
-// ask for their own first token, so someone with access to the server gives
-// it to them. This is an operator's act outside the tool layer and writes no
-// action row; whoever can run it can already write to the database.
-func token(cfg config.Config, args []string) error {
+// token issues an API token for an agent from the command line: a newly
+// registered agent never signs in to ask for its first, so someone with
+// access to the server gives it one. A person is refused: people sign in,
+// and hold no API token. This is an operator's act outside the tool layer
+// and writes no action row; whoever can run it can already write to the
+// database.
+func token(cfg config.Config, args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 || args[0] != "issue" {
-		return errors.New("token: want `token issue --actor ID|EMAIL|LOGIN_ID --label L`")
+		return errors.New("token: want `token issue --actor ID|EMAIL --label L`")
 	}
 	fs := flag.NewFlagSet("token issue", flag.ContinueOnError)
-	who := fs.String("actor", "", "actor id, email or login ID (required)")
+	fs.SetOutput(stderr)
+	who := fs.String("actor", "", "the agent's actor id or email (required)")
 	label := fs.String("label", "", "what the token is for (required)")
 	days := fs.Int("days", 0, "expire after this many days; 0 means never")
 	if err := fs.Parse(args[1:]); err != nil {
@@ -475,7 +492,7 @@ func token(cfg config.Config, args []string) error {
 	actorID, err := uuid.Parse(*who)
 	if err != nil {
 		// An email has an @, and a login ID none, as a sign-in tells them
-		// apart.
+		// apart. A login ID is a person's, and is found only to be refused.
 		var found uuid.UUID
 		if auth.IsEmail(*who) {
 			var a dbq.GetActorByEmailRow
@@ -501,9 +518,11 @@ func token(cfg config.Config, args []string) error {
 	}
 	tok, _, err := auth.IssueToken(ctx, q, actorID, nil, *label, expires, now)
 	if err != nil {
+		return fmt.Errorf("token issue: %w", err)
+	}
+	if _, err := fmt.Fprintf(stderr, "API token for agent %s, shown once:\n", actorID); err != nil {
 		return err
 	}
-	fmt.Fprintf(os.Stderr, "API token for actor %s, shown once:\n", actorID)
-	fmt.Println(tok.Full)
-	return nil
+	_, err = fmt.Fprintln(stdout, tok.Full)
+	return err
 }

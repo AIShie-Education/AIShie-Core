@@ -155,11 +155,35 @@ func newPeople(t *testing.T) people {
 	return p
 }
 
-// token issues actor an API token that lasts until expires, or for ever.
+// token is what actor presents: an agent's API token, which lasts until
+// expires or for ever; a person's session, as signing in makes one, which
+// lasts until expires or for as long as a session does. A person holds no
+// API token.
 func (p people) token(t *testing.T, actor uuid.UUID, expires *time.Time) string {
 	t.Helper()
-	tok, _, err := auth.IssueToken(t.Context(), dbq.New(p.pool), actor, nil, "test", expires, time.Now())
+	q := dbq.New(p.pool)
+	a, err := q.GetActor(t.Context(), actor)
 	if err != nil {
+		t.Fatal(err)
+	}
+	if a.Kind == "agent" {
+		tok, _, err := auth.IssueToken(t.Context(), q, actor, nil, "test", expires, time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return tok.Full
+	}
+	tok, err := auth.NewToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if expires == nil {
+		e := time.Now().Add(auth.DefaultSessionTTL)
+		expires = &e
+	}
+	label := "password login"
+	if err := q.InsertCredential(t.Context(), dbq.InsertCredentialParams{ID: ids.New(), ActorID: actor, Kind: auth.KindSession,
+		SecretHash: &tok.Hash, TokenPrefix: &tok.Prefix, Label: &label, ExpiresAt: expires, CreatedAt: time.Now()}); err != nil {
 		t.Fatal(err)
 	}
 	return tok.Full
@@ -258,8 +282,8 @@ func TestAnAssertionSaysWhoIsSignedIn(t *testing.T) {
 		t.Fatal("two assertions are the same token")
 	}
 
-	// An administrator with an API token that never expires: the role, and
-	// no email, since there is none; the token is the sid.
+	// An administrator, signed in for longer than an assertion lasts: the
+	// role, and no email, since there is none; the session is the sid.
 	ap := principal(p.token(t, p.admin, nil))
 	got, err = a.Assert(ctx, ap, runtimeAud)
 	if err != nil {
