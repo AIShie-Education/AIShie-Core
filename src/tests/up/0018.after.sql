@@ -88,5 +88,8 @@ BEGIN
        OR NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'course_member_person_ceiling') THEN
         RAISE EXCEPTION 'FAIL  0018 up: no trigger holds the rule';
     END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_class WHERE relname = 'conversation_respondent_idx') THEN
+        RAISE EXCEPTION 'FAIL  0018 up: no index lists an agent''s conversations';
+    END IF;
 END $chk$;
 \echo 'PASS  0018 up closes the conversations with people, saying so, cancels what could only fail, lowers people''s seats and presets, counts what was written as read, and nothing else'

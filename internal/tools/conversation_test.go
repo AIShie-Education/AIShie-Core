@@ -903,3 +903,60 @@ func TestAConversationWriteWaitsForTheSeatsItDependsOn(t *testing.T) {
 	b.start(t, done, b.tutor, "conversation.answer", answerArgs(b, conv, q, "Reasons for a claim."))
 	waits("answering while a newer question is written", release, done, apperr.Conflict)
 }
+
+// An agent's page: those who oversee conversations list one agent's, with
+// the members they decide actions for, and nobody else's; a member who
+// oversees nothing lists their own with it, and no more.
+func TestAnAgentsConversationsForThoseWhoOverseeThem(t *testing.T) {
+	c := newCast(t)
+	b := c.built
+	// Mori decides actions, for Ken only.
+	mori := testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", m{"kind": "human", "display_name": "Mori"})).ActorID
+	b.do(t, b.sato, "member.add", m{"course_id": b.course, "actor_id": mori, "preset": "ta",
+		"perms": m{"action_decide": "autonomous"}, "student_scope": "listed", "listed_students": []uuid.UUID{b.kenM}})
+	yukiTutor, _ := b.open(t, b.yuki, c.courseTutor, "Where do I start?")
+	kenTutor, _ := b.open(t, b.ken, c.courseTutor, "Is the exam open book?")
+	yukiListed, _ := b.open(t, b.yuki, b.tutorM, "Can you look at my essay?")
+	yukiOwn, _ := b.open(t, b.yuki, c.yukiBot, "Summarise my feedback")
+	b.do(t, b.ken, "conversation.close", m{"course_id": b.course, "conversation_id": kenTutor})
+
+	ids := func(views []tools.ConversationView) []uuid.UUID {
+		out := make([]uuid.UUID, len(views))
+		for i, v := range views {
+			out[i] = v.ID
+		}
+		return out
+	}
+	for _, tc := range []struct {
+		name  string
+		who   uuid.UUID
+		args  m
+		wants []uuid.UUID
+	}{
+		{"Sato, the course tutor's", b.sato, m{"as": "overseer", "respondent_member_id": c.courseTutor}, []uuid.UUID{yukiTutor, kenTutor}},
+		{"Sato, the course tutor's still open", b.sato, m{"as": "overseer", "respondent_member_id": c.courseTutor, "state": "open"}, []uuid.UUID{yukiTutor}},
+		{"Sato, Yuki's tutor's", b.sato, m{"as": "overseer", "respondent_member_id": b.tutorM}, []uuid.UUID{yukiListed}},
+		{"Sato, Yuki's own agent's", b.sato, m{"as": "overseer", "respondent_member_id": c.yukiBot}, []uuid.UUID{yukiOwn}},
+		{"Sato, a seat nobody asked", b.sato, m{"as": "overseer", "respondent_member_id": b.graderM}, []uuid.UUID{}},
+		{"Mori, the course tutor's with Ken", mori, m{"as": "overseer", "respondent_member_id": c.courseTutor}, []uuid.UUID{kenTutor}},
+		{"Mori, Yuki's tutor's", mori, m{"as": "overseer", "respondent_member_id": b.tutorM}, []uuid.UUID{}},
+		{"Yuki, her own with the course tutor", b.yuki, m{"respondent_member_id": c.courseTutor}, []uuid.UUID{yukiTutor}},
+		{"the course tutor, those addressed to it", b.seatActor(t, c.courseTutor), m{"respondent_member_id": c.courseTutor}, []uuid.UUID{yukiTutor, kenTutor}},
+	} {
+		if got := ids(b.listConversations(t, tc.who, tc.args)); !sameIDs(got, tc.wants) {
+			t.Errorf("%s: %v, want %v", tc.name, got, tc.wants)
+		}
+	}
+	// Paged by id, as ever.
+	page := testkit.Result[tools.ConversationListOut](t, b.do(t, b.sato, "conversation.list",
+		m{"course_id": b.course, "as": "overseer", "respondent_member_id": c.courseTutor, "limit": 1}))
+	if len(page.Conversations) != 1 || page.Conversations[0].ID != yukiTutor || page.Next == nil {
+		t.Fatalf("the first page of the course tutor's: %+v", page)
+	}
+	page = testkit.Result[tools.ConversationListOut](t, b.do(t, b.sato, "conversation.list",
+		m{"course_id": b.course, "as": "overseer", "respondent_member_id": c.courseTutor, "limit": 1, "after": page.Next}))
+	if len(page.Conversations) != 1 || page.Conversations[0].ID != kenTutor {
+		t.Fatalf("the second page of the course tutor's: %+v", page)
+	}
+	b.try(t, b.ken, "conversation.list", m{"course_id": b.course, "as": "overseer", "respondent_member_id": c.courseTutor}, apperr.Forbidden)
+}

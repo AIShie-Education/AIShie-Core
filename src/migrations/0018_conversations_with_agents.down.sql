@@ -15,6 +15,7 @@ SET LOCAL lock_timeout = '10s';
 
 DROP TABLE IF EXISTS conversation_read;
 DROP FUNCTION IF EXISTS conversation_read_check();
+DROP INDEX IF EXISTS conversation_respondent_idx;
 DROP TRIGGER IF EXISTS conversation_respondent_is_agent ON conversation;
 DROP FUNCTION IF EXISTS conversation_check_respondent();
 DROP TRIGGER IF EXISTS course_member_person_ceiling ON course_member;

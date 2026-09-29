@@ -13,8 +13,9 @@ BEGIN
     IF EXISTS (SELECT 1 FROM pg_trigger WHERE tgname IN ('conversation_respondent_is_agent', 'course_member_person_ceiling'))
        OR EXISTS (SELECT 1 FROM pg_proc WHERE proname IN ('conversation_check_respondent', 'course_member_person_answers_nothing',
                                                           'conversation_read_check'))
-       OR EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'conversation_read') THEN
-        RAISE EXCEPTION 'FAIL  0018 down: a trigger, a function or the read state is still there';
+       OR EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'conversation_read')
+       OR EXISTS (SELECT 1 FROM pg_class WHERE relname = 'conversation_respondent_idx') THEN
+        RAISE EXCEPTION 'FAIL  0018 down: a trigger, a function, an index or the read state is still there';
     END IF;
     IF (SELECT count(*) FROM conversation WHERE status = 'closed' AND closed_reason = 'conversations_are_with_agents'
         AND id IN ('00000000-0000-0000-0018-0000000000c1', '00000000-0000-0000-0018-0000000000c2',

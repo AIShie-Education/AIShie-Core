@@ -487,8 +487,9 @@ WHERE c.course_id = $1 AND c.id > $2
                                 ORDER BY m.seq DESC LIMIT 1)) THEN 'reply_pending_approval'
             WHEN c.last_author_member_id = c.opener_member_id THEN 'awaiting_answer'
             ELSE 'answered' END) )
+  AND ($11::uuid IS NULL OR c.respondent_member_id = $11::uuid)
 ORDER BY c.id
-LIMIT $11
+LIMIT $12
 `
 
 type ListConversationIDsParams struct {
@@ -502,6 +503,7 @@ type ListConversationIDsParams struct {
 	PrincipalStudentAll bool
 	PrincipalID         uuid.UUID
 	State               *string
+	RespondentMemberID  *uuid.UUID
 	MaxRows             int32
 }
 
@@ -510,6 +512,8 @@ type ListConversationIDsParams struct {
 // is within its student scope (and its principal's, for a delegate), in SQL.
 // state is a ConversationView state, or open; a reply waits for approval
 // only if it answers the opener's newest message (ConversationDetails).
+// respondent_member_id, when given, keeps those addressed to that seat: an
+// agent's page, for those who oversee its conversations.
 func (q *Queries) ListConversationIDs(ctx context.Context, arg ListConversationIDsParams) ([]uuid.UUID, error) {
 	rows, err := q.db.Query(ctx, listConversationIDs,
 		arg.CourseID,
@@ -522,6 +526,7 @@ func (q *Queries) ListConversationIDs(ctx context.Context, arg ListConversationI
 		arg.PrincipalStudentAll,
 		arg.PrincipalID,
 		arg.State,
+		arg.RespondentMemberID,
 		arg.MaxRows,
 	)
 	if err != nil {

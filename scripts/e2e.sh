@@ -370,6 +370,10 @@ call 200 GET /v1/me/conversations "$YUKI"
 call 200 GET "$C/conversations/$CONV" "$YUKI"
 [ "$(json "$WORK/body" 'd["result"]["unread"]')" = False ] || fail "still unread in the conversation: $(cat "$WORK/body")"
 call 404 POST "$C/conversations/$CONV/read" "$GRADER" # nobody else's to read, nor to mark read
+# Sato, who decides actions, lists the tutor's conversations on its page.
+call 200 GET "$C/conversations?as=overseer&respondent_member_id=$TUTOR_M" "$SATO"
+[ "$(json "$WORK/body" '[c["id"] for c in d["result"]["conversations"]] == ["'"$CONV"'"], "unread" in d["result"]["conversations"][0]')" = "True False" ] ||
+  fail "the tutor's conversations, as Sato oversees them: $(cat "$WORK/body")"
 call 200 GET "/v1/me/conversations?course_id=$COURSE&limit=1" "$YUKI"
 [ "$(json "$WORK/body" 'len(d["result"]["conversations"]), d["result"].get("next") is not None')" = "1 True" ] || fail "a page of one: $(cat "$WORK/body")"
 call 200 GET "/v1/me/conversations?limit=1&after=$(json "$WORK/body" 'd["result"]["next"]')" "$YUKI"

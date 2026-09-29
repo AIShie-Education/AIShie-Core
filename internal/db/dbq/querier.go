@@ -375,6 +375,8 @@ type Querier interface {
 	// is within its student scope (and its principal's, for a delegate), in SQL.
 	// state is a ConversationView state, or open; a reply waits for approval
 	// only if it answers the opener's newest message (ConversationDetails).
+	// respondent_member_id, when given, keeps those addressed to that seat: an
+	// agent's page, for those who oversee its conversations.
 	ListConversationIDs(ctx context.Context, arg ListConversationIDsParams) ([]uuid.UUID, error)
 	// Oldest first, after a seq.
 	ListConversationMessagesAfter(ctx context.Context, arg ListConversationMessagesAfterParams) ([]ListConversationMessagesAfterRow, error)

@@ -159,6 +159,8 @@ ORDER BY c.id;
 -- is within its student scope (and its principal's, for a delegate), in SQL.
 -- state is a ConversationView state, or open; a reply waits for approval
 -- only if it answers the opener's newest message (ConversationDetails).
+-- respondent_member_id, when given, keeps those addressed to that seat: an
+-- agent's page, for those who oversee its conversations.
 SELECT c.id
 FROM conversation c
 WHERE c.course_id = $1 AND c.id > sqlc.arg(after)
@@ -182,6 +184,7 @@ WHERE c.course_id = $1 AND c.id > sqlc.arg(after)
                                 ORDER BY m.seq DESC LIMIT 1)) THEN 'reply_pending_approval'
             WHEN c.last_author_member_id = c.opener_member_id THEN 'awaiting_answer'
             ELSE 'answered' END) )
+  AND (sqlc.narg(respondent_member_id)::uuid IS NULL OR c.respondent_member_id = sqlc.narg(respondent_member_id)::uuid)
 ORDER BY c.id
 LIMIT sqlc.arg(max_rows);
 

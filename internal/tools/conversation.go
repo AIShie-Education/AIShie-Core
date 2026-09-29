@@ -1247,6 +1247,8 @@ type ConversationListIn struct {
 	tool.InCourse
 	As    *string `json:"as,omitempty" jsonschema:"opener: those you started; respondent: those addressed to you; overseer: those opened by members you decide actions for; all three by default"`
 	State *string `json:"state,omitempty" jsonschema:"open, closed, awaiting_answer, reply_pending_approval or answered"`
+	// An agent's page: its conversations, for those who oversee them.
+	RespondentMemberID *uuid.UUID `json:"respondent_member_id,omitempty" jsonschema:"only those addressed to this seat, an agent's: with as overseer, that agent's conversations with the members you decide actions for"`
 	Page
 }
 
@@ -1265,7 +1267,8 @@ func conversationList() tool.Tool {
 		Name: "conversation.list",
 		Description: "Conversations in this course, oldest first, without what was written: those you started, those " +
 			"addressed to you, and, if you decide actions here, those opened by the members within your student scope. " +
-			"Each you take part in says whether the other has written since you last read it (unread; conversation.mark_read).",
+			"Each you take part in says whether the other has written since you last read it (unread; conversation.mark_read). " +
+			"Give respondent_member_id, with as overseer, for one agent's conversations, as an agent's page shows them.",
 		Kind: tool.Read, Gate: converses,
 		HTTP: tool.Route{Method: "GET", Pattern: "/v1/courses/{course_id}/conversations"},
 		Resolve: func(_ context.Context, _ dbq.Querier, in ConversationListIn) (tool.Target, error) {
@@ -1290,7 +1293,7 @@ func conversationList() tool.Tool {
 				AsOpener: as == "" || as == "opener", AsRespondent: as == "" || as == "respondent",
 				AsOverseer: (as == "" || as == "overseer") && decides, MemberID: rc.Member.ID,
 				StudentAll: rc.Scope.StudentAll, PrincipalID: rc.Scope.PrincipalID, PrincipalStudentAll: rc.Scope.PrincipalStudentAll,
-				State: in.State, MaxRows: in.limit()})
+				State: in.State, RespondentMemberID: in.RespondentMemberID, MaxRows: in.limit()})
 			if err != nil {
 				return ConversationListOut{}, err
 			}

@@ -137,6 +137,10 @@ CREATE TRIGGER conversation_respondent_is_agent
     BEFORE INSERT ON conversation
     FOR EACH ROW EXECUTE FUNCTION conversation_check_respondent();
 
+-- An agent's conversations, open or closed, paged by id, for those who
+-- oversee them (conversation.list with respondent_member_id).
+CREATE INDEX conversation_respondent_idx ON conversation (respondent_member_id, id);
+
 -- ---------------------------------------------------------------------------
 -- conversation_read: how far each participant has read
 -- ---------------------------------------------------------------------------
