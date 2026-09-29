@@ -264,7 +264,7 @@ type CredentialView struct {
 	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
 	RevokedAt   *time.Time `json:"revoked_at,omitempty"`
 	CreatedAt   time.Time  `json:"created_at"`
-	IssuedByID  *uuid.UUID `json:"issued_by_actor_id,omitempty" jsonschema:"who issued a token: the actor themself or an administrator; who set a temporary password (member.reset_password); absent for other kinds, for tokens made on the command line, and for tokens issued by a release before this field"`
+	IssuedByID  *uuid.UUID `json:"issued_by_actor_id,omitempty" jsonschema:"who issued a token: the agent itself, its owner or an administrator; who set a temporary password (member.reset_password); absent for other kinds, for tokens made on the command line, and for tokens issued by a release before this field"`
 	IssuedBy    *string    `json:"issued_by_name,omitempty" jsonschema:"the issuer's display name"`
 	MustChange  bool       `json:"must_change,omitempty" jsonschema:"a password someone else set (member.reset_password): until its person sets their own with credential.set_password, every other call of theirs is refused (password_change_required)"`
 }
@@ -288,7 +288,7 @@ type CredentialListOut struct {
 func credentialList() tool.Tool {
 	return tool.Define(tool.Spec[Empty, CredentialListOut]{
 		Name:        "credential.list",
-		Description: "The caller's own credentials: tokens, sessions, password, SSO identity. Secrets are never shown.",
+		Description: "The caller's own credentials: a person's sessions, password and single sign-on identity; an agent's API tokens. Secrets are never shown.",
 		Kind:        tool.Read, Gate: self,
 		HTTP:    tool.Route{Method: "GET", Pattern: "/v1/me/credentials"},
 		Resolve: noTarget[Empty]("credential"),
@@ -314,13 +314,24 @@ type IssueTokenOut struct {
 func credentialIssueToken() tool.Tool {
 	return tool.Define(tool.Spec[IssueTokenIn, IssueTokenOut]{
 		Name: "credential.issue_token",
-		Description: "Create an API token for the caller's own account. The token is returned once and only its " +
+		Description: "Create an API token for the caller's own account, which must be an agent's. A person is refused " +
+			"(api_tokens_are_for_agents): people sign in with a password or single sign-on, and use one of their agents " +
+			"for tools and scripts (agent.create, then agent.issue_token). The token is returned once and only its " +
 			"hash is kept: retrying this call returns the credential but not the token again.",
 		Kind: tool.Write, Gate: self,
 		HTTP:      tool.Route{Method: "POST", Pattern: "/v1/me/credentials/tokens"},
 		SecretOut: []string{"token"},
 		Resolve:   noTarget[IssueTokenIn]("credential"),
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in IssueTokenIn) (IssueTokenOut, error) {
+			// Whether the caller may hold one at all comes before what they
+			// asked for: a person may not, whatever the label.
+			me, err := ec.Q.GetActor(ctx, ec.Actor.ID)
+			if err != nil {
+				return IssueTokenOut{}, err
+			}
+			if err := auth.MayHoldToken(me.Kind); err != nil {
+				return IssueTokenOut{}, err
+			}
 			expires, err := tokenExpiry(in.Label, in.ExpiresInDays, ec.Now)
 			if err != nil {
 				return IssueTokenOut{}, err

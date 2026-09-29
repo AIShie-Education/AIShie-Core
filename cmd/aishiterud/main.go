@@ -50,8 +50,8 @@ Usage:
   aishiterud bootstrap --name N --email E|--login-id L --password-stdin
                                      create the root actor, once, with the password read from
                                      standard input, to sign in with; prints no token
-  aishiterud token issue --actor ID|EMAIL|LOGIN_ID --label L [--days N]
-                                     issue an API token, e.g. for a newly registered agent
+  aishiterud token issue --actor ID|EMAIL --label L [--days N]
+                                     issue an API token for an agent; a person holds none
   aishiterud version                 print build information
 
 Environment:
@@ -129,7 +129,7 @@ func run(args []string) error {
 	case "bootstrap":
 		return bootstrap(cfg, args[1:], os.Stdin, os.Stderr)
 	case "token":
-		return token(cfg, args[1:])
+		return token(cfg, args[1:], os.Stdout, os.Stderr)
 	case "version":
 		fmt.Println(version.String())
 		return nil
@@ -458,16 +458,19 @@ func bootstrap(cfg config.Config, args []string, stdin io.Reader, stderr io.Writ
 	return err
 }
 
-// token issues an API token from the command line. Agents cannot sign in to
-// ask for their own first token, so someone with access to the server gives
-// it to them. This is an operator's act outside the tool layer and writes no
-// action row; whoever can run it can already write to the database.
-func token(cfg config.Config, args []string) error {
+// token issues an API token for an agent from the command line: a newly
+// registered agent never signs in to ask for its first, so someone with
+// access to the server gives it one. A person is refused: people sign in,
+// and hold no API token. This is an operator's act outside the tool layer
+// and writes no action row; whoever can run it can already write to the
+// database.
+func token(cfg config.Config, args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 || args[0] != "issue" {
-		return errors.New("token: want `token issue --actor ID|EMAIL|LOGIN_ID --label L`")
+		return errors.New("token: want `token issue --actor ID|EMAIL --label L`")
 	}
 	fs := flag.NewFlagSet("token issue", flag.ContinueOnError)
-	who := fs.String("actor", "", "actor id, email or login ID (required)")
+	fs.SetOutput(stderr)
+	who := fs.String("actor", "", "the agent's actor id or email (required)")
 	label := fs.String("label", "", "what the token is for (required)")
 	days := fs.Int("days", 0, "expire after this many days; 0 means never")
 	if err := fs.Parse(args[1:]); err != nil {
@@ -489,7 +492,7 @@ func token(cfg config.Config, args []string) error {
 	actorID, err := uuid.Parse(*who)
 	if err != nil {
 		// An email has an @, and a login ID none, as a sign-in tells them
-		// apart.
+		// apart. A login ID is a person's, and is found only to be refused.
 		var found uuid.UUID
 		if auth.IsEmail(*who) {
 			var a dbq.GetActorByEmailRow
@@ -515,9 +518,11 @@ func token(cfg config.Config, args []string) error {
 	}
 	tok, _, err := auth.IssueToken(ctx, q, actorID, nil, *label, expires, now)
 	if err != nil {
+		return fmt.Errorf("token issue: %w", err)
+	}
+	if _, err := fmt.Fprintf(stderr, "API token for agent %s, shown once:\n", actorID); err != nil {
 		return err
 	}
-	fmt.Fprintf(os.Stderr, "API token for actor %s, shown once:\n", actorID)
-	fmt.Println(tok.Full)
-	return nil
+	_, err = fmt.Fprintln(stdout, tok.Full)
+	return err
 }

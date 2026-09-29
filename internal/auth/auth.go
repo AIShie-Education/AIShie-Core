@@ -31,6 +31,45 @@ const (
 	DefaultSessionTTL = 12 * time.Hour
 )
 
+// Who holds which credential (docs/schema.md §2.1). A person signs in, with
+// a password or through single sign-on, and is given a session for it; for
+// tools and scripts they use one of their agents. Only an agent holds an API
+// token, and the system actor holds none at all. The database holds the same
+// (credential_fits_actor_kind, migration 0017). A refusal says which rule in
+// error.details.reason.
+const (
+	// ReasonTokensForAgents refuses a person an API token, and a person's
+	// API token when it is presented.
+	ReasonTokensForAgents = "api_tokens_are_for_agents" //nolint:gosec // a reason code, not a credential
+)
+
+const tokensForAgents = "API tokens are for agents: a person signs in with a password or single sign-on, and uses one of " +
+	"their agents for tools and scripts (agent.create, then agent.issue_token)"
+
+var (
+	// ErrTokensForAgents refuses to issue a person an API token, whoever asks.
+	ErrTokensForAgents = apperr.Forbid(tokensForAgents).With("reason", ReasonTokensForAgents)
+	// errTokenOfAPerson refuses a person's API token presented as a
+	// credential: one from before migration 0017 revoked them, or written
+	// since past the database's refusal.
+	errTokenOfAPerson = apperr.New(apperr.Unauthenticated, tokensForAgents).With("reason", ReasonTokensForAgents)
+)
+
+// MayHoldToken says whether an actor of the given kind may be issued an API
+// token: an agent may, and nobody else. A person is refused
+// ErrTokensForAgents; the system actor, whose token would act as the sweeps
+// do and could take their idempotency keys before them, is refused too.
+// It reads kind to refuse, never to grant.
+func MayHoldToken(kind string) error {
+	switch kind {
+	case "agent":
+		return nil
+	case "system":
+		return apperr.Forbid("the system actor is never issued a token")
+	}
+	return ErrTokensForAgents
+}
+
 // Principal is an authenticated caller: which actor, by which credential.
 type Principal struct {
 	ActorID      uuid.UUID
@@ -65,7 +104,12 @@ func (a *Authenticator) SetClock(now func() time.Time) { a.now = now }
 // authenticates and is then denied by step 1 of authorize() on every call,
 // which also puts the attempt in the action log. The system actor is the one
 // exception: it never authenticates, so that a token issued to it before the
-// database refused them lends nobody the sweeps' authority.
+// database refused them lends nobody the sweeps' authority. And a person's
+// API token authenticates nobody either, one issued before migration 0017
+// revoked them or written since past the database: it is refused with its
+// reason, api_tokens_are_for_agents, revoked or not, since whoever presents
+// it holds the whole secret and is no guesser, and a script left with one is
+// told what to do instead.
 func (a *Authenticator) Authenticate(ctx context.Context, presented string) (Principal, error) {
 	prefix, ok := parsePrefix(presented)
 	if !ok {
@@ -83,6 +127,8 @@ func (a *Authenticator) Authenticate(ctx context.Context, presented string) (Pri
 	switch {
 	case cred.SecretHash == nil || !tokenMatches(presented, *cred.SecretHash):
 		return Principal{}, errUnauthenticated
+	case cred.Kind == KindAPIToken && cred.ActorKind == "human":
+		return Principal{}, errTokenOfAPerson
 	case cred.RevokedAt != nil:
 		return Principal{}, errUnauthenticated
 	case cred.ExpiresAt != nil && !cred.ExpiresAt.After(now):
@@ -208,11 +254,12 @@ func (a *Authenticator) Logout(ctx context.Context, p Principal) error {
 	return dbq.New(a.pool).RevokeCredentialByID(ctx, dbq.RevokeCredentialByIDParams{ID: p.CredentialID, RevokedAt: &now})
 }
 
-// IssueToken creates an API token for an actor. It is used by the tools that
-// issue tokens and by the operator's command line. The system actor is never
-// given one: a token of its would act as the sweeps do, and could take their
-// idempotency keys before them. issuedBy is the actor who asked for it, nil
-// when no actor did (the command line).
+// IssueToken creates an API token for an agent. It is used by the tools that
+// issue tokens and by the operator's command line. Nobody else is given one
+// (MayHoldToken): a person signs in instead, and is refused
+// api_tokens_are_for_agents, whoever asks; and the system actor's token would
+// act as the sweeps do. issuedBy is the actor who asked for it, nil when no
+// actor did (the command line).
 func IssueToken(ctx context.Context, q *dbq.Queries, actorID uuid.UUID, issuedBy *uuid.UUID, label string, expiresAt *time.Time, now time.Time) (Token, uuid.UUID, error) {
 	actor, err := q.GetActor(ctx, actorID)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -221,8 +268,8 @@ func IssueToken(ctx context.Context, q *dbq.Queries, actorID uuid.UUID, issuedBy
 	if err != nil {
 		return Token{}, uuid.Nil, err
 	}
-	if actor.Kind == "system" {
-		return Token{}, uuid.Nil, apperr.Forbid("the system actor is never issued a token")
+	if err := MayHoldToken(actor.Kind); err != nil {
+		return Token{}, uuid.Nil, err
 	}
 	tok, err := NewToken()
 	if err != nil {

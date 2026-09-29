@@ -50,10 +50,25 @@ func newAPI(t *testing.T, students int) *api {
 	return &api{t: t, c: c, srv: srv}
 }
 
-// tokenFor issues an API token the way the operator's command line does.
+// tokenFor is what actor calls with: an agent's API token, issued the way
+// the operator's command line issues one, and a person's session, as signing
+// in starts one. A person holds no API token.
 func (a *api) tokenFor(actor uuid.UUID) string {
 	a.t.Helper()
-	tok, _, err := auth.IssueToken(context.Background(), dbq.New(a.c.Pool), actor, nil, "test", nil, time.Now())
+	ctx := context.Background()
+	q := dbq.New(a.c.Pool)
+	who, err := q.GetActor(ctx, actor)
+	if err != nil {
+		a.t.Fatal(err)
+	}
+	if who.Kind != "agent" {
+		sess, err := auth.NewAuthenticator(a.c.Pool, time.Hour).StartSession(ctx, actor, "password login")
+		if err != nil {
+			a.t.Fatal(err)
+		}
+		return sess.Token
+	}
+	tok, _, err := auth.IssueToken(ctx, q, actor, nil, "test", nil, time.Now())
 	if err != nil {
 		a.t.Fatal(err)
 	}
@@ -210,6 +225,41 @@ func TestSiteChatIsDeclaredWithTheTokenOfTheCall(t *testing.T) {
 	}
 }
 
+// A person asks for an API token in vain, of their own or from an
+// administrator: 403. One from before migration 0017 revoked them opens
+// nothing, 401, and says why. People sign in, and agents hold tokens.
+func TestTokensAreForAgentsAndSigningInForPeople(t *testing.T) {
+	a := newAPI(t, 0)
+	c := a.c
+	root, sato := a.tokenFor(c.Root), a.tokenFor(c.Sato)
+	own := a.do(nil, "POST", "/v1/me/credentials/tokens", sato, m{"label": "my script"}, "Idempotency-Key", "own")
+	if own.Status != http.StatusForbidden || own.str("error", "details", "reason") != "api_tokens_are_for_agents" {
+		t.Fatalf("a person's own token: %d %s", own.Status, own.Raw)
+	}
+	given := a.do(nil, "POST", "/v1/actors/"+c.Sato.String()+"/tokens", root, m{"label": "for Sato"}, "Idempotency-Key", "given")
+	if given.Status != http.StatusForbidden || given.str("error", "details", "reason") != "api_tokens_are_for_agents" {
+		t.Fatalf("root's token for a person: %d %s", given.Status, given.Raw)
+	}
+	agents := a.do(nil, "POST", "/v1/actors/"+c.Grader.String()+"/tokens", root, m{"label": "server"}, "Idempotency-Key", "agents")
+	if agents.Status != http.StatusOK || !strings.HasPrefix(agents.str("result", "token"), "ais_") {
+		t.Fatalf("root's token for an agent: %d %s", agents.Status, agents.Raw)
+	}
+
+	// What the release before could leave: a token of Sato's.
+	tok, err := auth.NewToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.Exec(`ALTER TABLE credential DISABLE TRIGGER credential_fits_actor_kind`)
+	c.Exec(`INSERT INTO credential (actor_id, kind, secret_hash, token_prefix) VALUES ($1, 'api_token', $2, $3)`, c.Sato, tok.Hash, tok.Prefix)
+	c.Exec(`ALTER TABLE credential ENABLE TRIGGER credential_fits_actor_kind`)
+	me := a.do(nil, "GET", "/v1/me", tok.Full, nil)
+	if me.Status != http.StatusUnauthorized || me.str("error", "details", "reason") != "api_tokens_are_for_agents" ||
+		me.Header.Get("WWW-Authenticate") == "" || !strings.Contains(me.str("error", "message"), "sign") {
+		t.Fatalf("Sato's token: %d %s", me.Status, me.Raw)
+	}
+}
+
 // What a status says of whether anything was recorded: a call that was
 // attempted answers with the action on record as its top-level action_id,
 // and a failure there with its error's own status, 400 and 404 included. A
@@ -354,19 +404,30 @@ func TestBrowserSession(t *testing.T) {
 	}
 	// A hostile page cannot ride the cookie: a cross-origin POST is refused
 	// before it reaches anything.
-	evil := a.do(browser, "POST", "/v1/me/credentials/tokens", "", m{"label": "stolen"},
+	evil := a.do(browser, "POST", "/v1/me/agents", "", m{"display_name": "stolen"},
 		"Idempotency-Key", "x", "Origin", "https://evil.example", "Sec-Fetch-Site", "cross-site")
 	if evil.Status != http.StatusForbidden {
 		t.Fatalf("cross-origin POST with the session cookie: %d %s", evil.Status, evil.Raw)
 	}
-	if n := c.Count(`SELECT count(*) FROM credential WHERE label = 'stolen'`); n != 0 {
+	if n := c.Count(`SELECT count(*) FROM actor WHERE display_name = 'stolen'`); n != 0 {
 		t.Fatal("the cross-origin request went through")
 	}
 	// The front end's own origin is allowed, and gets CORS headers.
-	ours := a.do(browser, "POST", "/v1/me/credentials/tokens", "", m{"label": "laptop"},
+	bot := a.do(browser, "POST", "/v1/me/agents", "", m{"display_name": "Sato's helper"},
+		"Idempotency-Key", "bot", "Origin", frontEnd, "Sec-Fetch-Site", "cross-site")
+	if bot.Status != 200 || bot.Header.Get("Access-Control-Allow-Origin") != frontEnd || bot.Header.Get("Access-Control-Allow-Credentials") != "true" {
+		t.Fatalf("trusted origin: %d %v %s", bot.Status, bot.Header, bot.Raw)
+	}
+	// A person is issued no API token of their own, signed in or not: their
+	// agent is, for their tools and scripts.
+	mine := a.do(browser, "POST", "/v1/me/credentials/tokens", "", m{"label": "laptop"}, "Idempotency-Key", "mine", "Origin", frontEnd)
+	if mine.Status != http.StatusForbidden || mine.str("error", "details", "reason") != "api_tokens_are_for_agents" {
+		t.Fatalf("a person's own token: %d %s", mine.Status, mine.Raw)
+	}
+	ours := a.do(browser, "POST", "/v1/me/agents/"+bot.str("result", "actor_id")+"/tokens", "", m{"label": "laptop"},
 		"Idempotency-Key", "y", "Origin", frontEnd, "Sec-Fetch-Site", "cross-site")
-	if ours.Status != 200 || ours.Header.Get("Access-Control-Allow-Origin") != frontEnd || ours.Header.Get("Access-Control-Allow-Credentials") != "true" {
-		t.Fatalf("trusted origin: %d %v %s", ours.Status, ours.Header, ours.Raw)
+	if ours.Status != 200 {
+		t.Fatalf("a token for Sato's agent: %d %s", ours.Status, ours.Raw)
 	}
 	// The token is in the response once, and never in the log.
 	issued := ours.str("result", "token")
@@ -376,12 +437,13 @@ func TestBrowserSession(t *testing.T) {
 	if n := c.Count(`SELECT count(*) FROM action WHERE result::text LIKE '%' || $1 || '%'`, issued[17:]); n != 0 {
 		t.Fatal("the issued token reached the action log")
 	}
-	replay := a.do(browser, "POST", "/v1/me/credentials/tokens", "", m{"label": "laptop"}, "Idempotency-Key", "y", "Origin", frontEnd)
+	replay := a.do(browser, "POST", "/v1/me/agents/"+bot.str("result", "actor_id")+"/tokens", "", m{"label": "laptop"},
+		"Idempotency-Key", "y", "Origin", frontEnd)
 	if replay.Status != 200 || replay.str("result", "token") != "" || replay.str("result", "credential_id") != ours.str("result", "credential_id") {
-		t.Fatalf("replayed issue_token: %s", replay.Raw)
+		t.Fatalf("replayed agent.issue_token: %s", replay.Raw)
 	}
-	if me := a.do(nil, "GET", "/v1/me", issued, nil); me.Status != 200 {
-		t.Fatalf("the issued token does not work: %d", me.Status)
+	if me := a.do(nil, "GET", "/v1/me", issued, nil); me.Status != 200 || me.str("result", "kind") != "agent" {
+		t.Fatalf("the issued token does not work: %d %s", me.Status, me.Raw)
 	}
 	pre := a.do(browser, "OPTIONS", "/v1/me", "", nil, "Origin", frontEnd, "Access-Control-Request-Method", "GET")
 	if pre.Status != http.StatusNoContent || !strings.Contains(pre.Header.Get("Access-Control-Allow-Headers"), "Idempotency-Key") {

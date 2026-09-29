@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/apperr"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/auth"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/config"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/testdb"
@@ -148,5 +149,52 @@ func TestBootstrapTakesALoginID(t *testing.T) {
 	}
 	if _, err := auth.NewAuthenticator(pool, time.Hour).Login(context.Background(), "t0001", "a long enough password"); err != nil {
 		t.Fatalf("root signing in with the login ID: %v", err)
+	}
+}
+
+// The command line issues an agent a token, and a person none: people sign
+// in. Nor the system actor.
+func TestTokenIssueIsForAgents(t *testing.T) {
+	pool, url := testdb.NewWithURL(t)
+	cfg := config.Config{DatabaseURL: url}
+	res, err := auth.Bootstrap(context.Background(), pool, auth.BootstrapInput{DisplayName: "Root", Email: "root@example.edu",
+		LoginID: "T0001", Password: "a long enough password"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent := uuid.Must(uuid.NewV7())
+	if _, err := pool.Exec(context.Background(), `INSERT INTO actor (id, kind, display_name, email, created_by_actor_id)
+		VALUES ($1, 'agent', 'grader', 'grader@example.edu', $2)`, agent, res.RootID); err != nil {
+		t.Fatal(err)
+	}
+	issue := func(who string) (string, string, error) {
+		t.Helper()
+		var stdout, stderr bytes.Buffer
+		err := token(cfg, []string{"issue", "--actor", who, "--label", "cli", "--days", "30"}, &stdout, &stderr)
+		return stdout.String(), stderr.String(), err
+	}
+	for _, who := range []string{res.RootID.String(), "root@example.edu", "T0001"} {
+		stdout, _, err := issue(who)
+		e, ok := apperr.As(err)
+		if !ok || e.Code != apperr.Forbidden || e.Details["reason"] != auth.ReasonTokensForAgents || stdout != "" {
+			t.Fatalf("a token for root, as %s: %v; stdout %q", who, err, stdout)
+		}
+	}
+	if stdout, _, err := issue(res.SystemID.String()); err == nil || stdout != "" {
+		t.Fatalf("a token for the system actor: %v; stdout %q", err, stdout)
+	}
+	if n := count(t, pool, `SELECT count(*) FROM credential WHERE kind = 'api_token'`); n != 0 {
+		t.Fatalf("%d tokens made for those who may hold none", n)
+	}
+	for _, who := range []string{agent.String(), "GRADER@example.edu"} {
+		stdout, stderr, err := issue(who)
+		tok := strings.TrimSpace(stdout)
+		if err != nil || !strings.HasPrefix(tok, "ais_") || strings.Contains(stderr, tok) || !strings.Contains(stderr, agent.String()) {
+			t.Fatalf("a token for the agent, as %s: %v; stdout %q; stderr %q", who, err, stdout, stderr)
+		}
+		p, err := auth.NewAuthenticator(pool, time.Hour).Authenticate(context.Background(), tok)
+		if err != nil || p.ActorID != agent || p.ExpiresAt == nil {
+			t.Fatalf("the agent's token: %+v %v", p, err)
+		}
 	}
 }

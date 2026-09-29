@@ -536,7 +536,7 @@ func TestStaleSessionsAreDeleted(t *testing.T) {
 	add("long-dead", f.now.Add(-30*24*time.Hour))
 	add("just-dead", f.now.Add(-time.Hour))
 	add("alive", f.now.Add(time.Hour))
-	f.Exec(`INSERT INTO credential (actor_id, kind, secret_hash, token_prefix, expires_at) VALUES ($1, 'api_token', 'h', 'old-token', $2)`, f.Sato, f.now.Add(-30*24*time.Hour))
+	f.Exec(`INSERT INTO credential (actor_id, kind, secret_hash, token_prefix, expires_at) VALUES ($1, 'api_token', 'h', 'old-token', $2)`, f.Grader, f.now.Add(-30*24*time.Hour))
 
 	if rep := f.sweep(t); rep.SessionsDeleted != 1 {
 		t.Fatalf("%+v, want only the long-dead session deleted", rep)

@@ -79,6 +79,26 @@ src/
                          links: a person's seat at its member_manage level,
                          an agent's denied; presets by role
     0013_member_invite.down.sql
+    0014_agent_owner_and_decisions.up.sql
+                         an agent's owner never changes; an agent decides
+                         and reviews only by proposal
+    0014_agent_owner_and_decisions.down.sql
+    0015_flexible_records.up.sql
+                         a computed total overridden beside the number
+                         worked out; a document or a version purged,
+                         leaving a tombstone
+    0015_flexible_records.down.sql
+    0016_login_ids.up.sql
+                         a person's login ID beside their email; a password
+                         someone else set, which its person must change
+    0016_login_ids.down.sql
+    0017_api_tokens_for_agents.up.sql
+                         revokes every API token a person holds and every
+                         password, invitation, identity and session an
+                         agent holds; a trigger refusing either from then on
+    0017_api_tokens_for_agents.down.sql
+                         drops the trigger; what the up revoked stays revoked
+    0013_member_invite.down.sql
                          drops it from both tables
     0014_agent_owner_and_decisions.up.sql
                          an agent's owner never changes: a trigger refuses
@@ -181,6 +201,11 @@ database — every migration up, the seed, the checks, the newest two down and
 up again over the seeded built-in presets (`tests/redo_builtins.sql` checks
 they come through unchanged), every migration down, a check that nothing was
 left behind, and up again — and is what CI runs on PostgreSQL 13 and 18. On
+the way up, a migration with files in `tests/up/` goes up over the data its
+`.before.sql` commits, and its `.after.sql` checks what became of it: 0017
+over people's tokens, root's from bootstrap among them, and agents'
+passwords, sessions, identities and invitations, beside what it must leave
+alone. The data stays for the rest of the run. On
 the way down, a migration with files in `tests/down/` goes down over the data
 its `.before.sql` commits, and its `.after.sql` checks what became of it:
 0007 over a delegate with a proposal waiting and a token, 0008 over a
@@ -192,7 +217,8 @@ through it, 0013 over a seat and a preset that hand out links, 0014
 over an owned agent and one nobody owns, seated deciding by proposal, whose
 owners, and levels, may change again once it is down, and 0016 over login
 IDs, one of them a person's own and unchecked, and a temporary password
-signed in with.
+signed in with, and 0017 over a person signed in, an agent's token and what
+the up revoked, which stays revoked.
 
 ## What the database enforces
 
@@ -222,6 +248,7 @@ MCP, these are the invariants that survive a bug in the tool layer.
 | A version has text or a file; a file has a type and size | `document_version_has_content`, `document_version_file_described` |
 | SSO credentials carry an identity; passwords, tokens and sessions carry a hash; tokens and sessions carry a lookup prefix; sessions expire | `credential_*` CHECKs |
 | No credential is written for the system actor, nor moved to it | `credential_not_for_system_actor` trigger |
+| A person holds no API token, and an agent no password, invitation, identity or session: none is written, nor made live by moving it, changing its kind or taking back its revocation | `credential_fits_actor_kind` trigger |
 | Status, role, kind and scope columns hold only listed values | `*_valid` CHECKs |
 | Emails are unique regardless of case | unique index on `lower(email)` |
 | Login IDs are unique regardless of case, 1..64 of `[0-9A-Za-z._-]` (never an `@` or a space), and only a person's; one goes unverified only if it is a person's and there | unique index `actor_login_id_key`, `actor_login_id_valid`, `actor_login_id_is_a_persons`, `actor_unverified_login_id_is_a_persons` |
@@ -281,7 +308,9 @@ The database cannot express these. Each one is a place a bug can hide.
 - **Closing a removed seat's conversations**, a delegate's with its
   principal's, and cancelling its proposals.
 - **A token of the system actor's** written before migration 0004 refused
-  them authenticates nobody.
+  them authenticates nobody; nor does **a person's API token** from before
+  migration 0017, which is answered with `api_tokens_are_for_agents`, nor an
+  agent's password, identity or invitation from before it.
 - **A temporary password** (`credential.must_change`) refuses its person every
   call but setting their own; who may set one for whom is the tool's
   (`member.reset_password`).

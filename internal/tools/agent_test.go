@@ -379,8 +379,12 @@ func TestAnAgentKnowsWhoOwnsIt(t *testing.T) {
 	if got.ID != bot || got.Kind != "agent" || got.Status != "active" {
 		t.Fatalf("the agent's me.get: %s", raw)
 	}
-	got, raw = me(testkit.Result[tools.IssueTokenOut](t, b.do(t, b.yuki, "credential.issue_token", m{"label": "laptop"})).Token)
-	names("a person", got, raw, nil)
+	sess, err := authn.StartSession(t.Context(), b.yuki, "password login")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, raw = me(sess.Token)
+	names("a person, signed in", got, raw, nil)
 	got, raw = me(token(b.admin, "actor.issue_token", b.grader))
 	names("an agent registered with no owner", got, raw, nil)
 	registered := testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register",

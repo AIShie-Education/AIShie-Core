@@ -59,24 +59,25 @@ func TestAdminRevokesOneOfAnAgentsTokens(t *testing.T) {
 	}
 
 	// Root's are root's; an instructor has no platform role at all.
-	rootTok := testkit.Result[tools.IssueTokenOut](t, b.do(t, b.Root, "credential.issue_token", m{"label": "cli"}))
-	b.try(t, b.admin, "actor.revoke_credential", m{"actor_id": b.Root, "credential_id": rootTok.CredentialID}, apperr.Forbidden)
+	rootSession := b.session(t, b.Root)
+	b.try(t, b.admin, "actor.revoke_credential", m{"actor_id": b.Root, "credential_id": rootSession}, apperr.Forbidden)
 	// Nor are they listed to an admin: what is listed is there to be revoked.
 	b.try(t, b.admin, "actor.list_credentials", m{"actor_id": b.Root}, apperr.Forbidden)
 	if got := testkit.Result[tools.CredentialListOut](t, b.do(t, b.Root, "actor.list_credentials", m{"actor_id": b.admin})); len(got.Credentials) != 0 {
 		t.Fatalf("root listing the admin's credentials: %+v", got)
 	}
 	// An administrator's own are theirs, through this door too.
-	own := testkit.Result[tools.IssueTokenOut](t, b.do(t, b.admin, "credential.issue_token", m{"label": "own"}))
+	own := b.session(t, b.admin)
 	b.do(t, b.admin, "actor.list_credentials", m{"actor_id": b.admin})
-	b.do(t, b.admin, "actor.revoke_credential", m{"actor_id": b.admin, "credential_id": own.CredentialID})
+	b.do(t, b.admin, "actor.revoke_credential", m{"actor_id": b.admin, "credential_id": own})
 	if out := b.MustCall(b.sato, "actor.list_credentials", m{"actor_id": b.grader}, ""); out.Status != domain.StatusDenied {
 		t.Fatalf("an instructor listing an agent's tokens: %+v", out)
 	}
-	// A token one issues oneself is one's own.
-	mine := testkit.Result[tools.CredentialListOut](t, b.do(t, b.Root, "credential.list", m{}))
+	// A token an agent issues itself is its own.
+	self := testkit.Result[tools.IssueTokenOut](t, b.do(t, b.grader, "credential.issue_token", m{"label": "rotated"}))
+	mine := testkit.Result[tools.CredentialListOut](t, b.do(t, b.grader, "credential.list", m{}))
 	for _, c := range mine.Credentials {
-		if c.ID == rootTok.CredentialID && (c.IssuedByID == nil || *c.IssuedByID != b.Root) {
+		if c.ID == self.CredentialID && (c.IssuedByID == nil || *c.IssuedByID != b.grader) {
 			t.Fatalf("self-issued: %+v", c)
 		}
 	}

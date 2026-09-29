@@ -172,8 +172,8 @@ func TestADepartmentAdministratorCreatesBeneathTheirAppointment(t *testing.T) {
 func TestADepartmentAdministratorManagesNoAccountAndNothingPlatformWide(t *testing.T) {
 	w := newTree(t)
 	var credential uuid.UUID
-	if err := w.Pool.QueryRow(t.Context(), `INSERT INTO credential (actor_id, kind, secret_hash, token_prefix)
-		VALUES ($1, 'api_token', 'h', 'dan-1') RETURNING id`, w.Dan).Scan(&credential); err != nil {
+	if err := w.Pool.QueryRow(t.Context(), `INSERT INTO credential (actor_id, kind, secret_hash, token_prefix, expires_at)
+		VALUES ($1, 'session', 'h', 'dan-1', now() + interval '12 hours') RETURNING id`, w.Dan).Scan(&credential); err != nil {
 		t.Fatal(err)
 	}
 	var preset uuid.UUID
@@ -433,7 +433,7 @@ func TestAnActionSaysInWhatCapacityItWasAllowed(t *testing.T) {
 	w := newTree(t)
 	w.wantCapacity(w.do(w.Admin, "term.create", m{"name": "2027 Spring", "starts_on": "2027-01-10", "ends_on": "2027-05-20"}),
 		domain.AuthorityPlatform, uuid.Nil)
-	w.wantCapacity(w.do(w.Ada, "credential.issue_token", m{"label": "laptop"}), "", uuid.Nil)
+	w.wantCapacity(w.do(w.Ada, "credential.set_password", m{"password": "adas new password"}), "", uuid.Nil)
 	w.wantCapacity(w.do(w.Chan, "assignment.create", m{"course_id": w.CS, "title": "HW1", "points_possible": 10}), "", uuid.Nil)
 	// A department administrator seated in a course acts there by the seat,
 	// and nothing else.

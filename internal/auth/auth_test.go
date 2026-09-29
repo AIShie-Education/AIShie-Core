@@ -108,6 +108,33 @@ func newAgent(t *testing.T, pool *pgxpool.Pool, root uuid.UUID) (uuid.UUID, auth
 	return agent, tok
 }
 
+// withoutTheGuard writes what the database has refused since migration
+// 0017, as the release before it could.
+func withoutTheGuard(t *testing.T, pool *pgxpool.Pool, sql string, args ...any) {
+	t.Helper()
+	ctx := context.Background()
+	for _, stmt := range []string{`ALTER TABLE credential DISABLE TRIGGER credential_fits_actor_kind`, sql,
+		`ALTER TABLE credential ENABLE TRIGGER credential_fits_actor_kind`} {
+		var a []any
+		if stmt == sql {
+			a = args
+		}
+		if _, err := pool.Exec(ctx, stmt, a...); err != nil {
+			t.Fatalf("%v\n%s", err, stmt)
+		}
+	}
+}
+
+// reason is what an error says in details.reason.
+func reason(err error) string {
+	e, ok := apperr.As(err)
+	if !ok {
+		return ""
+	}
+	r, _ := e.Details["reason"].(string)
+	return r
+}
+
 // Root signs in with the password it was bootstrapped with, and holds no
 // API token: bootstrap makes none. An agent's token authenticates.
 func TestBootstrapAndAuthenticate(t *testing.T) {
@@ -212,6 +239,82 @@ func TestBootstrapNeedsAWayToSignIn(t *testing.T) {
 	sess, err := auth.NewAuthenticator(pool, time.Hour).Login(ctx, "t0001", rootPassword)
 	if err != nil || sess.ActorID != res.RootID {
 		t.Fatalf("root signing in with its login ID: %+v %v", sess, err)
+	}
+}
+
+// Nobody issues a person an API token, whoever asks: people sign in. Nor the
+// system actor. An agent is issued one.
+func TestOnlyAnAgentIsIssuedAToken(t *testing.T) {
+	pool := testdb.New(t)
+	ctx := context.Background()
+	q := dbq.New(pool)
+	res := bootstrap(t, pool)
+	agent, _ := newAgent(t, pool, res.RootID)
+	for name, actor := range map[string]uuid.UUID{"root": res.RootID, "the system actor": res.SystemID} {
+		if _, _, err := auth.IssueToken(ctx, q, actor, &res.RootID, "cli", nil, time.Now()); !apperr.Is(err, apperr.Forbidden) {
+			t.Errorf("a token for %s: %v", name, err)
+		}
+	}
+	_, _, err := auth.IssueToken(ctx, q, res.RootID, nil, "cli", nil, time.Now())
+	if reason(err) != auth.ReasonTokensForAgents || !strings.Contains(err.Error(), "signs in with a password or single sign-on") {
+		t.Fatalf("a token for a person: %v", err)
+	}
+	if _, _, err := auth.IssueToken(ctx, q, agent, nil, "cli", nil, time.Now()); err != nil {
+		t.Fatalf("a token for an agent: %v", err)
+	}
+	// The database refuses one however it is written.
+	tok, err := auth.NewToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = pool.Exec(ctx, `INSERT INTO credential (actor_id, kind, secret_hash, token_prefix) VALUES ($1, 'api_token', $2, $3)`,
+		res.RootID, tok.Hash, tok.Prefix)
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) || pgErr.Code != "23514" {
+		t.Fatalf("the database took a token for a person: %v", err)
+	}
+}
+
+// A person's API token, from before migration 0017 revoked them or written
+// since past the database, authenticates nobody, and says why to whoever
+// presents it, who holds the whole of it: revoked or not. A wrong one is
+// refused as any wrong token is.
+func TestAPersonsTokenAuthenticatesNobody(t *testing.T) {
+	pool := testdb.New(t)
+	ctx := context.Background()
+	res := bootstrap(t, pool)
+	a := auth.NewAuthenticator(pool, time.Hour)
+	for _, revoked := range []bool{false, true} {
+		tok, err := auth.NewToken()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var at *time.Time
+		if revoked {
+			now := time.Now()
+			at = &now
+		}
+		withoutTheGuard(t, pool, `INSERT INTO credential (actor_id, kind, secret_hash, token_prefix, label, revoked_at)
+			VALUES ($1, 'api_token', $2, $3, 'bootstrap', $4)`, res.RootID, tok.Hash, tok.Prefix, at)
+		_, err = a.Authenticate(ctx, tok.Full)
+		if !apperr.Is(err, apperr.Unauthenticated) || reason(err) != auth.ReasonTokensForAgents {
+			t.Fatalf("root's token (revoked %v): %v", revoked, err)
+		}
+		wrong := tok.Full[:len(tok.Full)-2] + "AA"
+		if wrong == tok.Full {
+			wrong = tok.Full[:len(tok.Full)-2] + "BB"
+		}
+		if _, err := a.Authenticate(ctx, wrong); !apperr.Is(err, apperr.Unauthenticated) || reason(err) != "" {
+			t.Fatalf("a wrong secret under root's token's prefix: %v", err)
+		}
+	}
+	// A session of theirs is who they are.
+	sess, err := a.Login(ctx, "root@example.edu", rootPassword)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p, err := a.Authenticate(ctx, sess.Token); err != nil || p.ActorID != res.RootID || p.Kind != auth.KindSession {
+		t.Fatalf("root's session: %+v %v", p, err)
 	}
 }
 

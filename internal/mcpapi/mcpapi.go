@@ -134,8 +134,11 @@ func NewHandler(d Deps) http.Handler {
 	verify := func(ctx context.Context, token string, _ *http.Request) (*sdkauth.TokenInfo, error) {
 		p, err := d.Auth.Authenticate(ctx, token)
 		if err != nil {
-			if apperr.Is(err, apperr.Unauthenticated) {
-				return nil, fmt.Errorf("%w: %s", sdkauth.ErrInvalidToken, "the credential is missing or not valid")
+			// Refused: said in Authenticate's words, which name no more
+			// than whoever holds the token may know, a person's token
+			// told that API tokens are for agents.
+			if e, ok := apperr.As(err); ok && e.Code == apperr.Unauthenticated {
+				return nil, fmt.Errorf("%w: %s", sdkauth.ErrInvalidToken, e.Message)
 			}
 			// Ours — the database is down, say. The SDK writes whatever
 			// error it gets straight to the client, so it gets a fixed

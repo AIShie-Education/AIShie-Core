@@ -48,7 +48,6 @@ func TestAnInstructorResetsAStudentsPassword(t *testing.T) {
 	if err != nil || before.PasswordChangeRequired {
 		t.Fatalf("Yuki signs in, before: %+v %v", before, err)
 	}
-	token := testkit.Result[tools.IssueTokenOut](t, b.do(t, b.yuki, "credential.issue_token", m{"label": "her own script"})).Token
 
 	b.key++
 	out := b.MustCall(b.sato, tools.ToolMemberResetPassword, m{"course_id": b.course, "member_id": b.yukiM}, "reset-once")
@@ -99,21 +98,12 @@ func TestAnInstructorResetsAStudentsPassword(t *testing.T) {
 		t.Fatal("no member.password_reset for Sato")
 	}
 
-	// Her session is over, and her old password with it; her own token does
-	// nothing until she has set her own.
+	// Her session is over, and her old password with it.
 	if _, err := authn.Authenticate(ctx, before.Token); err == nil {
 		t.Fatal("her session outlived the reset")
 	}
 	if _, err := authn.Login(ctx, "20230007", "yukis forgotten password"); !apperr.Is(err, apperr.Unauthenticated) {
 		t.Fatalf("her old password: %v", err)
-	}
-	p, err := authn.Authenticate(ctx, token)
-	if err != nil {
-		t.Fatalf("her token: %v", err)
-	}
-	if out, _ := b.CallWith(pipeline.Caller{ActorID: b.yuki, CredentialID: p.CredentialID}, "me.get", m{}, ""); out.Status != domain.StatusDenied ||
-		reason(out) != "password_change_required" {
-		t.Fatalf("her token, before she sets her own: %+v", out)
 	}
 
 	// She signs in with the temporary one, and is told to change it.
@@ -130,7 +120,7 @@ func TestAnInstructorResetsAStudentsPassword(t *testing.T) {
 		{"me.get", m{}}, {"me.memberships", m{}}, {"credential.list", m{}},
 		{"document.list", m{"course_id": b.course}},
 		{"submission.create", m{"course_id": b.course, "assignment_id": b.hw3, "body": "draft"}},
-		{"credential.issue_token", m{"label": "another"}},
+		{"agent.create", m{"display_name": "her helper"}},
 	} {
 		out := b.MustCall(b.yuki, call.name, call.args, "pending-"+call.name)
 		if out.Status != domain.StatusDenied || out.Error.Code != apperr.Forbidden || reason(out) != "password_change_required" {
@@ -173,8 +163,12 @@ func TestAnInstructorResetsAStudentsPassword(t *testing.T) {
 	if _, err := authn.Login(ctx, "20230007", temporary); !apperr.Is(err, apperr.Unauthenticated) {
 		t.Fatalf("the temporary password after: %v", err)
 	}
-	if out, _ := b.CallWith(pipeline.Caller{ActorID: b.yuki, CredentialID: p.CredentialID}, "me.get", m{}, ""); out.Status != domain.StatusExecuted {
-		t.Fatalf("her token after: %+v", out)
+	sp, err := authn.Authenticate(ctx, sess.Token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out, _ := b.CallWith(pipeline.Caller{ActorID: b.yuki, CredentialID: sp.CredentialID}, "me.get", m{}, ""); out.Status != domain.StatusExecuted {
+		t.Fatalf("her session after: %+v", out)
 	}
 
 	// Her credentials say who set the temporary one, and that it was.

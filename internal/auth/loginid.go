@@ -102,8 +102,7 @@ func NewTemporaryPassword() (string, error) {
 // invitation waiting, as setting any password revokes them; it is marked, so
 // that their next sign-in with it must set a new one before anything else
 // (credential.must_change); and every session they have is ended, so that
-// nobody signed in as them carries on. Their API tokens are left, and do
-// nothing until the password is changed. It says how many sessions it ended.
+// nobody signed in as them carries on. It says how many sessions it ended.
 // Who may do this to whom is the tool's to decide (member.reset_password).
 func SetTemporaryPassword(ctx context.Context, q *dbq.Queries, actorID, issuedBy uuid.UUID, password, label string, now time.Time) (int64, error) {
 	hash, err := HashNewPassword(password)

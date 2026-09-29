@@ -68,9 +68,24 @@ func serve(t *testing.T, students int) *fixture {
 	return &fixture{c: c, srv: srv}
 }
 
+// token is what actor connects with: an agent's API token, and a person's
+// session, as signing in starts one. A person holds no API token.
 func (f *fixture) token(t *testing.T, actor uuid.UUID) string {
 	t.Helper()
-	tok, _, err := auth.IssueToken(context.Background(), dbq.New(f.c.Pool), actor, nil, "mcp", nil, time.Now())
+	ctx := context.Background()
+	q := dbq.New(f.c.Pool)
+	who, err := q.GetActor(ctx, actor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if who.Kind != "agent" {
+		sess, err := auth.NewAuthenticator(f.c.Pool, time.Hour).StartSession(ctx, actor, "password login")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return sess.Token
+	}
+	tok, _, err := auth.IssueToken(ctx, q, actor, nil, "mcp", nil, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -510,14 +525,27 @@ func TestOnlyAuthenticatedAgentsConnect(t *testing.T) {
 	}
 	// Revocation takes effect on the very next call: there is no session to
 	// keep a revoked token alive.
-	token := f.token(t, f.c.Sato)
+	token := f.token(t, f.c.Grader)
 	s := f.connect(t, token)
 	if env, _ := call(t, s, "me_get", nil); env.Status != "executed" {
 		t.Fatalf("before revocation: %+v", env)
 	}
-	f.c.Exec(`UPDATE credential SET revoked_at = now() WHERE actor_id = $1`, f.c.Sato)
+	f.c.Exec(`UPDATE credential SET revoked_at = now() WHERE actor_id = $1`, f.c.Grader)
 	if _, err := s.CallTool(context.Background(), &mcp.CallToolParams{Name: "me_get"}); err == nil {
 		t.Fatal("a revoked token still works on an open session")
+	}
+	// A person's API token, from before migration 0017 revoked them, opens
+	// nothing, and the answer says why.
+	tok, err := auth.NewToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.c.Exec(`ALTER TABLE credential DISABLE TRIGGER credential_fits_actor_kind`)
+	f.c.Exec(`INSERT INTO credential (actor_id, kind, secret_hash, token_prefix) VALUES ($1, 'api_token', $2, $3)`, f.c.Sato, tok.Hash, tok.Prefix)
+	f.c.Exec(`ALTER TABLE credential ENABLE TRIGGER credential_fits_actor_kind`)
+	if status, out := post(t, f, tok.Full, `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`); status != http.StatusUnauthorized ||
+		!strings.Contains(string(out), "API tokens are for agents") {
+		t.Fatalf("a person's token over MCP: %d %s", status, out)
 	}
 	// A suspended actor still authenticates, and is then denied — on record.
 	f.c.Exec(`UPDATE actor SET status = 'suspended' WHERE id = $1`, f.c.Grader)
@@ -622,7 +650,7 @@ func TestToolsListIsTheRegistry(t *testing.T) {
 // test does.
 func TestAReplayWithoutItsSecretMatchesTheListedSchema(t *testing.T) {
 	f := serve(t, 0)
-	s := f.connect(t, f.token(t, f.c.Sato))
+	s := f.connect(t, f.token(t, f.c.Grader))
 	var listed *mcp.Tool
 	for tl, err := range s.Tools(context.Background(), nil) {
 		if err != nil {
