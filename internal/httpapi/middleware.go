@@ -14,6 +14,7 @@ import (
 
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/apperr"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/blob"
+	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/wake"
 )
 
 // tooMany answers a call that came too soon. It was never attempted: nothing
@@ -196,7 +197,15 @@ func (s *server) logged(next http.Handler) http.Handler {
 		_ = rc.SetWriteDeadline(start.Add(s.BodyTimeout))
 		info := &requestInfo{}
 		rec := &statusRecorder{ResponseWriter: w}
-		next.ServeHTTP(rec, r.WithContext(context.WithValue(r.Context(), requestInfoKey{}, info)))
+		// A call that waits for news (wait_s, over REST or MCP) keeps the
+		// connection until its wait is over, and then has as long as any
+		// request to answer. The read deadline moves with it: reached while
+		// the handler runs, it would end the call as a client that left.
+		ctx := wake.WithHold(context.WithValue(r.Context(), requestInfoKey{}, info), func(until time.Time) {
+			_ = rc.SetReadDeadline(until.Add(s.BodyTimeout))
+			_ = rc.SetWriteDeadline(until.Add(s.BodyTimeout))
+		})
+		next.ServeHTTP(rec, r.WithContext(ctx))
 
 		if r.URL.Path == "/healthz" && rec.status == http.StatusOK {
 			return // a probe every few seconds is not news

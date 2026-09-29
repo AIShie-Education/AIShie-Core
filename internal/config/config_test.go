@@ -20,7 +20,7 @@ func TestFromEnv(t *testing.T) {
 		}
 		if c.DatabaseURL == "" || c.HTTPAddr != ":8080" || c.ProposalTTL != 14*24*time.Hour || c.SessionTTL != 12*time.Hour || c.InsecureCookies ||
 			!c.AgentSelfService || c.AgentMaxPerOwner != 5 || !c.JoinLinkRegistration || c.JoinRegistrationsPerMinute != 60 ||
-			c.SignInsPerMinute != 10 {
+			c.SignInsPerMinute != 10 || c.LongPollWaiters != 1000 || c.LongPollWaitersPerActor != 16 {
 			t.Fatalf("defaults: %+v", c)
 		}
 		// Memory stays off until what forgets it on time is in place; its
@@ -48,13 +48,16 @@ func TestFromEnv(t *testing.T) {
 		t.Setenv("MEMORY_MAX_PER_AGENT", "14")
 		t.Setenv("MEMORY_WRITES_PER_HOUR", "15")
 		t.Setenv("MEMORY_WRITES_PER_DAY", "16")
+		t.Setenv("LONG_POLL_WAITERS", "0")
+		t.Setenv("LONG_POLL_WAITERS_PER_ACTOR", "4")
 		c, err := FromEnv()
 		if err != nil {
 			t.Fatal(err)
 		}
 		if c.ProposalTTL != 48*time.Hour || c.SessionTTL != 30*time.Minute || !c.InsecureCookies ||
 			c.AgentSelfService || c.AgentMaxPerOwner != 2 || c.JoinLinkRegistration || c.JoinRegistrationsPerMinute != 5 ||
-			len(c.TrustedOrigins) != 2 || c.TrustedOrigins[1] != "http://localhost:5173" {
+			len(c.TrustedOrigins) != 2 || c.TrustedOrigins[1] != "http://localhost:5173" ||
+			c.LongPollWaiters != 0 || c.LongPollWaitersPerActor != 4 {
 			t.Fatalf("%+v", c)
 		}
 		if want := (memory.Config{Enabled: true, MaxOwner: 10, MaxAsker: 11, MaxShared: 12, MaxProposed: 13, MaxPerAgent: 14,
@@ -65,7 +68,7 @@ func TestFromEnv(t *testing.T) {
 	for key, bad := range map[string]string{"PROPOSAL_TTL": "two weeks", "SESSION_TTL": "-1h", "INSECURE_COOKIES": "maybe",
 		"AGENT_SELF_SERVICE": "yes", "AGENT_MAX_PER_OWNER": "0", "MEMORY": "true", "MEMORY_MAX_ASKER": "0",
 		"MEMORY_WRITES_PER_DAY": "many", "MEMORY_MAX_PER_AGENT": "-5", "JOIN_LINK_REGISTRATION": "no",
-		"JOIN_REGISTRATIONS_PER_MINUTE": "-1"} {
+		"JOIN_REGISTRATIONS_PER_MINUTE": "-1", "LONG_POLL_WAITERS": "lots", "LONG_POLL_WAITERS_PER_ACTOR": "-1"} {
 		t.Run("rejects "+key+"="+bad, func(t *testing.T) {
 			t.Setenv(key, bad)
 			if _, err := FromEnv(); err == nil {

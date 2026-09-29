@@ -29,6 +29,7 @@ import (
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/db/dbq"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/domain"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/events"
+	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/wake"
 )
 
 func init() {
@@ -244,6 +245,40 @@ type Spec[In, Out any] struct {
 	// Execute is set for a Write, Query for a Read.
 	Execute func(ctx context.Context, ec *ExecCtx, in In) (Out, error)
 	Query   func(ctx context.Context, rc *ReadCtx, in In) (Out, error)
+	// Wait, for a Read whose input embeds CanWait, is what a call that asks
+	// to wait (wait_s) waits for when it finds nothing new.
+	Wait *Waiting[In, Out]
+}
+
+// MaxWaitSeconds is the longest a call may wait for news (wait_s): well
+// inside what a reverse proxy, or a client, gives a request before it gives
+// up on it.
+const MaxWaitSeconds = 25
+
+// CanWait is embedded by the input of a Read that can wait for news: one a
+// caller would otherwise poll. With wait_s above zero, a call that finds
+// nothing new waits, holding no connection to the database, until something
+// it would read is committed, or wait_s is up; it then reads again, as it
+// read the first time, and answers with that. A call that finds something
+// answers at once, and so does one past the server's bounds on how many calls
+// wait (package wake), whatever wait_s says.
+type CanWait struct {
+	WaitS int `json:"wait_s,omitempty" jsonschema:"seconds to wait, 0 to 25, when there is nothing new: the call answers as soon as there is, or when the time is up, with whatever there is then; 0, the default, answers at once"`
+}
+
+func (c CanWait) waitSeconds() int { return c.WaitS }
+
+type waitable interface{ waitSeconds() int }
+
+// Waiting is what a call of a Read that can wait waits for.
+type Waiting[In, Out any] struct {
+	// For is the news that wakes the call: rc is the caller's, as the first
+	// read authorized it.
+	For func(rc *ReadCtx, in In) wake.Filter
+	// Nothing says whether what the call read, now, is nothing new to its
+	// caller: nothing past the cursor in, and nothing changed since the
+	// call first read, first. A call waits only while it is.
+	Nothing func(in In, first, now Out) bool
 }
 
 // Tool is a Spec with its types erased.
@@ -275,6 +310,11 @@ type Tool struct {
 	Pin      func(ctx context.Context, q dbq.Querier, m *domain.Member, now time.Time, in any) (any, error)
 	Execute  func(ctx context.Context, ec *ExecCtx, in any) (any, error)
 	Query    func(ctx context.Context, rc *ReadCtx, in any) (any, error)
+	// WaitSeconds, set for a Read that can wait, is what the call asks for
+	// (wait_s); WaitFor and WaitNothing are Spec.Wait's.
+	WaitSeconds func(in any) int
+	WaitFor     func(rc *ReadCtx, in any) wake.Filter
+	WaitNothing func(in any, first, now any) bool
 }
 
 // hasNUL walks a decoded JSON value looking for a string with U+0000 in it.
@@ -376,6 +416,13 @@ func Define[In, Out any](s Spec[In, Out]) Tool {
 	if s.Gate.CourseScoped() != hasCourse {
 		fail("input must embed tool.InCourse exactly when the tool is gated by course permissions")
 	}
+	_, canWait := any(zero).(waitable)
+	if canWait != (s.Wait != nil) {
+		fail("input must embed tool.CanWait exactly when the tool says what it waits for (Wait)")
+	}
+	if s.Wait != nil && (s.Kind != Read || s.Wait.For == nil || s.Wait.Nothing == nil) {
+		fail("only a Read waits, and its Wait says both For and Nothing")
+	}
 
 	inSchema, err := jsonschema.For[In](schemaOptions)
 	if err != nil {
@@ -391,6 +438,16 @@ func Define[In, Out any](s Spec[In, Out]) Tool {
 	outSchema.Required = slices.DeleteFunc(outSchema.Required, func(name string) bool {
 		return slices.Contains(s.SecretOut, name)
 	})
+	if canWait {
+		// The schema holds wait_s to its bounds, so that a call asking for
+		// more is refused as it is asked, not cut short without a word.
+		p := inSchema.Properties["wait_s"]
+		if p == nil {
+			fail("input schema: no wait_s")
+		}
+		lo, hi := 0.0, float64(MaxWaitSeconds)
+		p.Minimum, p.Maximum = &lo, &hi
+	}
 	resolved, err := inSchema.Resolve(nil)
 	if err != nil {
 		fail("input schema: %v", err)
@@ -458,6 +515,11 @@ func Define[In, Out any](s Spec[In, Out]) Tool {
 		t.Query = func(ctx context.Context, rc *ReadCtx, in any) (any, error) {
 			return s.Query(ctx, rc, in.(In))
 		}
+	}
+	if s.Wait != nil {
+		t.WaitSeconds = func(in any) int { return in.(waitable).waitSeconds() }
+		t.WaitFor = func(rc *ReadCtx, in any) wake.Filter { return s.Wait.For(rc, in.(In)) }
+		t.WaitNothing = func(in any, first, now any) bool { return s.Wait.Nothing(in.(In), first.(Out), now.(Out)) }
 	}
 	return t
 }

@@ -3,6 +3,7 @@ package tool_test
 import (
 	"context"
 	"encoding/json"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -14,6 +15,7 @@ import (
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/db/dbq"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/domain"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/tool"
+	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/wake"
 )
 
 type in struct {
@@ -244,4 +246,86 @@ func TestDefineKeepsUnlistedToolsOffTheCatalogue(t *testing.T) {
 			tool.Define(s)
 		})
 	}
+}
+
+type waitIn struct {
+	tool.InCourse
+	After int `json:"after,omitempty"`
+	tool.CanWait
+}
+
+type waitOut struct {
+	Items []int `json:"items"`
+}
+
+func waiting() tool.Spec[waitIn, waitOut] {
+	return tool.Spec[waitIn, waitOut]{
+		Name: "thing.list", Kind: tool.Read, Gate: tool.Gate{Perms: []domain.Perm{domain.PermDocumentRead}},
+		Resolve: func(_ context.Context, _ dbq.Querier, i waitIn) (tool.Target, error) {
+			return tool.Target{CourseID: i.CourseID}, nil
+		},
+		Query: func(context.Context, *tool.ReadCtx, waitIn) (waitOut, error) { return waitOut{}, nil },
+		Wait: &tool.Waiting[waitIn, waitOut]{
+			For:     func(_ *tool.ReadCtx, i waitIn) wake.Filter { return wake.Filter{CourseID: i.CourseID} },
+			Nothing: func(_ waitIn, _, now waitOut) bool { return len(now.Items) == 0 },
+		},
+	}
+}
+
+// A read that can wait takes wait_s, from 0 to MaxWaitSeconds, and says what
+// it waits for; a tool that says one without the other, or a write that
+// would wait, is not a tool.
+func TestAToolThatWaits(t *testing.T) {
+	tl := tool.Define(waiting())
+	course := uuid.New()
+	for waitS, ok := range map[string]bool{"0": true, "25": true, "26": false, "-1": false, "1.5": false, `"5"`: false} {
+		v, err := tl.Decode([]byte(`{"course_id": "` + course.String() + `", "wait_s": ` + waitS + `}`))
+		if ok != (err == nil) {
+			t.Errorf("wait_s %s: %v", waitS, err)
+		}
+		if ok && strconv.Itoa(tl.WaitSeconds(v)) != waitS {
+			t.Errorf("wait_s %s: read as %d", waitS, tl.WaitSeconds(v))
+		}
+	}
+	v, _ := tl.Decode([]byte(`{"course_id": "` + course.String() + `"}`))
+	if tl.WaitSeconds(v) != 0 || !tl.WaitNothing(v, waitOut{}, waitOut{}) || tl.WaitNothing(v, waitOut{}, waitOut{Items: []int{1}}) {
+		t.Fatal("what the tool waits for, erased")
+	}
+	if f := tl.WaitFor(nil, v); f.CourseID != course {
+		t.Fatalf("waits for %+v", f)
+	}
+
+	cases := map[string]func(*tool.Spec[waitIn, waitOut]){
+		"input that can wait, and nothing to wait for": func(s *tool.Spec[waitIn, waitOut]) { s.Wait = nil },
+		"nothing said of what is nothing new":          func(s *tool.Spec[waitIn, waitOut]) { s.Wait.Nothing = nil },
+		"a write that waits": func(s *tool.Spec[waitIn, waitOut]) {
+			s.Kind, s.Query = tool.Write, nil
+			s.Execute = func(context.Context, *tool.ExecCtx, waitIn) (waitOut, error) { return waitOut{}, nil }
+		},
+	}
+	for name, breakIt := range cases {
+		t.Run(name, func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Fatal("Define accepted it")
+				}
+			}()
+			s := waiting()
+			breakIt(&s)
+			tool.Define(s)
+		})
+	}
+	t.Run("something to wait for, and input that cannot wait", func(t *testing.T) {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("Define accepted it")
+			}
+		}()
+		s := valid()
+		s.Kind, s.Execute = tool.Read, nil
+		s.Query = func(context.Context, *tool.ReadCtx, in) (out, error) { return out{}, nil }
+		s.Wait = &tool.Waiting[in, out]{For: func(*tool.ReadCtx, in) wake.Filter { return wake.Filter{} },
+			Nothing: func(in, out, out) bool { return true }}
+		tool.Define(s)
+	})
 }

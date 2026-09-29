@@ -12,6 +12,7 @@ import (
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/events"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/members"
 	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/tool"
+	"github.com/AIShiteru-LMS/AIShiteru-Core/internal/wake"
 )
 
 func eventTools() []tool.Tool { return []tool.Tool{eventList()} }
@@ -160,6 +161,7 @@ type EventListIn struct {
 	tool.InCourse
 	SinceSeq int64 `json:"since_seq,omitempty" jsonschema:"the seq of the last event already seen; 0 for the beginning"`
 	Limit    int   `json:"limit,omitempty" jsonschema:"default 100, maximum 500"`
+	tool.CanWait
 }
 
 type EventView struct {
@@ -188,7 +190,8 @@ func eventList() tool.Tool {
 		Description: "The course's event feed from a cursor: everything that has happened since since_seq that the caller is " +
 			"allowed to know about. Events carry ids, never content — fetch what they point to with the read tools. " +
 			"The events of your own actions are always included, which is how you learn that a proposal was approved, " +
-			"rejected or cancelled. Core never calls out: poll this.",
+			"rejected or cancelled. Core never calls out: call this again from next_seq. With wait_s, a call that finds " +
+			"nothing waits up to that many seconds for an event you may see, and answers as soon as there is one.",
 		Kind: tool.Read,
 		// Any seat in the course can read the feed; what it shows is decided
 		// per event type and per row.
@@ -214,6 +217,12 @@ func eventList() tool.Tool {
 				out.NextSeq = r.Seq
 			}
 			return out, err
+		},
+		// Any news of the course wakes a reader of its feed, which reads
+		// again what of it the caller may see.
+		Wait: &tool.Waiting[EventListIn, EventListOut]{
+			For:     func(_ *tool.ReadCtx, in EventListIn) wake.Filter { return wake.Filter{CourseID: in.CourseID} },
+			Nothing: func(_ EventListIn, _, now EventListOut) bool { return len(now.Events) == 0 },
 		},
 	})
 }
