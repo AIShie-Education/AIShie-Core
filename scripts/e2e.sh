@@ -10,8 +10,12 @@
 # the grade rescaled, override and restore the student's total, rename and
 # bring back the slides, and make the student a TA and a student again;
 # have the transcription service, given its credential by root, transcribe
-# the slides for the student to read and the instructor to correct, and be
-# refused everything else, and everything once its credential is revoked;
+# the slides for the student to read and the instructor to correct; have the
+# instructor upload a lecture of three files and its text, which the student
+# downloads file by file under their names, and the service transcribes file
+# by file, and add a version of two files, and be refused past the limits on
+# a version's files, saying why; and have the service be refused everything
+# else, and everything once its credential is revoked;
 # and have the instructor's own tutor agent answer the student's question,
 # once its runtime says it answers in the site, its inbox and her
 # conversation each waiting to hear what comes next, the answer's draft
@@ -22,7 +26,8 @@
 # more once he switches that off; and have another agent of his, given member_manage,
 # seat a student with its own token, and be refused on his seat, and his own
 # assistant propose an assignment he may make without anyone's confirmation,
-# which he then approves himself. Then he shows a join link: a new student
+# which he then approves himself, as he does its next version of the
+# lecture, with its files. Then he shows a join link: a new student
 # registers through it, a registered one joins, and once he revokes it, it
 # seats nobody; his agents, without member_invite, make none. Then a student
 # with no email registers through another link with her student number as
@@ -155,6 +160,8 @@ export BLOB_FS_ROOT="$WORK/blobs" PUBLIC_URL="$BASE"
 # Small limits on the files a message carries, so that going past them
 # costs nothing: 4 KiB a file, three to a message, 8 KiB in a conversation.
 export ATTACHMENT_MAX_BYTES=4096 ATTACHMENT_MAX_PER_MESSAGE=3 ATTACHMENT_MAX_CONVERSATION_BYTES=8192
+# And on the files a version of a document holds: three, 8 KiB in all.
+export DOCUMENT_MAX_FILES_PER_VERSION=3 DOCUMENT_MAX_VERSION_BYTES=8192
 # The agent runtime Core vouches for people to; its key is derived from
 # SIGNING_KEY, the same across the restart below.
 RUNTIME="$BASE/runtime"
@@ -370,6 +377,102 @@ call 200 GET "$C/documents/$DOC" "$YUKI"
 call 422 POST "$C/documents/$DOC/versions/$VERSION/text/retranscribe" "$SATO" '{}' # his edit goes only if he says so
 [ "$(reason)" = staff_edit ] || fail "refused, but not for his edit: $(cat "$WORK/body")"
 call 403 POST "$C/documents/$DOC/versions/$VERSION/text" "$YUKI" '{"body":"mine"}'
+
+step "Sato uploads a lecture of three files and its text; Yuki reads it and downloads each file under its name; the service transcribes each file on its own, for Yuki to read file by file"
+# docfile CONTENT_TYPE FILE [FILENAME] — a URL for a file of Sato's material, named FILENAME if given, and
+# FILE PUT to it; its token left in $UPLOAD.
+docfile() {
+  local q="kind=material&content_type=$1" put
+  [ -z "${3:-}" ] || q="$q&filename=$3"
+  call 200 GET "$C/upload-url?$q" "${4:-$SATO}"
+  put=$(json "$WORK/body" 'd["result"]["upload_url"]')
+  UPLOAD=$(json "$WORK/body" 'd["result"]["upload_token"]')
+  [ "$(curl -s -o /dev/null -w '%{http_code}' -X PUT -H "Content-Type: $1" --data-binary "@$2" "$put")" = 200 ] || fail "PUT to a document's upload URL"
+}
+printf '%%PDF-1.7 week three' >"$WORK/week3-slides.pdf"
+printf 'The handout for week three.' >"$WORK/handout.txt"
+printf 'for i in range(3):\n    print(i)\n' >"$WORK/loops.py"
+call 200 GET "$C/upload-url?kind=material&content_type=application/pdf" "$SATO"
+[ "$(json "$WORK/body" 'd["result"]["max_files"], d["result"]["max_version_bytes"]')" = "3 8192" ] ||
+  fail "the limits the upload URL says: $(cat "$WORK/body")"
+docfile application/pdf "$WORK/week3-slides.pdf"
+T1=$UPLOAD
+docfile text/plain "$WORK/handout.txt" handout.txt # named as it is uploaded
+T2=$UPLOAD
+docfile text/x-python "$WORK/loops.py"
+T3=$UPLOAD
+call 200 POST "$C/documents" "$SATO" "{\"kind\":\"material\",\"title\":\"Week 3\",\"body_md\":\"Slides first, then run the program.\",\"files\":[{\"upload_token\":\"$T1\",\"filename\":\"week3-slides.pdf\"},{\"upload_token\":\"$T2\"},{\"upload_token\":\"$T3\",\"filename\":\"loops.py\"}]}"
+W3=$(json "$WORK/body" 'd["result"]["document_id"]')
+W3_FILES=$(json "$WORK/body" '" ".join(d["result"]["file_ids"])')
+call 200 POST "$C/documents/$W3/publish" "$SATO"
+call 200 GET "$C/documents/$W3" "$YUKI"
+[ "$(json "$WORK/body" 'd["result"]["version"]["body_md"], " ".join(f["filename"] for f in d["result"]["version"]["files"])')" = \
+  "Slides first, then run the program. week3-slides.pdf handout.txt loops.py" ] || fail "Yuki reads $(cat "$WORK/body")"
+[ "$(json "$WORK/body" '" ".join(f["id"] for f in d["result"]["version"]["files"])')" = "$W3_FILES" ] || fail "the files are not in order"
+json "$WORK/body" '"\n".join(f["filename"] + " " + f["download_url"] for f in d["result"]["version"]["files"])' >"$WORK/w3-urls"
+while read -r name url; do
+  curl -sf -D "$WORK/headers" -o "$WORK/got" "$url" || fail "download of $name from the version"
+  cmp -s "$WORK/$name" "$WORK/got" || fail "$name downloaded from the version is not what Sato uploaded"
+  grep -qi "^content-disposition: attachment; filename=$name" "$WORK/headers" || fail "$name is not saved under its name: $(cat "$WORK/headers")"
+done <"$WORK/w3-urls"
+for f in $W3_FILES; do
+  call 200 GET "$C/documents/$W3/files/$f" "$YUKI"
+  name=$(json "$WORK/body" 'd["result"]["filename"]')
+  curl -sf -o "$WORK/got" "$(json "$WORK/body" 'd["result"]["download_url"]')" || fail "download of $name by its id"
+  cmp -s "$WORK/$name" "$WORK/got" || fail "$name downloaded by its id is not what Sato uploaded"
+done
+echo "  Yuki downloaded each of the three files exactly as Sato uploaded it, from the version and by its id, under its name"
+call 200 POST /v1/services/document_text/queue "$SVC" '{"max":5}'
+[ "$(json "$WORK/body" '" ".join(c["file_id"] for c in d["result"]["claimed"])')" = "$W3_FILES" ] || fail "the service claimed $(cat "$WORK/body")"
+json "$WORK/body" '"\n".join(" ".join([c["version_id"], c["file_id"], c["lease_id"], c["filename"]]) for c in d["result"]["claimed"])' >"$WORK/w3-claims"
+while read -r version file lease name; do
+  call 200 GET "/v1/services/document_text/versions/$version/file?lease_id=$lease&file_id=$file" "$SVC"
+  curl -sf -o "$WORK/got" "$(json "$WORK/body" 'd["result"]["download_url"]')" || fail "the service's download of $name"
+  cmp -s "$WORK/$name" "$WORK/got" || fail "the service downloaded a $name that is not what Sato uploaded"
+  call 200 POST "/v1/services/document_text/versions/$version/complete" "$SVC" \
+    "{\"lease_id\":\"$lease\",\"file_id\":\"$file\",\"status\":\"done\",\"body\":\"## $name\",\"pages\":1,\"model\":\"A model\"}"
+done <"$WORK/w3-claims"
+for f in $W3_FILES; do
+  call 200 GET "$C/documents/$W3/text?file_id=$f" "$YUKI"
+  [ "$(json "$WORK/body" 'd["result"]["text"]["body"] == "## " + d["result"]["filename"]')" = True ] || fail "Yuki reads the text $(cat "$WORK/body")"
+done
+W3_V1=$(json "$WORK/body" 'd["result"]["version_id"]')
+call 400 POST "$C/documents/$W3/versions/$W3_V1/text" "$SATO" '{"body":"## Slides"}' # which file?
+[ "$(reason)" = file_id_required ] || fail "an edit naming no file of three, refused, but not for want of one: $(cat "$WORK/body")"
+
+step "Sato adds a version of two files, which Yuki does not see until it is published; past the limits on a version's files it is refused, saying why"
+printf '%%PDF-1.7 week three, corrected' >"$WORK/week3-slides.pdf"
+printf 'Bring a laptop.' >"$WORK/notes.txt"
+docfile application/pdf "$WORK/week3-slides.pdf"
+T1=$UPLOAD
+docfile text/plain "$WORK/notes.txt" notes.txt
+T2=$UPLOAD
+call 200 POST "$C/documents/$W3/versions" "$SATO" "{\"files\":[{\"upload_token\":\"$T1\",\"filename\":\"week3-slides.pdf\"},{\"upload_token\":\"$T2\"}]}"
+[ "$(json "$WORK/body" 'd["result"]["seq"], len(d["result"]["file_ids"])')" = "2 2" ] || fail "the second version: $(cat "$WORK/body")"
+W3_V2_FILE=$(json "$WORK/body" 'd["result"]["file_ids"][1]')
+call 404 GET "$C/documents/$W3/files/$W3_V2_FILE" "$YUKI" # a draft's
+call 200 GET "$C/documents/$W3/files/$W3_V2_FILE" "$SATO"
+call 200 GET "$C/documents/$W3/versions" "$SATO"
+[ "$(json "$WORK/body" '[len(v["files"]) for v in d["result"]["versions"]]')" = "[3, 2]" ] || fail "the versions: $(cat "$WORK/body")"
+for i in 1 2 3 4; do printf 'part %s' "$i" >"$WORK/part$i.txt"; done
+FOUR=""
+for i in 1 2 3 4; do
+  docfile text/plain "$WORK/part$i.txt" "part$i.txt"
+  FOUR="$FOUR${FOUR:+,}{\"upload_token\":\"$UPLOAD\"}"
+done
+call 400 POST "$C/documents/$W3/versions" "$SATO" "{\"files\":[$FOUR]}"
+[ "$(reason)" = too_many_files ] || fail "four files refused, but not as too many: $(cat "$WORK/body")"
+head -c 5000 /dev/zero >"$WORK/big1.bin"
+head -c 5000 /dev/zero >"$WORK/big2.bin"
+BIG=""
+for i in 1 2; do
+  docfile application/octet-stream "$WORK/big$i.bin" "big$i.bin"
+  BIG="$BIG${BIG:+,}{\"upload_token\":\"$UPLOAD\"}"
+done
+call 422 POST "$C/documents/$W3/versions" "$SATO" "{\"files\":[$BIG]}"
+[ "$(reason)" = version_too_large ] || fail "10000 bytes refused, but not as too much for a version: $(cat "$WORK/body")"
+call 400 POST "$C/documents/$W3/versions" "$SATO" "{\"upload_token\":\"$T1\",\"files\":[{\"upload_token\":\"$T2\",\"filename\":\"notes.txt\"}]}"
+[ "$(reason)" = files_and_upload_token ] || fail "both refused, but not as both: $(cat "$WORK/body")"
 
 step "The service's credential opens nothing else, and once revoked, nothing at all"
 call 403 GET /v1/me "$SVC"
@@ -634,7 +737,7 @@ call 200 POST /v1/me/agents "$SATO" '{"display_name":"Assistant"}'
 ASSIST_ID=$(json "$WORK/body" 'd["result"]["actor_id"]')
 call 200 POST "/v1/me/agents/$ASSIST_ID/tokens" "$SATO" '{"label":"e2e"}'
 ASSIST=$(json "$WORK/body" 'd["result"]["token"]')
-call 200 POST "$C/delegates" "$SATO" "{\"actor_id\":\"$ASSIST_ID\",\"perms\":{\"assignment_write\":\"confirm_required\"}}"
+call 200 POST "$C/delegates" "$SATO" "{\"actor_id\":\"$ASSIST_ID\",\"perms\":{\"assignment_write\":\"confirm_required\",\"document_write\":\"confirm_required\"}}"
 call 202 POST "$C/assignments" "$ASSIST" '{"title":"HW4","points_possible":100}'
 HW4_ASK=$(json "$WORK/body" 'd["action_id"]')
 call 200 GET "$C/actions/proposed" "$SATO"
@@ -644,6 +747,24 @@ call 200 POST "$C/actions/$HW4_ASK/decide" "$SATO" '{"decision":"approve"}'
 [ "$(json "$WORK/body" 'd["result"]["outcome"], d["result"]["by_owner"]')" = "executed True" ] || fail "the owner's approval: $(cat "$WORK/body")"
 call 200 GET "$C/assignments" "$SATO"
 json "$WORK/body" '"HW4" in [a["title"] for a in d["result"]["assignments"]] or sys.exit("HW4 was not made")' >/dev/null
+
+step "Sato's assistant proposes the next version of Week 3 with its files, kept by their tokens until Sato approves it"
+printf '%%PDF-1.7 week three, third time' >"$WORK/week3-slides.pdf"
+docfile application/pdf "$WORK/week3-slides.pdf" "" "$ASSIST"
+T1=$UPLOAD
+docfile text/x-python "$WORK/loops.py" loops.py "$ASSIST"
+T2=$UPLOAD
+call 202 POST "$C/documents/$W3/versions" "$ASSIST" "{\"body_md\":\"Slides, then the program.\",\"files\":[{\"upload_token\":\"$T1\",\"filename\":\"week3-slides.pdf\"},{\"upload_token\":\"$T2\"}]}"
+W3_ASK=$(json "$WORK/body" 'd["action_id"]')
+call 200 GET "$C/documents/$W3/versions" "$SATO"
+[ "$(json "$WORK/body" 'len(d["result"]["versions"])')" = 2 ] || fail "a proposed version was written before anyone decided: $(cat "$WORK/body")"
+call 200 POST "$C/actions/$W3_ASK/decide" "$SATO" '{"decision":"approve"}'
+[ "$(json "$WORK/body" 'd["result"]["outcome"]')" = executed ] || fail "the approval: $(cat "$WORK/body")"
+call 200 GET "$C/documents/$W3" "$SATO"
+[ "$(json "$WORK/body" 'd["result"]["version"]["seq"], " ".join(f["filename"] for f in d["result"]["version"]["files"])')" = "3 week3-slides.pdf loops.py" ] ||
+  fail "the approved version: $(cat "$WORK/body")"
+curl -sf -o "$WORK/got" "$(json "$WORK/body" 'd["result"]["version"]["files"][0]["download_url"]')" || fail "download of the approved slides"
+cmp -s "$WORK/week3-slides.pdf" "$WORK/got" || fail "the approved slides are not what the assistant uploaded"
 
 step "Wei, who has no email, registers through a new link with her student number as her login ID, and signs in with it"
 call 200 POST "$C/join-links" "$SATO" '{}'

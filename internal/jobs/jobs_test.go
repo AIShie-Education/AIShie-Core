@@ -853,6 +853,53 @@ func TestTheSweepKeepsWhatMessagesCarry(t *testing.T) {
 	}
 }
 
+// Every file of a version is kept, not only the first its own columns name,
+// under documents/, where uploads for documents now go, as under courses/,
+// where they went before; an upload for a document that no version came to
+// hold is removed as any orphan is.
+func TestTheSweepKeepsEveryFileOfAVersion(t *testing.T) {
+	for name, wrap := range stores {
+		t.Run(name, func(t *testing.T) {
+			f := setupWith(t, 1, wrap)
+			store := wrap(f.Blob)
+			f.runner = jobs.New(f.Pool, f.P, f.system, jobs.Config{Blob: store}, nil)
+			ctx := context.Background()
+			first, firstKey := f.upload(t)
+			second, secondKey := f.upload(t)
+			_, abandoned := f.upload(t)
+			if !strings.HasPrefix(secondKey, tools.DocumentPrefix+f.Course.String()+"/") {
+				t.Fatalf("an upload for a document is kept at %s", secondKey)
+			}
+			if out := f.MustCall(f.Sato, "document.create", m{"course_id": f.Course, "kind": "material", "title": "Week 1",
+				"files": []m{{"upload_token": first, "filename": "slides.txt"}, {"upload_token": second, "filename": "notes.txt"}}}, "create"); out.Status != domain.StatusExecuted {
+				t.Fatalf("%+v", out)
+			}
+			// A file attached as the release before attached it, under courses/.
+			legacy := store.FinalKey("courses/" + f.Course.String() + "/" + uuid.Must(uuid.NewV7()).String())
+			if _, err := f.Blob.Put(ctx, legacy, "text/plain", strings.NewReader("an old upload"), 1<<20); err != nil {
+				t.Fatal(err)
+			}
+			doc := uuid.New()
+			f.Exec(`INSERT INTO document (id, course_id, kind, title) VALUES ($1, $2, 'material', 'Week 0')`, doc, f.Course)
+			f.Exec(`INSERT INTO document_version (document_id, seq, storage_key, content_type, byte_size, author_member_id)
+			        SELECT $1, 1, $2, 'text/plain', 13, id FROM course_member WHERE course_id = $3 AND actor_id = $4`, doc, legacy, f.Course, f.Sato)
+
+			f.now = f.now.Add(pipeline.DefaultProposalTTL + tools.OrphanGrace + time.Hour)
+			if rep := f.sweep(t); rep.OrphanFilesRemoved != 1 {
+				t.Fatalf("%+v, want the upload no version holds removed", rep)
+			}
+			if _, err := f.Blob.Stat(ctx, abandoned); !errors.Is(err, blob.ErrNotFound) {
+				t.Fatalf("the upload no version holds is still there: %v", err)
+			}
+			for _, key := range []string{store.FinalKey(firstKey), store.FinalKey(secondKey), legacy} {
+				if _, err := f.Blob.Stat(ctx, key); err != nil {
+					t.Fatalf("a file of a version was removed: %s: %v", key, err)
+				}
+			}
+		})
+	}
+}
+
 // A sweep takes on a batch of orphans at a time. Most old files are not
 // orphans — they are attached, or another deployment's — and they must not
 // use up the batch: were they to, a pass through a store of many of them
