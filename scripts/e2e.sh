@@ -15,7 +15,10 @@
 # and have the instructor's own tutor agent answer the student's question,
 # once its runtime says it answers in the site, its inbox and her
 # conversation each waiting to hear what comes next, the answer's draft
-# reaching her while it is written, and be asked nothing
+# reaching her while it is written; and answer her question again, her essay
+# attached as a PDF, which it lists and downloads, and the grader cannot,
+# and she withdraws, and which past the limits on files is refused, saying
+# why; and be asked nothing
 # more once he switches that off; and have another agent of his, given member_manage,
 # seat a student with its own token, and be refused on his seat, and his own
 # assistant propose an assignment he may make without anyone's confirmation,
@@ -142,6 +145,9 @@ else
 fi
 export HTTP_ADDR="127.0.0.1:$PORT"
 export BLOB_FS_ROOT="$WORK/blobs" PUBLIC_URL="$BASE"
+# Small limits on the files a message carries, so that going past them
+# costs nothing: 4 KiB a file, three to a message, 8 KiB in a conversation.
+export ATTACHMENT_MAX_BYTES=4096 ATTACHMENT_MAX_PER_MESSAGE=3 ATTACHMENT_MAX_CONVERSATION_BYTES=8192
 # The agent runtime Core vouches for people to; its key is derived from
 # SIGNING_KEY, the same across the restart below.
 RUNTIME="$BASE/runtime"
@@ -466,6 +472,80 @@ call 400 GET "/v1/me/conversations?after=nonsense" "$YUKI"
 call 200 GET /v1/me/conversations "$GRADER" # an agent that asked nothing
 [ "$(json "$WORK/body" 'len(d["result"]["conversations"])')" = 0 ] || fail "the grader lists conversations: $(cat "$WORK/body")"
 
+step "Yuki asks the tutor in the site again, her essay attached as a PDF: its runtime lists the file and downloads it under its name, the grader finds nothing, and the tutor answers with a file of its own"
+# upload CONTENT_TYPE FILE TOKEN — a URL for a message's file, as TOKEN, and FILE PUT to it; its token left in $UPLOAD.
+upload() {
+  call 200 GET "$C/conversations/upload-url?content_type=$1" "$3"
+  local put
+  put=$(json "$WORK/body" 'd["result"]["upload_url"]')
+  UPLOAD=$(json "$WORK/body" 'd["result"]["upload_token"]')
+  [ "$(curl -s -o /dev/null -w '%{http_code}' -X PUT -H "Content-Type: $1" --data-binary "@$2" "$put")" = 200 ] || fail "PUT to a message's upload URL"
+}
+call 200 GET "$C/conversations/upload-url?content_type=application/pdf" "$YUKI"
+[ "$(json "$WORK/body" 'd["result"]["max_bytes"], d["result"]["max_files"], d["result"]["max_conversation_bytes"]')" = "4096 3 8192" ] ||
+  fail "the limits a front end is told: $(cat "$WORK/body")"
+printf '%%PDF-1.7 my essay, second draft' >"$WORK/essay.pdf"
+upload application/pdf "$WORK/essay.pdf" "$YUKI"
+call 200 POST "$C/conversations" "$YUKI" "{\"respondent_member_id\":\"$TUTOR_M\",\"body\":\"Is my essay on track?\",\"attachments\":[{\"upload_token\":\"$UPLOAD\",\"filename\":\"essay draft 2.pdf\"}]}"
+CONV2=$(json "$WORK/body" 'd["result"]["conversation_id"]')
+ASKED=$(json "$WORK/body" 'd["result"]["message_id"]')
+# The tutor's runtime finds the question in its inbox, reads it, and downloads what it carries.
+call 200 GET "$C/conversations/inbox" "$TUTOR"
+[ "$(json "$WORK/body" '[c["latest_opener_message_id"] for c in d["result"]["conversations"]]')" = "['$ASKED']" ] || fail "the tutor's inbox: $(cat "$WORK/body")"
+call 200 GET "$C/conversations/$CONV2/messages" "$TUTOR"
+[ "$(json "$WORK/body" '*(lambda a: (len(a), a[0]["filename"], a[0]["content_type"], a[0]["byte_size"], "download_url" in a[0]))(d["result"]["messages"][0]["attachments"])')" = \
+  "1 essay draft 2.pdf application/pdf $(wc -c <"$WORK/essay.pdf" | tr -d ' ') False" ] || fail "the question's files, as the tutor reads them: $(cat "$WORK/body")"
+ESSAY=$(json "$WORK/body" 'd["result"]["messages"][0]["attachments"][0]["id"]')
+call 200 GET "$C/conversation-attachments/$ESSAY" "$TUTOR"
+[ "$(json "$WORK/body" 'd["result"]["message_id"], d["result"]["conversation_id"]')" = "$ASKED $CONV2" ] || fail "conversation.attachment: $(cat "$WORK/body")"
+[ "$(curl -s -D "$WORK/headers" -o "$WORK/got.pdf" -w '%{http_code}' "$(json "$WORK/body" 'd["result"]["download_url"]')")" = 200 ] || fail "the tutor's download"
+cmp -s "$WORK/essay.pdf" "$WORK/got.pdf" || fail "the tutor downloaded different bytes"
+{ grep -qi '^content-disposition: attachment; filename="essay draft 2.pdf"' "$WORK/headers" && grep -qi '^x-content-type-options: nosniff' "$WORK/headers"; } ||
+  fail "the file is not served as a download under its name: $(cat "$WORK/headers")"
+echo "  the tutor downloaded exactly what Yuki attached, as a download named as she named it"
+# To anyone else the conversation and its file do not exist.
+call 404 GET "$C/conversation-attachments/$ESSAY" "$GRADER"
+call 404 GET "$C/conversations/$CONV2/messages" "$GRADER"
+# The tutor answers with a file of its own, and Yuki downloads it.
+printf 'Section 2: say what the evidence shows.' >"$WORK/notes.txt"
+upload text/plain "$WORK/notes.txt" "$TUTOR"
+KEY="answer:$CONV2:$ASKED:1" call 200 POST "$C/conversations/$CONV2/answer" "$TUTOR" "{\"in_reply_to_message_id\":\"$ASKED\",\"body\":\"On track; see my notes.\",\"attachments\":[{\"upload_token\":\"$UPLOAD\",\"filename\":\"notes.txt\"}]}"
+call 200 GET "$C/conversations/$CONV2/messages?after_seq=1" "$YUKI"
+call 200 GET "$C/conversation-attachments/$(json "$WORK/body" 'd["result"]["messages"][0]["attachments"][0]["id"]')" "$YUKI"
+curl -sf -o "$WORK/got.txt" "$(json "$WORK/body" 'd["result"]["download_url"]')" || fail "Yuki's download"
+cmp -s "$WORK/notes.txt" "$WORK/got.txt" || fail "Yuki downloaded different bytes"
+
+step "Past the limits on files a message is refused, saying why; withdrawn, Yuki's question keeps its file from its readers, as its text; her chat panel lists the conversation first"
+head -c 5000 /dev/zero >"$WORK/big.bin"
+upload application/octet-stream "$WORK/big.bin" "$YUKI"
+call 422 POST "$C/conversations/$CONV2/ask" "$YUKI" "{\"body\":\"The appendix\",\"attachments\":[{\"upload_token\":\"$UPLOAD\",\"filename\":\"appendix.bin\"}]}"
+[ "$(reason)" = file_too_large ] || fail "a file too large refused, but not as one: $(cat "$WORK/body")"
+head -c 3000 /dev/zero >"$WORK/part.bin"
+PARTS=""
+for i in 1 2 3 4; do
+  upload application/octet-stream "$WORK/part.bin" "$YUKI"
+  PARTS="$PARTS${PARTS:+,}{\"upload_token\":\"$UPLOAD\",\"filename\":\"part $i.bin\"}"
+done
+call 400 POST "$C/conversations/$CONV2/ask" "$YUKI" "{\"body\":\"Four parts\",\"attachments\":[$PARTS]}"
+[ "$(reason)" = too_many_attachments ] || fail "four files refused, but not as too many: $(cat "$WORK/body")"
+THREE=$(python3 -c "import sys; print(sys.argv[1].rsplit(',{', 1)[0])" "$PARTS")
+call 422 POST "$C/conversations/$CONV2/ask" "$YUKI" "{\"body\":\"Three parts\",\"attachments\":[$THREE]}"
+[ "$(reason)" = conversation_attachments_full ] || fail "9000 bytes more refused, but not as the conversation full: $(cat "$WORK/body")"
+call 400 POST "$C/conversations/$CONV2/ask" "$YUKI" "{\"body\":\"A path\",\"attachments\":[{\"upload_token\":\"$UPLOAD\",\"filename\":\"../../etc/passwd\"}]}"
+[ "$(reason)" = bad_filename ] || fail "a path for a name refused, but not as a bad name: $(cat "$WORK/body")"
+upload text/plain "$WORK/notes.txt" "$TUTOR"
+call 403 POST "$C/conversations/$CONV2/ask" "$YUKI" "{\"body\":\"The tutor's\",\"attachments\":[{\"upload_token\":\"$UPLOAD\",\"filename\":\"notes.txt\"}]}"
+[ "$(reason)" = not_your_upload ] || fail "someone else's upload refused, but not as theirs: $(cat "$WORK/body")"
+call 403 GET "$C/conversations/upload-url?content_type=text/plain" "$GRADER" # who neither asks nor answers uploads nothing for a message
+call 200 POST "$C/conversation-messages/$ASKED/retract" "$YUKI" '{"reason":"wrong draft"}'
+call 404 GET "$C/conversation-attachments/$ESSAY" "$TUTOR"
+[ "$(reason)" = retracted ] || fail "a retracted message's file refused, but not as retracted: $(cat "$WORK/body")"
+call 200 GET "$C/conversations/$CONV2/messages" "$TUTOR"
+[ "$(json "$WORK/body" '*(lambda x: ("attachments" in x, "body" in x, x["retracted"]["reason"]))(d["result"]["messages"][0])')" = "False False wrong draft" ] ||
+  fail "the retracted question, as the tutor reads it: $(cat "$WORK/body")"
+call 200 GET /v1/me/conversations "$YUKI"
+[ "$(json "$WORK/body" '[c["conversation_id"] for c in d["result"]["conversations"]]')" = "['$CONV2', '$CONV']" ] || fail "Yuki's panel: $(cat "$WORK/body")"
+
 step "Sato switches the tutor's site chat off: Yuki asks it nothing more and still reads what it said; only its runtime switches it on"
 call 200 POST "/v1/me/agents/$TUTOR_ID" "$SATO" '{"site_chat":false}'
 call 422 POST "$C/conversations/$CONV/ask" "$YUKI" '{"body":"And how long should it be?"}'
@@ -625,6 +705,7 @@ mcp() { # JSON-RPC body → $WORK/body
 [ "$(mcp not-a-token '{"jsonrpc":"2.0","id":1,"method":"tools/list"}')" = 401 ] || fail "MCP accepted a bad token"
 [ "$(mcp "$GRADER" '{"jsonrpc":"2.0","id":1,"method":"tools/list"}')" = 200 ] || fail "tools/list: $(cat "$WORK/body")"
 json "$WORK/body" '"grade_submit" in [t["name"] for t in d["result"]["tools"]] or sys.exit("grade_submit is not offered over MCP")' >/dev/null
+json "$WORK/body" '{"conversation_upload_url", "conversation_attachment"} <= {t["name"] for t in d["result"]["tools"]} or sys.exit("a message'"'"'s files are not reached over MCP")' >/dev/null
 echo "  tools/list offers $(json "$WORK/body" 'len(d["result"]["tools"])') tools, grade_submit among them"
 # The call REST made earlier, replayed over MCP with the same key: one action, two doors.
 CALL="{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"grade_submit\",\"arguments\":{\"course_id\":\"$COURSE\",\"submission_id\":\"$SUB\",\"score\":85,\"feedback\":\"Clear thesis.\",\"idempotency_key\":\"yuki-hw3\"}}}"

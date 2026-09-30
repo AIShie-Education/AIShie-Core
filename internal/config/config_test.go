@@ -23,6 +23,10 @@ func TestFromEnv(t *testing.T) {
 			c.SignInsPerMinute != 10 || c.LongPollWaiters != 1000 || c.LongPollWaitersPerActor != 16 {
 			t.Fatalf("defaults: %+v", c)
 		}
+		// A message carries ten files of 50 MiB, a conversation 500 MiB.
+		if c.AttachmentMaxBytes != 50<<20 || c.AttachmentMaxPerMessage != 10 || c.AttachmentMaxConversationBytes != 500<<20 {
+			t.Fatalf("attachments' defaults: %d %d %d", c.AttachmentMaxBytes, c.AttachmentMaxPerMessage, c.AttachmentMaxConversationBytes)
+		}
 		// Memory stays off until what forgets it on time is in place; its
 		// limits are there whether or not.
 		if c.Memory != (memory.Config{}).WithDefaults() || c.Memory.Enabled || c.Memory.MaxOwner != 200 || c.Memory.MaxAsker != 50 ||
@@ -50,6 +54,9 @@ func TestFromEnv(t *testing.T) {
 		t.Setenv("MEMORY_WRITES_PER_DAY", "16")
 		t.Setenv("LONG_POLL_WAITERS", "0")
 		t.Setenv("LONG_POLL_WAITERS_PER_ACTOR", "4")
+		t.Setenv("ATTACHMENT_MAX_BYTES", "1048576")
+		t.Setenv("ATTACHMENT_MAX_PER_MESSAGE", "3")
+		t.Setenv("ATTACHMENT_MAX_CONVERSATION_BYTES", "10485760")
 		c, err := FromEnv()
 		if err != nil {
 			t.Fatal(err)
@@ -64,11 +71,23 @@ func TestFromEnv(t *testing.T) {
 			WritesPerHour: 15, WritesPerDay: 16}); c.Memory != want {
 			t.Fatalf("memory: %+v, want %+v", c.Memory, want)
 		}
+		if c.AttachmentMaxBytes != 1<<20 || c.AttachmentMaxPerMessage != 3 || c.AttachmentMaxConversationBytes != 10<<20 {
+			t.Fatalf("attachments: %d %d %d", c.AttachmentMaxBytes, c.AttachmentMaxPerMessage, c.AttachmentMaxConversationBytes)
+		}
+	})
+	t.Run("a file a message carries is never larger than an upload", func(t *testing.T) {
+		t.Setenv("MAX_UPLOAD_BYTES", "1000")
+		t.Setenv("ATTACHMENT_MAX_BYTES", "2000")
+		c, err := FromEnv()
+		if err != nil || c.AttachmentMaxBytes != 1000 {
+			t.Fatalf("ATTACHMENT_MAX_BYTES above MAX_UPLOAD_BYTES comes to %d (%v), want 1000", c.AttachmentMaxBytes, err)
+		}
 	})
 	for key, bad := range map[string]string{"PROPOSAL_TTL": "two weeks", "SESSION_TTL": "-1h", "INSECURE_COOKIES": "maybe",
 		"AGENT_SELF_SERVICE": "yes", "AGENT_MAX_PER_OWNER": "0", "MEMORY": "true", "MEMORY_MAX_ASKER": "0",
 		"MEMORY_WRITES_PER_DAY": "many", "MEMORY_MAX_PER_AGENT": "-5", "JOIN_LINK_REGISTRATION": "no",
-		"JOIN_REGISTRATIONS_PER_MINUTE": "-1", "LONG_POLL_WAITERS": "lots", "LONG_POLL_WAITERS_PER_ACTOR": "-1"} {
+		"JOIN_REGISTRATIONS_PER_MINUTE": "-1", "LONG_POLL_WAITERS": "lots", "LONG_POLL_WAITERS_PER_ACTOR": "-1",
+		"ATTACHMENT_MAX_BYTES": "0", "ATTACHMENT_MAX_PER_MESSAGE": "101", "ATTACHMENT_MAX_CONVERSATION_BYTES": "lots"} {
 		t.Run("rejects "+key+"="+bad, func(t *testing.T) {
 			t.Setenv(key, bad)
 			if _, err := FromEnv(); err == nil {
