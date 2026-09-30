@@ -472,6 +472,27 @@ type PermissionPreset struct {
 	PermMemberInvite       AutonomyLevel
 }
 
+type SsoProvider struct {
+	ID                  string
+	DisplayName         string
+	Issuer              string
+	ClientID            string
+	ClientSecretSealed  string
+	ClientSecretHint    string
+	Scopes              []string
+	SubjectClaim        string
+	EmailClaim          *string
+	AllowedEmailDomains []string
+	LinkByEmail         bool
+	Enabled             bool
+	Position            int32
+	Version             int32
+	CreatedByActorID    uuid.UUID
+	CreatedAt           time.Time
+	UpdatedByActorID    uuid.UUID
+	UpdatedAt           time.Time
+}
+
 type Submission struct {
 	ID                    uuid.UUID
 	AssignmentID          uuid.UUID
