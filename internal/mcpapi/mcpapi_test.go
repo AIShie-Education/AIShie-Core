@@ -592,9 +592,23 @@ func TestToolsListIsTheRegistry(t *testing.T) {
 		}
 		listed[tl.Name] = tl
 	}
-	exposed := f.c.P.Registry().Exposed()
+	// A site service's tools are called over REST alone, with a credential
+	// this door does not take.
+	var exposed []tool.Tool
+	for _, tl := range f.c.P.Registry().Exposed() {
+		if tl.Gate.Service == "" {
+			exposed = append(exposed, tl)
+		} else if listed[mcpapi.ToolName(tl.Name)] != nil {
+			t.Errorf("%s, a site service's, is offered over MCP", tl.Name)
+		}
+	}
 	if len(listed) != len(exposed) {
-		t.Fatalf("MCP lists %d tools, the registry exposes %d", len(listed), len(exposed))
+		t.Fatalf("MCP lists %d tools, the registry exposes %d that are not a site service's", len(listed), len(exposed))
+	}
+	for _, name := range []string{"document.text", "document.text_update", "service.issue_credential"} {
+		if listed[mcpapi.ToolName(name)] == nil {
+			t.Errorf("%s is not offered over MCP", name)
+		}
 	}
 	// Join links are made and managed like anything else in a course; taking
 	// a seat through one is a person's, at the REST endpoints alone.

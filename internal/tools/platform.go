@@ -418,7 +418,8 @@ func mayActOn(ctx context.Context, ec *tool.ExecCtx, target uuid.UUID) error {
 
 // mayReach is mayActOn without the rule about oneself, for a read that shows
 // what only acting on the actor would need: only root reaches another holder
-// of a platform role, and nobody the system actor.
+// of a platform role, nobody the system actor, and nobody a site service,
+// whose credentials are the service.* tools'.
 func mayReach(ctx context.Context, q *dbq.Queries, caller domain.Actor, target uuid.UUID) error {
 	a, err := q.GetActor(ctx, target)
 	if err != nil {
@@ -427,8 +428,12 @@ func mayReach(ctx context.Context, q *dbq.Queries, caller domain.Actor, target u
 	if a.PlatformRole != nil && caller.PlatformRole != domain.PlatformRoot {
 		return apperr.Forbid("only root acts on an actor who holds a platform role")
 	}
-	if a.Kind == "system" {
+	switch a.Kind {
+	case "system":
 		return apperr.Forbid("the system actor is not managed this way")
+	case "service":
+		return apperr.Forbid("a site service is not managed this way: its credentials are issued and revoked with " +
+			"service.issue_credential and service.revoke_credential")
 	}
 	return nil
 }
