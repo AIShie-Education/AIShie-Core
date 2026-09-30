@@ -298,3 +298,54 @@ func TestAssertionSettings(t *testing.T) {
 		}
 	}
 }
+
+// SECRETS_KEY seals identity providers' client secrets, and
+// SECRETS_KEY_PREVIOUS opens what older keys sealed, for as long as a
+// rotation takes. Each is 32 bytes in base64; a bad one is refused, saying
+// where and never repeating it.
+func TestSecretsKey(t *testing.T) {
+	const signingKey = "an installation's signing key, 32+ characters long"
+	current, older, oldest := bytes.Repeat([]byte{1}, 32), bytes.Repeat([]byte{2}, 32), bytes.Repeat([]byte{3}, 32)
+	b64 := base64.StdEncoding.EncodeToString
+	t.Run("off by default", func(t *testing.T) {
+		c, err := FromEnv()
+		if err != nil || c.SecretsKey != nil || c.SecretsKeysPrevious != nil {
+			t.Fatalf("%v %+v", err, c)
+		}
+	})
+	t.Run("a key and the keys before it", func(t *testing.T) {
+		t.Setenv("SIGNING_KEY", signingKey)
+		t.Setenv("SECRETS_KEY", b64(current))
+		t.Setenv("SECRETS_KEY_PREVIOUS", " "+base64.RawURLEncoding.EncodeToString(older)+", "+b64(oldest)+" ,")
+		c, err := FromEnv()
+		if err != nil || !bytes.Equal(c.SecretsKey, current) || len(c.SecretsKeysPrevious) != 2 ||
+			!bytes.Equal(c.SecretsKeysPrevious[0], older) || !bytes.Equal(c.SecretsKeysPrevious[1], oldest) {
+			t.Fatalf("%v %+v", err, c)
+		}
+	})
+	for name, tc := range map[string]struct {
+		env  map[string]string
+		want string
+	}{
+		"a short key":             {map[string]string{"SIGNING_KEY": signingKey, "SECRETS_KEY": b64(current[:16])}, "SECRETS_KEY is 16 bytes, not 32"},
+		"a key in hex":            {map[string]string{"SIGNING_KEY": signingKey, "SECRETS_KEY": strings.Repeat("ab", 32)}, "SECRETS_KEY is 48 bytes, not 32"},
+		"a key that is no base64": {map[string]string{"SIGNING_KEY": signingKey, "SECRETS_KEY": "not a key at all!"}, "SECRETS_KEY is not base64"},
+		"a bad old key": {map[string]string{"SIGNING_KEY": signingKey, "SECRETS_KEY": b64(current),
+			"SECRETS_KEY_PREVIOUS": b64(older) + "," + b64(oldest[:31])}, "SECRETS_KEY_PREVIOUS: the key at position 2 is 31 bytes"},
+		"old keys with no key":      {map[string]string{"SIGNING_KEY": signingKey, "SECRETS_KEY_PREVIOUS": b64(older)}, "SECRETS_KEY_PREVIOUS needs SECRETS_KEY"},
+		"a key with no SIGNING_KEY": {map[string]string{"SECRETS_KEY": b64(current)}, "SECRETS_KEY needs SIGNING_KEY"},
+	} {
+		t.Run("refuses "+name, func(t *testing.T) {
+			for k, v := range tc.env {
+				t.Setenv(k, v)
+			}
+			_, err := FromEnv()
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("accepted, or refused for another reason: %v", err)
+			}
+			if v := tc.env["SECRETS_KEY"]; v != "" && strings.Contains(err.Error(), v) {
+				t.Fatalf("the refusal repeats the key: %v", err)
+			}
+		})
+	}
+}
