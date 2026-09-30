@@ -244,6 +244,22 @@ func roomFor(ctx context.Context, d Deps, q dbq.Querier, conversation uuid.UUID,
 	return nil
 }
 
+// attachmentsOf are the files of the given messages, by message, each
+// message's in order: one statement. A retracted message's are not to be
+// asked for: they are withheld with its text.
+func attachmentsOf(ctx context.Context, q dbq.Querier, messages []uuid.UUID) (map[uuid.UUID][]AttachmentView, error) {
+	out := map[uuid.UUID][]AttachmentView{}
+	if len(messages) == 0 {
+		return out, nil
+	}
+	rows, err := q.ListMessageAttachments(ctx, messages)
+	for _, r := range rows {
+		out[r.MessageID] = append(out[r.MessageID], AttachmentView{ID: r.ID, Filename: r.Filename, ContentType: r.ContentType,
+			ByteSize: r.ByteSize, Checksum: r.Checksum, CreatedAt: r.CreatedAt})
+	}
+	return out, err
+}
+
 // checkProposedFiles is what a message that is to wait for a decision is
 // held to, as to its files, when it is proposed (Pin): that they may be
 // carried (checkAttachments), are young enough to outlast the proposal
