@@ -88,7 +88,8 @@ Environment:
   ATTACHMENT_MAX_CONVERSATION_BYTES  default 524288000 (500 MiB); the files of one conversation, in all
   AGENT_SELF_SERVICE   on (default) or off; whether people may register agents of their own
   AGENT_MAX_PER_OWNER  default 5; the agents one person may have that are not suspended
-  S3_ENDPOINT, S3_BUCKET, S3_REGION, S3_ACCESS_KEY, S3_SECRET_KEY, S3_USE_SSL
+  S3_ENDPOINT, S3_BUCKET, S3_ACCESS_KEY, S3_SECRET_KEY, S3_USE_SSL
+  S3_REGION         default us-east-1; the region requests are signed for and, with AWS, sent to
   S3_BUCKET_LOOKUP  auto (default), path or dns; how a request names the bucket: path after the endpoint
                     (endpoint/bucket), dns in the host name (bucket.endpoint, virtual-hosted style, for a
                     service that takes nothing else); auto is dns for AWS, Google and Aliyun, path otherwise
