@@ -48,6 +48,34 @@ func (q *Queries) DocumentInUseByPublishedAssignment(ctx context.Context, arg Do
 	return exists, err
 }
 
+const getDocumentFile = `-- name: GetDocumentFile :one
+SELECT id, version_id, document_id, position, filename, storage_key, content_type, byte_size, checksum, created_at FROM document_version_file WHERE id = $1 AND document_id = $2
+`
+
+type GetDocumentFileParams struct {
+	ID         uuid.UUID
+	DocumentID uuid.UUID
+}
+
+// A file of one of a document's versions.
+func (q *Queries) GetDocumentFile(ctx context.Context, arg GetDocumentFileParams) (DocumentVersionFile, error) {
+	row := q.db.QueryRow(ctx, getDocumentFile, arg.ID, arg.DocumentID)
+	var i DocumentVersionFile
+	err := row.Scan(
+		&i.ID,
+		&i.VersionID,
+		&i.DocumentID,
+		&i.Position,
+		&i.Filename,
+		&i.StorageKey,
+		&i.ContentType,
+		&i.ByteSize,
+		&i.Checksum,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
 const getDocumentWithOwner = `-- name: GetDocumentWithOwner :one
 SELECT d.id, d.course_id, d.kind, d.title, d.submission_id, d.grade_id, d.published_version_id,
        d.sort_order, d.status, d.created_at, d.purged_at, d.purged_by_actor_id, d.purge_reason,
@@ -239,6 +267,43 @@ func (q *Queries) InsertDocumentVersion(ctx context.Context, arg InsertDocumentV
 	return err
 }
 
+const insertDocumentVersionFile = `-- name: InsertDocumentVersionFile :exec
+INSERT INTO document_version_file (id, version_id, document_id, position, filename, storage_key, content_type, byte_size,
+                                   checksum, created_at)
+VALUES ($1, $2, $3, $4, $5,
+        $6, $7, $8, $9, $10)
+`
+
+type InsertDocumentVersionFileParams struct {
+	ID          uuid.UUID
+	VersionID   uuid.UUID
+	DocumentID  uuid.UUID
+	Position    int32
+	Filename    string
+	StorageKey  string
+	ContentType string
+	ByteSize    int64
+	Checksum    *string
+	CreatedAt   time.Time
+}
+
+// One file of a version, written with it (document_version_file_with_its_version).
+func (q *Queries) InsertDocumentVersionFile(ctx context.Context, arg InsertDocumentVersionFileParams) error {
+	_, err := q.db.Exec(ctx, insertDocumentVersionFile,
+		arg.ID,
+		arg.VersionID,
+		arg.DocumentID,
+		arg.Position,
+		arg.Filename,
+		arg.StorageKey,
+		arg.ContentType,
+		arg.ByteSize,
+		arg.Checksum,
+		arg.CreatedAt,
+	)
+	return err
+}
+
 const listCourseDocuments = `-- name: ListCourseDocuments :many
 SELECT id, kind, title, published_version_id, sort_order, status, created_at, purged_at
 FROM document d
@@ -317,6 +382,42 @@ func (q *Queries) ListCourseDocuments(ctx context.Context, arg ListCourseDocumen
 			&i.Status,
 			&i.CreatedAt,
 			&i.PurgedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listDocumentFiles = `-- name: ListDocumentFiles :many
+SELECT id, version_id, document_id, position, filename, storage_key, content_type, byte_size, checksum, created_at FROM document_version_file WHERE document_id = $1 ORDER BY version_id, position
+`
+
+// The files of every version of a document, each version's in order.
+func (q *Queries) ListDocumentFiles(ctx context.Context, documentID uuid.UUID) ([]DocumentVersionFile, error) {
+	rows, err := q.db.Query(ctx, listDocumentFiles, documentID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []DocumentVersionFile
+	for rows.Next() {
+		var i DocumentVersionFile
+		if err := rows.Scan(
+			&i.ID,
+			&i.VersionID,
+			&i.DocumentID,
+			&i.Position,
+			&i.Filename,
+			&i.StorageKey,
+			&i.ContentType,
+			&i.ByteSize,
+			&i.Checksum,
+			&i.CreatedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -433,6 +534,42 @@ func (q *Queries) ListSubmissionDocuments(ctx context.Context, submissionID *uui
 	return items, nil
 }
 
+const listVersionFiles = `-- name: ListVersionFiles :many
+SELECT id, version_id, document_id, position, filename, storage_key, content_type, byte_size, checksum, created_at FROM document_version_file WHERE version_id = $1 ORDER BY position
+`
+
+// A version's files, in order.
+func (q *Queries) ListVersionFiles(ctx context.Context, versionID uuid.UUID) ([]DocumentVersionFile, error) {
+	rows, err := q.db.Query(ctx, listVersionFiles, versionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []DocumentVersionFile
+	for rows.Next() {
+		var i DocumentVersionFile
+		if err := rows.Scan(
+			&i.ID,
+			&i.VersionID,
+			&i.DocumentID,
+			&i.Position,
+			&i.Filename,
+			&i.StorageKey,
+			&i.ContentType,
+			&i.ByteSize,
+			&i.Checksum,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listVersions = `-- name: ListVersions :many
 SELECT id, seq, (storage_key IS NOT NULL)::bool AS has_file, content_type, byte_size, author_member_id, created_at, purged_at
 FROM document_version WHERE document_id = $1 ORDER BY seq
@@ -479,15 +616,22 @@ func (q *Queries) ListVersions(ctx context.Context, documentID uuid.UUID) ([]Lis
 }
 
 const listVersionsToPurge = `-- name: ListVersionsToPurge :many
-SELECT id, storage_key FROM document_version WHERE document_id = $1 AND purged_at IS NULL ORDER BY seq
+SELECT v.id,
+       coalesce(array_agg(f.storage_key ORDER BY f.position) FILTER (WHERE f.id IS NOT NULL), '{}')::text[] AS storage_keys
+FROM document_version v
+LEFT JOIN document_version_file f ON f.version_id = v.id
+WHERE v.document_id = $1 AND v.purged_at IS NULL
+GROUP BY v.id, v.seq
+ORDER BY v.seq
 `
 
 type ListVersionsToPurgeRow struct {
-	ID         uuid.UUID
-	StorageKey *string
+	ID          uuid.UUID
+	StorageKeys []string
 }
 
-// The versions of a document not purged yet, and the file each holds.
+// The versions of a document not purged yet, and the files each holds, in
+// order.
 func (q *Queries) ListVersionsToPurge(ctx context.Context, documentID uuid.UUID) ([]ListVersionsToPurgeRow, error) {
 	rows, err := q.db.Query(ctx, listVersionsToPurge, documentID)
 	if err != nil {
@@ -497,7 +641,7 @@ func (q *Queries) ListVersionsToPurge(ctx context.Context, documentID uuid.UUID)
 	var items []ListVersionsToPurgeRow
 	for rows.Next() {
 		var i ListVersionsToPurgeRow
-		if err := rows.Scan(&i.ID, &i.StorageKey); err != nil {
+		if err := rows.Scan(&i.ID, &i.StorageKeys); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -629,11 +773,13 @@ func (q *Queries) SetPublishedVersion(ctx context.Context, arg SetPublishedVersi
 
 const storageKeyInUse = `-- name: StorageKeyInUse :one
 SELECT (EXISTS (SELECT 1 FROM document_version WHERE storage_key = $1::text)
+     OR EXISTS (SELECT 1 FROM document_version_file WHERE storage_key = $1::text)
      OR EXISTS (SELECT 1 FROM conversation_attachment WHERE storage_key = $1::text))::bool AS in_use
 `
 
-// Whether a file has been attached: to a version of a document, or to a
-// message of a conversation.
+// Whether a file has been attached: to a version of a document, as any of
+// its files or in its own columns (as the release before 0023 writes it),
+// or to a message of a conversation.
 func (q *Queries) StorageKeyInUse(ctx context.Context, storageKey *string) (bool, error) {
 	row := q.db.QueryRow(ctx, storageKeyInUse, storageKey)
 	var in_use bool

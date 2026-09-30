@@ -33,9 +33,10 @@ type Querier interface {
 	CancelProposal(ctx context.Context, arg CancelProposalParams) (int64, error)
 	// Up to max_rows text versions waiting, or whose claim has lapsed, claimed for
 	// the caller until claimed_until: uploads first, oldest first, then the
-	// backfill, newest first. SKIP LOCKED: two claims at once never take the
-	// same one. What is in an archived course, or of an archived document, waits
-	// until it is open again, since nothing is written there meanwhile.
+	// backfill, newest first; a version's files in order. SKIP LOCKED: two
+	// claims at once never take the same one. What is in an archived course, or
+	// of an archived document, waits until it is open again, since nothing is
+	// written there meanwhile.
 	ClaimTexts(ctx context.Context, arg ClaimTextsParams) ([]ClaimTextsRow, error)
 	ClearAssignmentScope(ctx context.Context, memberID uuid.UUID) error
 	ClearStudentScope(ctx context.Context, memberID uuid.UUID) error
@@ -227,7 +228,8 @@ type Querier interface {
 	// behind an update, including while the update waits for the tree lock.
 	GetAssignmentInCourseForUpdate(ctx context.Context, arg GetAssignmentInCourseForUpdateParams) (GetAssignmentInCourseForUpdateRow, error)
 	GetBuiltinPresetByName(ctx context.Context, name string) (PermissionPreset, error)
-	// The file of a text version the caller's claim holds.
+	// The file of a text version the caller's claim holds: the one named, or
+	// whichever of the version's the claim is of.
 	GetClaimedFile(ctx context.Context, arg GetClaimedFileParams) (GetClaimedFileRow, error)
 	GetComponentInCourse(ctx context.Context, arg GetComponentInCourseParams) (GetComponentInCourseRow, error)
 	GetComponentParent(ctx context.Context, id uuid.UUID) (*uuid.UUID, error)
@@ -249,6 +251,8 @@ type Querier interface {
 	GetCredentialForActor(ctx context.Context, arg GetCredentialForActorParams) (GetCredentialForActorRow, error)
 	GetDepartment(ctx context.Context, id uuid.UUID) (GetDepartmentRow, error)
 	GetDeptPresetByName(ctx context.Context, arg GetDeptPresetByNameParams) (PermissionPreset, error)
+	// A file of one of a document's versions.
+	GetDocumentFile(ctx context.Context, arg GetDocumentFileParams) (DocumentVersionFile, error)
 	GetDocumentInCourse(ctx context.Context, arg GetDocumentInCourseParams) (GetDocumentInCourseRow, error)
 	GetDocumentPublishedVersion(ctx context.Context, id uuid.UUID) (*uuid.UUID, error)
 	GetDocumentVersionOwner(ctx context.Context, id uuid.UUID) (uuid.UUID, error)
@@ -338,16 +342,17 @@ type Querier interface {
 	// Lookups are always "in this course": an id from another course is not found.
 	GetSubmissionInCourse(ctx context.Context, arg GetSubmissionInCourseParams) (GetSubmissionInCourseRow, error)
 	GetSystemActor(ctx context.Context) (uuid.UUID, error)
-	// A version's text version with its whole text, for reading it in parts.
-	GetTextBody(ctx context.Context, versionID uuid.UUID) (GetTextBodyRow, error)
-	// What a call of the service's is about: the text version and its course.
+	// A file's text version with its whole text, for reading it in parts.
+	GetTextBody(ctx context.Context, arg GetTextBodyParams) (GetTextBodyRow, error)
+	// What a call of the service's is about: the version's text versions' course.
 	GetTextForService(ctx context.Context, versionID uuid.UUID) (GetTextForServiceRow, error)
-	// Text versions (docs/schema.md §2.4, Text versions): the Markdown a version's
-	// file is transcribed into, by the site's service (source ai) or written by
-	// staff (source staff).
-	// A version's text version as its readers are shown it, without the text.
+	// Text versions (docs/schema.md §2.4, Text versions): the Markdown a file of
+	// a version is transcribed into, by the site's service (source ai) or
+	// written by staff (source staff). One to a file, keyed by its version and
+	// the file.
+	// A file's text version as its readers are shown it, without the text.
 	// Who edited it comes with their name.
-	GetTextView(ctx context.Context, versionID uuid.UUID) (GetTextViewRow, error)
+	GetTextView(ctx context.Context, arg GetTextViewParams) (GetTextViewRow, error)
 	GetVersionOfDocument(ctx context.Context, arg GetVersionOfDocumentParams) (DocumentVersion, error)
 	// Whether an actor already has a live identity at a provider.
 	HasLiveSSOLinkAt(ctx context.Context, arg HasLiveSSOLinkAtParams) (bool, error)
@@ -390,6 +395,8 @@ type Querier interface {
 	InsertDepartment(ctx context.Context, arg InsertDepartmentParams) error
 	InsertDocument(ctx context.Context, arg InsertDocumentParams) error
 	InsertDocumentVersion(ctx context.Context, arg InsertDocumentVersionParams) error
+	// One file of a version, written with it (document_version_file_with_its_version).
+	InsertDocumentVersionFile(ctx context.Context, arg InsertDocumentVersionFileParams) error
 	InsertEvent(ctx context.Context, arg InsertEventParams) (int64, error)
 	InsertGrade(ctx context.Context, arg InsertGradeParams) error
 	InsertJoinLink(ctx context.Context, arg InsertJoinLinkParams) error
@@ -504,6 +511,8 @@ type Querier interface {
 	// for a decision. Only the owner's: nobody else may ask to seat it.
 	ListDelegateRequestsFor(ctx context.Context, targetID *uuid.UUID) ([]ListDelegateRequestsForRow, error)
 	ListDepartments(ctx context.Context) ([]ListDepartmentsRow, error)
+	// The files of every version of a document, each version's in order.
+	ListDocumentFiles(ctx context.Context, documentID uuid.UUID) ([]DocumentVersionFile, error)
 	// The live drafts waiting to be posted for one assignment.
 	ListDraftGradeIDsForAssignment(ctx context.Context, arg ListDraftGradeIDsForAssignmentParams) ([]uuid.UUID, error)
 	// What a sign-in reads: the providers switched on, in the sign-in page's
@@ -589,7 +598,8 @@ type Querier interface {
 	// under any other course was written by another deployment keeping its
 	// files in the same place: it is not ours to remove, however old it is and
 	// whatever points at it there. Attached is attached to a version of a
-	// document or to a message of a conversation. What is left comes back in
+	// document, as any of its files or in its own columns, or to a message of a
+	// conversation. What is left comes back in
 	// the order it was given. The orphan sweep puts a page of listed files at a
 	// time to it, and asks again about each one it removes, under the lock
 	// attaching takes.
@@ -683,10 +693,16 @@ type Querier interface {
 	ListSubmissionDocuments(ctx context.Context, submissionID *uuid.UUID) ([]ListSubmissionDocumentsRow, error)
 	ListSubmissions(ctx context.Context, arg ListSubmissionsParams) ([]ListSubmissionsRow, error)
 	ListTerms(ctx context.Context) ([]Term, error)
-	// The text versions of a document's versions, without their text.
+	// The text versions of the files of a document's versions, without their
+	// text.
 	ListTextViews(ctx context.Context, documentID uuid.UUID) ([]ListTextViewsRow, error)
+	// A version's files, in order.
+	ListVersionFiles(ctx context.Context, versionID uuid.UUID) ([]DocumentVersionFile, error)
+	// The text versions of a version's files, without their text.
+	ListVersionTextViews(ctx context.Context, versionID uuid.UUID) ([]ListVersionTextViewsRow, error)
 	ListVersions(ctx context.Context, documentID uuid.UUID) ([]ListVersionsRow, error)
-	// The versions of a document not purged yet, and the file each holds.
+	// The versions of a document not purged yet, and the files each holds, in
+	// order.
 	ListVersionsToPurge(ctx context.Context, documentID uuid.UUID) ([]ListVersionsToPurgeRow, error)
 	LiveAppointment(ctx context.Context, arg LiveAppointmentParams) (DepartmentAdmin, error)
 	LiveComponentGradeExists(ctx context.Context, arg LiveComponentGradeExistsParams) (bool, error)
@@ -842,11 +858,13 @@ type Querier interface {
 	LockSubmissionForGrading(ctx context.Context, id uuid.UUID) (string, error)
 	// All of one student's attempts at one assignment, locked, newest first.
 	LockSubmissionsOf(ctx context.Context, arg LockSubmissionsOfParams) ([]LockSubmissionsOfRow, error)
-	// A version's text version, held for a change to it. Whoever changes it
-	// holds the document first, as adding and purging a version do.
+	// A file's text version, held for a change to it. Whoever changes it holds
+	// the document first, as adding and purging a version do.
 	LockText(ctx context.Context, arg LockTextParams) (DocumentVersionText, error)
-	// The text version the service completes, held.
-	LockTextForService(ctx context.Context, versionID uuid.UUID) (DocumentVersionText, error)
+	// The text versions a call of the service's may be about, held: the named
+	// file's, or, where it names none, each of the version's, the one its claim
+	// holds first.
+	LockTextsForService(ctx context.Context, arg LockTextsForServiceParams) ([]DocumentVersionText, error)
 	LoginIDTaken(ctx context.Context, lower string) (bool, error)
 	LoginIDTakenByAnother(ctx context.Context, arg LoginIDTakenByAnotherParams) (bool, error)
 	// The one person or agent a whole email address belongs to, or the one
@@ -921,9 +939,9 @@ type Querier interface {
 	// for a new one. Under the row's lock, so that two writes at once are
 	// ordered by it.
 	PutDraft(ctx context.Context, arg PutDraftParams) (int64, error)
-	// A text version for a version from before there were any, which nobody
-	// queued (the backfill queued the published and the latest): asked for by
-	// staff, it is queued as an upload is.
+	// A text version for a file of a version from before there were any, which
+	// nobody queued (the backfill queued the published and the latest): asked
+	// for by staff, it is queued as an upload is.
 	QueueNewText(ctx context.Context, arg QueueNewTextParams) error
 	ReactivateActor(ctx context.Context, id uuid.UUID) (int64, error)
 	// Only a suspension the owner made: one an administrator made, or one made
@@ -1048,8 +1066,9 @@ type Querier interface {
 	// ListRespondentCandidates hold the same rule: a change to one is a change
 	// to all three.
 	SiteChatOf(ctx context.Context, arg SiteChatOfParams) ([]SiteChatOfRow, error)
-	// Whether a file has been attached: to a version of a document, or to a
-	// message of a conversation.
+	// Whether a file has been attached: to a version of a document, as any of
+	// its files or in its own columns (as the release before 0023 writes it),
+	// or to a message of a conversation.
 	StorageKeyInUse(ctx context.Context, storageKey *string) (bool, error)
 	StudentCountedAsZero(ctx context.Context, studentMemberID uuid.UUID) (bool, error)
 	// A grade entered, or proposed and not yet decided: either way, one is on its

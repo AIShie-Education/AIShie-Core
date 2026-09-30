@@ -444,11 +444,11 @@ func TestRetranscribingKeepsStaffTextUnlessToldTo(t *testing.T) {
 	b.complete(t, svc, b.claim(t, svc, m{})[0], "## Page 1")
 
 	// A version from before there were text versions, which nobody queued.
-	b.Exec(`ALTER TABLE document_version DISABLE TRIGGER document_version_text_queued`)
+	b.Exec(`ALTER TABLE document_version_file DISABLE TRIGGER document_version_file_text_queued`)
 	old := uuid.New()
 	b.Exec(`INSERT INTO document_version (id, document_id, seq, storage_key, content_type, byte_size, author_member_id)
 	        VALUES ($1, $2, 9, 'courses/old', 'application/pdf', 5, $3)`, old, doc, b.satoM)
-	b.Exec(`ALTER TABLE document_version ENABLE TRIGGER document_version_text_queued`)
+	b.Exec(`ALTER TABLE document_version_file ENABLE TRIGGER document_version_file_text_queued`)
 	if n := b.Count(`SELECT count(*) FROM document_version_text WHERE version_id = $1`, old); n != 0 {
 		t.Fatal("the old version was queued")
 	}

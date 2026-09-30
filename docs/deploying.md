@@ -431,6 +431,27 @@ Run all of these as root on the server.
   back. It needs nothing of the operator. The previous release, while the
   migration goes in, writes and reads no draft, and a draft it leaves behind
   when it answers is read as none after two minutes and swept.
+- **Migration 0023, several files to a version:** a version of a document
+  holds files in order, each with a name (`document_version_file`), and each
+  file of material, instructions or a rubric has a text version of its own.
+  The migration records every version's file as its one file, named after its
+  document's title with its type's extension ("Week 1.pdf"), and each text
+  version as that file's; it needs nothing of the operator. A version holds
+  at most `DOCUMENT_MAX_FILES_PER_VERSION` files (20, at most 100) and
+  `DOCUMENT_MAX_VERSION_BYTES` in all (200 MiB), each file at most
+  `MAX_UPLOAD_BYTES` as before. New uploads for documents are kept under
+  `documents/` beside `courses/`, and the sweep looks under both; a move of
+  the files to another store copies both. The
+  previous release, while the migration goes in and after a rollback, works
+  for a version of one file as before: it reads a version's first file, whose
+  columns this release still fills, writes one file, which the database
+  records as the version's one file, and never sweeps `documents/`, so a
+  version's other files are kept. Of a version of several files it shows the
+  first alone, and a write of its text that would write every file's (a
+  staff edit, a transcription of it) is refused; its transcriber may claim
+  such a file and be refused when it completes it, until the file is failed
+  after five claims. Deploy this release again and send those back with
+  `document.text_retranscribe`.
 - **Migration 0013, `member_invite`:** the permission that makes a course's
   join links. Every seat a person holds got it at its level of
   `member_manage`, and every seat an agent holds got it `denied`, whatever it

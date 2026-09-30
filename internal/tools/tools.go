@@ -31,6 +31,9 @@ type Deps struct {
 	// Attachments bounds the files messages of conversations carry; a zero
 	// limit is its default.
 	Attachments AttachmentLimits
+	// Documents bounds the files one version of a document holds; a zero
+	// limit is its default.
+	Documents DocumentLimits
 	// DisableAgentSelfService stops people registering agents of their own
 	// (agent.create): administrators still do, with actor.register. What is
 	// already registered is left as it is. The zero value, self-service on,
@@ -63,6 +66,7 @@ func RegisterAll(reg *tool.Registry, d Deps) {
 		d.MaxUploadBytes = DefaultMaxUploadBytes
 	}
 	d.Attachments = d.Attachments.withDefaults(d.MaxUploadBytes)
+	d.Documents = d.Documents.withDefaults()
 	if d.MaxAgentsPerOwner <= 0 {
 		d.MaxAgentsPerOwner = DefaultMaxAgentsPerOwner
 	}

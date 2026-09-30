@@ -35,6 +35,18 @@ func gradeTools(d Deps) []tool.Tool {
 type FeedbackFile struct {
 	Title       string `json:"title"`
 	UploadToken string `json:"upload_token"`
+	Filename    string `json:"filename,omitempty" jsonschema:"the file's name, as it downloads: 1 to 255 characters on one line, a name and not a path; if omitted, the name given to document.upload_url, or else the title with its type's extension"`
+}
+
+// content is the one version of the feedback document it is recorded as: its
+// one file, named as it is named, or else (upload_token) as it was uploaded
+// or after its title.
+func (f FeedbackFile) content() Content {
+	token := f.UploadToken
+	if f.Filename != "" {
+		return Content{Files: []FileIn{{UploadToken: token, Filename: f.Filename}}}
+	}
+	return Content{UploadToken: &token}
 }
 
 // checkFeedbackFiles verifies each file without recording anything.
@@ -48,7 +60,11 @@ func checkFeedbackFiles(ctx context.Context, d Deps, q dbq.Querier, m *domain.Me
 			return apperr.Invalid("the same upload is listed twice")
 		}
 		seen[f.UploadToken] = true
-		if _, err := claimUpload(ctx, d, q, m, courseID, kindFeedback, f.UploadToken, false); err != nil {
+		named, err := f.content().named(d, f.Title)
+		if err != nil {
+			return err
+		}
+		if _, err := claimFiles(ctx, d, q, m, courseID, kindFeedback, named, false); err != nil {
 			return err
 		}
 	}
@@ -63,8 +79,7 @@ func attachFeedbackFiles(ctx context.Context, d Deps, ec *tool.ExecCtx, courseID
 			Title: f.Title, GradeID: &gradeID, SortOrder: int32(i), CreatedAt: ec.Now}); err != nil {
 			return err
 		}
-		token := f.UploadToken
-		v, err := insertVersion(ctx, d, ec, courseID, doc, kindFeedback, 1, Content{UploadToken: &token})
+		v, _, err := insertVersion(ctx, d, ec, courseID, doc, kindFeedback, f.Title, 1, f.content())
 		if err != nil {
 			return err
 		}

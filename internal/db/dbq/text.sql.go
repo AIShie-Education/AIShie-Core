@@ -14,8 +14,9 @@ import (
 
 const claimTexts = `-- name: ClaimTexts :many
 WITH picked AS (
-    SELECT t.version_id
+    SELECT t.version_id, t.file_id
     FROM document_version_text t
+    JOIN document_version_file f ON f.id = t.file_id
     JOIN document d ON d.id = t.document_id
     JOIN course c ON c.id = t.course_id
     WHERE (t.status = 'pending' OR (t.status = 'working' AND t.claimed_until <= $3))
@@ -24,7 +25,7 @@ WITH picked AS (
     ORDER BY t.backfill,
              CASE WHEN NOT t.backfill THEN t.queued_at END,
              CASE WHEN t.backfill THEN t.queued_at END DESC,
-             t.version_id
+             t.version_id, f.position
     LIMIT $5
     FOR UPDATE OF t SKIP LOCKED
 )
@@ -32,10 +33,10 @@ UPDATE document_version_text t
 SET status = 'working', lease_id = gen_random_uuid(), claimed_until = $1,
     claimed_by_credential_id = $2, claimed_at = $3,
     attempts = t.attempts + 1, updated_at = $3
-FROM picked, document_version v
-WHERE t.version_id = picked.version_id AND v.id = t.version_id
-RETURNING t.version_id, t.document_id, t.course_id, t.lease_id, t.claimed_until, t.attempts, t.backfill, t.queued_at,
-          v.storage_key, v.content_type, v.byte_size, v.checksum
+FROM picked, document_version_file f
+WHERE t.version_id = picked.version_id AND t.file_id = picked.file_id AND f.id = t.file_id
+RETURNING t.version_id, t.file_id, t.document_id, t.course_id, t.lease_id, t.claimed_until, t.attempts, t.backfill, t.queued_at,
+          f.position, f.filename, f.storage_key, f.content_type, f.byte_size, f.checksum
 `
 
 type ClaimTextsParams struct {
@@ -48,6 +49,7 @@ type ClaimTextsParams struct {
 
 type ClaimTextsRow struct {
 	VersionID    uuid.UUID
+	FileID       uuid.UUID
 	DocumentID   uuid.UUID
 	CourseID     uuid.UUID
 	LeaseID      *uuid.UUID
@@ -55,17 +57,20 @@ type ClaimTextsRow struct {
 	Attempts     int32
 	Backfill     bool
 	QueuedAt     time.Time
-	StorageKey   *string
-	ContentType  *string
-	ByteSize     *int64
+	Position     int32
+	Filename     string
+	StorageKey   string
+	ContentType  string
+	ByteSize     int64
 	Checksum     *string
 }
 
 // Up to max_rows text versions waiting, or whose claim has lapsed, claimed for
 // the caller until claimed_until: uploads first, oldest first, then the
-// backfill, newest first. SKIP LOCKED: two claims at once never take the
-// same one. What is in an archived course, or of an archived document, waits
-// until it is open again, since nothing is written there meanwhile.
+// backfill, newest first; a version's files in order. SKIP LOCKED: two
+// claims at once never take the same one. What is in an archived course, or
+// of an archived document, waits until it is open again, since nothing is
+// written there meanwhile.
 func (q *Queries) ClaimTexts(ctx context.Context, arg ClaimTextsParams) ([]ClaimTextsRow, error) {
 	rows, err := q.db.Query(ctx, claimTexts,
 		arg.ClaimedUntil,
@@ -83,6 +88,7 @@ func (q *Queries) ClaimTexts(ctx context.Context, arg ClaimTextsParams) ([]Claim
 		var i ClaimTextsRow
 		if err := rows.Scan(
 			&i.VersionID,
+			&i.FileID,
 			&i.DocumentID,
 			&i.CourseID,
 			&i.LeaseID,
@@ -90,6 +96,8 @@ func (q *Queries) ClaimTexts(ctx context.Context, arg ClaimTextsParams) ([]Claim
 			&i.Attempts,
 			&i.Backfill,
 			&i.QueuedAt,
+			&i.Position,
+			&i.Filename,
 			&i.StorageKey,
 			&i.ContentType,
 			&i.ByteSize,
@@ -111,7 +119,7 @@ SET status = 'done', source = 'staff', body = $1, reason = NULL,
     lease_id = NULL, claimed_until = NULL,
     edited_by_member_id = $2, edited_at = $3,
     revision = revision + 1, updated_at = $3
-WHERE version_id = $4
+WHERE version_id = $4 AND file_id = $5
 RETURNING revision
 `
 
@@ -120,6 +128,7 @@ type EditTextParams struct {
 	EditedByMemberID *uuid.UUID
 	Now              *time.Time
 	VersionID        uuid.UUID
+	FileID           uuid.UUID
 }
 
 // Staff's text in place of whatever there was: done, theirs, never written
@@ -131,6 +140,7 @@ func (q *Queries) EditText(ctx context.Context, arg EditTextParams) (int32, erro
 		arg.EditedByMemberID,
 		arg.Now,
 		arg.VersionID,
+		arg.FileID,
 	)
 	var revision int32
 	err := row.Scan(&revision)
@@ -141,8 +151,8 @@ const exhaustTexts = `-- name: ExhaustTexts :exec
 
 UPDATE document_version_text
 SET status = 'failed', reason = 'attempts_exhausted', lease_id = NULL, claimed_until = NULL, updated_at = $1
-WHERE version_id IN (
-    SELECT x.version_id FROM document_version_text x
+WHERE (version_id, file_id) IN (
+    SELECT x.version_id, x.file_id FROM document_version_text x
     WHERE x.attempts >= $2::int
       AND (x.status = 'pending' OR (x.status = 'working' AND x.claimed_until <= $1))
     FOR UPDATE SKIP LOCKED)
@@ -170,7 +180,7 @@ UPDATE document_version_text
 SET status = 'done', source = 'ai', body = $1, pages = $2, model = $3,
     produced_at = $4, reason = NULL, lease_id = NULL, claimed_until = NULL,
     revision = revision + 1, updated_at = $4
-WHERE version_id = $5
+WHERE version_id = $5 AND file_id = $6
 RETURNING revision
 `
 
@@ -180,6 +190,7 @@ type FinishTextDoneParams struct {
 	Model     *string
 	Now       *time.Time
 	VersionID uuid.UUID
+	FileID    uuid.UUID
 }
 
 // The service's text: done, the model's, made now.
@@ -190,6 +201,7 @@ func (q *Queries) FinishTextDone(ctx context.Context, arg FinishTextDoneParams) 
 		arg.Model,
 		arg.Now,
 		arg.VersionID,
+		arg.FileID,
 	)
 	var revision int32
 	err := row.Scan(&revision)
@@ -199,7 +211,7 @@ func (q *Queries) FinishTextDone(ctx context.Context, arg FinishTextDoneParams) 
 const finishTextUndone = `-- name: FinishTextUndone :exec
 UPDATE document_version_text
 SET status = $1, reason = $2, lease_id = NULL, claimed_until = NULL, updated_at = $3
-WHERE version_id = $4
+WHERE version_id = $4 AND file_id = $5
 `
 
 type FinishTextUndoneParams struct {
@@ -207,6 +219,7 @@ type FinishTextUndoneParams struct {
 	Reason    *string
 	Now       time.Time
 	VersionID uuid.UUID
+	FileID    uuid.UUID
 }
 
 // The service could not, or would not: failed or skipped, saying why.
@@ -216,36 +229,46 @@ func (q *Queries) FinishTextUndone(ctx context.Context, arg FinishTextUndonePara
 		arg.Reason,
 		arg.Now,
 		arg.VersionID,
+		arg.FileID,
 	)
 	return err
 }
 
 const getClaimedFile = `-- name: GetClaimedFile :one
-SELECT t.claimed_until, v.storage_key, v.content_type, v.byte_size, v.checksum
+SELECT t.file_id, t.claimed_until, f.position, f.filename, f.storage_key, f.content_type, f.byte_size, f.checksum
 FROM document_version_text t
-JOIN document_version v ON v.id = t.version_id
+JOIN document_version_file f ON f.id = t.file_id
 WHERE t.version_id = $1 AND t.status = 'working' AND t.lease_id = $2
+  AND ($3::uuid IS NULL OR t.file_id = $3::uuid)
 `
 
 type GetClaimedFileParams struct {
 	VersionID uuid.UUID
 	LeaseID   *uuid.UUID
+	FileID    *uuid.UUID
 }
 
 type GetClaimedFileRow struct {
+	FileID       uuid.UUID
 	ClaimedUntil *time.Time
-	StorageKey   *string
-	ContentType  *string
-	ByteSize     *int64
+	Position     int32
+	Filename     string
+	StorageKey   string
+	ContentType  string
+	ByteSize     int64
 	Checksum     *string
 }
 
-// The file of a text version the caller's claim holds.
+// The file of a text version the caller's claim holds: the one named, or
+// whichever of the version's the claim is of.
 func (q *Queries) GetClaimedFile(ctx context.Context, arg GetClaimedFileParams) (GetClaimedFileRow, error) {
-	row := q.db.QueryRow(ctx, getClaimedFile, arg.VersionID, arg.LeaseID)
+	row := q.db.QueryRow(ctx, getClaimedFile, arg.VersionID, arg.LeaseID, arg.FileID)
 	var i GetClaimedFileRow
 	err := row.Scan(
+		&i.FileID,
 		&i.ClaimedUntil,
+		&i.Position,
+		&i.Filename,
 		&i.StorageKey,
 		&i.ContentType,
 		&i.ByteSize,
@@ -278,18 +301,24 @@ func (q *Queries) GetServiceActor(ctx context.Context, serviceScope *string) (Ge
 }
 
 const getTextBody = `-- name: GetTextBody :one
-SELECT t.version_id, t.status, t.source, t.pages, t.model, t.reason, t.revision, t.produced_at,
+SELECT t.version_id, t.file_id, t.status, t.source, t.pages, t.model, t.reason, t.revision, t.produced_at,
        t.edited_by_member_id, t.edited_at, t.updated_at,
        coalesce(octet_length(t.body), 0)::int AS bytes, t.body,
        e.display_name AS edited_by_name
 FROM document_version_text t
 LEFT JOIN course_member m ON m.id = t.edited_by_member_id
 LEFT JOIN actor e ON e.id = m.actor_id
-WHERE t.version_id = $1
+WHERE t.version_id = $1 AND t.file_id = $2
 `
+
+type GetTextBodyParams struct {
+	VersionID uuid.UUID
+	FileID    uuid.UUID
+}
 
 type GetTextBodyRow struct {
 	VersionID        uuid.UUID
+	FileID           uuid.UUID
 	Status           string
 	Source           *string
 	Pages            *int32
@@ -305,12 +334,13 @@ type GetTextBodyRow struct {
 	EditedByName     *string
 }
 
-// A version's text version with its whole text, for reading it in parts.
-func (q *Queries) GetTextBody(ctx context.Context, versionID uuid.UUID) (GetTextBodyRow, error) {
-	row := q.db.QueryRow(ctx, getTextBody, versionID)
+// A file's text version with its whole text, for reading it in parts.
+func (q *Queries) GetTextBody(ctx context.Context, arg GetTextBodyParams) (GetTextBodyRow, error) {
+	row := q.db.QueryRow(ctx, getTextBody, arg.VersionID, arg.FileID)
 	var i GetTextBodyRow
 	err := row.Scan(
 		&i.VersionID,
+		&i.FileID,
 		&i.Status,
 		&i.Source,
 		&i.Pages,
@@ -329,7 +359,7 @@ func (q *Queries) GetTextBody(ctx context.Context, versionID uuid.UUID) (GetText
 }
 
 const getTextForService = `-- name: GetTextForService :one
-SELECT version_id, document_id, course_id FROM document_version_text WHERE version_id = $1
+SELECT version_id, document_id, course_id FROM document_version_text WHERE version_id = $1 LIMIT 1
 `
 
 type GetTextForServiceRow struct {
@@ -338,7 +368,7 @@ type GetTextForServiceRow struct {
 	CourseID   uuid.UUID
 }
 
-// What a call of the service's is about: the text version and its course.
+// What a call of the service's is about: the version's text versions' course.
 func (q *Queries) GetTextForService(ctx context.Context, versionID uuid.UUID) (GetTextForServiceRow, error) {
 	row := q.db.QueryRow(ctx, getTextForService, versionID)
 	var i GetTextForServiceRow
@@ -348,18 +378,24 @@ func (q *Queries) GetTextForService(ctx context.Context, versionID uuid.UUID) (G
 
 const getTextView = `-- name: GetTextView :one
 
-SELECT t.version_id, t.status, t.source, t.pages, t.model, t.reason, t.revision, t.produced_at,
+SELECT t.version_id, t.file_id, t.status, t.source, t.pages, t.model, t.reason, t.revision, t.produced_at,
        t.edited_by_member_id, t.edited_at, t.updated_at,
        coalesce(octet_length(t.body), 0)::int AS bytes,
        e.display_name AS edited_by_name
 FROM document_version_text t
 LEFT JOIN course_member m ON m.id = t.edited_by_member_id
 LEFT JOIN actor e ON e.id = m.actor_id
-WHERE t.version_id = $1
+WHERE t.version_id = $1 AND t.file_id = $2
 `
+
+type GetTextViewParams struct {
+	VersionID uuid.UUID
+	FileID    uuid.UUID
+}
 
 type GetTextViewRow struct {
 	VersionID        uuid.UUID
+	FileID           uuid.UUID
 	Status           string
 	Source           *string
 	Pages            *int32
@@ -374,16 +410,18 @@ type GetTextViewRow struct {
 	EditedByName     *string
 }
 
-// Text versions (docs/schema.md §2.4, Text versions): the Markdown a version's
-// file is transcribed into, by the site's service (source ai) or written by
-// staff (source staff).
-// A version's text version as its readers are shown it, without the text.
+// Text versions (docs/schema.md §2.4, Text versions): the Markdown a file of
+// a version is transcribed into, by the site's service (source ai) or
+// written by staff (source staff). One to a file, keyed by its version and
+// the file.
+// A file's text version as its readers are shown it, without the text.
 // Who edited it comes with their name.
-func (q *Queries) GetTextView(ctx context.Context, versionID uuid.UUID) (GetTextViewRow, error) {
-	row := q.db.QueryRow(ctx, getTextView, versionID)
+func (q *Queries) GetTextView(ctx context.Context, arg GetTextViewParams) (GetTextViewRow, error) {
+	row := q.db.QueryRow(ctx, getTextView, arg.VersionID, arg.FileID)
 	var i GetTextViewRow
 	err := row.Scan(
 		&i.VersionID,
+		&i.FileID,
 		&i.Status,
 		&i.Source,
 		&i.Pages,
@@ -520,7 +558,7 @@ func (q *Queries) ListServiceCredentials(ctx context.Context, actorID uuid.UUID)
 }
 
 const listTextViews = `-- name: ListTextViews :many
-SELECT t.version_id, t.status, t.source, t.pages, t.model, t.reason, t.revision, t.produced_at,
+SELECT t.version_id, t.file_id, t.status, t.source, t.pages, t.model, t.reason, t.revision, t.produced_at,
        t.edited_by_member_id, t.edited_at, t.updated_at,
        coalesce(octet_length(t.body), 0)::int AS bytes,
        e.display_name AS edited_by_name
@@ -532,6 +570,7 @@ WHERE t.document_id = $1
 
 type ListTextViewsRow struct {
 	VersionID        uuid.UUID
+	FileID           uuid.UUID
 	Status           string
 	Source           *string
 	Pages            *int32
@@ -546,7 +585,8 @@ type ListTextViewsRow struct {
 	EditedByName     *string
 }
 
-// The text versions of a document's versions, without their text.
+// The text versions of the files of a document's versions, without their
+// text.
 func (q *Queries) ListTextViews(ctx context.Context, documentID uuid.UUID) ([]ListTextViewsRow, error) {
 	rows, err := q.db.Query(ctx, listTextViews, documentID)
 	if err != nil {
@@ -558,6 +598,71 @@ func (q *Queries) ListTextViews(ctx context.Context, documentID uuid.UUID) ([]Li
 		var i ListTextViewsRow
 		if err := rows.Scan(
 			&i.VersionID,
+			&i.FileID,
+			&i.Status,
+			&i.Source,
+			&i.Pages,
+			&i.Model,
+			&i.Reason,
+			&i.Revision,
+			&i.ProducedAt,
+			&i.EditedByMemberID,
+			&i.EditedAt,
+			&i.UpdatedAt,
+			&i.Bytes,
+			&i.EditedByName,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listVersionTextViews = `-- name: ListVersionTextViews :many
+SELECT t.version_id, t.file_id, t.status, t.source, t.pages, t.model, t.reason, t.revision, t.produced_at,
+       t.edited_by_member_id, t.edited_at, t.updated_at,
+       coalesce(octet_length(t.body), 0)::int AS bytes,
+       e.display_name AS edited_by_name
+FROM document_version_text t
+LEFT JOIN course_member m ON m.id = t.edited_by_member_id
+LEFT JOIN actor e ON e.id = m.actor_id
+WHERE t.version_id = $1
+`
+
+type ListVersionTextViewsRow struct {
+	VersionID        uuid.UUID
+	FileID           uuid.UUID
+	Status           string
+	Source           *string
+	Pages            *int32
+	Model            *string
+	Reason           *string
+	Revision         int32
+	ProducedAt       *time.Time
+	EditedByMemberID *uuid.UUID
+	EditedAt         *time.Time
+	UpdatedAt        time.Time
+	Bytes            int32
+	EditedByName     *string
+}
+
+// The text versions of a version's files, without their text.
+func (q *Queries) ListVersionTextViews(ctx context.Context, versionID uuid.UUID) ([]ListVersionTextViewsRow, error) {
+	rows, err := q.db.Query(ctx, listVersionTextViews, versionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListVersionTextViewsRow
+	for rows.Next() {
+		var i ListVersionTextViewsRow
+		if err := rows.Scan(
+			&i.VersionID,
+			&i.FileID,
 			&i.Status,
 			&i.Source,
 			&i.Pages,
@@ -592,18 +697,21 @@ func (q *Queries) LockServiceActor(ctx context.Context, id uuid.UUID) error {
 }
 
 const lockText = `-- name: LockText :one
-SELECT version_id, document_id, course_id, status, body, source, pages, model, reason, revision, attempts, backfill, queued_at, lease_id, claimed_until, claimed_by_credential_id, claimed_at, produced_at, edited_by_member_id, edited_at, created_at, updated_at FROM document_version_text WHERE version_id = $1 AND document_id = $2 FOR UPDATE
+SELECT version_id, document_id, course_id, status, body, source, pages, model, reason, revision, attempts, backfill, queued_at, lease_id, claimed_until, claimed_by_credential_id, claimed_at, produced_at, edited_by_member_id, edited_at, created_at, updated_at, file_id FROM document_version_text
+WHERE version_id = $1 AND file_id = $2 AND document_id = $3
+FOR UPDATE
 `
 
 type LockTextParams struct {
 	VersionID  uuid.UUID
+	FileID     uuid.UUID
 	DocumentID uuid.UUID
 }
 
-// A version's text version, held for a change to it. Whoever changes it
-// holds the document first, as adding and purging a version do.
+// A file's text version, held for a change to it. Whoever changes it holds
+// the document first, as adding and purging a version do.
 func (q *Queries) LockText(ctx context.Context, arg LockTextParams) (DocumentVersionText, error) {
-	row := q.db.QueryRow(ctx, lockText, arg.VersionID, arg.DocumentID)
+	row := q.db.QueryRow(ctx, lockText, arg.VersionID, arg.FileID, arg.DocumentID)
 	var i DocumentVersionText
 	err := row.Scan(
 		&i.VersionID,
@@ -628,63 +736,92 @@ func (q *Queries) LockText(ctx context.Context, arg LockTextParams) (DocumentVer
 		&i.EditedAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.FileID,
 	)
 	return i, err
 }
 
-const lockTextForService = `-- name: LockTextForService :one
-SELECT version_id, document_id, course_id, status, body, source, pages, model, reason, revision, attempts, backfill, queued_at, lease_id, claimed_until, claimed_by_credential_id, claimed_at, produced_at, edited_by_member_id, edited_at, created_at, updated_at FROM document_version_text WHERE version_id = $1 FOR UPDATE
+const lockTextsForService = `-- name: LockTextsForService :many
+SELECT version_id, document_id, course_id, status, body, source, pages, model, reason, revision, attempts, backfill, queued_at, lease_id, claimed_until, claimed_by_credential_id, claimed_at, produced_at, edited_by_member_id, edited_at, created_at, updated_at, file_id FROM document_version_text
+WHERE version_id = $1 AND ($2::uuid IS NULL OR file_id = $2::uuid)
+ORDER BY lease_id IS NOT DISTINCT FROM $3::uuid DESC, file_id
+FOR UPDATE
 `
 
-// The text version the service completes, held.
-func (q *Queries) LockTextForService(ctx context.Context, versionID uuid.UUID) (DocumentVersionText, error) {
-	row := q.db.QueryRow(ctx, lockTextForService, versionID)
-	var i DocumentVersionText
-	err := row.Scan(
-		&i.VersionID,
-		&i.DocumentID,
-		&i.CourseID,
-		&i.Status,
-		&i.Body,
-		&i.Source,
-		&i.Pages,
-		&i.Model,
-		&i.Reason,
-		&i.Revision,
-		&i.Attempts,
-		&i.Backfill,
-		&i.QueuedAt,
-		&i.LeaseID,
-		&i.ClaimedUntil,
-		&i.ClaimedByCredentialID,
-		&i.ClaimedAt,
-		&i.ProducedAt,
-		&i.EditedByMemberID,
-		&i.EditedAt,
-		&i.CreatedAt,
-		&i.UpdatedAt,
-	)
-	return i, err
+type LockTextsForServiceParams struct {
+	VersionID uuid.UUID
+	FileID    *uuid.UUID
+	LeaseID   uuid.UUID
+}
+
+// The text versions a call of the service's may be about, held: the named
+// file's, or, where it names none, each of the version's, the one its claim
+// holds first.
+func (q *Queries) LockTextsForService(ctx context.Context, arg LockTextsForServiceParams) ([]DocumentVersionText, error) {
+	rows, err := q.db.Query(ctx, lockTextsForService, arg.VersionID, arg.FileID, arg.LeaseID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []DocumentVersionText
+	for rows.Next() {
+		var i DocumentVersionText
+		if err := rows.Scan(
+			&i.VersionID,
+			&i.DocumentID,
+			&i.CourseID,
+			&i.Status,
+			&i.Body,
+			&i.Source,
+			&i.Pages,
+			&i.Model,
+			&i.Reason,
+			&i.Revision,
+			&i.Attempts,
+			&i.Backfill,
+			&i.QueuedAt,
+			&i.LeaseID,
+			&i.ClaimedUntil,
+			&i.ClaimedByCredentialID,
+			&i.ClaimedAt,
+			&i.ProducedAt,
+			&i.EditedByMemberID,
+			&i.EditedAt,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.FileID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const queueNewText = `-- name: QueueNewText :exec
-INSERT INTO document_version_text (version_id, document_id, course_id, queued_at, created_at, updated_at)
-VALUES ($1, $2, $3, $4, $4, $4)
+INSERT INTO document_version_text (version_id, file_id, document_id, course_id, queued_at, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $5,
+        $5)
 `
 
 type QueueNewTextParams struct {
 	VersionID  uuid.UUID
+	FileID     uuid.UUID
 	DocumentID uuid.UUID
 	CourseID   uuid.UUID
 	Now        time.Time
 }
 
-// A text version for a version from before there were any, which nobody
-// queued (the backfill queued the published and the latest): asked for by
-// staff, it is queued as an upload is.
+// A text version for a file of a version from before there were any, which
+// nobody queued (the backfill queued the published and the latest): asked
+// for by staff, it is queued as an upload is.
 func (q *Queries) QueueNewText(ctx context.Context, arg QueueNewTextParams) error {
 	_, err := q.db.Exec(ctx, queueNewText,
 		arg.VersionID,
+		arg.FileID,
 		arg.DocumentID,
 		arg.CourseID,
 		arg.Now,
@@ -729,7 +866,7 @@ func (q *Queries) ReleaseTexts(ctx context.Context, arg ReleaseTextsParams) ([]u
 const renewTextLease = `-- name: RenewTextLease :one
 UPDATE document_version_text
 SET claimed_until = $1, updated_at = $2
-WHERE version_id = $3 AND status = 'working' AND lease_id = $4
+WHERE version_id = $3 AND file_id = $4 AND status = 'working' AND lease_id = $5
 RETURNING claimed_until
 `
 
@@ -737,6 +874,7 @@ type RenewTextLeaseParams struct {
 	ClaimedUntil *time.Time
 	Now          time.Time
 	VersionID    uuid.UUID
+	FileID       uuid.UUID
 	LeaseID      *uuid.UUID
 }
 
@@ -746,6 +884,7 @@ func (q *Queries) RenewTextLease(ctx context.Context, arg RenewTextLeaseParams) 
 		arg.ClaimedUntil,
 		arg.Now,
 		arg.VersionID,
+		arg.FileID,
 		arg.LeaseID,
 	)
 	var claimed_until *time.Time
@@ -759,19 +898,20 @@ SET status = 'pending', body = NULL, source = NULL, pages = NULL, model = NULL, 
     edited_by_member_id = NULL, edited_at = NULL, lease_id = NULL, claimed_until = NULL,
     attempts = 0, backfill = false, queued_at = $1,
     revision = revision + CASE WHEN body IS NULL THEN 0 ELSE 1 END, updated_at = $1
-WHERE version_id = $2
+WHERE version_id = $2 AND file_id = $3
 RETURNING revision
 `
 
 type RequeueTextParams struct {
 	Now       time.Time
 	VersionID uuid.UUID
+	FileID    uuid.UUID
 }
 
 // Back to the queue, as an upload is queued: whatever it said goes, a claim
 // of it ends, and its attempts start again.
 func (q *Queries) RequeueText(ctx context.Context, arg RequeueTextParams) (int32, error) {
-	row := q.db.QueryRow(ctx, requeueText, arg.Now, arg.VersionID)
+	row := q.db.QueryRow(ctx, requeueText, arg.Now, arg.VersionID, arg.FileID)
 	var revision int32
 	err := row.Scan(&revision)
 	return revision, err

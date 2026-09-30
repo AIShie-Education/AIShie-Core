@@ -35,7 +35,7 @@ import (
 
 func documentTools(d Deps) []tool.Tool {
 	return []tool.Tool{documentUploadURL(d), documentCreate(d), documentAddVersion(d), documentPublish(), documentArchive(),
-		documentList(), documentGet(d), documentVersions(), documentUpdate(), documentUnarchive(), documentPurge(d)}
+		documentList(), documentGet(d), documentVersions(), documentFile(d), documentUpdate(), documentUnarchive(), documentPurge(d)}
 }
 
 const (
@@ -209,21 +209,37 @@ type UploadURLIn struct {
 	tool.InCourse
 	Kind        string `json:"kind" jsonschema:"what the file is for: material, instructions, rubric, submission or feedback"`
 	ContentType string `json:"content_type" jsonschema:"the file's media type, e.g. application/pdf; the upload must send the same"`
+	Filename    string `json:"filename,omitempty" jsonschema:"the file's name, e.g. week1-slides.pdf: 1 to 255 characters on one line, a name and not a path. The file is called so when it is attached without a name of its own"`
 }
 
 type UploadURLOut struct {
 	UploadURL   string            `json:"upload_url" jsonschema:"PUT the file's bytes here, once, within the window"`
 	Headers     map[string]string `json:"headers" jsonschema:"headers the PUT must carry"`
-	UploadToken string            `json:"upload_token" jsonschema:"hand this to document.create, document.add_version or grade.submit to attach what you uploaded"`
+	UploadToken string            `json:"upload_token" jsonschema:"name this in files of document.create or document.add_version, or in feedback_files of grade.submit, to attach what you uploaded"`
 	ExpiresAt   time.Time         `json:"expires_at"`
-	MaxBytes    int64             `json:"max_bytes" jsonschema:"the largest file, in bytes, that can be attached. It is checked when the file is attached, which refuses a larger one; where the URL is an object store's, a larger upload is not stopped as it arrives"`
+	MaxBytes    int64             `json:"max_bytes" jsonschema:"the largest file, in bytes, that can be attached. It is checked when the file is attached, which refuses a larger one (file_too_large); where the URL is an object store's, a larger upload is not stopped as it arrives"`
+	MaxFiles    int               `json:"max_files" jsonschema:"the most files one version of a document holds (too_many_files)"`
+	// MaxVersionBytes is what a front end checks a version's files against
+	// before it is refused for them.
+	MaxVersionBytes int64 `json:"max_version_bytes" jsonschema:"the most one version's files come to, in bytes, all together (version_too_large)"`
 }
 
-// UploadPrefix begins the key of every upload: courses/<course>/<upload>.
-// These keys, and the final keys that attaching moves them to, are all the
-// server ever writes to the store. The orphan sweep looks at nothing else, so
-// a bucket or directory that holds other things as well loses none of them.
-const UploadPrefix = "courses/"
+// DocumentPrefix begins the key of every upload for a document:
+// documents/<course>/<upload>. These keys, and the final keys that attaching
+// moves them to, are with those of UploadPrefix and AttachmentPrefix all the
+// server ever writes to the store. The orphan sweep looks at nothing else,
+// so a bucket or directory that holds other things as well loses none of
+// them.
+//
+// UploadPrefix, courses/<course>/<upload>, is where documents' uploads went
+// before a version held several files. The release before that sweeps it
+// alone, and knows of a version's first file alone: under it, the other
+// files of a version would look to it like uploads nothing came to point
+// at. So they go under a prefix of their own, which it leaves be.
+const (
+	DocumentPrefix = "documents/"
+	UploadPrefix   = "courses/"
+)
 
 // OrphanGrace is how long past the proposal TTL the orphan sweep keeps an
 // upload that nothing has attached (see jobs.sweepBlobs), and so how old an
@@ -240,8 +256,11 @@ func proposalsExpire(d Deps) bool {
 
 func documentUploadURL(d Deps) tool.Tool {
 	description := "Get somewhere to upload a file. Files do not travel through tool calls: PUT the bytes to the URL this " +
-		"returns, then pass the upload_token to the tool that attaches it. Nothing is recorded until then, and an upload " +
-		"that is never attached is eventually discarded."
+		"returns, then name the upload_token, with the file's name, in files of document.create or document.add_version " +
+		"(a version holds several files, in order), or in feedback_files of grade.submit. A filename given here is the " +
+		"file's name where the call that attaches it gives none. max_bytes, max_files and max_version_bytes say how large " +
+		"a file, how many files to a version and how much in one version. Nothing is recorded until the file is attached, " +
+		"and an upload that is never attached is eventually discarded."
 	if proposalsExpire(d) {
 		description += " A call that would attach it by way of a proposal is refused once the upload is more than " +
 			strconv.Itoa(int(OrphanGrace.Hours())) + " hours old."
@@ -266,6 +285,13 @@ func documentUploadURL(d Deps) tool.Tool {
 			if strings.TrimSpace(in.ContentType) == "" || len(in.ContentType) > 200 {
 				return UploadURLOut{}, apperr.Invalid("content_type is required")
 			}
+			filename := ""
+			if in.Filename != "" {
+				var err error
+				if filename, err = checkFilename(in.Filename); err != nil {
+					return UploadURLOut{}, err
+				}
+			}
 			// This is a read — it records nothing — but what it hands out is
 			// the means to write, and an archived course refuses every write.
 			if c, err := rc.Q.GetCourse(ctx, in.CourseID); err != nil {
@@ -276,7 +302,7 @@ func documentUploadURL(d Deps) tool.Tool {
 			// The key is ours and unguessable; nothing the uploader says goes
 			// into it. The orphan sweep knows the server's own keys by this
 			// shape.
-			key := UploadPrefix + in.CourseID.String() + "/" + ids.New().String()
+			key := DocumentPrefix + in.CourseID.String() + "/" + ids.New().String()
 			url, headers, err := d.Blob.PresignPut(ctx, key, in.ContentType, uploadWindow)
 			if err != nil {
 				return UploadURLOut{}, err
@@ -284,8 +310,9 @@ func documentUploadURL(d Deps) tool.Tool {
 			expires := rc.Now.Add(uploadWindow)
 			return UploadURLOut{
 				UploadURL: url, Headers: headers, ExpiresAt: expires, MaxBytes: d.MaxUploadBytes,
+				MaxFiles: d.Documents.FilesPerVersion, MaxVersionBytes: d.Documents.VersionBytes,
 				UploadToken: d.Uploads.SignUpload(blob.UploadClaim{Key: key, CourseID: in.CourseID, MemberID: rc.Member.ID,
-					Purpose: in.Kind, ContentType: in.ContentType, Expires: expires.Unix()}),
+					Purpose: in.Kind, ContentType: in.ContentType, Expires: expires.Unix(), Filename: filename}),
 			}, nil
 		},
 	})
@@ -475,47 +502,67 @@ func checkUploadAge(ctx context.Context, d Deps, now time.Time, tokens ...string
 	return nil
 }
 
-// Content is what a version holds: text, a file, or both.
+// Content is what a version holds: text, files, or both.
 type Content struct {
-	BodyMD      *string `json:"body_md,omitempty" jsonschema:"markdown text"`
-	UploadToken *string `json:"upload_token,omitempty" jsonschema:"from document.upload_url, after uploading the file"`
+	BodyMD      *string  `json:"body_md,omitempty" jsonschema:"markdown text"`
+	Files       []FileIn `json:"files,omitempty" jsonschema:"the version's files, in order, each uploaded first with document.upload_url; at most max_files of them, together at most max_version_bytes"`
+	UploadToken *string  `json:"upload_token,omitempty" jsonschema:"deprecated: one file, as files with one, named as it was uploaded or else after the document's title; not with files"`
 }
 
-func (c Content) empty() bool { return (c.BodyMD == nil || *c.BodyMD == "") && c.UploadToken == nil }
+func (c Content) empty() bool {
+	return (c.BodyMD == nil || *c.BodyMD == "") && c.UploadToken == nil && len(c.Files) == 0
+}
 
-// uploads is the upload token the content names, if any, for checkUploadAge.
+// uploads are the upload tokens the content names, for checkUploadAge.
 func (c Content) uploads() []string {
-	if c.UploadToken == nil {
-		return nil
+	if c.UploadToken != nil {
+		return []string{*c.UploadToken}
 	}
-	return []string{*c.UploadToken}
+	tokens := make([]string, len(c.Files))
+	for i, f := range c.Files {
+		tokens[i] = f.UploadToken
+	}
+	return tokens
 }
 
-// insertVersion writes one version. The author is the calling member, who is
-// a member of the document's course because the call was authorized in it —
-// which is the whole of the rule that a version's author belongs to its
-// document's course. A file of material, instructions or a rubric is queued
-// to be transcribed as it is added (document_version_text_queued), and the
-// service is woken to take it.
-func insertVersion(ctx context.Context, d Deps, ec *tool.ExecCtx, courseID, documentID uuid.UUID, kind string, seq int32, c Content) (uuid.UUID, error) {
+// insertVersion writes one version, with its files, named (Content.named)
+// after title where nothing else names them. The author is the calling
+// member, who is a member of the document's course because the call was
+// authorized in it — which is the whole of the rule that a version's author
+// belongs to its document's course. The version's own file columns name its
+// first file, as the release before reads them. Each file of material,
+// instructions or a rubric is queued to be transcribed as it is added
+// (document_version_file_text_queued), and the service is woken to take it.
+func insertVersion(ctx context.Context, d Deps, ec *tool.ExecCtx, courseID, documentID uuid.UUID, kind, title string, seq int32,
+	c Content) (uuid.UUID, []uuid.UUID, error) {
+	named, err := c.named(d, title)
+	if err != nil {
+		return uuid.Nil, nil, err
+	}
+	files, err := claimFiles(ctx, d, ec.Q, ec.Member, courseID, kind, named, true)
+	if err != nil {
+		return uuid.Nil, nil, err
+	}
 	row := dbq.InsertDocumentVersionParams{ID: ids.New(), DocumentID: documentID, Seq: seq, BodyMd: c.BodyMD,
 		AuthorMemberID: ec.Member.ID, CreatedAt: ec.Now}
-	if c.UploadToken != nil {
-		up, err := claimUpload(ctx, d, ec.Q, ec.Member, courseID, kind, *c.UploadToken, true)
-		if err != nil {
-			return uuid.Nil, err
-		}
-		row.StorageKey, row.ContentType, row.ByteSize, row.Checksum = &up.key, &up.info.ContentType, &up.info.Size, &up.info.Checksum
+	if len(files) > 0 {
+		first := files[0]
+		row.StorageKey, row.ContentType, row.ByteSize, row.Checksum = &first.key, &first.info.ContentType, &first.info.Size,
+			nonEmpty(first.info.Checksum)
 	}
 	if err := ec.Q.InsertDocumentVersion(ctx, row); err != nil {
-		return uuid.Nil, err
+		return uuid.Nil, nil, err
 	}
-	if row.StorageKey != nil && courseLevel(kind) {
+	fileIDs, err := insertFiles(ctx, ec, documentID, row.ID, files)
+	if err != nil {
+		return uuid.Nil, nil, err
+	}
+	if len(files) > 0 && courseLevel(kind) {
 		if err := notifyQueued(ctx, ec.Q, courseID); err != nil {
-			return uuid.Nil, err
+			return uuid.Nil, nil, err
 		}
 	}
-	return row.ID, nil
+	return row.ID, fileIDs, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -533,8 +580,9 @@ type DocumentCreateIn struct {
 }
 
 type DocumentCreateOut struct {
-	DocumentID uuid.UUID  `json:"document_id"`
-	VersionID  *uuid.UUID `json:"version_id,omitempty" jsonschema:"absent when the document was created empty"`
+	DocumentID uuid.UUID   `json:"document_id"`
+	VersionID  *uuid.UUID  `json:"version_id,omitempty" jsonschema:"absent when the document was created empty"`
+	FileIDs    []uuid.UUID `json:"file_ids,omitempty" jsonschema:"the version's files' ids, in order; absent when it has none"`
 }
 
 func documentCreate(d Deps) tool.Tool {
@@ -542,7 +590,9 @@ func documentCreate(d Deps) tool.Tool {
 		Name: "document.create",
 		Description: "Create a document. Material, instructions and rubrics are versioned and start unpublished — students " +
 			"see nothing until document.publish. A submission file is attached to a draft submission, and a feedback file " +
-			"to a grade, a computed total included; those have exactly one version and are given their content here.",
+			"to a grade, a computed total included; those have exactly one version and are given their content here. " +
+			"A version is text (body_md), files, or both: upload each file first (document.upload_url) and name them, in " +
+			"order, in files, each with its upload_token and filename; upload_token alone is one file, and is deprecated.",
 		Kind: tool.Write, Gate: anyDocumentWrite,
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/documents"},
 		Resolve: func(ctx context.Context, q dbq.Querier, in DocumentCreateIn) (tool.Target, error) {
@@ -584,9 +634,13 @@ func documentCreate(d Deps) tool.Tool {
 			}
 			return t, nil
 		},
-		// The file must still be there when the proposal is approved.
-		Pin: func(ctx context.Context, _ dbq.Querier, _ *domain.Member, now time.Time, in DocumentCreateIn) (DocumentCreateIn, error) {
-			return in, checkUploadAge(ctx, d, now, in.uploads()...)
+		Validate: func(_ context.Context, _ dbq.Querier, _ *domain.Member, in DocumentCreateIn) error {
+			return in.check(d)
+		},
+		// The files must be ones a version may hold, and still be there when
+		// the proposal is approved.
+		Pin: func(ctx context.Context, q dbq.Querier, m *domain.Member, now time.Time, in DocumentCreateIn) (DocumentCreateIn, error) {
+			return in, checkProposedVersion(ctx, d, q, m, now, in.CourseID, in.Kind, in.Title, in.Content)
 		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in DocumentCreateIn) (DocumentCreateOut, error) {
 			if strings.TrimSpace(in.Title) == "" {
@@ -622,7 +676,7 @@ func documentCreate(d Deps) tool.Tool {
 				ev.Type, ev.StudentMemberID, ev.AssignmentID = EventFeedbackFileAdded, &g.StudentMemberID, g.AssignmentID
 			}
 			if !courseLevel(in.Kind) && in.empty() {
-				return DocumentCreateOut{}, apperr.Invalid("a %s file has one version and needs its content now: body_md or upload_token", in.Kind)
+				return DocumentCreateOut{}, apperr.Invalid("a %s file has one version and needs its content now: body_md or files", in.Kind)
 			}
 
 			out := DocumentCreateOut{DocumentID: ids.New()}
@@ -631,11 +685,11 @@ func documentCreate(d Deps) tool.Tool {
 				return DocumentCreateOut{}, err
 			}
 			if !in.empty() {
-				v, err := insertVersion(ctx, d, ec, in.CourseID, out.DocumentID, in.Kind, 1, in.Content)
+				v, files, err := insertVersion(ctx, d, ec, in.CourseID, out.DocumentID, in.Kind, in.Title, 1, in.Content)
 				if err != nil {
 					return DocumentCreateOut{}, err
 				}
-				out.VersionID = &v
+				out.VersionID, out.FileIDs = &v, files
 				if !courseLevel(in.Kind) {
 					// An owned file has no draft stage: it is what it is.
 					if err := ec.Q.SetPublishedVersion(ctx, dbq.SetPublishedVersionParams{ID: out.DocumentID, PublishedVersionID: &v}); err != nil {
@@ -661,9 +715,10 @@ type DocumentAddVersionIn struct {
 }
 
 type DocumentVersionOut struct {
-	VersionID uuid.UUID `json:"version_id"`
-	Seq       int32     `json:"seq"`
-	Published bool      `json:"published"`
+	VersionID uuid.UUID   `json:"version_id"`
+	Seq       int32       `json:"seq"`
+	Published bool        `json:"published"`
+	FileIDs   []uuid.UUID `json:"file_ids,omitempty" jsonschema:"document.add_version: the new version's files' ids, in order; absent when it has none"`
 }
 
 func documentAddVersion(d Deps) tool.Tool {
@@ -671,15 +726,24 @@ func documentAddVersion(d Deps) tool.Tool {
 		Name: "document.add_version",
 		Description: "Edit material, instructions or a rubric by adding a version. Versions are never changed or removed, " +
 			"but for an administrator's purge of one uploaded by mistake (document.purge). " +
-			"The new version is a draft until it is published; what students read does not change until then.",
+			"The new version is a draft until it is published; what students read does not change until then. " +
+			"It is text (body_md), files, or both, as document.create takes them: files, in order, each with its " +
+			"upload_token and filename; upload_token alone is one file, and is deprecated.",
 		Kind: tool.Write, Gate: anyDocumentWrite,
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/documents/{document_id}/versions"},
 		Resolve: func(ctx context.Context, q dbq.Querier, in DocumentAddVersionIn) (tool.Target, error) {
 			return documentTarget(ctx, q, in.CourseID, in.DocumentID, writePerm)
 		},
+		Validate: func(_ context.Context, _ dbq.Querier, _ *domain.Member, in DocumentAddVersionIn) error {
+			return in.check(d)
+		},
 		// As document.create.
-		Pin: func(ctx context.Context, _ dbq.Querier, _ *domain.Member, now time.Time, in DocumentAddVersionIn) (DocumentAddVersionIn, error) {
-			return in, checkUploadAge(ctx, d, now, in.uploads()...)
+		Pin: func(ctx context.Context, q dbq.Querier, m *domain.Member, now time.Time, in DocumentAddVersionIn) (DocumentAddVersionIn, error) {
+			doc, err := loadDocument(ctx, q, in.CourseID, in.DocumentID)
+			if err != nil {
+				return in, err
+			}
+			return in, checkProposedVersion(ctx, d, q, m, now, in.CourseID, doc.Kind, doc.Title, in.Content)
 		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in DocumentAddVersionIn) (DocumentVersionOut, error) {
 			if err := ec.Q.LockDocument(ctx, in.DocumentID); err != nil {
@@ -695,18 +759,19 @@ func documentAddVersion(d Deps) tool.Tool {
 			case doc.Status != "active":
 				return DocumentVersionOut{}, apperr.Conflicts("the document is archived")
 			case in.empty():
-				return DocumentVersionOut{}, apperr.Invalid("a version needs content: body_md or upload_token")
+				return DocumentVersionOut{}, apperr.Invalid("a version needs content: body_md or files")
 			}
 			last, err := ec.Q.MaxVersionSeq(ctx, doc.ID)
 			if err != nil {
 				return DocumentVersionOut{}, err
 			}
 			out := DocumentVersionOut{Seq: last + 1, Published: in.Publish}
-			if out.VersionID, err = insertVersion(ctx, d, ec, in.CourseID, doc.ID, doc.Kind, out.Seq, in.Content); err != nil {
+			if out.VersionID, out.FileIDs, err = insertVersion(ctx, d, ec, in.CourseID, doc.ID, doc.Kind, doc.Title, out.Seq, in.Content); err != nil {
 				return DocumentVersionOut{}, err
 			}
 			if err := emitDocumentEvent(ctx, ec, doc.Kind, events.Event{Type: EventDocumentVersionAdded, CourseID: &in.CourseID,
-				SubjectType: "document", SubjectID: &doc.ID, Payload: map[string]any{"kind": doc.Kind, "seq": out.Seq}}); err != nil {
+				SubjectType: "document", SubjectID: &doc.ID, Payload: map[string]any{"kind": doc.Kind, "seq": out.Seq,
+					"files": len(out.FileIDs)}}); err != nil {
 				return DocumentVersionOut{}, err
 			}
 			if in.Publish {
@@ -1099,13 +1164,19 @@ func documentPurge(d Deps) tool.Tool {
 				if v.PurgedAt != nil {
 					return DocumentPurgeOut{}, apperr.Conflicts("that version has been purged already").With("reason", "already_purged")
 				}
-				versions = []dbq.ListVersionsToPurgeRow{{ID: v.ID, StorageKey: v.StorageKey}}
+				files, err := ec.Q.ListVersionFiles(ctx, v.ID)
+				if err != nil {
+					return DocumentPurgeOut{}, err
+				}
+				keys := make([]string, len(files))
+				for i, f := range files {
+					keys[i] = f.StorageKey
+				}
+				versions = []dbq.ListVersionsToPurgeRow{{ID: v.ID, StorageKeys: keys}}
 			}
 			var files []string
 			for _, v := range versions {
-				if v.StorageKey != nil {
-					files = append(files, *v.StorageKey)
-				}
+				files = append(files, v.StorageKeys...)
 			}
 			if len(files) > 0 && d.Blob == nil {
 				return DocumentPurgeOut{}, apperr.Precondition("this installation has no file storage configured, so the file cannot be removed")
@@ -1240,18 +1311,19 @@ type DocumentGetIn struct {
 }
 
 type VersionView struct {
-	ID             uuid.UUID `json:"id"`
-	Seq            int32     `json:"seq"`
-	BodyMD         *string   `json:"body_md,omitempty"`
-	DownloadURL    *string   `json:"download_url,omitempty" jsonschema:"a short-lived URL for the file, if the version has one"`
-	ContentType    *string   `json:"content_type,omitempty"`
-	ByteSize       *int64    `json:"byte_size,omitempty"`
-	Checksum       *string   `json:"checksum,omitempty"`
-	AuthorMemberID uuid.UUID `json:"author_member_id"`
-	CreatedAt      time.Time `json:"created_at"`
-	Published      bool      `json:"published"`
-	Purged         *Purge    `json:"purged,omitempty" jsonschema:"the version was purged: its text and file are gone, and this says who removed them, when and why. Work handed in under it still names it"`
-	Text           *TextView `json:"text,omitempty" jsonschema:"the version's text version: its file transcribed into Markdown, for a version with a file of material, instructions or a rubric; absent for any other"`
+	ID             uuid.UUID  `json:"id"`
+	Seq            int32      `json:"seq"`
+	BodyMD         *string    `json:"body_md,omitempty"`
+	Files          []FileView `json:"files" jsonschema:"the version's files, in order, each with a short-lived URL to download it under its name and its text version; empty for a version of text alone, and for a purged one"`
+	DownloadURL    *string    `json:"download_url,omitempty" jsonschema:"deprecated: files[0].download_url, the first file's"`
+	ContentType    *string    `json:"content_type,omitempty" jsonschema:"deprecated: the first file's; a purged version's still says it"`
+	ByteSize       *int64     `json:"byte_size,omitempty" jsonschema:"deprecated: the first file's; a purged version's still says it"`
+	Checksum       *string    `json:"checksum,omitempty" jsonschema:"deprecated: the first file's"`
+	AuthorMemberID uuid.UUID  `json:"author_member_id"`
+	CreatedAt      time.Time  `json:"created_at"`
+	Published      bool       `json:"published"`
+	Purged         *Purge     `json:"purged,omitempty" jsonschema:"the version was purged: its text and files are gone, and this says who removed them, when and why. Work handed in under it still names it"`
+	Text           *TextView  `json:"text,omitempty" jsonschema:"deprecated: files[0].text, the first file's text version"`
 }
 
 type DocumentGetOut struct {
@@ -1265,9 +1337,11 @@ type DocumentGetOut struct {
 func documentGet(d Deps) tool.Tool {
 	return tool.Define(tool.Spec[DocumentGetIn, DocumentGetOut]{
 		Name: "document.get",
-		Description: "Read a document: its text, and a short-lived URL for its file if it has one. Students get the " +
-			"published version; members who can read drafts get the latest. A specific version can be asked for by id — " +
-			"always allowed if it is the one your own submission was handed in under.",
+		Description: "Read a document: its text, and its files, each with a short-lived URL to download it under its name " +
+			"and its text version. Students get the published version; members who can read drafts get the latest. A " +
+			"specific version can be asked for by id — always allowed if it is the one your own submission was handed in " +
+			"under. The version's download_url, content_type, byte_size, checksum and text are its first file's, and are " +
+			"deprecated: read files.",
 		Kind: tool.Read, Gate: anyDocumentRead,
 		HTTP: tool.Route{Method: "GET", Pattern: "/v1/courses/{course_id}/documents/{document_id}"},
 		Resolve: func(ctx context.Context, q dbq.Querier, in DocumentGetIn) (tool.Target, error) {
@@ -1289,15 +1363,15 @@ func documentGet(d Deps) tool.Tool {
 				Checksum: v.Checksum, AuthorMemberID: v.AuthorMemberID, CreatedAt: v.CreatedAt,
 				Published: doc.PublishedVersionID != nil && *doc.PublishedVersionID == v.ID,
 				Purged:    purgeOf(v.PurgedAt, v.PurgedByActorID, v.PurgeReason)}
-			if v.StorageKey != nil && d.Blob != nil {
-				url, err := d.Blob.PresignGet(ctx, *v.StorageKey, downloadTTL)
-				if err != nil {
-					return DocumentGetOut{}, err
-				}
-				view.DownloadURL = &url
-			}
-			if view.Text, err = versionText(ctx, rc.Q, v.ID); err != nil {
+			if view.Files, err = versionFiles(ctx, d, rc.Q, v.ID); err != nil {
 				return DocumentGetOut{}, err
+			}
+			if view.Files == nil {
+				view.Files = []FileView{}
+			}
+			// What the release before gave, of the first file.
+			if len(view.Files) > 0 {
+				view.DownloadURL, view.Text = view.Files[0].DownloadURL, view.Files[0].Text
 			}
 			out.Version = &view
 			return out, nil
@@ -1382,14 +1456,15 @@ func readableVersion(ctx context.Context, rc *tool.ReadCtx, courseID, documentID
 type VersionSummary struct {
 	ID             uuid.UUID  `json:"id"`
 	Seq            int32      `json:"seq"`
-	HasFile        bool       `json:"has_file"`
-	ContentType    *string    `json:"content_type,omitempty"`
-	ByteSize       *int64     `json:"byte_size,omitempty"`
+	Files          []FileView `json:"files" jsonschema:"its files, in order, each with its text version, without the text: document.file gives one to download, document.text reads its text"`
+	HasFile        bool       `json:"has_file" jsonschema:"deprecated: whether it has a file; files is not empty"`
+	ContentType    *string    `json:"content_type,omitempty" jsonschema:"deprecated: the first file's"`
+	ByteSize       *int64     `json:"byte_size,omitempty" jsonschema:"deprecated: the first file's"`
 	AuthorMemberID uuid.UUID  `json:"author_member_id"`
 	CreatedAt      time.Time  `json:"created_at"`
 	Published      bool       `json:"published"`
-	PurgedAt       *time.Time `json:"purged_at,omitempty" jsonschema:"when its text and file were purged; document.get of it says who and why"`
-	Text           *TextView  `json:"text,omitempty" jsonschema:"its text version, without the text: document.text reads it"`
+	PurgedAt       *time.Time `json:"purged_at,omitempty" jsonschema:"when its text and files were purged; document.get of it says who and why"`
+	Text           *TextView  `json:"text,omitempty" jsonschema:"deprecated: files[0].text, the first file's text version"`
 }
 
 type DocumentVersionsOut struct {
@@ -1421,9 +1496,11 @@ func assignmentWithheld(ctx context.Context, rc *tool.ReadCtx, docID uuid.UUID) 
 
 func documentVersions() tool.Tool {
 	return tool.Define(tool.Spec[DocumentIDIn, DocumentVersionsOut]{
-		Name:        "document.versions",
-		Description: "Every version of a document, oldest first, with which one is published. For members who can read drafts.",
-		Kind:        tool.Read, Gate: tool.Gate{Perms: []domain.Perm{domain.PermDocumentReadDraft}},
+		Name: "document.versions",
+		Description: "Every version of a document, oldest first, with which one is published, and each version's files, " +
+			"with their text versions, without the texts. For members who can read drafts. Each version's has_file, " +
+			"content_type, byte_size and text are its first file's, and are deprecated: read files.",
+		Kind: tool.Read, Gate: tool.Gate{Perms: []domain.Perm{domain.PermDocumentReadDraft}},
 		HTTP: tool.Route{Method: "GET", Pattern: "/v1/courses/{course_id}/documents/{document_id}/versions"},
 		Resolve: func(ctx context.Context, q dbq.Querier, in DocumentIDIn) (tool.Target, error) {
 			t, err := documentTarget(ctx, q, in.CourseID, in.DocumentID, readPerm)
@@ -1450,16 +1527,21 @@ func documentVersions() tool.Tool {
 			if err != nil {
 				return DocumentVersionsOut{}, err
 			}
-			texts, err := textsOf(ctx, rc.Q, doc.ID)
+			files, err := documentFiles(ctx, rc.Q, doc.ID)
 			if err != nil {
 				return DocumentVersionsOut{}, err
 			}
 			out := DocumentVersionsOut{Versions: make([]VersionSummary, 0, len(rows))}
 			for _, r := range rows {
-				out.Versions = append(out.Versions, VersionSummary{ID: r.ID, Seq: r.Seq, HasFile: r.HasFile, ContentType: r.ContentType,
+				v := VersionSummary{ID: r.ID, Seq: r.Seq, Files: files[r.ID], HasFile: r.HasFile, ContentType: r.ContentType,
 					ByteSize: r.ByteSize, AuthorMemberID: r.AuthorMemberID, CreatedAt: r.CreatedAt,
-					Published: doc.PublishedVersionID != nil && *doc.PublishedVersionID == r.ID, PurgedAt: r.PurgedAt,
-					Text: texts[r.ID]})
+					Published: doc.PublishedVersionID != nil && *doc.PublishedVersionID == r.ID, PurgedAt: r.PurgedAt}
+				if len(v.Files) > 0 {
+					v.Text = v.Files[0].Text
+				} else {
+					v.Files = []FileView{}
+				}
+				out.Versions = append(out.Versions, v)
 			}
 			return out, nil
 		},

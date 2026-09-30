@@ -243,8 +243,9 @@ func (r *Runner) Sweep(ctx context.Context) (Report, error) {
 	return rep, nil
 }
 
-// sweepBlobs removes files that no document version and no message of a
-// conversation points at, and none will.
+// sweepBlobs removes files that no document version, as one of its files or
+// in its own columns, and no message of a conversation points at, and none
+// will.
 //
 // A file is uploaded first and attached afterwards, so there are always some
 // that are not attached yet, and some never are: the tab was closed, the
@@ -364,12 +365,13 @@ func (r *Runner) sweepBlobs(ctx context.Context, now time.Time) (int, error) {
 	return removed, nil
 }
 
-// blobPrefixes are where the server's files are kept: uploads for documents
+// blobPrefixes are where the server's files are kept: uploads for documents,
+// under documents/ and, from before a version held several files, courses/,
 // and for messages of conversations, and where attaching moves them, which
 // for a store that moves nothing is the same place.
 func (r *Runner) blobPrefixes() []string {
 	var prefixes []string
-	for _, prefix := range []string{tools.UploadPrefix, tools.AttachmentPrefix} {
+	for _, prefix := range []string{tools.UploadPrefix, tools.DocumentPrefix, tools.AttachmentPrefix} {
 		prefixes = append(prefixes, prefix)
 		if final := r.cfg.Blob.FinalKey(prefix); final != prefix {
 			prefixes = append(prefixes, final)

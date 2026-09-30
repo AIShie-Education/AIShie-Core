@@ -205,14 +205,19 @@ once an hour and removes up to 200 such uploads every `JOBS_INTERVAL`, however
 many attached files it passes on the way. So that no proposal outlives its
 files, a call that would attach an upload by way of a proposal is refused
 once the upload is two days old. With `PROPOSAL_TTL=0` proposals wait for
-ever, and uploads are neither removed nor refused for their age. The files
+ever, and uploads are neither removed nor refused for their age. One version
+of a document holds at most `DOCUMENT_MAX_FILES_PER_VERSION` files (20, at
+most 100), `DOCUMENT_MAX_VERSION_BYTES` in all (200 MiB), each at most
+`MAX_UPLOAD_BYTES`. The files
 messages of conversations carry are kept the same way, under a prefix of their
 own, and held to limits of their own: `ATTACHMENT_MAX_PER_MESSAGE` files to a
 message (10), each at most `ATTACHMENT_MAX_BYTES` (50 MiB, and never more than
 `MAX_UPLOAD_BYTES`), and `ATTACHMENT_MAX_CONVERSATION_BYTES` in one
-conversation (500 MiB). The server keeps its files under `courses/` and
-`conversations/` (with S3, `attached/courses/` and `attached/conversations/`
-as well) and leaves anything else in the directory or bucket alone, uploads
+conversation (500 MiB). The server keeps its files under `documents/`,
+`courses/` (documents' uploads from before a version held several files) and
+`conversations/` (with S3, `attached/documents/`, `attached/courses/` and
+`attached/conversations/` as well) and leaves anything else in the directory
+or bucket alone, uploads
 under a course its database does not have included. The files may be moved from
 the disk to a bucket by copying each to the key it has on the disk (its path
 under `BLOB_FS_ROOT`; not the `.meta` beside it, whose content type the object

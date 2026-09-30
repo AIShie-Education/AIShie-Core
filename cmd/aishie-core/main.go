@@ -85,7 +85,9 @@ Environment:
   BLOB_FS_ROOT      default var/blobs
   PUBLIC_URL        how clients reach this server; default http://localhost:8080
   SIGNING_KEY       32+ characters; required with s3, with single sign-on, and for more than one instance
-  MAX_UPLOAD_BYTES  default 52428800 (50 MiB)
+  MAX_UPLOAD_BYTES  default 52428800 (50 MiB); the largest file
+  DOCUMENT_MAX_FILES_PER_VERSION  default 20, at most 100; the files one version of a document holds
+  DOCUMENT_MAX_VERSION_BYTES      default 209715200 (200 MiB); the files of one version, in all
   ATTACHMENT_MAX_BYTES     default 52428800 (50 MiB); the largest file a message of a conversation
                            carries, never more than MAX_UPLOAD_BYTES
   ATTACHMENT_MAX_PER_MESSAGE         default 10, at most 100; the files one message carries
@@ -232,6 +234,7 @@ func serve(cfg config.Config) error {
 	tools.RegisterAll(reg, tools.Deps{Pipeline: pl, Blob: store, Uploads: signer, MaxUploadBytes: cfg.MaxUploadBytes, SSO: providers,
 		Attachments: tools.AttachmentLimits{MaxBytes: cfg.AttachmentMaxBytes, PerMessage: cfg.AttachmentMaxPerMessage,
 			ConversationBytes: cfg.AttachmentMaxConversationBytes},
+		Documents:               tools.DocumentLimits{FilesPerVersion: cfg.DocumentMaxFilesPerVersion, VersionBytes: cfg.DocumentMaxVersionBytes},
 		DisableAgentSelfService: !cfg.AgentSelfService, MaxAgentsPerOwner: cfg.AgentMaxPerOwner, Memory: cfg.Memory})
 
 	// The sweeps act as the system actor, which bootstrap creates. Before

@@ -93,6 +93,13 @@ type Config struct {
 	// in all (ATTACHMENT_MAX_CONVERSATION_BYTES, 500 MiB).
 	AttachmentMaxBytes, AttachmentMaxConversationBytes int64
 	AttachmentMaxPerMessage                            int
+	// DocumentMaxFilesPerVersion and DocumentMaxVersionBytes bound the files
+	// one version of a document holds (docs/schema.md §2.4, Files of a
+	// version): how many (DOCUMENT_MAX_FILES_PER_VERSION, 20) and how much
+	// in all (DOCUMENT_MAX_VERSION_BYTES, 200 MiB). Each file is held to
+	// MaxUploadBytes as ever.
+	DocumentMaxFilesPerVersion int
+	DocumentMaxVersionBytes    int64
 
 	// OIDC is the identity provider the server's operator sets: single
 	// sign-on through it is off unless OIDC_ISSUER is set. Administrators
@@ -235,6 +242,9 @@ func FromEnv() (Config, error) {
 		}
 		c.MaxUploadBytes = n
 	}
+	if err := c.readDocumentLimits(); err != nil {
+		return Config{}, err
+	}
 	if err := c.readAttachments(); err != nil {
 		return Config{}, err
 	}
@@ -361,6 +371,32 @@ func (c *Config) readAttachments() error {
 		c.AttachmentMaxPerMessage = n
 	}
 	c.AttachmentMaxBytes = min(c.AttachmentMaxBytes, c.MaxUploadBytes)
+	return nil
+}
+
+// MaxDocumentFilesPerVersion is the most DOCUMENT_MAX_FILES_PER_VERSION may
+// be, and what the database holds a version to (document_version_file).
+const MaxDocumentFilesPerVersion = 100
+
+// readDocumentLimits reads the limits on the files one version of a
+// document holds, each a whole number, one or more, and one not set its
+// default.
+func (c *Config) readDocumentLimits() error {
+	c.DocumentMaxFilesPerVersion, c.DocumentMaxVersionBytes = 20, 200<<20
+	if v := os.Getenv("DOCUMENT_MAX_FILES_PER_VERSION"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 || n > MaxDocumentFilesPerVersion {
+			return fmt.Errorf("DOCUMENT_MAX_FILES_PER_VERSION: %q is not a number from 1 to %d", v, MaxDocumentFilesPerVersion)
+		}
+		c.DocumentMaxFilesPerVersion = n
+	}
+	if v := os.Getenv("DOCUMENT_MAX_VERSION_BYTES"); v != "" {
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil || n <= 0 {
+			return fmt.Errorf("DOCUMENT_MAX_VERSION_BYTES: %q is not a positive number of bytes", v)
+		}
+		c.DocumentMaxVersionBytes = n
+	}
 	return nil
 }
 
