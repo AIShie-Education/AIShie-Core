@@ -22,6 +22,11 @@ type Actor struct {
 	// set (member.reset_password): until they set their own, every call but
 	// that one is refused. It only ever takes away.
 	PasswordChangeRequired bool
+	// Service is what a site service is for (actor.service_scope), "" for
+	// anyone who is not one. Like PlatformRole it is read only to gate tools:
+	// a service calls its own tools (tool.Gate.Service) and nothing else, and
+	// nobody else calls them.
+	Service string
 }
 
 func (a Actor) Active() bool { return a.Status == ActorActive }
@@ -32,6 +37,10 @@ const (
 
 	PlatformRoot  = "root"
 	PlatformAdmin = "admin"
+
+	// ServiceDocumentText is the service that writes documents' text
+	// versions: the runtime's transcriber.
+	ServiceDocumentText = "document_text"
 )
 
 // Member is one actor's seat in one course: permissions and scope. The

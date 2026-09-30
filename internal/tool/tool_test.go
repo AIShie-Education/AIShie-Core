@@ -148,8 +148,11 @@ func TestDefineRefusesMalformedTools(t *testing.T) {
 		"ephemeral with a validation": func(s *tool.Spec[in, out]) {
 			s.Kind, s.Validate = tool.Ephemeral, func(context.Context, dbq.Querier, *domain.Member, in) error { return nil }
 		},
-		"ephemeral and internal":  func(s *tool.Spec[in, out]) { s.Kind, s.Internal = tool.Ephemeral, true },
-		"ephemeral with a secret": func(s *tool.Spec[in, out]) { s.Kind, s.SecretIn = tool.Ephemeral, []string{"score"} },
+		"ephemeral and internal":           func(s *tool.Spec[in, out]) { s.Kind, s.Internal = tool.Ephemeral, true },
+		"a write that bounds its own rate": func(s *tool.Spec[in, out]) { s.BoundsOwnRate = true },
+		"a service's, with course input":   func(s *tool.Spec[in, out]) { s.Gate = tool.Gate{Service: domain.ServiceDocumentText} },
+		"a service's and a course's":       func(s *tool.Spec[in, out]) { s.Gate.Service = domain.ServiceDocumentText },
+		"ephemeral with a secret":          func(s *tool.Spec[in, out]) { s.Kind, s.SecretIn = tool.Ephemeral, []string{"score"} },
 		"own agents with any": func(s *tool.Spec[in, out]) {
 			s.Gate.Any, s.Gate.OwnAgents = true, func(context.Context, dbq.Querier, domain.Actor, *domain.Member, tool.Target, time.Time) (domain.Level, error) {
 				return domain.Denied, nil
@@ -341,6 +344,15 @@ func TestAToolThatWaits(t *testing.T) {
 			tool.Define(s)
 		})
 	}
+	// An Ephemeral tool that takes what waits for it waits as a read does.
+	t.Run("an ephemeral tool that waits", func(t *testing.T) {
+		s := waiting()
+		s.Kind, s.Query = tool.Ephemeral, nil
+		s.Execute = func(context.Context, *tool.ExecCtx, waitIn) (waitOut, error) { return waitOut{}, nil }
+		if tl := tool.Define(s); tl.WaitSeconds == nil || tl.Kind != tool.Ephemeral {
+			t.Fatalf("defined: %+v", tl)
+		}
+	})
 	t.Run("something to wait for, and input that cannot wait", func(t *testing.T) {
 		defer func() {
 			if recover() == nil {

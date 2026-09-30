@@ -183,7 +183,7 @@ func conversationDraft(limit *ratelimit.Limiter) tool.Tool {
 			"no action, no idempotency key, never proposed; at most 10 writes a second per conversation (rate_limited), " +
 			"and a write carried out does not count against your rate limit. The text is shown to the opener only while " +
 			"your answers are posted without approval; otherwise to those who would approve them.",
-		Kind: tool.Ephemeral, Gate: answers,
+		Kind: tool.Ephemeral, Gate: answers, BoundsOwnRate: true,
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/conversations/{conversation_id}/draft"},
 		Resolve: func(ctx context.Context, q dbq.Querier, in ConversationDraftIn) (tool.Target, error) {
 			return conversationTarget(ctx, q, in.CourseID, in.ConversationID)

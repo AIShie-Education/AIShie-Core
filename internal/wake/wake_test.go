@@ -43,6 +43,8 @@ func TestAWaiterIsWokenByItsNewsAlone(t *testing.T) {
 		OpenerMemberID: uuid.New(), RespondentMemberID: seat}
 	drafted := wake.Note{CourseID: course, Kind: wake.KindDraft, ConversationID: conversation, OpenerMemberID: posted.OpenerMemberID,
 		RespondentMemberID: seat}
+	queue := wake.Filter{AnyCourse: true, Kinds: []string{wake.KindTextQueued}}
+	queued := wake.Note{CourseID: course, Kind: wake.KindTextQueued}
 
 	cases := []struct {
 		name string
@@ -68,6 +70,13 @@ func TestAWaiterIsWokenByItsNewsAlone(t *testing.T) {
 		{"a draft, for a reader that does not watch drafts", reader, drafted, false},
 		{"a draft, for the course's feed", feed, drafted, false},
 		{"a draft, for the respondent's inbox", inbox, drafted, false},
+		// A text queued wakes the service's claim, whatever course it is in,
+		// and nobody else.
+		{"a text queued, for the service's claim", queue, queued, true},
+		{"a text queued in another course, for the service's claim", queue, func() wake.Note { n := queued; n.CourseID = other; return n }(), true},
+		{"other news, for the service's claim", queue, posted, false},
+		{"a text queued, for the course's feed", feed, queued, false},
+		{"a text queued, for a reader", reader, queued, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

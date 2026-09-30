@@ -29,13 +29,16 @@ import (
 // token fails at its scheme, before anything is looked up, and a token
 // presented as an invitation does too. So is a course's join link, under
 // "aisjoin_": it is kept in course_join_link, not as a credential, and is
-// never taken for either.
+// never taken for either. A site service's credential is a bearer token
+// under "aissvc_", so that one that leaks is known for what it is, and is
+// taken only for a service credential, and nothing else for one.
 const (
-	tokenScheme  = "ais"
-	inviteScheme = "aisinv"
-	joinScheme   = "aisjoin"
-	prefixLen    = 12
-	secretBytes  = 32
+	tokenScheme   = "ais"
+	inviteScheme  = "aisinv"
+	joinScheme    = "aisjoin"
+	serviceScheme = "aissvc"
+	prefixLen     = 12
+	secretBytes   = 32
 )
 
 var prefixEncoding = base32.StdEncoding.WithPadding(base32.NoPadding)
@@ -52,6 +55,10 @@ func NewToken() (Token, error) { return newSecret(tokenScheme) }
 
 // NewInvite makes an invitation's secret: a token under the invitation scheme.
 func NewInvite() (Token, error) { return newSecret(inviteScheme) }
+
+// NewServiceToken makes a site service's credential: a token under the
+// service scheme.
+func NewServiceToken() (Token, error) { return newSecret(serviceScheme) }
 
 // NewJoinToken makes a join link's secret: a token under the join scheme.
 // Full is shown once, to whoever made the link; Prefix and Hash are kept.
@@ -93,6 +100,9 @@ func parsePrefix(full string) (string, bool) { return parseScheme(full, tokenSch
 
 // parseInvitePrefix is parsePrefix for an invitation.
 func parseInvitePrefix(full string) (string, bool) { return parseScheme(full, inviteScheme) }
+
+// parseServicePrefix is parsePrefix for a site service's credential.
+func parseServicePrefix(full string) (string, bool) { return parseScheme(full, serviceScheme) }
 
 func parseScheme(full, scheme string) (string, bool) {
 	// Three parts and no more: the secret is base64url and may itself

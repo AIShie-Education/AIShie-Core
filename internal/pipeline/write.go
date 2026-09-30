@@ -92,7 +92,7 @@ func (p *Pipeline) write(ctx context.Context, tx pgx.Tx, caller Caller, t tool.T
 	if err != nil {
 		return Outcome{}, err
 	}
-	a, err := p.authorize(ctx, q, t, in, actor, nil, now)
+	a, err := p.authorize(ctx, q, t, in, actor, caller.CredentialID, nil, now)
 	if err != nil {
 		return Outcome{}, err
 	}

@@ -151,6 +151,11 @@ func NewHandler(d Deps) http.Handler {
 			d.Log.Error("credential check failed", "err", err)
 			return nil, errCredentialCheck
 		}
+		if p.Service() {
+			// A site service calls its service's tools, over REST, and
+			// nothing here.
+			return nil, fmt.Errorf("%w: a site service's credential is taken at its service's REST routes alone", sdkauth.ErrInvalidToken)
+		}
 		info := &sdkauth.TokenInfo{UserID: p.ActorID.String(), Extra: map[string]any{"credential_id": p.CredentialID.String()}}
 		if p.ExpiresAt != nil {
 			info.Expiration = *p.ExpiresAt
@@ -491,6 +496,11 @@ func newServer(d Deps) *mcp.Server {
 		}})
 	seen := map[string]string{}
 	for _, t := range d.Pipeline.Registry().Exposed() {
+		if t.Gate.Service != "" {
+			// A site service's tools: no credential this door takes may
+			// call them.
+			continue
+		}
 		name := ToolName(t.Name)
 		if other, dup := seen[name]; dup {
 			panic(fmt.Sprintf("mcpapi: %s and %s are both %s over MCP", t.Name, other, name))
@@ -616,10 +626,10 @@ func handle(d Deps, t tool.Tool) mcp.ToolHandler {
 			defer done()
 		}
 		out, err := d.Pipeline.Invoke(ctx, caller, t.Name, args, key)
-		if err == nil && t.Kind == tool.Ephemeral && out.Status == domain.StatusExecuted {
-			// An ephemeral write carried out is not what the limit counts:
-			// it bounds its own rate (tool.Ephemeral). One refused counts
-			// as any call does.
+		if err == nil && t.BoundsOwnRate && out.Status == domain.StatusExecuted {
+			// An ephemeral write carried out that bounds its own rate is
+			// not what the limit counts (tool.Spec.BoundsOwnRate). One
+			// refused counts as any call does.
 			d.Calls.Refund(req.Extra.TokenInfo.UserID)
 		}
 		if err != nil {
