@@ -50,6 +50,11 @@ type Querier interface {
 	ComponentHasGrades(ctx context.Context, componentID *uuid.UUID) (bool, error)
 	// Any origin: an entered grade, or a total written down when it was a parent.
 	ComponentHasLivePostedGrades(ctx context.Context, componentID *uuid.UUID) (bool, error)
+	// What a conversation holds in files: every message's, a retracted one's
+	// included, since its files are kept. Asked under the conversation's row
+	// lock, which every message is written under, so that two messages at once
+	// are held to the limit together.
+	ConversationAttachmentBytes(ctx context.Context, conversationID uuid.UUID) (int64, error)
 	// Whether a conversation stands awaiting_answer, as the views say
 	// (tools.conversationViews): open, the opener wrote last, the opener's
 	// newest message is not retracted, and no answer of the respondent's to it
@@ -222,6 +227,10 @@ type Querier interface {
 	GetClaimedFile(ctx context.Context, arg GetClaimedFileParams) (GetClaimedFileRow, error)
 	GetComponentInCourse(ctx context.Context, arg GetComponentInCourseParams) (GetComponentInCourseRow, error)
 	GetComponentParent(ctx context.Context, id uuid.UUID) (*uuid.UUID, error)
+	// One file, with its message's author, whether the message is retracted,
+	// and where the file is kept, for conversation.attachment to hand out a URL
+	// for, once it has decided that the caller may read the message.
+	GetConversationAttachment(ctx context.Context, arg GetConversationAttachmentParams) (GetConversationAttachmentRow, error)
 	GetConversationInCourse(ctx context.Context, arg GetConversationInCourseParams) (Conversation, error)
 	// A message with what its conversation says about who may act on it.
 	GetConversationMessage(ctx context.Context, arg GetConversationMessageParams) (GetConversationMessageRow, error)
@@ -353,6 +362,13 @@ type Querier interface {
 	// among them is limited in SQL to what the caller may list: their own
 	// conversations, and those they oversee within their scope.
 	InsertConversation(ctx context.Context, arg InsertConversationParams) error
+	// Attachments (docs/schema.md §2.8, Attachments): the files a message of a
+	// conversation carries, written with it. Who may read them is who may read
+	// the message, which is decided in Go (tools.addressing.mayRead); a
+	// retracted message's files are withheld from its readers as its text is.
+	// One file of a message, written in the message's transaction and dated as
+	// the message is (conversation_attachment_with_its_message).
+	InsertConversationAttachment(ctx context.Context, arg InsertConversationAttachmentParams) error
 	// The second half, under the lock TouchConversation took: the next seq in
 	// this conversation.
 	InsertConversationMessage(ctx context.Context, arg InsertConversationMessageParams) (int32, error)
@@ -542,6 +558,9 @@ type Querier interface {
 	// A page of one bucket in one status, by id: newest first, after the last
 	// id seen, or oldest first.
 	ListMemoryBucket(ctx context.Context, arg ListMemoryBucketParams) ([]ListMemoryBucketRow, error)
+	// The files of the given messages, each message's in order. What a message
+	// view shows of them: never where they are kept.
+	ListMessageAttachments(ctx context.Context, messageIds []uuid.UUID) ([]ListMessageAttachmentsRow, error)
 	// The conversations the given seats opened, newest activity first — its
 	// last message, or its opening while it has none — after a
 	// (last_activity_at, id) cursor, both descending. The seats are the
@@ -550,13 +569,15 @@ type Querier interface {
 	ListMyConversations(ctx context.Context, arg ListMyConversationsParams) ([]ListMyConversationsRow, error)
 	// Which of these uploads, each given with the course its key names, are
 	// this deployment's and attached to nothing? The course must be one this
-	// database has. document.upload_url issues keys only under courses that
-	// exist, and a course is never deleted, so a key under any other course was
-	// written by another deployment keeping its files in the same place: it is
-	// not ours to remove, however old it is and whatever points at it there.
-	// What is left comes back in the order it was given. The orphan sweep puts
-	// a page of listed files at a time to it, and asks again about each one it
-	// removes, under the lock attaching takes.
+	// database has. document.upload_url and conversation.upload_url issue keys
+	// only under courses that exist, and a course is never deleted, so a key
+	// under any other course was written by another deployment keeping its
+	// files in the same place: it is not ours to remove, however old it is and
+	// whatever points at it there. Attached is attached to a version of a
+	// document or to a message of a conversation. What is left comes back in
+	// the order it was given. The orphan sweep puts a page of listed files at a
+	// time to it, and asks again about each one it removes, under the lock
+	// attaching takes.
 	ListOrphanUploads(ctx context.Context, arg ListOrphanUploadsParams) ([]ListOrphanUploadsRow, error)
 	// Seats that count for nothing for good (SeatOrphaned), not yet removed: a
 	// delegate's whose principal is removed or past its expiry, and seats that
@@ -985,6 +1006,8 @@ type Querier interface {
 	// ListRespondentCandidates hold the same rule: a change to one is a change
 	// to all three.
 	SiteChatOf(ctx context.Context, arg SiteChatOfParams) ([]SiteChatOfRow, error)
+	// Whether a file has been attached: to a version of a document, or to a
+	// message of a conversation.
 	StorageKeyInUse(ctx context.Context, storageKey *string) (bool, error)
 	StudentCountedAsZero(ctx context.Context, studentMemberID uuid.UUID) (bool, error)
 	// A grade entered, or proposed and not yet decided: either way, one is on its

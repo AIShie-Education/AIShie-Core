@@ -628,14 +628,17 @@ func (q *Queries) SetPublishedVersion(ctx context.Context, arg SetPublishedVersi
 }
 
 const storageKeyInUse = `-- name: StorageKeyInUse :one
-SELECT EXISTS (SELECT 1 FROM document_version WHERE storage_key = $1)
+SELECT (EXISTS (SELECT 1 FROM document_version WHERE storage_key = $1::text)
+     OR EXISTS (SELECT 1 FROM conversation_attachment WHERE storage_key = $1::text))::bool AS in_use
 `
 
+// Whether a file has been attached: to a version of a document, or to a
+// message of a conversation.
 func (q *Queries) StorageKeyInUse(ctx context.Context, storageKey *string) (bool, error) {
 	row := q.db.QueryRow(ctx, storageKeyInUse, storageKey)
-	var exists bool
-	err := row.Scan(&exists)
-	return exists, err
+	var in_use bool
+	err := row.Scan(&in_use)
+	return in_use, err
 }
 
 const updateDocumentDetails = `-- name: UpdateDocumentDetails :exec

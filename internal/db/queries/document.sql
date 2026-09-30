@@ -140,7 +140,10 @@ SELECT EXISTS (
 );
 
 -- name: StorageKeyInUse :one
-SELECT EXISTS (SELECT 1 FROM document_version WHERE storage_key = $1);
+-- Whether a file has been attached: to a version of a document, or to a
+-- message of a conversation.
+SELECT (EXISTS (SELECT 1 FROM document_version WHERE storage_key = sqlc.narg(storage_key)::text)
+     OR EXISTS (SELECT 1 FROM conversation_attachment WHERE storage_key = sqlc.narg(storage_key)::text))::bool AS in_use;
 
 -- name: LockStorageKey :exec
 -- Serialises attaching one upload. Held until the transaction ends.
