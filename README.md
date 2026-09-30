@@ -185,7 +185,14 @@ cannot do themselves.
 Configuration is environment variables only; `bin/aishie-core help` lists them.
 Files are kept under `var/blobs` by default (`BLOB_STORE=fs`). For more than
 one instance, or for production, use `BLOB_STORE=s3` with the `S3_*` settings
-and a `SIGNING_KEY` shared by every instance. With S3 an upload URL does not
+and a `SIGNING_KEY` shared by every instance. `S3_REGION` (`us-east-1` unless
+set) is the region requests are signed for and, with AWS, the one they are
+sent to, a region newer than the S3 client's own table of regions included.
+`S3_BUCKET_LOOKUP` says how a request names the bucket: `path` after the
+endpoint (`https://endpoint/bucket/key`), `dns` in the host name
+(`https://bucket.endpoint/key`, virtual-hosted style, which some services take
+alone), and `auto`, the default, in the host name for AWS, Google and Aliyun
+and after the endpoint for anything else. With S3 an upload URL does not
 limit what is PUT to it: `MAX_UPLOAD_BYTES` is checked only when the file is
 attached, which refuses a larger one. An upload that is not attached
 to a document within `PROPOSAL_TTL` plus two days is removed about an hour
@@ -202,7 +209,11 @@ message (10), each at most `ATTACHMENT_MAX_BYTES` (50 MiB, and never more than
 conversation (500 MiB). The server keeps its files under `courses/` and
 `conversations/` (with S3, `attached/courses/` and `attached/conversations/`
 as well) and leaves anything else in the directory or bucket alone, uploads
-under a course its database does not have included. Still, two deployments must not share a
+under a course its database does not have included. The files may be moved from
+the disk to a bucket by copying each to the key it has on the disk (its path
+under `BLOB_FS_ROOT`; not the `.meta` beside it, whose content type the object
+takes): Core finds what was attached where its version or message says, and an
+upload attached on the disk is not attached again. Still, two deployments must not share a
 directory or bucket: a staging copy whose database was cloned from production
 has production's courses, and each would take the files the other has attached
 since the copy for orphans, and remove them.

@@ -898,8 +898,18 @@ does not: it takes a PUT of any size the store allows, and a larger file that is
 attached stays until the sweep removes it. The token is a signed claim
 that this member of this course was given this storage key for this purpose; there is no
 table of pending uploads. Its expiry limits the upload, not the attaching: a proposal carrying
-a feedback file may be approved days later, and `unique(storage_key)` is what stops a file
-being attached twice. What limits the attaching is the sweep, which removes an upload that
+a feedback file may be approved days later, and a direct call may come after it too, after a
+slow upload or a retry. What stops a file being attached twice is that an upload is refused
+(`already_attached`) while either of its keys is any version's or message's file: the key it
+was uploaded under, and the key the store attaches it under, which with S3 is `attached/` and
+that key (an object store's upload URL can be written to again until it expires, so the file
+is moved where none reaches), and on this server's disk the same key (a file there is written
+once). Attaching takes the lock of each, in one order, and holds it until its transaction
+ends. Both are asked because files are moved from the disk to a bucket under the keys the disk
+kept them under: what the disk attached is recorded under its upload's key, which in a bucket
+is not where an upload is attached, and attaching it again there would move the file its
+version points at and delete it.
+What limits the attaching is the sweep, which removes an upload that
 nothing has attached once it is `PROPOSAL_TTL` plus two days old; and a call that would attach
 one by way of a proposal is refused once the upload is two days old, so that the proposal is
 decided while its files are there. With `PROPOSAL_TTL=0` proposals wait for ever, and neither
@@ -2308,9 +2318,13 @@ respondent's `conversation_answer` decides is who is shown its text.
   rate limit when they are carried out.
 - Removing a seat closes its open conversations, a delegate's with its principal's.
 - A message is retracted by its author, or by whoever decides actions for the opener.
+- An upload is attached once, to a version or to a message's file: attaching takes the locks
+  of the key it was uploaded under and of the key the store attaches it under, in one order,
+  and refuses it (`already_attached`) while either is any version's or message's file, so that
+  what the disk attached is not attached again once the files are moved to a bucket (§2.4).
 - A message's files (§2.8, Attachments) are uploads its author was given for a message, each
-  claimed under its storage key's lock (`already_attached`), held to how many a message carries
-  and how large each is, and the conversation to how much it holds in all, asked under its row
+  claimed so (`already_attached`), held to how many a message carries and how large each is,
+  and the conversation to how much it holds in all, asked under its row
   lock, which every message is written under, so that two messages at once are held to it
   together; a proposal naming an upload more than two days old is refused. A file is read by
   whoever reads its conversation, and withheld from them once its message is retracted; to
