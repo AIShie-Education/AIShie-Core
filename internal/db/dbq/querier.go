@@ -45,17 +45,18 @@ type Querier interface {
 	// Any origin: an entered grade, or a total written down when it was a parent.
 	ComponentHasLivePostedGrades(ctx context.Context, componentID *uuid.UUID) (bool, error)
 	// Whether a conversation stands awaiting_answer, as the views say
-	// (tools.conversationViews): open, the opener wrote last, and no answer of
-	// the respondent's to the opener's newest message waits for a decision.
-	// Asked after LockConversationForDraft, so that what that lock waited for
-	// is seen.
+	// (tools.conversationViews): open, the opener wrote last, the opener's
+	// newest message is not retracted, and no answer of the respondent's to it
+	// waits for a decision. Asked after LockConversationForDraft, so that what
+	// that lock waited for is seen.
 	ConversationAwaitsAnswer(ctx context.Context, id uuid.UUID) (bool, error)
 	// What the views show of each conversation: its two participants, whether a
-	// reply to the opener's newest message waits for a decision, that message,
-	// and when a message in it was last retracted. last_seen_at is an agent's:
-	// when it last used a token that still works. A reply waiting for a decision
-	// about an older message is not waited for: approving it can only fail,
-	// since the conversation has moved on.
+	// reply to the opener's newest message waits for a decision, that message
+	// and whether it is retracted, and when a message in it was last retracted.
+	// last_seen_at is an agent's: when it last used a token that still works. A
+	// reply waiting for a decision about an older message, or about one
+	// retracted, is not waited for: approving it can only fail, since the
+	// conversation has moved on, or nothing waits for an answer in it.
 	ConversationDetails(ctx context.Context, arg ConversationDetailsParams) ([]ConversationDetailsRow, error)
 	// The agents a person owns that are not suspended: what the limit counts.
 	CountActiveAgentsOf(ctx context.Context, ownerActorID *uuid.UUID) (int64, error)
@@ -86,7 +87,8 @@ type Querier interface {
 	CourseCodeTaken(ctx context.Context, arg CourseCodeTakenParams) (bool, error)
 	// Courses directly in each department, archived ones included.
 	CourseCountsByDept(ctx context.Context) ([]CourseCountsByDeptRow, error)
-	// The respondent's answer is posted, or proposed, or the conversation
+	// The respondent's answer is posted, or proposed, the question it answers
+	// withdrawn (the opener's newest message retracted), or the conversation
 	// closed: in the same transaction, its draft is gone.
 	DeleteDraft(ctx context.Context, conversationID uuid.UUID) error
 	// DeleteDraft for the conversations a removal of seats closed.
@@ -351,7 +353,9 @@ type Querier interface {
 	// The seq of a conversation's newest message, 0 while it has none; with at,
 	// of the newest written at or before it.
 	LastMessageSeq(ctx context.Context, arg LastMessageSeqParams) (int32, error)
-	// The opener's newest message: the one an answer is to answer.
+	// The opener's newest message: the one an answer is to answer, unless it is
+	// retracted, when nothing is. Asked under the conversation's row lock, which
+	// a retraction of the opener's message takes too.
 	LatestOpenerMessage(ctx context.Context, conversationID uuid.UUID) (LatestOpenerMessageRow, error)
 	// exclude_types leaves out whole action types: a chat's messages from a
 	// list of what one has done, say.
@@ -393,8 +397,9 @@ type Querier interface {
 	// The conversations a member may list, paged by id: those it opened, those
 	// addressed to it, and, for someone who decides actions, those whose opener
 	// is within its student scope (and its principal's, for a delegate), in SQL.
-	// state is a ConversationView state, or open; a reply waits for approval
-	// only if it answers the opener's newest message (ConversationDetails).
+	// state is a ConversationView state, or open; a conversation whose opener's
+	// newest message is retracted is answered, and a reply waits for approval
+	// only if it answers that message (ConversationDetails).
 	// respondent_member_id, when given, keeps those addressed to that seat: an
 	// agent's page, for those who oversee its conversations.
 	ListConversationIDs(ctx context.Context, arg ListConversationIDsParams) ([]uuid.UUID, error)
@@ -608,7 +613,11 @@ type Querier interface {
 	// Proposing an answer takes the conversation as writing a message does,
 	// FOR NO KEY UPDATE, so that a draft being written waits for the proposal,
 	// and finds the answer waiting for approval, or the proposal waits for the
-	// draft and deletes it (DeleteDraft).
+	// draft and deletes it (DeleteDraft). Retracting a message of the opener's
+	// takes it too, so that the retraction and an answer being posted or
+	// proposed are made one after the other, and a draft being written waits
+	// for the retraction, and finds the question withdrawn, or the retraction
+	// waits for the draft and deletes it.
 	LockConversationForAnswer(ctx context.Context, id uuid.UUID) error
 	// An answer's draft while it is written (docs/schema.md §2.8, Drafts): one
 	// row per conversation in an UNLOGGED table, written by conversation.draft,
@@ -616,11 +625,13 @@ type Querier interface {
 	// is no draft: reads leave it out, a write replaces it whatever it held, and
 	// the sweep deletes it.
 	// The conversation a draft is written in, held FOR SHARE until the write
-	// ends: writing a message (TouchConversation), closing it, and proposing an
-	// answer in it (LockConversationForAnswer) each take a lock this waits for,
-	// or that waits for it. So a draft written after the answer is posted,
-	// proposed or the conversation closed, finds it so (ConversationAwaitsAnswer,
-	// asked after this), and one written before is deleted with them.
+	// ends: writing a message (TouchConversation), closing it, proposing an
+	// answer in it and retracting a message of its opener's
+	// (LockConversationForAnswer) each take a lock this waits for, or that waits
+	// for it. So a draft written after the answer is posted or proposed, the
+	// question withdrawn or the conversation closed, finds it so
+	// (ConversationAwaitsAnswer, asked after this), and one written before is
+	// deleted with them.
 	LockConversationForDraft(ctx context.Context, arg LockConversationForDraftParams) (LockConversationForDraftRow, error)
 	// Taken before changing the tree's shape, so that two moves cannot each
 	// check for a cycle and then create one between them.

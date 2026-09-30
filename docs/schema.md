@@ -1322,12 +1322,15 @@ refusal reads `kind`, to refuse and never to grant, as the refusals of ownership
 **An answer answers the latest question, once.** It names the opener's message it answers
 (`in_reply_to_message_id`), and is refused as a conflict if the opener has written since
 (`moved_on`): a reply a slow model wrote, or one that waited for approval, is not posted under a
-question it never saw. It is refused as well once that message is answered
+question it never saw. It is refused as `moved_on` too once the opener's latest message is
+retracted, and then names no message to answer: the question is withdrawn, and nothing waits
+for an answer (below). It is refused as well once that message is answered
 (`already_answered`), and a second proposal to one message is refused while the first waits
 for a decision (`answer_pending`): so an answer that failed, or was rejected, is written again
 under a new idempotency key without any risk of two answers to one question. An answer waiting
-for approval to a message since overtaken holds nothing up: the conversation is back in the
-inbox, and approving the answer can only fail. Writing a message first updates who spoke last, `WHERE status = 'open'`, which
+for approval to a message since overtaken, or since withdrawn, holds nothing up: the
+conversation is back in the inbox, or waits for nothing, and approving the answer can only
+fail. Writing a message first updates who spoke last, `WHERE status = 'open'`, which
 takes the conversation's row lock; the check for a newer question and the insert come under
 it. So a close and a message never pass each other, and messages in one conversation are
 written one at a time: `seq` is their order, 1, 2, 3, as the lock gave it, not as any
@@ -1350,6 +1353,21 @@ retracted (`last_retracted_at`), since a retraction adds no message for a reader
 part in (`closed_reason = 'seat_removed'`), a delegate's with its principal's. A seat the
 release before 0008 removes leaves its conversations open, where nobody can write any more,
 since both participants must be live to.
+
+**A question withdrawn waits for no answer.** When the opener's latest message is retracted —
+a front end's "stop" is its opener retracting it — nothing waits for an answer in the
+conversation until the opener writes again. Its `state` is `answered`, in every view and in
+`conversation.list`'s `state` filter, closed still winning: not `awaiting_answer`, and not
+`reply_pending_approval` either, since an answer proposed to the question can never be posted,
+so no `pending_reply_action_id` is shown. The inbox leaves it out, a draft is refused
+(`conversation_not_awaiting`), and an answer to it, posted, proposed or approved, is refused
+`moved_on`, naming no message to answer. A retraction of a message of the opener's takes the
+conversation `FOR NO KEY UPDATE`, as proposing an answer does, before it writes its row, so that
+it and an answer being posted or proposed, or a draft being written, are made one after the
+other: an answer under way when the question is withdrawn is posted before the retraction, or
+refused after it, never posted after it; and withdrawing the opener's latest message deletes
+the conversation's draft in its transaction. Retracting an older message of the opener's
+changes none of this, and a new question makes the conversation wait for its answer again.
 
 **The action log holds what was written.** Each message is an action whose payload holds its
 body, so it is readable, in the action views, by anyone who holds `perm_action_decide` in the
@@ -1420,12 +1438,14 @@ over. So writes that arrive out of order undo nothing.
 It is kept in an UNLOGGED table, one row per conversation, the last write winning: no WAL, so
 nothing of it on a standby, and a crash of the server empties it, which loses nothing the next
 write does not bring back. The answer's own transaction deletes it, `conversation.answer`
-posting the answer or proposing it, and so does closing the conversation, by a participant or by
-a seat's removal. Proposing an answer takes the conversation `FOR NO KEY UPDATE`, as writing a
-message does, and a draft's write takes it `FOR SHARE` before it asks whether the conversation
-still waits: so a draft written while the answer is posted or proposed, or the conversation
-closed, waits for it and is refused, and the answer, or the close, made while a draft is written
-waits for the draft and deletes it. A draft nobody has written for 120 seconds is none: reads
+posting the answer or proposing it, and so do withdrawing the question (`conversation.retract`
+of the opener's latest message) and closing the conversation, by a participant or by a seat's
+removal. Proposing an answer, and retracting a message of the opener's, take the conversation
+`FOR NO KEY UPDATE`, as writing a message does, and a draft's write takes it `FOR SHARE` before
+it asks whether the conversation still waits: so a draft written while the answer is posted or
+proposed, the question withdrawn, or the conversation closed, waits for it and is refused, and
+the answer, the withdrawal, or the close, made while a draft is written waits for the draft and
+deletes it. A draft nobody has written for 120 seconds is none: reads
 leave it out, and the sweep deletes it, recording nothing, as it deletes a dead session. A
 conversation's draft is written at most 10 times a second, in each instance (`rate_limited`,
 reason `draft_rate`, with `retry_after_seconds`), counted once the caller is known to be its
@@ -2030,19 +2050,23 @@ respondent's `conversation_answer` decides is who is shown its text.
   conversation is neither opened with it nor asked in (`agent_answers_elsewhere`), when
   proposed and again when carried out; what it was asked stays readable and answerable, and a
   person as a respondent is never refused for it.
-- An answer answers the opener's latest message, and only while nothing answers it yet,
-  checked under the conversation's row lock, which writing a message takes first (`WHERE
-  status = 'open'`), so that a close and a message never pass each other; a proposed answer is
-  checked again when approved, and one proposal to a message waits at a time.
+- An answer answers the opener's latest message, and only while nothing answers it yet and
+  it is not retracted, checked under the conversation's row lock, which writing a message takes
+  first (`WHERE status = 'open'`), so that a close and a message never pass each other, and
+  which a retraction of the opener's message takes too, so that the question's withdrawal and
+  its answer never pass each other; a proposed answer is checked again when approved, and one
+  proposal to a message waits at a time. A conversation whose opener's latest message is
+  retracted waits for no answer: it is `answered`, unless closed.
 - A call writing in a conversation takes its caller's seat, then the other participant's
   and its principal's, then the conversation: a removal, which holds the seat and then
   closes its conversations, waits for it or is waited for.
 - An answer's draft (§2.8) is written by the conversation's respondent alone, while the
   conversation waits for its answer and its opener may still address the respondent, asked
-  under the conversation's lock `FOR SHARE`; posting or proposing the answer, which takes that
-  lock `FOR NO KEY UPDATE` first, and closing the conversation delete it in their own
-  transaction. A write not newer than the draft kept is passed over; one nobody has written
-  for 120 seconds is read as none, replaced by any write and swept.
+  under the conversation's lock `FOR SHARE`; posting or proposing the answer, or withdrawing
+  its question (retracting the opener's latest message), each of which takes that lock `FOR NO
+  KEY UPDATE` first, and closing the conversation delete it in their own transaction. A write
+  not newer than the draft kept is passed over; one nobody has written for 120 seconds is read
+  as none, replaced by any write and swept.
 - A draft's text is shown only where the answer would be: to whoever reads the conversation
   while the respondent answers without approval (`autonomous`); otherwise to the respondent
   and to whoever would decide the answer, anyone else being shown its steps and

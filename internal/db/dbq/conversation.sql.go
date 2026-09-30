@@ -119,7 +119,8 @@ SELECT c.id, c.course_id, c.title, c.status, c.closed_reason, c.created_at, c.la
        r.status AS respondent_status, r.expires_at AS respondent_expires_at,
        r.principal_member_id AS respondent_principal_member_id, own.display_name AS respondent_owner_name,
        seen.last_used_at AS respondent_last_seen_at, pending.id AS pending_reply_action_id,
-       latest.id AS latest_opener_message_id, retracted.created_at AS last_retracted_at
+       latest.id AS latest_opener_message_id, (withdrawn.message_id IS NOT NULL)::bool AS latest_opener_message_retracted,
+       retracted.created_at AS last_retracted_at
 FROM conversation c
 JOIN course_member o ON o.id = c.opener_member_id
 JOIN actor oa ON oa.id = o.actor_id
@@ -135,12 +136,13 @@ LEFT JOIN conversation_message latest ON latest.id = (
     SELECT m.id FROM conversation_message m
     WHERE m.conversation_id = c.id AND m.author_member_id = c.opener_member_id
     ORDER BY m.seq DESC LIMIT 1)
+LEFT JOIN conversation_message_retraction withdrawn ON withdrawn.message_id = latest.id
 LEFT JOIN conversation_message_retraction retracted ON retracted.message_id = (
     SELECT x.message_id FROM conversation_message_retraction x
     JOIN conversation_message xm ON xm.id = x.message_id
     WHERE xm.conversation_id = c.id
     ORDER BY x.created_at DESC LIMIT 1)
-LEFT JOIN action pending ON pending.id = (
+LEFT JOIN action pending ON withdrawn.message_id IS NULL AND pending.id = (
     SELECT a.id FROM action a
     WHERE a.target_type = 'conversation' AND a.target_id = c.id AND a.action_type = 'conversation.answer'
       AND a.status = 'proposed' AND a.member_id = c.respondent_member_id
@@ -156,38 +158,40 @@ type ConversationDetailsParams struct {
 }
 
 type ConversationDetailsRow struct {
-	ID                          uuid.UUID
-	CourseID                    uuid.UUID
-	Title                       *string
-	Status                      string
-	ClosedReason                *string
-	CreatedAt                   time.Time
-	LastMessageAt               *time.Time
-	LastAuthorMemberID          *uuid.UUID
-	OpenerMemberID              uuid.UUID
-	OpenerName                  string
-	OpenerKind                  string
-	RespondentMemberID          uuid.UUID
-	RespondentActorID           uuid.UUID
-	RespondentName              string
-	RespondentKind              string
-	RespondentRole              string
-	RespondentStatus            string
-	RespondentExpiresAt         *time.Time
-	RespondentPrincipalMemberID *uuid.UUID
-	RespondentOwnerName         *string
-	RespondentLastSeenAt        *time.Time
-	PendingReplyActionID        *uuid.UUID
-	LatestOpenerMessageID       *uuid.UUID
-	LastRetractedAt             *time.Time
+	ID                           uuid.UUID
+	CourseID                     uuid.UUID
+	Title                        *string
+	Status                       string
+	ClosedReason                 *string
+	CreatedAt                    time.Time
+	LastMessageAt                *time.Time
+	LastAuthorMemberID           *uuid.UUID
+	OpenerMemberID               uuid.UUID
+	OpenerName                   string
+	OpenerKind                   string
+	RespondentMemberID           uuid.UUID
+	RespondentActorID            uuid.UUID
+	RespondentName               string
+	RespondentKind               string
+	RespondentRole               string
+	RespondentStatus             string
+	RespondentExpiresAt          *time.Time
+	RespondentPrincipalMemberID  *uuid.UUID
+	RespondentOwnerName          *string
+	RespondentLastSeenAt         *time.Time
+	PendingReplyActionID         *uuid.UUID
+	LatestOpenerMessageID        *uuid.UUID
+	LatestOpenerMessageRetracted bool
+	LastRetractedAt              *time.Time
 }
 
 // What the views show of each conversation: its two participants, whether a
-// reply to the opener's newest message waits for a decision, that message,
-// and when a message in it was last retracted. last_seen_at is an agent's:
-// when it last used a token that still works. A reply waiting for a decision
-// about an older message is not waited for: approving it can only fail,
-// since the conversation has moved on.
+// reply to the opener's newest message waits for a decision, that message
+// and whether it is retracted, and when a message in it was last retracted.
+// last_seen_at is an agent's: when it last used a token that still works. A
+// reply waiting for a decision about an older message, or about one
+// retracted, is not waited for: approving it can only fail, since the
+// conversation has moved on, or nothing waits for an answer in it.
 func (q *Queries) ConversationDetails(ctx context.Context, arg ConversationDetailsParams) ([]ConversationDetailsRow, error) {
 	rows, err := q.db.Query(ctx, conversationDetails, arg.Now, arg.Ids)
 	if err != nil {
@@ -221,6 +225,7 @@ func (q *Queries) ConversationDetails(ctx context.Context, arg ConversationDetai
 			&i.RespondentLastSeenAt,
 			&i.PendingReplyActionID,
 			&i.LatestOpenerMessageID,
+			&i.LatestOpenerMessageRetracted,
 			&i.LastRetractedAt,
 		); err != nil {
 			return nil, err
@@ -418,7 +423,8 @@ func (q *Queries) LastMessageSeq(ctx context.Context, arg LastMessageSeqParams) 
 }
 
 const latestOpenerMessage = `-- name: LatestOpenerMessage :one
-SELECT m.id, m.seq
+SELECT m.id, m.seq,
+       EXISTS (SELECT 1 FROM conversation_message_retraction x WHERE x.message_id = m.id)::bool AS retracted
 FROM conversation_message m
 JOIN conversation c ON c.id = m.conversation_id
 WHERE m.conversation_id = $1 AND m.author_member_id = c.opener_member_id
@@ -427,15 +433,18 @@ LIMIT 1
 `
 
 type LatestOpenerMessageRow struct {
-	ID  uuid.UUID
-	Seq int32
+	ID        uuid.UUID
+	Seq       int32
+	Retracted bool
 }
 
-// The opener's newest message: the one an answer is to answer.
+// The opener's newest message: the one an answer is to answer, unless it is
+// retracted, when nothing is. Asked under the conversation's row lock, which
+// a retraction of the opener's message takes too.
 func (q *Queries) LatestOpenerMessage(ctx context.Context, conversationID uuid.UUID) (LatestOpenerMessageRow, error) {
 	row := q.db.QueryRow(ctx, latestOpenerMessage, conversationID)
 	var i LatestOpenerMessageRow
-	err := row.Scan(&i.ID, &i.Seq)
+	err := row.Scan(&i.ID, &i.Seq, &i.Retracted)
 	return i, err
 }
 
@@ -478,6 +487,10 @@ WHERE c.course_id = $1 AND c.id > $2
      OR ($10::text = 'open' AND c.status = 'open')
      OR $10::text = (CASE
             WHEN c.status = 'closed' THEN 'closed'
+            WHEN (SELECT EXISTS (SELECT 1 FROM conversation_message_retraction x WHERE x.message_id = m.id)
+                  FROM conversation_message m
+                  WHERE m.conversation_id = c.id AND m.author_member_id = c.opener_member_id
+                  ORDER BY m.seq DESC LIMIT 1) THEN 'answered'
             WHEN EXISTS (SELECT 1 FROM action a
                           WHERE a.target_type = 'conversation' AND a.target_id = c.id AND a.action_type = 'conversation.answer'
                             AND a.status = 'proposed' AND a.member_id = c.respondent_member_id
@@ -510,8 +523,9 @@ type ListConversationIDsParams struct {
 // The conversations a member may list, paged by id: those it opened, those
 // addressed to it, and, for someone who decides actions, those whose opener
 // is within its student scope (and its principal's, for a delegate), in SQL.
-// state is a ConversationView state, or open; a reply waits for approval
-// only if it answers the opener's newest message (ConversationDetails).
+// state is a ConversationView state, or open; a conversation whose opener's
+// newest message is retracted is answered, and a reply waits for approval
+// only if it answers that message (ConversationDetails).
 // respondent_member_id, when given, keeps those addressed to that seat: an
 // agent's page, for those who oversee its conversations.
 func (q *Queries) ListConversationIDs(ctx context.Context, arg ListConversationIDsParams) ([]uuid.UUID, error) {

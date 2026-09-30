@@ -14,23 +14,25 @@ import (
 
 const conversationAwaitsAnswer = `-- name: ConversationAwaitsAnswer :one
 SELECT (c.status = 'open' AND c.last_author_member_id = c.opener_member_id
+        AND NOT EXISTS (SELECT 1 FROM conversation_message_retraction x WHERE x.message_id = latest.id)
         AND NOT EXISTS (
             SELECT 1 FROM action a
             WHERE a.target_type = 'conversation' AND a.target_id = c.id AND a.action_type = 'conversation.answer'
               AND a.status = 'proposed' AND a.member_id = c.respondent_member_id
-              AND a.payload->>'in_reply_to_message_id' = (
-                  SELECT m.id::text FROM conversation_message m
-                  WHERE m.conversation_id = c.id AND m.author_member_id = c.opener_member_id
-                  ORDER BY m.seq DESC LIMIT 1)))::bool AS awaiting
+              AND a.payload->>'in_reply_to_message_id' = latest.id::text))::bool AS awaiting
 FROM conversation c
+LEFT JOIN LATERAL (
+    SELECT m.id FROM conversation_message m
+    WHERE m.conversation_id = c.id AND m.author_member_id = c.opener_member_id
+    ORDER BY m.seq DESC LIMIT 1) latest ON true
 WHERE c.id = $1
 `
 
 // Whether a conversation stands awaiting_answer, as the views say
-// (tools.conversationViews): open, the opener wrote last, and no answer of
-// the respondent's to the opener's newest message waits for a decision.
-// Asked after LockConversationForDraft, so that what that lock waited for
-// is seen.
+// (tools.conversationViews): open, the opener wrote last, the opener's
+// newest message is not retracted, and no answer of the respondent's to it
+// waits for a decision. Asked after LockConversationForDraft, so that what
+// that lock waited for is seen.
 func (q *Queries) ConversationAwaitsAnswer(ctx context.Context, id uuid.UUID) (bool, error) {
 	row := q.db.QueryRow(ctx, conversationAwaitsAnswer, id)
 	var awaiting bool
@@ -42,7 +44,8 @@ const deleteDraft = `-- name: DeleteDraft :exec
 DELETE FROM conversation_draft WHERE conversation_id = $1
 `
 
-// The respondent's answer is posted, or proposed, or the conversation
+// The respondent's answer is posted, or proposed, the question it answers
+// withdrawn (the opener's newest message retracted), or the conversation
 // closed: in the same transaction, its draft is gone.
 func (q *Queries) DeleteDraft(ctx context.Context, conversationID uuid.UUID) error {
 	_, err := q.db.Exec(ctx, deleteDraft, conversationID)
@@ -134,7 +137,11 @@ SELECT 1 FROM conversation WHERE id = $1 FOR NO KEY UPDATE
 // Proposing an answer takes the conversation as writing a message does,
 // FOR NO KEY UPDATE, so that a draft being written waits for the proposal,
 // and finds the answer waiting for approval, or the proposal waits for the
-// draft and deletes it (DeleteDraft).
+// draft and deletes it (DeleteDraft). Retracting a message of the opener's
+// takes it too, so that the retraction and an answer being posted or
+// proposed are made one after the other, and a draft being written waits
+// for the retraction, and finds the question withdrawn, or the retraction
+// waits for the draft and deletes it.
 func (q *Queries) LockConversationForAnswer(ctx context.Context, id uuid.UUID) error {
 	_, err := q.db.Exec(ctx, lockConversationForAnswer, id)
 	return err
@@ -166,11 +173,13 @@ type LockConversationForDraftRow struct {
 // is no draft: reads leave it out, a write replaces it whatever it held, and
 // the sweep deletes it.
 // The conversation a draft is written in, held FOR SHARE until the write
-// ends: writing a message (TouchConversation), closing it, and proposing an
-// answer in it (LockConversationForAnswer) each take a lock this waits for,
-// or that waits for it. So a draft written after the answer is posted,
-// proposed or the conversation closed, finds it so (ConversationAwaitsAnswer,
-// asked after this), and one written before is deleted with them.
+// ends: writing a message (TouchConversation), closing it, proposing an
+// answer in it and retracting a message of its opener's
+// (LockConversationForAnswer) each take a lock this waits for, or that waits
+// for it. So a draft written after the answer is posted or proposed, the
+// question withdrawn or the conversation closed, finds it so
+// (ConversationAwaitsAnswer, asked after this), and one written before is
+// deleted with them.
 func (q *Queries) LockConversationForDraft(ctx context.Context, arg LockConversationForDraftParams) (LockConversationForDraftRow, error) {
 	row := q.db.QueryRow(ctx, lockConversationForDraft, arg.ID, arg.CourseID)
 	var i LockConversationForDraftRow

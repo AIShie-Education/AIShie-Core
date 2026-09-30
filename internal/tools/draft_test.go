@@ -547,9 +547,10 @@ func TestAWaitingReaderHearsTheDraft(t *testing.T) {
 }
 
 // A draft and what takes its place never pass each other: a draft written
-// while the answer is being posted or proposed, or the conversation closed,
-// waits for it and finds nothing to wait for; the answer, or the close,
-// made while a draft is being written waits for it and deletes it.
+// while the answer is being posted or proposed, the question withdrawn, or
+// the conversation closed, waits for it and finds nothing to wait for; the
+// answer, the withdrawal, or the close, made while a draft is being written
+// waits for it and deletes it.
 func TestADraftAndItsAnswerNeverPassEachOther(t *testing.T) {
 	b := unbounded(t)
 	ctx := context.Background()
@@ -585,6 +586,46 @@ func TestADraftAndItsAnswerNeverPassEachOther(t *testing.T) {
 	}
 	if n := b.drafts(t, conv); n != 0 {
 		t.Fatal("a draft outlived the answer it waited for")
+	}
+
+	// The opener's question being withdrawn: the retraction holds the
+	// conversation as LockConversationForAnswer does and has written its
+	// row; the draft under way waits, and is refused once it is withdrawn.
+	withdrawing, q := b.open(t, b.yuki, b.tutorM, "Never mind")
+	var action uuid.UUID
+	if err := b.Pool.QueryRow(ctx, `SELECT created_by_action_id FROM conversation_message WHERE id = $1`, q).Scan(&action); err != nil {
+		t.Fatal(err)
+	}
+	wtx, err := b.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = wtx.Rollback(ctx) }()
+	if _, err := wtx.Exec(ctx, `SELECT 1 FROM conversation WHERE id = $1 FOR NO KEY UPDATE`, withdrawing); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := wtx.Exec(ctx, `INSERT INTO conversation_message_retraction (message_id, course_id, retracted_by_member_id, created_by_action_id)
+		VALUES ($1, $2, $3, $4)`, q, b.course, b.yukiM, action); err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		_, err := b.Call(b.tutor, "conversation.draft", draftArgs(b, withdrawing, "a1", 1, m{"text": "Never"}), "")
+		refused <- err
+	}()
+	b.blocked(t, 1, nil)
+	if err := wtx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-refused:
+		if e, ok := apperr.As(err); !ok || e.Details["reason"] != "conversation_not_awaiting" {
+			t.Fatalf("a draft written while its question was withdrawn: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the draft never came back")
+	}
+	if n := b.drafts(t, withdrawing); n != 0 {
+		t.Fatal("a draft outlived the question it waited for")
 	}
 
 	// A draft being written holds the conversation as LockConversationForDraft
@@ -635,6 +676,15 @@ func TestADraftAndItsAnswerNeverPassEachOther(t *testing.T) {
 		during(t, conv, func(done chan pipeline.Outcome) {
 			b.start(t, done, b.tutor, "conversation.answer", answerArgs(b, conv, q, "Chapter two."))
 		})
+	})
+	t.Run("withdrawn", func(t *testing.T) {
+		conv, q := b.open(t, b.yuki, b.tutorM, "Oops, not this")
+		during(t, conv, func(done chan pipeline.Outcome) {
+			b.start(t, done, b.yuki, "conversation.retract", m{"course_id": b.course, "message_id": q})
+		})
+		if got := b.conversation(t, b.yuki, conv); got.State != tools.StateAnswered || got.Draft != nil {
+			t.Fatalf("the conversation, its question withdrawn: %+v", got)
+		}
 	})
 	t.Run("closed", func(t *testing.T) {
 		during(t, conv, func(done chan pipeline.Outcome) {
