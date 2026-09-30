@@ -418,7 +418,11 @@ Rules:
    bytes]`, keeping `status` and `error` whole.
 6. Files: the runtime fetches `download_url` itself and passes a file part
    (Anthropic `document`, OpenAI `input_file`, Gemini `inlineData`), or
-   extracted text. Cap the size; never give the model the URL.
+   extracted text. Cap the size; never give the model the URL. A version whose
+   text version is done (`version.text`, and `document_text` for one longer
+   than a part; schema.md §2.4) is given to every model first, saying whether
+   a model transcribed it or staff wrote it; the file stays there for a model
+   that checks a page against it.
 
 ### 3.2 Declaring tools, calls and results
 
