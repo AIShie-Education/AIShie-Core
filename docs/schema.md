@@ -53,7 +53,7 @@ the role, the permissions and the scope. There is no separate grant table and no
 authorization is one lookup on `(course_id, actor_id)`, which for an agent a person owns
 brings its owner's seat with it, and no further (§2.2, Delegates).
 
-Outside the course: `term`, `department`, `actor`, `credential`, `permission_preset`. The platform level has only
+Outside the course: `term`, `department`, `actor`, `credential`, `permission_preset`, `sso_provider`. The platform level has only
 two roles (`root`, `admin`) and a handful of operations — creating courses, registering actors,
 seating the first instructor. A site service (§2.1, Services) is outside every course too, and
 does one thing across all of them: the transcription service writes documents' text versions.
@@ -97,6 +97,18 @@ course(id, dept_id→department, term_id→term, code, section = '', title, desc
        status [draft|active|archived], copied_from_course_id null→course,
        created_by_actor_id→actor, created_at,
        unique(term_id, code, section))
+
+sso_provider(id text, display_name, issuer, client_id,             -- keyed by its name (below)
+             client_secret_sealed, client_secret_hint,
+             scopes text[] = {openid,profile,email}, subject_claim = 'sub',
+             email_claim null, allowed_email_domains text[] = {}, link_by_email = false,
+             enabled = false, position = 0, version = 1,
+             created_by_actor_id→actor, created_at, updated_by_actor_id→actor, updated_at)
+    check: id is 1..64 of [a-z0-9-], beginning and ending with a letter or digit;
+           client_secret_sealed is a v1 envelope, never the secret; the hint an ellipsis and
+           four printable ASCII characters at most; openid ∈ scopes;
+           link_by_email ⇒ email_claim set and allowed_email_domains not empty; version ≥ 1
+    trigger: the id never changes (sso_provider_id_fixed)
 ```
 
 `actor.kind` is for display and audit. **Nothing branches on it.** What an actor may do is
@@ -271,6 +283,85 @@ An administrator lists an actor's credentials with `actor.list_credentials` and 
 its agent. Both are held to the rule for acting on an actor: only root reaches the credentials
 of another holder of a platform role, and nobody the system actor's. An agent's owner lists and
 revokes its tokens the same way (`agent.list_credentials`, `agent.revoke_credential`).
+
+**Single sign-on.** A person signs in through an OpenID Connect identity provider as an
+identity linked to their account: a `credential` of kind `sso`, whose `provider` names the
+provider and `subject` the account there (`actor.link_sso`). Providers come from two places.
+One is the server's operator's, set in its environment (`OIDC_ISSUER`, `OIDC_CLIENT_ID`,
+`OIDC_CLIENT_SECRET`, `OIDC_PROVIDER_NAME` — `polyu-adfs` unless set —, `OIDC_SUBJECT_CLAIM`,
+`OIDC_SCOPES`, `OIDC_DISPLAY_NAME`), discovered when the server starts, which does not start if
+it cannot reach it. The others are the site's, which its administrators — root and the
+platform's, never a department's, since a provider signs people in to the whole site — set up
+from the front end, each a row of `sso_provider` (migration 0022). The operator's is listed with
+them, read-only (`source: operator`): the tools refuse to change it (`set_by_operator`) and
+refuse its id to a new one (`id_taken`); and a row of the site's with its id, from before the
+operator set it, is offered nowhere (`status: id_taken`), the operator's winning.
+
+A site's provider is keyed by its id, which is the name `credential.provider` records, as
+`event` is keyed otherwise than by a UUID: it is what `actor.link_sso` names, what a sign-in
+starts through (`/v1/auth/sso/start/{id}`), and what the action log's payloads name. It never
+changes (trigger `sso_provider_id_fixed`): renamed, a provider would leave the identities
+linked at it behind. No foreign key joins `credential.provider` to it: the operator's provider
+has no row, an identity may be linked before its provider is set up, and one linked at a
+provider since removed is kept, revoked. The row keeps the name on the sign-in button, the
+issuer, the client id, the client secret sealed, the scopes a sign-in asks for (openid always
+among them), the claim an account is known by, whether the provider is switched on and its place
+on the sign-in page; `version` counts its changes, and who last changed it and when are kept
+beside it, the action log keeping every change.
+
+The client secret is the one secret Core keeps and must read back: it is sent to the provider at
+every sign-in. It is sealed (package `secrets`): AES-256-GCM under the server's `SECRETS_KEY`,
+32 random bytes, in an envelope that names its version (`v1`) and the key that sealed it (the
+first 8 bytes of SHA-256 over a label and the key, in hex), bound to the provider's id and to
+what it is (`sso_provider.client_secret`), so that it opens nowhere else. A CHECK holds the
+column to the envelope's shape, so that a secret is never written there in the clear;
+`client_secret_hint` is what may be shown of it, an ellipsis and its last four characters, or
+the ellipsis alone for a secret shorter than 20. The secret is in no answer, action, event or
+log line: the tools that take it name it a secret (`tool.Spec.SecretIn`), so that the recorded
+payload leaves it out and its hash takes a keyed digest of it. `SECRETS_KEY_PREVIOUS` holds older
+keys, which open what they sealed and seal nothing: a rotation sets the new key, keeps the old
+one there, runs `aishie-core secrets rewrap` — which seals every secret again under the new key,
+writing only over what it read, and says which open with no key it holds — and then drops the
+old one. Without `SECRETS_KEY` no provider is added and no secret given
+(`secrets_key_missing`), and the operator's provider signs people in as before; a provider whose
+secret opens with no key the server holds is not offered (`status: secret_unavailable`), nor
+switched on, until its secret is given again. The configuration refuses `SECRETS_KEY` without
+`SIGNING_KEY`, which signs a sign-in's state, and without which a sign-in could not finish on
+another instance or after a restart.
+
+The tools, each gated to root and the platform's administrators (`platform_role_required`
+otherwise): `sso.list` and `sso.get` read the providers, the operator's first, with their status
+(`offered`, `disabled`, `id_taken`, `secret_unavailable`), how many accounts are linked at each
+now, their version, and the redirect URI to register with each, which is the same for every
+provider: `<PUBLIC_URL>/v1/auth/sso/callback`. `sso.create` sets one up, switched off unless
+told otherwise; `sso.update` changes what it is given over the version its caller read
+(`version`, or `If-Match` over REST; `version_mismatch` with `current_version` otherwise), the
+secret only when a new one is given; `sso.set_enabled` switches one on or off, unlinking nobody;
+`sso.delete` removes one, refused while accounts are linked at it (`provider_in_use`, with
+`linked_accounts`) unless forced, when their identities are revoked with it, for the record: an
+identity is never linked to another account (`unique(provider, subject)`), and linking it again
+to the same one revives it, whoever sets the provider up again under the same id. Each is an
+action. `sso.test` is a read: it fetches an issuer's discovery document and key set, following
+no redirect and sending no secret, and says what it found and what would stop a sign-in.
+Changing a provider's issuer keeps the identities linked at it: whoever the new issuer vouches
+for under the same subject signs in as them.
+
+A sign-in reads the site's providers from the database, each time, so that a change is in force
+at the next sign-in on every instance; what it reads of a provider over the network, its
+discovery document and keys, each instance keeps until the provider's settings change or an
+hour has passed. `GET /v1/auth/methods` lists the providers offered (README, Single sign-on).
+Signing in creates nobody (§6). Someone the provider vouches for is who their identity is
+linked to, if it is linked, their actor is active, and a person; otherwise nobody, one refusal
+for all of it. A provider may also link by email (`link_by_email`, off by default): someone it
+vouches for whose identity has never been linked to anyone is linked, at that sign-in, to the
+account whose email is the one the provider vouches for (its `email_claim`, `email` unless set,
+with `email_verified` true), when that email is of one of `allowed_email_domains` exactly (a
+subdomain is a domain of its own), the account is an active person's whose email someone here
+vouches for (`email_verified`), holds no platform role, and has no live identity at the provider
+yet. The link is `sso.link_by_email`, which neither adapter offers: the sign-in makes it through
+the pipeline as the person, who is authenticated by the provider, and it asks every one of those
+questions again in its transaction and is recorded as theirs. An identity once linked and
+unlinked is not linked again by its email: unlinking it was somebody's decision.
 
 **Services.** A site service is a program of the site's that Core gives an identity for one
 thing, and nothing else. There is one: `document_text`, the agent runtime's transcriber, which
@@ -2059,6 +2150,7 @@ respondent's `conversation_answer` decides is who is shown its text.
 | An override of a total is on a computed grade, not negative, and says who, when and why | CHECKs on `grade` |
 | A submitted submission never changes | trigger |
 | Owner columns match `document.kind`; a version has content; SSO rows carry an identity | CHECKs |
+| An identity provider's client secret is kept sealed, never in the clear, and its hint is four characters of it at most; its id never changes | CHECKs `sso_provider_secret_sealed`, `sso_provider_secret_hint_valid`, trigger `sso_provider_id_fixed` |
 | Emails are unique regardless of case | unique index on `lower(email)` |
 | Login IDs are unique regardless of case; 1..64 of `[0-9A-Za-z._-]`, so never an `@` or a space; only a person has one | unique index `actor_login_id_key` on `lower(login_id)`, CHECKs `actor_login_id_valid`, `actor_login_id_is_a_persons` |
 | Only a person's login ID goes unverified, and only a login ID there is | CHECK `actor_unverified_login_id_is_a_persons` |
@@ -2104,6 +2196,11 @@ respondent's `conversation_answer` decides is who is shown its text.
 **Enforced by the application.** Each is a place a bug can hide, and each needs a test.
 
 - `authorize()` itself, including the scope checks in steps 4–5.
+- An identity provider's client secret is sealed before it is written, and in no answer, action
+  or log line; a sign-in goes through the provider its state names, as it is now, and one
+  switched off signs nobody in; the operator's provider wins over a site's of its name; linking
+  by email asks every one of its questions again in the link's transaction (§2.1, Single
+  sign-on).
 - The *transitions* between `action.status` values. The database checks that a row at rest is
   consistent with its `authz_result`; the order things happen in is application logic.
 - Idempotent replay: same key and same `payload_hash` returns the stored result, same key and
@@ -2412,7 +2509,11 @@ garbage in the grades, full record in the log.
   them through its own pipeline (agent-runtime.md), and a front end shows them to download.
 - **A message of files alone.** A message has text (1 to 20,000 characters); its files come
   with it.
-- **JIT provisioning** on first SSO login.
+- **JIT provisioning** on first SSO login: signing in creates nobody. A provider that links by
+  email (§2.1, Single sign-on) links an identity to an account that is there already, and to no
+  other.
+- **Other kinds of identity provider**: SAML, CAS, or OAuth without OpenID Connect. A provider is
+  one OpenID Connect issuer with a confidential client (code flow, client secret).
 - **Organisation hierarchy** above `department`; cross-course administrative roles beyond
   `platform_role`.
 - **Embeddings and semantic search** of memory (§2.9): full text and recency in v1.

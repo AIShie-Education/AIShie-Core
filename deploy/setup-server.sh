@@ -7,7 +7,7 @@
 # The environment, staging or production, names the GitHub settings it prints.
 #
 # It installs Docker, PostgreSQL and Caddy; creates the database, the env file
-# with a generated database password and SIGNING_KEY, the data and backup
+# with a generated database password, SIGNING_KEY and SECRETS_KEY, the data and backup
 # directories and a nightly backup; installs aishie-deploy and aishie-core;
 # points Caddy at the server for HTTPS; opens ports 80 and 443 in ufw when ufw
 # is on; and makes an SSH user, deploy, that can do one thing: run
@@ -15,7 +15,8 @@
 #
 # Run again, it installs the scripts in this directory over the old ones and
 # leaves everything else as it is: the env file, the database, Caddy's
-# configuration and deploy's key. That is how a newer aishie-deploy reaches
+# configuration and deploy's key. An env file without SECRETS_KEY, from
+# before it, is given one, and nothing else in it changes. That is how a newer aishie-deploy reaches
 # the server. On a server set up before the rename to AIshie, it also puts
 # aishie-deploy and aishie-core in the place of the scripts' old names, which
 # it removes (docs/deploying.md, A server set up before the rename).
@@ -76,7 +77,7 @@ again:
 Otherwise give the role a new password (openssl rand -hex 24), with psql:
 ALTER ROLE $NAME PASSWORD '...'; and write $ENV_FILE, mode 600, with the
 lines this script writes: DATABASE_URL, HTTP_ADDR, PUBLIC_URL, TRUSTED_PROXIES,
-SIGNING_KEY, BLOB_STORE and BLOB_FS_ROOT (see the script).
+SIGNING_KEY, SECRETS_KEY, BLOB_STORE and BLOB_FS_ROOT (see the script).
 MSG
   exit 1
 else
@@ -89,6 +90,7 @@ HTTP_ADDR=127.0.0.1:8080
 PUBLIC_URL=https://$HOST
 TRUSTED_PROXIES=127.0.0.1/32
 SIGNING_KEY=$(openssl rand -hex 32)
+SECRETS_KEY=$(openssl rand -base64 32)
 BLOB_STORE=fs
 BLOB_FS_ROOT=/data/blobs
 ENVEOF
@@ -97,7 +99,15 @@ ENVEOF
   printf "SET log_min_error_statement = panic;\nCREATE ROLE %s LOGIN PASSWORD '%s';\nCREATE DATABASE %s OWNER %s;\n" "$NAME" "$pw" "$NAME" "$NAME" |
     runuser -u postgres -- psql -q -v ON_ERROR_STOP=1
   mv "$ENV_FILE.new" "$ENV_FILE"
-  echo "wrote $ENV_FILE (keep a copy somewhere safe: SIGNING_KEY must not change)"
+  echo "wrote $ENV_FILE (keep a copy somewhere safe: SIGNING_KEY and SECRETS_KEY must not change)"
+fi
+# SECRETS_KEY seals the client secrets of the identity providers the site's
+# administrators set up (README, Single sign-on). An env file from before it
+# is given one; one there is kept, since what it sealed opens with nothing
+# else. The key goes from openssl into the file, and is printed nowhere.
+if ! grep -q '^SECRETS_KEY=' "$ENV_FILE"; then
+  printf 'SECRETS_KEY=%s\n' "$(openssl rand -base64 32)" >> "$ENV_FILE"
+  echo "added SECRETS_KEY to $ENV_FILE (keep a copy with it: it must not change)"
 fi
 
 say "Directories, scripts and the nightly backup"
