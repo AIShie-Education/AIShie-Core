@@ -27,6 +27,9 @@ type Deps struct {
 	Uploads *blob.Signer
 	// MaxUploadBytes bounds one file.
 	MaxUploadBytes int64
+	// Attachments bounds the files messages of conversations carry; a zero
+	// limit is its default.
+	Attachments AttachmentLimits
 	// DisableAgentSelfService stops people registering agents of their own
 	// (agent.create): administrators still do, with actor.register. What is
 	// already registered is left as it is. The zero value, self-service on,
@@ -53,6 +56,7 @@ func RegisterAll(reg *tool.Registry, d Deps) {
 	if d.MaxUploadBytes <= 0 {
 		d.MaxUploadBytes = DefaultMaxUploadBytes
 	}
+	d.Attachments = d.Attachments.withDefaults(d.MaxUploadBytes)
 	if d.MaxAgentsPerOwner <= 0 {
 		d.MaxAgentsPerOwner = DefaultMaxAgentsPerOwner
 	}

@@ -159,6 +159,18 @@ func TestS3Store(t *testing.T) {
 	if cd := res.Header.Get("Content-Disposition"); res.StatusCode != http.StatusOK || !strings.HasPrefix(cd, "attachment") {
 		t.Fatalf("a page uploaded as %s: %d, Content-Disposition %q, want an attachment", res.Header.Get("Content-Type"), res.StatusCode, cd)
 	}
+	// A message's file downloads under its name, as the disk store serves it.
+	namedURL, err := s.PresignDownload(ctx, key, "作業 3.pdf", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res, err = http.Get(namedURL); err != nil {
+		t.Fatal(err)
+	}
+	res.Body.Close()
+	if cd := res.Header.Get("Content-Disposition"); res.StatusCode != http.StatusOK || cd != Disposition("作業 3.pdf") {
+		t.Fatalf("a named download: %d, Content-Disposition %q", res.StatusCode, cd)
+	}
 	if err := s.Delete(ctx, key); err != nil {
 		t.Fatal(err)
 	}

@@ -13,6 +13,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"mime"
 	"time"
 )
 
@@ -41,6 +42,11 @@ type Store interface {
 	// PresignGet returns a URL that serves the object for a while, as a
 	// download and never as a page, whatever type it was uploaded with.
 	PresignGet(ctx context.Context, key string, ttl time.Duration) (string, error)
+	// PresignDownload is PresignGet for a file that has a name of its own,
+	// such as a conversation's attachment: it is served as a download all
+	// the same, and saved under that name (Disposition). An empty name is
+	// PresignGet.
+	PresignDownload(ctx context.Context, key, filename string, ttl time.Duration) (string, error)
 	// Stat describes the object, or returns ErrNotFound.
 	Stat(ctx context.Context, key string) (Info, error)
 	Delete(ctx context.Context, key string) error
@@ -86,6 +92,10 @@ type Local interface {
 	Store
 	// Redeem checks a URL token issued by PresignPut or PresignGet.
 	Redeem(token, method string) (key, contentType string, err error)
+	// RedeemDownload checks a URL token issued by PresignGet or
+	// PresignDownload, and says the name the file is to be saved under, if
+	// it was given one.
+	RedeemDownload(token string) (key, filename string, err error)
 	Put(ctx context.Context, key, contentType string, r io.Reader, maxBytes int64) (Info, error)
 	Open(ctx context.Context, key string) (io.ReadCloser, Info, error)
 }
@@ -95,3 +105,16 @@ var ErrTooLarge = errors.New("blob: upload is larger than allowed")
 
 // ErrExists means the key has been written already: a key is written once.
 var ErrExists = errors.New("blob: the object already exists; a key is written once")
+
+// Disposition is the Content-Disposition a stored file is served with:
+// always a download, never a page, and under its name when it has one, in
+// the form RFC 6266 gives a name in any script: filename*, in UTF-8,
+// percent-encoded, where it is not plain ASCII.
+func Disposition(filename string) string {
+	if filename != "" {
+		if d := mime.FormatMediaType("attachment", map[string]string{"filename": filename}); d != "" {
+			return d
+		}
+	}
+	return "attachment"
+}

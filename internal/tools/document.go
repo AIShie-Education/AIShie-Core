@@ -260,7 +260,7 @@ func documentUploadURL(d Deps) tool.Tool {
 		},
 		Query: func(ctx context.Context, rc *tool.ReadCtx, in UploadURLIn) (UploadURLOut, error) {
 			if d.Blob == nil {
-				return UploadURLOut{}, apperr.Precondition("this installation has no file storage configured")
+				return UploadURLOut{}, errNoFileStorage
 			}
 			if strings.TrimSpace(in.ContentType) == "" || len(in.ContentType) > 200 {
 				return UploadURLOut{}, apperr.Invalid("content_type is required")
@@ -296,20 +296,41 @@ type upload struct {
 	info blob.Info
 }
 
+// errNoFileStorage refuses what would store a file where there is nowhere
+// to store one (BLOB_STORE=none).
+var errNoFileStorage = apperr.Precondition("this installation has no file storage configured").With("reason", "no_file_storage")
+
+// errTooLarge refuses a file larger than the most one of its kind may be.
+func errTooLarge(size, most int64) *apperr.Error {
+	return apperr.Precondition("the file is %d bytes; the limit is %d", size, most).
+		With("reason", "file_too_large").With("byte_size", size).With("max_bytes", most)
+}
+
+// maxBytes is the most a file of the kind may be: a conversation's
+// attachment its own limit, never more than MaxUploadBytes, and a
+// document's file MaxUploadBytes.
+func (d Deps) maxBytes(kind string) int64 {
+	if kind == kindAttachment {
+		return d.Attachments.MaxBytes
+	}
+	return d.MaxUploadBytes
+}
+
 // claimUpload turns an upload token into a file to attach. The token proves
 // that this member of this course was given the key for this purpose; the
 // store is asked whether anything is actually there, and how big it is.
 func claimUpload(ctx context.Context, d Deps, q dbq.Querier, m *domain.Member, courseID uuid.UUID, kind, token string, finalize bool) (upload, error) {
 	if d.Blob == nil {
-		return upload{}, apperr.Precondition("this installation has no file storage configured")
+		return upload{}, errNoFileStorage
 	}
 	c, err := d.Uploads.VerifyUpload(token)
 	if err != nil {
-		return upload{}, apperr.Invalid("upload_token is not valid")
+		return upload{}, apperr.Invalid("upload_token is not valid").With("reason", "bad_upload_token")
 	}
 	if c.CourseID != courseID || c.MemberID != m.ID || c.Purpose != kind {
-		return upload{}, apperr.Forbid("that upload was issued to someone else, or for something else")
+		return upload{}, apperr.Forbid("that upload was issued to someone else, or for something else").With("reason", "not_your_upload")
 	}
+	most := d.maxBytes(kind)
 	// An upload URL can be written to again for as long as it is valid, so
 	// the object is moved, on attaching, to a final key that no upload URL
 	// was ever issued for; that key is what the version records. The lock
@@ -323,9 +344,14 @@ func claimUpload(ctx context.Context, d Deps, q dbq.Querier, m *domain.Member, c
 	if used, err := q.StorageKeyInUse(ctx, &final); err != nil {
 		return upload{}, err
 	} else if used {
-		return upload{}, apperr.Conflicts("that upload is already attached to a document")
+		to := "a document"
+		if kind == kindAttachment {
+			to = "a message"
+		}
+		return upload{}, apperr.Conflicts("that upload is already attached to %s", to).With("reason", "already_attached")
 	}
-	if staged, err := d.Blob.Stat(ctx, c.Key); errors.Is(err, blob.ErrNotFound) {
+	staged, err := d.Blob.Stat(ctx, c.Key)
+	if errors.Is(err, blob.ErrNotFound) {
 		// Nothing staged: either nothing was uploaded, or an earlier attach
 		// moved it and then its transaction did not commit — the move is
 		// outside the transaction. The object is then at the final key,
@@ -334,7 +360,7 @@ func claimUpload(ctx context.Context, d Deps, q dbq.Querier, m *domain.Member, c
 		// upload, and is attached as it is.
 		info, err := d.Blob.Stat(ctx, final)
 		if errors.Is(err, blob.ErrNotFound) {
-			return upload{}, apperr.Precondition("nothing has been uploaded to that URL yet")
+			return upload{}, errNotUploaded
 		}
 		if err != nil {
 			return upload{}, err
@@ -342,34 +368,46 @@ func claimUpload(ctx context.Context, d Deps, q dbq.Querier, m *domain.Member, c
 		if info.ContentType == "" {
 			info.ContentType = c.ContentType
 		}
+		if info.Size > most {
+			// Moved, by an attach that did not commit, under a larger
+			// limit than there is now.
+			return upload{}, errTooLarge(info.Size, most)
+		}
 		return upload{key: final, info: info}, nil
 	} else if err != nil {
 		return upload{}, err
-	} else if staged.Size > d.MaxUploadBytes {
+	} else if staged.Size > most {
 		_ = d.Blob.Delete(ctx, c.Key)
-		return upload{}, apperr.Precondition("the file is %d bytes; the limit is %d", staged.Size, d.MaxUploadBytes)
+		return upload{}, errTooLarge(staged.Size, most)
 	}
 	if !finalize {
-		// A dry run, for Validate: everything is checked and nothing moves.
-		return upload{key: final}, nil
+		// A dry run, for Validate and Pin: everything is checked and nothing
+		// moves. What is there is described as it is now.
+		if staged.ContentType == "" {
+			staged.ContentType = c.ContentType
+		}
+		return upload{key: final, info: staged}, nil
 	}
 	// What is recorded describes the final object, read after the move.
 	info, err := d.Blob.Finalize(ctx, c.Key)
 	if errors.Is(err, blob.ErrNotFound) {
-		return upload{}, apperr.Precondition("nothing has been uploaded to that URL yet")
+		return upload{}, errNotUploaded
 	}
 	if err != nil {
 		return upload{}, err
 	}
-	if info.Size > d.MaxUploadBytes {
+	if info.Size > most {
 		_ = d.Blob.Delete(ctx, final)
-		return upload{}, apperr.Precondition("the file is %d bytes; the limit is %d", info.Size, d.MaxUploadBytes)
+		return upload{}, errTooLarge(info.Size, most)
 	}
 	if info.ContentType == "" {
 		info.ContentType = c.ContentType
 	}
 	return upload{key: final, info: info}, nil
 }
+
+// errNotUploaded refuses a token whose upload URL has had nothing PUT to it.
+var errNotUploaded = apperr.Precondition("nothing has been uploaded to that URL yet").With("reason", "not_uploaded")
 
 // checkUploadAge refuses uploads that a proposal made now could outlive. A
 // proposal waits up to the TTL for its decision, and the sweep removes an
@@ -407,7 +445,7 @@ func checkUploadAge(ctx context.Context, d Deps, now time.Time, tokens ...string
 		}
 		if info.Modified.Before(now.Add(-OrphanGrace)) {
 			return apperr.Precondition("that upload is more than %d hours old and may be discarded before the proposal is decided; upload the file again",
-				int(OrphanGrace.Hours()))
+				int(OrphanGrace.Hours())).With("reason", "upload_too_old")
 		}
 	}
 	return nil

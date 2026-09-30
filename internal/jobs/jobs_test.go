@@ -800,6 +800,59 @@ func TestTheSweepRemovesOnlyTheServersOwnFiles(t *testing.T) {
 	}
 }
 
+// Files a message of a conversation carries are kept under conversations/,
+// beside documents' under courses/, and the sweep keeps them as it keeps a
+// version's file, however the store keeps them; an upload for a message
+// that no message came to carry is removed as any orphan is.
+func TestTheSweepKeepsWhatMessagesCarry(t *testing.T) {
+	for name, wrap := range stores {
+		t.Run(name, func(t *testing.T) {
+			f := setupWith(t, 1, wrap)
+			store := wrap(f.Blob)
+			f.runner = jobs.New(f.Pool, f.P, f.system, jobs.Config{Blob: store}, nil)
+			ctx := context.Background()
+			yuki := f.Students[0]
+			tutor := f.Actor("agent", "tutor")
+			tutorM := f.Member(f.Course, tutor, "course_tutor")
+			f.SiteChat(tutor)
+			forAMessage := func() (token, key string) {
+				t.Helper()
+				u := testkit.Result[tools.AttachmentUploadURLOut](t, f.MustCall(yuki.Actor, "conversation.upload_url",
+					m{"course_id": f.Course, "content_type": "text/plain"}, ""))
+				key, ct, err := f.Blob.Redeem(strings.TrimPrefix(u.UploadURL, "http://lms.test"+blob.BlobPath), "PUT")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := f.Blob.Put(ctx, key, ct, strings.NewReader("my notes"), 1<<20); err != nil {
+					t.Fatal(err)
+				}
+				return u.UploadToken, key
+			}
+			token, carried := forAMessage()
+			_, abandoned := forAMessage()
+			if !strings.HasPrefix(abandoned, tools.AttachmentPrefix+f.Course.String()+"/") {
+				t.Fatalf("an upload for a message is kept at %s", abandoned)
+			}
+			if out := f.MustCall(yuki.Actor, "conversation.open", m{"course_id": f.Course, "respondent_member_id": tutorM,
+				"body": "Here are my notes", "attachments": []m{{"upload_token": token, "filename": "notes.txt"}}}, "open"); out.Status != domain.StatusExecuted {
+				t.Fatalf("%+v", out)
+			}
+			carried = store.FinalKey(carried)
+
+			f.now = f.now.Add(pipeline.DefaultProposalTTL + tools.OrphanGrace + time.Hour)
+			if rep := f.sweep(t); rep.OrphanFilesRemoved != 1 {
+				t.Fatalf("%+v, want the upload no message carries removed", rep)
+			}
+			if _, err := f.Blob.Stat(ctx, abandoned); !errors.Is(err, blob.ErrNotFound) {
+				t.Fatalf("the upload no message carries is still there: %v", err)
+			}
+			if _, err := f.Blob.Stat(ctx, carried); err != nil {
+				t.Fatalf("the file a message carries was removed: %v", err)
+			}
+		})
+	}
+}
+
 // A sweep takes on a batch of orphans at a time. Most old files are not
 // orphans — they are attached, or another deployment's — and they must not
 // use up the batch: were they to, a pass through a store of many of them

@@ -97,7 +97,7 @@ func readFault(err error) error {
 
 func (s *server) blobGet(local blob.Local) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		key, _, err := local.Redeem(r.PathValue("token"), http.MethodGet)
+		key, filename, err := local.RedeemDownload(r.PathValue("token"))
 		if err != nil {
 			s.writeError(w, r, apperr.Forbid("the download URL is not valid, or has expired"))
 			return
@@ -118,8 +118,9 @@ func (s *server) blobGet(local blob.Local) http.HandlerFunc {
 		h.Set("Content-Length", strconv.FormatInt(info.Size, 10))
 		// Uploaded files are other people's bytes served from the API's own
 		// origin. They are downloads, never pages: a student's "essay.html"
-		// must not run as script with the viewer's session.
-		h.Set("Content-Disposition", "attachment")
+		// must not run as script with the viewer's session. One with a name
+		// of its own, a conversation's attachment, is saved under it.
+		h.Set("Content-Disposition", blob.Disposition(filename))
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("Content-Security-Policy", "default-src 'none'; sandbox")
 		h.Set("Cache-Control", "private, no-store")

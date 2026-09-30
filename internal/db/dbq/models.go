@@ -131,6 +131,20 @@ type Conversation struct {
 	LastAuthorMemberID *uuid.UUID
 }
 
+type ConversationAttachment struct {
+	ID             uuid.UUID
+	MessageID      uuid.UUID
+	ConversationID uuid.UUID
+	CourseID       uuid.UUID
+	Position       int32
+	Filename       string
+	StorageKey     string
+	ContentType    string
+	ByteSize       int64
+	Checksum       *string
+	CreatedAt      time.Time
+}
+
 type ConversationDraft struct {
 	ConversationID uuid.UUID
 	CourseID       uuid.UUID

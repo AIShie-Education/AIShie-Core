@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -89,6 +90,72 @@ func TestFSStoreRoundTrip(t *testing.T) {
 // says the file is whole. Bytes lost from under one are a fault, not a file
 // that is not there; and a delete stopped half way has taken the .meta
 // already, leaving bytes that a listing still finds.
+// A file with a name of its own, a message's attachment, downloads under it,
+// in whatever script it is written; one without, as a document's file does.
+// Either way it is a download, never a page.
+func TestAFileDownloadsUnderItsName(t *testing.T) {
+	for name, want := range map[string]string{
+		"":             "attachment",
+		"essay.pdf":    "attachment; filename=essay.pdf",
+		"essay 1.pdf":  `attachment; filename="essay 1.pdf"`,
+		`say "hi".txt`: `attachment; filename="say \"hi\".txt"`,
+		"作業 3.docx":    "attachment; filename*=utf-8''%E4%BD%9C%E6%A5%AD%203.docx",
+	} {
+		if got := Disposition(name); got != want {
+			t.Errorf("Disposition(%q) = %q, want %q", name, got, want)
+		}
+	}
+
+	s, _ := newFS(t)
+	ctx := context.Background()
+	key := "conversations/c1/u1"
+	named, err := s.PresignDownload(ctx, key, "作業 3.docx", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotKey, filename, err := s.RedeemDownload(strings.TrimPrefix(named, "http://lms.test"+BlobPath))
+	if err != nil || gotKey != key || filename != "作業 3.docx" {
+		t.Fatalf("a named download redeems as %q %q %v", gotKey, filename, err)
+	}
+	plain, err := s.PresignGet(ctx, key, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, filename, err := s.RedeemDownload(strings.TrimPrefix(plain, "http://lms.test"+BlobPath)); err != nil || filename != "" {
+		t.Fatalf("a download with no name redeems as %q %v", filename, err)
+	}
+	// An upload URL downloads nothing, named or not.
+	put, _, err := s.PresignPut(ctx, key, "text/plain", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.RedeemDownload(strings.TrimPrefix(put, "http://lms.test"+BlobPath)); !errors.Is(err, ErrBadToken) {
+		t.Fatalf("an upload URL redeemed as a download: %v", err)
+	}
+}
+
+// An object store is asked, in the URL it signs, to serve the file as a
+// download under its name: nothing is sent to the store to sign it.
+func TestS3StoreSignsANamedDownload(t *testing.T) {
+	s, err := NewS3Store(S3Config{Endpoint: "s3.invalid:9000", Bucket: "aishie", Region: "us-east-1", AccessKey: "k", SecretKey: "s"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, want := range map[string]string{"": "attachment", "作業 3.docx": Disposition("作業 3.docx")} {
+		raw, err := s.PresignDownload(context.Background(), "attached/conversations/c1/u1", name, time.Minute)
+		if err != nil {
+			t.Fatal(err)
+		}
+		u, err := url.Parse(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := u.Query().Get("response-content-disposition"); got != want {
+			t.Fatalf("a download named %q is signed with %q, want %q", name, got, want)
+		}
+	}
+}
+
 func TestFSStoreTellsLostBytesFromNone(t *testing.T) {
 	s, _ := newFS(t)
 	ctx := context.Background()

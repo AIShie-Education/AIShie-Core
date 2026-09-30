@@ -179,16 +179,18 @@ The events that matter carry ids, never text:
   `result.decision.reason`, which `action_list_mine` returns.
 - `conversation.opened`, `conversation.message_posted` (`conversation_id`,
   `message_id`, `author_member_id`, `opener_member_id`,
-  `respondent_member_id`), `conversation.closed`,
+  `respondent_member_id`, and `attachments`, `[{id, filename, content_type,
+  byte_size}]`, when the message carries files), `conversation.closed`,
   `conversation.message_retracted`: for the two participants only.
 
 **Answering**
 
 | Tool | Input | Notes |
 |---|---|---|
-| `conversation_messages` | `course_id`, `conversation_id`, `after_seq` or `before_seq`, `limit` (default 50, at most 200), `wait_s` (0 to 25, default 0, not with `before_seq`), `seen_state`, `seen_draft_version` | `conversation` (the view below), `messages[]`, `more`, `draft` (§2.8; null for none). A message has `id`, `seq`, `author_member_id`, `in_reply_to_message_id`, `body`, `created_at`; a retracted one has no `body` but `retracted: {at, by_member_id, reason}`. `after_seq` reads on; `before_seq`, or neither, gives the newest; both oldest first. With `wait_s`, a call that finds no message after `after_seq`, and the conversation standing as it did (`state`, `pending_reply_action_id`, `last_retracted_at`, `closed_reason`), waits for one of them to change; `seen_state`, the `state` last read, answers at once if the state has changed since; `seen_draft_version`, the draft's `version` last read (0 for none), answers as soon as the draft is another, a front end's long poll; without it a draft wakes nothing. |
+| `conversation_messages` | `course_id`, `conversation_id`, `after_seq` or `before_seq`, `limit` (default 50, at most 200), `wait_s` (0 to 25, default 0, not with `before_seq`), `seen_state`, `seen_draft_version` | `conversation` (the view below), `messages[]`, `more`, `draft` (§2.8; null for none). A message has `id`, `seq`, `author_member_id`, `in_reply_to_message_id`, `body`, `created_at`, and `attachments`, the files it carries (§2.9), absent when none; a retracted one has no `body` and no `attachments` but `retracted: {at, by_member_id, reason}`. `after_seq` reads on; `before_seq`, or neither, gives the newest; both oldest first. With `wait_s`, a call that finds no message after `after_seq`, and the conversation standing as it did (`state`, `pending_reply_action_id`, `last_retracted_at`, `closed_reason`), waits for one of them to change; `seen_state`, the `state` last read, answers at once if the state has changed since; `seen_draft_version`, the draft's `version` last read (0 for none), answers as soon as the draft is another, a front end's long poll; without it a draft wakes nothing. |
 | `conversation_get` | `course_id`, `conversation_id` | The view: `status`, `state` (`awaiting_answer`, `reply_pending_approval`, `answered`, `closed`), `pending_reply_action_id`, `opener`, `respondent` (with `answer_level`), `latest_opener_message_id`, `last_retracted_at`, `visible_to`, and `draft` (§2.8). |
-| `conversation_answer` | `course_id`, `conversation_id`, `in_reply_to_message_id`, `body`, `idempotency_key` | `body` is 1 to 20,000 characters of Markdown. `in_reply_to_message_id` must be the opener's newest message. Returns `message_id`. Posted or proposed, it deletes the conversation's draft. |
+| `conversation_attachment` | `course_id`, `attachment_id` | One file a message carries (§2.9): `id`, `filename`, `content_type`, `byte_size`, `checksum`, `created_at`, `conversation_id`, `message_id`, `message_seq`, `author_member_id`, and `download_url`, a download for about 15 minutes (`expires_at`), fetched with no `Authorization` header. `not_found` for a file the agent may not read now, `reason: retracted` for one whose message was retracted. |
+| `conversation_answer` | `course_id`, `conversation_id`, `in_reply_to_message_id`, `body`, `attachments`, `idempotency_key` | `body` is 1 to 20,000 characters of Markdown. `in_reply_to_message_id` must be the opener's newest message. `attachments`, optional, are files the answer carries, each `{upload_token, filename}` from `conversation_upload_url` (§2.9); the runtime sends none yet. Returns `message_id`. Posted or proposed, it deletes the conversation's draft. |
 | `conversation_draft` | `course_id`, `conversation_id`, `attempt` (1 to 64 characters), `version` (1 or more), `text` (at most 20,000 characters), `steps` (at most 20 `{kind, target, state}`), `done`; no `idempotency_key` | `{stored, version}`. The answer being written, for whoever reads the conversation to watch (§2.8). An ephemeral write: recorded nowhere, never proposed, and not counted against the rate limit when carried out; at most 10 a second per conversation. The respondent's alone, while the conversation is `awaiting_answer`: `not_the_respondent`, `conversation_not_awaiting`, `not_addressable` otherwise. |
 | `conversation_close` | `course_id`, `conversation_id`, `reason` (≤ 500 characters) | Either participant closes. The runtime closes only as §2.4 says. A reason that reads as the system's (`seat_removed`, `conversations_are_with_agents`) is refused. |
 | `conversation_retract` | `course_id`, `message_id`, `reason` | The author retracts, or staff overseeing the opener; the runtime only when the owner asks. Retracting the opener's latest message withdraws the question: the conversation is `answered`, an answer to it is refused `moved_on`, and its draft is gone. |
@@ -367,6 +369,57 @@ the agent's message in progress.
 - **Two workers at once** (§7.4) write under their own attempts, and the last
   write wins; the answer is posted once whichever it is.
 
+### 2.9 A question's files
+
+A question may carry files (schema.md §2.8, Attachments): an essay, a photo of
+a worked problem, slides, a spreadsheet, of any type. The model gets them
+through the runtime's own file pipeline, the one documents' files go through
+(§3.1, rule 6), never through Core, which keeps and serves them and makes no
+text of them.
+
+- **Where they are.** A message of `conversation_messages` lists its
+  `attachments` in order: `id`, `filename`, `content_type`, `byte_size`,
+  `checksum`, `created_at`. `conversation_attachment{course_id,
+  attachment_id}`, with the agent's own token, gives a `download_url` for one,
+  good for about 15 minutes, served as a download: `GET` it as it is, with no
+  `Authorization` header, and ask again for a fresh one when it has lapsed. It
+  is the runtime's call, never the model's: `conversation_*` stays in the deny
+  list (§6.1), and the model never sees a URL. Core lets the agent read what its
+  conversation's readers may, and nothing else (`not_found`).
+- **Into the prompt.** For the question being answered — the opener's newest
+  message, and any others of theirs since the agent last answered — each file
+  goes through the pipeline by its `content_type`: text extracted from text,
+  PDFs and Office files (Office converted to PDF with LibreOffice first), a
+  PDF's pages as file parts for a model that reads them, scans and images
+  through OCR where it is on, and images as image parts for a model that
+  takes them. The prompt announces them before the question's text, as
+  information: "the asker attached: essay.pdf (application/pdf, 1.2 MB),
+  graph.png (image/png, 240 KB)". Files of earlier messages in the tail are
+  announced by name alone.
+- **Long ones in parts.** A file whose text does not fit the prompt's budget
+  is announced with its first part, and the model reads the rest with a tool
+  of the runtime's own, in parts as `document_text` reads a text version:
+  `attachment_read{attachment_id, part}` over what the runtime extracted,
+  from the files of that conversation alone. The same caps as for documents'
+  files: pages, bytes, and the cost of OCR and of a model's file parts. One
+  over them is announced as not read, and why ("too large to read whole: ask
+  which pages matter"); so is a type the pipeline takes nothing from.
+- **Kept by id.** A file never changes: its id is its bytes for good. What the
+  runtime extracted is cached under the attachment's id, with the other
+  working state of the conversation (§2.5), and dropped when the message is
+  retracted (§6.3) or the seat leaves.
+- **What someone sent.** A file is what the asker said, with whatever it
+  says to a model inside it: the system prompt frames it as data, never as
+  instructions (§6.1), as it frames a message.
+- **Answers with files.** `conversation_answer` takes `attachments` (upload
+  first with `conversation_upload_url`, then name each token with a
+  `filename`), as `conversation_ask` does for a person. The runtime does not
+  attach files to answers yet.
+- **Limits.** Core holds a message to `ATTACHMENT_MAX_PER_MESSAGE` files (10),
+  each to `ATTACHMENT_MAX_BYTES` (50 MiB), and a conversation to
+  `ATTACHMENT_MAX_CONVERSATION_BYTES` (500 MiB); `conversation_upload_url` says
+  them (`max_files`, `max_bytes`, `max_conversation_bytes`).
+
 ## 3. Providers
 
 ### 3.1 The internal format
@@ -422,7 +475,8 @@ Rules:
    text version is done (`version.text`, and `document_text` for one longer
    than a part; schema.md §2.4) is given to every model first, saying whether
    a model transcribed it or staff wrote it; the file stays there for a model
-   that checks a page against it.
+   that checks a page against it. A question's files go the same way (§2.9),
+   their URLs from `conversation_attachment`.
 
 ### 3.2 Declaring tools, calls and results
 
@@ -843,7 +897,8 @@ its owner for as long as the token works.
 
 **Never offered to a model** in M1 and M2: `agent_*`, `credential_*`,
 `actor_*`, `member_*`, `action_decide`, `action_review`, `action_withdraw`,
-`conversation_*` and `me_site_chat` (the runtime calls those itself;
+`conversation_*` and `me_site_chat` (the runtime calls those itself,
+`conversation_attachment` and `conversation_upload_url` among them;
 `conversation_draft` above all, which writes what people watch and records
 nothing: name it in the built-in list, whatever pattern matches it), `preset_*`,
 `course_create`, `course_update`, `term_*`, `department_*`,
@@ -881,7 +936,10 @@ token for one party, nor approves for the owner.
   capture is encrypted, audited and gone in 7 days. Deleting an agent deletes
   all but the ledger's ids and numbers.
 - On `conversation.message_retracted`, or a message with `retracted`, remove
-  it from caches and memory and show it as `[message retracted]`. When
+  it from caches and memory, the text extracted from its files with it (§2.9),
+  and show it as `[message retracted]`. Core withholds a retracted message's
+  files as it does its text (`conversation_attachment` answers `not_found`,
+  `retracted`). When
   `last_retracted_at` changes, read the conversation again: a retraction adds
   no message for `after_seq` to find. If it was the agent's own answer, note
   in that conversation's notes not to repeat it, and tell the owner. If it was

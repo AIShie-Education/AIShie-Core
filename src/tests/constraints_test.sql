@@ -51,7 +51,7 @@ END $$;
 --      3x actors · 4x courses · 5x members · 6x components
 --      7x assignments · ex documents · fx versions · ax submissions
 --      bx actions · dx grades · cx conversations · cxx their messages
---      1cx credentials · 1ax join links
+--      1cx credentials · 1ax join links · cax attachments
 INSERT INTO term (id, name, starts_on, ends_on)
 VALUES ('00000000-0000-0000-0000-000000000011', '2026 Autumn', '2026-09-01', '2026-12-20');
 INSERT INTO department (id, name) VALUES ('00000000-0000-0000-0000-000000000021', 'Computing');
@@ -1293,6 +1293,82 @@ SELECT pg_temp.ok('an attempt that is over keeps nothing but its end', $q$
     UPDATE conversation_draft SET done = true, body = NULL, steps = '[]' WHERE conversation_id = '00000000-0000-0000-0000-0000000000c1' $q$);
 SELECT pg_temp.ok('a draft is deleted', $q$
     DELETE FROM conversation_draft WHERE conversation_id = '00000000-0000-0000-0000-0000000000c1' $q$);
+-- A message's files: written with it, in its conversation and course, and
+-- kept as they are. ca1, ca2 Yuki's two files on her question c11.
+SELECT pg_temp.ok('a message carries files, in order', $q$
+    INSERT INTO conversation_attachment (id, message_id, conversation_id, course_id, position, filename, storage_key,
+                                         content_type, byte_size, checksum, created_at)
+    SELECT '00000000-0000-0000-0000-000000000ca1', m.id, m.conversation_id, m.course_id, 1, 'essay draft.pdf', 'k/ca1',
+           'application/pdf', 1024, 'sha256:00', m.created_at
+    FROM conversation_message m WHERE m.id = '00000000-0000-0000-0000-000000000c11';
+    INSERT INTO conversation_attachment (id, message_id, conversation_id, course_id, position, filename, storage_key,
+                                         content_type, byte_size, created_at)
+    SELECT '00000000-0000-0000-0000-000000000ca2', m.id, m.conversation_id, m.course_id, 2, '作業 3.docx', 'k/ca2',
+           'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 0, m.created_at
+    FROM conversation_message m WHERE m.id = '00000000-0000-0000-0000-000000000c11' $q$);
+SELECT pg_temp.fails('one file at each place', '23505', $q$
+    INSERT INTO conversation_attachment (message_id, conversation_id, course_id, position, filename, storage_key, content_type, byte_size)
+    VALUES ('00000000-0000-0000-0000-000000000c11', '00000000-0000-0000-0000-0000000000c1', '00000000-0000-0000-0000-000000000041',
+            2, 'again.pdf', 'k/ca3', 'application/pdf', 1) $q$);
+SELECT pg_temp.fails('a file is attached once', '23505', $q$
+    INSERT INTO conversation_attachment (message_id, conversation_id, course_id, position, filename, storage_key, content_type, byte_size)
+    VALUES ('00000000-0000-0000-0000-000000000c12', '00000000-0000-0000-0000-0000000000c1', '00000000-0000-0000-0000-000000000041',
+            1, 'copy.pdf', 'k/ca1', 'application/pdf', 1) $q$);
+SELECT pg_temp.fails('a file is in its message''s conversation', '23503', $q$
+    INSERT INTO conversation_attachment (message_id, conversation_id, course_id, position, filename, storage_key, content_type, byte_size)
+    VALUES ('00000000-0000-0000-0000-000000000c11', '00000000-0000-0000-0000-0000000000c2', '00000000-0000-0000-0000-000000000041',
+            3, 'elsewhere.pdf', 'k/ca4', 'application/pdf', 1) $q$);
+SELECT pg_temp.fails('and in its conversation''s course', '23503', $q$
+    INSERT INTO conversation_attachment (message_id, conversation_id, course_id, position, filename, storage_key, content_type, byte_size)
+    VALUES ('00000000-0000-0000-0000-000000000c11', '00000000-0000-0000-0000-0000000000c1', '00000000-0000-0000-0000-000000000042',
+            3, 'elsewhere.pdf', 'k/ca4', 'application/pdf', 1) $q$);
+SELECT pg_temp.fails('a file is written with its message, never added to it afterwards', '23514', $q$
+    INSERT INTO conversation_attachment (message_id, conversation_id, course_id, position, filename, storage_key, content_type, byte_size,
+                                         created_at)
+    VALUES ('00000000-0000-0000-0000-000000000c11', '00000000-0000-0000-0000-0000000000c1', '00000000-0000-0000-0000-000000000041',
+            3, 'later.pdf', 'k/ca4', 'application/pdf', 1, now() + interval '1 minute') $q$);
+SELECT pg_temp.fails('its place counts from 1', '23514', $q$
+    INSERT INTO conversation_attachment (message_id, conversation_id, course_id, position, filename, storage_key, content_type, byte_size)
+    VALUES ('00000000-0000-0000-0000-000000000c11', '00000000-0000-0000-0000-0000000000c1', '00000000-0000-0000-0000-000000000041',
+            0, 'first.pdf', 'k/ca4', 'application/pdf', 1) $q$);
+SELECT pg_temp.fails('a file has a name', '23514', $q$
+    INSERT INTO conversation_attachment (message_id, conversation_id, course_id, position, filename, storage_key, content_type, byte_size)
+    VALUES ('00000000-0000-0000-0000-000000000c11', '00000000-0000-0000-0000-0000000000c1', '00000000-0000-0000-0000-000000000041',
+            3, '', 'k/ca4', 'application/pdf', 1) $q$);
+SELECT pg_temp.fails('of 255 characters at most', '23514', $q$
+    INSERT INTO conversation_attachment (message_id, conversation_id, course_id, position, filename, storage_key, content_type, byte_size)
+    VALUES ('00000000-0000-0000-0000-000000000c11', '00000000-0000-0000-0000-0000000000c1', '00000000-0000-0000-0000-000000000041',
+            3, repeat('x', 252) || '.pdf', 'k/ca4', 'application/pdf', 1) $q$);
+SELECT pg_temp.fails('a name, not a path', '23514', $q$
+    INSERT INTO conversation_attachment (message_id, conversation_id, course_id, position, filename, storage_key, content_type, byte_size)
+    VALUES ('00000000-0000-0000-0000-000000000c11', '00000000-0000-0000-0000-0000000000c1', '00000000-0000-0000-0000-000000000041',
+            3, 'home/yuki/essay.pdf', 'k/ca4', 'application/pdf', 1) $q$);
+SELECT pg_temp.fails('nor a Windows one', '23514', $q$
+    INSERT INTO conversation_attachment (message_id, conversation_id, course_id, position, filename, storage_key, content_type, byte_size)
+    VALUES ('00000000-0000-0000-0000-000000000c11', '00000000-0000-0000-0000-0000000000c1', '00000000-0000-0000-0000-000000000041',
+            3, 'C:\essay.pdf', 'k/ca4', 'application/pdf', 1) $q$);
+SELECT pg_temp.fails('on one line', '23514', $q$
+    INSERT INTO conversation_attachment (message_id, conversation_id, course_id, position, filename, storage_key, content_type, byte_size)
+    VALUES ('00000000-0000-0000-0000-000000000c11', '00000000-0000-0000-0000-0000000000c1', '00000000-0000-0000-0000-000000000041',
+            3, E'essay\n.pdf', 'k/ca4', 'application/pdf', 1) $q$);
+SELECT pg_temp.fails('with nothing around it', '23514', $q$
+    INSERT INTO conversation_attachment (message_id, conversation_id, course_id, position, filename, storage_key, content_type, byte_size)
+    VALUES ('00000000-0000-0000-0000-000000000c11', '00000000-0000-0000-0000-0000000000c1', '00000000-0000-0000-0000-000000000041',
+            3, ' essay.pdf', 'k/ca4', 'application/pdf', 1) $q$);
+SELECT pg_temp.fails('a file has a type', '23514', $q$
+    INSERT INTO conversation_attachment (message_id, conversation_id, course_id, position, filename, storage_key, content_type, byte_size)
+    VALUES ('00000000-0000-0000-0000-000000000c11', '00000000-0000-0000-0000-0000000000c1', '00000000-0000-0000-0000-000000000041',
+            3, 'essay.pdf', 'k/ca4', '', 1) $q$);
+SELECT pg_temp.fails('and no size below nothing', '23514', $q$
+    INSERT INTO conversation_attachment (message_id, conversation_id, course_id, position, filename, storage_key, content_type, byte_size)
+    VALUES ('00000000-0000-0000-0000-000000000c11', '00000000-0000-0000-0000-0000000000c1', '00000000-0000-0000-0000-000000000041',
+            3, 'essay.pdf', 'k/ca4', 'application/pdf', -1) $q$);
+SELECT pg_temp.fails('files are kept as they are: no rename', '23001', $q$
+    UPDATE conversation_attachment SET filename = 'final.pdf' WHERE id = '00000000-0000-0000-0000-000000000ca1' $q$);
+SELECT pg_temp.fails('no delete, retracted or not', '23001', $q$
+    DELETE FROM conversation_attachment WHERE id = '00000000-0000-0000-0000-000000000ca2' $q$);
+SELECT pg_temp.fails('no truncate', '23001', $q$
+    TRUNCATE conversation_attachment $q$);
 -- Conversations are between a person and an agent: a person answers none.
 SELECT pg_temp.fails('a conversation''s respondent is an agent''s seat, never a person''s', '23514', $q$
     INSERT INTO conversation (course_id, opener_member_id, respondent_member_id)

@@ -74,16 +74,21 @@ func (s *Signer) VerifyUpload(token string) (UploadClaim, error) {
 }
 
 // urlClaim is what a filesystem-store URL carries: one method, one key, for
-// a while.
+// a while; for a download, the name it is saved under, if it has one.
 type urlClaim struct {
 	Key         string `json:"k"`
 	Method      string `json:"v"`
 	ContentType string `json:"t,omitempty"`
+	Filename    string `json:"f,omitempty"`
 	Expires     int64  `json:"e"`
 }
 
 func (s *Signer) signURL(key, method, contentType string, ttl time.Duration, now time.Time) string {
 	return s.s.Sign(purposeURL, urlClaim{Key: key, Method: method, ContentType: contentType, Expires: now.Add(ttl).Unix()})
+}
+
+func (s *Signer) signDownload(key, filename string, ttl time.Duration, now time.Time) string {
+	return s.s.Sign(purposeURL, urlClaim{Key: key, Method: "GET", Filename: filename, Expires: now.Add(ttl).Unix()})
 }
 
 func (s *Signer) verifyURL(token, method string, now time.Time) (urlClaim, error) {

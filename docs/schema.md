@@ -41,6 +41,7 @@ course
  ├ action
  ├ grade
  ├ conversation ── conversation_message ── conversation_message_retraction
+ │                                      └─ conversation_attachment (the files it carries)
  ├ memory_entry (an agent's memory of the course's askers, and the course's shared memory)
  └ event
 ```
@@ -425,6 +426,8 @@ the nearest one, and the choice is recorded here so that it is a decision and no
 | Deciding, reviewing and reading one's own agent's actions (`action.decide`, `.review`, `.get`), and the queues of them (`action.list_proposed`, `.list_pending_review`) | `perm_action_decide`, or owning the agent | an owner decides and reviews their agent's action where they could have done it themselves (§2.6), which needs no `perm_action_decide`; without it they reach their own agents' actions alone, and anything else is denied as it is to anyone without it |
 | Taking back one's own proposal, or one's own agent's, while nobody has decided it (`action.withdraw`) | `perm_document_read` | the most basic permission a seated member holds; that the proposal is the caller's own, or their own agent's, is what decides, as `action.list_mine` shows only the caller's own |
 | Closing a conversation (`conversation.close`), retracting a message (`conversation.retract`), listing and reading conversations (`conversation.list`, `.get`, `.messages`) | `perm_document_read` | the most basic permission a seated member holds; the conversation decides who may: its two participants, and whoever decides actions for its opener (§2.8) |
+| Uploading a file for a message (`conversation.upload_url`) | `perm_document_read`, and `perm_conversation_ask` or `perm_conversation_answer` above `denied` | whoever writes messages here uploads for one; whose conversation the file comes to be in, and whether they may write in it, is asked by the call that writes the message (§2.8, Attachments) |
+| Reading a message's file (`conversation.attachment`) | `perm_document_read` | as reading the conversation: the conversation decides who may (§2.8, Attachments) |
 | Regrading | the lower of `perm_grade_submit` and `perm_grade_post` | it writes a grade and makes it visible in one step |
 | Undoing `treat_ungraded_as_zero` (`grade.undo_ungraded_as_zero`) | `perm_grade_post` | the undo of posting as final, with the same reach: every student it is about, over the whole course |
 | Overriding a total, taking the override off, commenting on a total (`grade.override_total`, `.clear_override`, `.comment_total`) | the lower of `perm_grade_submit` and `perm_grade_post` | as a regrade: it writes a total and makes it visible in one step |
@@ -903,7 +906,9 @@ decided while its files are there. With `PROPOSAL_TTL=0` proposals wait for ever
 is done. Reading returns a short-lived download URL the same way, and the file is served as a
 download, never as a page, whichever store keeps it: a student's `essay.html` does not run as
 script for whoever opens it. The storage key is made by the server and is unguessable; nothing
-the uploader says goes into it.
+the uploader says goes into it. A message of a conversation carries files the same way, with
+an upload URL of its own (`conversation.upload_url`), and they are kept apart (§2.8,
+Attachments).
 
 Once a submission is handed in, its files are frozen with it. The trigger guards the
 `submission` row; that nothing is added to, archived from, renamed or brought back among its
@@ -1362,6 +1367,16 @@ conversation_message_retraction(message_id, course_id, retracted_by_member_id,
                   (course_id, retracted_by_member_id) → course_member
     append-only
 
+conversation_attachment(id, message_id, conversation_id, course_id, position, filename,
+                        storage_key, content_type, byte_size, checksum null, created_at,
+                        unique(message_id, position), unique(storage_key))
+    composite FKs (message_id, conversation_id) → conversation_message(id, conversation_id),
+                  (conversation_id, course_id) → conversation(id, course_id)
+    check: position ≥ 1;  filename 1..255 characters, trimmed, on one line, no / or \;
+           content_type 1..200 characters;  byte_size ≥ 0
+    trigger: written with its message, dated as it is (conversation_attachment_with_its_message)
+    append-only
+
 conversation_read(conversation_id, course_id, member_id, last_read_seq, read_at,
                   primary key (conversation_id, member_id))
     composite FKs (conversation_id, course_id) → conversation,
@@ -1543,6 +1558,47 @@ and, unless the respondent is the opener's own delegate, whomever else the respo
 (`respondent_answers_others`). There is no privacy promised beyond that. `action.list_mine` takes `exclude_types`, so
 that a list of what one has done need not be a transcript.
 
+**A message's files (attachments).** A question — the first, with `conversation.open`, or any
+after it, with `conversation.ask` — and an answer may carry files, of any type: a draft of an
+essay, a photo of a worked problem, a marked-up copy. They are uploaded first, as a document's
+file is (§2.4): `conversation.upload_url` gives a URL to PUT the bytes to, for fifteen minutes,
+and a token, to whoever asks or answers in the course's conversations (`permission_denied`
+otherwise) and not in an archived course (`course_archived`). The call that writes the message
+names them in `attachments`, each by its token and the name it is to be shown and saved under
+(`filename`: 1 to 255 characters on one line, trimmed, a name and not a path, with nothing that
+turns the text round; `bad_filename`). They are part of the message: checked and recorded in its
+transaction, under the conversation's row lock that writing it takes, as part of its action,
+replayed by its key, and carried by its proposal, which names them by their tokens, is refused
+once an upload it names is two days old (`upload_too_old`), and attaches them when it is
+approved, checked again then. A message carries at most `ATTACHMENT_MAX_PER_MESSAGE` files (10;
+`too_many_attachments`), each at most `ATTACHMENT_MAX_BYTES` (50 MiB, and never more than
+`MAX_UPLOAD_BYTES`; `file_too_large`, the upload removed as it is refused), and a conversation at
+most `ATTACHMENT_MAX_CONVERSATION_BYTES` of them in all (500 MiB, a retracted message's
+included, since its files are kept; `conversation_attachments_full`, and a new conversation has
+room of its own); `conversation.upload_url` says all three, for a front end to check first. An
+upload is attached once (`already_attached`), by the member it was given to and for a message
+(`not_your_upload`: a document's upload is never a message's file, nor the other way about), once
+something has been PUT to it (`not_uploaded`); `conversation.open` takes files only with a first
+question (`attachments_need_body`), and a message has text as well as files. Each file is kept
+under `conversations/<course>/<upload>` (with S3, moved to `attached/conversations/…` as it is
+attached, as a document's file is), where the orphan sweep removes an upload no message came to
+carry, as it removes a document's (§2.4); the release before migration 0021 sweeps only under
+`courses/`, and so leaves them alone.
+
+Whoever may read the conversation (above) reads its messages' files, and nobody else:
+`conversation.messages` lists each message's in order — `id`, `filename`, `content_type`,
+`byte_size`, `checksum`, `created_at`, never where it is kept — and `conversation.attachment`
+gives one of them with a URL that serves it for fifteen minutes, as a download saved under its
+name (`Content-Disposition: attachment; filename…`), never as a page, whichever store keeps it.
+To anyone else a file does not exist. A retracted message's files are withheld from its readers
+as its text is: its view lists none, and `conversation.attachment` answers `not_found`, reason
+`retracted`, to whoever reads the conversation. They are kept, as its text is kept in the action
+that wrote it, whose payload names each file and its upload token: the rows and the files stay,
+for whoever keeps the site to recover, and no tool hands them out. Nothing deletes a message, and
+so nothing deletes its files; were a conversation ever purged, its files would go with it. A
+message's news (`conversation.message_posted`) says what it carries: each file's `id`,
+`filename`, `content_type` and `byte_size`, and nothing of where it is kept.
+
 **What each participant has read.** Each participant has a place in a conversation: the `seq` of
 the last message they have read, and when they last said so (`conversation_read`). They move it
 with `conversation.mark_read`: every message there is now, or up to one of its messages
@@ -1636,7 +1692,8 @@ nor does it wake an inbox or a feed.
 
 **Its news is its participants'.** `conversation.opened`, `.message_posted`, `.closed` and
 `.message_retracted` are filed under the conversation (`subject_type = 'conversation'`), name
-no student and no assignment, and carry ids only, never a body. They are shown to the two
+no student and no assignment, and carry ids only, never a body, but for the files a message
+carries, which its news names (above). They are shown to the two
 participants and to nobody else, whatever they hold: not by permission (the visibility table
 lists none for them), and not by the rule that shows a member the events of its own actions,
 so a manager whose removal of a seat closed a conversation is not told of it.
@@ -2015,6 +2072,8 @@ respondent's `conversation_answer` decides is who is shown its text.
 | A message and its retraction are in their conversation's course; one message at each `seq`; a message is retracted once | composite FKs, `unique(conversation_id, seq)`, primary key on `conversation_message_retraction` |
 | Every message and retraction names its action | `created_by_action_id NOT NULL` |
 | `conversation_message` and `conversation_message_retraction` are append-only | triggers |
+| A message's file is in its message's conversation and course, one at each place, and a stored file is attached to one message at most; it is written with its message and dated as it is, and kept as it is: never changed or deleted | composite FKs, `unique(message_id, position)`, `unique(storage_key)`, trigger `conversation_attachment_with_its_message`, append-only triggers on `conversation_attachment` |
+| A file's name is 1..255 characters, trimmed, on one line, and no path; its type is 1..200 characters; its size is not below nothing | CHECKs on `conversation_attachment` |
 | An answer's draft is one per conversation, in its course; its attempt, version, text and steps are held to their shape, and an attempt's end keeps nothing | primary key, composite FK and CHECKs on `conversation_draft` |
 | Memory is held by agents, owner memory is about the agent's owner, and each seat an entry names is its actor's, in the entry's course | trigger `memory_entry_guarded`, composite FKs on `memory_entry` |
 | Each scope of memory has its shape: owner memory in no seat, asker memory in both, shared memory in the agent's seat and about nobody; only shared memory is proposed or rejected | `memory_shape_valid` |
@@ -2249,6 +2308,15 @@ respondent's `conversation_answer` decides is who is shown its text.
   rate limit when they are carried out.
 - Removing a seat closes its open conversations, a delegate's with its principal's.
 - A message is retracted by its author, or by whoever decides actions for the opener.
+- A message's files (§2.8, Attachments) are uploads its author was given for a message, each
+  claimed under its storage key's lock (`already_attached`), held to how many a message carries
+  and how large each is, and the conversation to how much it holds in all, asked under its row
+  lock, which every message is written under, so that two messages at once are held to it
+  together; a proposal naming an upload more than two days old is refused. A file is read by
+  whoever reads its conversation, and withheld from them once its message is retracted; to
+  anyone else it does not exist.
+- The orphan sweep removes an upload that neither a version nor a message's file names, under
+  `courses/` and `conversations/` alike, and holds the lock attaching takes while it asks.
 - News of a conversation reaches its two participants and nobody else (`event.list`).
 - A read that waits for news (`wait_s`) holds no transaction or connection while it waits, and
   is authorized again each time it reads; every event a transaction writes in a course is
@@ -2325,6 +2393,11 @@ garbage in the grades, full record in the log.
   (§2.4) are what it would index, and their news says when to index them again.
 - **Transcribing students' files.** A submitted file and a feedback file have no text version:
   sending a student's work to a model the site chose is a decision of its own.
+- **A message's files as text, or seen in the page.** Core keeps a message's files and serves
+  them as downloads; it makes no text version of them (§2.4) and no preview. A runtime reads
+  them through its own pipeline (agent-runtime.md), and a front end shows them to download.
+- **A message of files alone.** A message has text (1 to 20,000 characters); its files come
+  with it.
 - **JIT provisioning** on first SSO login.
 - **Organisation hierarchy** above `department`; cross-course administrative roles beyond
   `platform_role`.
