@@ -9,6 +9,9 @@
 # have the instructor rename the course, halve the assignment's points with
 # the grade rescaled, override and restore the student's total, rename and
 # bring back the slides, and make the student a TA and a student again;
+# have the transcription service, given its credential by root, transcribe
+# the slides for the student to read and the instructor to correct, and be
+# refused everything else, and everything once its credential is revoked;
 # and have the instructor's own tutor agent answer the student's question,
 # once its runtime says it answers in the site, its inbox and her
 # conversation each waiting to hear what comes next, the answer's draft
@@ -326,6 +329,44 @@ call 404 GET "$C/documents/$DOC" "$YUKI" # withdrawn
 call 200 POST "$C/documents/$DOC/unarchive" "$SATO"
 call 200 GET "$C/documents/$DOC" "$YUKI"
 [ "$(json "$WORK/body" 'd["result"]["title"]')" = "Lecture 1: Loops" ] || fail "Yuki reads $(cat "$WORK/body")"
+
+step "Root gives the transcription service its credential; it claims the slides, reads them and writes their text back; Yuki reads it; Sato corrects it"
+call 403 POST /v1/services/document_text/credentials "$SATO" '{"label":"mine"}'
+call 200 POST /v1/services/document_text/credentials "$ROOT" '{"label":"runtime"}'
+SVC=$(json "$WORK/body" 'd["result"]["token"]')
+SVC_CRED=$(json "$WORK/body" 'd["result"]["credential_id"]')
+case "$SVC" in aissvc_*) ;; *) fail "the service's credential: $(cat "$WORK/body")" ;; esac
+call 403 POST /v1/services/document_text/queue "$SATO" '{}' # the service's alone
+call 200 POST /v1/services/document_text/queue "$SVC" '{"max":5}'
+[ "$(json "$WORK/body" 'len(d["result"]["claimed"])')" = 1 ] || fail "the service claimed $(cat "$WORK/body")"
+VERSION=$(json "$WORK/body" 'd["result"]["claimed"][0]["version_id"]')
+LEASE=$(json "$WORK/body" 'd["result"]["claimed"][0]["lease_id"]')
+curl -sf -o "$WORK/claimed.pdf" "$(json "$WORK/body" 'd["result"]["claimed"][0]["download_url"]')" || fail "the service's download"
+cmp -s "$WORK/slides.pdf" "$WORK/claimed.pdf" || fail "the service downloaded different bytes"
+call 200 GET "/v1/services/document_text/versions/$VERSION/file?lease_id=$LEASE" "$SVC"
+call 200 POST "/v1/services/document_text/versions/$VERSION/complete" "$SVC" \
+  "{\"lease_id\":\"$LEASE\",\"status\":\"done\",\"body\":\"## Page 1\\n\\nLoops.\",\"pages\":1,\"model\":\"A model\"}"
+call 200 GET "$C/documents/$DOC/text" "$YUKI"
+[ "$(json "$WORK/body" 'd["result"]["text"]["source"], d["result"]["text"]["body"]')" = "ai ## Page 1
+
+Loops." ] || fail "Yuki reads the text $(cat "$WORK/body")"
+call 200 POST "$C/documents/$DOC/versions/$VERSION/text" "$SATO" '{"body":"## Page 1\n\nLoops, for and while."}'
+call 200 GET "$C/documents/$DOC" "$YUKI"
+[ "$(json "$WORK/body" 'd["result"]["version"]["text"]["source"], d["result"]["version"]["text"]["edited_by_name"]')" = "staff Sato" ] ||
+  fail "Yuki reads $(cat "$WORK/body")"
+call 422 POST "$C/documents/$DOC/versions/$VERSION/text/retranscribe" "$SATO" '{}' # his edit goes only if he says so
+[ "$(reason)" = staff_edit ] || fail "refused, but not for his edit: $(cat "$WORK/body")"
+call 403 POST "$C/documents/$DOC/versions/$VERSION/text" "$YUKI" '{"body":"mine"}'
+
+step "The service's credential opens nothing else, and once revoked, nothing at all"
+call 403 GET /v1/me "$SVC"
+[ "$(reason)" = not_for_services ] || fail "refused, but not as a service: $(cat "$WORK/body")"
+call 403 GET "$C/documents/$DOC" "$SVC"
+call 403 POST /v1/auth/logout "$SVC"
+call 200 GET /v1/services/document_text/credentials "$ROOT"
+[ "$(json "$WORK/body" '[c["live"] for c in d["result"]["credentials"]]')" = "[True]" ] || fail "the service's credentials: $(cat "$WORK/body")"
+call 200 POST "/v1/services/document_text/credentials/$SVC_CRED/revoke" "$ROOT"
+call 401 POST /v1/services/document_text/queue "$SVC" '{}'
 
 step "Sato makes Yuki a TA and a student again: the roster follows, and nothing she may do changes"
 call 200 POST "$C/members/$YUKI_M/role" "$SATO" '{"role":"ta"}'
