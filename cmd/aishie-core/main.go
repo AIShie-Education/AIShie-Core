@@ -89,6 +89,9 @@ Environment:
   AGENT_SELF_SERVICE   on (default) or off; whether people may register agents of their own
   AGENT_MAX_PER_OWNER  default 5; the agents one person may have that are not suspended
   S3_ENDPOINT, S3_BUCKET, S3_REGION, S3_ACCESS_KEY, S3_SECRET_KEY, S3_USE_SSL
+  S3_BUCKET_LOOKUP  auto (default), path or dns; how a request names the bucket: path after the endpoint
+                    (endpoint/bucket), dns in the host name (bucket.endpoint, virtual-hosted style, for a
+                    service that takes nothing else); auto is dns for AWS, Google and Aliyun, path otherwise
   OIDC_ISSUER       turns single sign-on on; for ADFS, https://<host>/adfs
   OIDC_CLIENT_ID, OIDC_CLIENT_SECRET
   OIDC_PROVIDER_NAME   default polyu-adfs; what actor.link_sso calls the provider
@@ -323,7 +326,7 @@ func openBlobStore(ctx context.Context, cfg config.Config, signer *blob.Signer) 
 		return blob.NewFSStore(cfg.BlobFSRoot, cfg.PublicURL, signer)
 	case "s3":
 		s, err := blob.NewS3Store(blob.S3Config{Endpoint: cfg.S3.Endpoint, Bucket: cfg.S3.Bucket, Region: cfg.S3.Region,
-			AccessKey: cfg.S3.AccessKey, SecretKey: cfg.S3.SecretKey, UseSSL: cfg.S3.UseSSL})
+			AccessKey: cfg.S3.AccessKey, SecretKey: cfg.S3.SecretKey, UseSSL: cfg.S3.UseSSL, BucketLookup: cfg.S3.BucketLookup})
 		if err != nil {
 			return nil, err
 		}

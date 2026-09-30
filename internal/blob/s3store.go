@@ -3,6 +3,7 @@ package blob
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 	"time"
@@ -19,6 +20,18 @@ type S3Config struct {
 	SecretKey string
 	Region    string
 	UseSSL    bool
+	// BucketLookup is how a request names the bucket (S3_BUCKET_LOOKUP):
+	// "path" after the endpoint (endpoint/bucket/key), "dns" in the host
+	// name (bucket.endpoint/key, virtual-hosted style), or "auto", as
+	// empty is, which is dns for AWS, Google Cloud Storage and Alibaba
+	// Cloud OSS and path for anything else. A service that takes only
+	// virtual-hosted requests needs dns.
+	BucketLookup string
+}
+
+// bucketLookups are the values S3Config.BucketLookup may take.
+var bucketLookups = map[string]minio.BucketLookupType{
+	"": minio.BucketLookupAuto, "auto": minio.BucketLookupAuto, "path": minio.BucketLookupPath, "dns": minio.BucketLookupDNS,
 }
 
 // S3Store hands out presigned URLs straight to the object store. The bytes
@@ -32,10 +45,15 @@ func NewS3Store(cfg S3Config) (*S3Store, error) {
 	if cfg.Endpoint == "" || cfg.Bucket == "" {
 		return nil, errors.New("blob: S3 needs an endpoint and a bucket")
 	}
+	lookup, ok := bucketLookups[cfg.BucketLookup]
+	if !ok {
+		return nil, fmt.Errorf("blob: the bucket lookup %q is not auto, path or dns", cfg.BucketLookup)
+	}
 	c, err := minio.New(cfg.Endpoint, &minio.Options{
-		Creds:  credentials.NewStaticV4(cfg.AccessKey, cfg.SecretKey, ""),
-		Secure: cfg.UseSSL,
-		Region: cfg.Region,
+		Creds:        credentials.NewStaticV4(cfg.AccessKey, cfg.SecretKey, ""),
+		Secure:       cfg.UseSSL,
+		Region:       cfg.Region,
+		BucketLookup: lookup,
 	})
 	if err != nil {
 		return nil, err

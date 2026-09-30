@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"runtime"
 	"slices"
@@ -176,6 +177,61 @@ func TestS3Store(t *testing.T) {
 	}
 	if _, err := s.Stat(ctx, key); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("stat after delete: %v", err)
+	}
+}
+
+// A request names the bucket as S3_BUCKET_LOOKUP says: after the endpoint,
+// in its host name, or as the S3 client judges by the endpoint, which puts
+// it in the host name for AWS and after the endpoint for anything else. A
+// presigned URL says which, and is made without asking the store anything,
+// since the region is given.
+func TestS3StoreNamesTheBucketAsItIsTold(t *testing.T) {
+	ctx := context.Background()
+	const key = "courses/c/u"
+	for _, c := range []struct {
+		endpoint, lookup string
+		inHost           bool
+	}{
+		{"objects.example.edu", "", false},
+		{"objects.example.edu", "auto", false},
+		{"objects.example.edu", "path", false},
+		{"objects.example.edu", "dns", true},
+		{"s3.eu-west-1.amazonaws.com", "auto", true},
+		{"s3.eu-west-1.amazonaws.com", "dns", true},
+		{"s3.eu-west-1.amazonaws.com", "path", false},
+	} {
+		s, err := NewS3Store(S3Config{Endpoint: c.endpoint, Bucket: "aishie", Region: "eu-west-1", AccessKey: "access", SecretKey: "secret",
+			UseSSL: true, BucketLookup: c.lookup})
+		if err != nil {
+			t.Fatal(err)
+		}
+		get, err := s.PresignGet(ctx, key, time.Minute)
+		if err != nil {
+			t.Fatal(err)
+		}
+		put, _, err := s.PresignPut(ctx, key, "application/pdf", time.Minute)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, raw := range []string{get, put} {
+			u, err := url.Parse(raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			inHost := strings.HasPrefix(u.Host, "aishie.") && u.Path == "/"+key
+			inPath := !strings.HasPrefix(u.Host, "aishie.") && u.Path == "/aishie/"+key
+			if u.Scheme != "https" || inHost != c.inHost || inPath == c.inHost {
+				t.Errorf("%s with the bucket lookup %q: %s://%s%s", c.endpoint, c.lookup, u.Scheme, u.Host, u.Path)
+			}
+			if c.endpoint == "objects.example.edu" && strings.TrimPrefix(u.Host, "aishie.") != c.endpoint {
+				t.Errorf("%s with the bucket lookup %q is sent to %s", c.endpoint, c.lookup, u.Host)
+			}
+		}
+	}
+	for _, bad := range []string{"virtual", "DNS"} {
+		if _, err := NewS3Store(S3Config{Endpoint: "objects.example.edu", Bucket: "aishie", Region: "eu-west-1", BucketLookup: bad}); err == nil {
+			t.Errorf("the bucket lookup %q was taken", bad)
+		}
 	}
 }
 
