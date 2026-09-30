@@ -24,8 +24,11 @@ import (
 	"github.com/AIShie-Education/AIShie-Core/internal/db"
 	"github.com/AIShie-Education/AIShie-Core/internal/httpapi"
 	"github.com/AIShie-Education/AIShie-Core/internal/ratelimit"
+	"github.com/AIShie-Education/AIShie-Core/internal/secrets"
 	"github.com/AIShie-Education/AIShie-Core/internal/signing"
+	"github.com/AIShie-Education/AIShie-Core/internal/sso"
 	"github.com/AIShie-Education/AIShie-Core/internal/testkit"
+	"github.com/AIShie-Education/AIShie-Core/internal/tools"
 )
 
 // fakeIdP is an OpenID Connect provider, as much of one as a relying party
@@ -123,6 +126,14 @@ func (p *fakeIdP) grant(upn, nonce string, change func(map[string]any)) string {
 type ssoAPI struct {
 	*api
 	idp *fakeIdP
+	// op is the operator's provider, polyu-adfs, at idp; nil in a server
+	// with none (newSite).
+	op *sso.Operator
+	// keys seal the site's providers' client secrets; nil in a server with
+	// no SECRETS_KEY.
+	keys *secrets.Keyring
+	// registry is the server's.
+	registry *sso.Registry
 }
 
 func newSSO(t *testing.T) *ssoAPI {
@@ -133,8 +144,33 @@ func newSSO(t *testing.T) *ssoAPI {
 // newSSOWith is newSSO with a sign-in limit, and the Deps adjusted first.
 func newSSOWith(t *testing.T, signIns *ratelimit.Limiter, adjust func(*httpapi.Deps)) *ssoAPI {
 	t.Helper()
+	return newSSOServer(t, ssoSetup{operator: true, keys: true, signIns: signIns, adjust: adjust})
+}
+
+// ssoSetup is a server's single sign-on: the operator's provider or none,
+// a secrets key or none.
+type ssoSetup struct {
+	operator, keys bool
+	signIns        *ratelimit.Limiter
+	adjust         func(*httpapi.Deps)
+}
+
+func testKeys(t *testing.T) *secrets.Keyring {
+	t.Helper()
+	k := make([]byte, secrets.KeySize)
+	if _, err := rand.Read(k); err != nil {
+		t.Fatal(err)
+	}
+	keys, err := secrets.NewKeyring(k)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return keys
+}
+
+func newSSOServer(t *testing.T, set ssoSetup) *ssoAPI {
+	t.Helper()
 	idp := newFakeIdP(t)
-	c := testkit.NewCS101(t, 0)
 	latest, err := db.LatestEmbedded()
 	if err != nil {
 		t.Fatal(err)
@@ -143,25 +179,39 @@ func newSSOWith(t *testing.T, signIns *ratelimit.Limiter, adjust func(*httpapi.D
 	if err != nil {
 		t.Fatal(err)
 	}
-	var srv *httptest.Server
 	mux := http.NewServeMux()
-	srv = httptest.NewServer(mux)
+	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
-	provider, err := auth.NewOIDC(context.Background(), auth.OIDCConfig{Name: "polyu-adfs", Issuer: idp.issuer(), ClientID: clientID,
-		ClientSecret: clientSecret, SubjectClaim: "upn", RedirectURL: srv.URL + httpapi.SSOCallbackPath})
-	if err != nil {
-		t.Fatalf("discovery: %v", err)
+	a := &ssoAPI{idp: idp}
+	if set.keys {
+		a.keys = testKeys(t)
 	}
+	if set.operator {
+		provider, err := auth.NewOIDC(context.Background(), auth.OIDCConfig{Name: "polyu-adfs", Issuer: idp.issuer(), ClientID: clientID,
+			ClientSecret: clientSecret, SubjectClaim: "upn", RedirectURL: srv.URL + httpapi.SSOCallbackPath})
+		if err != nil {
+			t.Fatalf("discovery: %v", err)
+		}
+		a.op = &sso.Operator{ID: "polyu-adfs", Issuer: idp.issuer(), ClientID: clientID, SecretHint: secrets.Hint(clientSecret),
+			Scopes: sso.DefaultScopes, SubjectClaim: "upn", IdP: provider}
+	}
+	// The tools and the server share the operator's provider and the keys,
+	// as serve's one registry has them.
+	c := testkit.NewCS101WithDeps(t, 0, func(d *tools.Deps) {
+		d.SSO = sso.New(sso.Config{Operator: a.op, Keys: a.keys, PublicURL: srv.URL})
+	})
+	a.registry = sso.New(sso.Config{Pool: c.Pool, Operator: a.op, Keys: a.keys, PublicURL: srv.URL})
 	deps := httpapi.Deps{
 		Pool: c.Pool, LatestSchema: latest, Pipeline: c.P, Auth: auth.NewAuthenticator(c.Pool, time.Hour),
-		TrustedOrigins: []string{frontEnd}, InsecureCookies: true, SSO: provider, Signer: signer,
-		SignIns: signIns,
+		TrustedOrigins: []string{frontEnd}, InsecureCookies: true, SSO: a.registry, Signer: signer,
+		SignIns: set.signIns,
 	}
-	if adjust != nil {
-		adjust(&deps)
+	if set.adjust != nil {
+		set.adjust(&deps)
 	}
 	mux.Handle("/", httpapi.NewHandler(deps))
-	return &ssoAPI{api: &api{t: t, c: c, srv: srv}, idp: idp}
+	a.api = &api{t: t, c: c, srv: srv}
+	return a
 }
 
 func (a *ssoAPI) link(actor uuid.UUID, upn string) {
