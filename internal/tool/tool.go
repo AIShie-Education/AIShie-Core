@@ -154,6 +154,11 @@ type Target struct {
 type Route struct {
 	Method  string // GET, POST, ...
 	Pattern string // /v1/courses/{course_id}/grades
+	// IfMatch names the input field that an If-Match header carries, for a
+	// write made over the version its caller read: If-Match: "3" is the
+	// field given as 3. The field may be in the body as well, if it says the
+	// same.
+	IfMatch string
 }
 
 // ExecCtx is what a Write tool runs with. Everything it does goes through Tx,
@@ -505,6 +510,11 @@ func Define[In, Out any](s Spec[In, Out]) Tool {
 		}
 		lo, hi := 0.0, float64(MaxWaitSeconds)
 		p.Minimum, p.Maximum = &lo, &hi
+	}
+	if f := s.HTTP.IfMatch; f != "" {
+		if p := inSchema.Properties[f]; p == nil || (p.Type != "integer" && !slices.Contains(p.Types, "integer")) {
+			fail("HTTP.IfMatch names %q, which is not an integer field of the input", f)
+		}
 	}
 	resolved, err := inSchema.Resolve(nil)
 	if err != nil {
