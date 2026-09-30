@@ -197,8 +197,11 @@ The events that matter carry ids, never text:
 | `action_list_mine` | `course_id`, `exclude_types`, `after`, `limit` | The agent's own actions, oldest first, with `status` and `result`: a proposal's fate and a rejection's reason. Keep its `after` cursor. (`action_get` needs `action_decide`.) |
 
 **Read tools for the model**, where the seat allows (§4): `course_get`,
-`document_list`, `document_get` (text in `version.body_md`; a file's
-`download_url` lasts 15 minutes),
+`document_list`, `document_get` (text in `version.body_md`; the version's
+files in `version.files`, in order, each with its `id`, `filename`,
+`content_type`, `byte_size`, a `download_url` that lasts 15 minutes, and its
+text version, `text`; §3.1, rule 6), `document_text` (one file's text version,
+in parts, by `file_id`), `document_file` (one file again, with a fresh URL),
 `assignment_list`, `assignment_get`, `submission_list`, `submission_get`,
 `grade_list`, `grade_get`, `component_tree`, `gradebook_get`.
 
@@ -469,14 +472,24 @@ Rules:
    plain text, so a change of model between answers breaks nothing.
 5. A tool result is Core's envelope, cut at 32 KB with `…[truncated, N
    bytes]`, keeping `status` and `error` whole.
-6. Files: the runtime fetches `download_url` itself and passes a file part
-   (Anthropic `document`, OpenAI `input_file`, Gemini `inlineData`), or
-   extracted text. Cap the size; never give the model the URL. A version whose
-   text version is done (`version.text`, and `document_text` for one longer
-   than a part; schema.md §2.4) is given to every model first, saying whether
-   a model transcribed it or staff wrote it; the file stays there for a model
-   that checks a page against it. A question's files go the same way (§2.9),
-   their URLs from `conversation_attachment`.
+6. Files: a version of a document holds files, in order (`version.files` of
+   `document_get`; schema.md §2.4, Files of a version): a lecture's slides,
+   its handout and a sample program, say. The runtime reads each of them, not
+   the first alone: for each file, its text version when it is done
+   (`files[].text`, with its `body` when it is short; `document_text{file_id,
+   part}` for a longer one, or one whose body `document_get` left out) is
+   given to every model first, saying whether a model transcribed it or staff
+   wrote it, under the file's name; otherwise, or for a model that checks a
+   page against it, the runtime fetches the file's `download_url` itself
+   (`document_file{file_id}` for a fresh one once it has lapsed) and passes a
+   file part (Anthropic `document`, OpenAI `input_file`, Gemini `inlineData`),
+   or extracted text. Cap the size, per file and per version; never give the
+   model a URL. The version's own `download_url`, `content_type`, `byte_size`
+   and `text` are its first file's, kept for the runtimes of the release
+   before: read `files`. A text version is kept by its file's id, which never
+   changes, and dropped when its news (`document.text_updated`, with
+   `file_id`) says it has. A question's files go the same way (§2.9), their
+   URLs from `conversation_attachment`.
 
 ### 3.2 Declaring tools, calls and results
 
@@ -765,7 +778,8 @@ toolset(seat) = { t in the catalogue |
 and checks them when the catalogue's hash changes. Today: `document_read` for
 `course_get`, `assignment_list`, `assignment_get`, `event_list`,
 `action_list_mine`; `document_read` or `rubric_read` for `document_list`; any
-of those or `submission_read` or `grade_read` for `document_get`;
+of those or `submission_read` or `grade_read` for `document_get`, `document_file`
+and `document_text`;
 `submission_read` for `submission_list`, `submission_get`; `grade_read` for
 `grade_list`, `grade_get`, `component_tree`, `gradebook_get`. An empty
 toolset is fine: the agent answers from the conversation alone.

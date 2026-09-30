@@ -583,7 +583,8 @@ func TestToolsListIsTheRegistry(t *testing.T) {
 	if got := s.InitializeResult().Instructions; !strings.Contains(got, "idempotency_key") || !strings.Contains(got, "proposed") || !strings.Contains(got, "me_memberships") ||
 		!strings.Contains(got, "conversation_inbox") || !strings.Contains(got, "me_site_chat") ||
 		!strings.Contains(got, "conversations_are_with_agents") || !strings.Contains(got, "document_text") ||
-		!strings.Contains(got, "conversation_attachment") || !strings.Contains(got, "conversation_upload_url") {
+		!strings.Contains(got, "conversation_attachment") || !strings.Contains(got, "conversation_upload_url") ||
+		!strings.Contains(got, "version.files") || !strings.Contains(got, "document_file") {
 		t.Fatalf("the server's instructions do not explain the essentials:\n%s", got)
 	}
 	listed := map[string]*mcp.Tool{}

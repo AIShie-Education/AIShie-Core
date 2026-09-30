@@ -925,18 +925,34 @@ document_version(id, document_id→document, seq, body_md null,
     check: body_md or storage_key present, or purged;  purged: all three purge columns,
            no body_md, storage_key or checksum, a reason of 1..500 characters
     trigger: append-only, but for being purged, once;
-             a version with a file of material, instructions or a rubric is queued for its text
-             as it is added, and its text is deleted as it is purged
+             at commit, its files are numbered 1..n and the first is the one storage_key,
+             content_type, byte_size and checksum name; a version written with a file in those
+             columns alone (by the release before 0023) is given it as its one file;
+             its files and their text versions are deleted as it is purged
+    storage_key, content_type, byte_size, checksum: deprecated, the first file's, kept for the
+             release before 0023, which reads them; a later migration drops them
 
-document_version_text(version_id→document_version, document_id, course_id,
+document_version_file(id, version_id, document_id, position, filename, storage_key unique,
+                      content_type, byte_size, checksum null, created_at,
+                      unique(version_id, position))
+    composite FK (version_id, document_id) → document_version(id, document_id)
+    check: position 1..100;  filename 1..255 characters, trimmed, no control characters or
+           slashes;  content_type 1..200 characters;  byte_size ≥ 0
+    trigger: written with its version, in its transaction and dated as it is, never to a purged
+             one; kept as written, deleted only as its version is purged;
+             a file of material, instructions or a rubric is queued for its text as it is added
+
+document_version_text(version_id→document_version, file_id→document_version_file,
+                      document_id, course_id,
                       status [pending|working|done|failed|skipped], body null,
                       source null [ai|staff], pages null, model null, reason null,
                       revision = 1, attempts = 0, backfill = false, queued_at,
                       lease_id null, claimed_until null,
                       claimed_by_credential_id null→credential, claimed_at null,
                       produced_at null, edited_by_member_id null, edited_at null,
-                      created_at, updated_at)
+                      created_at, updated_at, primary key (version_id, file_id))
     composite FKs (version_id, document_id) → document_version(id, document_id),
+                  (file_id, version_id) → document_version_file(id, version_id),
                   (document_id, course_id) → document(id, course_id),
                   (course_id, edited_by_member_id) → course_member(course_id, id)
     check: body set ⇔ done, and then source set;  body 1 byte..2 MiB;
@@ -945,17 +961,20 @@ document_version_text(version_id→document_version, document_id, course_id,
            reason set ⇔ failed or skipped, 1..500 characters;  model 1..200 characters;
            pages 1..100000;
            working ⇔ lease_id, with claimed_until, and the claim's credential and time
-    trigger: only for a version with a file of material, instructions or a rubric, not purged;
-             its version, document, course and creation never change;
-             deleted only when its version is purged
+    trigger: only for a file of a version of material, instructions or a rubric, not purged;
+             one naming no file is its version's first file's;
+             its version, file, document, course and creation never change;
+             deleted only when its version is purged;
+             one statement writes the text of one file of a version at most
 ```
 
-**Everything readable is a document**, and a version is text, a file in object storage, or
-both. There is no separate file table. A version with a file of material, instructions or a
-rubric has a text version as well (Text versions, below): its file transcribed into Markdown,
-which every reader of the version reads before the file. Versions are append-only; an edit is
-`seq + 1`. The one exception is a purge (below), which empties a version and leaves a tombstone
-in its place.
+**Everything readable is a document**, and a version is text, files in object storage, or
+both: a lecture's slides, its handout and a sample program, say, in one version, with text in
+Markdown beside them or none (Files of a version, below). Each file of material,
+instructions or a rubric has a text version as well (Text versions, below): the file
+transcribed into Markdown, which every reader of the version reads before the file. Versions
+are append-only; an edit is `seq + 1`. The one exception is a purge (below), which empties a
+version and leaves a tombstone in its place.
 
 Two ways to attach a document, chosen by shape:
 
@@ -963,7 +982,9 @@ Two ways to attach a document, chosen by shape:
   `submission` pins `instructions_version_id` and `grade` pins `rubric_version_id`, so a
   dispute can show exactly what the student was told and what the grader was given.
 - **Many, unversioned, owned** — submitted files and feedback files. The document points at its
-  owner (`submission_id`, `grade_id`). An essay plus a zip is two documents.
+  owner (`submission_id`, `grade_id`). An essay plus a zip is two documents, or one document
+  of two files: a submitted document's one version holds files as any version does.
+  `grade.submit`'s `feedback_files` are a document each, of one file.
 
 Material is published by moving `published_version_id`. Students read the published version;
 instructors read the latest. A half-edited lecture is invisible until the pointer moves.
@@ -981,9 +1002,10 @@ within their scope was handed in under, even after the instructions have moved o
 **Bytes never pass through a tool call.** An MCP agent cannot stream a file through a JSON-RPC
 message. `document.upload_url` returns a short-lived URL and an upload token; the client PUTs
 the bytes to the URL — straight to the object store, or to this server when files are kept on
-its own disk — and hands the token to the tool that attaches the file (`document.create`,
-`document.add_version`, or `feedback_files` on `grade.submit`). The `max_bytes` it is given
-with the URL is checked when the file is attached: a larger file is refused then, and removed.
+its own disk — and hands the token to the tool that attaches the file (`files` of
+`document.create` and `document.add_version`, or `feedback_files` on `grade.submit`). The
+`max_bytes` it is given with the URL is checked when the file is attached: a larger file is
+refused then, and removed.
 This server's own disk also stops a larger upload as it arrives. An object store's upload URL
 does not: it takes a PUT of any size the store allows, and a larger file that is never
 attached stays until the sweep removes it. The token is a signed claim
@@ -1009,7 +1031,45 @@ download, never as a page, whichever store keeps it: a student's `essay.html` do
 script for whoever opens it. The storage key is made by the server and is unguessable; nothing
 the uploader says goes into it. A message of a conversation carries files the same way, with
 an upload URL of its own (`conversation.upload_url`), and they are kept apart (§2.8,
-Attachments).
+Attachments). A document's uploads are kept under `documents/<course>/<upload>`; before a
+version held several files they went under `courses/`, where those stay. The orphan sweep looks
+under both; the release before looks under `courses/` alone, and would take a version's files
+beyond its first, which it does not know, for uploads nothing came to point at.
+
+**Files of a version.** A version holds files (`document_version_file`), in order: each
+uploaded first, and named, in the call that writes the version, by its upload token and the name
+it is shown and downloaded under — `files: [{upload_token, filename}]` — or by the name given to
+`document.upload_url` when it gave the upload URL (`filename` there, signed into the token). A
+name is 1 to 255 characters on one line, a name and not a path. A version holds at most
+`DOCUMENT_MAX_FILES_PER_VERSION` files (20; at most 100, which the database holds too) and
+`DOCUMENT_MAX_VERSION_BYTES` in all (200 MiB), each file at most `MAX_UPLOAD_BYTES`;
+`document.upload_url` says the three (`max_files`, `max_version_bytes`, `max_bytes`), for a front
+end to check first. What a version is given is checked before anything is written or proposed
+(`too_many_files`, `duplicate_file`, `bad_filename`, `filename_required`,
+`files_and_upload_token`), and the files together when they are claimed (`version_too_large`).
+A version is text, files, or both; it has at least one of the two. Its files are written with it, in its
+transaction, dated as it is, and kept as they are: nothing is added to a version afterwards, a
+file never changes, and it goes only as its version is purged, when every file of it goes. A proposal
+names its files by their tokens, as a proposal of a feedback file does, is held to all of this
+when it is made and again when it is approved, and is refused once an upload it names is two
+days old.
+
+The one `upload_token` a version took before is one file still, named as it was uploaded, or
+else after the document's title with the extension of its type (`document_file_name`, the same
+in the application), and cannot be given with `files`. It is deprecated. So are a version's own
+file columns (`storage_key`, `content_type`, `byte_size`, `checksum`), filled with its first
+file for the release before, which reads them, and the fields of the reads they filled:
+`document.get`'s `version.download_url`, `.content_type`, `.byte_size`, `.checksum` and `.text`,
+and `document.versions`' `has_file`, `content_type`, `byte_size` and `text`, each now its first
+file's. The release before, while the migration goes in and after a rollback, reads a version's
+first file and writes one file as it did, which the database records as its one file at commit.
+Migration 0023 recorded every version's file as its one file, named after its document.
+
+Who may read a file is who may read its version. `document.get` lists the version's `files`,
+each with `id`, `position`, `filename`, `content_type`, `byte_size`, `checksum`, a short-lived
+`download_url` that serves it as a download under its name, and its text version;
+`document.versions` lists every version's, without URLs or texts; `document.file` gives one by
+its id, with a fresh URL, to whoever `document.get` would show its version when named by id.
 
 Once a submission is handed in, its files are frozen with it. The trigger guards the
 `submission` row; that nothing is added to, archived from, renamed or brought back among its
@@ -1031,10 +1091,11 @@ material, instructions or a rubric, or the whole document — personal data atta
 say. It is an administrator's, from outside the course, as removing data is not something a
 seat's permissions reach (the Admin gate, §2.10): a platform administrator anywhere, a
 department administrator in the courses of the departments they cover; and, unlike every
-other write but opening the course again, it is done in an archived course too. Its text, its file and the file's checksum go, the file
-deleted from storage; the version keeps its place, author, date, content type and size, with
-who purged it, when and why (`purged_at`, `purged_by_actor_id`, `purge_reason`), and reads so
-to anyone who reads it. A purged document is archived for good — nothing is added to it or
+other write but opening the course again, it is done in an archived course too. Its text and
+every file of it go, the files deleted from storage and from `document_version_file`, names and
+checksums and all; the version keeps its place, author, date, and its first file's content type
+and size, with who purged it, when and why (`purged_at`, `purged_by_actor_id`,
+`purge_reason`), and reads so to anyone who reads it. A purged document is archived for good — nothing is added to it or
 brought back — and the version list and `document.list` say when it was purged. What pinned a
 purged version still names it: a submission handed in under it reads the tombstone as what it
 was told, a grade its rubric the same, and neither the work nor the grade changes. A published
@@ -1043,25 +1104,26 @@ version is never published again. A submitted file and a feedback file are their
 and grade's, archived with them and never purged. The file is deleted last, once the rows say
 it is gone; if the call then fails to commit, the file is gone and the rows still name it, and
 the call made again with its key purges them, deleting what is gone already being no error.
-A purged version's text version is deleted with it, by the database, whichever release purges
-it: it is what the file said.
+A purged version's files, and their text versions, are deleted with it, by the database,
+whichever release purges it: a text is what its file said.
 
-**Text versions.** A version of a course's material, instructions or rubric that has a file has
-a text version (`document_version_text`): the file — slides, a PDF, a Word file — transcribed
-into Markdown by a model the site chooses, each page or slide under a heading of its own
-(`## 第 N 頁`, `## Slide N`), tables, formulas and code as Markdown writes them, each picture or
+**Text versions.** Each file of a version of a course's material, instructions or rubric has a
+text version of its own (`document_version_text`, keyed by the version and the file): the file —
+slides, a PDF, a Word file — transcribed into Markdown by a model the site chooses, each page or
+slide under a heading of its own (`## 第 N 頁`, `## Slide N`), tables, formulas and code as Markdown writes them, each picture or
 diagram described in one bracketed line, nothing invented. Every model then reads the same text,
 a model that reads no files included, and search has something to index. A submitted file and a
 feedback file have none: they are a student's work and a grader's words about it, and are not
 sent to a model for this.
 
-- **Queued as the version is added.** The database records it `pending` in the transaction
-  that adds the version (trigger `document_version_text_queued`), whichever release adds it,
-  and the call that adds it wakes the service (below). Migration 0020 queued what was there
-  already, once, marked `backfill`: the published and the latest version of every document
-  that is not archived, in every course that is not archived. Earlier versions, and those of
-  archived documents and courses, have none until staff ask for one (`document.text_retranscribe`
-  makes it, `pending`); a version of text alone has none.
+- **Queued as the file is added.** The database records it `pending` in the transaction
+  that adds the version, as each file is recorded (trigger `document_version_file_text_queued`),
+  whichever release adds it, and the call that adds it wakes the service (below). Migration 0020
+  queued what was there already, once, marked `backfill`: the published and the latest version
+  of every document that is not archived, in every course that is not archived; migration 0023
+  made each of those its version's one file's. Earlier versions, and those of archived documents
+  and courses, have none until staff ask for one (`document.text_retranscribe` makes it,
+  `pending`); a version of text alone has none.
 - **Where it stands.** `status` is `pending`, waiting its turn; `working`, claimed by the service;
   `done`, with its text (`body`, at most 2 MiB); `failed` or `skipped`, with `reason` (the
   service's: a model's error, a file too long, the day's pages spent, a format it does not take,
@@ -1070,17 +1132,22 @@ sent to a model for this.
   (`produced_at`); or `staff`, which says who wrote or last edited it and when
   (`edited_by_member_id`, `edited_at`). `revision` counts the changes to the text: the service's
   text, an edit, and discarding it, each add one.
-- **Read as its version is.** Whoever may read the version reads its text, and nobody else: a
-  student the published version's, a member who reads drafts any version's, as `document.get`
-  decides it (`readableVersion`). `document.get` gives it with the version (`version.text`: where
-  it stands, and the text itself when it is one part), `document.versions` each version's without
-  the text, and `document.text` reads it, in parts of at most 64 KiB (65536 bytes): whole pages
+- **Read as its version is.** Whoever may read the version reads its files' texts, and nobody
+  else: a student the published version's, a member who reads drafts any version's, as
+  `document.get` decides it (`readableVersion`). `document.get` gives each with its file
+  (`files[].text`: where it stands, and the text itself when it is one part and the texts given
+  with the version so far, in order, come to no more than one part), `document.versions` each
+  file's without the text, and `document.text` reads one, named by `file_id` (the version's
+  first when none is named; given a `file_id` and no `version_id`, the file's version), in parts
+  of at most 64 KiB (65536 bytes): whole pages
   where they fit, a page being what starts at a heading of the second level, otherwise whole
   lines, otherwise whole characters, the same text always cut the same way. A reader reads every
   part of one `revision`.
-- **Written by staff.** Whoever may write the document — `perm_document_write` — writes its text
-  (`document.text_update`, the whole text) or sends it back to be transcribed
-  (`document.text_retranscribe`), each an action like a new version: recorded, replayed by its
+- **Written by staff.** Whoever may write the document — `perm_document_write` — writes a file's
+  text (`document.text_update`, the whole text) or sends it back to be transcribed
+  (`document.text_retranscribe`), each an action like a new version, naming the file by
+  `file_id`, which a version of one file needs not and a version of several must
+  (`file_id_required`); a proposal pins the file it was made about: recorded, replayed by its
   key, proposed or under review as the writer's level says, refused in an archived course or
   document. An edit is `source: staff` from then on: no transcription writes over it, and one
   under way is refused when it finishes. The edit's text is recorded with the action, as a
@@ -1096,27 +1163,30 @@ sent to a model for this.
   version's, to whoever reads drafts. Instructions and a rubric are filed under each published
   assignment that refers to them, or under the `_unreleased` names while none does (§2.6). Each
   is told when the text becomes `done` (the service's, or staff's) and when a text is sent back to
-  be transcribed, with `version_id`, `status`, `source` and `revision`, never the text, so that a
-  runtime drops what it kept and search reads it again.
+  be transcribed, with `version_id`, `file_id`, `status`, `source` and `revision`, never the text,
+  so that a runtime drops what it kept and search reads it again.
 
 **The queue.** The transcription service (§2.1, Services) takes what waits and writes it back:
 
-- `document_text.queue` claims up to ten versions at once, across the site, each for the caller
-  alone until its lease runs out (`lease_s`, 60 to 3600 seconds, 600 by default): uploads first,
-  those waiting longest first, then the backfill, the newest first. It hands back each version
-  with its claim's `lease_id` and a download URL for its file that lasts fifteen minutes. Two
-  claims at once never take one version (`FOR UPDATE SKIP LOCKED`). A claim that lapses may be
-  claimed again, by anyone; each claim counts an attempt, and a version claimed five times and
-  not finished is failed, `attempts_exhausted`, rather than claimed again. Nothing in an archived
+- `document_text.queue` claims up to ten files at once, across the site, each file's text for
+  the caller alone until its lease runs out (`lease_s`, 60 to 3600 seconds, 600 by default):
+  uploads first, those waiting longest first, then the backfill, the newest first, a version's
+  files in order. It hands back each with its version, its file (`file_id`, `position`,
+  `filename`), its claim's `lease_id` and a download URL for the file that lasts fifteen
+  minutes. Two claims at once never take one file (`FOR UPDATE SKIP LOCKED`). A claim that lapses
+  may be claimed again, by anyone; each claim counts an attempt, and a file claimed five times
+  and not finished is failed, `attempts_exhausted`, rather than claimed again. Nothing in an archived
   course, or of an archived document, is claimed, and nothing is written back there, as nothing
   is written in one; it waits until they are open again. The claim is an ephemeral write
   (`tool.Ephemeral`): no action, no key, no event; the claim itself, on the text version, is the
   record. With `wait_s` a claim that finds nothing waits, as a read that waits for news does
   (§2.6, Waiting for news), for a version to be queued anywhere: the calls that queue one notify
   kind `document_text.queued` at `seq` 0, told by no event, which wakes only such a claim.
-- `document_text.file` gives another URL for the file of a version the caller's claim holds,
-  and `document_text.renew` holds a claim longer, from now; neither is the caller's once the
-  claim no longer holds (`lease_lost`).
+- `document_text.file` gives another URL for a file the caller's claim holds, and
+  `document_text.renew` holds a claim longer, from now; neither is the caller's once the claim no
+  longer holds (`lease_lost`). These and `document_text.complete` name the claim's version, its
+  `lease_id` and its `file_id`; one naming no file means the file its lease is of, which for a
+  version of one file is that file.
 - `document_text.complete` writes back what became of it while the claim holds: `done`, with its
   text, its page count and the model's name; or `failed` or `skipped`, with why. It is refused,
   and writes nothing, once staff have written the text (`edited_by_staff`), or once the claim no
@@ -1327,7 +1397,8 @@ applies to it. While no published assignment does, it is written once under the 
 with `_unreleased` appended (`document.published_unreleased`), which is shown to those who
 would be shown the event by its own name and who also hold `perm_assignment_write`, as only
 it sees unpublished work. Material's events belong to no assignment and are for the whole
-course.
+course. `document.version_added` says how many files the new version holds (`files`),
+and a text version's news which file's text it is (`file_id`).
 
 Nobody approves or reviews their own action. The CHECKs compare seats; the application compares
 actors as well, so the rule holds across every seat one actor has held: someone removed and
@@ -2146,6 +2217,8 @@ respondent's `conversation_answer` decides is who is shown its text.
 | No credential is written for the system actor | trigger on `credential` |
 | A person holds no API token, and an agent nothing but API tokens: none written, moved, changed in kind or brought back live otherwise | trigger `credential_fits_actor_kind` on `credential` |
 | `event` is append-only; `document_version` is too, but for being purged once: its text, file and checksum emptied, who, when and why recorded, nothing else changed | triggers |
+| A version's file is of its version and its document, at a place of its own, and a stored file is one version's file at most; it is written with its version and dated as it is, never to a purged one, and kept as it is: never changed, and deleted only as its version is purged | composite FK, `unique(version_id, position)`, `unique(storage_key)`, triggers `document_version_file_with_its_version`, `document_version_file_kept` |
+| A version's files are numbered 1 to n, at most 100, and the first is the file its own columns name; a version written with a file in them alone is given it as its one file | trigger `document_version_files_whole` on `document_version` and `document_version_file_whole` on `document_version_file`, at commit |
 | A purge says who, when and why; a purged document is material, instructions or a rubric, archived, and stays purged as it was purged | CHECKs and trigger `document_purge_kept` on `document`, CHECKs on `document_version` |
 | An override of a total is on a computed grade, not negative, and says who, when and why | CHECKs on `grade` |
 | A submitted submission never changes | trigger |
@@ -2189,8 +2262,9 @@ respondent's `conversation_answer` decides is who is shown its text.
 | A site service has a scope, one for each scope, and no email or platform role; only a service has a scope | CHECKs `actor_service_is_scoped`, `actor_service_scope_valid`, `actor_service_holds_no_account`, unique index `actor_service_scope_key` |
 | A service holds service credentials and nothing else, and nobody else holds one: none written, moved, changed in kind or brought back live otherwise | trigger `credential_fits_actor_kind` on `credential` |
 | A service is seated in no course | trigger `course_member_not_a_service` |
-| A version with a file of material, instructions or a rubric has a text version from the transaction that adds it, whichever release adds it; a purge deletes it with the file | triggers `document_version_text_queued`, `document_version_text_purged` on `document_version` |
-| A text version is of a version with a file of material, instructions or a rubric, not purged, in its document's course, and stays so; it is deleted only when its version is purged | composite FKs, trigger `document_version_text_guarded` |
+| Each file of a version of material, instructions or a rubric has a text version from the transaction that adds it, whichever release adds it; a purge deletes it with the files | trigger `document_version_file_text_queued` on `document_version_file`, `document_version_files_purged` on `document_version` |
+| A text version is of a file of a version of material, instructions or a rubric, not purged, in its document's course, and stays so; it is deleted only when its version is purged | composite FKs, trigger `document_version_text_guarded` |
+| One statement writes the text of one file of a version at most: the release before 0023, which writes a version's text by its version alone, cannot write one text over several files | trigger `document_version_text_one_file_at_a_time` |
 | A text version's shape: a text exactly when done, at most 2 MiB, saying whose; the service's says its model and when, staff's who and when; failed and skipped say why; a claim holds a lease, made by a credential | CHECKs on `document_version_text` |
 
 **Enforced by the application.** Each is a place a bug can hide, and each needs a test.
@@ -2426,8 +2500,14 @@ respondent's `conversation_answer` decides is who is shown its text.
   together; a proposal naming an upload more than two days old is refused. A file is read by
   whoever reads its conversation, and withheld from them once its message is retracted; to
   anyone else it does not exist.
-- The orphan sweep removes an upload that neither a version nor a message's file names, under
-  `courses/` and `conversations/` alike, and holds the lock attaching takes while it asks.
+- The orphan sweep removes an upload that neither a version, as any of its files or in its own
+  columns, nor a message's file names, under `documents/`, `courses/` and `conversations/`
+  alike, and holds the lock attaching takes while it asks.
+- A version's files (§2.4, Files of a version) are uploads its author was given for that kind of
+  document, each claimed under its storage key's lock (`already_attached`), held to how many a
+  version holds, how large each is and how much they come to together, before anything is
+  written; a proposal naming an upload more than two days old is refused. A file is read by
+  whoever may read its version, and to anyone else it does not exist.
 - News of a conversation reaches its two participants and nobody else (`event.list`).
 - A read that waits for news (`wait_s`) holds no transaction or connection while it waits, and
   is authorized again each time it reads; every event a transaction writes in a course is
@@ -2459,14 +2539,15 @@ respondent's `conversation_answer` decides is who is shown its text.
   by the agents' door. A service is managed by the `service.*` tools alone: refused by
   `actor.*`, never seated, never issued an API token (§2.1, Services).
 - A text version is read by whoever may read its version, as `document.get` decides it
-  (`readableVersion`), and by nobody else (§2.4, Text versions).
+  (`readableVersion`), and by nobody else (§2.4, Text versions). A write of a text names its
+  file, but for a version of one file; a read that names none reads the first file's.
 - A text version's changes take turns: staff's hold the document and then the text version, the
   service's the document `FOR SHARE` and then the text version, a claim takes it `SKIP LOCKED`.
   The service writes back only while its claim holds it and staff have not written it; staff's
   text is discarded only with `discard_edit`; a change made from a revision is refused once the
   text has another (`text_changed`), a proposal held to the revision it was made about.
 - Nothing is claimed, or written back, in an archived course or of an archived document; a
-  version claimed five times and not finished is failed (`attempts_exhausted`).
+  file claimed five times and not finished is failed (`attempts_exhausted`).
 - `actor.kind` and `course_member.role` are never read by authorization.
 
 ## 5. Worked example: an agent grades an essay
