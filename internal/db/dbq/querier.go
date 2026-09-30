@@ -31,6 +31,12 @@ type Querier interface {
 	// Any row at all: a draft, a hand-in, a 'missing' placeholder.
 	AssignmentHasSubmissions(ctx context.Context, assignmentID uuid.UUID) (bool, error)
 	CancelProposal(ctx context.Context, arg CancelProposalParams) (int64, error)
+	// Up to max_rows text versions waiting, or whose claim has lapsed, claimed for
+	// the caller until claimed_until: uploads first, oldest first, then the
+	// backfill, newest first. SKIP LOCKED: two claims at once never take the
+	// same one. What is in an archived course, or of an archived document, waits
+	// until it is open again, since nothing is written there meanwhile.
+	ClaimTexts(ctx context.Context, arg ClaimTextsParams) ([]ClaimTextsRow, error)
 	ClearAssignmentScope(ctx context.Context, memberID uuid.UUID) error
 	ClearStudentScope(ctx context.Context, memberID uuid.UUID) error
 	CloseConversation(ctx context.Context, arg CloseConversationParams) (int64, error)
@@ -87,6 +93,12 @@ type Querier interface {
 	CourseCodeTaken(ctx context.Context, arg CourseCodeTakenParams) (bool, error)
 	// Courses directly in each department, archived ones included.
 	CourseCountsByDept(ctx context.Context) ([]CourseCountsByDeptRow, error)
+	// Whether the credential a call came with is still the actor's, not revoked
+	// and not expired: asked on every call of a site service's (tool.Gate.Service),
+	// so that revoking its credential stops a call that waits, as well as the
+	// next one. A service holds service credentials and nothing else
+	// (credential_fits_actor_kind).
+	CredentialLive(ctx context.Context, arg CredentialLiveParams) (bool, error)
 	// The respondent's answer is posted, or proposed, the question it answers
 	// withdrawn (the opener's newest message retracted), or the conversation
 	// closed: in the same transaction, its draft is gone.
@@ -118,6 +130,10 @@ type Querier interface {
 	// The version of the draft kept, as a reader finds it (GetDraft), for a
 	// write passed over: 0 for none, one gone stale, or an attempt's end.
 	DraftVersion(ctx context.Context, arg DraftVersionParams) (int64, error)
+	// Staff's text in place of whatever there was: done, theirs, never written
+	// over by the service. A claim of it ends here; the service's completion of
+	// it is refused.
+	EditText(ctx context.Context, arg EditTextParams) (int32, error)
 	EmailTaken(ctx context.Context, lower string) (bool, error)
 	EmailTakenByAnother(ctx context.Context, arg EmailTakenByAnotherParams) (bool, error)
 	// Zero rows: it had ended already. An Admin-gated write by the appointee
@@ -135,9 +151,19 @@ type Querier interface {
 	// executed action.decide about the one before, made from the seat that
 	// approved it.
 	EscalatedBy(ctx context.Context, arg EscalatedByParams) (bool, error)
+	// ---------------------------------------------------------------------------
+	// The service's queue
+	// ---------------------------------------------------------------------------
+	// What has been claimed max_attempts times and not finished fails, rather
+	// than be claimed for ever: a file the service cannot get through.
+	ExhaustTexts(ctx context.Context, arg ExhaustTextsParams) error
 	// Moves a proposal to its end state. The status guard makes a lost race
 	// between two deciders, or a decider and the expiry sweep, a no-op.
 	FinishProposal(ctx context.Context, arg FinishProposalParams) (int64, error)
+	// The service's text: done, the model's, made now.
+	FinishTextDone(ctx context.Context, arg FinishTextDoneParams) (int32, error)
+	// The service could not, or would not: failed or skipped, saying why.
+	FinishTextUndone(ctx context.Context, arg FinishTextUndoneParams) error
 	GetActionByKey(ctx context.Context, arg GetActionByKeyParams) (Action, error)
 	GetActionCourse(ctx context.Context, id uuid.UUID) (*uuid.UUID, error)
 	GetActionForUpdate(ctx context.Context, id uuid.UUID) (Action, error)
@@ -161,6 +187,8 @@ type Querier interface {
 	// set (member.reset_password), which they must change before anything else.
 	// Only a password is marked so (credential_must_change_is_an_issued_password),
 	// so the mark alone finds it.
+	// service_scope: what a site service is for (docs/schema.md §2.1), which
+	// gates its tools, and it nothing else.
 	GetActorForAuthz(ctx context.Context, id uuid.UUID) (GetActorForAuthzRow, error)
 	// The same, FOR SHARE, for a write that acts on whether the actor is active
 	// and does not change the row: seating it, appointing it. A suspension then
@@ -188,6 +216,8 @@ type Querier interface {
 	// behind an update, including while the update waits for the tree lock.
 	GetAssignmentInCourseForUpdate(ctx context.Context, arg GetAssignmentInCourseForUpdateParams) (GetAssignmentInCourseForUpdateRow, error)
 	GetBuiltinPresetByName(ctx context.Context, name string) (PermissionPreset, error)
+	// The file of a text version the caller's claim holds.
+	GetClaimedFile(ctx context.Context, arg GetClaimedFileParams) (GetClaimedFileRow, error)
 	GetComponentInCourse(ctx context.Context, arg GetComponentInCourseParams) (GetComponentInCourseRow, error)
 	GetComponentParent(ctx context.Context, id uuid.UUID) (*uuid.UUID, error)
 	GetConversationInCourse(ctx context.Context, arg GetConversationInCourseParams) (Conversation, error)
@@ -195,11 +225,11 @@ type Querier interface {
 	GetConversationMessage(ctx context.Context, arg GetConversationMessageParams) (GetConversationMessageRow, error)
 	GetCourse(ctx context.Context, id uuid.UUID) (GetCourseRow, error)
 	GetCourseForAuthz(ctx context.Context, id uuid.UUID) (GetCourseForAuthzRow, error)
-	// A token or a session, found by its public prefix before its hash is
-	// checked. Revoked and expired rows are returned too, so that the caller can
-	// tell them from an unknown prefix in its logs; it rejects all three alike.
-	// The actor's kind comes with it: a credential of the system actor's is
-	// rejected the same way.
+	// A token, a session or a service's credential, found by its public prefix
+	// before its hash is checked. Revoked and expired rows are returned too, so
+	// that the caller can tell them from an unknown prefix in its logs; it
+	// rejects all three alike. The actor's kind comes with it: a credential of
+	// the system actor's is rejected the same way.
 	GetCredentialByPrefix(ctx context.Context, tokenPrefix *string) (GetCredentialByPrefixRow, error)
 	GetCredentialForActor(ctx context.Context, arg GetCredentialForActorParams) (GetCredentialForActorRow, error)
 	GetDepartment(ctx context.Context, id uuid.UUID) (GetDepartmentRow, error)
@@ -278,6 +308,7 @@ type Querier interface {
 	// Which seat a seat is a delegate of, if any. Whose delegate a seat is never
 	// changes, so it may be read before anything is locked.
 	GetSeatPrincipal(ctx context.Context, id uuid.UUID) (*uuid.UUID, error)
+	GetServiceActor(ctx context.Context, serviceScope *string) (GetServiceActorRow, error)
 	GetSubmissionFull(ctx context.Context, arg GetSubmissionFullParams) (Submission, error)
 	// GetSubmissionFull, locked until the transaction ends, so that what
 	// submission.submit checks is what it hands in: an edit to the draft, or a
@@ -287,6 +318,16 @@ type Querier interface {
 	// Lookups are always "in this course": an id from another course is not found.
 	GetSubmissionInCourse(ctx context.Context, arg GetSubmissionInCourseParams) (GetSubmissionInCourseRow, error)
 	GetSystemActor(ctx context.Context) (uuid.UUID, error)
+	// A version's text version with its whole text, for reading it in parts.
+	GetTextBody(ctx context.Context, versionID uuid.UUID) (GetTextBodyRow, error)
+	// What a call of the service's is about: the text version and its course.
+	GetTextForService(ctx context.Context, versionID uuid.UUID) (GetTextForServiceRow, error)
+	// Text versions (docs/schema.md §2.4, Text versions): the Markdown a version's
+	// file is transcribed into, by the site's service (source ai) or written by
+	// staff (source staff).
+	// A version's text version as its readers are shown it, without the text.
+	// Who edited it comes with their name.
+	GetTextView(ctx context.Context, versionID uuid.UUID) (GetTextViewRow, error)
 	GetVersionOfDocument(ctx context.Context, arg GetVersionOfDocumentParams) (DocumentVersion, error)
 	// Whether other is the department itself or beneath it.
 	InSubtree(ctx context.Context, arg InSubtreeParams) (bool, error)
@@ -336,6 +377,12 @@ type Querier interface {
 	// vouched for, as there is nothing to doubt.
 	InsertRegisteredPerson(ctx context.Context, arg InsertRegisteredPersonParams) error
 	InsertRetraction(ctx context.Context, arg InsertRetractionParams) (int64, error)
+	// ---------------------------------------------------------------------------
+	// Services and their credentials
+	// ---------------------------------------------------------------------------
+	// The service for a scope, made the first time a credential is issued for
+	// it, by whoever issues it; there is one for each scope.
+	InsertServiceActor(ctx context.Context, arg InsertServiceActorParams) error
 	InsertSubmission(ctx context.Context, arg InsertSubmissionParams) error
 	// A password someone else set for its person, who must change it before
 	// anything else (member.reset_password): marked must_change, saying who set
@@ -361,7 +408,8 @@ type Querier interface {
 	// list of what one has done, say.
 	ListActionsByMember(ctx context.Context, arg ListActionsByMemberParams) ([]Action, error)
 	// Everyone registered, as GetActorView sees them: people and agents, not the
-	// system actor, which nobody registers or manages. The search is a piece of
+	// system actor, which nobody registers or manages, nor a service, whose
+	// credentials are listed with service.list_credentials. The search is a piece of
 	// the name, of the email or of the login ID, in any case, taken as it is:
 	// strpos has no wildcards to escape.
 	ListActors(ctx context.Context, arg ListActorsParams) ([]ListActorsRow, error)
@@ -482,6 +530,7 @@ type Querier interface {
 	// wait for: the call waits instead for the principal, and then finds it
 	// removed.
 	ListLiveDelegatesOf(ctx context.Context, principalMemberID *uuid.UUID) ([]uuid.UUID, error)
+	ListLiveServiceCredentials(ctx context.Context, arg ListLiveServiceCredentialsParams) ([]uuid.UUID, error)
 	// Where the student has a total written down.
 	ListLiveTotalComponents(ctx context.Context, studentMemberID uuid.UUID) ([]*uuid.UUID, error)
 	// The student's totals a person has overridden, and with what, out of 100.
@@ -554,6 +603,9 @@ type Querier interface {
 	// Every seat an actor holds that is not removed, with its course and the
 	// name of the preset it was copied from.
 	ListSeatsOfActor(ctx context.Context, actorID uuid.UUID) ([]ListSeatsOfActorRow, error)
+	// A service's credentials, newest first, revoked ones included, and how many
+	// claims each holds now. Never the hash.
+	ListServiceCredentials(ctx context.Context, actorID uuid.UUID) ([]ListServiceCredentialsRow, error)
 	// What the background sweeps look for. Each returns a small batch; the sweep
 	// runs again on the next tick. None of these is what makes the system
 	// correct — authorize() ignores an expired member on every call and approval
@@ -585,6 +637,8 @@ type Querier interface {
 	ListSubmissionDocuments(ctx context.Context, submissionID *uuid.UUID) ([]ListSubmissionDocumentsRow, error)
 	ListSubmissions(ctx context.Context, arg ListSubmissionsParams) ([]ListSubmissionsRow, error)
 	ListTerms(ctx context.Context) ([]Term, error)
+	// The text versions of a document's versions, without their text.
+	ListTextViews(ctx context.Context, documentID uuid.UUID) ([]ListTextViewsRow, error)
 	ListVersions(ctx context.Context, documentID uuid.UUID) ([]ListVersionsRow, error)
 	// The versions of a document not purged yet, and the file each holds.
 	ListVersionsToPurge(ctx context.Context, documentID uuid.UUID) ([]ListVersionsToPurgeRow, error)
@@ -726,6 +780,8 @@ type Querier interface {
 	// or the call waits for it and, reading the row again here, sees what it
 	// did.
 	LockPrincipalForAuthz(ctx context.Context, id uuid.UUID) (LockPrincipalForAuthzRow, error)
+	// Credentials for one service are issued one at a time, and counted so.
+	LockServiceActor(ctx context.Context, id uuid.UUID) error
 	// Serialises attaching one upload. Held until the transaction ends.
 	LockStorageKey(ctx context.Context, storageKey string) error
 	// One writer of a student's rolled-up totals at a time.
@@ -737,6 +793,11 @@ type Querier interface {
 	LockSubmissionForGrading(ctx context.Context, id uuid.UUID) (string, error)
 	// All of one student's attempts at one assignment, locked, newest first.
 	LockSubmissionsOf(ctx context.Context, arg LockSubmissionsOfParams) ([]LockSubmissionsOfRow, error)
+	// A version's text version, held for a change to it. Whoever changes it
+	// holds the document first, as adding and purging a version do.
+	LockText(ctx context.Context, arg LockTextParams) (DocumentVersionText, error)
+	// The text version the service completes, held.
+	LockTextForService(ctx context.Context, versionID uuid.UUID) (DocumentVersionText, error)
 	LoginIDTaken(ctx context.Context, lower string) (bool, error)
 	LoginIDTakenByAnother(ctx context.Context, arg LoginIDTakenByAnotherParams) (bool, error)
 	// The one person or agent a whole email address belongs to, or the one
@@ -809,15 +870,27 @@ type Querier interface {
 	// for a new one. Under the row's lock, so that two writes at once are
 	// ordered by it.
 	PutDraft(ctx context.Context, arg PutDraftParams) (int64, error)
+	// A text version for a version from before there were any, which nobody
+	// queued (the backfill queued the published and the latest): asked for by
+	// staff, it is queued as an upload is.
+	QueueNewText(ctx context.Context, arg QueueNewTextParams) error
 	ReactivateActor(ctx context.Context, id uuid.UUID) (int64, error)
 	// Only a suspension the owner made: one an administrator made, or one made
 	// before this was recorded, is an administrator's to lift.
 	ReactivateAgentByOwner(ctx context.Context, arg ReactivateAgentByOwnerParams) (int64, error)
 	ReleaseJobLock(ctx context.Context, key int64) (bool, error)
+	// What a revoked credential had claimed, back in the queue for another,
+	// that claim not counted. The courses come back, to wake whoever waits.
+	ReleaseTexts(ctx context.Context, arg ReleaseTextsParams) ([]uuid.UUID, error)
 	RenameDepartment(ctx context.Context, arg RenameDepartmentParams) error
+	// A claim held longer, from now; its own and nobody else's.
+	RenewTextLease(ctx context.Context, arg RenewTextLeaseParams) (*time.Time, error)
 	// A 'missing' row is a placeholder written when the due date passed with
 	// nothing handed in. Late work takes it over rather than sitting beside it.
 	ReopenMissingSubmission(ctx context.Context, arg ReopenMissingSubmissionParams) error
+	// Back to the queue, as an upload is queued: whatever it said goes, a claim
+	// of it ends, and its attempts start again.
+	RequeueText(ctx context.Context, arg RequeueTextParams) (int32, error)
 	// Linking again an identity that was unlinked from the same actor.
 	ReviveSSOCredential(ctx context.Context, id uuid.UUID) error
 	// Only the owner's own credential; someone else's id changes nothing.
@@ -828,6 +901,7 @@ type Querier interface {
 	RevokeInvites(ctx context.Context, arg RevokeInvitesParams) error
 	RevokeJoinLink(ctx context.Context, arg RevokeJoinLinkParams) (int64, error)
 	RevokePasswordCredentials(ctx context.Context, arg RevokePasswordCredentialsParams) error
+	RevokeServiceCredential(ctx context.Context, arg RevokeServiceCredentialParams) (int64, error)
 	// Signs a person out everywhere: every browser session they have.
 	RevokeSessions(ctx context.Context, arg RevokeSessionsParams) (int64, error)
 	// Whether two actors are one party, for four eyes: the same actor, one the
@@ -885,6 +959,9 @@ type Querier interface {
 	// would otherwise wait under that lock for an unpublish, which is holding
 	// the assignment and waiting for the same lock to write its own event.
 	ShareAssignments(ctx context.Context, ids []uuid.UUID) error
+	// The document's status, held FOR SHARE for a write about one of its
+	// versions: archiving it waits for the write, or the write sees it.
+	ShareDocument(ctx context.Context, id uuid.UUID) (string, error)
 	// KEY SHARE on the given seats, in id order: what taking them before some
 	// other lock looks like, where that lock would otherwise be held while one of
 	// them is waited for. A delegate's seat and its principal's are not taken

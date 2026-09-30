@@ -1569,6 +1569,177 @@ SELECT pg_temp.fails('a count is of one write or more', '23514', $q$
     INSERT INTO memory_write_count (holder_actor_id, hour, n)
     VALUES ('00000000-0000-0000-0000-00000000003b', date_trunc('hour', now()) - interval '1 hour', 0) $q$);
 
+-- Services -------------------------------------------------------------------
+-- 20a1 the transcription service · 20c1 its credential
+SELECT pg_temp.ok('a service is an actor with a scope', $q$
+    INSERT INTO actor (id, kind, display_name, service_scope, created_by_actor_id)
+    VALUES ('00000000-0000-0000-0000-0000000020a1', 'service', 'Transcription', 'document_text',
+            '00000000-0000-0000-0000-000000000032') $q$);
+SELECT pg_temp.fails('one service for each scope', '23505', $q$
+    INSERT INTO actor (kind, display_name, service_scope) VALUES ('service', 'Another', 'document_text') $q$);
+SELECT pg_temp.fails('a service says what it is for', '23514', $q$
+    INSERT INTO actor (kind, display_name) VALUES ('service', 'Nothing in particular') $q$);
+SELECT pg_temp.fails('for one of the things there are services for', '23514', $q$
+    INSERT INTO actor (kind, display_name, service_scope) VALUES ('service', 'Grader', 'grading') $q$);
+SELECT pg_temp.fails('only a service has a scope', '23514', $q$
+    INSERT INTO actor (kind, display_name, service_scope) VALUES ('agent', 'Transcriber', 'document_text') $q$);
+SELECT pg_temp.fails('a service has no email', '23514', $q$
+    UPDATE actor SET email = 'transcriber@example.edu' WHERE id = '00000000-0000-0000-0000-0000000020a1' $q$);
+SELECT pg_temp.fails('nor a platform role', '23514', $q$
+    UPDATE actor SET platform_role = 'admin' WHERE id = '00000000-0000-0000-0000-0000000020a1' $q$);
+SELECT pg_temp.ok('a service holds a service credential', $q$
+    INSERT INTO credential (id, actor_id, kind, secret_hash, token_prefix, label, issued_by_actor_id)
+    VALUES ('00000000-0000-0000-0000-0000000020c1', '00000000-0000-0000-0000-0000000020a1', 'service', 'h', 'svc-1',
+            'runtime', '00000000-0000-0000-0000-000000000032') $q$);
+SELECT pg_temp.fails('found by its prefix', '23514', $q$
+    INSERT INTO credential (actor_id, kind, secret_hash) VALUES ('00000000-0000-0000-0000-0000000020a1', 'service', 'h') $q$);
+SELECT pg_temp.fails('and nothing else: no API token', '23514', $q$
+    INSERT INTO credential (actor_id, kind, secret_hash, token_prefix)
+    VALUES ('00000000-0000-0000-0000-0000000020a1', 'api_token', 'h', 'svc-tok-1') $q$);
+SELECT pg_temp.fails('no password', '23514', $q$
+    INSERT INTO credential (actor_id, kind, secret_hash) VALUES ('00000000-0000-0000-0000-0000000020a1', 'password', 'h') $q$);
+SELECT pg_temp.fails('no session', '23514', $q$
+    INSERT INTO credential (actor_id, kind, secret_hash, token_prefix, expires_at)
+    VALUES ('00000000-0000-0000-0000-0000000020a1', 'session', 'h', 'svc-sess-1', now() + interval '1 hour') $q$);
+SELECT pg_temp.fails('an agent holds no service credential', '23514', $q$
+    INSERT INTO credential (actor_id, kind, secret_hash, token_prefix)
+    VALUES ('00000000-0000-0000-0000-000000000036', 'service', 'h', 'svc-agent-1') $q$);
+SELECT pg_temp.fails('nor a person', '23514', $q$
+    INSERT INTO credential (actor_id, kind, secret_hash, token_prefix)
+    VALUES ('00000000-0000-0000-0000-000000000034', 'service', 'h', 'svc-person-1') $q$);
+SELECT pg_temp.ok('an agent''s token', $q$
+    INSERT INTO credential (actor_id, kind, secret_hash, token_prefix)
+    VALUES ('00000000-0000-0000-0000-000000000036', 'api_token', 'h', 'svc-agent-tok-1') $q$);
+SELECT pg_temp.fails('is not made into one', '23514', $q$
+    UPDATE credential SET kind = 'service' WHERE token_prefix = 'svc-agent-tok-1' $q$);
+SELECT pg_temp.fails('a service is seated in no course', '23514', $q$
+    INSERT INTO course_member (course_id, actor_id, role, added_by_actor_id, student_scope, assignment_scope)
+    VALUES ('00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-0000000020a1', 'assistant',
+            '00000000-0000-0000-0000-000000000034', 'all', 'all') $q$);
+SELECT pg_temp.fails('nor moved into a seat', '23514', $q$
+    UPDATE course_member SET actor_id = '00000000-0000-0000-0000-0000000020a1' WHERE id = '00000000-0000-0000-0000-000000000053' $q$);
+
+-- Text versions --------------------------------------------------------------
+-- 20e1 slides (material) · 20e2 an exam's instructions · 20e3 a submitted file
+-- 20f1 the slides' file · 20f2 their text · 20f3 the exam's file · 20f4 the submitted file
+INSERT INTO document (id, course_id, kind, title, submission_id) VALUES
+    ('00000000-0000-0000-0000-0000000020e1', '00000000-0000-0000-0000-000000000041', 'material', 'Slides', NULL),
+    ('00000000-0000-0000-0000-0000000020e2', '00000000-0000-0000-0000-000000000041', 'instructions', 'Exam', NULL),
+    ('00000000-0000-0000-0000-0000000020e3', '00000000-0000-0000-0000-000000000041', 'submission', 'essay.pdf',
+     '00000000-0000-0000-0000-0000000000a1');
+SELECT pg_temp.ok('a version with a file is queued for its text as it is added', $q$
+    INSERT INTO document_version (id, document_id, seq, storage_key, content_type, byte_size, author_member_id)
+    VALUES ('00000000-0000-0000-0000-0000000020f1', '00000000-0000-0000-0000-0000000020e1', 1, 'k/slides.pdf',
+            'application/pdf', 2048, '00000000-0000-0000-0000-000000000051'),
+           ('00000000-0000-0000-0000-0000000020f3', '00000000-0000-0000-0000-0000000020e2', 1, 'k/exam.pdf',
+            'application/pdf', 512, '00000000-0000-0000-0000-000000000051');
+    DO $chk$
+    BEGIN
+        IF (SELECT count(*) FROM document_version_text
+            WHERE version_id IN ('00000000-0000-0000-0000-0000000020f1', '00000000-0000-0000-0000-0000000020f3')
+              AND status = 'pending' AND NOT backfill AND revision = 1 AND attempts = 0
+              AND course_id = '00000000-0000-0000-0000-000000000041') <> 2 THEN
+            RAISE EXCEPTION 'the versions were not queued';
+        END IF;
+    END $chk$ $q$);
+SELECT pg_temp.ok('a version of text alone, and a submitted file, are not', $q$
+    INSERT INTO document_version (id, document_id, seq, body_md, author_member_id)
+    VALUES ('00000000-0000-0000-0000-0000000020f2', '00000000-0000-0000-0000-0000000020e1', 2, '# Slides',
+            '00000000-0000-0000-0000-000000000051');
+    INSERT INTO document_version (id, document_id, seq, storage_key, content_type, byte_size, author_member_id)
+    VALUES ('00000000-0000-0000-0000-0000000020f4', '00000000-0000-0000-0000-0000000020e3', 1, 'k/essay.pdf',
+            'application/pdf', 100, '00000000-0000-0000-0000-000000000052');
+    DO $chk$
+    BEGIN
+        IF EXISTS (SELECT 1 FROM document_version_text
+                   WHERE version_id IN ('00000000-0000-0000-0000-0000000020f2', '00000000-0000-0000-0000-0000000020f4')) THEN
+            RAISE EXCEPTION 'a version with nothing to transcribe was queued';
+        END IF;
+    END $chk$ $q$);
+SELECT pg_temp.fails('nor may they be', '23514', $q$
+    INSERT INTO document_version_text (version_id, document_id, course_id)
+    VALUES ('00000000-0000-0000-0000-0000000020f4', '00000000-0000-0000-0000-0000000020e3', '00000000-0000-0000-0000-000000000041') $q$);
+SELECT pg_temp.fails('one text version for each version', '23505', $q$
+    INSERT INTO document_version_text (version_id, document_id, course_id)
+    VALUES ('00000000-0000-0000-0000-0000000020f1', '00000000-0000-0000-0000-0000000020e1', '00000000-0000-0000-0000-000000000041') $q$);
+SELECT pg_temp.fails('in its document''s course', '23001', $q$
+    UPDATE document_version_text SET course_id = '00000000-0000-0000-0000-000000000042'
+    WHERE version_id = '00000000-0000-0000-0000-0000000020f1' $q$);
+SELECT pg_temp.fails('a text version stays its version''s', '23001', $q$
+    UPDATE document_version_text SET version_id = '00000000-0000-0000-0000-0000000020f3', document_id = '00000000-0000-0000-0000-0000000020e2'
+    WHERE version_id = '00000000-0000-0000-0000-0000000020f1' $q$);
+SELECT pg_temp.fails('a claim holds a lease', '23514', $q$
+    UPDATE document_version_text SET status = 'working' WHERE version_id = '00000000-0000-0000-0000-0000000020f1' $q$);
+SELECT pg_temp.fails('made by a credential', '23514', $q$
+    UPDATE document_version_text SET status = 'working', lease_id = gen_random_uuid(), claimed_until = now() + interval '10 minutes'
+    WHERE version_id = '00000000-0000-0000-0000-0000000020f1' $q$);
+SELECT pg_temp.ok('the service claims it', $q$
+    UPDATE document_version_text SET status = 'working', lease_id = gen_random_uuid(), claimed_until = now() + interval '10 minutes',
+                                     claimed_by_credential_id = '00000000-0000-0000-0000-0000000020c1', claimed_at = now(),
+                                     attempts = 1
+    WHERE version_id = '00000000-0000-0000-0000-0000000020f1' $q$);
+SELECT pg_temp.fails('a text is there only when it is done', '23514', $q$
+    UPDATE document_version_text SET body = '## Page 1', source = 'ai', model = 'M', produced_at = now()
+    WHERE version_id = '00000000-0000-0000-0000-0000000020f1' $q$);
+SELECT pg_temp.fails('done has its text', '23514', $q$
+    UPDATE document_version_text SET status = 'done', lease_id = NULL, claimed_until = NULL
+    WHERE version_id = '00000000-0000-0000-0000-0000000020f1' $q$);
+SELECT pg_temp.fails('the service''s says what model made it', '23514', $q$
+    UPDATE document_version_text SET status = 'done', lease_id = NULL, claimed_until = NULL, body = '## Page 1', source = 'ai',
+                                     produced_at = now()
+    WHERE version_id = '00000000-0000-0000-0000-0000000020f1' $q$);
+SELECT pg_temp.fails('at most 2 MiB of it', '23514', $q$
+    UPDATE document_version_text SET status = 'done', lease_id = NULL, claimed_until = NULL, body = repeat('x', 2097153),
+                                     source = 'ai', model = 'M', produced_at = now()
+    WHERE version_id = '00000000-0000-0000-0000-0000000020f1' $q$);
+SELECT pg_temp.fails('and not nothing', '23514', $q$
+    UPDATE document_version_text SET status = 'done', lease_id = NULL, claimed_until = NULL, body = '',
+                                     source = 'ai', model = 'M', produced_at = now()
+    WHERE version_id = '00000000-0000-0000-0000-0000000020f1' $q$);
+SELECT pg_temp.fails('a page count is a count of pages', '23514', $q$
+    UPDATE document_version_text SET status = 'done', lease_id = NULL, claimed_until = NULL, body = '## Page 1',
+                                     source = 'ai', model = 'M', produced_at = now(), pages = 0
+    WHERE version_id = '00000000-0000-0000-0000-0000000020f1' $q$);
+SELECT pg_temp.ok('the service writes its text', $q$
+    UPDATE document_version_text SET status = 'done', lease_id = NULL, claimed_until = NULL, body = repeat('x', 2097152),
+                                     source = 'ai', model = 'M', produced_at = now(), pages = 12, revision = 2
+    WHERE version_id = '00000000-0000-0000-0000-0000000020f1' $q$);
+SELECT pg_temp.fails('done gives no reason', '23514', $q$
+    UPDATE document_version_text SET reason = 'fine' WHERE version_id = '00000000-0000-0000-0000-0000000020f1' $q$);
+SELECT pg_temp.fails('staff''s says who edited it', '23514', $q$
+    UPDATE document_version_text SET body = '## Page 1 (corrected)', source = 'staff'
+    WHERE version_id = '00000000-0000-0000-0000-0000000020f1' $q$);
+SELECT pg_temp.fails('a member of the course', '23503', $q$
+    UPDATE document_version_text SET body = '## Page 1 (corrected)', source = 'staff',
+                                     edited_by_member_id = '00000000-0000-0000-0000-000000000055', edited_at = now()
+    WHERE version_id = '00000000-0000-0000-0000-0000000020f1' $q$);
+SELECT pg_temp.ok('staff edit it', $q$
+    UPDATE document_version_text SET body = '## Page 1 (corrected)', source = 'staff',
+                                     edited_by_member_id = '00000000-0000-0000-0000-000000000051', edited_at = now(), revision = 3
+    WHERE version_id = '00000000-0000-0000-0000-0000000020f1' $q$);
+SELECT pg_temp.fails('failed says why', '23514', $q$
+    UPDATE document_version_text SET status = 'failed' WHERE version_id = '00000000-0000-0000-0000-0000000020f3' $q$);
+SELECT pg_temp.ok('skipped, saying why', $q$
+    UPDATE document_version_text SET status = 'skipped', reason = 'too_many_pages'
+    WHERE version_id = '00000000-0000-0000-0000-0000000020f3' $q$);
+SELECT pg_temp.fails('a text version is not deleted', '23001', $q$
+    DELETE FROM document_version_text WHERE version_id = '00000000-0000-0000-0000-0000000020f3' $q$);
+SELECT pg_temp.ok('but goes with its file when its version is purged', $q$
+    UPDATE document_version SET storage_key = NULL, purged_at = now(),
+                                purged_by_actor_id = '00000000-0000-0000-0000-000000000032', purge_reason = 'personal data'
+    WHERE id = '00000000-0000-0000-0000-0000000020f1';
+    DO $chk$
+    BEGIN
+        IF EXISTS (SELECT 1 FROM document_version_text WHERE version_id = '00000000-0000-0000-0000-0000000020f1') THEN
+            RAISE EXCEPTION 'the text of a purged version is still there';
+        END IF;
+    END $chk$ $q$);
+SELECT pg_temp.fails('and a purged version is queued no more', '23514', $q$
+    INSERT INTO document_version_text (version_id, document_id, course_id)
+    VALUES ('00000000-0000-0000-0000-0000000020f1', '00000000-0000-0000-0000-0000000020e1', '00000000-0000-0000-0000-000000000041') $q$);
+SELECT pg_temp.ok('a service credential is revoked as any is', $q$
+    UPDATE credential SET revoked_at = now() WHERE id = '00000000-0000-0000-0000-0000000020c1' $q$);
+
 \o
 ROLLBACK;
 \echo 'All checks passed.'

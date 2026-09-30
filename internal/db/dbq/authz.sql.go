@@ -48,9 +48,35 @@ func (q *Queries) CountStudentsInScope(ctx context.Context, arg CountStudentsInS
 	return count, err
 }
 
+const credentialLive = `-- name: CredentialLive :one
+SELECT EXISTS (
+    SELECT 1 FROM credential c
+    WHERE c.id = $1 AND c.actor_id = $2 AND c.revoked_at IS NULL
+      AND (c.expires_at IS NULL OR c.expires_at > $3)
+)
+`
+
+type CredentialLiveParams struct {
+	CredentialID uuid.UUID
+	ActorID      uuid.UUID
+	Now          *time.Time
+}
+
+// Whether the credential a call came with is still the actor's, not revoked
+// and not expired: asked on every call of a site service's (tool.Gate.Service),
+// so that revoking its credential stops a call that waits, as well as the
+// next one. A service holds service credentials and nothing else
+// (credential_fits_actor_kind).
+func (q *Queries) CredentialLive(ctx context.Context, arg CredentialLiveParams) (bool, error) {
+	row := q.db.QueryRow(ctx, credentialLive, arg.CredentialID, arg.ActorID, arg.Now)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
+}
+
 const getActorForAuthz = `-- name: GetActorForAuthz :one
 
-SELECT a.id, a.display_name, a.status, a.platform_role,
+SELECT a.id, a.display_name, a.status, a.platform_role, a.service_scope,
        EXISTS (SELECT 1 FROM department_admin da WHERE da.actor_id = a.id AND da.removed_at IS NULL) AS administers,
        EXISTS (SELECT 1 FROM credential c
                WHERE c.actor_id = a.id AND c.must_change AND c.revoked_at IS NULL) AS password_change_required
@@ -63,6 +89,7 @@ type GetActorForAuthzRow struct {
 	DisplayName            string
 	Status                 string
 	PlatformRole           *string
+	ServiceScope           *string
 	Administers            bool
 	PasswordChangeRequired bool
 }
@@ -76,6 +103,8 @@ type GetActorForAuthzRow struct {
 // set (member.reset_password), which they must change before anything else.
 // Only a password is marked so (credential_must_change_is_an_issued_password),
 // so the mark alone finds it.
+// service_scope: what a site service is for (docs/schema.md §2.1), which
+// gates its tools, and it nothing else.
 func (q *Queries) GetActorForAuthz(ctx context.Context, id uuid.UUID) (GetActorForAuthzRow, error) {
 	row := q.db.QueryRow(ctx, getActorForAuthz, id)
 	var i GetActorForAuthzRow
@@ -84,6 +113,7 @@ func (q *Queries) GetActorForAuthz(ctx context.Context, id uuid.UUID) (GetActorF
 		&i.DisplayName,
 		&i.Status,
 		&i.PlatformRole,
+		&i.ServiceScope,
 		&i.Administers,
 		&i.PasswordChangeRequired,
 	)
