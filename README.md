@@ -559,3 +559,7 @@ a release, and the repository settings this needs, are in
 ## License
 
 AIshie Core is copyright 2026 XIE Hanming, and source-available under the [Elastic License 2.0](LICENSE) (ELv2), governed by the laws of Hong Kong. You may use, copy, change and redistribute it on the terms in LICENSE, which include that you may not offer it to others as a hosted or managed service.
+
+For clarity: an educational institution that runs its own installation for its own staff and students is not providing the software to third parties as a hosted or managed service.
+
+（補充說明：教育機構自行架設、供其教職員及學生使用，不視為向第三方提供託管服務。）
