@@ -223,8 +223,8 @@ the disk to a bucket by copying each to the key it has on the disk (its path
 under `BLOB_FS_ROOT`; not the `.meta` beside it, whose content type the object
 takes): Core finds what was attached where its version or message says, and an
 upload attached on the disk is not attached again. Still, two deployments must not share a
-directory or bucket: a staging copy whose database was cloned from production
-has production's courses, and each would take the files the other has attached
+directory or bucket: a test copy whose database was cloned from a school's
+site has that site's courses, and each would take the files the other has attached
 since the copy for orphans, and remove them.
 `serve` never migrates on its own. It refuses to start against a schema older
 than the binary (run `aishie-core migrate up` first), and `/healthz` reports
@@ -592,16 +592,17 @@ a green `make ci` locally means the same thing.
 A push to `main` whose checks all pass is published:
 [publish.yml](.github/workflows/publish.yml) pushes its image as
 `ghcr.io/aishie-education/aishie-core:sha-<commit>`, moves `:edge` to it, and
-hands it to [deploy.yml](.github/workflows/deploy.yml) for the `staging`
-environment.
+hands it to [deploy.yml](.github/workflows/deploy.yml) for the `edge`
+environment, the test site.
 
 Releases are built only from version tags (`v*.*.*`):
 [release.yml](.github/workflows/release.yml) checks that the tag is on
 `main`, runs the whole of CI again, and then publishes binaries for Linux and
 macOS with checksums, and a multi-architecture image (`:1.2.3`, `:1.2`,
-`:latest`) with its SBOM and build provenance. A pre-release tag
-(`v1.2.3-rc.1`) does not move `:latest`, and goes to staging. A stable release
-goes to production when somebody runs Deploy for it, from its tag.
+`:latest`, and `:stable` for the highest stable release) with its SBOM and
+build provenance. A pre-release tag (`v1.2.3-rc.1`) moves neither `:latest`
+nor `:stable`, and goes to edge. A stable release goes to the `stable`
+environment, schools' sites, when somebody runs Deploy for it, from its tag.
 
 deploy.yml deploys over SSH to a server set up with
 [deploy/setup-server.sh](deploy/setup-server.sh), once the repository has its
@@ -613,6 +614,52 @@ and `seed` with the new image, replaces the container, and waits for
 running it day to day are in [docs/deploying.md](docs/deploying.md). How to cut
 a release, and the repository settings this needs, are in
 [CONTRIBUTING.md](CONTRIBUTING.md).
+
+### Renaming the settings
+
+The environments were called `staging` and `production`, and are `edge` and
+`stable` now. Deploy reads each of its settings by the new name first and,
+until a later release that removes this, by the old one, with a warning in
+the run that names the setting to add; so deploys go on while the settings
+are renamed. In the repository's settings, before merging the rename if you
+can:
+
+1. **Environments** (Settings → Environments → New environment): make `edge`
+   with the rules `staging` has, and `stable` with the rules `production`
+   has: its required reviewers, and Deployment branches and tags (`edge`:
+   branch `main` and tags `v*`; `stable`: tags `v*` only). **Give `stable`
+   production's protection before its first deploy.** GitHub neither renames
+   environments nor carries their rules over: the first run that names
+   `stable` creates it with no protection at all, and then nothing but
+   Deploy's own check that it runs from a stable release's tag stands
+   between write access to this repository and the schools' sites.
+2. **Variables and secrets** (Settings → Secrets and variables → Actions):
+   add each one that is set under its new name, with the same value, then
+   delete the old one.
+
+   | Kind | Old name | New name |
+   | --- | --- | --- |
+   | Variable | `DEPLOY_TARGET_STAGING` | `DEPLOY_TARGET_EDGE` |
+   | Variable | `DEPLOY_KNOWN_HOSTS_STAGING` | `DEPLOY_KNOWN_HOSTS_EDGE` |
+   | Secret | `DEPLOY_SSH_KEY_STAGING` | `DEPLOY_SSH_KEY_EDGE` |
+   | Variable | `DEPLOY_TARGET_PRODUCTION` | `DEPLOY_TARGET_STABLE` |
+   | Variable | `DEPLOY_KNOWN_HOSTS_PRODUCTION` | `DEPLOY_KNOWN_HOSTS_STABLE` |
+   | Secret | `DEPLOY_SSH_KEY_PRODUCTION` | `DEPLOY_SSH_KEY_STABLE` |
+
+   A variable's value can be copied from its page. A secret's cannot be read
+   back: paste the key from wherever a copy is kept or, with none, give the
+   server a new key ([docs/deploying.md](docs/deploying.md#connecting-the-deploy-workflow),
+   to replace the key), which `setup-server.sh` prints under the new name.
+3. Once a deploy to each environment runs without a warning, the
+   environments `staging` and `production` can be deleted, with the
+   deployments they recorded.
+
+The Deploy form offers `edge` and `stable` alone, as GitHub takes nothing
+but a choice's options there; a workflow that calls Deploy with `staging`
+or `production` has them taken as `edge` and `stable`, with a warning.
+Servers need nothing: `deploy/setup-server.sh` takes `edge` or `stable`, or
+their old names until the same later release, only to name the settings it
+prints.
 
 ## License
 
