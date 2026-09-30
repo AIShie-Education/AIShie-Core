@@ -173,9 +173,14 @@ jobs:
           NAME: ${{ inputs.environment == 'production' && 'PRODUCTION' || 'STAGING' }}
           TARGET: ${{ vars[format('DEPLOY_TARGET_{0}', inputs.environment == 'production' && 'PRODUCTION' || 'STAGING')] }}
           KNOWN_HOSTS: ${{ vars[format('DEPLOY_KNOWN_HOSTS_{0}', inputs.environment == 'production' && 'PRODUCTION' || 'STAGING')] }}
-          SSH_KEY: ${{ secrets[format('DEPLOY_SSH_KEY_{0}', inputs.environment == 'production' && 'PRODUCTION' || 'STAGING')] }}
+          # Each key by its own name: a secret indexed by a name made at
+          # run time has every secret of the repository handed to the
+          # runner. Only the environment's has a value.
+          SSH_KEY_STAGING: ${{ inputs.environment != 'production' && secrets.DEPLOY_SSH_KEY_STAGING || '' }}
+          SSH_KEY_PRODUCTION: ${{ inputs.environment == 'production' && secrets.DEPLOY_SSH_KEY_PRODUCTION || '' }}
           GH_TOKEN: ${{ github.token }}
         run: |
+          SSH_KEY=$SSH_KEY_PRODUCTION$SSH_KEY_STAGING
           if [ -z "$TARGET" ]; then
             # Half a configuration would otherwise pass as none, green.
             if [ -n "$SSH_KEY$KNOWN_HOSTS" ]; then
