@@ -1,8 +1,9 @@
 # Deploying AIshie Core
 
-One server per environment: staging first, production when staging has
-earned it. On each server, [Caddy](https://caddyserver.com) serves HTTPS and
-hands requests to Core's container, `aishie`, on `127.0.0.1:8080`, and
+One server per environment: edge first, the test site every green push to
+`main` reaches, and stable, the site a school runs on releases, when edge
+has earned it. On each server, [Caddy](https://caddyserver.com) serves HTTPS
+and hands requests to Core's container, `aishie`, on `127.0.0.1:8080`, and
 PostgreSQL runs on the same machine. The files people upload are kept under
 `/srv/aishie/data`, and the configuration is in
 `/etc/aishie/aishie.env`.
@@ -21,7 +22,7 @@ The scripts in [`deploy/`](../deploy) do the work:
 - Ubuntu 24.04 or later, 2 CPUs, 4 GB of memory and 40 GB of disk, to start
   with. It keeps grades and students' work, so pick a provider and a region
   your institution allows for that.
-- A DNS name for it, such as `lms-staging.example.edu`, pointing at its
+- A DNS name for it, such as `lms-test.example.edu`, pointing at its
   address. If the name's DNS is on Cloudflare, make the record "DNS only":
   SSH does not go through Cloudflare's proxy.
 - Ports 22 (SSH), 80 and 443 open. The Deploy workflow connects on 22 from
@@ -46,10 +47,10 @@ The scripts in [`deploy/`](../deploy) do the work:
    server's name and its environment:
 
    ```
-   scp -r deploy you@lms-staging.example.edu:
-   ssh you@lms-staging.example.edu
+   scp -r deploy you@lms-test.example.edu:
+   ssh you@lms-test.example.edu
    sudo -i
-   sh ~you/deploy/setup-server.sh lms-staging.example.edu staging
+   sh ~you/deploy/setup-server.sh lms-test.example.edu edge
    ```
 
    It installs Docker, PostgreSQL and Caddy. It creates the database, and the
@@ -87,7 +88,7 @@ The scripts in [`deploy/`](../deploy) do the work:
 3. Start it. Every green push to `main` publishes
    `ghcr.io/aishie-education/aishie-core:sha-<commit>`: the CI run's
    `publish / image` job names it, and so does the package's page. A release
-   publishes `:X.Y.Z`. Production takes only releases.
+   publishes `:X.Y.Z`. Stable takes only releases.
 
    ```
    aishie-deploy ghcr.io/aishie-education/aishie-core:sha-de4f548
@@ -106,7 +107,7 @@ The scripts in [`deploy/`](../deploy) do the work:
    read -rsp 'Password (10 characters or more): ' PW; echo
    printf '%s\n' "$PW" | aishie-core bootstrap --name "Your Name" --email you@example.edu --password-stdin; unset PW
    docker restart aishie
-   curl https://lms-staging.example.edu/healthz
+   curl https://lms-test.example.edu/healthz
    ```
 
 5. The day after, check that the nightly backup ran:
@@ -149,24 +150,26 @@ repository's Settings → Secrets and variables → Actions:
 
 | Kind | Name | Value |
 | --- | --- | --- |
-| Variable | `DEPLOY_TARGET_STAGING` | `deploy@lms-staging.example.edu` |
-| Variable | `DEPLOY_KNOWN_HOSTS_STAGING` | the server's host key line, as printed |
-| Secret | `DEPLOY_SSH_KEY_STAGING` | the whole of `/root/aishie-deploy-key` |
+| Variable | `DEPLOY_TARGET_EDGE` | `deploy@lms-test.example.edu` |
+| Variable | `DEPLOY_KNOWN_HOSTS_EDGE` | the server's host key line, as printed |
+| Secret | `DEPLOY_SSH_KEY_EDGE` | the whole of `/root/aishie-deploy-key` |
 
 Then delete `/root/aishie-deploy-key` from the server. The server keeps
 only the public half, in `~deploy/.ssh/authorized_keys`.
 
-For production, the names end in `_PRODUCTION`. SSH on a port other than 22
-is `ssh://deploy@host:2222` in the target and `[host]:2222 ssh-ed25519 …` in
-the host key line.
+For stable, the names end in `_STABLE`. SSH on a port other than 22 is
+`ssh://deploy@host:2222` in the target and `[host]:2222 ssh-ed25519 …` in
+the host key line. Settings added before edge and stable had those names
+end in `_STAGING` and `_PRODUCTION`: they are read, with a warning, until a
+later release ([README.md](../README.md#renaming-the-settings)).
 
-From then on, every green push to `main` deploys to staging, and a
+From then on, every green push to `main` deploys to edge, and a
 pre-release tag (`v1.2.3-rc.1`) does too. To try the connection without a
 push, go to Actions → Deploy → Run workflow, from `main`, with environment
-`staging` and image `ghcr.io/aishie-education/aishie-core:edge`. That is also
-the way to deploy staging again: re-running the deploy of an older push to
+`edge` and image `ghcr.io/aishie-education/aishie-core:edge`. That is also
+the way to deploy edge again: re-running the deploy of an older push to
 `main` fails once `main` has moved on. (Re-running a pre-release's deploy, or
-a Deploy run by hand, still deploys the image it had.) Production is deployed only by running
+a Deploy run by hand, still deploys the image it had.) Stable is deployed only by running
 Deploy by hand, from a release's tag
 ([CONTRIBUTING.md](../CONTRIBUTING.md#releasing)).
 
@@ -236,7 +239,7 @@ Run all of these as root on the server.
   the old one in `SECRETS_KEY_PREVIOUS` (comma separated, for more than one),
   deploy, run `aishie-core secrets rewrap`, which seals every client secret
   again under the new key and says how many, and then remove the old key.
-  Register `https://lms-staging.example.edu/v1/auth/sso/callback` with every
+  Register `https://lms-test.example.edu/v1/auth/sso/callback` with every
   provider: it is the same for all of them.
   `OIDC_DISPLAY_NAME` is what the front end's sign-in button calls the
   provider; without it, the front end uses words of its own. Like every value
@@ -275,7 +278,7 @@ Run all of these as root on the server.
   the env file, beside `SIGNING_KEY`:
 
   ```
-  RUNTIME_AUDIENCES=https://lms-staging.example.edu/runtime
+  RUNTIME_AUDIENCES=https://lms-test.example.edu/runtime
   ```
 
   More than one runtime is a comma-separated list. Give each URL exactly as
@@ -293,7 +296,7 @@ Run all of these as root on the server.
   working, which costs people a new one, asked for by the front end without
   their noticing. `ASSERTION_TTL` (default `5m`, from `1m` to `15m`) is how
   long one lasts, and so how long a sign-out or a suspension takes to reach a
-  runtime. A runtime checks them against `https://lms-staging.example.edu/v1/auth/keys`;
+  runtime. A runtime checks them against `https://lms-test.example.edu/v1/auth/keys`;
   both routes are under `/v1`, which the proxy already sends to Core. Set
   none of these, and no assertion is made.
 - **Long polling.** A call that waits for news (`wait_s`: an agent's inbox,
@@ -329,9 +332,9 @@ Run all of these as root on the server.
   ```
   read -rsp 'Password: ' PW; echo
   SESSION=$(printf '{"login":"you@example.edu","password":"%s"}' "$PW" |
-    curl -s -o /dev/null -D - -H 'Content-Type: application/json' --data @- https://lms-staging.example.edu/v1/auth/login |
+    curl -s -o /dev/null -D - -H 'Content-Type: application/json' --data @- https://lms-test.example.edu/v1/auth/login |
     sed -n 's/^[Ss]et-[Cc]ookie: ais_session=\([^;]*\).*/\1/p' | tr -d '\r'); unset PW
-  curl -X POST https://lms-staging.example.edu/v1/actors/<actor_id>/invite \
+  curl -X POST https://lms-test.example.edu/v1/actors/<actor_id>/invite \
     -H "Authorization: Bearer $SESSION" -H "Idempotency-Key: invite-<actor_id>-$(date +%s)" \
     -H 'Content-Type: application/json' -d '{}'
   ```
@@ -346,7 +349,7 @@ Run all of these as root on the server.
   `member.add_delegate` into the course, `agent.issue_token`.
 
   ```
-  curl -X POST https://lms-staging.example.edu/v1/actors \
+  curl -X POST https://lms-test.example.edu/v1/actors \
     -H "Authorization: Bearer $SESSION" -H "Idempotency-Key: register-grader-bot" \
     -H 'Content-Type: application/json' -d '{"kind":"agent","display_name":"grader-bot"}'
   aishie-core token issue --actor <result.actor_id> --label grader-bot --days 90
@@ -356,7 +359,7 @@ Run all of these as root on the server.
   `POST /v1/courses/{course_id}/members`, with preset `grader` or `tutor`.
   The administrator is no member of the course and cannot. The administrator
   seats the instructor first, with `course.seat_instructor`. Point the agent's
-  MCP client at `https://lms-staging.example.edu/mcp`.
+  MCP client at `https://lms-test.example.edu/mcp`.
 - **Agents people own:** anyone registered may register agents of their own
   (`agent.create`) and bring them into their courses as their delegates, never
   able to do more there than they can. `AGENT_SELF_SERVICE=off` in the env file

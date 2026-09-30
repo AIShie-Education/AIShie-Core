@@ -2,9 +2,11 @@
 # Sets up a fresh Ubuntu server (24.04 or later) to run AIshie Core.
 # Run as root with this directory copied to the server (docs/deploying.md):
 #
-#   sh deploy/setup-server.sh lms-staging.example.edu staging
+#   sh deploy/setup-server.sh lms-test.example.edu edge
 #
-# The environment, staging or production, names the GitHub settings it prints.
+# The environment, edge or stable, names the GitHub settings it prints. Its
+# old names, staging and production, are taken for them until a later
+# release.
 #
 # It installs Docker, PostgreSQL and Caddy; creates the database, the env file
 # with a generated database password, SIGNING_KEY and SECRETS_KEY, the data and backup
@@ -24,11 +26,20 @@ set -eu
 
 HOST=${1:-}
 ENVIRONMENT=${2:-}
-usage() { echo "usage: setup-server.sh HOSTNAME staging|production, e.g. lms-staging.example.edu staging" >&2; exit 2; }
+usage() { echo "usage: setup-server.sh HOSTNAME edge|stable, e.g. lms-test.example.edu edge" >&2; exit 2; }
 case $HOST in '' | *[!A-Za-z0-9.-]* | .* | -*) usage ;; esac
 # It names the GitHub settings this server needs; guessing would name the
 # other environment's.
-case $ENVIRONMENT in staging | production) ;; *) usage ;; esac
+case $ENVIRONMENT in
+  edge | stable) ;;
+  # Compatibility: the names edge and stable had before, until a later release.
+  staging | production)
+    old=$ENVIRONMENT
+    if [ "$old" = staging ]; then ENVIRONMENT=edge; else ENVIRONMENT=stable; fi
+    echo "notice: $old is called $ENVIRONMENT now: setting this server up for $ENVIRONMENT (README.md, Renaming the settings)" >&2
+    ;;
+  *) usage ;;
+esac
 [ "$(id -u)" = 0 ] || { echo "run this as root (sudo -i)" >&2; exit 1; }
 here=$(cd "$(dirname "$0")" && pwd)
 # The name of this installation: of its configuration, data and backup

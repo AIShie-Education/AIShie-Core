@@ -1,18 +1,19 @@
 name: Deploy
 
-# The one place a build reaches an environment. publish.yml calls it for
-# staging on every green push to main, and release.yml for staging on a
-# pre-release tag. Production is deployed by running it by hand, from the
+# The one place a build reaches an environment: edge, every green push to
+# main (the image :edge), or stable, the releases schools run. publish.yml
+# calls it for edge on every green push to main, and release.yml for edge on
+# a pre-release tag. Stable is deployed by running it by hand, from the
 # release's tag: that run is the decision to deploy, and the migration that
-# comes with it, which README says is somebody's to make. For production it
+# comes with it, which README says is somebody's to make. For stable it
 # takes a stable release's tag (v1.2.3) and a stable release's image (:1.2.3)
 # and nothing else, whatever the plan lets the environment enforce. Those
 # checks are this workflow's: the server deploys any image of this repository
 # it is handed by whoever holds its key.
 #
 # A deploy target is a server set up with deploy/setup-server.sh
-# (docs/deploying.md). Once the repository variable DEPLOY_TARGET_STAGING (or
-# _PRODUCTION) names it, the deploy job connects to it with SSH, as a user
+# (docs/deploying.md). Once the repository variable DEPLOY_TARGET_EDGE (or
+# _STABLE) names it, the deploy job connects to it with SSH, as a user
 # that can do nothing but run deploy/aishie-deploy, and hands it the image
 # by digest. That script does this, in this order:
 #
@@ -39,6 +40,15 @@ name: Deploy
 # job still names the environment, so whatever protection the environment has
 # applies. Every workflow that calls this one passes `secrets: inherit`: a
 # called workflow sees no secret its caller does not pass.
+#
+# Edge and stable were called staging and production before. Until a later
+# release, which removes this, a setting not yet added by its new name is
+# read by its old one (DEPLOY_*_STAGING, DEPLOY_*_PRODUCTION), with a warning
+# that names the one to add, and an environment given by its old name is
+# taken as the new one (README.md, Renaming the settings). GitHub's
+# environments are not renamed with them: the first run for stable creates
+# an environment of that name with no protection rules, unless it has been
+# given production's first.
 
 on:
   workflow_call:
@@ -61,14 +71,16 @@ on:
   workflow_dispatch:
     inputs:
       # A list of its own: the form offers only environments that exist, and
-      # a private repository on GitHub Free may have none.
+      # a private repository on GitHub Free may have none. GitHub takes no
+      # value that is not in it, so the old names are not: plan takes them
+      # from a caller only.
       environment:
         description: Where to deploy
         type: choice
-        options: [staging, production]
+        options: [edge, stable]
         required: true
       image:
-        description: "ghcr.io/aishie-education/aishie-core:TAG or @sha256:DIGEST; production takes a release's tag, e.g. :1.2.3"
+        description: "ghcr.io/aishie-education/aishie-core:TAG or @sha256:DIGEST; stable takes a release's tag, e.g. :1.2.3"
         type: string
         required: true
 
@@ -94,6 +106,7 @@ jobs:
       contents: read
       packages: read
     outputs:
+      environment: ${{ steps.resolve.outputs.environment }}
       image: ${{ steps.resolve.outputs.image }}
     steps:
       - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
@@ -109,10 +122,15 @@ jobs:
           MIGRATIONS: ${{ inputs.migrations }}
           SINCE: ${{ inputs.since }}
         run: |
+          # The old names, until a later release: the deploy job takes the
+          # environment from here.
           case "$ENVIRONMENT" in
-            staging | production) ;;
-            *) echo "::error::there is no environment $ENVIRONMENT: staging or production"; exit 1 ;;
+            edge | stable) ;;
+            staging) echo "::warning::staging is called edge now: deploying to edge"; ENVIRONMENT=edge ;;
+            production) echo "::warning::production is called stable now: deploying to stable"; ENVIRONMENT=stable ;;
+            *) echo "::error::there is no environment $ENVIRONMENT: edge or stable"; exit 1 ;;
           esac
+          echo "environment=$ENVIRONMENT" >> "$GITHUB_OUTPUT"
           case "$WANT" in
             "$IMAGE:"* | "$IMAGE@"*) ;;
             *) echo "::error::$WANT is not an image of $IMAGE"; exit 1 ;;
@@ -120,11 +138,11 @@ jobs:
           # Not a build of main, nor a pre-release, nor a deploy procedure
           # from a branch: a rollback too is a release's image, run from a
           # release's tag.
-          if [ "$ENVIRONMENT" = production ]; then
+          if [ "$ENVIRONMENT" = stable ]; then
             [[ $GITHUB_REF_TYPE == tag && $GITHUB_REF_NAME =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] \
-              || { echo "::error::production is deployed from a release's tag, like v1.2.3, not from $GITHUB_REF_NAME"; exit 1; }
+              || { echo "::error::stable is deployed from a release's tag, like v1.2.3, not from $GITHUB_REF_NAME"; exit 1; }
             [[ ${WANT#"$IMAGE:"} =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
-              || { echo "::error::production takes a release's image, like $IMAGE:1.2.3, not $WANT"; exit 1; }
+              || { echo "::error::stable takes a release's image, like $IMAGE:1.2.3, not $WANT"; exit 1; }
           fi
           digest=$(docker buildx imagetools inspect "$WANT" --format '{{json .Manifest}}' | jq -r .digest)
           [[ $digest == sha256:* ]] || { echo "::error::$WANT did not resolve to a digest"; exit 1; }
@@ -154,13 +172,13 @@ jobs:
     timeout-minutes: 30
     # GitHub records the deployment here, and any protection the environment
     # has (required reviewers, allowed branches and tags) applies here.
-    environment: ${{ inputs.environment }}
+    environment: ${{ needs.plan.outputs.environment }}
     # One deploy to an environment at a time, and never cancelled half way:
     # a migration stopped in the middle leaves the schema dirty. A deploy
     # still waiting is cancelled when a newer one for the environment comes,
     # and the run that asked for it ends as cancelled.
     concurrency:
-      group: deploy-${{ inputs.environment }}
+      group: deploy-${{ needs.plan.outputs.environment }}
       cancel-in-progress: false
     permissions:
       contents: read
@@ -168,19 +186,41 @@ jobs:
     steps:
       - name: Deploy
         env:
-          ENVIRONMENT: ${{ inputs.environment }}
+          ENVIRONMENT: ${{ needs.plan.outputs.environment }}
           IMAGE_REF: ${{ needs.plan.outputs.image }}
-          NAME: ${{ inputs.environment == 'production' && 'PRODUCTION' || 'STAGING' }}
-          TARGET: ${{ vars[format('DEPLOY_TARGET_{0}', inputs.environment == 'production' && 'PRODUCTION' || 'STAGING')] }}
-          KNOWN_HOSTS: ${{ vars[format('DEPLOY_KNOWN_HOSTS_{0}', inputs.environment == 'production' && 'PRODUCTION' || 'STAGING')] }}
-          # Each key by its own name: a secret indexed by a name made at
+          # Each setting by its own name: a secret indexed by a name made at
           # run time has every secret of the repository handed to the
-          # runner. Only the environment's has a value.
-          SSH_KEY_STAGING: ${{ inputs.environment != 'production' && secrets.DEPLOY_SSH_KEY_STAGING || '' }}
-          SSH_KEY_PRODUCTION: ${{ inputs.environment == 'production' && secrets.DEPLOY_SSH_KEY_PRODUCTION || '' }}
+          # runner. Only the environment's have a value. The _STAGING and
+          # _PRODUCTION names are the ones they had before, read until a
+          # later release.
+          DEPLOY_TARGET_EDGE: ${{ needs.plan.outputs.environment == 'edge' && vars.DEPLOY_TARGET_EDGE || '' }}
+          DEPLOY_TARGET_STAGING: ${{ needs.plan.outputs.environment == 'edge' && vars.DEPLOY_TARGET_STAGING || '' }}
+          DEPLOY_TARGET_STABLE: ${{ needs.plan.outputs.environment == 'stable' && vars.DEPLOY_TARGET_STABLE || '' }}
+          DEPLOY_TARGET_PRODUCTION: ${{ needs.plan.outputs.environment == 'stable' && vars.DEPLOY_TARGET_PRODUCTION || '' }}
+          DEPLOY_KNOWN_HOSTS_EDGE: ${{ needs.plan.outputs.environment == 'edge' && vars.DEPLOY_KNOWN_HOSTS_EDGE || '' }}
+          DEPLOY_KNOWN_HOSTS_STAGING: ${{ needs.plan.outputs.environment == 'edge' && vars.DEPLOY_KNOWN_HOSTS_STAGING || '' }}
+          DEPLOY_KNOWN_HOSTS_STABLE: ${{ needs.plan.outputs.environment == 'stable' && vars.DEPLOY_KNOWN_HOSTS_STABLE || '' }}
+          DEPLOY_KNOWN_HOSTS_PRODUCTION: ${{ needs.plan.outputs.environment == 'stable' && vars.DEPLOY_KNOWN_HOSTS_PRODUCTION || '' }}
+          DEPLOY_SSH_KEY_EDGE: ${{ needs.plan.outputs.environment == 'edge' && secrets.DEPLOY_SSH_KEY_EDGE || '' }}
+          DEPLOY_SSH_KEY_STAGING: ${{ needs.plan.outputs.environment == 'edge' && secrets.DEPLOY_SSH_KEY_STAGING || '' }}
+          DEPLOY_SSH_KEY_STABLE: ${{ needs.plan.outputs.environment == 'stable' && secrets.DEPLOY_SSH_KEY_STABLE || '' }}
+          DEPLOY_SSH_KEY_PRODUCTION: ${{ needs.plan.outputs.environment == 'stable' && secrets.DEPLOY_SSH_KEY_PRODUCTION || '' }}
           GH_TOKEN: ${{ github.token }}
         run: |
-          SSH_KEY=$SSH_KEY_PRODUCTION$SSH_KEY_STAGING
+          if [ "$ENVIRONMENT" = stable ]; then NAME=STABLE OLD=PRODUCTION; else NAME=EDGE OLD=STAGING; fi
+          # A setting by its old name alone is taken, and said; by both, the
+          # new one is.
+          for setting in DEPLOY_TARGET DEPLOY_KNOWN_HOSTS DEPLOY_SSH_KEY; do
+            new=${setting}_$NAME old=${setting}_$OLD
+            if [ -z "${!new}" ] && [ -n "${!old}" ]; then
+              printf -v "$new" '%s' "${!old}"
+              echo "::warning::$old is read by its old name: add $new, with the same value, then delete $old (README.md, Renaming the settings). A later release stops reading $old."
+            elif [ -n "${!old}" ]; then
+              echo "::notice::$new is set, and $old is no longer read: delete $old."
+            fi
+          done
+          t=DEPLOY_TARGET_$NAME k=DEPLOY_KNOWN_HOSTS_$NAME s=DEPLOY_SSH_KEY_$NAME
+          TARGET=${!t} KNOWN_HOSTS=${!k} SSH_KEY=${!s}
           if [ -z "$TARGET" ]; then
             # Half a configuration would otherwise pass as none, green.
             if [ -n "$SSH_KEY$KNOWN_HOSTS" ]; then

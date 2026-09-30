@@ -1,12 +1,12 @@
 name: Publish
 
-# A green push to main, published for staging. ci.yml calls this once every
+# A green push to main, published for edge. ci.yml calls this once every
 # check on the commit has passed, and nothing else does.
 #
 # It builds the image of the commit CI checked and pushes it as :sha-<commit>.
 # If that commit is still main's tip, it moves :edge to it and deploys it to
-# the staging environment through deploy.yml; a run that main has moved past
-# publishes its image and stops there, so staging never goes backwards.
+# the edge environment through deploy.yml; a run that main has moved past
+# publishes its image and stops there, so edge never goes backwards.
 
 on:
   workflow_call:
@@ -93,7 +93,7 @@ jobs:
             echo "tip=false" >> "$GITHUB_OUTPUT"
           fi
 
-  staging:
+  edge:
     needs: image
     if: needs.image.outputs.tip == 'true'
     permissions:
@@ -101,7 +101,7 @@ jobs:
       packages: read
     uses: ./.github/workflows/deploy.yml
     with:
-      environment: staging
+      environment: edge
       image: ${{ needs.image.outputs.image }}
       migrations: ${{ needs.image.outputs.migrations }}
       since: ${{ needs.image.outputs.since }}
