@@ -102,6 +102,9 @@ type Registry struct {
 	mu     sync.Mutex
 	cache  map[string]*discovered
 	flight map[string]*sync.Mutex
+	// warned is the sealed secrets said once, in the log, not to open: the
+	// sign-in page is asked often, and the log need not say it each time.
+	warned map[string]bool
 }
 
 // discovered is a site's provider as discovered, with the settings it was
@@ -129,7 +132,7 @@ func New(cfg Config) *Registry {
 	if cfg.Discover == nil {
 		cfg.Discover = auth.NewOIDC
 	}
-	return &Registry{cfg: cfg, cache: map[string]*discovered{}, flight: map[string]*sync.Mutex{}}
+	return &Registry{cfg: cfg, cache: map[string]*discovered{}, flight: map[string]*sync.Mutex{}, warned: map[string]bool{}}
 }
 
 // Operator is the operator's provider, or nil.
@@ -196,8 +199,7 @@ func (r *Registry) Offered(ctx context.Context) ([]Offer, error) {
 			continue
 		}
 		if _, err := r.cfg.Keys.Open(SecretBinding(p.ID), p.ClientSecretSealed); err != nil {
-			r.cfg.Log.Warn("an identity provider is switched on, but its client secret does not open with this server's keys; it is not offered",
-				"provider", p.ID, "err", err)
+			r.warnOnce(p.ID, p.ClientSecretSealed, err)
 			continue
 		}
 		label := p.DisplayName
@@ -215,6 +217,19 @@ func (r *Registry) enabled(ctx context.Context) ([]dbq.ListEnabledSSOProvidersRo
 		return nil, fmt.Errorf("identity providers: %w", err)
 	}
 	return rows, nil
+}
+
+// warnOnce says, once for each sealed secret, that a provider switched on
+// is not offered because its secret does not open.
+func (r *Registry) warnOnce(id, sealed string, err error) {
+	r.mu.Lock()
+	said := r.warned[id+" "+sealed]
+	r.warned[id+" "+sealed] = true
+	r.mu.Unlock()
+	if !said {
+		r.cfg.Log.Warn("an identity provider is switched on, but its client secret does not open with this server's keys; it is not offered",
+			"provider", id, "err", err)
+	}
 }
 
 // shadowed reports whether id is the operator's provider's.

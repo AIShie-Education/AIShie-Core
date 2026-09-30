@@ -126,8 +126,8 @@ func isOperators(d Deps, id string) bool {
 var (
 	errSetByOperator = apperr.Precondition("that provider is set by the server's operator, in its environment (OIDC_*), and changes only there").
 				With("reason", "set_by_operator")
-	errNoSSOProvider  = apperr.Missing("there is no identity provider with that id").With("reason", "sso_provider_not_found")
-	errSecretsKeyGone = apperr.Precondition("this server has no secrets key (SECRETS_KEY) to seal a client secret with, so no identity provider "+
+	errNoSSOProvider = apperr.Missing("there is no identity provider with that id").With("reason", "sso_provider_not_found")
+	errNoSecretsKey  = apperr.Precondition("this server has no secrets key (SECRETS_KEY) to seal a client secret with, so no identity provider "+
 		"is added or given a secret here; its operator sets one (openssl rand -base64 32), and the provider the operator sets "+
 		"in the environment signs people in meanwhile").With("reason", "secrets_key_missing")
 )
@@ -347,7 +347,7 @@ func ssoCreate(d Deps) tool.Tool {
 				return SSOProviderView{}, errIDTaken(false)
 			}
 			if !d.SSO.Keys().CanSeal() {
-				return SSOProviderView{}, errSecretsKeyGone
+				return SSOProviderView{}, errNoSecretsKey
 			}
 			sealed, err := d.SSO.Keys().Seal(sso.SecretBinding(in.ID), secret)
 			if err != nil {
@@ -471,7 +471,7 @@ func ssoUpdate(d Deps) tool.Tool {
 					return SSOProviderView{}, err
 				}
 				if !d.SSO.Keys().CanSeal() {
-					return SSOProviderView{}, errSecretsKeyGone
+					return SSOProviderView{}, errNoSecretsKey
 				}
 				if sealed, err = d.SSO.Keys().Seal(sso.SecretBinding(in.ProviderID), secret); err != nil {
 					return SSOProviderView{}, err
