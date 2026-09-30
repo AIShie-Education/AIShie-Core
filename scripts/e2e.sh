@@ -32,9 +32,14 @@
 # Then a department's administrator, invited and appointed by root, makes a
 # course beneath her appointment and seats its instructor, found by their
 # email. Then Core vouches for the instructor to an agent runtime, and the key it
-# publishes checks what it says, before and after a restart. Last, the sign-in
+# publishes checks what it says, before and after a restart. Then the sign-in
 # page is told how a person signs in: by password alone, and then, restarted
 # with single sign-on against a stand-in provider, by that too, under its name.
+# Last, root finds no provider of the site's can be added without
+# SECRETS_KEY; restarted with one, tests a stand-in provider that signs
+# people in, sets it up, switches it on over the version read and is told
+# its secret nowhere; the instructor, linked at it, signs in through it; and
+# root cannot remove it while he is linked, and then, forced, does.
 #
 #   make e2e            (builds first)
 #   scripts/e2e.sh      (expects bin/aishie-core)
@@ -75,6 +80,8 @@ call() {
     [ -n "$body" ] || body='{}'
     args+=(-H "Idempotency-Key: ${KEY:-e2e-$N}" -H 'Content-Type: application/json' -d "$body")
   fi
+  # IF_MATCH='"3"' call ... — the version a write is made over.
+  [ -z "${IF_MATCH:-}" ] || args+=(-H "If-Match: $IF_MATCH")
   local got
   got=$(curl "${args[@]}" "$BASE$path")
   [ "$got" = "$want" ] || fail "$method $path → $got, want $want: $(cat "$WORK/body")"
@@ -796,21 +803,26 @@ echo "  a server restarted with the same SIGNING_KEY publishes the same key"
 
 step "The sign-in page is told how a person signs in here: by password, and no single sign-on"
 call 200 GET /v1/auth/methods ""
-[ "$(json "$WORK/body" 'd == {"password": True, "password_accepts": ["login_id", "email"], "sso": None}')" = True ] ||
+[ "$(json "$WORK/body" 'd == {"password": True, "password_accepts": ["login_id", "email"], "sso": None, "sso_providers": []}')" = True ] ||
   fail "the sign-in methods: $(cat "$WORK/body")"
 curl -s -o /dev/null -D "$WORK/headers" "$BASE/v1/auth/methods"
 grep -qi '^cache-control: public, max-age=60' "$WORK/headers" || fail "the sign-in methods may not be kept for a minute: $(cat "$WORK/headers")"
 
 step "Restarted with single sign-on against a stand-in provider, the sign-in page is told to offer it too, by name"
-# The stand-in provider is its discovery document, which is all the server
-# reads of a provider before anyone signs in.
+# The stand-in provider (scripts/e2e-idp.py) serves the operator's issuer,
+# /adfs, as its discovery document, which is all the server reads of a
+# provider before anyone signs in; and, at /site, a provider of the site's
+# that signs in Mori, whose identity there is mori@campus.example, with the
+# client and the secret made here, and sends the browser back only to the
+# redirect URI the server says to register.
 ISSUER="http://127.0.0.1:$IDP_PORT/adfs"
-mkdir -p "$WORK/idp/adfs/.well-known"
-printf '{"issuer":"%s","authorization_endpoint":"%s/oauth2/authorize","token_endpoint":"%s/oauth2/token","jwks_uri":"%s/discovery/keys"}\n' \
-  "$ISSUER" "$ISSUER" "$ISSUER" "$ISSUER" >"$WORK/idp/adfs/.well-known/openid-configuration"
-python3 -m http.server "$IDP_PORT" --bind 127.0.0.1 --directory "$WORK/idp" >"$WORK/idp.log" 2>&1 &
+SITE_ISSUER="http://127.0.0.1:$IDP_PORT/site"
+SITE_SECRET=$(python3 -c 'import secrets; print("e2e-" + secrets.token_urlsafe(24))')
+IDP_CLIENT_ID=aishie-site IDP_CLIENT_SECRET=$SITE_SECRET IDP_REDIRECT_URI="$BASE/v1/auth/sso/callback" \
+  IDP_SUBJECT=mori@campus.example IDP_EMAIL=mori@example.edu \
+  python3 "$(dirname "$0")/e2e-idp.py" "$IDP_PORT" >"$WORK/idp.log" 2>&1 &
 IDP_PID=$!
-for _ in $(seq 1 50); do curl -sf "$ISSUER/.well-known/openid-configuration" >/dev/null 2>&1 && break; sleep 0.1; done
+for _ in $(seq 1 100); do curl -sf "$ISSUER/.well-known/openid-configuration" >/dev/null 2>&1 && break; sleep 0.1; done
 curl -sf "$ISSUER/.well-known/openid-configuration" >/dev/null || fail "the stand-in provider did not come up: $(cat "$WORK/idp.log")"
 export OIDC_ISSUER="$ISSUER" OIDC_CLIENT_ID=aishie-e2e OIDC_DISPLAY_NAME="PolyU NetID"
 # A name the button cannot show as it is, and the server does not start.
@@ -820,10 +832,101 @@ kill "$SERVER_PID"
 wait "$SERVER_PID" 2>/dev/null || true
 start
 call 200 GET /v1/auth/methods ""
-[ "$(json "$WORK/body" 'd == {"password": True, "password_accepts": ["login_id", "email"], "sso": {"label": "PolyU NetID", "start": "/v1/auth/sso/start"}}')" = True ] ||
+[ "$(json "$WORK/body" 'd == {"password": True, "password_accepts": ["login_id", "email"], "sso": {"label": "PolyU NetID", "start": "/v1/auth/sso/start"}, "sso_providers": [{"id": "polyu-adfs", "label": "PolyU NetID", "start": "/v1/auth/sso/start/polyu-adfs"}]}')" = True ] ||
   fail "the sign-in methods with single sign-on: $(cat "$WORK/body")"
 [[ "$(curl -s -o /dev/null -w '%{http_code} %{redirect_url}' "$BASE/v1/auth/sso/start?return_to=/courses")" == "302 $ISSUER/oauth2/authorize?"* ]] ||
   fail "where the answer says to start does not send the browser to the provider"
 echo "  the answer names the button, says where to start, and says nothing else of the provider"
+
+step "Without SECRETS_KEY, no provider of the site's is added; the operator's is listed, read-only"
+call 200 GET /v1/sso/providers "$ROOT"
+[ "$(json "$WORK/body" 'd["result"]["can_add"], d["result"]["cannot_add_reason"], [(p["id"], p["source"], p["read_only"], p["status"]) for p in d["result"]["providers"]]')" = \
+  "False secrets_key_missing [('polyu-adfs', 'operator', True, 'offered')]" ] || fail "the providers: $(cat "$WORK/body")"
+[ "$(json "$WORK/body" 'd["result"]["redirect_uri"]')" = "$BASE/v1/auth/sso/callback" ] || fail "the redirect URI: $(cat "$WORK/body")"
+SITE="{\"id\":\"campus\",\"display_name\":\"Campus ID\",\"issuer\":\"$SITE_ISSUER\",\"client_id\":\"aishie-site\",\"client_secret\":\"$SITE_SECRET\"}"
+call 422 POST /v1/sso/providers "$ROOT" "$SITE"
+[ "$(reason)" = secrets_key_missing ] || fail "refused, but not for want of a key: $(cat "$WORK/body")"
+
+step "Restarted with SECRETS_KEY, root tests the site's provider, sets it up and switches it on over the version read; its secret is said nowhere"
+SECRETS_KEY=$(python3 -c 'import base64, os; print(base64.b64encode(os.urandom(32)).decode())')
+export SECRETS_KEY
+kill "$SERVER_PID"
+wait "$SERVER_PID" 2>/dev/null || true
+start
+call 200 GET "/v1/sso/test?issuer=$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$SITE_ISSUER")" "$ROOT"
+[ "$(json "$WORK/body" 'd["result"]["ok"], len(d["result"]["signing_keys"]), d["result"]["token_endpoint"]')" = "True 1 $SITE_ISSUER/token" ] ||
+  fail "the test of the site's provider: $(cat "$WORK/body")"
+call 200 GET "/v1/sso/test?issuer=http://127.0.0.1:$IDP_PORT/nothing" "$ROOT"
+[ "$(json "$WORK/body" 'd["result"]["ok"]')" = False ] || fail "an issuer with no provider passed its test: $(cat "$WORK/body")"
+call 403 POST /v1/sso/providers "$ADA" "$SITE" # a department's administrator sets up none
+[ "$(reason)" = platform_role_required ] || fail "refused, but not for want of a platform role: $(cat "$WORK/body")"
+call 200 POST /v1/sso/providers "$ROOT" "$SITE"
+[ "$(json "$WORK/body" 'd["result"]["status"], d["result"]["version"], d["result"]["client_secret_hint"][-4:]')" = \
+  "disabled 1 ${SITE_SECRET: -4}" ] || fail "the provider set up: $(cat "$WORK/body")"
+call 422 POST /v1/sso/providers/polyu-adfs "$ROOT" '{"version":1,"display_name":"Mine now"}'
+[ "$(reason)" = set_by_operator ] || fail "the operator's provider was not refused as the operator's: $(cat "$WORK/body")"
+IF_MATCH='"1"' call 200 POST /v1/sso/providers/campus/enabled "$ROOT" '{"enabled":true}'
+[ "$(json "$WORK/body" 'd["result"]["status"], d["result"]["version"]')" = "offered 2" ] || fail "switched on: $(cat "$WORK/body")"
+IF_MATCH='"1"' call 409 POST /v1/sso/providers/campus "$ROOT" '{"display_name":"Stale"}'
+[ "$(json "$WORK/body" 'd["error"]["details"]["reason"], d["error"]["details"]["current_version"]')" = "version_mismatch 2" ] ||
+  fail "a write over an old version: $(cat "$WORK/body")"
+call 200 GET /v1/auth/methods ""
+[ "$(json "$WORK/body" '[(p["id"], p["label"], p["start"]) for p in d["sso_providers"]], d["sso"]["start"]')" = \
+  "[('polyu-adfs', 'PolyU NetID', '/v1/auth/sso/start/polyu-adfs'), ('campus', 'Campus ID', '/v1/auth/sso/start/campus')] /v1/auth/sso/start/polyu-adfs" ] ||
+  fail "the sign-in methods with two providers: $(cat "$WORK/body")"
+call 400 GET "/v1/auth/sso/start?return_to=/courses" "" # two providers: which?
+[ "$(reason)" = provider_required ] || fail "a bare start with two providers: $(cat "$WORK/body")"
+"$BIN" secrets rewrap >"$WORK/rewrap.out" 2>&1 || fail "secrets rewrap: $(cat "$WORK/rewrap.out")"
+grep -q ': 0 sealed again, 1 already' "$WORK/rewrap.out" || fail "secrets rewrap: $(cat "$WORK/rewrap.out")"
+for f in "$WORK/server.log" "$WORK/rewrap.out" "$WORK/idp.log"; do
+  grep -qF "$SITE_SECRET" "$f" && fail "$f says the client secret"
+done
+call 200 GET /v1/sso/providers "$ROOT"
+grep -qF "$SITE_SECRET" "$WORK/body" && fail "the providers' list says the client secret"
+# The secret goes to psql on its input, not its command line.
+[ "$({
+  printf '\\set secret %s\n' "'$SITE_SECRET'"
+  echo "SELECT count(*) FROM action WHERE strpos(payload::text, :'secret') > 0 OR strpos(coalesce(result::text, ''), :'secret') > 0"
+  echo "  OR (action_type LIKE 'sso.%' AND payload ? 'client_secret');"
+} | psql -X -At -d "$DB")" = 0 ] || fail "the action log records the client secret"
+[ "$(psql -X -At -d "$DB" -c "SELECT count(*) FROM sso_provider WHERE client_secret_sealed LIKE 'v1.%' AND strpos(row_to_json(sso_provider)::text, 'e2e-') = 0")" = 1 ] ||
+  fail "the provider's row keeps its secret otherwise than sealed"
+echo "  set up, tested and switched on; its secret is in no answer, action, log line or column, but sealed"
+
+step "Mori, linked at the site's provider, signs in through it as a browser does, and his session is his"
+call 200 POST "/v1/actors/$MORI_ID/sso" "$ROOT" '{"provider":"campus","subject":"mori@campus.example"}'
+# header FILE NAME — a header's value; cookie FILE NAME — the value of a cookie it sets.
+header() { grep -i "^$2:" "$1" | head -1 | cut -d' ' -f2- | tr -d '\r'; }
+cookie() { grep -i "^set-cookie: $2=" "$1" | head -1 | sed 's/^[^=]*=\([^;]*\).*/\1/' | tr -d '\r'; }
+curl -s -o /dev/null -D "$WORK/h.start" "$BASE/v1/auth/sso/start/campus?return_to=/courses"
+TO_IDP=$(header "$WORK/h.start" location)
+[[ "$TO_IDP" == "$SITE_ISSUER/authorize?"* ]] || fail "the start sent the browser to $TO_IDP"
+STATE=$(cookie "$WORK/h.start" ais_sso)
+[ -n "$STATE" ] || fail "the start set no state cookie"
+curl -s -o /dev/null -D "$WORK/h.idp" "$TO_IDP"
+BACK=$(header "$WORK/h.idp" location)
+[[ "$BACK" == "$BASE/v1/auth/sso/callback?"* ]] || fail "the provider sent the browser back to $BACK: $(cat "$WORK/h.idp")"
+[ "$(curl -s -o "$WORK/body" -D "$WORK/h.back" -w '%{http_code}' -H "Cookie: ais_sso=$STATE" "$BACK")" = 302 ] || fail "the callback: $(cat "$WORK/body")"
+[ "$(header "$WORK/h.back" location)" = /courses ] || fail "the callback sent the browser to $(header "$WORK/h.back" location)"
+MORI=$(cookie "$WORK/h.back" ais_session)
+[ -n "$MORI" ] || fail "the callback set no session"
+N=$((N + 3))
+printf '  %-4s %-62s %s\n' GET "/v1/auth/sso/start/campus → the provider → /v1/auth/sso/callback" 302
+call 200 GET /v1/me "$MORI"
+[ "$(json "$WORK/body" 'd["result"]["display_name"]')" = Mori ] || fail "signed in as someone else: $(cat "$WORK/body")"
+# The same answer from the provider, again, even with the state cookie kept, signs in nobody: the provider redeems a code once.
+[ "$(curl -s -o "$WORK/body" -D "$WORK/h.again" -w '%{http_code}' -H "Cookie: ais_sso=$STATE" "$BACK")" = 401 ] ||
+  fail "a replayed callback: $(cat "$WORK/body")"
+[ -z "$(cookie "$WORK/h.again" ais_session)" ] || fail "a replayed callback set a session"
+
+step "Root cannot remove the provider while Mori is linked at it; forced, it goes, and his identity is unlinked"
+call 409 POST /v1/sso/providers/campus/delete "$ROOT" '{}'
+[ "$(json "$WORK/body" 'd["error"]["details"]["reason"], d["error"]["details"]["linked_accounts"]')" = "provider_in_use 1" ] ||
+  fail "a provider with linked accounts: $(cat "$WORK/body")"
+call 200 POST /v1/sso/providers/campus/delete "$ROOT" '{"force":true}'
+[ "$(json "$WORK/body" 'd["result"]["unlinked_accounts"]')" = 1 ] || fail "removed: $(cat "$WORK/body")"
+call 404 GET "/v1/auth/sso/start/campus?return_to=/courses" ""
+call 200 GET /v1/auth/methods ""
+[ "$(json "$WORK/body" '[p["id"] for p in d["sso_providers"]]')" = "['polyu-adfs']" ] || fail "the sign-in methods after: $(cat "$WORK/body")"
 
 printf '\n\033[32mPASS\033[0m %d requests\n' "$N"
