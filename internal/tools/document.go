@@ -494,9 +494,10 @@ func (c Content) uploads() []string {
 // insertVersion writes one version. The author is the calling member, who is
 // a member of the document's course because the call was authorized in it —
 // which is the whole of the rule that a version's author belongs to its
-// document's course. A file of material, instructions or a rubric is queued
-// to be transcribed as it is added (document_version_text_queued), and the
-// service is woken to take it.
+// document's course. Its file is recorded as its one file by the database
+// (document_version_files_whole), and a file of material, instructions or a
+// rubric is queued to be transcribed as it is (document_version_file_text_queued):
+// the service is woken to take it.
 func insertVersion(ctx context.Context, d Deps, ec *tool.ExecCtx, courseID, documentID uuid.UUID, kind string, seq int32, c Content) (uuid.UUID, error) {
 	row := dbq.InsertDocumentVersionParams{ID: ids.New(), DocumentID: documentID, Seq: seq, BodyMd: c.BodyMD,
 		AuthorMemberID: ec.Member.ID, CreatedAt: ec.Now}
@@ -1099,13 +1100,19 @@ func documentPurge(d Deps) tool.Tool {
 				if v.PurgedAt != nil {
 					return DocumentPurgeOut{}, apperr.Conflicts("that version has been purged already").With("reason", "already_purged")
 				}
-				versions = []dbq.ListVersionsToPurgeRow{{ID: v.ID, StorageKey: v.StorageKey}}
+				files, err := ec.Q.ListVersionFiles(ctx, v.ID)
+				if err != nil {
+					return DocumentPurgeOut{}, err
+				}
+				keys := make([]string, len(files))
+				for i, f := range files {
+					keys[i] = f.StorageKey
+				}
+				versions = []dbq.ListVersionsToPurgeRow{{ID: v.ID, StorageKeys: keys}}
 			}
 			var files []string
 			for _, v := range versions {
-				if v.StorageKey != nil {
-					files = append(files, *v.StorageKey)
-				}
+				files = append(files, v.StorageKeys...)
 			}
 			if len(files) > 0 && d.Blob == nil {
 				return DocumentPurgeOut{}, apperr.Precondition("this installation has no file storage configured, so the file cannot be removed")
@@ -1296,13 +1303,49 @@ func documentGet(d Deps) tool.Tool {
 				}
 				view.DownloadURL = &url
 			}
-			if view.Text, err = versionText(ctx, rc.Q, v.ID); err != nil {
+			if view.Text, err = firstFileText(ctx, rc.Q, v.ID); err != nil {
 				return DocumentGetOut{}, err
 			}
 			out.Version = &view
 			return out, nil
 		},
 	})
+}
+
+// firstFileText is the text version of a version's first file, for
+// document.get: with its text when it is one part. nil for a version that
+// has none.
+func firstFileText(ctx context.Context, q dbq.Querier, version uuid.UUID) (*TextView, error) {
+	files, err := q.ListVersionFiles(ctx, version)
+	if err != nil || len(files) == 0 {
+		return nil, err
+	}
+	key := dbq.GetTextViewParams{VersionID: version, FileID: files[0].ID}
+	r, err := q.GetTextView(ctx, key)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	v := textView(r.Status, r.Source, r.Pages, r.Model, r.Reason, r.Revision, r.ProducedAt, r.EditedByMemberID, r.EditedAt,
+		r.UpdatedAt, r.Bytes, r.EditedByName)
+	if r.Status == textDone && r.Bytes <= TextPartBytes {
+		b, err := q.GetTextBody(ctx, dbq.GetTextBodyParams(key))
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil // purged meanwhile
+		}
+		if err != nil {
+			return nil, err
+		}
+		// Read again with its text: what is shown is of one revision.
+		v = textView(b.Status, b.Source, b.Pages, b.Model, b.Reason, b.Revision, b.ProducedAt, b.EditedByMemberID, b.EditedAt,
+			b.UpdatedAt, b.Bytes, b.EditedByName)
+		if b.Bytes <= TextPartBytes {
+			v.Body = b.Body
+		}
+	}
+	return v, nil
 }
 
 // readableVersion is the version of a document a read shows its caller, and
@@ -1454,12 +1497,23 @@ func documentVersions() tool.Tool {
 			if err != nil {
 				return DocumentVersionsOut{}, err
 			}
+			// Each version's text is its first file's.
+			files, err := rc.Q.ListDocumentFiles(ctx, doc.ID)
+			if err != nil {
+				return DocumentVersionsOut{}, err
+			}
+			first := map[uuid.UUID]uuid.UUID{}
+			for _, f := range files {
+				if f.Position == 1 {
+					first[f.VersionID] = f.ID
+				}
+			}
 			out := DocumentVersionsOut{Versions: make([]VersionSummary, 0, len(rows))}
 			for _, r := range rows {
 				out.Versions = append(out.Versions, VersionSummary{ID: r.ID, Seq: r.Seq, HasFile: r.HasFile, ContentType: r.ContentType,
 					ByteSize: r.ByteSize, AuthorMemberID: r.AuthorMemberID, CreatedAt: r.CreatedAt,
 					Published: doc.PublishedVersionID != nil && *doc.PublishedVersionID == r.ID, PurgedAt: r.PurgedAt,
-					Text: texts[r.ID]})
+					Text: texts[first[r.ID]]})
 			}
 			return out, nil
 		},

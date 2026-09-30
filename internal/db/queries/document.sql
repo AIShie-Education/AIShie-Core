@@ -6,6 +6,25 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8);
 INSERT INTO document_version (id, document_id, seq, body_md, storage_key, content_type, byte_size, checksum, author_member_id, created_at)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10);
 
+-- name: InsertDocumentVersionFile :exec
+-- One file of a version, written with it (document_version_file_with_its_version).
+INSERT INTO document_version_file (id, version_id, document_id, position, filename, storage_key, content_type, byte_size,
+                                   checksum, created_at)
+VALUES (sqlc.arg(id), sqlc.arg(version_id), sqlc.arg(document_id), sqlc.arg(position), sqlc.arg(filename),
+        sqlc.arg(storage_key), sqlc.arg(content_type), sqlc.arg(byte_size), sqlc.narg(checksum), sqlc.arg(created_at));
+
+-- name: ListVersionFiles :many
+-- A version's files, in order.
+SELECT * FROM document_version_file WHERE version_id = $1 ORDER BY position;
+
+-- name: ListDocumentFiles :many
+-- The files of every version of a document, each version's in order.
+SELECT * FROM document_version_file WHERE document_id = $1 ORDER BY version_id, position;
+
+-- name: GetDocumentFile :one
+-- A file of one of a document's versions.
+SELECT * FROM document_version_file WHERE id = $1 AND document_id = $2;
+
 -- name: GetDocumentWithOwner :one
 -- A document and, when it is owned, whose it is: a submitted file belongs to
 -- its submission's student and assignment; a feedback file to its grade's.
@@ -50,8 +69,15 @@ UPDATE document SET status = $2 WHERE id = $1 AND status <> $2;
 UPDATE document SET title = $2, sort_order = $3 WHERE id = $1;
 
 -- name: ListVersionsToPurge :many
--- The versions of a document not purged yet, and the file each holds.
-SELECT id, storage_key FROM document_version WHERE document_id = $1 AND purged_at IS NULL ORDER BY seq;
+-- The versions of a document not purged yet, and the files each holds, in
+-- order.
+SELECT v.id,
+       coalesce(array_agg(f.storage_key ORDER BY f.position) FILTER (WHERE f.id IS NOT NULL), '{}')::text[] AS storage_keys
+FROM document_version v
+LEFT JOIN document_version_file f ON f.version_id = v.id
+WHERE v.document_id = $1 AND v.purged_at IS NULL
+GROUP BY v.id, v.seq
+ORDER BY v.seq;
 
 -- name: PurgeVersion :execrows
 -- Its text, its file and the file's checksum go; the rest stays, with who,
@@ -140,9 +166,11 @@ SELECT EXISTS (
 );
 
 -- name: StorageKeyInUse :one
--- Whether a file has been attached: to a version of a document, or to a
--- message of a conversation.
+-- Whether a file has been attached: to a version of a document, as any of
+-- its files or in its own columns (as the release before 0023 writes it),
+-- or to a message of a conversation.
 SELECT (EXISTS (SELECT 1 FROM document_version WHERE storage_key = sqlc.narg(storage_key)::text)
+     OR EXISTS (SELECT 1 FROM document_version_file WHERE storage_key = sqlc.narg(storage_key)::text)
      OR EXISTS (SELECT 1 FROM conversation_attachment WHERE storage_key = sqlc.narg(storage_key)::text))::bool AS in_use;
 
 -- name: LockStorageKey :exec

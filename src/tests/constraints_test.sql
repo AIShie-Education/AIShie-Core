@@ -52,6 +52,7 @@ END $$;
 --      7x assignments · ex documents · fx versions · ax submissions
 --      bx actions · dx grades · cx conversations · cxx their messages
 --      1cx credentials · 1ax join links · cax attachments
+--      22xx files of versions
 INSERT INTO term (id, name, starts_on, ends_on)
 VALUES ('00000000-0000-0000-0000-000000000011', '2026 Autumn', '2026-09-01', '2026-12-20');
 INSERT INTO department (id, name) VALUES ('00000000-0000-0000-0000-000000000021', 'Computing');
@@ -721,10 +722,21 @@ SELECT pg_temp.ok('text-only version', $q$
     INSERT INTO document_version (id, document_id, seq, body_md, author_member_id)
     VALUES ('00000000-0000-0000-0000-0000000000f1', '00000000-0000-0000-0000-0000000000e1', 1, 'Lecture text',
             '00000000-0000-0000-0000-000000000051') $q$);
-SELECT pg_temp.ok('file-only version', $q$
+SELECT pg_temp.ok('file-only version, its file in its own columns, recorded at commit as its one file', $q$
     INSERT INTO document_version (id, document_id, seq, storage_key, content_type, byte_size, author_member_id)
     VALUES ('00000000-0000-0000-0000-0000000000f2', '00000000-0000-0000-0000-0000000000e2', 1, 'k/lecture2.pdf',
-            'application/pdf', 1024, '00000000-0000-0000-0000-000000000051') $q$);
+            'application/pdf', 1024, '00000000-0000-0000-0000-000000000051');
+    SET CONSTRAINTS ALL IMMEDIATE;
+    SET CONSTRAINTS ALL DEFERRED;
+    DO $chk$
+    BEGIN
+        IF NOT EXISTS (SELECT 1 FROM document_version_file f JOIN document d ON d.id = f.document_id
+                       WHERE f.version_id = '00000000-0000-0000-0000-0000000000f2' AND f.position = 1
+                         AND f.storage_key = 'k/lecture2.pdf' AND f.content_type = 'application/pdf' AND f.byte_size = 1024
+                         AND f.filename = document_file_name(d.title, 'application/pdf')) THEN
+            RAISE EXCEPTION 'the version''s file was not recorded as its one file';
+        END IF;
+    END $chk$ $q$);
 SELECT pg_temp.fails('version needs text or a file', '23514', $q$
     INSERT INTO document_version (document_id, seq, author_member_id)
     VALUES ('00000000-0000-0000-0000-0000000000e1', 2, '00000000-0000-0000-0000-000000000051') $q$);
@@ -759,6 +771,9 @@ SELECT pg_temp.ok('a version is purged: its file goes, what it was and who purge
         IF NOT EXISTS (SELECT 1 FROM document_version WHERE id = '00000000-0000-0000-0000-0000000000f2'
                        AND seq = 1 AND content_type = 'application/pdf' AND byte_size = 1024 AND storage_key IS NULL) THEN
             RAISE EXCEPTION 'the tombstone does not say what was there';
+        END IF;
+        IF EXISTS (SELECT 1 FROM document_version_file WHERE version_id = '00000000-0000-0000-0000-0000000000f2') THEN
+            RAISE EXCEPTION 'the purged version''s file is still recorded';
         END IF;
     END $chk$ $q$);
 SELECT pg_temp.fails('a purged version is purged once', '23001', $q$
@@ -1703,12 +1718,14 @@ INSERT INTO document (id, course_id, kind, title, submission_id) VALUES
     ('00000000-0000-0000-0000-0000000020e2', '00000000-0000-0000-0000-000000000041', 'instructions', 'Exam', NULL),
     ('00000000-0000-0000-0000-0000000020e3', '00000000-0000-0000-0000-000000000041', 'submission', 'essay.pdf',
      '00000000-0000-0000-0000-0000000000a1');
-SELECT pg_temp.ok('a version with a file is queued for its text as it is added', $q$
+SELECT pg_temp.ok('a version with a file is queued for its text as its file is recorded', $q$
     INSERT INTO document_version (id, document_id, seq, storage_key, content_type, byte_size, author_member_id)
     VALUES ('00000000-0000-0000-0000-0000000020f1', '00000000-0000-0000-0000-0000000020e1', 1, 'k/slides.pdf',
             'application/pdf', 2048, '00000000-0000-0000-0000-000000000051'),
            ('00000000-0000-0000-0000-0000000020f3', '00000000-0000-0000-0000-0000000020e2', 1, 'k/exam.pdf',
             'application/pdf', 512, '00000000-0000-0000-0000-000000000051');
+    SET CONSTRAINTS ALL IMMEDIATE;
+    SET CONSTRAINTS ALL DEFERRED;
     DO $chk$
     BEGIN
         IF (SELECT count(*) FROM document_version_text
@@ -1725,6 +1742,8 @@ SELECT pg_temp.ok('a version of text alone, and a submitted file, are not', $q$
     INSERT INTO document_version (id, document_id, seq, storage_key, content_type, byte_size, author_member_id)
     VALUES ('00000000-0000-0000-0000-0000000020f4', '00000000-0000-0000-0000-0000000020e3', 1, 'k/essay.pdf',
             'application/pdf', 100, '00000000-0000-0000-0000-000000000052');
+    SET CONSTRAINTS ALL IMMEDIATE;
+    SET CONSTRAINTS ALL DEFERRED;
     DO $chk$
     BEGIN
         IF EXISTS (SELECT 1 FROM document_version_text
@@ -1735,13 +1754,13 @@ SELECT pg_temp.ok('a version of text alone, and a submitted file, are not', $q$
 SELECT pg_temp.fails('nor may they be', '23514', $q$
     INSERT INTO document_version_text (version_id, document_id, course_id)
     VALUES ('00000000-0000-0000-0000-0000000020f4', '00000000-0000-0000-0000-0000000020e3', '00000000-0000-0000-0000-000000000041') $q$);
-SELECT pg_temp.fails('one text version for each version', '23505', $q$
+SELECT pg_temp.fails('one text version for each file, the first when none is named', '23505', $q$
     INSERT INTO document_version_text (version_id, document_id, course_id)
     VALUES ('00000000-0000-0000-0000-0000000020f1', '00000000-0000-0000-0000-0000000020e1', '00000000-0000-0000-0000-000000000041') $q$);
 SELECT pg_temp.fails('in its document''s course', '23001', $q$
     UPDATE document_version_text SET course_id = '00000000-0000-0000-0000-000000000042'
     WHERE version_id = '00000000-0000-0000-0000-0000000020f1' $q$);
-SELECT pg_temp.fails('a text version stays its version''s', '23001', $q$
+SELECT pg_temp.fails('a text version stays its file''s', '23001', $q$
     UPDATE document_version_text SET version_id = '00000000-0000-0000-0000-0000000020f3', document_id = '00000000-0000-0000-0000-0000000020e2'
     WHERE version_id = '00000000-0000-0000-0000-0000000020f1' $q$);
 SELECT pg_temp.fails('a claim holds a lease', '23514', $q$
@@ -1862,6 +1881,131 @@ SELECT pg_temp.fails('who changed it is an actor', '23503', $q$
     UPDATE sso_provider SET updated_by_actor_id = '00000000-0000-0000-0000-0000000000ff' WHERE id = 'adfs' $q$);
 SELECT pg_temp.ok('and a provider is removed', $q$
     DELETE FROM sso_provider WHERE id = 'adfs' $q$);
+
+-- Files of versions ----------------------------------------------------------
+-- 22e1 a lecture (material) · 22f1 its version of three files, 22d1..22d3 · 22f2 one refused
+INSERT INTO document (id, course_id, kind, title) VALUES
+    ('00000000-0000-0000-0000-0000000022e1', '00000000-0000-0000-0000-000000000041', 'material', 'Week 3');
+SELECT pg_temp.ok('a version holds several files, the first in its own columns, each queued for its text', $q$
+    INSERT INTO document_version (id, document_id, seq, body_md, storage_key, content_type, byte_size, checksum, author_member_id,
+                                  created_at)
+    VALUES ('00000000-0000-0000-0000-0000000022f1', '00000000-0000-0000-0000-0000000022e1', 1, 'Read these.', 'k/22d1',
+            'application/pdf', 10, 'sha256:1', '00000000-0000-0000-0000-000000000051', '2026-09-30 09:00:00+00');
+    INSERT INTO document_version_file (id, version_id, document_id, position, filename, storage_key, content_type, byte_size,
+                                       checksum, created_at) VALUES
+        ('00000000-0000-0000-0000-0000000022d1', '00000000-0000-0000-0000-0000000022f1', '00000000-0000-0000-0000-0000000022e1', 1,
+         'slides.pdf', 'k/22d1', 'application/pdf', 10, 'sha256:1', '2026-09-30 09:00:00+00'),
+        ('00000000-0000-0000-0000-0000000022d2', '00000000-0000-0000-0000-0000000022f1', '00000000-0000-0000-0000-0000000022e1', 2,
+         'handout.docx', 'k/22d2', 'application/msword', 20, NULL, '2026-09-30 09:00:00+00'),
+        ('00000000-0000-0000-0000-0000000022d3', '00000000-0000-0000-0000-0000000022f1', '00000000-0000-0000-0000-0000000022e1', 3,
+         'loops.py', 'k/22d3', 'text/x-python', 30, NULL, '2026-09-30 09:00:00+00');
+    SET CONSTRAINTS ALL IMMEDIATE;
+    SET CONSTRAINTS ALL DEFERRED;
+    DO $chk$
+    BEGIN
+        IF (SELECT count(*) FROM document_version_text WHERE version_id = '00000000-0000-0000-0000-0000000022f1'
+            AND status = 'pending') <> 3 THEN
+            RAISE EXCEPTION 'each file was not queued for its text';
+        END IF;
+    END $chk$ $q$);
+SELECT pg_temp.fails('a version''s files are numbered from 1, none missing', '23514', $q$
+    INSERT INTO document_version (id, document_id, seq, storage_key, content_type, byte_size, author_member_id, created_at)
+    VALUES ('00000000-0000-0000-0000-0000000022f2', '00000000-0000-0000-0000-0000000022e1', 2, 'k/22d4', 'application/pdf', 10,
+            '00000000-0000-0000-0000-000000000051', '2026-09-30 10:00:00+00');
+    INSERT INTO document_version_file (version_id, document_id, position, filename, storage_key, content_type, byte_size, created_at)
+    VALUES ('00000000-0000-0000-0000-0000000022f2', '00000000-0000-0000-0000-0000000022e1', 1, 'a.pdf', 'k/22d4', 'application/pdf',
+            10, '2026-09-30 10:00:00+00'),
+           ('00000000-0000-0000-0000-0000000022f2', '00000000-0000-0000-0000-0000000022e1', 3, 'c.pdf', 'k/22d6', 'application/pdf',
+            10, '2026-09-30 10:00:00+00') $q$);
+SELECT pg_temp.fails('the first is the file the version''s own columns name', '23514', $q$
+    INSERT INTO document_version (id, document_id, seq, storage_key, content_type, byte_size, author_member_id, created_at)
+    VALUES ('00000000-0000-0000-0000-0000000022f2', '00000000-0000-0000-0000-0000000022e1', 2, 'k/22d4', 'application/pdf', 10,
+            '00000000-0000-0000-0000-000000000051', '2026-09-30 10:00:00+00');
+    INSERT INTO document_version_file (version_id, document_id, position, filename, storage_key, content_type, byte_size, created_at)
+    VALUES ('00000000-0000-0000-0000-0000000022f2', '00000000-0000-0000-0000-0000000022e1', 1, 'a.pdf', 'k/22d5', 'application/pdf',
+            10, '2026-09-30 10:00:00+00') $q$);
+SELECT pg_temp.fails('a version with files names its first in its own columns', '23514', $q$
+    INSERT INTO document_version (id, document_id, seq, body_md, author_member_id, created_at)
+    VALUES ('00000000-0000-0000-0000-0000000022f2', '00000000-0000-0000-0000-0000000022e1', 2, 'text', '00000000-0000-0000-0000-000000000051',
+            '2026-09-30 10:00:00+00');
+    INSERT INTO document_version_file (version_id, document_id, position, filename, storage_key, content_type, byte_size, created_at)
+    VALUES ('00000000-0000-0000-0000-0000000022f2', '00000000-0000-0000-0000-0000000022e1', 1, 'a.pdf', 'k/22d5', 'application/pdf',
+            10, '2026-09-30 10:00:00+00') $q$);
+SELECT pg_temp.fails('nothing is added to a version afterwards', '23514', $q$
+    INSERT INTO document_version_file (version_id, document_id, position, filename, storage_key, content_type, byte_size)
+    VALUES ('00000000-0000-0000-0000-0000000022f1', '00000000-0000-0000-0000-0000000022e1', 4, 'more.pdf', 'k/22d5',
+            'application/pdf', 10) $q$);
+SELECT pg_temp.fails('nor to another document''s version', '23503', $q$
+    INSERT INTO document_version_file (version_id, document_id, position, filename, storage_key, content_type, byte_size, created_at)
+    VALUES ('00000000-0000-0000-0000-0000000022f1', '00000000-0000-0000-0000-0000000020e1', 4, 'more.pdf', 'k/22d5',
+            'application/pdf', 10, '2026-09-30 09:00:00+00') $q$);
+SELECT pg_temp.fails('a file''s name is a name, not a path', '23514', $q$
+    INSERT INTO document_version (id, document_id, seq, storage_key, content_type, byte_size, author_member_id, created_at)
+    VALUES ('00000000-0000-0000-0000-0000000022f2', '00000000-0000-0000-0000-0000000022e1', 2, 'k/22d4', 'application/pdf', 10,
+            '00000000-0000-0000-0000-000000000051', '2026-09-30 10:00:00+00');
+    INSERT INTO document_version_file (version_id, document_id, position, filename, storage_key, content_type, byte_size, created_at)
+    VALUES ('00000000-0000-0000-0000-0000000022f2', '00000000-0000-0000-0000-0000000022e1', 1, '../a.pdf', 'k/22d4',
+            'application/pdf', 10, '2026-09-30 10:00:00+00') $q$);
+SELECT pg_temp.fails('one file to a key', '23505', $q$
+    INSERT INTO document_version (id, document_id, seq, storage_key, content_type, byte_size, author_member_id, created_at)
+    VALUES ('00000000-0000-0000-0000-0000000022f2', '00000000-0000-0000-0000-0000000022e1', 2, 'k/22d4', 'application/pdf', 10,
+            '00000000-0000-0000-0000-000000000051', '2026-09-30 10:00:00+00');
+    INSERT INTO document_version_file (version_id, document_id, position, filename, storage_key, content_type, byte_size, created_at)
+    VALUES ('00000000-0000-0000-0000-0000000022f2', '00000000-0000-0000-0000-0000000022e1', 1, 'a.pdf', 'k/22d4', 'application/pdf',
+            10, '2026-09-30 10:00:00+00'),
+           ('00000000-0000-0000-0000-0000000022f2', '00000000-0000-0000-0000-0000000022e1', 2, 'b.pdf', 'k/22d2', 'application/pdf',
+            10, '2026-09-30 10:00:00+00') $q$);
+SELECT pg_temp.fails('at most 100 files to a version', '23514', $q$
+    INSERT INTO document_version (id, document_id, seq, storage_key, content_type, byte_size, author_member_id, created_at)
+    VALUES ('00000000-0000-0000-0000-0000000022f2', '00000000-0000-0000-0000-0000000022e1', 2, 'k/22d4', 'application/pdf', 10,
+            '00000000-0000-0000-0000-000000000051', '2026-09-30 10:00:00+00');
+    INSERT INTO document_version_file (version_id, document_id, position, filename, storage_key, content_type, byte_size, created_at)
+    SELECT '00000000-0000-0000-0000-0000000022f2', '00000000-0000-0000-0000-0000000022e1', n, 'f' || n, 'k/22x' || n,
+           'application/pdf', 10, '2026-09-30 10:00:00+00'
+    FROM generate_series(1, 101) AS n $q$);
+SELECT pg_temp.fails('a file is kept as it was written', '23001', $q$
+    UPDATE document_version_file SET filename = 'renamed.pdf' WHERE id = '00000000-0000-0000-0000-0000000022d1' $q$);
+SELECT pg_temp.fails('and not deleted', '23001', $q$
+    DELETE FROM document_version_file WHERE id = '00000000-0000-0000-0000-0000000022d3' $q$);
+SELECT pg_temp.fails('one file''s text is written at a time', '23514', $q$
+    UPDATE document_version_text SET status = 'done', body = '## Page 1', source = 'staff', revision = revision + 1,
+                                     edited_by_member_id = '00000000-0000-0000-0000-000000000051', edited_at = now()
+    WHERE version_id = '00000000-0000-0000-0000-0000000022f1' $q$);
+SELECT pg_temp.ok('by its file', $q$
+    UPDATE document_version_text SET status = 'done', body = '## Page 1', source = 'staff', revision = revision + 1,
+                                     edited_by_member_id = '00000000-0000-0000-0000-000000000051', edited_at = now()
+    WHERE version_id = '00000000-0000-0000-0000-0000000022f1' AND file_id = '00000000-0000-0000-0000-0000000022d2' $q$);
+SELECT pg_temp.ok('several are claimed at once', $q$
+    UPDATE document_version_text SET status = 'working', lease_id = gen_random_uuid(), claimed_until = now() + interval '10 minutes',
+                                     claimed_by_credential_id = '00000000-0000-0000-0000-0000000020c1', claimed_at = now(),
+                                     attempts = 1
+    WHERE version_id = '00000000-0000-0000-0000-0000000022f1' AND status = 'pending' $q$);
+SELECT pg_temp.ok('a version''s files go with it, and their texts, when it is purged', $q$
+    UPDATE document_version SET body_md = NULL, storage_key = NULL, checksum = NULL, purged_at = now(),
+                                purged_by_actor_id = '00000000-0000-0000-0000-000000000032', purge_reason = 'personal data'
+    WHERE id = '00000000-0000-0000-0000-0000000022f1';
+    DO $chk$
+    BEGIN
+        IF EXISTS (SELECT 1 FROM document_version_file WHERE version_id = '00000000-0000-0000-0000-0000000022f1')
+           OR EXISTS (SELECT 1 FROM document_version_text WHERE version_id = '00000000-0000-0000-0000-0000000022f1') THEN
+            RAISE EXCEPTION 'the files of a purged version are still there';
+        END IF;
+    END $chk$ $q$);
+SELECT pg_temp.fails('and a purged version takes no file', '23514', $q$
+    INSERT INTO document_version_file (version_id, document_id, position, filename, storage_key, content_type, byte_size, created_at)
+    VALUES ('00000000-0000-0000-0000-0000000022f1', '00000000-0000-0000-0000-0000000022e1', 1, 'back.pdf', 'k/22d9',
+            'application/pdf', 10, '2026-09-30 09:00:00+00') $q$);
+SELECT pg_temp.ok('a document''s title makes a file''s name', $q$
+    DO $chk$
+    BEGIN
+        IF document_file_name(E'Week 2/3\tnotes', 'application/pdf') <> 'Week 2 3 notes.pdf'
+           OR document_file_name('essay.PDF', 'application/pdf; charset=binary') <> 'essay.PDF'
+           OR document_file_name('   ', 'image/png') <> 'file.png'
+           OR document_file_name('data', 'application/x-unknown') <> 'data'
+           OR char_length(document_file_name(repeat('x', 300), 'application/pdf')) <> 255 THEN
+            RAISE EXCEPTION 'a title made the wrong name';
+        END IF;
+    END $chk$ $q$);
 
 \o
 ROLLBACK;

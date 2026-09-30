@@ -1,22 +1,24 @@
--- Text versions (docs/schema.md §2.4, Text versions): the Markdown a version's
--- file is transcribed into, by the site's service (source ai) or written by
--- staff (source staff).
+-- Text versions (docs/schema.md §2.4, Text versions): the Markdown a file of
+-- a version is transcribed into, by the site's service (source ai) or
+-- written by staff (source staff). One to a file, keyed by its version and
+-- the file.
 
 -- name: GetTextView :one
--- A version's text version as its readers are shown it, without the text.
+-- A file's text version as its readers are shown it, without the text.
 -- Who edited it comes with their name.
-SELECT t.version_id, t.status, t.source, t.pages, t.model, t.reason, t.revision, t.produced_at,
+SELECT t.version_id, t.file_id, t.status, t.source, t.pages, t.model, t.reason, t.revision, t.produced_at,
        t.edited_by_member_id, t.edited_at, t.updated_at,
        coalesce(octet_length(t.body), 0)::int AS bytes,
        e.display_name AS edited_by_name
 FROM document_version_text t
 LEFT JOIN course_member m ON m.id = t.edited_by_member_id
 LEFT JOIN actor e ON e.id = m.actor_id
-WHERE t.version_id = $1;
+WHERE t.version_id = sqlc.arg(version_id) AND t.file_id = sqlc.arg(file_id);
 
 -- name: ListTextViews :many
--- The text versions of a document's versions, without their text.
-SELECT t.version_id, t.status, t.source, t.pages, t.model, t.reason, t.revision, t.produced_at,
+-- The text versions of the files of a document's versions, without their
+-- text.
+SELECT t.version_id, t.file_id, t.status, t.source, t.pages, t.model, t.reason, t.revision, t.produced_at,
        t.edited_by_member_id, t.edited_at, t.updated_at,
        coalesce(octet_length(t.body), 0)::int AS bytes,
        e.display_name AS edited_by_name
@@ -25,28 +27,42 @@ LEFT JOIN course_member m ON m.id = t.edited_by_member_id
 LEFT JOIN actor e ON e.id = m.actor_id
 WHERE t.document_id = $1;
 
--- name: GetTextBody :one
--- A version's text version with its whole text, for reading it in parts.
-SELECT t.version_id, t.status, t.source, t.pages, t.model, t.reason, t.revision, t.produced_at,
+-- name: ListVersionTextViews :many
+-- The text versions of a version's files, without their text.
+SELECT t.version_id, t.file_id, t.status, t.source, t.pages, t.model, t.reason, t.revision, t.produced_at,
        t.edited_by_member_id, t.edited_at, t.updated_at,
-       coalesce(octet_length(t.body), 0)::int AS bytes, t.body,
+       coalesce(octet_length(t.body), 0)::int AS bytes,
        e.display_name AS edited_by_name
 FROM document_version_text t
 LEFT JOIN course_member m ON m.id = t.edited_by_member_id
 LEFT JOIN actor e ON e.id = m.actor_id
 WHERE t.version_id = $1;
 
+-- name: GetTextBody :one
+-- A file's text version with its whole text, for reading it in parts.
+SELECT t.version_id, t.file_id, t.status, t.source, t.pages, t.model, t.reason, t.revision, t.produced_at,
+       t.edited_by_member_id, t.edited_at, t.updated_at,
+       coalesce(octet_length(t.body), 0)::int AS bytes, t.body,
+       e.display_name AS edited_by_name
+FROM document_version_text t
+LEFT JOIN course_member m ON m.id = t.edited_by_member_id
+LEFT JOIN actor e ON e.id = m.actor_id
+WHERE t.version_id = sqlc.arg(version_id) AND t.file_id = sqlc.arg(file_id);
+
 -- name: LockText :one
--- A version's text version, held for a change to it. Whoever changes it
--- holds the document first, as adding and purging a version do.
-SELECT * FROM document_version_text WHERE version_id = $1 AND document_id = $2 FOR UPDATE;
+-- A file's text version, held for a change to it. Whoever changes it holds
+-- the document first, as adding and purging a version do.
+SELECT * FROM document_version_text
+WHERE version_id = sqlc.arg(version_id) AND file_id = sqlc.arg(file_id) AND document_id = sqlc.arg(document_id)
+FOR UPDATE;
 
 -- name: QueueNewText :exec
--- A text version for a version from before there were any, which nobody
--- queued (the backfill queued the published and the latest): asked for by
--- staff, it is queued as an upload is.
-INSERT INTO document_version_text (version_id, document_id, course_id, queued_at, created_at, updated_at)
-VALUES (sqlc.arg(version_id), sqlc.arg(document_id), sqlc.arg(course_id), sqlc.arg(now), sqlc.arg(now), sqlc.arg(now));
+-- A text version for a file of a version from before there were any, which
+-- nobody queued (the backfill queued the published and the latest): asked
+-- for by staff, it is queued as an upload is.
+INSERT INTO document_version_text (version_id, file_id, document_id, course_id, queued_at, created_at, updated_at)
+VALUES (sqlc.arg(version_id), sqlc.arg(file_id), sqlc.arg(document_id), sqlc.arg(course_id), sqlc.arg(now), sqlc.arg(now),
+        sqlc.arg(now));
 
 -- name: EditText :one
 -- Staff's text in place of whatever there was: done, theirs, never written
@@ -57,7 +73,7 @@ SET status = 'done', source = 'staff', body = sqlc.arg(body), reason = NULL,
     lease_id = NULL, claimed_until = NULL,
     edited_by_member_id = sqlc.arg(edited_by_member_id), edited_at = sqlc.arg(now),
     revision = revision + 1, updated_at = sqlc.arg(now)
-WHERE version_id = sqlc.arg(version_id)
+WHERE version_id = sqlc.arg(version_id) AND file_id = sqlc.arg(file_id)
 RETURNING revision;
 
 -- name: RequeueText :one
@@ -68,7 +84,7 @@ SET status = 'pending', body = NULL, source = NULL, pages = NULL, model = NULL, 
     edited_by_member_id = NULL, edited_at = NULL, lease_id = NULL, claimed_until = NULL,
     attempts = 0, backfill = false, queued_at = sqlc.arg(now),
     revision = revision + CASE WHEN body IS NULL THEN 0 ELSE 1 END, updated_at = sqlc.arg(now)
-WHERE version_id = sqlc.arg(version_id)
+WHERE version_id = sqlc.arg(version_id) AND file_id = sqlc.arg(file_id)
 RETURNING revision;
 
 -- ---------------------------------------------------------------------------
@@ -82,8 +98,8 @@ RETURNING revision;
 -- claims at once never wait for each other here.
 UPDATE document_version_text
 SET status = 'failed', reason = 'attempts_exhausted', lease_id = NULL, claimed_until = NULL, updated_at = sqlc.arg(now)
-WHERE version_id IN (
-    SELECT x.version_id FROM document_version_text x
+WHERE (version_id, file_id) IN (
+    SELECT x.version_id, x.file_id FROM document_version_text x
     WHERE x.attempts >= sqlc.arg(max_attempts)::int
       AND (x.status = 'pending' OR (x.status = 'working' AND x.claimed_until <= sqlc.arg(now)))
     FOR UPDATE SKIP LOCKED);
@@ -91,12 +107,14 @@ WHERE version_id IN (
 -- name: ClaimTexts :many
 -- Up to max_rows text versions waiting, or whose claim has lapsed, claimed for
 -- the caller until claimed_until: uploads first, oldest first, then the
--- backfill, newest first. SKIP LOCKED: two claims at once never take the
--- same one. What is in an archived course, or of an archived document, waits
--- until it is open again, since nothing is written there meanwhile.
+-- backfill, newest first; a version's files in order. SKIP LOCKED: two
+-- claims at once never take the same one. What is in an archived course, or
+-- of an archived document, waits until it is open again, since nothing is
+-- written there meanwhile.
 WITH picked AS (
-    SELECT t.version_id
+    SELECT t.version_id, t.file_id
     FROM document_version_text t
+    JOIN document_version_file f ON f.id = t.file_id
     JOIN document d ON d.id = t.document_id
     JOIN course c ON c.id = t.course_id
     WHERE (t.status = 'pending' OR (t.status = 'working' AND t.claimed_until <= sqlc.arg(now)))
@@ -105,7 +123,7 @@ WITH picked AS (
     ORDER BY t.backfill,
              CASE WHEN NOT t.backfill THEN t.queued_at END,
              CASE WHEN t.backfill THEN t.queued_at END DESC,
-             t.version_id
+             t.version_id, f.position
     LIMIT sqlc.arg(max_rows)
     FOR UPDATE OF t SKIP LOCKED
 )
@@ -113,27 +131,29 @@ UPDATE document_version_text t
 SET status = 'working', lease_id = gen_random_uuid(), claimed_until = sqlc.arg(claimed_until),
     claimed_by_credential_id = sqlc.arg(credential_id), claimed_at = sqlc.arg(now),
     attempts = t.attempts + 1, updated_at = sqlc.arg(now)
-FROM picked, document_version v
-WHERE t.version_id = picked.version_id AND v.id = t.version_id
-RETURNING t.version_id, t.document_id, t.course_id, t.lease_id, t.claimed_until, t.attempts, t.backfill, t.queued_at,
-          v.storage_key, v.content_type, v.byte_size, v.checksum;
+FROM picked, document_version_file f
+WHERE t.version_id = picked.version_id AND t.file_id = picked.file_id AND f.id = t.file_id
+RETURNING t.version_id, t.file_id, t.document_id, t.course_id, t.lease_id, t.claimed_until, t.attempts, t.backfill, t.queued_at,
+          f.position, f.filename, f.storage_key, f.content_type, f.byte_size, f.checksum;
 
 -- name: GetTextForService :one
--- What a call of the service's is about: the text version and its course.
-SELECT version_id, document_id, course_id FROM document_version_text WHERE version_id = $1;
+-- What a call of the service's is about: the version's text versions' course.
+SELECT version_id, document_id, course_id FROM document_version_text WHERE version_id = $1 LIMIT 1;
 
 -- name: GetClaimedFile :one
--- The file of a text version the caller's claim holds.
-SELECT t.claimed_until, v.storage_key, v.content_type, v.byte_size, v.checksum
+-- The file of a text version the caller's claim holds: the one named, or
+-- whichever of the version's the claim is of.
+SELECT t.file_id, t.claimed_until, f.position, f.filename, f.storage_key, f.content_type, f.byte_size, f.checksum
 FROM document_version_text t
-JOIN document_version v ON v.id = t.version_id
-WHERE t.version_id = sqlc.arg(version_id) AND t.status = 'working' AND t.lease_id = sqlc.arg(lease_id);
+JOIN document_version_file f ON f.id = t.file_id
+WHERE t.version_id = sqlc.arg(version_id) AND t.status = 'working' AND t.lease_id = sqlc.arg(lease_id)
+  AND (sqlc.narg(file_id)::uuid IS NULL OR t.file_id = sqlc.narg(file_id)::uuid);
 
 -- name: RenewTextLease :one
 -- A claim held longer, from now; its own and nobody else's.
 UPDATE document_version_text
 SET claimed_until = sqlc.arg(claimed_until), updated_at = sqlc.arg(now)
-WHERE version_id = sqlc.arg(version_id) AND status = 'working' AND lease_id = sqlc.arg(lease_id)
+WHERE version_id = sqlc.arg(version_id) AND file_id = sqlc.arg(file_id) AND status = 'working' AND lease_id = sqlc.arg(lease_id)
 RETURNING claimed_until;
 
 -- name: ShareDocument :one
@@ -141,9 +161,14 @@ RETURNING claimed_until;
 -- versions: archiving it waits for the write, or the write sees it.
 SELECT status FROM document WHERE id = $1 FOR SHARE;
 
--- name: LockTextForService :one
--- The text version the service completes, held.
-SELECT * FROM document_version_text WHERE version_id = $1 FOR UPDATE;
+-- name: LockTextsForService :many
+-- The text versions a call of the service's may be about, held: the named
+-- file's, or, where it names none, each of the version's, the one its claim
+-- holds first.
+SELECT * FROM document_version_text
+WHERE version_id = sqlc.arg(version_id) AND (sqlc.narg(file_id)::uuid IS NULL OR file_id = sqlc.narg(file_id)::uuid)
+ORDER BY lease_id IS NOT DISTINCT FROM sqlc.arg(lease_id)::uuid DESC, file_id
+FOR UPDATE;
 
 -- name: FinishTextDone :one
 -- The service's text: done, the model's, made now.
@@ -151,14 +176,14 @@ UPDATE document_version_text
 SET status = 'done', source = 'ai', body = sqlc.arg(body), pages = sqlc.arg(pages), model = sqlc.arg(model),
     produced_at = sqlc.arg(now), reason = NULL, lease_id = NULL, claimed_until = NULL,
     revision = revision + 1, updated_at = sqlc.arg(now)
-WHERE version_id = sqlc.arg(version_id)
+WHERE version_id = sqlc.arg(version_id) AND file_id = sqlc.arg(file_id)
 RETURNING revision;
 
 -- name: FinishTextUndone :exec
 -- The service could not, or would not: failed or skipped, saying why.
 UPDATE document_version_text
 SET status = sqlc.arg(status), reason = sqlc.arg(reason), lease_id = NULL, claimed_until = NULL, updated_at = sqlc.arg(now)
-WHERE version_id = sqlc.arg(version_id);
+WHERE version_id = sqlc.arg(version_id) AND file_id = sqlc.arg(file_id);
 
 -- name: ReleaseTexts :many
 -- What a revoked credential had claimed, back in the queue for another,

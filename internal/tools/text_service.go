@@ -21,9 +21,11 @@ import (
 // The transcription service's tools (docs/schema.md §2.4, The queue). The
 // runtime's transcriber, a site service with a credential of its own
 // (service.issue_credential), claims what waits to be transcribed, across
-// the site: a claim holds a text version for it alone until its lease runs
-// out, and hands it the file, by a short-lived URL, as document.get hands
-// one to a reader. It writes the text back while its claim holds: done,
+// the site: a claim holds the text version of one file of a version for it
+// alone until its lease runs out, and hands it the file, by a short-lived
+// URL, as document.get hands one to a reader. A call about a claim names its
+// version and its lease, and the file (file_id); one that names no file
+// means the file its lease is of, or the version's one file. It writes the text back while its claim holds: done,
 // with the text, or failed or skipped, saying why; never over staff's text.
 // Nothing else is its to read or write: no course, no seat, no person, and
 // no file but those of what it has claimed.
@@ -45,11 +47,14 @@ const (
 
 type ClaimedText struct {
 	VersionID         uuid.UUID `json:"version_id"`
+	FileID            uuid.UUID `json:"file_id" jsonschema:"the file whose text is claimed: give it to document_text.file, .renew and .complete"`
+	Position          int32     `json:"position" jsonschema:"the file's place among its version's files, from 1"`
+	Filename          string    `json:"filename"`
 	DocumentID        uuid.UUID `json:"document_id"`
 	CourseID          uuid.UUID `json:"course_id"`
 	LeaseID           uuid.UUID `json:"lease_id" jsonschema:"the claim's: give it to document_text.file, .renew and .complete"`
 	LeaseExpiresAt    time.Time `json:"lease_expires_at" jsonschema:"when the claim lapses, and the version may be claimed again, unless it is renewed"`
-	Attempt           int32     `json:"attempt" jsonschema:"how many times it has been claimed since it was queued, this one included; a version claimed 5 times and not finished is failed (attempts_exhausted)"`
+	Attempt           int32     `json:"attempt" jsonschema:"how many times it has been claimed since it was queued, this one included; a file claimed 5 times and not finished is failed (attempts_exhausted)"`
 	Backfill          bool      `json:"backfill" jsonschema:"queued when text versions came in, rather than as its file was added"`
 	ContentType       string    `json:"content_type"`
 	ByteSize          int64     `json:"byte_size"`
@@ -65,7 +70,7 @@ type TextQueueIn struct {
 }
 
 type TextQueueOut struct {
-	Claimed []ClaimedText `json:"claimed" jsonschema:"what was claimed, uploads before what was queued when text versions came in; empty when nothing waits"`
+	Claimed []ClaimedText `json:"claimed" jsonschema:"what was claimed, one file's text each, uploads before what was queued when text versions came in, a version's files in order; empty when nothing waits"`
 }
 
 func leaseOf(seconds int) (time.Duration, error) {
@@ -82,14 +87,15 @@ func leaseOf(seconds int) (time.Duration, error) {
 func textQueue(d Deps) tool.Tool {
 	return tool.Define(tool.Spec[TextQueueIn, TextQueueOut]{
 		Name: "document_text.queue",
-		Description: "For the transcription service alone: claim document versions waiting to be transcribed, across the " +
-			"site: those added most lately waiting longest first, then those queued when text versions came in, the " +
-			"newest first. Each claim holds its version for you alone until lease_expires_at, and comes with a " +
-			"short-lived URL for its file; write the text back with document_text.complete before then, or hold it " +
-			"longer with document_text.renew. A claim that lapses may be claimed again, by you or another; a version " +
+		Description: "For the transcription service alone: claim files of document versions waiting to be transcribed, " +
+			"across the site, each file of a version on its own: those added most lately waiting longest first, then those " +
+			"queued when text versions came in, the newest first, a version's files in order. Each claim holds its file's " +
+			"text version for you alone until lease_expires_at, and comes with a short-lived URL for the file; write the " +
+			"text back with document_text.complete before then, or hold it longer with document_text.renew, naming its " +
+			"version_id, file_id and lease_id. A claim that lapses may be claimed again, by you or another; a file " +
 			"claimed 5 times and not finished is failed (attempts_exhausted). Nothing in an archived course, or of an " +
 			"archived document, is claimed. With wait_s, a call that finds nothing waits up to that many seconds for a " +
-			"version to be queued, and claims it as soon as it is. Recorded nowhere; the claims are the record.",
+			"file to be queued, and claims it as soon as it is. Recorded nowhere; the claims are the record.",
 		Kind: tool.Ephemeral, Gate: transcriber,
 		HTTP:    tool.Route{Method: "POST", Pattern: "/v1/services/document_text/queue"},
 		Resolve: noTarget[TextQueueIn]("document_version"),
@@ -121,23 +127,29 @@ func textQueue(d Deps) tool.Tool {
 						return 1
 					}
 					return -1
-				case a.Backfill:
-					return b.QueuedAt.Compare(a.QueuedAt)
+				case !a.QueuedAt.Equal(b.QueuedAt):
+					if a.Backfill {
+						return b.QueuedAt.Compare(a.QueuedAt)
+					}
+					return a.QueuedAt.Compare(b.QueuedAt)
+				case a.VersionID != b.VersionID:
+					return strings.Compare(a.VersionID.String(), b.VersionID.String())
 				}
-				return a.QueuedAt.Compare(b.QueuedAt)
+				return int(a.Position - b.Position)
 			})
 			out := TextQueueOut{Claimed: make([]ClaimedText, 0, len(rows))}
 			for _, r := range rows {
-				if r.LeaseID == nil || r.ClaimedUntil == nil || r.StorageKey == nil || r.ContentType == nil || r.ByteSize == nil {
-					return TextQueueOut{}, errors.New("a claimed text version has no lease, or its version no file")
+				if r.LeaseID == nil || r.ClaimedUntil == nil {
+					return TextQueueOut{}, errors.New("a claimed text version has no lease")
 				}
-				url, err := d.Blob.PresignGet(ctx, *r.StorageKey, downloadTTL)
+				url, err := d.Blob.PresignDownload(ctx, r.StorageKey, r.Filename, downloadTTL)
 				if err != nil {
 					return TextQueueOut{}, err
 				}
-				out.Claimed = append(out.Claimed, ClaimedText{VersionID: r.VersionID, DocumentID: r.DocumentID, CourseID: r.CourseID,
+				out.Claimed = append(out.Claimed, ClaimedText{VersionID: r.VersionID, FileID: r.FileID, Position: r.Position,
+					Filename: r.Filename, DocumentID: r.DocumentID, CourseID: r.CourseID,
 					LeaseID: *r.LeaseID, LeaseExpiresAt: *r.ClaimedUntil, Attempt: r.Attempts, Backfill: r.Backfill,
-					ContentType: *r.ContentType, ByteSize: *r.ByteSize, Checksum: r.Checksum,
+					ContentType: r.ContentType, ByteSize: r.ByteSize, Checksum: r.Checksum,
 					DownloadURL: url, DownloadExpiresAt: ec.Now.Add(downloadTTL)})
 			}
 			return out, nil
@@ -167,11 +179,28 @@ func serviceText(ctx context.Context, q dbq.Querier, version uuid.UUID) (tool.Ta
 }
 
 // errLeaseLost refuses a call about a claim that no longer holds: it lapsed
-// and the version was claimed again, the version was sent back to be
-// transcribed again, or the credential that made it was revoked.
+// and the file was claimed again, the file was sent back to be transcribed
+// again, or the credential that made it was revoked.
 func errLeaseLost() *apperr.Error {
-	return apperr.Conflicts("the claim no longer holds: the version was claimed again, or sent back to the queue").
+	return apperr.Conflicts("the claim no longer holds: the file was claimed again, or sent back to the queue").
 		With("reason", "lease_lost")
+}
+
+// lockClaimed holds the text version a call of the service's is about: the
+// named file's; where it names none, the one of the version's files the
+// caller's lease is of, or the version's one file. A version with several
+// files none of which the lease is of says the claim no longer holds.
+func lockClaimed(ctx context.Context, q dbq.Querier, version uuid.UUID, file *uuid.UUID, lease uuid.UUID) (dbq.DocumentVersionText, error) {
+	rows, err := q.LockTextsForService(ctx, dbq.LockTextsForServiceParams{VersionID: version, FileID: file, LeaseID: lease})
+	switch {
+	case err != nil:
+		return dbq.DocumentVersionText{}, err
+	case len(rows) == 0:
+		return dbq.DocumentVersionText{}, apperr.Missing("no such text version")
+	case len(rows) > 1 && (rows[0].LeaseID == nil || *rows[0].LeaseID != lease):
+		return dbq.DocumentVersionText{}, errLeaseLost()
+	}
+	return rows[0], nil
 }
 
 // leaseHeld says whether the caller's claim still holds the text version,
@@ -188,12 +217,16 @@ func leaseHeld(t dbq.DocumentVersionText, lease uuid.UUID) error {
 }
 
 type TextLeaseIn struct {
-	VersionID uuid.UUID `json:"version_id"`
-	LeaseID   uuid.UUID `json:"lease_id" jsonschema:"the claim's, from document_text.queue"`
+	VersionID uuid.UUID  `json:"version_id"`
+	LeaseID   uuid.UUID  `json:"lease_id" jsonschema:"the claim's, from document_text.queue"`
+	FileID    *uuid.UUID `json:"file_id,omitempty" jsonschema:"the claim's file, from document_text.queue; if omitted, the file the lease is of"`
 }
 
 type TextFileOut struct {
 	VersionID         uuid.UUID `json:"version_id"`
+	FileID            uuid.UUID `json:"file_id"`
+	Position          int32     `json:"position"`
+	Filename          string    `json:"filename"`
 	ContentType       string    `json:"content_type"`
 	ByteSize          int64     `json:"byte_size"`
 	Checksum          *string   `json:"checksum,omitempty"`
@@ -205,8 +238,8 @@ type TextFileOut struct {
 func textFile(d Deps) tool.Tool {
 	return tool.Define(tool.Spec[TextLeaseIn, TextFileOut]{
 		Name: "document_text.file",
-		Description: "For the transcription service alone: another short-lived URL for the file of a version you have " +
-			"claimed, while the claim holds. Any other version's file is not yours to read (lease_lost).",
+		Description: "For the transcription service alone: another short-lived URL for a file you have claimed, while the " +
+			"claim holds. Any other file is not yours to read (lease_lost).",
 		Kind: tool.Read, Gate: transcriber,
 		HTTP: tool.Route{Method: "GET", Pattern: "/v1/services/document_text/versions/{version_id}/file"},
 		Resolve: func(ctx context.Context, q dbq.Querier, in TextLeaseIn) (tool.Target, error) {
@@ -216,30 +249,32 @@ func textFile(d Deps) tool.Tool {
 			if d.Blob == nil {
 				return TextFileOut{}, apperr.Precondition("this installation has no file storage configured")
 			}
-			f, err := rc.Q.GetClaimedFile(ctx, dbq.GetClaimedFileParams{VersionID: in.VersionID, LeaseID: &in.LeaseID})
+			f, err := rc.Q.GetClaimedFile(ctx, dbq.GetClaimedFileParams{VersionID: in.VersionID, LeaseID: &in.LeaseID, FileID: in.FileID})
 			if errors.Is(err, pgx.ErrNoRows) {
 				return TextFileOut{}, errLeaseLost()
 			}
 			if err != nil {
 				return TextFileOut{}, err
 			}
-			if f.StorageKey == nil || f.ContentType == nil || f.ByteSize == nil || f.ClaimedUntil == nil {
-				return TextFileOut{}, errors.New("a claimed text version's version has no file")
+			if f.ClaimedUntil == nil {
+				return TextFileOut{}, errors.New("a claimed text version has no lease")
 			}
-			url, err := d.Blob.PresignGet(ctx, *f.StorageKey, downloadTTL)
+			url, err := d.Blob.PresignDownload(ctx, f.StorageKey, f.Filename, downloadTTL)
 			if err != nil {
 				return TextFileOut{}, err
 			}
-			return TextFileOut{VersionID: in.VersionID, ContentType: *f.ContentType, ByteSize: *f.ByteSize, Checksum: f.Checksum,
+			return TextFileOut{VersionID: in.VersionID, FileID: f.FileID, Position: f.Position, Filename: f.Filename,
+				ContentType: f.ContentType, ByteSize: f.ByteSize, Checksum: f.Checksum,
 				DownloadURL: url, DownloadExpiresAt: rc.Now.Add(downloadTTL), LeaseExpiresAt: *f.ClaimedUntil}, nil
 		},
 	})
 }
 
 type TextRenewIn struct {
-	VersionID uuid.UUID `json:"version_id"`
-	LeaseID   uuid.UUID `json:"lease_id" jsonschema:"the claim's, from document_text.queue"`
-	LeaseS    int       `json:"lease_s,omitempty" jsonschema:"how long the claim holds from now, 60 to 3600 seconds; 600 if omitted"`
+	VersionID uuid.UUID  `json:"version_id"`
+	LeaseID   uuid.UUID  `json:"lease_id" jsonschema:"the claim's, from document_text.queue"`
+	FileID    *uuid.UUID `json:"file_id,omitempty" jsonschema:"the claim's file, from document_text.queue; if omitted, the file the lease is of"`
+	LeaseS    int        `json:"lease_s,omitempty" jsonschema:"how long the claim holds from now, 60 to 3600 seconds; 600 if omitted"`
 }
 
 type TextRenewOut struct {
@@ -262,10 +297,7 @@ func textRenew() tool.Tool {
 			if err != nil {
 				return TextRenewOut{}, err
 			}
-			t, err := ec.Q.LockTextForService(ctx, in.VersionID)
-			if errors.Is(err, pgx.ErrNoRows) {
-				return TextRenewOut{}, apperr.Missing("no such text version")
-			}
+			t, err := lockClaimed(ctx, ec.Q, in.VersionID, in.FileID, in.LeaseID)
 			if err != nil {
 				return TextRenewOut{}, err
 			}
@@ -273,7 +305,7 @@ func textRenew() tool.Tool {
 				return TextRenewOut{}, err
 			}
 			until := ec.Now.Add(lease)
-			if _, err := ec.Q.RenewTextLease(ctx, dbq.RenewTextLeaseParams{VersionID: in.VersionID, LeaseID: &in.LeaseID,
+			if _, err := ec.Q.RenewTextLease(ctx, dbq.RenewTextLeaseParams{VersionID: in.VersionID, FileID: t.FileID, LeaseID: &in.LeaseID,
 				ClaimedUntil: &until, Now: ec.Now}); err != nil {
 				return TextRenewOut{}, err
 			}
@@ -283,17 +315,19 @@ func textRenew() tool.Tool {
 }
 
 type TextCompleteIn struct {
-	VersionID uuid.UUID `json:"version_id"`
-	LeaseID   uuid.UUID `json:"lease_id" jsonschema:"the claim's, from document_text.queue"`
-	Status    string    `json:"status" jsonschema:"done, with the text; failed, when it could not be transcribed; skipped, when it was not to be"`
-	Body      *string   `json:"body,omitempty" jsonschema:"for done: the whole text, Markdown, at most 2 MiB"`
-	Pages     *int32    `json:"pages,omitempty" jsonschema:"for done: how many pages or slides the file has, 1 to 100000"`
-	Model     *string   `json:"model,omitempty" jsonschema:"for done: the model that transcribed it, as staff are to be shown it, 1 to 200 characters"`
-	Reason    *string   `json:"reason,omitempty" jsonschema:"for failed and skipped: why, 1 to 500 characters, as staff are to be shown it"`
+	VersionID uuid.UUID  `json:"version_id"`
+	LeaseID   uuid.UUID  `json:"lease_id" jsonschema:"the claim's, from document_text.queue"`
+	FileID    *uuid.UUID `json:"file_id,omitempty" jsonschema:"the claim's file, from document_text.queue; if omitted, the file the lease is of"`
+	Status    string     `json:"status" jsonschema:"done, with the text; failed, when it could not be transcribed; skipped, when it was not to be"`
+	Body      *string    `json:"body,omitempty" jsonschema:"for done: the whole text, Markdown, at most 2 MiB"`
+	Pages     *int32     `json:"pages,omitempty" jsonschema:"for done: how many pages or slides the file has, 1 to 100000"`
+	Model     *string    `json:"model,omitempty" jsonschema:"for done: the model that transcribed it, as staff are to be shown it, 1 to 200 characters"`
+	Reason    *string    `json:"reason,omitempty" jsonschema:"for failed and skipped: why, 1 to 500 characters, as staff are to be shown it"`
 }
 
 type TextCompleteOut struct {
 	VersionID uuid.UUID `json:"version_id"`
+	FileID    uuid.UUID `json:"file_id"`
 	Status    string    `json:"status"`
 	Revision  int32     `json:"revision"`
 }
@@ -333,10 +367,10 @@ func checkCompletion(in TextCompleteIn) error {
 func textComplete() tool.Tool {
 	return tool.Define(tool.Spec[TextCompleteIn, TextCompleteOut]{
 		Name: "document_text.complete",
-		Description: "For the transcription service alone: write back what became of a version you have claimed, while the " +
+		Description: "For the transcription service alone: write back what became of a file you have claimed, while the " +
 			"claim holds: done, with its text (Markdown, at most 2 MiB), its page count and the model's name; or failed " +
 			"or skipped, with why. Refused, and nothing written, once staff have written the text (edited_by_staff), or " +
-			"once the claim no longer holds (lease_lost): it lapsed and was claimed again, or the version was sent back " +
+			"once the claim no longer holds (lease_lost): it lapsed and was claimed again, or the file was sent back " +
 			"to the queue. Done tells the version's readers the text is there. Recorded as an action, but for the text, " +
 			"which is kept only as the text version; retry it with the same idempotency key.",
 		Kind: tool.Write, Gate: transcriber, MaxRequestBytes: textRequestBytes,
@@ -370,23 +404,20 @@ func textComplete() tool.Tool {
 			if status != "active" {
 				return TextCompleteOut{}, apperr.Conflicts("the document is archived").With("reason", "document_archived")
 			}
-			t, err := ec.Q.LockTextForService(ctx, in.VersionID)
-			if errors.Is(err, pgx.ErrNoRows) {
-				return TextCompleteOut{}, apperr.Missing("no such text version")
-			}
+			t, err := lockClaimed(ctx, ec.Q, in.VersionID, in.FileID, in.LeaseID)
 			if err != nil {
 				return TextCompleteOut{}, err
 			}
 			if err := leaseHeld(t, in.LeaseID); err != nil {
 				return TextCompleteOut{}, err
 			}
-			out := TextCompleteOut{VersionID: t.VersionID, Status: in.Status, Revision: t.Revision}
+			out := TextCompleteOut{VersionID: t.VersionID, FileID: t.FileID, Status: in.Status, Revision: t.Revision}
 			if in.Status != textDone {
-				return out, ec.Q.FinishTextUndone(ctx, dbq.FinishTextUndoneParams{VersionID: t.VersionID, Status: in.Status,
-					Reason: in.Reason, Now: ec.Now})
+				return out, ec.Q.FinishTextUndone(ctx, dbq.FinishTextUndoneParams{VersionID: t.VersionID, FileID: t.FileID,
+					Status: in.Status, Reason: in.Reason, Now: ec.Now})
 			}
-			if out.Revision, err = ec.Q.FinishTextDone(ctx, dbq.FinishTextDoneParams{VersionID: t.VersionID, Body: in.Body,
-				Pages: in.Pages, Model: in.Model, Now: &ec.Now}); err != nil {
+			if out.Revision, err = ec.Q.FinishTextDone(ctx, dbq.FinishTextDoneParams{VersionID: t.VersionID, FileID: t.FileID,
+				Body: in.Body, Pages: in.Pages, Model: in.Model, Now: &ec.Now}); err != nil {
 				return TextCompleteOut{}, err
 			}
 			doc, err := loadDocument(ctx, ec.Q, t.CourseID, t.DocumentID)
@@ -394,7 +425,7 @@ func textComplete() tool.Tool {
 				return TextCompleteOut{}, err
 			}
 			source := textByAI
-			return out, emitTextEvent(ctx, ec, doc, t.VersionID, textDone, &source, out.Revision)
+			return out, emitTextEvent(ctx, ec, doc, t.VersionID, t.FileID, textDone, &source, out.Revision)
 		},
 	})
 }

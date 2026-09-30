@@ -316,6 +316,19 @@ type DocumentVersion struct {
 	PurgeReason     *string
 }
 
+type DocumentVersionFile struct {
+	ID          uuid.UUID
+	VersionID   uuid.UUID
+	DocumentID  uuid.UUID
+	Position    int32
+	Filename    string
+	StorageKey  string
+	ContentType string
+	ByteSize    int64
+	Checksum    *string
+	CreatedAt   time.Time
+}
+
 type DocumentVersionText struct {
 	VersionID             uuid.UUID
 	DocumentID            uuid.UUID
@@ -339,6 +352,7 @@ type DocumentVersionText struct {
 	EditedAt              *time.Time
 	CreatedAt             time.Time
 	UpdatedAt             time.Time
+	FileID                uuid.UUID
 }
 
 type Event struct {
