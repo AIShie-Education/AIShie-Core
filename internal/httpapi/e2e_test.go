@@ -776,7 +776,7 @@ func TestFileUploadOverHTTP(t *testing.T) {
 		t.Fatalf("download: %d %q %s", res.StatusCode, res.Header.Get("Content-Type"), got)
 	}
 	// Other people's bytes, from the API's own origin: a download, never a page.
-	if res.Header.Get("Content-Disposition") != "attachment" || res.Header.Get("X-Content-Type-Options") != "nosniff" ||
+	if res.Header.Get("Content-Disposition") != "attachment; filename=Slides.pdf" || res.Header.Get("X-Content-Type-Options") != "nosniff" ||
 		!strings.Contains(res.Header.Get("Content-Security-Policy"), "sandbox") {
 		t.Fatalf("download headers: %v", res.Header)
 	}
