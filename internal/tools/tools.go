@@ -12,6 +12,7 @@ import (
 	"github.com/AIShie-Education/AIShie-Core/internal/memory"
 	"github.com/AIShie-Education/AIShie-Core/internal/pipeline"
 	"github.com/AIShie-Education/AIShie-Core/internal/ratelimit"
+	"github.com/AIShie-Education/AIShie-Core/internal/sso"
 	"github.com/AIShie-Education/AIShie-Core/internal/tool"
 )
 
@@ -42,6 +43,11 @@ type Deps struct {
 	// by default, and every memory tool refuses), and its limits, a zero
 	// one its default.
 	Memory memory.Config
+	// SSO is single sign-on's providers: the one the server's operator
+	// sets, which the sso tools list read-only, the keys that seal the
+	// site's providers' client secrets, and the redirect URI. Nil is none:
+	// no operator's provider, and no key, so that no provider is added.
+	SSO *sso.Registry
 	// Drafts bounds how often one conversation's draft is written
 	// (conversation.draft), in this process, keyed by the conversation.
 	// Nil means DraftWritesPerSecond, in bursts of as many.
@@ -64,6 +70,9 @@ func RegisterAll(reg *tool.Registry, d Deps) {
 	if d.Uploads == nil {
 		// A random key: fine for one process, until it restarts.
 		d.Uploads, _ = blob.NewSigner("")
+	}
+	if d.SSO == nil {
+		d.SSO = sso.New(sso.Config{})
 	}
 	if d.Drafts == nil {
 		d.Drafts = ratelimit.New(60*DraftWritesPerSecond, DraftWritesPerSecond)
@@ -88,6 +97,7 @@ func RegisterAll(reg *tool.Registry, d Deps) {
 	reg.Register(memoryTools(d)...)
 	reg.Register(eventTools()...)
 	reg.Register(systemTools()...)
+	reg.Register(ssoTools(d)...)
 }
 
 var one = decimal.NewFromInt(1)

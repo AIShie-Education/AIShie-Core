@@ -1816,6 +1816,53 @@ SELECT pg_temp.fails('and a purged version is queued no more', '23514', $q$
 SELECT pg_temp.ok('a service credential is revoked as any is', $q$
     UPDATE credential SET revoked_at = now() WHERE id = '00000000-0000-0000-0000-0000000020c1' $q$);
 
+-- Identity providers the site sets up (migration 0022) -----------------------
+-- adfs, set up by admin (32); its secret sealed, as package secrets seals it
+SELECT pg_temp.ok('a provider is set up, its secret sealed', $q$
+    INSERT INTO sso_provider (id, display_name, issuer, client_id, client_secret_sealed, client_secret_hint, subject_claim,
+                              created_by_actor_id, updated_by_actor_id)
+    VALUES ('adfs', 'PolyU NetID', 'https://adfs.example.edu/adfs', 'aishie', 'v1.0123456789abcdef.' || repeat('A', 60), '…abcd',
+            'upn', '00000000-0000-0000-0000-000000000032', '00000000-0000-0000-0000-000000000032') $q$);
+SELECT pg_temp.fails('one provider to an id', '23505', $q$
+    INSERT INTO sso_provider (id, display_name, issuer, client_id, client_secret_sealed, client_secret_hint,
+                              created_by_actor_id, updated_by_actor_id)
+    VALUES ('adfs', 'Again', 'https://adfs.example.edu/adfs', 'aishie', 'v1.0123456789abcdef.' || repeat('A', 60), '…',
+            '00000000-0000-0000-0000-000000000032', '00000000-0000-0000-0000-000000000032') $q$);
+SELECT pg_temp.fails('an id is lower-case letters, digits and hyphens', '23514', $q$
+    INSERT INTO sso_provider (id, display_name, issuer, client_id, client_secret_sealed, client_secret_hint,
+                              created_by_actor_id, updated_by_actor_id)
+    VALUES ('ADFS/2', 'Two', 'https://adfs.example.edu/adfs', 'aishie', 'v1.0123456789abcdef.' || repeat('A', 60), '…',
+            '00000000-0000-0000-0000-000000000032', '00000000-0000-0000-0000-000000000032') $q$);
+SELECT pg_temp.fails('a secret is never kept in the clear', '23514', $q$
+    INSERT INTO sso_provider (id, display_name, issuer, client_id, client_secret_sealed, client_secret_hint,
+                              created_by_actor_id, updated_by_actor_id)
+    VALUES ('google', 'Google', 'https://accounts.google.com', 'aishie', 's3cret-for-the-token-endpoint', '…',
+            '00000000-0000-0000-0000-000000000032', '00000000-0000-0000-0000-000000000032') $q$);
+SELECT pg_temp.fails('nor more of it in its hint than four characters', '23514', $q$
+    UPDATE sso_provider SET client_secret_hint = 's3cret-for-the-token-endpoint' WHERE id = 'adfs' $q$);
+SELECT pg_temp.fails('a sign-in asks for openid', '23514', $q$
+    UPDATE sso_provider SET scopes = '{profile,email}' WHERE id = 'adfs' $q$);
+SELECT pg_temp.fails('an issuer is an http or https URL', '23514', $q$
+    UPDATE sso_provider SET issuer = 'adfs.example.edu' WHERE id = 'adfs' $q$);
+SELECT pg_temp.fails('a name on the button is one line', '23514', $q$
+    UPDATE sso_provider SET display_name = E'PolyU\nNetID' WHERE id = 'adfs' $q$);
+SELECT pg_temp.fails('linking by email needs the claim and the domains', '23514', $q$
+    UPDATE sso_provider SET link_by_email = true, email_claim = 'email' WHERE id = 'adfs' $q$);
+SELECT pg_temp.fails('domains are kept in lower case', '23514', $q$
+    UPDATE sso_provider SET allowed_email_domains = '{PolyU.edu.hk}' WHERE id = 'adfs' $q$);
+SELECT pg_temp.ok('linking by email within the domains', $q$
+    UPDATE sso_provider SET link_by_email = true, email_claim = 'email', allowed_email_domains = '{polyu.edu.hk}',
+                            version = version + 1
+    WHERE id = 'adfs' $q$);
+SELECT pg_temp.fails('a version counts from 1', '23514', $q$
+    UPDATE sso_provider SET version = 0 WHERE id = 'adfs' $q$);
+SELECT pg_temp.fails('an id never changes', '23514', $q$
+    UPDATE sso_provider SET id = 'adfs2' WHERE id = 'adfs' $q$);
+SELECT pg_temp.fails('who changed it is an actor', '23503', $q$
+    UPDATE sso_provider SET updated_by_actor_id = '00000000-0000-0000-0000-0000000000ff' WHERE id = 'adfs' $q$);
+SELECT pg_temp.ok('and a provider is removed', $q$
+    DELETE FROM sso_provider WHERE id = 'adfs' $q$);
+
 \o
 ROLLBACK;
 \echo 'All checks passed.'

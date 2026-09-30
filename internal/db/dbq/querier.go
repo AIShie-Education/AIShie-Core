@@ -88,6 +88,9 @@ type Querier interface {
 	// ends with it, with the oldest hour that day's count still holds.
 	CountMemoryWrites(ctx context.Context, arg CountMemoryWritesParams) (CountMemoryWritesRow, error)
 	CountRootActors(ctx context.Context) (int64, error)
+	// The live identities linked at a provider: the accounts that sign in
+	// through it, whatever their actors' status.
+	CountSSOLinks(ctx context.Context, provider *string) (int32, error)
 	CountStudentsInScope(ctx context.Context, arg CountStudentsInScopeParams) (int64, error)
 	// How many of the given member ids are current students of this course.
 	CountStudentsOfCourse(ctx context.Context, arg CountStudentsOfCourseParams) (int64, error)
@@ -111,6 +114,7 @@ type Querier interface {
 	// DeleteDraft for the conversations a removal of seats closed.
 	DeleteDrafts(ctx context.Context, conversationIds []uuid.UUID) error
 	DeleteMemory(ctx context.Context, arg DeleteMemoryParams) (int64, error)
+	DeleteSSOProvider(ctx context.Context, arg DeleteSSOProviderParams) (int64, error)
 	// The sweep: drafts nobody has written for a while, which reads leave out
 	// already. The table is a row per conversation being answered, and scanned.
 	DeleteStaleDrafts(ctx context.Context, staleBefore time.Time) (int64, error)
@@ -316,6 +320,11 @@ type Querier interface {
 	// The account an identity provider's subject is linked to, if any, and its
 	// kind, read to refuse: an agent does not sign in so.
 	GetSSOCredential(ctx context.Context, arg GetSSOCredentialParams) (GetSSOCredentialRow, error)
+	// The person an email names, as linking by a verified email reads them: only
+	// an active person whose email someone vouches for here, with no platform
+	// role, is ever linked so.
+	GetSSOLinkByEmailCandidate(ctx context.Context, email string) (GetSSOLinkByEmailCandidateRow, error)
+	GetSSOProvider(ctx context.Context, id string) (GetSSOProviderRow, error)
 	// Which seat a seat is a delegate of, if any. Whose delegate a seat is never
 	// changes, so it may be read before anything is locked.
 	GetSeatPrincipal(ctx context.Context, id uuid.UUID) (*uuid.UUID, error)
@@ -340,6 +349,8 @@ type Querier interface {
 	// Who edited it comes with their name.
 	GetTextView(ctx context.Context, versionID uuid.UUID) (GetTextViewRow, error)
 	GetVersionOfDocument(ctx context.Context, arg GetVersionOfDocumentParams) (DocumentVersion, error)
+	// Whether an actor already has a live identity at a provider.
+	HasLiveSSOLinkAt(ctx context.Context, arg HasLiveSSOLinkAtParams) (bool, error)
 	// Whether other is the department itself or beneath it.
 	InSubtree(ctx context.Context, arg InSubtreeParams) (bool, error)
 	// Zero rows means another call with the same key got there first; the caller
@@ -395,6 +406,7 @@ type Querier interface {
 	// vouched for, as there is nothing to doubt.
 	InsertRegisteredPerson(ctx context.Context, arg InsertRegisteredPersonParams) error
 	InsertRetraction(ctx context.Context, arg InsertRetractionParams) (int64, error)
+	InsertSSOProvider(ctx context.Context, arg InsertSSOProviderParams) error
 	// ---------------------------------------------------------------------------
 	// Services and their credentials
 	// ---------------------------------------------------------------------------
@@ -494,6 +506,9 @@ type Querier interface {
 	ListDepartments(ctx context.Context) ([]ListDepartmentsRow, error)
 	// The live drafts waiting to be posted for one assignment.
 	ListDraftGradeIDsForAssignment(ctx context.Context, arg ListDraftGradeIDsForAssignmentParams) ([]uuid.UUID, error)
+	// What a sign-in reads: the providers switched on, in the sign-in page's
+	// order, with what signing in through each takes, the sealed secret among it.
+	ListEnabledSSOProviders(ctx context.Context) ([]ListEnabledSSOProvidersRow, error)
 	// The feed, from a cursor. Three filters, all here rather than afterwards:
 	//   * type: what kinds of event this member's permissions let it see, worked
 	//     out by the caller from the member row — plus, always, the events of
@@ -623,6 +638,14 @@ type Querier interface {
 	// principal. Unpaged: what is left is a course's agents, and the caller's
 	// own agents, a handful; max_rows bounds them anyway.
 	ListRespondentCandidates(ctx context.Context, arg ListRespondentCandidatesParams) ([]ListRespondentCandidatesRow, error)
+	// Every identity provider the site's administrators set up, in the order the
+	// sign-in page shows them, with who made and last changed each, and how many
+	// accounts are linked at it now (live identities, whatever their actors'
+	// status). The sealed secret comes with the row, for the caller to see
+	// whether it opens; it is never shown.
+	ListSSOProviders(ctx context.Context) ([]ListSSOProvidersRow, error)
+	// Every sealed client secret, for `aishie-core secrets rewrap`.
+	ListSealedSSOSecrets(ctx context.Context) ([]ListSealedSSOSecretsRow, error)
 	// Every seat an actor holds that is not removed, with its course and the
 	// name of the preset it was copied from.
 	ListSeatsOfActor(ctx context.Context, actorID uuid.UUID) ([]ListSeatsOfActorRow, error)
@@ -803,6 +826,9 @@ type Querier interface {
 	// or the call waits for it and, reading the row again here, sees what it
 	// did.
 	LockPrincipalForAuthz(ctx context.Context, id uuid.UUID) (LockPrincipalForAuthzRow, error)
+	// A provider, held for the change a write makes to it: two writes made over
+	// the same version meet here, and the second finds the version moved on.
+	LockSSOProvider(ctx context.Context, id string) (LockSSOProviderRow, error)
 	// Credentials for one service are issued one at a time, and counted so.
 	LockServiceActor(ctx context.Context, id uuid.UUID) error
 	// Serialises attaching one upload. Held until the transaction ends.
@@ -851,6 +877,8 @@ type Querier interface {
 	MyAppointments(ctx context.Context, actorID uuid.UUID) ([]MyAppointmentsRow, error)
 	NewestComponentDraftAt(ctx context.Context, arg NewestComponentDraftAtParams) (time.Time, error)
 	NewestSubmissionDraftAt(ctx context.Context, submissionID *uuid.UUID) (time.Time, error)
+	// Where a provider added without a position goes: after every other.
+	NextSSOPosition(ctx context.Context) (int32, error)
 	// Tells every Core listening on the channel (package wake) what this
 	// transaction wrote, once it commits: PostgreSQL sends a notification only
 	// then, and never for a transaction, or a savepoint, rolled back. One per row
@@ -924,9 +952,22 @@ type Querier interface {
 	RevokeInvites(ctx context.Context, arg RevokeInvitesParams) error
 	RevokeJoinLink(ctx context.Context, arg RevokeJoinLinkParams) (int64, error)
 	RevokePasswordCredentials(ctx context.Context, arg RevokePasswordCredentialsParams) error
+	// Every live identity linked at a provider that is going. Revoked, not
+	// deleted: an identity once linked to an account is never linked to another
+	// (unique (provider, subject)), and linking it again to the same one revives
+	// it.
+	RevokeSSOLinks(ctx context.Context, arg RevokeSSOLinksParams) (int64, error)
 	RevokeServiceCredential(ctx context.Context, arg RevokeServiceCredentialParams) (int64, error)
 	// Signs a person out everywhere: every browser session they have.
 	RevokeSessions(ctx context.Context, arg RevokeSessionsParams) (int64, error)
+	// A secret sealed again under the current key, written only over what was
+	// read: a change made meanwhile is left as it is. The secret is the same, so
+	// the version does not move.
+	RewrapSSOSecret(ctx context.Context, arg RewrapSSOSecretParams) (int64, error)
+	// Whether an identity has ever been linked at a provider, to anyone, revoked
+	// or not.
+	SSOIdentityKnown(ctx context.Context, arg SSOIdentityKnownParams) (bool, error)
+	SSOProviderExists(ctx context.Context, id string) (bool, error)
 	// Whether two actors are one party, for four eyes: the same actor, one the
 	// other's owner, or two agents of one owner. An agent acts only as its
 	// owner's delegate, so neither of them checks the other's work, and nor does
@@ -966,6 +1007,7 @@ type Querier interface {
 	SetMemberScopeKinds(ctx context.Context, arg SetMemberScopeKindsParams) error
 	SetMemberStatus(ctx context.Context, arg SetMemberStatusParams) (int64, error)
 	SetPublishedVersion(ctx context.Context, arg SetPublishedVersionParams) error
+	SetSSOProviderEnabled(ctx context.Context, arg SetSSOProviderEnabledParams) (int32, error)
 	// The credential an agent calls with declares that it takes conversations
 	// in the site, in place of any that did before; null, that it takes none.
 	// The key holds a credential to the agent's own (actor_site_chat_credential_fk).
@@ -1059,6 +1101,9 @@ type Querier interface {
 	// Built-ins (dept_id null) are policy shipped with the system; only a
 	// department's own presets are edited here.
 	UpdatePreset(ctx context.Context, arg UpdatePresetParams) (int64, error)
+	// Writes every field over the version its writer read, and moves the version
+	// on; no row comes back when the version moved on first.
+	UpdateSSOProvider(ctx context.Context, arg UpdateSSOProviderParams) (int32, error)
 	UpdateSubmissionDraft(ctx context.Context, arg UpdateSubmissionDraftParams) (int64, error)
 	// Is this version the one some submission within the member's scope was
 	// submitted under? Then that member may read it even after the instructions

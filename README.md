@@ -75,9 +75,11 @@ revoked; a student with no email registers through another with her student
 number as her login ID and signs in with it, is given a temporary password by
 the instructor when she forgets hers, and sets her own before anything else,
 and the instructor cannot reset a TA's; Core vouches for the instructor to an agent runtime, and the
-key it publishes checks the assertion; last, the sign-in page is told whether
+key it publishes checks the assertion; the sign-in page is told whether
 to offer single sign-on, with it off and then, against a stand-in provider,
-on.
+on; last, root sets up a provider of the site's against a stand-in provider
+that signs, tests it, switches it on, and a person linked at it signs in
+through it, and nothing says its secret.
 
 - MCP: agents connect at `/mcp` (stateless streamable HTTP, bearer token) and
   get the same catalogue as REST, tool for tool, through the same pipeline.
@@ -88,8 +90,10 @@ on.
   point at removed. Every instance may run them; Postgres advisory locks see
   that one does.
 
-- single sign-on over OpenID Connect (written against ADFS), which signs in
-  people who are already registered and creates nobody;
+- single sign-on over OpenID Connect (written against ADFS), through the
+  operator's provider and those the site's administrators set up from the
+  front end, their client secrets sealed, which signs in people who are
+  already registered and creates nobody;
 - join links: a course's link, shown in class as a QR code and working for ten
   minutes, seats whoever opens it as a student, signed in or registering
   through it, which is the one way a person registers themselves; made by
@@ -288,41 +292,79 @@ sign in with (`no_sign_in_name`), a student out of the caller's reach
 
 ### Single sign-on
 
-Set `OIDC_ISSUER`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET` and `SIGNING_KEY`,
-and register `<PUBLIC_URL>/v1/auth/sso/callback` with the provider. The
-defaults are for ADFS: accounts are known by their `upn` claim
-(`OIDC_SUBJECT_CLAIM`) and the provider is recorded as `polyu-adfs`
-(`OIDC_PROVIDER_NAME`). A browser signs in by visiting
-`/v1/auth/sso/start?return_to=/where/to/go/afterwards` and comes back with the
+A person signs in through an OpenID Connect identity provider. There are two
+kinds (docs/schema.md §2.1, Single sign-on):
+
+- the operator's: set `OIDC_ISSUER`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`
+  and `SIGNING_KEY`. The defaults are for ADFS: accounts are known by their
+  `upn` claim (`OIDC_SUBJECT_CLAIM`) and the provider is recorded as
+  `polyu-adfs` (`OIDC_PROVIDER_NAME`). It is discovered when the server
+  starts, and administrators see it read-only.
+- the site's: root and the platform's administrators set them up from the
+  front end, with the `sso.*` tools, kept in the database with their client
+  secrets sealed under `SECRETS_KEY` (32 random bytes in base64: `openssl
+  rand -base64 32`). Without `SECRETS_KEY`, none is added
+  (`secrets_key_missing`) and the operator's still works. A change is in
+  force at the next sign-in, on every instance, with no restart.
+
+Register `<PUBLIC_URL>/v1/auth/sso/callback` with every provider: it is the
+same for all of them, and `sso.list` gives it. A browser signs in by visiting
+`/v1/auth/sso/start/{provider}?return_to=/where/to/go/afterwards` (or
+`/v1/auth/sso/start?provider={provider}&return_to=…`; with one provider
+offered, `/v1/auth/sso/start` alone goes through it) and comes back with the
 same session cookie a password sign-in gives.
 
-The front end's sign-in page asks `GET /v1/auth/methods` whether to offer
-single sign-on, so one front end serves an installation with it and one
-without. Anyone may ask, with no credential:
+```
+GET  /v1/sso/providers                          sso.list: the operator's first, then the site's; never a secret
+GET  /v1/sso/providers/{provider_id}            sso.get
+POST /v1/sso/providers                          sso.create {id, display_name, issuer, client_id, client_secret, ...}
+POST /v1/sso/providers/{provider_id}            sso.update, over If-Match: "<version>" (or version in the body)
+POST /v1/sso/providers/{provider_id}/enabled    sso.set_enabled {enabled}
+POST /v1/sso/providers/{provider_id}/delete     sso.delete {force?}: refused while accounts are linked, unless forced
+GET  /v1/sso/test?issuer=… | ?provider_id=…     sso.test: the discovery document and keys, checked; signs nobody in
+```
+
+The front end's sign-in page asks `GET /v1/auth/methods` which providers to
+offer, so one front end serves every installation. Anyone may ask, with no
+credential:
 
 ```
-{"password": true, "password_accepts": ["login_id", "email"], "sso": null}
+{"password": true, "password_accepts": ["login_id", "email"], "sso": null, "sso_providers": []}
 {"password": true, "password_accepts": ["login_id", "email"],
- "sso": {"label": "PolyU NetID", "start": "/v1/auth/sso/start"}}
+ "sso": {"label": "PolyU NetID", "start": "/v1/auth/sso/start"},
+ "sso_providers": [{"id": "polyu-adfs", "label": "PolyU NetID", "start": "/v1/auth/sso/start/polyu-adfs"}]}
 ```
 
-`sso` is null unless `OIDC_ISSUER` is set. `label` is `OIDC_DISPLAY_NAME`,
-the provider's name as the sign-in button shows it, or null when that is not
-set, and the front end then uses words of its own; it is at most 64
-characters, all printable, and the server refuses to start on anything else.
-`start` is the path on this server to send the browser to, with `return_to`
-added. `password` is always true, since password sign-in cannot be turned
+`sso_providers` are the providers a sign-in may go through now: the
+operator's first, then the site's that are switched on, by position. Each
+has its `id`, its `label` — the operator's `OIDC_DISPLAY_NAME`, or null when
+that is not set, and the front end then uses words of its own; a site's
+provider's display name — and `start`, the path on this server to send the
+browser to, with `return_to` added. `sso` is the first of them, for a front
+end from before there were several: null when there is none, and its `start`
+`/v1/auth/sso/start` when it is the only one. `OIDC_DISPLAY_NAME` is at most
+64 characters, all printable, and the server refuses to start on anything
+else. `password` is always true, since password sign-in cannot be turned
 off. `password_accepts` says what the password sign-in's name field takes, in
 the order its label should name them: a login ID (the student or staff
-number) and an email. Nothing else about the provider is said. A browser or a cache may keep
-the answer for a minute (`Cache-Control: public, max-age=60`), so a change of
-settings reaches the sign-in page within a minute of the restart.
+number) and an email. Nothing else about a provider is said. A browser or a
+cache may keep the answer for a minute (`Cache-Control: public, max-age=60`),
+so a provider switched on or off reaches the sign-in page within a minute.
 
 Signing in creates nobody. An administrator registers the person
 (`actor.register`) and links their identity (`actor.link_sso`, with the
-provider's name and the person's UPN) first; until then the provider vouching
-for someone makes them nobody here. An identity that has opened one account is
-never reassigned to another.
+provider's id and the person's subject there, such as their UPN) first; until
+then the provider vouching for someone makes them nobody here. An identity
+that has opened one account is never reassigned to another. A site's provider
+may instead link by email (`link_by_email`, off by default): someone it
+vouches for, whose identity was never linked, is linked at sign-in to the
+active person whose email here is the one the provider vouches for
+(`email_verified`), within the provider's `allowed_email_domains`, and never
+to an account with a platform role.
+
+Rotating `SECRETS_KEY`: put the new key in `SECRETS_KEY` and the old one in
+`SECRETS_KEY_PREVIOUS`, restart, run `aishie-core secrets rewrap`, and then
+remove the old one.
 
 ### Join links
 

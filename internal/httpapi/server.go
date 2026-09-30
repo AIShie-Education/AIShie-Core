@@ -44,6 +44,7 @@ import (
 	"github.com/AIShie-Education/AIShie-Core/internal/pipeline"
 	"github.com/AIShie-Education/AIShie-Core/internal/ratelimit"
 	"github.com/AIShie-Education/AIShie-Core/internal/signing"
+	"github.com/AIShie-Education/AIShie-Core/internal/sso"
 	"github.com/AIShie-Education/AIShie-Core/internal/tool"
 )
 
@@ -84,13 +85,12 @@ type Deps struct {
 	Blob           blob.Store
 	MaxUploadBytes int64
 
-	// SSO is the identity provider, when single sign-on is configured; Signer
-	// signs the short-lived state cookie a sign-in carries. SSOLabel is the
-	// provider's name as the front end's sign-in button shows it
-	// (OIDC_DISPLAY_NAME); empty leaves the button to the front end's words.
-	SSO      auth.IdentityProvider
-	Signer   *signing.Signer
-	SSOLabel string
+	// SSO is single sign-on's providers: the one the server's operator sets
+	// and those the site's administrators set up (package sso). Nil means
+	// no single sign-on at all, and no route for it. Signer signs the
+	// short-lived state cookie a sign-in carries.
+	SSO    *sso.Registry
+	Signer *signing.Signer
 
 	// Assertions vouch for the person signed in here to a service that
 	// hosts agents, and publish the key that checks them. Nil means this
@@ -153,6 +153,7 @@ func NewHandler(d Deps) http.Handler {
 				panic("httpapi: single sign-on needs a Signer for its state cookie")
 			}
 			mux.HandleFunc("GET "+ssoStartPath, s.ssoStart)
+			mux.HandleFunc("GET "+ssoStartPath+"/{provider}", s.ssoStart)
 			mux.HandleFunc("GET "+ssoReturnPath, s.ssoCallback)
 		}
 		mux.Handle("POST /v1/auth/logout", s.authenticated(s.logout))
@@ -647,7 +648,7 @@ func (s *server) cors(next http.Handler) http.Handler {
 			h.Add("Vary", "Origin")
 			if r.Method == http.MethodOptions && r.Header.Get("Access-Control-Request-Method") != "" {
 				h.Set("Access-Control-Allow-Methods", "GET, POST, PUT, OPTIONS")
-				h.Set("Access-Control-Allow-Headers", "Authorization, Content-Type, "+HeaderIdempotencyKey)
+				h.Set("Access-Control-Allow-Headers", "Authorization, Content-Type, "+HeaderIdempotencyKey+", "+HeaderIfMatch)
 				h.Set("Access-Control-Max-Age", "600")
 				w.WriteHeader(http.StatusNoContent)
 				return

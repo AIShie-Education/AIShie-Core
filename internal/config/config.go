@@ -18,6 +18,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/AIShie-Education/AIShie-Core/internal/memory"
+	"github.com/AIShie-Education/AIShie-Core/internal/secrets"
 	"github.com/AIShie-Education/AIShie-Core/internal/wake"
 )
 
@@ -93,8 +94,16 @@ type Config struct {
 	AttachmentMaxBytes, AttachmentMaxConversationBytes int64
 	AttachmentMaxPerMessage                            int
 
-	// OIDC is single sign-on. It is off unless OIDC_ISSUER is set.
+	// OIDC is the identity provider the server's operator sets: single
+	// sign-on through it is off unless OIDC_ISSUER is set. Administrators
+	// add others from the front end (sso.create), kept in the database.
 	OIDC OIDC
+	// SecretsKey seals, and SecretsKeysPrevious open as well, the secrets
+	// Core keeps and must read back: an identity provider's client secret
+	// (SECRETS_KEY, SECRETS_KEY_PREVIOUS, 32 bytes each in base64; package
+	// secrets). Without it, no provider is added from the front end.
+	SecretsKey          []byte
+	SecretsKeysPrevious [][]byte
 	// JoinLinkRegistration lets someone with no account register through a
 	// course's join link (JOIN_LINK_REGISTRATION, on unless off): the one
 	// way a person registers on their own, a stopgap until single sign-on
@@ -305,6 +314,9 @@ func FromEnv() (Config, error) {
 	if err := c.readAssertions(); err != nil {
 		return Config{}, err
 	}
+	if err := c.readSecrets(); err != nil {
+		return Config{}, err
+	}
 	switch c.CookieSameSite {
 	case "lax":
 	case "none":
@@ -376,6 +388,38 @@ func (c *Config) readMemory() error {
 		}
 	}
 	c.Memory = c.Memory.WithDefaults()
+	return nil
+}
+
+// readSecrets reads SECRETS_KEY and SECRETS_KEY_PREVIOUS. Each key is 32
+// bytes in base64. An old key is of no use without the one that took its
+// place, and the key is refused without SIGNING_KEY: what it keeps is
+// identity providers' secrets, and a sign-in through one must verify on
+// every instance and after a restart, as the operator's provider's does.
+func (c *Config) readSecrets() error {
+	if v := os.Getenv("SECRETS_KEY"); v != "" {
+		key, err := secrets.ParseKey(v)
+		if err != nil {
+			return fmt.Errorf("SECRETS_KEY %w", err)
+		}
+		c.SecretsKey = key
+	}
+	for i, v := range strings.Split(os.Getenv("SECRETS_KEY_PREVIOUS"), ",") {
+		if v = strings.TrimSpace(v); v == "" {
+			continue
+		}
+		key, err := secrets.ParseKey(v)
+		if err != nil {
+			return fmt.Errorf("SECRETS_KEY_PREVIOUS: the key at position %d %w", i+1, err)
+		}
+		c.SecretsKeysPrevious = append(c.SecretsKeysPrevious, key)
+	}
+	switch {
+	case len(c.SecretsKeysPrevious) > 0 && c.SecretsKey == nil:
+		return errors.New("SECRETS_KEY_PREVIOUS needs SECRETS_KEY: the old keys open what they sealed, and SECRETS_KEY seals from now on")
+	case c.SecretsKey != nil && c.SigningKey == "":
+		return errors.New("SECRETS_KEY needs SIGNING_KEY: a sign-in through an identity provider it keeps must verify on every instance and after a restart")
+	}
 	return nil
 }
 

@@ -30,7 +30,9 @@ import (
 	"github.com/AIShie-Education/AIShie-Core/internal/mcpapi"
 	"github.com/AIShie-Education/AIShie-Core/internal/pipeline"
 	"github.com/AIShie-Education/AIShie-Core/internal/ratelimit"
+	"github.com/AIShie-Education/AIShie-Core/internal/secrets"
 	"github.com/AIShie-Education/AIShie-Core/internal/signing"
+	"github.com/AIShie-Education/AIShie-Core/internal/sso"
 	"github.com/AIShie-Education/AIShie-Core/internal/tool"
 	"github.com/AIShie-Education/AIShie-Core/internal/tools"
 	"github.com/AIShie-Education/AIShie-Core/internal/version"
@@ -53,6 +55,8 @@ Usage:
                                      standard input, to sign in with; prints no token
   aishie-core token issue --actor ID|EMAIL --label L [--days N]
                                      issue an API token for an agent; a person holds none
+  aishie-core secrets rewrap         seal again, under SECRETS_KEY, every secret an older key
+                                     (SECRETS_KEY_PREVIOUS) sealed: the last step of a rotation
   aishie-core version                print build information
 
 Environment:
@@ -93,7 +97,10 @@ Environment:
   S3_BUCKET_LOOKUP  auto (default), path or dns; how a request names the bucket: path after the endpoint
                     (endpoint/bucket), dns in the host name (bucket.endpoint, virtual-hosted style, for a
                     service that takes nothing else); auto is dns for AWS, Google and Aliyun, path otherwise
-  OIDC_ISSUER       turns single sign-on on; for ADFS, https://<host>/adfs
+  OIDC_ISSUER       the operator's identity provider, for single sign-on; for ADFS,
+                    https://<host>/adfs. Administrators add others from the front end
+                    (sso.create), which need SECRETS_KEY; this one is read-only to them,
+                    and wins over one of theirs with its name
   OIDC_CLIENT_ID, OIDC_CLIENT_SECRET
   OIDC_PROVIDER_NAME   default polyu-adfs; what actor.link_sso calls the provider
   OIDC_SUBJECT_CLAIM   default upn; the claim an account is known by
@@ -101,8 +108,15 @@ Environment:
   OIDC_DISPLAY_NAME    the provider's name on the front end's sign-in button, such as
                        "PolyU NetID", at most 64 printable characters; unset, the front end
                        uses words of its own. GET /v1/auth/methods tells the front end this,
-                       and whether single sign-on is on.
-                       Register <PUBLIC_URL>/v1/auth/sso/callback with the provider.
+                       and which providers a person may sign in through.
+                       Register <PUBLIC_URL>/v1/auth/sso/callback with every provider.
+  SECRETS_KEY          base64 of 32 random bytes (openssl rand -base64 32): seals the client
+                       secrets of the identity providers administrators add; unset, none is
+                       added. Needs SIGNING_KEY; the same on every instance; never lost
+                       (what it sealed opens with nothing else)
+  SECRETS_KEY_PREVIOUS older keys, comma separated, which open what they sealed and seal
+                       nothing: set the new key in SECRETS_KEY and the old one here, run
+                       aishie-core secrets rewrap, then remove the old one
   JOIN_LINK_REGISTRATION  on (default) or off; whether someone with no account may register
                        through a course's join link. Off, people sign in (by single sign-on,
                        say) and then join; GET /v1/join/{token} says registration is false
@@ -142,6 +156,8 @@ func run(args []string) error {
 		return bootstrap(cfg, args[1:], os.Stdin, os.Stderr)
 	case "token":
 		return token(cfg, args[1:], os.Stdout, os.Stderr)
+	case "secrets":
+		return secretsCmd(cfg, args[1:], os.Stdout)
 	case "version":
 		fmt.Println(version.String())
 		return nil
@@ -205,7 +221,15 @@ func serve(cfg config.Config) error {
 
 	reg := tool.NewRegistry()
 	pl := pipeline.New(pool, reg, pipeline.Config{ProposalTTL: cfg.ProposalTTL, Secrets: signatures, Wake: hub})
-	tools.RegisterAll(reg, tools.Deps{Pipeline: pl, Blob: store, Uploads: signer, MaxUploadBytes: cfg.MaxUploadBytes,
+	// Single sign-on's providers: the operator's is discovered now, and if
+	// it cannot be reached the server does not start — better that than a
+	// sign-in page that fails for everyone with nothing in the log to say
+	// why. The site's are read at each sign-in.
+	providers, err := ssoProviders(ctx, pool, cfg, log)
+	if err != nil {
+		return err
+	}
+	tools.RegisterAll(reg, tools.Deps{Pipeline: pl, Blob: store, Uploads: signer, MaxUploadBytes: cfg.MaxUploadBytes, SSO: providers,
 		Attachments: tools.AttachmentLimits{MaxBytes: cfg.AttachmentMaxBytes, PerMessage: cfg.AttachmentMaxPerMessage,
 			ConversationBytes: cfg.AttachmentMaxConversationBytes},
 		DisableAgentSelfService: !cfg.AgentSelfService, MaxAgentsPerOwner: cfg.AgentMaxPerOwner, Memory: cfg.Memory})
@@ -226,20 +250,6 @@ func serve(cfg config.Config) error {
 
 	authn := auth.NewAuthenticator(pool, cfg.SessionTTL)
 	calls := ratelimit.New(cfg.CallsPerMinute, cfg.CallsBurst)
-	// Single sign-on is discovered at start-up. If the provider cannot be
-	// reached the server does not start: better that than a sign-in page that
-	// fails for everyone with nothing in the log to say why.
-	var sso auth.IdentityProvider
-	if cfg.OIDC.Enabled() {
-		discover, cancel := context.WithTimeout(ctx, 20*time.Second)
-		sso, err = auth.NewOIDC(discover, auth.OIDCConfig{Name: cfg.OIDC.ProviderName, Issuer: cfg.OIDC.Issuer,
-			ClientID: cfg.OIDC.ClientID, ClientSecret: cfg.OIDC.ClientSecret, SubjectClaim: cfg.OIDC.SubjectClaim,
-			Scopes: cfg.OIDC.Scopes, RedirectURL: strings.TrimRight(cfg.PublicURL, "/") + httpapi.SSOCallbackPath})
-		cancel()
-		if err != nil {
-			return err
-		}
-	}
 	asserter, err := newAsserter(pool, cfg)
 	if err != nil {
 		return err
@@ -254,7 +264,7 @@ func serve(cfg config.Config) error {
 			TrustedOrigins: cfg.TrustedOrigins, TrustedProxies: cfg.TrustedProxies,
 			InsecureCookies: cfg.InsecureCookies, CookieSameSite: sameSite(cfg.CookieSameSite),
 			Blob: store, MaxUploadBytes: cfg.MaxUploadBytes,
-			SSO: sso, Signer: signatures, SSOLabel: cfg.OIDC.DisplayName, Assertions: asserter,
+			SSO: providers, Signer: signatures, Assertions: asserter,
 		}),
 		// Headers within ten seconds, an idle keep-alive for two minutes; the
 		// body and the response are bounded per request by the handler.
@@ -295,6 +305,49 @@ func serve(cfg config.Config) error {
 		}
 	}
 	return nil
+}
+
+// ssoProviders is single sign-on's providers: the one the operator sets in
+// the environment (OIDC_ISSUER), discovered now, and those the site's
+// administrators set up, read from the database at each sign-in, their
+// client secrets opened with SECRETS_KEY and SECRETS_KEY_PREVIOUS.
+func ssoProviders(ctx context.Context, pool *pgxpool.Pool, cfg config.Config, log *slog.Logger) (*sso.Registry, error) {
+	keys, err := keyring(cfg)
+	if err != nil {
+		return nil, err
+	}
+	client := &http.Client{Timeout: sso.DefaultTimeout}
+	var op *sso.Operator
+	if cfg.OIDC.Enabled() {
+		discover, cancel := context.WithTimeout(ctx, 20*time.Second)
+		idp, err := auth.NewOIDC(discover, auth.OIDCConfig{Name: cfg.OIDC.ProviderName, Issuer: cfg.OIDC.Issuer,
+			ClientID: cfg.OIDC.ClientID, ClientSecret: cfg.OIDC.ClientSecret, SubjectClaim: cfg.OIDC.SubjectClaim,
+			Scopes: cfg.OIDC.Scopes, RedirectURL: strings.TrimRight(cfg.PublicURL, "/") + httpapi.SSOCallbackPath, HTTPClient: client})
+		cancel()
+		if err != nil {
+			return nil, err
+		}
+		op = &sso.Operator{ID: cfg.OIDC.ProviderName, DisplayName: cfg.OIDC.DisplayName, Issuer: cfg.OIDC.Issuer,
+			ClientID: cfg.OIDC.ClientID, SecretHint: secrets.Hint(cfg.OIDC.ClientSecret), Scopes: cfg.OIDC.Scopes,
+			SubjectClaim: cfg.OIDC.SubjectClaim, IdP: idp}
+	}
+	if keys != nil {
+		// The key's id is public, and says which key sealed what.
+		log.Info("secrets key", "key_id", keys.KeyID(), "previous", len(cfg.SecretsKeysPrevious))
+	}
+	return sso.New(sso.Config{Pool: pool, Operator: op, Keys: keys, PublicURL: cfg.PublicURL, Client: client, Log: log}), nil
+}
+
+// keyring is SECRETS_KEY with SECRETS_KEY_PREVIOUS, or nil without them.
+func keyring(cfg config.Config) (*secrets.Keyring, error) {
+	if cfg.SecretsKey == nil {
+		return nil, nil
+	}
+	keys, err := secrets.NewKeyring(cfg.SecretsKey, cfg.SecretsKeysPrevious...)
+	if err != nil {
+		return nil, fmt.Errorf("SECRETS_KEY: %w", err)
+	}
+	return keys, nil
 }
 
 // newAsserter makes what vouches for a signed-in person to a service that
@@ -487,6 +540,70 @@ func bootstrap(cfg config.Config, args []string, stdin io.Reader, stderr io.Writ
 	_, err = fmt.Fprintf(stderr, "root actor   %s\nsystem actor %s\n\nSign in at your site with %s and that password.\n"+
 		"No API token is made: people sign in, and API tokens are for agents.\n", res.RootID, res.SystemID, signIn)
 	return err
+}
+
+// secretsCmd is `secrets rewrap`: every secret an older key sealed
+// (SECRETS_KEY_PREVIOUS) is sealed again under SECRETS_KEY, as it was bound,
+// written only over what was read, so that the older key can then go. It
+// says how many were sealed again, how many were under SECRETS_KEY already,
+// and which open with no key this server holds, and fails if any does not.
+// It prints no secret. Like `token issue` it is an operator's act outside
+// the tool layer and writes no action row: nothing a secret says changes.
+func secretsCmd(cfg config.Config, args []string, stdout io.Writer) error {
+	if len(args) != 1 || args[0] != "rewrap" {
+		return errors.New("secrets: want `secrets rewrap`")
+	}
+	keys, err := keyring(cfg)
+	if err != nil {
+		return err
+	}
+	if keys == nil {
+		return errors.New("secrets rewrap: SECRETS_KEY is not set; it is the key everything is sealed again under")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	pool, err := db.Open(ctx, cfg.DatabaseURL)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+	q := dbq.New(pool)
+	rows, err := q.ListSealedSSOSecrets(ctx)
+	if err != nil {
+		return err
+	}
+	var rewrapped, current int
+	var unopened []string
+	for _, r := range rows {
+		if keys.Current(r.ClientSecretSealed) {
+			current++
+			continue
+		}
+		sealed, err := keys.Rewrap(sso.SecretBinding(r.ID), r.ClientSecretSealed)
+		if err != nil {
+			unopened = append(unopened, r.ID)
+			continue
+		}
+		n, err := q.RewrapSSOSecret(ctx, dbq.RewrapSSOSecretParams{ID: r.ID, Sealed: sealed, Was: r.ClientSecretSealed})
+		if err != nil {
+			return err
+		}
+		if n == 1 {
+			rewrapped++
+		} else {
+			current++ // changed meanwhile, by a write that sealed it under SECRETS_KEY
+		}
+	}
+	if _, err := fmt.Fprintf(stdout, "identity providers' client secrets under key %s: %d sealed again, %d already\n",
+		keys.KeyID(), rewrapped, current); err != nil {
+		return err
+	}
+	if len(unopened) > 0 {
+		return fmt.Errorf("secrets rewrap: %d do not open with SECRETS_KEY or SECRETS_KEY_PREVIOUS: the client secrets of %s; "+
+			"keep the key that sealed them in SECRETS_KEY_PREVIOUS, or give each provider its secret again (sso.update)",
+			len(unopened), strings.Join(unopened, ", "))
+	}
+	return nil
 }
 
 // token issues an API token for an agent from the command line: a newly

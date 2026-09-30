@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"strings"
 
 	"github.com/coreos/go-oidc/v3/oidc"
 	"golang.org/x/oauth2"
@@ -26,6 +28,13 @@ type OIDCConfig struct {
 	// UPN is what an administrator can actually type when linking an account.
 	SubjectClaim string
 	Scopes       []string
+	// EmailClaim, when set, names the claim holding the person's email,
+	// which Exchange reads into Identity.Email when the provider vouches for
+	// it (email_verified). Empty, no email is read.
+	EmailClaim string
+	// HTTPClient is what discovery, the keys and the code's exchange are
+	// fetched with; nil is http.DefaultClient.
+	HTTPClient *http.Client
 }
 
 type oidcProvider struct {
@@ -45,6 +54,9 @@ func NewOIDC(ctx context.Context, cfg OIDCConfig) (IdentityProvider, error) {
 	if len(cfg.Scopes) == 0 {
 		cfg.Scopes = []string{oidc.ScopeOpenID, "profile", "email"}
 	}
+	if cfg.HTTPClient != nil {
+		ctx = oidc.ClientContext(ctx, cfg.HTTPClient)
+	}
 	provider, err := oidc.NewProvider(ctx, cfg.Issuer)
 	if err != nil {
 		return nil, fmt.Errorf("oidc discovery at %s: %w", cfg.Issuer, err)
@@ -63,6 +75,9 @@ func (p *oidcProvider) AuthCodeURL(state, nonce string) string {
 }
 
 func (p *oidcProvider) Exchange(ctx context.Context, code, nonce string) (Identity, error) {
+	if p.cfg.HTTPClient != nil {
+		ctx = oidc.ClientContext(ctx, p.cfg.HTTPClient)
+	}
 	token, err := p.oauth.Exchange(ctx, code)
 	if err != nil {
 		return Identity{}, fmt.Errorf("oidc: code exchange: %w", err)
@@ -90,5 +105,28 @@ func (p *oidcProvider) Exchange(ctx context.Context, code, nonce string) (Identi
 	if subject == "" {
 		return Identity{}, fmt.Errorf("oidc: the id_token has no %q claim", p.cfg.SubjectClaim)
 	}
-	return Identity{Provider: p.cfg.Name, Subject: subject}, nil
+	id := Identity{Provider: p.cfg.Name, Subject: subject}
+	if p.cfg.EmailClaim != "" {
+		id.Email = verifiedEmail(claims, p.cfg.EmailClaim)
+	}
+	return id, nil
+}
+
+// verifiedEmail is the email in claim, lower-cased, when the provider
+// vouches for it: email_verified is true, as a boolean or, as some providers
+// write it, a string. An email it does not vouch for is none.
+func verifiedEmail(claims map[string]any, claim string) string {
+	email, _ := claims[claim].(string)
+	email = strings.ToLower(strings.TrimSpace(email))
+	switch v := claims["email_verified"].(type) {
+	case bool:
+		if v {
+			return email
+		}
+	case string:
+		if v == "true" {
+			return email
+		}
+	}
+	return ""
 }

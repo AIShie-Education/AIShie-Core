@@ -197,6 +197,14 @@ func TestADepartmentAdministratorManagesNoAccountAndNothingPlatformWide(t *testi
 		"preset.create":           merge(m{"dept_id": w.F, "name": "lab-tutor"}, body),
 		"preset.update":           merge(m{"preset_id": preset}, body),
 		"department.create":       {"name": "Law"},
+		"sso.list":                {},
+		"sso.get":                 {"provider_id": "polyu-adfs"},
+		"sso.test":                {"issuer": "https://adfs.example.edu/adfs"},
+		"sso.create": {"id": "hers", "display_name": "Hers", "issuer": "https://idp.example.edu", "client_id": "c",
+			"client_secret": "s"},
+		"sso.update":      {"provider_id": "polyu-adfs", "version": 1, "display_name": "Hers"},
+		"sso.set_enabled": {"provider_id": "polyu-adfs", "enabled": false},
+		"sso.delete":      {"provider_id": "polyu-adfs", "force": true},
 	} {
 		t.Run(name, func(t *testing.T) {
 			w := tree{w.DeptTree, t}

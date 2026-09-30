@@ -53,7 +53,9 @@ The scripts in [`deploy/`](../deploy) do the work:
    ```
 
    It installs Docker, PostgreSQL and Caddy. It creates the database, and the
-   env file with a generated database password and `SIGNING_KEY`. It creates
+   env file with a generated database password, `SIGNING_KEY` and
+   `SECRETS_KEY` (an env file from before `SECRETS_KEY` is given one, and
+   nothing else in it changes). It creates
    the data and backup directories and a nightly backup, and installs the two
    scripts. It points Caddy at the name, which gets a certificate as soon as
    the name resolves to the server. Last, it creates the SSH user `deploy`
@@ -65,7 +67,9 @@ The scripts in [`deploy/`](../deploy) do the work:
    Keep a copy of the env file somewhere safe. `SIGNING_KEY` must not change,
    or every upload and download link already given out stops working, and,
    unless `ASSERTION_KEY` is set, the key a service that hosts agents checks
-   Core's assertions with changes too.
+   Core's assertions with changes too. `SECRETS_KEY` must not be lost: the
+   client secrets of the identity providers administrators set up are sealed
+   with it and open with nothing else (rotating it: below, Single sign-on).
 
 2. Let the server pull the image. The package is private, and GitHub's
    registry takes only a personal access token (classic), not a fine-grained
@@ -213,10 +217,27 @@ Run all of these as root on the server.
   needs no setting here, and one in a browser or an app's web view gets
   its preflight answered and may read the answers (CORS for any origin,
   without credentials).
-- **Single sign-on** is `OIDC_ISSUER`, `OIDC_CLIENT_ID` and
-  `OIDC_CLIENT_SECRET` in the env file, with
-  `https://lms-staging.example.edu/v1/auth/sso/callback` registered with the
-  provider (README, Single sign-on).
+- **Single sign-on** has two sources (README, Single sign-on). The
+  operator's provider is `OIDC_ISSUER`, `OIDC_CLIENT_ID` and
+  `OIDC_CLIENT_SECRET` in the env file; administrators see it read-only.
+  Root and the platform's administrators add others from the front end,
+  which needs `SECRETS_KEY` in the env file: 32 random bytes in base64,
+  which seal each provider's client secret. `setup-server.sh` writes one; by
+  hand:
+
+  ```
+  printf 'SECRETS_KEY=%s\n' "$(openssl rand -base64 32)" >> /etc/aishie/aishie.env
+  ```
+
+  It needs `SIGNING_KEY`, is the same on every server, and is never lost:
+  what it sealed opens with nothing else. Without it, the front end is told
+  no provider can be added (`secrets_key_missing`), and the operator's
+  provider works as before. To rotate it, put a new key in `SECRETS_KEY` and
+  the old one in `SECRETS_KEY_PREVIOUS` (comma separated, for more than one),
+  deploy, run `aishie-core secrets rewrap`, which seals every client secret
+  again under the new key and says how many, and then remove the old key.
+  Register `https://lms-staging.example.edu/v1/auth/sso/callback` with every
+  provider: it is the same for all of them.
   `OIDC_DISPLAY_NAME` is what the front end's sign-in button calls the
   provider; without it, the front end uses words of its own. Like every value
   in the file it takes no quotes, even with a space in it:
@@ -227,9 +248,10 @@ Run all of these as root on the server.
 
   It is at most 64 characters, all of them printable (a tab is not), or the
   server will not start. The front end asks the server at
-  `GET /v1/auth/methods` whether to show the button at all, and what it
-  says, so the same front end serves a server with single sign-on and one
-  without; a change reaches the sign-in page within a minute of the deploy.
+  `GET /v1/auth/methods` which buttons to show, and what each says, so the
+  same front end serves a server with single sign-on and one without; a
+  change reaches the sign-in page within a minute of the deploy, or of an
+  administrator's change to a provider.
 - **Files in a bucket** instead of on the server's disk are `BLOB_STORE=s3`,
   with `S3_ENDPOINT` (`HOST[:PORT]`, no scheme), `S3_BUCKET`,
   `S3_ACCESS_KEY` and `S3_SECRET_KEY` in the env file, and `S3_REGION`, the
@@ -496,16 +518,18 @@ else regularly:
 
 - `/var/backups/aishie/`, the database;
 - `/srv/aishie/data/`, the uploaded files;
-- `/etc/aishie/aishie.env`, which holds `SIGNING_KEY` (and
-  `ASSERTION_KEY`, if it is set) and the database password.
+- `/etc/aishie/aishie.env`, which holds `SIGNING_KEY`, `SECRETS_KEY` (and
+  `ASSERTION_KEY`, if it is set) and the database password. The database's
+  backups hold identity providers' client secrets sealed with `SECRETS_KEY`:
+  keep the two apart, or both in one place as well kept as the key.
 
 ## More than one server per environment
 
 Two servers behind a load balancer need more than this set-up gives:
 
 - files in S3 (`BLOB_STORE=s3` and the `S3_*` settings);
-- the same `SIGNING_KEY` on every server, and the same `ASSERTION_KEY` if it
-  is set;
+- the same `SIGNING_KEY` and `SECRETS_KEY` on every server, and the same
+  `ASSERTION_KEY` and `SECRETS_KEY_PREVIOUS` if they are set;
 - `HTTP_ADDR` that the load balancer can reach;
 - `TRUSTED_PROXIES` set to the load balancer's addresses;
 - a load balancer that lets a request run 40 seconds or more, for long

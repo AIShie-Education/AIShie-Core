@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"regexp"
 	"slices"
+	"strings"
 
 	"github.com/google/jsonschema-go/jsonschema"
 
@@ -65,6 +67,11 @@ func buildArgs(t tool.Tool, r *http.Request) ([]byte, error) {
 		}
 	}
 
+	if f := t.HTTP.IfMatch; f != "" {
+		if err := ifMatch(r, args, f); err != nil {
+			return nil, err
+		}
+	}
 	for _, m := range pathParam.FindAllStringSubmatch(t.HTTP.Pattern, -1) {
 		name, value := m[1], r.PathValue(m[1])
 		if prior, ok := args[name]; ok && prior != value {
@@ -73,6 +80,35 @@ func buildArgs(t tool.Tool, r *http.Request) ([]byte, error) {
 		args[name] = value
 	}
 	return json.Marshal(args)
+}
+
+// HeaderIfMatch names the version a write is made over (tool.Route.IfMatch).
+const HeaderIfMatch = "If-Match"
+
+var versionTag = regexp.MustCompile(`^"?([0-9]{1,9})"?$`)
+
+// ifMatch puts the version If-Match names into args as field: "3", or 3, is
+// version 3. A weak tag, a list of them, * or anything else is refused, as is
+// a body that names another version: which of the two the write is made
+// over would be a guess.
+func ifMatch(r *http.Request, args map[string]any, field string) error {
+	values := r.Header.Values(HeaderIfMatch)
+	switch len(values) {
+	case 0:
+		return nil
+	case 1:
+	default:
+		return apperr.Invalid("%s is given more than once", HeaderIfMatch)
+	}
+	m := versionTag.FindStringSubmatch(strings.TrimSpace(values[0]))
+	if m == nil {
+		return apperr.Invalid(`%s names the version the change is made over, as the provider's version reads, such as "3"`, HeaderIfMatch)
+	}
+	if prior, ok := args[field]; ok && fmt.Sprint(prior) != m[1] {
+		return apperr.Invalid("%s in the request is not the version %s names; they must agree", field, HeaderIfMatch)
+	}
+	args[field] = json.Number(m[1])
+	return nil
 }
 
 func propertySchema(t tool.Tool, name string) *jsonschema.Schema {

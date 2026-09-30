@@ -21,6 +21,11 @@ type Identity struct {
 	// Subject is the provider's stable name for the account, as stored in
 	// credential.subject: for ADFS, the UPN.
 	Subject string
+	// Email is the person's email, lower-cased, as the provider vouches for
+	// it (email_verified), when the provider is asked for one; otherwise
+	// empty. A provider that links by email reads it (docs/schema.md §2.1,
+	// Single sign-on); nothing else does.
+	Email string
 }
 
 // IdentityProvider is single sign-on, reduced to what this system needs from
@@ -42,6 +47,11 @@ type IdentityProvider interface {
 // someone registers the actor and links the identity first
 // (actor.register, actor.link_sso).
 var errNotRegistered = apperr.Forbid("that account signed in with the identity provider but is not registered here; ask an administrator to add it")
+
+// ErrNotRegistered is SignInWithIdentity's answer for an identity linked to
+// nobody who may sign in: never linked, unlinked, or its actor's suspended.
+// They are one answer, which is all an outsider needs to know.
+var ErrNotRegistered = errNotRegistered
 
 // NormalizeSubject puts a subject in the form it is stored and compared in.
 // A UPN or an email address names the same account however it is capitalised,
