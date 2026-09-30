@@ -101,6 +101,9 @@ func versionText(ctx context.Context, q dbq.Querier, version uuid.UUID) (*TextVi
 		r.UpdatedAt, r.Bytes, r.EditedByName)
 	if r.Status == textDone && r.Bytes <= TextPartBytes {
 		b, err := q.GetTextBody(ctx, version)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil // purged meanwhile
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -157,9 +160,10 @@ func textCut(window string) int {
 	if i := strings.LastIndexByte(window[:TextPartBytes], '\n'); i+1 >= half {
 		return i + 1
 	}
-	// Else after a whole character.
+	// Else after a whole character; a part is never empty, whatever the
+	// bytes are.
 	cut := TextPartBytes
-	for cut > 0 && !utf8.RuneStart(window[cut]) {
+	for cut > TextPartBytes-utf8.UTFMax && !utf8.RuneStart(window[cut]) {
 		cut--
 	}
 	return cut

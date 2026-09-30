@@ -355,6 +355,9 @@ func textComplete() tool.Tool {
 				return TextCompleteOut{}, err
 			}
 			r, err := ec.Q.GetTextForService(ctx, in.VersionID)
+			if errors.Is(err, pgx.ErrNoRows) {
+				return TextCompleteOut{}, apperr.Missing("no such text version") // purged meanwhile
+			}
 			if err != nil {
 				return TextCompleteOut{}, err
 			}

@@ -6,6 +6,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 
@@ -251,6 +252,35 @@ func TestALongTextIsReadInParts(t *testing.T) {
 	}
 	if _, err := b.readText(t, b.sato, m{"document_id": doc, "part": first.Parts + 1}); !apperr.Is(err, apperr.InvalidArgument) {
 		t.Fatalf("a part past the last: %v", err)
+	}
+
+	// Without pages, a text is cut after whole lines; a line longer than a
+	// part, after whole characters.
+	for name, text := range map[string]string{
+		"lines":     strings.Repeat("一行文字，沒有標題。\n", 12000),
+		"one line":  strings.Repeat("字", 50000),
+		"odd bytes": "a" + strings.Repeat("字", 40000) + "\n" + strings.Repeat("é", 50000),
+	} {
+		b.do(t, b.sato, "document.text_update", m{"course_id": b.course, "document_id": doc, "version_id": first.VersionID, "body": text})
+		var whole strings.Builder
+		for part, parts := 1, 1; part <= parts; part++ {
+			got, err := b.readText(t, b.sato, m{"document_id": doc, "part": part})
+			if err != nil {
+				t.Fatalf("%s, part %d: %v", name, part, err)
+			}
+			parts = got.Parts
+			body := *got.Text.Body
+			if len(body) == 0 || len(body) > tools.TextPartBytes || !utf8.ValidString(body) {
+				t.Fatalf("%s, part %d of %d: %d bytes, valid %v", name, part, parts, len(body), utf8.ValidString(body))
+			}
+			if name == "lines" && part < parts && !strings.HasSuffix(body, "\n") {
+				t.Fatalf("%s, part %d does not end with a whole line", name, part)
+			}
+			whole.WriteString(body)
+		}
+		if whole.String() != text {
+			t.Fatalf("%s: the parts put together are not the text", name)
+		}
 	}
 }
 
