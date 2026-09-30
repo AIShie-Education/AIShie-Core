@@ -194,10 +194,15 @@ once an hour and removes up to 200 such uploads every `JOBS_INTERVAL`, however
 many attached files it passes on the way. So that no proposal outlives its
 files, a call that would attach an upload by way of a proposal is refused
 once the upload is two days old. With `PROPOSAL_TTL=0` proposals wait for
-ever, and uploads are neither removed nor refused for their age. The server
-keeps its files under `courses/` (with S3, `attached/courses/` as well) and
-leaves anything else in the directory or bucket alone, uploads under a course
-its database does not have included. Still, two deployments must not share a
+ever, and uploads are neither removed nor refused for their age. The files
+messages of conversations carry are kept the same way, under a prefix of their
+own, and held to limits of their own: `ATTACHMENT_MAX_PER_MESSAGE` files to a
+message (10), each at most `ATTACHMENT_MAX_BYTES` (50 MiB, and never more than
+`MAX_UPLOAD_BYTES`), and `ATTACHMENT_MAX_CONVERSATION_BYTES` in one
+conversation (500 MiB). The server keeps its files under `courses/` and
+`conversations/` (with S3, `attached/courses/` and `attached/conversations/`
+as well) and leaves anything else in the directory or bucket alone, uploads
+under a course its database does not have included. Still, two deployments must not share a
 directory or bucket: a staging copy whose database was cloned from production
 has production's courses, and each would take the files the other has attached
 since the copy for orphans, and remove them.
