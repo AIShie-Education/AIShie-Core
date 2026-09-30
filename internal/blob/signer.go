@@ -58,6 +58,9 @@ type UploadClaim struct {
 	Purpose     string    `json:"p"`
 	ContentType string    `json:"t"`
 	Expires     int64     `json:"e"`
+	// Filename is the name the uploader gave the file when asking where to
+	// upload it, if any: what it is called when it is attached without one.
+	Filename string `json:"f,omitempty"`
 }
 
 // SignUpload issues an upload token.

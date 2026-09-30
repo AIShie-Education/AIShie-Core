@@ -234,7 +234,7 @@ func TestFilesRoundTrip(t *testing.T) {
 	if !bytes.Equal(b.download(t, *got.DownloadURL), pdf) {
 		t.Fatal("what came back is not what went up")
 	}
-	if n := b.Count(`SELECT count(*) FROM document_version WHERE document_id = $1 AND author_member_id = $2 AND storage_key LIKE 'courses/' || $3 || '/%'`,
+	if n := b.Count(`SELECT count(*) FROM document_version WHERE document_id = $1 AND author_member_id = $2 AND storage_key LIKE 'documents/' || $3 || '/%'`,
 		made.DocumentID, b.satoM, b.course.String()); n != 1 {
 		t.Fatal("the version row does not name its author and a key inside the course")
 	}
