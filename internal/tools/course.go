@@ -480,8 +480,12 @@ func seat(ctx context.Context, ec *tool.ExecCtx, s seating) (uuid.UUID, error) {
 	if a.Status != domain.ActorActive {
 		return uuid.Nil, apperr.Precondition("the actor is suspended")
 	}
-	if a.Kind == "system" {
+	switch a.Kind {
+	case "system":
 		return uuid.Nil, apperr.Precondition("the system actor is not seated in courses")
+	case "service":
+		// The database refuses it too (course_member_not_a_service).
+		return uuid.Nil, apperr.Precondition("a site service is not seated in courses")
 	}
 	// An agent someone owns acts only as its owner's delegate, and only its
 	// owner seats it so. The database refuses it too.

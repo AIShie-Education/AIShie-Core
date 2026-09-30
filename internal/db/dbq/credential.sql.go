@@ -16,7 +16,7 @@ const getCredentialByPrefix = `-- name: GetCredentialByPrefix :one
 SELECT c.id, c.actor_id, c.kind, c.secret_hash, c.expires_at, c.revoked_at, a.kind AS actor_kind
 FROM credential c
 JOIN actor a ON a.id = c.actor_id
-WHERE c.token_prefix = $1 AND c.kind IN ('api_token', 'session')
+WHERE c.token_prefix = $1 AND c.kind IN ('api_token', 'session', 'service')
 `
 
 type GetCredentialByPrefixRow struct {
@@ -29,11 +29,11 @@ type GetCredentialByPrefixRow struct {
 	ActorKind  string
 }
 
-// A token or a session, found by its public prefix before its hash is
-// checked. Revoked and expired rows are returned too, so that the caller can
-// tell them from an unknown prefix in its logs; it rejects all three alike.
-// The actor's kind comes with it: a credential of the system actor's is
-// rejected the same way.
+// A token, a session or a service's credential, found by its public prefix
+// before its hash is checked. Revoked and expired rows are returned too, so
+// that the caller can tell them from an unknown prefix in its logs; it
+// rejects all three alike. The actor's kind comes with it: a credential of
+// the system actor's is rejected the same way.
 func (q *Queries) GetCredentialByPrefix(ctx context.Context, tokenPrefix *string) (GetCredentialByPrefixRow, error) {
 	row := q.db.QueryRow(ctx, getCredentialByPrefix, tokenPrefix)
 	var i GetCredentialByPrefixRow

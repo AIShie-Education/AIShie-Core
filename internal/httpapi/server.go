@@ -38,6 +38,7 @@ import (
 
 	"github.com/AIShie-Education/AIShie-Core/internal/apperr"
 	"github.com/AIShie-Education/AIShie-Core/internal/auth"
+	"github.com/AIShie-Education/AIShie-Core/internal/authz"
 	"github.com/AIShie-Education/AIShie-Core/internal/blob"
 	"github.com/AIShie-Education/AIShie-Core/internal/domain"
 	"github.com/AIShie-Education/AIShie-Core/internal/pipeline"
@@ -161,10 +162,10 @@ func NewHandler(d Deps) http.Handler {
 		mux.Handle("POST "+AssertionPath, s.assertions(s.authenticated(s.assert)))
 		mux.HandleFunc("GET "+KeysPath, s.keys)
 		mux.HandleFunc("GET /v1/tools", s.listTools)
-		mux.Handle("POST /v1/tools/{tool_name}", s.authenticated(s.callByName))
+		mux.Handle("POST /v1/tools/{tool_name}", s.calling(s.callByName))
 		for _, t := range d.Pipeline.Registry().Exposed() {
 			if t.HTTP.Pattern != "" {
-				mux.Handle(t.HTTP.Method+" "+t.HTTP.Pattern, s.authenticated(s.callTool(t)))
+				mux.Handle(t.HTTP.Method+" "+t.HTTP.Pattern, s.calling(s.callTool(t)))
 			}
 		}
 	}
@@ -300,10 +301,10 @@ func (s *server) callTool(t tool.Tool) func(http.ResponseWriter, *http.Request) 
 		p := r.Context().Value(callerKey{}).(auth.Principal)
 		out, err := s.Pipeline.Invoke(r.Context(), pipeline.Caller{ActorID: p.ActorID, CredentialID: p.CredentialID}, t.Name, args,
 			r.Header.Get(HeaderIdempotencyKey))
-		if err == nil && t.Kind == tool.Ephemeral && out.Status == domain.StatusExecuted {
-			// An ephemeral write carried out is not what the limit counts:
-			// it bounds its own rate (tool.Ephemeral). One refused counts
-			// as any call does.
+		if err == nil && t.BoundsOwnRate && out.Status == domain.StatusExecuted {
+			// An ephemeral write carried out that bounds its own rate is
+			// not what the limit counts (tool.Spec.BoundsOwnRate). One
+			// refused counts as any call does.
 			s.Calls.Refund(p.ActorID.String())
 		}
 		if err != nil {
@@ -364,7 +365,26 @@ func (s *server) listTools(w http.ResponseWriter, _ *http.Request) {
 // Who is calling
 // ---------------------------------------------------------------------------
 
+// authenticated lets through a caller whose credential is good, to anything
+// but a tool: signing out, joining a course, being vouched for. A site
+// service's credential is taken at its service's tools alone (calling), and
+// is refused here, as it is by every tool not its service's.
 func (s *server) authenticated(next http.HandlerFunc) http.Handler {
+	return s.authenticatedAs(false, next)
+}
+
+// calling is authenticated for a tool's route: a site service's credential
+// is let through too, for the pipeline to hold to its service's tools.
+func (s *server) calling(next http.HandlerFunc) http.Handler {
+	return s.authenticatedAs(true, next)
+}
+
+// errNotForServices refuses a site service's credential where only tools
+// take it.
+var errNotForServices = apperr.Forbid("a site service's credential calls its service's tools and nothing else").
+	With("reason", string(authz.ReasonNotForServices))
+
+func (s *server) authenticatedAs(tools bool, next http.HandlerFunc) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		presented := bearer(r)
 		if presented == "" {
@@ -375,6 +395,10 @@ func (s *server) authenticated(next http.HandlerFunc) http.Handler {
 		p, err := s.Auth.Authenticate(r.Context(), presented)
 		if err != nil {
 			s.writeError(w, r, err)
+			return
+		}
+		if p.Service() && !tools {
+			s.writeError(w, r, errNotForServices)
 			return
 		}
 		// After authentication, so that the limit is the actor's and nobody
@@ -737,7 +761,7 @@ type errorBody struct {
 func (s *server) writeError(w http.ResponseWriter, r *http.Request, err error) {
 	var tooLarge *http.MaxBytesError
 	if errors.As(err, &tooLarge) {
-		err = apperr.Invalid("the request body is larger than %d bytes", maxBodyBytes)
+		err = apperr.Invalid("the request body is larger than %d bytes", tooLarge.Limit)
 	}
 	e, ok := apperr.As(err)
 	if !ok {

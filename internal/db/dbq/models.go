@@ -97,6 +97,7 @@ type Actor struct {
 	EmailVerified        bool
 	LoginID              *string
 	LoginIDVerified      bool
+	ServiceScope         *string
 }
 
 type Assignment struct {
@@ -299,6 +300,31 @@ type DocumentVersion struct {
 	PurgedAt        *time.Time
 	PurgedByActorID *uuid.UUID
 	PurgeReason     *string
+}
+
+type DocumentVersionText struct {
+	VersionID             uuid.UUID
+	DocumentID            uuid.UUID
+	CourseID              uuid.UUID
+	Status                string
+	Body                  *string
+	Source                *string
+	Pages                 *int32
+	Model                 *string
+	Reason                *string
+	Revision              int32
+	Attempts              int32
+	Backfill              bool
+	QueuedAt              time.Time
+	LeaseID               *uuid.UUID
+	ClaimedUntil          *time.Time
+	ClaimedByCredentialID *uuid.UUID
+	ClaimedAt             *time.Time
+	ProducedAt            *time.Time
+	EditedByMemberID      *uuid.UUID
+	EditedAt              *time.Time
+	CreatedAt             time.Time
+	UpdatedAt             time.Time
 }
 
 type Event struct {

@@ -196,7 +196,7 @@ func (p *Pipeline) Decide(ctx context.Context, ec *tool.ExecCtx, in DecideIn) (D
 	if err != nil {
 		return DecideOut{}, err
 	}
-	a, err := p.authorize(ctx, ec.Q, t, args, proposer, prop.MemberID, ec.Now)
+	a, err := p.authorize(ctx, ec.Q, t, args, proposer, uuid.Nil, prop.MemberID, ec.Now)
 	switch {
 	case apperr.Is(err, apperr.NotFound):
 		return cancel(CancelTargetGone, nil)
@@ -319,7 +319,7 @@ func (p *Pipeline) ownerJudges(ctx context.Context, q dbq.Querier, actor domain.
 	if err != nil {
 		return true, false, nil
 	}
-	got, err := p.authorize(ctx, q, t, args, actor, &seat, now)
+	got, err := p.authorize(ctx, q, t, args, actor, uuid.Nil, &seat, now)
 	if err != nil {
 		// A target gone, or not found in the course: not something they
 		// could do now. Anything else is a fault, and says so.

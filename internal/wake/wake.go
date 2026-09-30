@@ -50,13 +50,23 @@ type Note struct {
 // is written, and wakes only a call that asks for it (Filter.Drafts).
 const KindDraft = "conversation.draft"
 
-// Filter is the news a waiting call is woken by: of its course, and, where
-// they are set, of one conversation, of conversations addressed to one seat,
-// and of some kinds alone. A zero field, or no kinds, asks nothing of it.
-// News of a draft wakes only a filter that says Drafts: a reader of the
-// conversation that shows its draft as it is written.
+// KindTextQueued is the kind of the news that a version's text is waiting
+// to be transcribed: a version with a file added, a text sent back to be
+// transcribed again, a claim given back. It is told by no event, at seq 0,
+// and wakes only a call that names it among its Kinds: the service's claim
+// on the queue (document_text.queue).
+const KindTextQueued = "document_text.queued"
+
+// Filter is the news a waiting call is woken by: of its course, or of any
+// course (AnyCourse), and, where they are set, of one conversation, of
+// conversations addressed to one seat, and of some kinds alone. A zero
+// field, or no kinds, asks nothing of it. News of a draft wakes only a
+// filter that says Drafts: a reader of the conversation that shows its
+// draft as it is written; news of a text queued only a filter that names
+// its kind.
 type Filter struct {
 	CourseID           uuid.UUID
+	AnyCourse          bool
 	ConversationID     uuid.UUID
 	RespondentMemberID uuid.UUID
 	Kinds              []string
@@ -66,9 +76,11 @@ type Filter struct {
 // Matches says whether n is news f waits for.
 func (f Filter) Matches(n Note) bool {
 	switch {
-	case n.CourseID != f.CourseID:
+	case !f.AnyCourse && n.CourseID != f.CourseID:
 		return false
 	case n.Kind == KindDraft && !f.Drafts:
+		return false
+	case n.Kind == KindTextQueued && !slices.Contains(f.Kinds, KindTextQueued):
 		return false
 	case f.ConversationID != uuid.Nil && n.ConversationID != f.ConversationID:
 		return false
@@ -138,10 +150,11 @@ func (h *Hub) Subscribe(actor uuid.UUID, f Filter) (*Waiter, bool) {
 		return nil, false
 	}
 	w := &Waiter{hub: h, actor: actor, f: f, woken: make(chan struct{}, 1)}
-	in := h.byCourse[f.CourseID]
+	key := f.key()
+	in := h.byCourse[key]
 	if in == nil {
 		in = map[*Waiter]struct{}{}
-		h.byCourse[f.CourseID] = in
+		h.byCourse[key] = in
 	}
 	in[w] = struct{}{}
 	h.perActor[actor]++
@@ -155,10 +168,11 @@ func (w *Waiter) Close() {
 		h := w.hub
 		h.mu.Lock()
 		defer h.mu.Unlock()
-		in := h.byCourse[w.f.CourseID]
+		key := w.f.key()
+		in := h.byCourse[key]
 		delete(in, w)
 		if len(in) == 0 {
-			delete(h.byCourse, w.f.CourseID)
+			delete(h.byCourse, key)
 		}
 		if h.perActor[w.actor]--; h.perActor[w.actor] <= 0 {
 			delete(h.perActor, w.actor)
@@ -174,13 +188,28 @@ func (w *Waiter) wake() {
 	}
 }
 
-// Publish wakes every waiter n is news for.
+// key is where a waiter is kept in the hub: under its course, or under the
+// nil UUID, which names no course, for one that waits for news of any.
+func (f Filter) key() uuid.UUID {
+	if f.AnyCourse {
+		return uuid.Nil
+	}
+	return f.CourseID
+}
+
+// Publish wakes every waiter n is news for: those waiting for news of its
+// course, and those waiting for news of any.
 func (h *Hub) Publish(n Note) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	for w := range h.byCourse[n.CourseID] {
-		if w.f.Matches(n) {
-			w.wake()
+	for _, key := range []uuid.UUID{n.CourseID, uuid.Nil} {
+		for w := range h.byCourse[key] {
+			if w.f.Matches(n) {
+				w.wake()
+			}
+		}
+		if n.CourseID == uuid.Nil {
+			break
 		}
 	}
 }

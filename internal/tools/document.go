@@ -165,6 +165,9 @@ var unreleased = map[string]string{
 	EventDocumentUpdated:      EventDocumentUpdatedUnreleased,
 	EventDocumentUnarchived:   EventDocumentUnarchivedUnreleased,
 	EventDocumentPurged:       EventDocumentPurgedUnreleased,
+	EventTextUpdated:          EventTextUpdatedUnreleased,
+	EventRubricTextUpdated:    EventRubricTextUpdatedUnreleased,
+	EventDraftTextUpdated:     EventDraftTextUpdatedUnreleased,
 }
 
 // emitDocumentEvent emits an event about a document of the given kind.
@@ -429,7 +432,9 @@ func (c Content) uploads() []string {
 // insertVersion writes one version. The author is the calling member, who is
 // a member of the document's course because the call was authorized in it —
 // which is the whole of the rule that a version's author belongs to its
-// document's course.
+// document's course. A file of material, instructions or a rubric is queued
+// to be transcribed as it is added (document_version_text_queued), and the
+// service is woken to take it.
 func insertVersion(ctx context.Context, d Deps, ec *tool.ExecCtx, courseID, documentID uuid.UUID, kind string, seq int32, c Content) (uuid.UUID, error) {
 	row := dbq.InsertDocumentVersionParams{ID: ids.New(), DocumentID: documentID, Seq: seq, BodyMd: c.BodyMD,
 		AuthorMemberID: ec.Member.ID, CreatedAt: ec.Now}
@@ -440,7 +445,15 @@ func insertVersion(ctx context.Context, d Deps, ec *tool.ExecCtx, courseID, docu
 		}
 		row.StorageKey, row.ContentType, row.ByteSize, row.Checksum = &up.key, &up.info.ContentType, &up.info.Size, &up.info.Checksum
 	}
-	return row.ID, ec.Q.InsertDocumentVersion(ctx, row)
+	if err := ec.Q.InsertDocumentVersion(ctx, row); err != nil {
+		return uuid.Nil, err
+	}
+	if row.StorageKey != nil && courseLevel(kind) {
+		if err := notifyQueued(ctx, ec.Q, courseID); err != nil {
+			return uuid.Nil, err
+		}
+	}
+	return row.ID, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -1176,6 +1189,7 @@ type VersionView struct {
 	CreatedAt      time.Time `json:"created_at"`
 	Published      bool      `json:"published"`
 	Purged         *Purge    `json:"purged,omitempty" jsonschema:"the version was purged: its text and file are gone, and this says who removed them, when and why. Work handed in under it still names it"`
+	Text           *TextView `json:"text,omitempty" jsonschema:"the version's text version: its file transcribed into Markdown, for a version with a file of material, instructions or a rubric; absent for any other"`
 }
 
 type DocumentGetOut struct {
@@ -1198,74 +1212,16 @@ func documentGet(d Deps) tool.Tool {
 			return documentTarget(ctx, q, in.CourseID, in.DocumentID, readPerm)
 		},
 		Query: func(ctx context.Context, rc *tool.ReadCtx, in DocumentGetIn) (DocumentGetOut, error) {
-			doc, err := loadDocument(ctx, rc.Q, in.CourseID, in.DocumentID)
+			doc, v, err := readableVersion(ctx, rc, in.CourseID, in.DocumentID, in.VersionID)
 			if err != nil {
 				return DocumentGetOut{}, err
-			}
-			if feedbackWithheld(doc, rc.Member) {
-				return DocumentGetOut{}, apperr.Missing("no such document in this course")
-			}
-			drafts := rc.Member.Perm(domain.PermDocumentReadDraft).Allowed()
-			if courseLevel(doc.Kind) && doc.PublishedVersionID == nil && !drafts {
-				return DocumentGetOut{}, apperr.Missing("no such document in this course")
-			}
-			// To anyone who cannot read drafts, a course-level document is
-			// there while it is published and not archived — archiving is
-			// the only way to withdraw something published, so it has to
-			// withdraw it from anyone who kept the id. Instructions and a
-			// rubric are the assignment's, and follow it: to anyone who does
-			// not write assignments they are there only while a published
-			// assignment in their scope refers to them, drafts or no drafts.
-			// What stays readable regardless is a version someone's
-			// submission is pinned to, named by id below, because that is
-			// the record of what they were told.
-			withdrawn := courseLevel(doc.Kind) && doc.Status == "archived" && !drafts
-			if courseLevel(doc.Kind) && doc.Kind != kindMaterial && !withdrawn {
-				withdrawn, err = assignmentWithheld(ctx, rc, doc.ID)
-				if err != nil {
-					return DocumentGetOut{}, err
-				}
-			}
-			if withdrawn && in.VersionID == nil {
-				return DocumentGetOut{}, apperr.Missing("no such document in this course")
 			}
 			out := DocumentGetOut{SubmissionID: doc.SubmissionID, GradeID: doc.GradeID,
 				Purged: purgeOf(doc.PurgedAt, doc.PurgedByActorID, doc.PurgeReason),
 				DocumentSummary: DocumentSummary{ID: doc.ID, Kind: doc.Kind, Title: doc.Title, PublishedVersionID: doc.PublishedVersionID,
 					SortOrder: doc.SortOrder, Status: doc.Status, CreatedAt: doc.CreatedAt, PurgedAt: doc.PurgedAt}}
-
-			var v dbq.DocumentVersion
-			switch {
-			case in.VersionID != nil:
-				v, err = rc.Q.GetVersionOfDocument(ctx, dbq.GetVersionOfDocumentParams{ID: *in.VersionID, DocumentID: doc.ID})
-				if err == nil && (withdrawn || (!drafts && (doc.PublishedVersionID == nil || *doc.PublishedVersionID != v.ID))) {
-					// Not the published one and no right to drafts. One more
-					// way in: it is what the caller's own work was pinned to.
-					pinned, perr := rc.Q.VersionPinnedInScope(ctx, dbq.VersionPinnedInScopeParams{VersionID: &v.ID,
-						StudentAll: rc.Scope.StudentAll, AssignmentAll: rc.Scope.AssignmentAll, MemberID: rc.Scope.MemberID,
-						PrincipalID: rc.Scope.PrincipalID, PrincipalStudentAll: rc.Scope.PrincipalStudentAll, PrincipalAssignmentAll: rc.Scope.PrincipalAssignmentAll})
-					if perr != nil {
-						return DocumentGetOut{}, perr
-					}
-					if !pinned {
-						err = pgx.ErrNoRows
-					}
-				}
-			case drafts && courseLevel(doc.Kind):
-				v, err = rc.Q.GetLatestVersion(ctx, doc.ID)
-			case doc.PublishedVersionID != nil:
-				v, err = rc.Q.GetVersionOfDocument(ctx, dbq.GetVersionOfDocumentParams{ID: *doc.PublishedVersionID, DocumentID: doc.ID})
-			default:
-				err = pgx.ErrNoRows
-			}
-			if errors.Is(err, pgx.ErrNoRows) {
-				if in.VersionID != nil {
-					return DocumentGetOut{}, apperr.Missing("no such version of this document")
-				}
+			if v == nil {
 				return out, nil
-			}
-			if err != nil {
-				return DocumentGetOut{}, err
 			}
 			view := VersionView{ID: v.ID, Seq: v.Seq, BodyMD: v.BodyMd, ContentType: v.ContentType, ByteSize: v.ByteSize,
 				Checksum: v.Checksum, AuthorMemberID: v.AuthorMemberID, CreatedAt: v.CreatedAt,
@@ -1278,10 +1234,87 @@ func documentGet(d Deps) tool.Tool {
 				}
 				view.DownloadURL = &url
 			}
+			if view.Text, err = versionText(ctx, rc.Q, v.ID); err != nil {
+				return DocumentGetOut{}, err
+			}
 			out.Version = &view
 			return out, nil
 		},
 	})
+}
+
+// readableVersion is the version of a document a read shows its caller, and
+// the document: the one named, if the caller may read it; otherwise the
+// published one, or the latest for members who can read drafts. It is nil,
+// with no error, for a document the caller may read that has no version for
+// them. A document or a version the caller may not read is not found.
+func readableVersion(ctx context.Context, rc *tool.ReadCtx, courseID, documentID uuid.UUID, versionID *uuid.UUID) (dbq.GetDocumentWithOwnerRow, *dbq.DocumentVersion, error) {
+	doc, err := loadDocument(ctx, rc.Q, courseID, documentID)
+	if err != nil {
+		return doc, nil, err
+	}
+	if feedbackWithheld(doc, rc.Member) {
+		return doc, nil, apperr.Missing("no such document in this course")
+	}
+	drafts := rc.Member.Perm(domain.PermDocumentReadDraft).Allowed()
+	if courseLevel(doc.Kind) && doc.PublishedVersionID == nil && !drafts {
+		return doc, nil, apperr.Missing("no such document in this course")
+	}
+	// To anyone who cannot read drafts, a course-level document is
+	// there while it is published and not archived — archiving is
+	// the only way to withdraw something published, so it has to
+	// withdraw it from anyone who kept the id. Instructions and a
+	// rubric are the assignment's, and follow it: to anyone who does
+	// not write assignments they are there only while a published
+	// assignment in their scope refers to them, drafts or no drafts.
+	// What stays readable regardless is a version someone's
+	// submission is pinned to, named by id below, because that is
+	// the record of what they were told.
+	withdrawn := courseLevel(doc.Kind) && doc.Status == "archived" && !drafts
+	if courseLevel(doc.Kind) && doc.Kind != kindMaterial && !withdrawn {
+		withdrawn, err = assignmentWithheld(ctx, rc, doc.ID)
+		if err != nil {
+			return doc, nil, err
+		}
+	}
+	if withdrawn && versionID == nil {
+		return doc, nil, apperr.Missing("no such document in this course")
+	}
+
+	var v dbq.DocumentVersion
+	switch {
+	case versionID != nil:
+		v, err = rc.Q.GetVersionOfDocument(ctx, dbq.GetVersionOfDocumentParams{ID: *versionID, DocumentID: doc.ID})
+		if err == nil && (withdrawn || (!drafts && (doc.PublishedVersionID == nil || *doc.PublishedVersionID != v.ID))) {
+			// Not the published one and no right to drafts. One more
+			// way in: it is what the caller's own work was pinned to.
+			pinned, perr := rc.Q.VersionPinnedInScope(ctx, dbq.VersionPinnedInScopeParams{VersionID: &v.ID,
+				StudentAll: rc.Scope.StudentAll, AssignmentAll: rc.Scope.AssignmentAll, MemberID: rc.Scope.MemberID,
+				PrincipalID: rc.Scope.PrincipalID, PrincipalStudentAll: rc.Scope.PrincipalStudentAll, PrincipalAssignmentAll: rc.Scope.PrincipalAssignmentAll})
+			if perr != nil {
+				return doc, nil, perr
+			}
+			if !pinned {
+				err = pgx.ErrNoRows
+			}
+		}
+	case drafts && courseLevel(doc.Kind):
+		v, err = rc.Q.GetLatestVersion(ctx, doc.ID)
+	case doc.PublishedVersionID != nil:
+		v, err = rc.Q.GetVersionOfDocument(ctx, dbq.GetVersionOfDocumentParams{ID: *doc.PublishedVersionID, DocumentID: doc.ID})
+	default:
+		err = pgx.ErrNoRows
+	}
+	if errors.Is(err, pgx.ErrNoRows) {
+		if versionID != nil {
+			return doc, nil, apperr.Missing("no such version of this document")
+		}
+		return doc, nil, nil
+	}
+	if err != nil {
+		return doc, nil, err
+	}
+	return doc, &v, nil
 }
 
 type VersionSummary struct {
@@ -1294,6 +1327,7 @@ type VersionSummary struct {
 	CreatedAt      time.Time  `json:"created_at"`
 	Published      bool       `json:"published"`
 	PurgedAt       *time.Time `json:"purged_at,omitempty" jsonschema:"when its text and file were purged; document.get of it says who and why"`
+	Text           *TextView  `json:"text,omitempty" jsonschema:"its text version, without the text: document.text reads it"`
 }
 
 type DocumentVersionsOut struct {
@@ -1351,13 +1385,21 @@ func documentVersions() tool.Tool {
 				}
 			}
 			rows, err := rc.Q.ListVersions(ctx, doc.ID)
+			if err != nil {
+				return DocumentVersionsOut{}, err
+			}
+			texts, err := textsOf(ctx, rc.Q, doc.ID)
+			if err != nil {
+				return DocumentVersionsOut{}, err
+			}
 			out := DocumentVersionsOut{Versions: make([]VersionSummary, 0, len(rows))}
 			for _, r := range rows {
 				out.Versions = append(out.Versions, VersionSummary{ID: r.ID, Seq: r.Seq, HasFile: r.HasFile, ContentType: r.ContentType,
 					ByteSize: r.ByteSize, AuthorMemberID: r.AuthorMemberID, CreatedAt: r.CreatedAt,
-					Published: doc.PublishedVersionID != nil && *doc.PublishedVersionID == r.ID, PurgedAt: r.PurgedAt})
+					Published: doc.PublishedVersionID != nil && *doc.PublishedVersionID == r.ID, PurgedAt: r.PurgedAt,
+					Text: texts[r.ID]})
 			}
-			return out, err
+			return out, nil
 		},
 	})
 }

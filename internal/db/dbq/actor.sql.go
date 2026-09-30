@@ -86,7 +86,8 @@ func (q *Queries) EndSiteChatByOwner(ctx context.Context, arg EndSiteChatByOwner
 
 const getActor = `-- name: GetActor :one
 SELECT id, kind, display_name, email, status, platform_role, created_by_actor_id, created_at,
-       owner_actor_id, suspended_by_actor_id, site_chat_credential_id, email_verified, login_id, login_id_verified
+       owner_actor_id, suspended_by_actor_id, site_chat_credential_id, email_verified, login_id, login_id_verified,
+       service_scope
 FROM actor
 WHERE id = $1
 `
@@ -111,6 +112,7 @@ func (q *Queries) GetActor(ctx context.Context, id uuid.UUID) (Actor, error) {
 		&i.EmailVerified,
 		&i.LoginID,
 		&i.LoginIDVerified,
+		&i.ServiceScope,
 	)
 	return i, err
 }
@@ -155,7 +157,8 @@ func (q *Queries) GetActorByLoginID(ctx context.Context, lower string) (GetActor
 
 const getActorForShare = `-- name: GetActorForShare :one
 SELECT id, kind, display_name, email, status, platform_role, created_by_actor_id, created_at,
-       owner_actor_id, suspended_by_actor_id, site_chat_credential_id, email_verified, login_id, login_id_verified
+       owner_actor_id, suspended_by_actor_id, site_chat_credential_id, email_verified, login_id, login_id_verified,
+       service_scope
 FROM actor
 WHERE id = $1
 FOR SHARE
@@ -184,6 +187,7 @@ func (q *Queries) GetActorForShare(ctx context.Context, id uuid.UUID) (Actor, er
 		&i.EmailVerified,
 		&i.LoginID,
 		&i.LoginIDVerified,
+		&i.ServiceScope,
 	)
 	return i, err
 }

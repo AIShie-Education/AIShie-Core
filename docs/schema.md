@@ -19,7 +19,8 @@ exact types and constraints.
   (§2.9) is the one thing Core deletes rather than retires: what a person asks to be forgotten
   is gone, and so is what a retention period ends. No other row points at it. An answer's
   draft (§2.8) is no record at all: kept in an unlogged table while the answer is written, and
-  deleted once it is there.
+  deleted once it is there. A version's text version (§2.4) is what its file said, as text, and
+  is deleted with the file when the version is purged.
 - **Who did it**: inside a course, points at `course_member`, so a record carries the role it
   was made under and stays distinct when the same actor is removed and re-added. Creation and
   adding point at `actor`, because the creator may not be a member (an admin, or the system).
@@ -35,7 +36,7 @@ course
  ├ course_member ── member_student_scope / member_assignment_scope
  ├ course_join_link (a way in, as a student, for whoever holds its token)
  ├ grade_component (tree; root = course total)
- ├ document ── document_version
+ ├ document ── document_version ── document_version_text (its file, transcribed)
  ├ assignment ── submission
  ├ action
  ├ grade
@@ -53,7 +54,8 @@ brings its owner's seat with it, and no further (§2.2, Delegates).
 
 Outside the course: `term`, `department`, `actor`, `credential`, `permission_preset`. The platform level has only
 two roles (`root`, `admin`) and a handful of operations — creating courses, registering actors,
-seating the first instructor.
+seating the first instructor. A site service (§2.1, Services) is outside every course too, and
+does one thing across all of them: the transcription service writes documents' text versions.
 
 ## 2. Tables
 
@@ -66,22 +68,24 @@ department(id, name, parent_id null→department, created_at)   -- a tree of the
     check: parent_id ≠ id
     trigger: no department under itself or under one beneath it; at most 8 levels
 
-actor(id, kind [human|agent|system], display_name, email null,
+actor(id, kind [human|agent|system|service], display_name, email null,
       status [active|suspended], platform_role null [root|admin],
       created_by_actor_id null→actor, created_at,
       owner_actor_id null→actor, suspended_by_actor_id null→actor,
       site_chat_credential_id null, email_verified = true,
-      login_id null, login_id_verified = true)
-    unique(lower(email)), unique(lower(login_id))
+      login_id null, login_id_verified = true,
+      service_scope null [document_text])
+    unique(lower(email)), unique(lower(login_id)), unique(service_scope)
     check: owner_actor_id ≠ id;  owner_actor_id set ⇒ kind = 'agent' and no platform_role;
            site_chat_credential_id set ⇒ kind = 'agent';
            not email_verified ⇒ kind = 'human' and email set;
            login_id is 1..64 of [0-9A-Za-z._-];  login_id set ⇒ kind = 'human';
-           not login_id_verified ⇒ kind = 'human' and login_id set
+           not login_id_verified ⇒ kind = 'human' and login_id set;
+           service_scope set ⇔ kind = 'service';  kind = 'service' ⇒ no email, no platform_role
     composite FK (site_chat_credential_id, id) → credential(id, actor_id)
     trigger: the owner is a person (kind = 'human'), and never changes
 
-credential(id, actor_id→actor, kind [password|sso|api_token|session|invite],
+credential(id, actor_id→actor, kind [password|sso|api_token|session|invite|service],
            secret_hash null, provider null, subject null, token_prefix null,
            label null, last_used_at null, expires_at null, revoked_at null, created_at,
            issued_by_actor_id null→actor, must_change = false,
@@ -107,7 +111,9 @@ refused as a respondent in the site.
 So does one refusal outside the database: Core vouches for nobody but a person to a service
 that hosts agents (`POST /v1/auth/assertion`, README), and an agent's token asks in vain.
 So does the rule for who holds which credential, below: a person signs in and holds no API
-token; an agent holds API tokens and never signs in.
+token; an agent holds API tokens and never signs in. So do the refusals of a site service
+(Services, below): it is seated in no course, signs in nowhere, and holds service credentials
+alone; what it may call is read from `service_scope`, never from `kind`.
 
 **An agent a person owns acts only as that person's delegate.** `owner_actor_id` names the
 person. Every seat of the agent that is not removed is a *delegate seat*, whose principal is the
@@ -206,7 +212,7 @@ how a newly registered agent, which never signs in, gets its first token — and
 database access that already implies everything. Like the tools, it refuses the system actor,
 and a person.
 
-`credential` covers five kinds of the same thing. SSO rows hold no secret — `provider` and
+`credential` covers six kinds of the same thing. SSO rows hold no secret — `provider` and
 `subject` identify the account at the identity provider (`polyu-adfs` + UPN). API tokens store a
 hash plus a `token_prefix` so the row can be found before the hash is checked. A browser
 `session` is a short-lived token minted at login and is stored exactly like an API token, so
@@ -216,7 +222,8 @@ there is one verification path and no session table; unlike an API token it must
 (`aisinv_`) and never looked up as a bearer token. It is taken for setting the password, once,
 and revoked as it is; an actor has one live invitation at most. Setting a password some other
 way revokes it too, and so does a change of email: it went to the old one. A person is invited
-who has an email or a login ID to sign in with.
+who has an email or a login ID to sign in with. A `service` credential is a site service's
+(Services, below), stored like an API token under a scheme of its own (`aissvc_`).
 
 **People sign in; API tokens are for agents.** A person holds passwords, identities at a
 provider, invitations and the sessions signing in with them makes, and never an API token: for
@@ -263,6 +270,47 @@ An administrator lists an actor's credentials with `actor.list_credentials` and 
 its agent. Both are held to the rule for acting on an actor: only root reaches the credentials
 of another holder of a platform role, and nobody the system actor's. An agent's owner lists and
 revokes its tokens the same way (`agent.list_credentials`, `agent.revoke_credential`).
+
+**Services.** A site service is a program of the site's that Core gives an identity for one
+thing, and nothing else. There is one: `document_text`, the agent runtime's transcriber, which
+writes documents' text versions (§2.4, Text versions). It is neither a person nor an agent, nor
+a member of any course: an actor of kind `service`, whose `service_scope` says what it is for,
+one for each scope (`actor_service_scope_key`), made by the platform administrator who first
+issues it a credential, and seated in no course (trigger `course_member_not_a_service`). It has
+no email, login ID, platform role or owner, and never signs in. It holds credentials of kind
+`service` and nothing else, and nobody else holds one (`credential_fits_actor_kind`, migration
+0020): a bearer token made as an API token is, under a scheme of its own (`aissvc_`), so that
+one that leaks is known for what it is; each scheme is taken for its own kind of credential
+alone.
+
+What a service may call is its scope's tools (`tool.Gate.Service`), and nobody else calls them.
+It is the first thing asked of every call, before any gate (§3): a service is refused every other
+tool, `not_for_services`, and anyone else its tools, `service_only`, reading `service_scope` as
+the platform's tools read `platform_role`. The Service gate then asks, on every call, that the
+service is active and that the credential the call came with is its own, not revoked and not
+expired, so that revoking one stops the service's next call, and a call of it waiting on the
+queue, at once. Only REST takes the credential, at the routes of the service's tools: every other
+endpoint that takes a credential — signing out, joining a course, being vouched for — refuses it
+(`not_for_services`), and the agents' door (MCP) takes none and does not offer a service's
+tools. Its calls count against the limit on one actor's calls, as anyone's do.
+
+Root and platform administrators, and not a department's, issue a service's credentials
+(`service.issue_credential`, whose token is shown once, kept only as its hash, and in no action,
+result, event or log line), list them (`service.list_credentials`: prefix, label, issuer, last
+use, expiry, whether each is live, and how many text versions each has claimed and not finished)
+and revoke them (`service.revoke_credential`). Each is an action, and news of no course
+(`service.credential_issued`, `service.credential_revoked`). A service holds five live
+credentials at most (`too_many_credentials`): a runtime's, and a new one's while it takes over;
+`replace` revokes the others in the call that issues a new one. Revoking a credential puts what
+it had claimed back in the queue for another. Nothing else manages a service: the `actor.*`
+tools refuse it as they refuse the system actor, `actor.list` leaves it out, and no API token is
+issued for it, by a tool or on the command line (`service_credentials_only`).
+
+A service credential that leaks lets whoever holds it, until it is revoked, read the files of
+the versions it claims — those waiting to be transcribed, each by a URL that lasts fifteen
+minutes — and write the text of those it holds a claim on, but for a text staff have written:
+nothing else, of any course, seat or person. The last claim of each text version says which
+credential made it (`claimed_by_credential_id`, `claimed_at`).
 
 `course.status = 'archived'` refuses every write, from agents included.
 
@@ -382,6 +430,9 @@ the nearest one, and the choice is recorded here so that it is a decision and no
 | Overriding a total, taking the override off, commenting on a total (`grade.override_total`, `.clear_override`, `.comment_total`) | the lower of `perm_grade_submit` and `perm_grade_post` | as a regrade: it writes a total and makes it visible in one step |
 | Course settings, status, department, first instructor | `platform_role`, or an appointment at or above the course's department (§2.10) | outside the course by definition |
 | Purging a document or a version (`document.purge`) | `platform_role`, or an appointment at or above the course's department (§2.10) | removing data is not a seat's to do, and must be possible in an archived course |
+| Reading a version's text version (`document.text`, and `text` in `document.get` and `document.versions`) | what reading the version takes, as `document.get` decides it | it is the version's, as text (§2.4, Text versions) |
+| Writing a text version, or sending it to be transcribed again (`document.text_update`, `.text_retranscribe`) | what writing the document takes: `perm_document_write` for material, instructions and a rubric | it is a change to what the version says, as a new version is |
+| A site service's credentials (`service.*`) | `platform_role` | outside every course (§2.1, Services) |
 | The course's title and description, from a seat in it (`course.update_details`) | `perm_member_manage` | its instructors run the course and name it; its code, section, term, department and status stay with its administrators |
 
 An unposted grade, and a superseded one, is visible only to a member holding `perm_grade_submit`
@@ -779,13 +830,38 @@ document_version(id, document_id→document, seq, body_md null,
                  unique(document_id, seq))
     check: body_md or storage_key present, or purged;  purged: all three purge columns,
            no body_md, storage_key or checksum, a reason of 1..500 characters
-    trigger: append-only, but for being purged, once
+    trigger: append-only, but for being purged, once;
+             a version with a file of material, instructions or a rubric is queued for its text
+             as it is added, and its text is deleted as it is purged
+
+document_version_text(version_id→document_version, document_id, course_id,
+                      status [pending|working|done|failed|skipped], body null,
+                      source null [ai|staff], pages null, model null, reason null,
+                      revision = 1, attempts = 0, backfill = false, queued_at,
+                      lease_id null, claimed_until null,
+                      claimed_by_credential_id null→credential, claimed_at null,
+                      produced_at null, edited_by_member_id null, edited_at null,
+                      created_at, updated_at)
+    composite FKs (version_id, document_id) → document_version(id, document_id),
+                  (document_id, course_id) → document(id, course_id),
+                  (course_id, edited_by_member_id) → course_member(course_id, id)
+    check: body set ⇔ done, and then source set;  body 1 byte..2 MiB;
+           source ai ⇒ model and produced_at;
+           source staff ⇔ edited_by_member_id, with edited_at;
+           reason set ⇔ failed or skipped, 1..500 characters;  model 1..200 characters;
+           pages 1..100000;
+           working ⇔ lease_id, with claimed_until, and the claim's credential and time
+    trigger: only for a version with a file of material, instructions or a rubric, not purged;
+             its version, document, course and creation never change;
+             deleted only when its version is purged
 ```
 
 **Everything readable is a document**, and a version is text, a file in object storage, or
-both. The model reads files directly, so there is no extracted-text step and no separate file
-table. Versions are append-only; an edit is `seq + 1`. The one exception is a purge (below),
-which empties a version and leaves a tombstone in its place.
+both. There is no separate file table. A version with a file of material, instructions or a
+rubric has a text version as well (Text versions, below): its file transcribed into Markdown,
+which every reader of the version reads before the file. Versions are append-only; an edit is
+`seq + 1`. The one exception is a purge (below), which empties a version and leaves a tombstone
+in its place.
 
 Two ways to attach a document, chosen by shape:
 
@@ -861,6 +937,91 @@ version is never published again. A submitted file and a feedback file are their
 and grade's, archived with them and never purged. The file is deleted last, once the rows say
 it is gone; if the call then fails to commit, the file is gone and the rows still name it, and
 the call made again with its key purges them, deleting what is gone already being no error.
+A purged version's text version is deleted with it, by the database, whichever release purges
+it: it is what the file said.
+
+**Text versions.** A version of a course's material, instructions or rubric that has a file has
+a text version (`document_version_text`): the file — slides, a PDF, a Word file — transcribed
+into Markdown by a model the site chooses, each page or slide under a heading of its own
+(`## 第 N 頁`, `## Slide N`), tables, formulas and code as Markdown writes them, each picture or
+diagram described in one bracketed line, nothing invented. Every model then reads the same text,
+a model that reads no files included, and search has something to index. A submitted file and a
+feedback file have none: they are a student's work and a grader's words about it, and are not
+sent to a model for this.
+
+- **Queued as the version is added.** The database records it `pending` in the transaction
+  that adds the version (trigger `document_version_text_queued`), whichever release adds it,
+  and the call that adds it wakes the service (below). Migration 0020 queued what was there
+  already, once, marked `backfill`: the published and the latest version of every document
+  that is not archived, in every course that is not archived. Earlier versions, and those of
+  archived documents and courses, have none until staff ask for one (`document.text_retranscribe`
+  makes it, `pending`); a version of text alone has none.
+- **Where it stands.** `status` is `pending`, waiting its turn; `working`, claimed by the service;
+  `done`, with its text (`body`, at most 2 MiB); `failed` or `skipped`, with `reason` (the
+  service's: a model's error, a file too long, the day's pages spent, a format it does not take,
+  an encrypted file; or Core's own, `attempts_exhausted`). `source` says whose the text is:
+  `ai`, the service's, which says which `model` made it, from how many `pages`, and when
+  (`produced_at`); or `staff`, which says who wrote or last edited it and when
+  (`edited_by_member_id`, `edited_at`). `revision` counts the changes to the text: the service's
+  text, an edit, and discarding it, each add one.
+- **Read as its version is.** Whoever may read the version reads its text, and nobody else: a
+  student the published version's, a member who reads drafts any version's, as `document.get`
+  decides it (`readableVersion`). `document.get` gives it with the version (`version.text`: where
+  it stands, and the text itself when it is one part), `document.versions` each version's without
+  the text, and `document.text` reads it, in parts of at most 64 KiB (65536 bytes): whole pages
+  where they fit, a page being what starts at a heading of the second level, otherwise whole
+  lines, otherwise whole characters, the same text always cut the same way. A reader reads every
+  part of one `revision`.
+- **Written by staff.** Whoever may write the document — `perm_document_write` — writes its text
+  (`document.text_update`, the whole text) or sends it back to be transcribed
+  (`document.text_retranscribe`), each an action like a new version: recorded, replayed by its
+  key, proposed or under review as the writer's level says, refused in an archived course or
+  document. An edit is `source: staff` from then on: no transcription writes over it, and one
+  under way is refused when it finishes. The edit's text is recorded with the action, as a
+  message's body is, for whoever decides or reviews it. Sending it back discards what it said
+  and queues it as an upload is, ahead of the backfill; staff's text only with `discard_edit`
+  (`staff_edit`). Either may name the `base_revision` it was made from, and is refused if the
+  text has changed since (`text_changed`); a proposal is held to the revision it was made about,
+  which it pins when it names none. Writing the text it already is, or sending back a text already
+  waiting its turn, changes nothing (`changed: false`).
+- **News.** A text version's news is its version's: `document.text_updated` for the published
+  version of material or instructions, to whoever reads those; `document.rubric_text_updated`
+  for a published rubric's, to whoever reads rubrics; `document.draft_text_updated` for any other
+  version's, to whoever reads drafts. Instructions and a rubric are filed under each published
+  assignment that refers to them, or under the `_unreleased` names while none does (§2.6). Each
+  is told when the text becomes `done` (the service's, or staff's) and when a text is sent back to
+  be transcribed, with `version_id`, `status`, `source` and `revision`, never the text, so that a
+  runtime drops what it kept and search reads it again.
+
+**The queue.** The transcription service (§2.1, Services) takes what waits and writes it back:
+
+- `document_text.queue` claims up to ten versions at once, across the site, each for the caller
+  alone until its lease runs out (`lease_s`, 60 to 3600 seconds, 600 by default): uploads first,
+  those waiting longest first, then the backfill, the newest first. It hands back each version
+  with its claim's `lease_id` and a download URL for its file that lasts fifteen minutes. Two
+  claims at once never take one version (`FOR UPDATE SKIP LOCKED`). A claim that lapses may be
+  claimed again, by anyone; each claim counts an attempt, and a version claimed five times and
+  not finished is failed, `attempts_exhausted`, rather than claimed again. Nothing in an archived
+  course, or of an archived document, is claimed, and nothing is written back there, as nothing
+  is written in one; it waits until they are open again. The claim is an ephemeral write
+  (`tool.Ephemeral`): no action, no key, no event; the claim itself, on the text version, is the
+  record. With `wait_s` a claim that finds nothing waits, as a read that waits for news does
+  (§2.6, Waiting for news), for a version to be queued anywhere: the calls that queue one notify
+  kind `document_text.queued` at `seq` 0, told by no event, which wakes only such a claim.
+- `document_text.file` gives another URL for the file of a version the caller's claim holds,
+  and `document_text.renew` holds a claim longer, from now; neither is the caller's once the
+  claim no longer holds (`lease_lost`).
+- `document_text.complete` writes back what became of it while the claim holds: `done`, with its
+  text, its page count and the model's name; or `failed` or `skipped`, with why. It is refused,
+  and writes nothing, once staff have written the text (`edited_by_staff`), or once the claim no
+  longer holds (`lease_lost`): it lapsed and was claimed again, the text was sent back to the
+  queue, or the credential that made it was revoked. It is an action of the service's, replayed
+  by its key, which keeps the text out of the action log (`SecretIn`): the text version is where
+  it is kept.
+
+A request that carries a whole text (`document.text_update`, `document_text.complete`) may be up
+to 5 MiB over REST, where every other call's is at most 1 MiB; the agents' door takes 4 MiB, as
+for any call.
 
 ### 2.5 Assignments and submissions
 
@@ -1014,32 +1175,35 @@ it, and nobody else (§2.8). Then scope, per row, as below.
 
 **Waiting for news.** A reader that would poll may wait instead. `conversation.inbox`,
 `conversation.messages` and `event.list` take `wait_s`, 0 to 25 seconds, 0 by default, which is
-the call as it always was. A call that finds nothing new (an empty inbox; no message after
-`after_seq`, the conversation standing as it did; no event after `since_seq` that the caller may
-see) waits up to `wait_s`, holding no transaction and no connection, until something it would
-read is committed. It then reads again, authorized again as the first time, and answers if it
-finds something; if not, it waits on. When its time is up it reads once more and answers with
-that. Whatever flushes events also calls `pg_notify('aishie_wake', …)` in the same
-transaction (`events.Flush`, query `NotifyWake`), once for each course, event type, and
-conversation or proposal, at the newest `seq`: `course_id`, `kind` (the event type) and
-`seq`, and, for news of a conversation or of a proposal whose target is one, `conversation_id`,
-`opener_member_id` and `respondent_member_id`. That is a few hundred bytes, well under the 8000
-a notification may carry. PostgreSQL delivers it when the transaction commits, never when it
-rolls back, to every instance listening. Each instance keeps one connection of its own on the
-channel (`wake.Listener`, `application_name` `aishie-core wake`). The listener reconnects with
-backoff, and each time it listens again it wakes every waiting call, since it heard nothing
-meanwhile. It hands each notification to the calls waiting in its process (`wake.Hub`). An
-inbox is woken by news, in its course, of a message or a decided proposal in a conversation
-addressed to the seat. A reader of a conversation is woken by any news of it: a message, a
-retraction, an answer proposed or decided, its closing. A feed is woken by any news of its
-course. A notification says where to look and never what is there, so one that is lost costs a
-wait its time and never an answer. A wait is one call to the rate limit. A call past
-`LONG_POLL_WAITERS` waiting calls in its process (1000), or past
+the call as it always was, and so does the transcription service's claim on its queue
+(`document_text.queue`, §2.4), which waits for something to claim. A call that finds nothing new
+(an empty inbox; no message after `after_seq`, the conversation standing as it did; no event
+after `since_seq` that the caller may see) waits up to `wait_s`, holding no transaction and no
+connection, until something it would read is committed. It then reads again, authorized again as
+the first time, and answers if it finds something; if not, it waits on. When its time is up it
+reads once more and answers with that. Whatever flushes events also calls
+`pg_notify('aishie_wake', …)` in the same transaction (`events.Flush`, query `NotifyWake`), once
+for each course, event type, and conversation or proposal, at the newest `seq`: `course_id`,
+`kind` (the event type) and `seq`, and, for news of a conversation or of a proposal whose target
+is one, `conversation_id`, `opener_member_id` and `respondent_member_id`. That is a few hundred
+bytes, well under the 8000 a notification may carry. PostgreSQL delivers it when the transaction
+commits, never when it rolls back, to every instance listening. Each instance keeps one
+connection of its own on the channel (`wake.Listener`, `application_name` `aishie-core wake`).
+The listener reconnects with backoff, and each time it listens again it wakes every waiting
+call, since it heard nothing meanwhile. It hands each notification to the calls waiting in its
+process (`wake.Hub`). An inbox is woken by news, in its course, of a message or a decided
+proposal in a conversation addressed to the seat. A reader of a conversation is woken by any
+news of it: a message, a retraction, an answer proposed or decided, its closing. A feed is woken
+by any news of its course. The service's claim is woken by a version queued in any course: kind
+`document_text.queued`, at `seq` 0 and told by no event, which the calls that queue one notify,
+and which wakes nothing else. A notification says where to look and never what is there, so one
+that is lost costs a wait its time and never an answer. A wait is one call to the rate limit. A
+call past `LONG_POLL_WAITERS` waiting calls in its process (1000), or past
 `LONG_POLL_WAITERS_PER_ACTOR` of one actor's (16), answers at once, as does one on a server
 shutting down. A wait ends when its client goes. `conversation.messages` also takes
 `seen_state`, the state its reader last saw: a conversation now in another state answers at
-once, though nothing was written, so that a change between two calls is not missed. An
-answer's draft reaches its readers by the same wake-up (§2.8): each write kept notifies kind
+once, though nothing was written, so that a change between two calls is not missed. An answer's
+draft reaches its readers by the same wake-up (§2.8): each write kept notifies kind
 `conversation.draft` at `seq` 0, which wakes only a reader of the conversation that gives
 `seen_draft_version`, never an inbox or a feed.
 
@@ -1738,13 +1902,16 @@ authorize(actor, course, action_type, target) → autonomy_level
 6. return level
 ```
 
-Before any of it, a caller whose live password is one someone else set (`must_change`, §2.1) is
-refused every call but setting their own (`credential.set_password`), denied with reason
-`password_change_required`, whatever credential the call comes with and whatever the caller
-holds; a write so refused is recorded, as a suspended actor's is. It is read with the actor
-(`GetActorForAuthz`), and only ever takes away. It is the caller's own call that is refused:
-approving a proposal the person made before is someone else's call, re-authorized against their
-seat as any is.
+Before any of it, a site service (§2.1, Services) is refused every call but its own tools'
+(`not_for_services`), and anyone else those tools (`service_only`), reading `service_scope` as
+the platform's tools read `platform_role`; its own tools then ask that it is active and that the
+credential of the call is its own and live, on every call. A caller whose live password is one
+someone else set (`must_change`, §2.1) is refused every call but setting their own
+(`credential.set_password`), denied with reason `password_change_required`, whatever credential
+the call comes with and whatever the caller holds; a write so refused is recorded, as a
+suspended actor's is. It is read with the actor (`GetActorForAuthz`), and only ever takes away.
+It is the caller's own call that is refused: approving a proposal the person made before is
+someone else's call, re-authorized against their seat as any is.
 
 A denial at step 3 gives `permission_denied`, unless the tool knows a reason that tells more
 (`tool.Gate.Refusal`): a person denied `conversation_answer`, as every person is, is told
@@ -1775,13 +1942,14 @@ its principal's KEY SHARE before it; and removing a principal holds it FOR UPDAT
 removes its delegates. Every path that takes both therefore meets the other at the principal
 first.
 
-Platform-level operations (`actor.register`, terms, presets) check `actor.platform_role`
-instead. That is the only place it is read. The operations a department's administrators share
-with platform administrators (§2.10: `course.create`, seating the first instructor, the tree)
-are gated by either: a platform role, anywhere, or an appointment at or above the department the
-call is about, looked up only for an actor who holds one, and only once the call has said which
-department it is about. Both are recorded on the action (`authority`), and neither reaches inside a course. For
-a course, what the call is about is the course's department.
+Platform-level operations (`actor.register`, terms, presets, a service's credentials) check
+`actor.platform_role` instead. That is the only place it is read. The operations a department's
+administrators share with platform administrators (§2.10: `course.create`, seating the first
+instructor, the tree) are gated by either: a platform role, anywhere, or an appointment at or
+above the department the call is about, looked up only for an actor who holds one, and only once
+the call has said which department it is about. Both are recorded on the action (`authority`),
+and neither reaches inside a course. For a course, what the call is about is the course's
+department.
 
 Whether an agent takes conversations in the site (§2.8) is no part of `authorize()`. It grants
 nothing, and is asked of the respondent, not of the caller: once `authorize()` has let a member
@@ -1857,6 +2025,12 @@ respondent's `conversation_answer` decides is who is shown its text.
 | A department is never under itself or under a department beneath it; the tree is at most 8 levels deep | CHECK `department_not_own_parent`, trigger `department_tree_valid` |
 | A department's administrator is a person, appointed by someone else, at most once at a time per department; an appointment is kept as written and ended once, saying by whom | trigger `department_admin_guarded`, CHECKs and a partial unique index on `department_admin` |
 | An action's capacity is `platform`, `department` or none, and only `department` names a department | `action_authority_valid`, `action_authority_dept_fk` |
+| A site service has a scope, one for each scope, and no email or platform role; only a service has a scope | CHECKs `actor_service_is_scoped`, `actor_service_scope_valid`, `actor_service_holds_no_account`, unique index `actor_service_scope_key` |
+| A service holds service credentials and nothing else, and nobody else holds one: none written, moved, changed in kind or brought back live otherwise | trigger `credential_fits_actor_kind` on `credential` |
+| A service is seated in no course | trigger `course_member_not_a_service` |
+| A version with a file of material, instructions or a rubric has a text version from the transaction that adds it, whichever release adds it; a purge deletes it with the file | triggers `document_version_text_queued`, `document_version_text_purged` on `document_version` |
+| A text version is of a version with a file of material, instructions or a rubric, not purged, in its document's course, and stays so; it is deleted only when its version is purged | composite FKs, trigger `document_version_text_guarded` |
+| A text version's shape: a text exactly when done, at most 2 MiB, saying whose; the service's says its model and when, staff's who and when; failed and skipped say why; a claim holds a lease, made by a credential | CHECKs on `document_version_text` |
 
 **Enforced by the application.** Each is a place a bug can hide, and each needs a test.
 
@@ -2099,6 +2273,21 @@ respondent's `conversation_answer` decides is who is shown its text.
   call after finds it ended.
 - A department administrator's invitation opens an account that reaches nothing beyond what
   they administer, when it is made and again when it is taken up (§2.10).
+- A site service calls its own tools and nothing else, and nobody else calls them
+  (`authz.Services`, first of every call); its tools ask on every call that its credential is
+  still live, so that a revocation stops a call waiting on the queue as well as the next one.
+  Its credential is taken at its tools' REST routes alone: refused by every other endpoint, and
+  by the agents' door. A service is managed by the `service.*` tools alone: refused by
+  `actor.*`, never seated, never issued an API token (§2.1, Services).
+- A text version is read by whoever may read its version, as `document.get` decides it
+  (`readableVersion`), and by nobody else (§2.4, Text versions).
+- A text version's changes take turns: staff's hold the document and then the text version, the
+  service's the document `FOR SHARE` and then the text version, a claim takes it `SKIP LOCKED`.
+  The service writes back only while its claim holds it and staff have not written it; staff's
+  text is discarded only with `discard_edit`; a change made from a revision is refused once the
+  text has another (`text_changed`), a proposal held to the revision it was made about.
+- Nothing is claimed, or written back, in an archived course or of an archived document; a
+  version claimed five times and not finished is failed (`attempts_exhausted`).
 - `actor.kind` and `course_member.role` are never read by authorization.
 
 ## 5. Worked example: an agent grades an essay
@@ -2132,7 +2321,10 @@ garbage in the grades, full record in the log.
   would use.
 - **Full-text search** of course content. `to_tsvector('simple')` does not segment Chinese or
   Japanese, so it was dropped rather than shipped broken. Needs `pg_bigm`/PGroonga or
-  application-side segmentation, which memory's search does for itself (§2.9).
+  application-side segmentation, which memory's search does for itself (§2.9). Text versions
+  (§2.4) are what it would index, and their news says when to index them again.
+- **Transcribing students' files.** A submitted file and a feedback file have no text version:
+  sending a student's work to a model the site chose is a decision of its own.
 - **JIT provisioning** on first SSO login.
 - **Organisation hierarchy** above `department`; cross-course administrative roles beyond
   `platform_role`.

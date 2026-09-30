@@ -40,7 +40,7 @@ func buildArgs(t tool.Tool, r *http.Request) ([]byte, error) {
 			args[name] = coerce(propertySchema(t, name), values)
 		}
 	} else {
-		body, err := io.ReadAll(http.MaxBytesReader(nil, r.Body, maxBodyBytes))
+		body, err := io.ReadAll(http.MaxBytesReader(nil, r.Body, max(maxBodyBytes, t.MaxRequestBytes)))
 		if err != nil {
 			return nil, err
 		}

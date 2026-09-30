@@ -45,16 +45,17 @@ func init() {
 // included, needs an idempotency key, and may become a proposal. A Read is
 // authorized, scope included, and leaves no action row.
 //
-// An Ephemeral tool changes state that is not worth an action: short-lived,
-// written many times a second, and lost without harm, as an answer's draft
-// is while it is written (conversation.draft). It is authorized as a Write
-// is, scope included, its caller's seat held and an archived course refused,
-// and is then carried out at once, in a transaction of its own, whatever
-// level above denied its caller holds: nothing it does waits for anyone. It
-// is recorded nowhere: no action row, no idempotency key, no proposal, no
-// event. A call of one that is carried out is not counted against its
-// caller's rate limit (the adapters give it back), so the tool bounds its
-// own rate.
+// An Ephemeral tool changes state that is not worth an action: short-lived
+// and lost without harm, as an answer's draft is while it is written
+// (conversation.draft), or a claim on a text version to transcribe, which
+// lapses (document_text.queue). It is authorized as a Write is, scope
+// included, its caller's seat held and an archived course refused, and is
+// then carried out at once, in a transaction of its own, whatever level
+// above denied its caller holds: nothing it does waits for anyone's
+// decision. It is recorded nowhere: no action row, no idempotency key, no
+// proposal, no event. One written many times a second bounds its own rate
+// (Spec.BoundsOwnRate), and a call of it that is carried out is not counted
+// against its caller's rate limit.
 type Kind int
 
 const (
@@ -63,8 +64,8 @@ const (
 	Ephemeral
 )
 
-// Gate says who may call a tool. Exactly one of Perms, Platform, Admin and
-// Self is set.
+// Gate says who may call a tool. Exactly one of Perms, Platform, Admin, Self
+// and Service is set.
 type Gate struct {
 	// Perms are course permissions; the call runs at the lowest of their
 	// levels on the caller's membership. The tool's input carries course_id.
@@ -87,6 +88,13 @@ type Gate struct {
 	Admin bool
 	// Self marks a tool where an actor acts on its own account.
 	Self bool
+	// Service names the site service whose tool this is
+	// (domain.ServiceDocumentText): only that service calls it, with a live
+	// credential of its own, and a service calls nothing that is not its own
+	// (authz.Services). Like Platform, it is allowed outright or not at all.
+	// A service's tools are called over REST only: the agents' door takes no
+	// service's credential, and does not offer them.
+	Service string
 	// OwnAgents, with Perms, is what an agent's owner may do about their own
 	// agents whatever Perms give them: once the target is resolved, the
 	// pipeline asks it, for a caller whose seat counts and whom Perms deny
@@ -223,6 +231,13 @@ type Spec[In, Out any] struct {
 	// OnArchived lets a Write act on an archived course. Nothing may, except
 	// what changes whether it is archived.
 	OnArchived bool
+	// BoundsOwnRate marks an Ephemeral tool written many times a second,
+	// which bounds its own rate: a call of it that is carried out is given
+	// back to its caller's rate limit by the adapters.
+	BoundsOwnRate bool
+	// MaxRequestBytes, when set, is the most a REST request for the tool may
+	// carry, beyond the default, for a tool that takes a long text.
+	MaxRequestBytes int64
 	// SetsOwnPassword marks the one tool a person whose password someone
 	// else set may call before they have set their own: setting it. Every
 	// other call of theirs is refused (password_change_required).
@@ -263,8 +278,9 @@ type Spec[In, Out any] struct {
 	// Execute is set for a Write and an Ephemeral tool, Query for a Read.
 	Execute func(ctx context.Context, ec *ExecCtx, in In) (Out, error)
 	Query   func(ctx context.Context, rc *ReadCtx, in In) (Out, error)
-	// Wait, for a Read whose input embeds CanWait, is what a call that asks
-	// to wait (wait_s) waits for when it finds nothing new.
+	// Wait, for a Read or an Ephemeral tool whose input embeds CanWait, is
+	// what a call that asks to wait (wait_s) waits for when it finds nothing
+	// new: nothing to read, or nothing to claim.
 	Wait *Waiting[In, Out]
 }
 
@@ -279,7 +295,10 @@ const MaxWaitSeconds = 25
 // it would read is committed, or wait_s is up; it then reads again, as it
 // read the first time, and answers with that. A call that finds something
 // answers at once, and so does one past the server's bounds on how many calls
-// wait (package wake), whatever wait_s says.
+// wait (package wake), whatever wait_s says. An Ephemeral tool that takes
+// what waits for it, a claim on the queue, waits the same way when there is
+// nothing to take, and is carried out again, as the first time, once there
+// may be.
 type CanWait struct {
 	WaitS int `json:"wait_s,omitempty" jsonschema:"seconds to wait, 0 to 25, when there is nothing new: the call answers as soon as there is, or when the time is up, with whatever there is then; 0, the default, answers at once"`
 }
@@ -288,10 +307,11 @@ func (c CanWait) waitSeconds() int { return c.WaitS }
 
 type waitable interface{ waitSeconds() int }
 
-// Waiting is what a call of a Read that can wait waits for.
+// Waiting is what a call of a Read, or an Ephemeral tool, that can wait
+// waits for.
 type Waiting[In, Out any] struct {
 	// For is the news that wakes the call: rc is the caller's, as the first
-	// read authorized it.
+	// call authorized it.
 	For func(rc *ReadCtx, in In) wake.Filter
 	// Nothing says whether what the call read, now, is nothing new to its
 	// caller: nothing past the cursor in, and nothing changed since the
@@ -309,6 +329,9 @@ type Tool struct {
 	Internal    bool
 	Unlisted    bool
 	OnArchived  bool
+	// BoundsOwnRate and MaxRequestBytes are Spec's.
+	BoundsOwnRate   bool
+	MaxRequestBytes int64
 	// SetsOwnPassword is Spec.SetsOwnPassword.
 	SetsOwnPassword bool
 	// OwnerJudgedBy is Spec.OwnerJudgedBy.
@@ -328,7 +351,7 @@ type Tool struct {
 	Pin      func(ctx context.Context, q dbq.Querier, m *domain.Member, now time.Time, in any) (any, error)
 	Execute  func(ctx context.Context, ec *ExecCtx, in any) (any, error)
 	Query    func(ctx context.Context, rc *ReadCtx, in any) (any, error)
-	// WaitSeconds, set for a Read that can wait, is what the call asks for
+	// WaitSeconds, set for a tool that can wait, is what the call asks for
 	// (wait_s); WaitFor and WaitNothing are Spec.Wait's.
 	WaitSeconds func(in any) int
 	WaitFor     func(rc *ReadCtx, in any) wake.Filter
@@ -391,8 +414,11 @@ func Define[In, Out any](s Spec[In, Out]) Tool {
 	if s.Gate.Self {
 		gates++
 	}
+	if s.Gate.Service != "" {
+		gates++
+	}
 	if gates != 1 && !s.Internal {
-		fail("exactly one of Gate.Perms, Gate.Platform, Gate.Admin and Gate.Self must be set")
+		fail("exactly one of Gate.Perms, Gate.Platform, Gate.Admin, Gate.Self and Gate.Service must be set")
 	}
 	if s.Unlisted && (s.Internal || s.HTTP.Pattern != "") {
 		fail("an Unlisted tool is not Internal, and has no route of its own")
@@ -437,6 +463,9 @@ func Define[In, Out any](s Spec[In, Out]) Tool {
 	default:
 		fail("unknown kind %d", s.Kind)
 	}
+	if s.BoundsOwnRate && s.Kind != Ephemeral {
+		fail("only an Ephemeral tool bounds its own rate")
+	}
 	if s.Resolve == nil {
 		fail("Resolve is required")
 	}
@@ -449,8 +478,8 @@ func Define[In, Out any](s Spec[In, Out]) Tool {
 	if canWait != (s.Wait != nil) {
 		fail("input must embed tool.CanWait exactly when the tool says what it waits for (Wait)")
 	}
-	if s.Wait != nil && (s.Kind != Read || s.Wait.For == nil || s.Wait.Nothing == nil) {
-		fail("only a Read waits, and its Wait says both For and Nothing")
+	if s.Wait != nil && (s.Kind == Write || s.Wait.For == nil || s.Wait.Nothing == nil) {
+		fail("only a Read or an Ephemeral tool waits, and its Wait says both For and Nothing")
 	}
 
 	inSchema, err := jsonschema.For[In](schemaOptions)
@@ -485,6 +514,7 @@ func Define[In, Out any](s Spec[In, Out]) Tool {
 	t := Tool{
 		Name: s.Name, Description: s.Description, Kind: s.Kind, Gate: s.Gate, HTTP: s.HTTP,
 		Internal: s.Internal, Unlisted: s.Unlisted, OnArchived: s.OnArchived, SetsOwnPassword: s.SetsOwnPassword,
+		BoundsOwnRate: s.BoundsOwnRate, MaxRequestBytes: s.MaxRequestBytes,
 		OwnerJudgedBy: s.OwnerJudgedBy, SecretIn: s.SecretIn, SecretOut: s.SecretOut,
 		InputSchema: inSchema, OutputSchema: outSchema,
 	}

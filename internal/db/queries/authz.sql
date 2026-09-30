@@ -9,7 +9,9 @@
 -- set (member.reset_password), which they must change before anything else.
 -- Only a password is marked so (credential_must_change_is_an_issued_password),
 -- so the mark alone finds it.
-SELECT a.id, a.display_name, a.status, a.platform_role,
+-- service_scope: what a site service is for (docs/schema.md §2.1), which
+-- gates its tools, and it nothing else.
+SELECT a.id, a.display_name, a.status, a.platform_role, a.service_scope,
        EXISTS (SELECT 1 FROM department_admin da WHERE da.actor_id = a.id AND da.removed_at IS NULL) AS administers,
        EXISTS (SELECT 1 FROM credential c
                WHERE c.actor_id = a.id AND c.must_change AND c.revoked_at IS NULL) AS password_change_required
@@ -178,3 +180,15 @@ WHERE member_id = $1 AND student_member_id = ANY(sqlc.arg(student_member_ids)::u
 SELECT count(*)
 FROM member_assignment_scope
 WHERE member_id = $1 AND assignment_id = ANY(sqlc.arg(assignment_ids)::uuid[]);
+
+-- name: CredentialLive :one
+-- Whether the credential a call came with is still the actor's, not revoked
+-- and not expired: asked on every call of a site service's (tool.Gate.Service),
+-- so that revoking its credential stops a call that waits, as well as the
+-- next one. A service holds service credentials and nothing else
+-- (credential_fits_actor_kind).
+SELECT EXISTS (
+    SELECT 1 FROM credential c
+    WHERE c.id = sqlc.arg(credential_id) AND c.actor_id = sqlc.arg(actor_id) AND c.revoked_at IS NULL
+      AND (c.expires_at IS NULL OR c.expires_at > sqlc.arg(now))
+);

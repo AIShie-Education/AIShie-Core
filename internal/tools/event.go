@@ -93,6 +93,12 @@ var visibility = map[string][]domain.Perm{
 	EventSubmissionFileUpdated: {domain.PermSubmissionRead}, EventSubmissionFileRestored: {domain.PermSubmissionRead},
 	EventFeedbackFileUpdated: {domain.PermGradeSubmit, domain.PermGradePost}, EventFeedbackFileRestored: {domain.PermGradeSubmit, domain.PermGradePost},
 
+	// A text version's news is its version's: of the published version for
+	// whoever reads that kind of document, of any other for those who read
+	// drafts.
+	EventTextUpdated: {domain.PermDocumentRead}, EventRubricTextUpdated: {domain.PermRubricRead},
+	EventDraftTextUpdated: {domain.PermDocumentReadDraft},
+
 	// Instructions and a rubric are their assignment's. News of them is filed
 	// under each published assignment that refers to them, for scope to
 	// apply, and until there is one it goes by these names instead: an
@@ -102,6 +108,8 @@ var visibility = map[string][]domain.Perm{
 	EventDocumentPublishedUnreleased: {domain.PermAssignmentWrite}, EventRubricPublishedUnreleased: {domain.PermAssignmentWrite},
 	EventDocumentArchivedUnreleased: {domain.PermAssignmentWrite}, EventDocumentUpdatedUnreleased: {domain.PermAssignmentWrite},
 	EventDocumentUnarchivedUnreleased: {domain.PermAssignmentWrite}, EventDocumentPurgedUnreleased: {domain.PermAssignmentWrite},
+	EventTextUpdatedUnreleased: {domain.PermAssignmentWrite}, EventRubricTextUpdatedUnreleased: {domain.PermAssignmentWrite},
+	EventDraftTextUpdatedUnreleased: {domain.PermAssignmentWrite},
 
 	// A conversation's news is for its two participants and nobody else,
 	// whoever holds what: event.list shows it by the participant rule
@@ -117,6 +125,7 @@ var visibility = map[string][]domain.Perm{
 	EventActorSuspended: nil, EventActorReactivated: nil, EventAgentCreated: nil,
 	EventDepartmentCreated: nil, EventDepartmentUpdated: nil, EventDepartmentMoved: nil,
 	EventDepartmentAdminAdded: nil, EventDepartmentAdminRemoved: nil,
+	EventServiceCredentialIssued: nil, EventServiceCredentialRevoked: nil,
 }
 
 // KnownEventTypes lists every event type that has a visibility rule.

@@ -63,6 +63,11 @@ const (
 	// A call by a person whose password someone else set, other than
 	// setting their own (tool.Spec.SetsOwnPassword).
 	ReasonPasswordChangeRequired Reason = "password_change_required"
+	// A call of a site service's tool by anyone but that service, with a
+	// credential of its own that is live (tool.Gate.Service).
+	ReasonServiceOnly Reason = "service_only"
+	// A call by a site service of anything but its own tools.
+	ReasonNotForServices Reason = "not_for_services"
 )
 
 // Decision is the result of a check. Member is set whenever a membership row
@@ -405,7 +410,42 @@ func LoadActor(ctx context.Context, q dbq.Querier, id uuid.UUID) (domain.Actor, 
 	if row.PlatformRole != nil {
 		a.PlatformRole = *row.PlatformRole
 	}
+	if row.ServiceScope != nil {
+		a.Service = *row.ServiceScope
+	}
 	return a, nil
+}
+
+// Services is the first thing asked of every call: a site service calls its
+// own tools and nothing else, and nobody else calls them. gate is the
+// service the tool is for, "" for any other tool. It is actor.service_scope,
+// never kind, that is read, as platform_role is for the platform's tools.
+func Services(actor domain.Actor, gate string) Reason {
+	switch {
+	case actor.Service == gate:
+		return ReasonNone
+	case actor.Service != "":
+		return ReasonNotForServices
+	}
+	return ReasonServiceOnly
+}
+
+// Service gates a site service's tools, once Services has let the call
+// through: the service is active, and the call came with a credential of
+// its own that is live now, which is asked on every call, so that revoking
+// it stops even a call that is waiting.
+func Service(ctx context.Context, q dbq.Querier, actor domain.Actor, credential uuid.UUID, now time.Time) (Decision, error) {
+	if !actor.Active() {
+		return deny(ReasonActorNotActive, nil), nil
+	}
+	live, err := q.CredentialLive(ctx, dbq.CredentialLiveParams{CredentialID: credential, ActorID: actor.ID, Now: &now})
+	if err != nil {
+		return Decision{}, fmt.Errorf("service credential: %w", err)
+	}
+	if !live {
+		return deny(ReasonServiceOnly, nil), nil
+	}
+	return Decision{Level: domain.Autonomous}, nil
 }
 
 // ScopeFilter is a member's scope in the shape list queries take it, so that

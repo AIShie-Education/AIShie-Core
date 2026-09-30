@@ -28,12 +28,22 @@ import (
 // bounds reached, or no hub — answers what it first read. Either way it is
 // one call, as the rate limit counts it.
 func (p *Pipeline) invokeRead(ctx context.Context, caller Caller, t tool.Tool, in any) (Outcome, error) {
+	return p.waitFor(ctx, t, in, func(before func(*tool.ReadCtx)) (Outcome, any, error) {
+		return p.read(ctx, caller, t, in, before)
+	})
+}
+
+// waitFor makes a call that can wait (tool.CanWait): once, if it does not ask
+// to wait, and otherwise until it finds something or its time is up. once
+// makes it once, calling before, when given, once it is authorized and
+// before it queries.
+func (p *Pipeline) waitFor(ctx context.Context, t tool.Tool, in any, once func(before func(*tool.ReadCtx)) (Outcome, any, error)) (Outcome, error) {
 	var wait time.Duration
 	if t.WaitSeconds != nil && p.cfg.Wake != nil {
 		wait = time.Duration(t.WaitSeconds(in)) * time.Second
 	}
 	if wait <= 0 {
-		out, _, err := p.read(ctx, caller, t, in, nil)
+		out, _, err := once(nil)
 		return out, err
 	}
 	until := time.Now().Add(wait)
@@ -47,16 +57,16 @@ func (p *Pipeline) invokeRead(ctx context.Context, caller Caller, t tool.Tool, i
 			w.Close()
 		}
 	}()
-	// The first read subscribes once it is authorized and before it
+	// The first call subscribes once it is authorized and before it
 	// queries, so that whatever is committed after its query looked wakes
-	// the call.
+	// it.
 	subscribe := func(rc *tool.ReadCtx) {
 		if first == nil && w == nil {
 			w, _ = p.cfg.Wake.Subscribe(rc.Actor.ID, t.WaitFor(rc, in))
 		}
 	}
 	for final := false; ; {
-		out, res, err := p.read(ctx, caller, t, in, subscribe)
+		out, res, err := once(subscribe)
 		if err != nil || out.Status != domain.StatusExecuted || w == nil || final {
 			return out, err
 		}
@@ -90,7 +100,7 @@ func (p *Pipeline) read(ctx context.Context, caller Caller, t tool.Tool, in any,
 	if err != nil {
 		return Outcome{}, nil, err
 	}
-	a, err := p.authorize(ctx, q, t, in, actor, nil, now)
+	a, err := p.authorize(ctx, q, t, in, actor, caller.CredentialID, nil, now)
 	if err != nil {
 		return Outcome{}, nil, err
 	}

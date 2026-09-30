@@ -27,6 +27,7 @@ const (
 	KindAPIToken = "api_token"
 	KindSession  = "session"
 	KindInvite   = "invite"
+	KindService  = "service"
 
 	DefaultSessionTTL = 12 * time.Hour
 )
@@ -69,28 +70,44 @@ var (
 	errAgentSignsIn = apperr.New(apperr.Unauthenticated, agentsUseTokens).With("reason", ReasonAgentsUseTokens)
 )
 
+// ReasonServiceCredentialsOnly refuses a site service anything but a
+// service credential (service.issue_credential).
+const ReasonServiceCredentialsOnly = "service_credentials_only"
+
+// ErrServiceCredentialsOnly refuses a site service an API token, a password,
+// an invitation or an identity at a provider, whoever asks.
+var ErrServiceCredentialsOnly = apperr.Forbid("a site service holds service credentials only, issued with "+
+	"service.issue_credential, and never signs in").With("reason", ReasonServiceCredentialsOnly)
+
 // MayHoldToken says whether an actor of the given kind may be issued an API
 // token: an agent may, and nobody else. A person is refused
-// ErrTokensForAgents; the system actor, whose token would act as the sweeps
-// do and could take their idempotency keys before them, is refused too.
-// It reads kind to refuse, never to grant.
+// ErrTokensForAgents; a site service ErrServiceCredentialsOnly; the system
+// actor, whose token would act as the sweeps do and could take their
+// idempotency keys before them, is refused too. It reads kind to refuse,
+// never to grant.
 func MayHoldToken(kind string) error {
 	switch kind {
 	case "agent":
 		return nil
 	case "system":
 		return apperr.Forbid("the system actor is never issued a token")
+	case "service":
+		return ErrServiceCredentialsOnly
 	}
 	return ErrTokensForAgents
 }
 
 // MaySignIn says whether an actor of the given kind may be given a way to
 // sign in: a password, an invitation to choose one, or an identity at a
-// provider. A person may; an agent is refused ErrAgentsUseTokens. The
-// system actor is refused by whatever reaches it first, as ever.
+// provider. A person may; an agent is refused ErrAgentsUseTokens, a site
+// service ErrServiceCredentialsOnly. The system actor is refused by
+// whatever reaches it first, as ever.
 func MaySignIn(kind string) error {
-	if kind == "agent" {
+	switch kind {
+	case "agent":
 		return ErrAgentsUseTokens
+	case "service":
+		return ErrServiceCredentialsOnly
 	}
 	return nil
 }
@@ -99,9 +116,13 @@ func MaySignIn(kind string) error {
 type Principal struct {
 	ActorID      uuid.UUID
 	CredentialID uuid.UUID
-	Kind         string // api_token or session
+	Kind         string // api_token, session or service
 	ExpiresAt    *time.Time
 }
+
+// Service says the caller is a site service, by a credential of its own:
+// what it presents is taken at its service's tools alone.
+func (p Principal) Service() bool { return p.Kind == KindService }
 
 // errUnauthenticated is deliberately one message for every way a credential
 // can be wrong: unknown, revoked, expired or mismatched. The difference is
@@ -134,11 +155,16 @@ func (a *Authenticator) SetClock(now func() time.Time) { a.now = now }
 // revoked them or written since past the database: it is refused with its
 // reason, api_tokens_are_for_agents, revoked or not, since whoever presents
 // it holds the whole secret and is no guesser, and a script left with one is
-// told what to do instead.
+// told what to do instead. A site service's credential is presented under a
+// scheme of its own ("aissvc_"), and each scheme is taken for its own kind
+// of credential alone.
 func (a *Authenticator) Authenticate(ctx context.Context, presented string) (Principal, error) {
-	prefix, ok := parsePrefix(presented)
-	if !ok {
-		return Principal{}, errUnauthenticated
+	prefix, service := parseServicePrefix(presented)
+	if !service {
+		var ok bool
+		if prefix, ok = parsePrefix(presented); !ok {
+			return Principal{}, errUnauthenticated
+		}
 	}
 	q := dbq.New(a.pool)
 	cred, err := q.GetCredentialByPrefix(ctx, &prefix)
@@ -151,6 +177,9 @@ func (a *Authenticator) Authenticate(ctx context.Context, presented string) (Pri
 	now := a.now()
 	switch {
 	case cred.SecretHash == nil || !tokenMatches(presented, *cred.SecretHash):
+		return Principal{}, errUnauthenticated
+	case service != (cred.Kind == KindService), service && cred.ActorKind != "service":
+		// Held by the database as well (credential_fits_actor_kind).
 		return Principal{}, errUnauthenticated
 	case cred.Kind == KindAPIToken && cred.ActorKind == "human":
 		return Principal{}, errTokenOfAPerson

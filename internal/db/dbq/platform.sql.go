@@ -354,7 +354,7 @@ SELECT a.id, a.kind, a.display_name, a.email, a.status, a.platform_role, a.creat
 FROM actor a
 LEFT JOIN credential i ON i.actor_id = a.id AND i.kind = 'invite' AND i.revoked_at IS NULL
 LEFT JOIN actor o ON o.id = a.owner_actor_id
-WHERE a.id > $1 AND a.kind <> 'system'
+WHERE a.id > $1 AND a.kind NOT IN ('system', 'service')
   AND ($2::text IS NULL OR a.kind = $2)
   AND ($3::text IS NULL OR a.status = $3)
   AND ($4::uuid IS NULL OR a.owner_actor_id = $4)
@@ -396,7 +396,8 @@ type ListActorsRow struct {
 }
 
 // Everyone registered, as GetActorView sees them: people and agents, not the
-// system actor, which nobody registers or manages. The search is a piece of
+// system actor, which nobody registers or manages, nor a service, whose
+// credentials are listed with service.list_credentials. The search is a piece of
 // the name, of the email or of the login ID, in any case, taken as it is:
 // strpos has no wildcards to escape.
 func (q *Queries) ListActors(ctx context.Context, arg ListActorsParams) ([]ListActorsRow, error) {
