@@ -55,11 +55,15 @@ import (
 // action log shows it to whoever decides actions in the course, unscoped, as
 // it shows every proposal (docs/schema.md §7). The events say only that
 // something was written, and only to the two participants.
+//
+// A message may carry files, uploaded first and named in the call that
+// writes it (attachment.go): part of the message, and read as it is.
 
 func conversationTools(d Deps) []tool.Tool {
-	return []tool.Tool{conversationRespondents(), conversationOpen(), conversationAsk(), conversationAnswer(),
+	return []tool.Tool{conversationRespondents(), conversationOpen(d), conversationAsk(d), conversationAnswer(d),
 		conversationClose(), conversationRetract(), conversationMarkRead(), conversationList(), conversationGet(),
-		conversationMessages(), conversationInbox(), conversationDraft(d.Drafts)}
+		conversationMessages(), conversationInbox(), conversationDraft(d.Drafts), conversationUploadURL(d),
+		conversationAttachment(d)}
 }
 
 // ToolConversationAnswer is the answer's action type, which the views look
@@ -407,13 +411,16 @@ var (
 	errNotRespondent = apperr.Forbid("only the member a conversation is addressed to answers in it")
 )
 
-// post writes a message in c as author. Who spoke last is written first,
-// WHERE the conversation is open: that takes the conversation's row lock, so
-// a close waits for the message or the message finds the conversation
-// closed, and messages are written one at a time. check, when given, runs
-// under that lock, before the message is written: an answer looks there for
-// a newer question than the one it answers.
-func post(ctx context.Context, ec *tool.ExecCtx, c dbq.Conversation, inReplyTo *uuid.UUID, body string, check func() error) (uuid.UUID, error) {
+// post writes a message in c as author, with the files it carries, claimed
+// already (claimAttachments). Who spoke last is written first, WHERE the
+// conversation is open: that takes the conversation's row lock, so a close
+// waits for the message or the message finds the conversation closed, and
+// messages are written one at a time. check, when given, runs under that
+// lock, before the message is written: an answer looks there for a newer
+// question than the one it answers. So is the room the conversation has for
+// the files asked there, so that two messages at once are held to its limit
+// together.
+func post(ctx context.Context, d Deps, ec *tool.ExecCtx, c dbq.Conversation, inReplyTo *uuid.UUID, body string, files []attached, check func() error) (uuid.UUID, error) {
 	author := ec.Member.ID
 	n, err := ec.Q.TouchConversation(ctx, dbq.TouchConversationParams{At: &ec.Now, AuthorMemberID: &author, ID: c.ID})
 	if err != nil {
@@ -427,12 +434,24 @@ func post(ctx context.Context, ec *tool.ExecCtx, c dbq.Conversation, inReplyTo *
 			return uuid.Nil, err
 		}
 	}
+	if err := roomFor(ctx, d, ec.Q, c.ID, sizeOf(files)); err != nil {
+		return uuid.Nil, err
+	}
 	id := ids.New()
 	if _, err := ec.Q.InsertConversationMessage(ctx, dbq.InsertConversationMessageParams{
 		ID: id, ConversationID: c.ID, CourseID: c.CourseID, AuthorMemberID: author, InReplyToMessageID: inReplyTo,
 		Body: body, CreatedByActionID: ec.ActionID, CreatedAt: ec.Now,
 	}); err != nil {
 		return uuid.Nil, err
+	}
+	// Each file is dated as its message is: written with it, never added to
+	// it afterwards (conversation_attachment_with_its_message).
+	for i, f := range files {
+		if err := ec.Q.InsertConversationAttachment(ctx, dbq.InsertConversationAttachmentParams{ID: ids.New(), MessageID: id,
+			ConversationID: c.ID, CourseID: c.CourseID, Position: int32(i + 1), Filename: f.filename, StorageKey: f.key,
+			ContentType: f.info.ContentType, ByteSize: f.info.Size, Checksum: nonEmpty(f.info.Checksum), CreatedAt: ec.Now}); err != nil {
+			return uuid.Nil, err
+		}
 	}
 	conversation := c.ID
 	ec.Emit(events.Event{Type: events.ConversationMessagePosted, CourseID: &c.CourseID, SubjectType: "conversation", SubjectID: &conversation,
@@ -499,9 +518,10 @@ func askable(ctx context.Context, q dbq.Querier, now time.Time, respondent *doma
 
 type ConversationOpenIn struct {
 	tool.InCourse
-	RespondentMemberID uuid.UUID `json:"respondent_member_id" jsonschema:"the agent to ask: one of conversation.respondents"`
-	Title              *string   `json:"title,omitempty" jsonschema:"at most 200 characters"`
-	Body               *string   `json:"body,omitempty" jsonschema:"the first question, if you have it now; at most 20000 characters"`
+	RespondentMemberID uuid.UUID      `json:"respondent_member_id" jsonschema:"the agent to ask: one of conversation.respondents"`
+	Title              *string        `json:"title,omitempty" jsonschema:"at most 200 characters"`
+	Body               *string        `json:"body,omitempty" jsonschema:"the first question, if you have it now; at most 20000 characters"`
+	Attachments        []AttachmentIn `json:"attachments,omitempty" jsonschema:"files the first question carries, in the order they are shown, each uploaded first with conversation.upload_url; only with body"`
 }
 
 type ConversationOpenOut struct {
@@ -522,6 +542,8 @@ func checkOpen(ctx context.Context, q dbq.Querier, m, respondent *domain.Member,
 		if err := checkBody(*in.Body); err != nil {
 			return err
 		}
+	} else if len(in.Attachments) > 0 {
+		return errAttachmentsNeedBody
 	}
 	notAgent, elsewhere, err := askable(ctx, q, now, respondent)
 	switch {
@@ -540,11 +562,12 @@ func checkOpen(ctx context.Context, q dbq.Querier, m, respondent *domain.Member,
 	return elsewhere
 }
 
-func conversationOpen() tool.Tool {
+func conversationOpen(d Deps) tool.Tool {
 	return tool.Define(tool.Spec[ConversationOpenIn, ConversationOpenOut]{
 		Name: "conversation.open",
 		Description: "Start a conversation with an agent seated in the course — the course's tutor agent, your own agent — " +
-			"and, if you give body, ask the first question. Conversations are between a person and an agent: a person is " +
+			"and, if you give body, ask the first question, which may carry files (attachments, each uploaded first with " +
+			"conversation.upload_url). Conversations are between a person and an agent: a person is " +
 			"nobody's respondent (conversations_are_with_agents); people talk to people elsewhere. You may address only " +
 			"an agent that can see and do nothing you cannot, or your own agent, and only while what runs it answers in " +
 			"the site (agent_answers_elsewhere otherwise: it is operated from an external tool): conversation.respondents " +
@@ -569,7 +592,10 @@ func conversationOpen() tool.Tool {
 			if err != nil {
 				return in, err
 			}
-			return in, checkOpen(ctx, q, m, respondent, now, in)
+			if err := checkOpen(ctx, q, m, respondent, now, in); err != nil {
+				return in, err
+			}
+			return in, checkProposedFiles(ctx, d, q, m, in.CourseID, nil, now, in.Attachments)
 		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in ConversationOpenIn) (ConversationOpenOut, error) {
 			respondent, err := holdSeat(ctx, ec.Q, in.RespondentMemberID)
@@ -577,6 +603,10 @@ func conversationOpen() tool.Tool {
 				return ConversationOpenOut{}, err
 			}
 			if err := checkOpen(ctx, ec.Q, ec.Member, respondent, ec.Now, in); err != nil {
+				return ConversationOpenOut{}, err
+			}
+			files, err := claimAttachments(ctx, d, ec, in.CourseID, in.Attachments)
+			if err != nil {
 				return ConversationOpenOut{}, err
 			}
 			title, _ := optionalText("title", in.Title, maxTitleChars)
@@ -590,7 +620,7 @@ func conversationOpen() tool.Tool {
 				Payload: map[string]any{"conversation_id": c.ID, "opener_member_id": c.OpenerMemberID, "respondent_member_id": c.RespondentMemberID}})
 			out := ConversationOpenOut{ConversationID: c.ID}
 			if in.Body != nil {
-				id, err := post(ctx, ec, c, nil, *in.Body, nil)
+				id, err := post(ctx, d, ec, c, nil, *in.Body, files, nil)
 				if err != nil {
 					return ConversationOpenOut{}, err
 				}
@@ -603,8 +633,9 @@ func conversationOpen() tool.Tool {
 
 type ConversationAskIn struct {
 	tool.InCourse
-	ConversationID uuid.UUID `json:"conversation_id"`
-	Body           string    `json:"body" jsonschema:"at most 20000 characters"`
+	ConversationID uuid.UUID      `json:"conversation_id"`
+	Body           string         `json:"body" jsonschema:"at most 20000 characters"`
+	Attachments    []AttachmentIn `json:"attachments,omitempty" jsonschema:"files the message carries, in the order they are shown, each uploaded first with conversation.upload_url"`
 }
 
 type MessageIDOut struct {
@@ -642,10 +673,11 @@ func checkAsk(ctx context.Context, q dbq.Querier, m, respondent *domain.Member, 
 	return elsewhere
 }
 
-func conversationAsk() tool.Tool {
+func conversationAsk(d Deps) tool.Tool {
 	return tool.Define(tool.Spec[ConversationAskIn, MessageIDOut]{
 		Name: "conversation.ask",
-		Description: "Write in a conversation you opened: a question, or anything more you have to say. It is refused once the " +
+		Description: "Write in a conversation you opened: a question, or anything more you have to say, which may carry files " +
+			"(attachments, each uploaded first with conversation.upload_url). It is refused once the " +
 			"conversation is closed, or once you may no longer address its respondent; start a new conversation then. It is " +
 			"refused too, as agent_answers_elsewhere, while its respondent is an agent that takes no conversations in the " +
 			"site: what was written stays readable.",
@@ -663,7 +695,10 @@ func conversationAsk() tool.Tool {
 			if err != nil {
 				return in, err
 			}
-			return in, checkAsk(ctx, q, m, respondent, now, c, in.Body)
+			if err := checkAsk(ctx, q, m, respondent, now, c, in.Body); err != nil {
+				return in, err
+			}
+			return in, checkProposedFiles(ctx, d, q, m, in.CourseID, &c.ID, now, in.Attachments)
 		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in ConversationAskIn) (MessageIDOut, error) {
 			c, err := findConversation(ctx, ec.Q, in.CourseID, in.ConversationID)
@@ -680,7 +715,11 @@ func conversationAsk() tool.Tool {
 			if err := checkAsk(ctx, ec.Q, ec.Member, respondent, ec.Now, c, in.Body); err != nil {
 				return MessageIDOut{}, err
 			}
-			id, err := post(ctx, ec, c, nil, in.Body, nil)
+			files, err := claimAttachments(ctx, d, ec, in.CourseID, in.Attachments)
+			if err != nil {
+				return MessageIDOut{}, err
+			}
+			id, err := post(ctx, d, ec, c, nil, in.Body, files, nil)
 			return MessageIDOut{MessageID: id}, err
 		},
 	})
@@ -688,9 +727,10 @@ func conversationAsk() tool.Tool {
 
 type ConversationAnswerIn struct {
 	tool.InCourse
-	ConversationID     uuid.UUID `json:"conversation_id"`
-	InReplyToMessageID uuid.UUID `json:"in_reply_to_message_id" jsonschema:"the opener's latest message, which you answer: latest_opener_message_id in conversation.inbox and conversation.get"`
-	Body               string    `json:"body" jsonschema:"at most 20000 characters"`
+	ConversationID     uuid.UUID      `json:"conversation_id"`
+	InReplyToMessageID uuid.UUID      `json:"in_reply_to_message_id" jsonschema:"the opener's latest message, which you answer: latest_opener_message_id in conversation.inbox and conversation.get"`
+	Body               string         `json:"body" jsonschema:"at most 20000 characters"`
+	Attachments        []AttachmentIn `json:"attachments,omitempty" jsonschema:"files the answer carries, in the order they are shown, each uploaded first with conversation.upload_url"`
 }
 
 // checkAnswer is conversation.answer's rule, all but whether a newer
@@ -758,11 +798,12 @@ func newerQuestion(ctx context.Context, q dbq.Querier, c dbq.Conversation, answe
 	return nil
 }
 
-func conversationAnswer() tool.Tool {
+func conversationAnswer(d Deps) tool.Tool {
 	return tool.Define(tool.Spec[ConversationAnswerIn, MessageIDOut]{
 		Name: ToolConversationAnswer,
 		Description: "Answer, as an agent, in a conversation addressed to you (conversation.inbox lists those waiting), " +
-			"replying to the opener's latest message, whose id you give as in_reply_to_message_id. A person answers none, " +
+			"replying to the opener's latest message, whose id you give as in_reply_to_message_id. An answer may carry files " +
+			"(attachments, each uploaded first with conversation.upload_url). A person answers none, " +
 			"and is refused (conversations_are_with_agents). It is refused as a conflict, with a reason: " +
 			"moved_on if the opener has written again since (read the new message and answer that), or has withdrawn " +
 			"(retracted) their latest message, when nothing waits for an answer and no message is named; already_answered " +
@@ -813,6 +854,9 @@ func conversationAnswer() tool.Tool {
 			if pending {
 				return in, apperr.Conflicts("an answer of yours to that message already waits for a decision").With("reason", "answer_pending")
 			}
+			if err := checkProposedFiles(ctx, d, q, m, in.CourseID, &c.ID, now, in.Attachments); err != nil {
+				return in, err
+			}
 			// Proposed, the answer takes its draft's place: whoever reads
 			// the conversation sees it waiting for approval.
 			return in, q.DeleteDraft(ctx, c.ID)
@@ -832,8 +876,12 @@ func conversationAnswer() tool.Tool {
 			if err := checkAnswer(ctx, ec.Q, ec.Member, opener, ec.Now, c, in); err != nil {
 				return MessageIDOut{}, err
 			}
+			files, err := claimAttachments(ctx, d, ec, in.CourseID, in.Attachments)
+			if err != nil {
+				return MessageIDOut{}, err
+			}
 			answered := in.InReplyToMessageID
-			id, err := post(ctx, ec, c, &answered, in.Body, func() error { return newerQuestion(ctx, ec.Q, c, answered) })
+			id, err := post(ctx, d, ec, c, &answered, in.Body, files, func() error { return newerQuestion(ctx, ec.Q, c, answered) })
 			if err != nil {
 				return MessageIDOut{}, err
 			}

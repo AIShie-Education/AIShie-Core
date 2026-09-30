@@ -82,6 +82,10 @@ Environment:
   PUBLIC_URL        how clients reach this server; default http://localhost:8080
   SIGNING_KEY       32+ characters; required with s3, with single sign-on, and for more than one instance
   MAX_UPLOAD_BYTES  default 52428800 (50 MiB)
+  ATTACHMENT_MAX_BYTES     default 52428800 (50 MiB); the largest file a message of a conversation
+                           carries, never more than MAX_UPLOAD_BYTES
+  ATTACHMENT_MAX_PER_MESSAGE         default 10, at most 100; the files one message carries
+  ATTACHMENT_MAX_CONVERSATION_BYTES  default 524288000 (500 MiB); the files of one conversation, in all
   AGENT_SELF_SERVICE   on (default) or off; whether people may register agents of their own
   AGENT_MAX_PER_OWNER  default 5; the agents one person may have that are not suspended
   S3_ENDPOINT, S3_BUCKET, S3_REGION, S3_ACCESS_KEY, S3_SECRET_KEY, S3_USE_SSL
@@ -198,6 +202,8 @@ func serve(cfg config.Config) error {
 	reg := tool.NewRegistry()
 	pl := pipeline.New(pool, reg, pipeline.Config{ProposalTTL: cfg.ProposalTTL, Secrets: signatures, Wake: hub})
 	tools.RegisterAll(reg, tools.Deps{Pipeline: pl, Blob: store, Uploads: signer, MaxUploadBytes: cfg.MaxUploadBytes,
+		Attachments: tools.AttachmentLimits{MaxBytes: cfg.AttachmentMaxBytes, PerMessage: cfg.AttachmentMaxPerMessage,
+			ConversationBytes: cfg.AttachmentMaxConversationBytes},
 		DisableAgentSelfService: !cfg.AgentSelfService, MaxAgentsPerOwner: cfg.AgentMaxPerOwner, Memory: cfg.Memory})
 
 	// The sweeps act as the system actor, which bootstrap creates. Before

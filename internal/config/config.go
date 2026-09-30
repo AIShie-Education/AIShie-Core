@@ -85,6 +85,14 @@ type Config struct {
 	MaxUploadBytes int64
 	S3             S3
 
+	// The files messages of conversations carry (docs/schema.md §2.8,
+	// Attachments): the largest one (ATTACHMENT_MAX_BYTES, 50 MiB, and
+	// never more than MaxUploadBytes), how many one message carries
+	// (ATTACHMENT_MAX_PER_MESSAGE, 10) and how much one conversation holds
+	// in all (ATTACHMENT_MAX_CONVERSATION_BYTES, 500 MiB).
+	AttachmentMaxBytes, AttachmentMaxConversationBytes int64
+	AttachmentMaxPerMessage                            int
+
 	// OIDC is single sign-on. It is off unless OIDC_ISSUER is set.
 	OIDC OIDC
 	// JoinLinkRegistration lets someone with no account register through a
@@ -214,6 +222,9 @@ func FromEnv() (Config, error) {
 		}
 		c.MaxUploadBytes = n
 	}
+	if err := c.readAttachments(); err != nil {
+		return Config{}, err
+	}
 	switch c.BlobStore {
 	case "fs", "none":
 	case "s3":
@@ -297,6 +308,38 @@ func FromEnv() (Config, error) {
 		return Config{}, fmt.Errorf("JOBS_INTERVAL: %s is too often; at least 1s", c.JobsInterval)
 	}
 	return c, nil
+}
+
+// MaxAttachmentsPerMessage is the most ATTACHMENT_MAX_PER_MESSAGE may be:
+// each file is named by an upload token in the request that writes the
+// message, which is at most 1 MiB.
+const MaxAttachmentsPerMessage = 100
+
+// readAttachments reads the limits on the files messages of conversations
+// carry, each a whole number, one or more, and one not set its default. A
+// file is never larger than MAX_UPLOAD_BYTES, whatever ATTACHMENT_MAX_BYTES
+// says: that is what this server's own disk takes as it arrives.
+func (c *Config) readAttachments() error {
+	c.AttachmentMaxBytes, c.AttachmentMaxPerMessage, c.AttachmentMaxConversationBytes = 50<<20, 10, 500<<20
+	for key, dst := range map[string]*int64{"ATTACHMENT_MAX_BYTES": &c.AttachmentMaxBytes,
+		"ATTACHMENT_MAX_CONVERSATION_BYTES": &c.AttachmentMaxConversationBytes} {
+		if v := os.Getenv(key); v != "" {
+			n, err := strconv.ParseInt(v, 10, 64)
+			if err != nil || n <= 0 {
+				return fmt.Errorf("%s: %q is not a positive number of bytes", key, v)
+			}
+			*dst = n
+		}
+	}
+	if v := os.Getenv("ATTACHMENT_MAX_PER_MESSAGE"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 || n > MaxAttachmentsPerMessage {
+			return fmt.Errorf("ATTACHMENT_MAX_PER_MESSAGE: %q is not a number from 1 to %d", v, MaxAttachmentsPerMessage)
+		}
+		c.AttachmentMaxPerMessage = n
+	}
+	c.AttachmentMaxBytes = min(c.AttachmentMaxBytes, c.MaxUploadBytes)
+	return nil
 }
 
 // readMemory reads MEMORY and the limits of agents' memory. A limit is a

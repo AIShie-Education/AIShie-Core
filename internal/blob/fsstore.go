@@ -57,16 +57,25 @@ func (s *FSStore) PresignPut(_ context.Context, key, contentType string, ttl tim
 	return url, map[string]string{"Content-Type": contentType}, nil
 }
 
-func (s *FSStore) PresignGet(_ context.Context, key string, ttl time.Duration) (string, error) {
+func (s *FSStore) PresignGet(ctx context.Context, key string, ttl time.Duration) (string, error) {
+	return s.PresignDownload(ctx, key, "", ttl)
+}
+
+func (s *FSStore) PresignDownload(_ context.Context, key, filename string, ttl time.Duration) (string, error) {
 	if _, err := s.path(key); err != nil {
 		return "", err
 	}
-	return s.baseURL + BlobPath + s.signer.signURL(key, "GET", "", ttl, s.now()), nil
+	return s.baseURL + BlobPath + s.signer.signDownload(key, filename, ttl, s.now()), nil
 }
 
 func (s *FSStore) Redeem(token, method string) (string, string, error) {
 	c, err := s.signer.verifyURL(token, method, s.now())
 	return c.Key, c.ContentType, err
+}
+
+func (s *FSStore) RedeemDownload(token string) (string, string, error) {
+	c, err := s.signer.verifyURL(token, "GET", s.now())
+	return c.Key, c.Filename, err
 }
 
 // path maps a key to a file, and refuses any key that would leave the root.
