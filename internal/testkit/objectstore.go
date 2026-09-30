@@ -3,6 +3,7 @@ package testkit
 import (
 	"context"
 	"io"
+	"sync/atomic"
 
 	"github.com/AIShie-Education/AIShie-Core/internal/blob"
 )
@@ -40,4 +41,35 @@ func (s ObjectStore) Overwrite(ctx context.Context, key, contentType string, r i
 	_ = s.Delete(ctx, key)
 	_, err := s.Put(ctx, key, contentType, r, 1<<40)
 	return err
+}
+
+// MovingStore is this server's disk until Move, and then a bucket the disk's
+// files were copied to, as an operator moves them from BLOB_STORE=fs to
+// BLOB_STORE=s3: under exactly the keys the disk kept them under. What was
+// attached on the disk is in the bucket under its upload's own key, which is
+// what its version or message records, and what is attached from then on is
+// moved to a final key, as ObjectStore moves it.
+type MovingStore struct {
+	*blob.FSStore
+	moved *atomic.Bool
+}
+
+func NewMovingStore(fs *blob.FSStore) MovingStore {
+	return MovingStore{FSStore: fs, moved: new(atomic.Bool)}
+}
+
+// Move makes the store the bucket the disk's files were copied to.
+func (s MovingStore) Move() { s.moved.Store(true) }
+
+func (s MovingStore) store() blob.Store {
+	if s.moved.Load() {
+		return ObjectStore{FSStore: s.FSStore}
+	}
+	return s.FSStore
+}
+
+func (s MovingStore) FinalKey(stagingKey string) string { return s.store().FinalKey(stagingKey) }
+
+func (s MovingStore) Finalize(ctx context.Context, stagingKey string) (blob.Info, error) {
+	return s.store().Finalize(ctx, stagingKey)
 }

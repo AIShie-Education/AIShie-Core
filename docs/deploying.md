@@ -230,6 +230,22 @@ Run all of these as root on the server.
   `GET /v1/auth/methods` whether to show the button at all, and what it
   says, so the same front end serves a server with single sign-on and one
   without; a change reaches the sign-in page within a minute of the deploy.
+- **Files in a bucket** instead of on the server's disk are `BLOB_STORE=s3`,
+  with `S3_ENDPOINT` (`HOST[:PORT]`, no scheme), `S3_BUCKET`,
+  `S3_ACCESS_KEY` and `S3_SECRET_KEY` in the env file, and `S3_REGION`, the
+  bucket's region (`us-east-1` unless set): requests are signed for it and,
+  at AWS, sent to it, a region newer than the S3 client's own table of
+  regions included. `S3_BUCKET_LOOKUP` says how a request names the bucket:
+  `auto`, the default, puts it in the host name at AWS, Google and Aliyun
+  and after the endpoint anywhere else; `path` always after the endpoint;
+  `dns` always in the host name, for a service that takes nothing else.
+  The server refuses to start on any other value, or on a bucket it cannot
+  reach. Moving the files there from the disk is copying each to the key
+  it has on the disk, its path under `/srv/aishie/data/blobs` (not the
+  `.meta` beside it, whose content type the object takes), with Core
+  stopped for the last copy and deployed again on the new settings: what
+  was attached is read where it was, and an upload attached on the disk is
+  not attached again.
 - **A service that hosts agents** (the agent runtime), where people connect
   their agents from the front end, knows who they are by an assertion Core
   makes for them (README, Signing in to a service that hosts agents). Name

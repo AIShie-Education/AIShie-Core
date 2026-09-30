@@ -3,9 +3,11 @@ package tools_test
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -950,4 +952,127 @@ func TestARetriedAttachFindsTheMovedObject(t *testing.T) {
 	// A token whose object was never uploaded is still refused.
 	never := testkit.Result[tools.UploadURLOut](t, b.do(t, b.yuki, "document.upload_url", m{"course_id": b.course, "kind": "submission", "content_type": "text/plain"}))
 	b.try(t, b.yuki, "document.create", m{"course_id": b.course, "kind": "submission", "title": "x", "submission_id": draft, "upload_token": never.UploadToken}, apperr.FailedPrecondition)
+}
+
+// An installation's files can be moved from this server's disk to a bucket,
+// copied under the keys the disk kept them under. The disk attaches an
+// upload where it was uploaded, so that is the key its version records; a
+// bucket attaches one by moving it to a final key of its own, which for an
+// upload attached on the disk names nothing. The token replayed after the
+// move must still be refused as attached, and the file the version points
+// at stay where it is: attaching it again would move it to the final key,
+// and delete it from under the version.
+func TestAnUploadAttachedOnDiskIsNotAttachedAgainOnceTheFilesAreInABucket(t *testing.T) {
+	var store testkit.MovingStore
+	b := buildOn(t, testkit.NewPlatformWithStore(t, func(fs *blob.FSStore) blob.Store {
+		store = testkit.NewMovingStore(fs)
+		return store
+	}))
+	ctx := context.Background()
+	keyOf := func(token string) string {
+		t.Helper()
+		c, err := b.Uploads.VerifyUpload(token)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return c.Key
+	}
+
+	// On the disk: Sato's slides, Yuki's essay, handed in, and Sato's notes
+	// on it, with its grade.
+	files := map[string][]byte{}
+	slides := b.upload(t, b.sato, "material", "application/pdf", []byte("%PDF-1.7 the slides"))
+	files[slides] = []byte("%PDF-1.7 the slides")
+	lecture := testkit.Result[tools.DocumentCreateOut](t, b.do(t, b.sato, "document.create",
+		m{"course_id": b.course, "kind": "material", "title": "Lecture 1", "upload_token": slides})).DocumentID
+	b.do(t, b.sato, "document.publish", m{"course_id": b.course, "document_id": lecture})
+	draft := testkit.Result[tools.SubmissionCreateOut](t, b.do(t, b.yuki, "submission.create", m{"course_id": b.course, "assignment_id": b.hw3})).SubmissionID
+	essay := b.upload(t, b.yuki, "submission", "application/pdf", []byte("%PDF-1.7 the essay"))
+	files[essay] = []byte("%PDF-1.7 the essay")
+	b.do(t, b.yuki, "document.create", m{"course_id": b.course, "kind": "submission", "title": "essay.pdf", "submission_id": draft, "upload_token": essay})
+	b.do(t, b.yuki, "submission.submit", m{"course_id": b.course, "submission_id": draft})
+	notes := b.upload(t, b.sato, "feedback", "text/plain", []byte("well argued"))
+	files[notes] = []byte("well argued")
+	b.do(t, b.sato, "grade.submit", m{"course_id": b.course, "submission_id": draft, "score": 80,
+		"feedback_files": []m{{"title": "notes.txt", "upload_token": notes}}})
+	for token := range files {
+		if n := b.Count(`SELECT count(*) FROM document_version WHERE storage_key = $1`, keyOf(token)); n != 1 {
+			t.Fatalf("the disk recorded %d versions under the key %s was uploaded to, want 1", n, keyOf(token))
+		}
+	}
+
+	store.Move()
+
+	// Replayed in the bucket, each token is refused as attached, however it
+	// comes: a new version, a new document, a new attempt's file, the files
+	// of another grade.
+	b.refusedAs(t, b.sato, "document.add_version", m{"course_id": b.course, "document_id": lecture, "upload_token": slides},
+		apperr.Conflict, "already_attached")
+	b.refusedAs(t, b.sato, "document.create", m{"course_id": b.course, "kind": "material", "title": "Lecture 1 again", "upload_token": slides},
+		apperr.Conflict, "already_attached")
+	again := testkit.Result[tools.SubmissionCreateOut](t, b.do(t, b.yuki, "submission.create", m{"course_id": b.course, "assignment_id": b.hw3})).SubmissionID
+	b.refusedAs(t, b.yuki, "document.create", m{"course_id": b.course, "kind": "submission", "title": "essay.pdf", "submission_id": again, "upload_token": essay},
+		apperr.Conflict, "already_attached")
+	kens := b.submit(t, b.ken, "Ken's essay")
+	b.refusedAs(t, b.sato, "grade.submit", m{"course_id": b.course, "submission_id": kens, "score": 70,
+		"feedback_files": []m{{"title": "notes.txt", "upload_token": notes}}}, apperr.Conflict, "already_attached")
+
+	// Every file is where its version points, as it was, and nothing was
+	// moved to where the bucket attaches an upload.
+	for token, body := range files {
+		key := keyOf(token)
+		rc, _, err := b.Blob.Open(ctx, key)
+		if err != nil {
+			t.Fatalf("the file a version points at is gone: %v", err)
+		}
+		got, _ := io.ReadAll(rc)
+		rc.Close()
+		if !bytes.Equal(got, body) {
+			t.Fatalf("the file at %s is %q, want %q", key, got, body)
+		}
+		if _, err := b.Blob.Stat(ctx, store.FinalKey(key)); !errors.Is(err, blob.ErrNotFound) {
+			t.Fatalf("an attached file was copied to %s: %v", store.FinalKey(key), err)
+		}
+	}
+	if got := b.get(t, b.yuki, m{"document_id": lecture}); string(b.download(t, *got.Version.DownloadURL)) != "%PDF-1.7 the slides" {
+		t.Fatal("Yuki cannot read the slides the move kept")
+	}
+
+	// An upload the disk never attached is attached as the bucket attaches
+	// one, once.
+	fresh := b.upload(t, b.sato, "material", "application/pdf", []byte("%PDF-1.7 new slides"))
+	b.do(t, b.sato, "document.add_version", m{"course_id": b.course, "document_id": lecture, "upload_token": fresh, "publish": true})
+	if n := b.Count(`SELECT count(*) FROM document_version WHERE document_id = $1 AND storage_key = $2`, lecture, store.FinalKey(keyOf(fresh))); n != 1 {
+		t.Fatal("an upload attached in the bucket is not recorded under its final key")
+	}
+	b.refusedAs(t, b.sato, "document.add_version", m{"course_id": b.course, "document_id": lecture, "upload_token": fresh},
+		apperr.Conflict, "already_attached")
+
+	// Attaching one upload several times at once, each call takes the locks
+	// of both its keys in the same order, and waits for the others: one
+	// attaches it, and the rest find it attached.
+	raced := b.upload(t, b.sato, "material", "application/pdf", []byte("%PDF-1.7 raced"))
+	outs, errs := make([]pipeline.Outcome, 4), make([]error, 4)
+	var wg sync.WaitGroup
+	for i := range outs {
+		wg.Go(func() {
+			outs[i], errs[i] = b.Call(b.sato, "document.create", m{"course_id": b.course, "kind": "material", "title": "Raced",
+				"upload_token": raced}, "raced-"+uuid.NewString())
+		})
+	}
+	wg.Wait()
+	attached := 0
+	for i, out := range outs {
+		switch {
+		case errs[i] != nil:
+			t.Fatalf("an attach racing others: %v", errs[i])
+		case out.Status == domain.StatusExecuted:
+			attached++
+		case out.Status != domain.StatusFailed || reason(out) != "already_attached":
+			t.Fatalf("an attach racing others: %+v", out)
+		}
+	}
+	if attached != 1 || b.Count(`SELECT count(*) FROM document_version WHERE storage_key = $1`, store.FinalKey(keyOf(raced))) != 1 {
+		t.Fatalf("%d attaches of one upload went through at once, want 1", attached)
+	}
 }

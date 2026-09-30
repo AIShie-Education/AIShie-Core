@@ -83,6 +83,30 @@ func TestFromEnv(t *testing.T) {
 			t.Fatalf("ATTACHMENT_MAX_BYTES above MAX_UPLOAD_BYTES comes to %d (%v), want 1000", c.AttachmentMaxBytes, err)
 		}
 	})
+	t.Run("S3 names the bucket as S3_BUCKET_LOOKUP says", func(t *testing.T) {
+		t.Setenv("BLOB_STORE", "s3")
+		t.Setenv("S3_ENDPOINT", "objects.example.edu")
+		t.Setenv("S3_BUCKET", "aishie")
+		t.Setenv("SIGNING_KEY", strings.Repeat("k", 32))
+		// By default as the S3 client judges by the endpoint, as it always
+		// has.
+		c, err := FromEnv()
+		if err != nil || c.S3.BucketLookup != "auto" || c.S3.Region != "us-east-1" || !c.S3.UseSSL {
+			t.Fatalf("S3 by default: %+v %v", c.S3, err)
+		}
+		for _, lookup := range []string{"auto", "path", "dns"} {
+			t.Setenv("S3_BUCKET_LOOKUP", lookup)
+			if c, err := FromEnv(); err != nil || c.S3.BucketLookup != lookup {
+				t.Fatalf("S3_BUCKET_LOOKUP=%s comes to %q (%v)", lookup, c.S3.BucketLookup, err)
+			}
+		}
+		for _, bad := range []string{"virtual", "DNS", "path ", "host"} {
+			t.Setenv("S3_BUCKET_LOOKUP", bad)
+			if _, err := FromEnv(); err == nil || !strings.Contains(err.Error(), "S3_BUCKET_LOOKUP") {
+				t.Fatalf("S3_BUCKET_LOOKUP=%q: %v", bad, err)
+			}
+		}
+	})
 	for key, bad := range map[string]string{"PROPOSAL_TTL": "two weeks", "SESSION_TTL": "-1h", "INSECURE_COOKIES": "maybe",
 		"AGENT_SELF_SERVICE": "yes", "AGENT_MAX_PER_OWNER": "0", "MEMORY": "true", "MEMORY_MAX_ASKER": "0",
 		"MEMORY_WRITES_PER_DAY": "many", "MEMORY_MAX_PER_AGENT": "-5", "JOIN_LINK_REGISTRATION": "no",

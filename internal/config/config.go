@@ -151,6 +151,10 @@ func (o OIDC) Enabled() bool { return o.Issuer != "" }
 type S3 struct {
 	Endpoint, Bucket, Region, AccessKey, SecretKey string
 	UseSSL                                         bool
+	// BucketLookup is how a request names the bucket (S3_BUCKET_LOOKUP):
+	// "auto", the default, as the S3 client judges by the endpoint; "path",
+	// after the endpoint; or "dns", in the host name (virtual-hosted style).
+	BucketLookup string
 }
 
 // The bounds of ASSERTION_TTL, and its default. Shorter than a minute, a
@@ -229,9 +233,15 @@ func FromEnv() (Config, error) {
 	case "fs", "none":
 	case "s3":
 		c.S3 = S3{Endpoint: os.Getenv("S3_ENDPOINT"), Bucket: os.Getenv("S3_BUCKET"), Region: env("S3_REGION", "us-east-1"),
-			AccessKey: os.Getenv("S3_ACCESS_KEY"), SecretKey: os.Getenv("S3_SECRET_KEY"), UseSSL: env("S3_USE_SSL", "true") != "false"}
+			AccessKey: os.Getenv("S3_ACCESS_KEY"), SecretKey: os.Getenv("S3_SECRET_KEY"), UseSSL: env("S3_USE_SSL", "true") != "false",
+			BucketLookup: env("S3_BUCKET_LOOKUP", "auto")}
 		if c.S3.Endpoint == "" || c.S3.Bucket == "" {
 			return Config{}, fmt.Errorf("BLOB_STORE=s3 needs S3_ENDPOINT and S3_BUCKET")
+		}
+		switch c.S3.BucketLookup {
+		case "auto", "path", "dns":
+		default:
+			return Config{}, fmt.Errorf("S3_BUCKET_LOOKUP: %q is not auto, path or dns", c.S3.BucketLookup)
 		}
 		if c.SigningKey == "" {
 			return Config{}, fmt.Errorf("BLOB_STORE=s3 needs SIGNING_KEY: upload tokens must verify on every instance")

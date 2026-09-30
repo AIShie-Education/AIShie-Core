@@ -6,10 +6,12 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"runtime"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -177,6 +179,176 @@ func TestS3Store(t *testing.T) {
 	if _, err := s.Stat(ctx, key); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("stat after delete: %v", err)
 	}
+}
+
+// A request names the bucket as S3_BUCKET_LOOKUP says: after the endpoint,
+// in its host name, or as the S3 client judges by the endpoint, which puts
+// it in the host name for AWS and after the endpoint for anything else. A
+// presigned URL says which, and is made without asking the store anything,
+// since the region is given.
+func TestS3StoreNamesTheBucketAsItIsTold(t *testing.T) {
+	ctx := context.Background()
+	const key = "courses/c/u"
+	for _, c := range []struct {
+		endpoint, lookup string
+		inHost           bool
+	}{
+		{"objects.example.edu", "", false},
+		{"objects.example.edu", "auto", false},
+		{"objects.example.edu", "path", false},
+		{"objects.example.edu", "dns", true},
+		{"s3.eu-west-1.amazonaws.com", "auto", true},
+		{"s3.eu-west-1.amazonaws.com", "dns", true},
+		{"s3.eu-west-1.amazonaws.com", "path", false},
+	} {
+		s, err := NewS3Store(S3Config{Endpoint: c.endpoint, Bucket: "aishie", Region: "eu-west-1", AccessKey: "access", SecretKey: "secret",
+			UseSSL: true, BucketLookup: c.lookup})
+		if err != nil {
+			t.Fatal(err)
+		}
+		get, err := s.PresignGet(ctx, key, time.Minute)
+		if err != nil {
+			t.Fatal(err)
+		}
+		put, _, err := s.PresignPut(ctx, key, "application/pdf", time.Minute)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, raw := range []string{get, put} {
+			u, err := url.Parse(raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			inHost := strings.HasPrefix(u.Host, "aishie.") && u.Path == "/"+key
+			inPath := !strings.HasPrefix(u.Host, "aishie.") && u.Path == "/aishie/"+key
+			if u.Scheme != "https" || inHost != c.inHost || inPath == c.inHost {
+				t.Errorf("%s with the bucket lookup %q: %s://%s%s", c.endpoint, c.lookup, u.Scheme, u.Host, u.Path)
+			}
+			if c.endpoint == "objects.example.edu" && strings.TrimPrefix(u.Host, "aishie.") != c.endpoint {
+				t.Errorf("%s with the bucket lookup %q is sent to %s", c.endpoint, c.lookup, u.Host)
+			}
+		}
+	}
+	for _, bad := range []string{"virtual", "DNS"} {
+		if _, err := NewS3Store(S3Config{Endpoint: "objects.example.edu", Bucket: "aishie", Region: "eu-west-1", BucketLookup: bad}); err == nil {
+			t.Errorf("the bucket lookup %q was taken", bad)
+		}
+	}
+}
+
+// S3_REGION is the region requests are signed for, and with AWS it is where
+// they are sent. The S3 client sends a region its table of regions does not
+// have, one newer than its release, to us-east-1, which refuses a request
+// signed for another; the store sends it to S3_ENDPOINT, if that names the
+// region, or to the region's own endpoint. A region the table has, and
+// another service, are sent requests where they always were.
+func TestS3StoreSendsRequestsToTheRegionTheyAreSignedFor(t *testing.T) {
+	ctx := context.Background()
+	for _, c := range []struct {
+		endpoint, region, lookup string
+		// host is where requests must go; empty, anywhere of the region's.
+		host string
+	}{
+		{"s3.xx-future-1.amazonaws.com", "xx-future-1", "", "aishie.s3.xx-future-1.amazonaws.com"},
+		{"s3.xx-future-1.amazonaws.com", "xx-future-1", "path", "s3.xx-future-1.amazonaws.com"},
+		{"s3.xx-future-1.amazonaws.com:443", "xx-future-1", "", "aishie.s3.xx-future-1.amazonaws.com"},
+		{"s3.dualstack.xx-future-1.amazonaws.com", "xx-future-1", "", "aishie.s3.dualstack.xx-future-1.amazonaws.com"},
+		{"s3.amazonaws.com", "xx-future-1", "", "aishie.s3.xx-future-1.amazonaws.com"},
+		{"s3.us-east-1.amazonaws.com", "xx-future-1", "", "aishie.s3.xx-future-1.amazonaws.com"},
+		{"s3.cn-future-1.amazonaws.com.cn", "cn-future-1", "", "aishie.s3.cn-future-1.amazonaws.com.cn"},
+		{"s3.eu-west-1.amazonaws.com", "eu-west-1", "", ""},
+		{"s3.amazonaws.com", "eu-west-1", "path", ""},
+		{"s3.amazonaws.com", "us-east-1", "", ""},
+		{"objects.example.edu", "xx-future-1", "", "objects.example.edu"},
+		{"objects.example.edu", "xx-future-1", "dns", "aishie.objects.example.edu"},
+	} {
+		name := c.endpoint + " in " + c.region
+		sent := &recorder{}
+		s, err := newS3Store(S3Config{Endpoint: c.endpoint, Bucket: "aishie", Region: c.region, AccessKey: "access", SecretKey: "secret",
+			UseSSL: true, BucketLookup: c.lookup}, sent)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		get, err := s.PresignGet(ctx, "courses/c/u", time.Minute)
+		if err != nil {
+			t.Fatal(err)
+		}
+		put, _, err := s.PresignPut(ctx, "courses/c/u", "application/pdf", time.Minute)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.Stat(ctx, "courses/c/u"); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("%s: stat: %v", name, err)
+		}
+		if err := s.Delete(ctx, "courses/c/u"); err != nil {
+			t.Fatalf("%s: delete: %v", name, err)
+		}
+		if len(sent.requests) != 2 {
+			t.Fatalf("%s: %d requests were sent, want 2", name, len(sent.requests))
+		}
+		for _, r := range append(sent.requests, presigned(t, get), presigned(t, put)) {
+			good := r.host == c.host
+			if c.host == "" {
+				good = strings.Contains(r.host, "."+c.region+".") && strings.HasSuffix(r.host, ".amazonaws.com")
+			}
+			if !good || r.region != c.region {
+				t.Errorf("%s (bucket lookup %q): sent to %s, signed for %q", name, c.lookup, r.host, r.region)
+			}
+		}
+	}
+
+	// A bucket whose name has a dot is not sent to the endpoint of a
+	// region the client does not know; the store says so rather than send
+	// it to us-east-1.
+	if _, err := NewS3Store(S3Config{Endpoint: "s3.xx-future-1.amazonaws.com", Bucket: "files.example.edu", Region: "xx-future-1",
+		UseSSL: true}); err == nil || !strings.Contains(err.Error(), "dot") {
+		t.Fatalf("a bucket with a dot in a region the client does not know: %v", err)
+	}
+	if _, err := NewS3Store(S3Config{Endpoint: "s3.eu-west-1.amazonaws.com", Bucket: "files.example.edu", Region: "eu-west-1",
+		UseSSL: true}); err != nil {
+		t.Fatalf("a bucket with a dot in a region the client knows: %v", err)
+	}
+}
+
+// sentRequest is where a request went, or a presigned URL would send one,
+// and the region it is signed for.
+type sentRequest struct{ host, region string }
+
+// recorder is a store with nothing in it: every request is answered 404
+// there and then, and kept.
+type recorder struct {
+	mu       sync.Mutex
+	requests []sentRequest
+}
+
+func (r *recorder) RoundTrip(req *http.Request) (*http.Response, error) {
+	credential, _, _ := strings.Cut(strings.TrimPrefix(req.Header.Get("Authorization"), "AWS4-HMAC-SHA256 Credential="), ",")
+	r.mu.Lock()
+	r.requests = append(r.requests, sentRequest{req.URL.Host, signedFor(credential)})
+	r.mu.Unlock()
+	status := http.StatusNotFound
+	if req.Method == http.MethodDelete {
+		status = http.StatusNoContent
+	}
+	return &http.Response{StatusCode: status, Header: http.Header{}, Body: io.NopCloser(strings.NewReader("")), Request: req}, nil
+}
+
+func presigned(t *testing.T, raw string) sentRequest {
+	t.Helper()
+	u, err := url.Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sentRequest{u.Host, signedFor(u.Query().Get("X-Amz-Credential"))}
+}
+
+// signedFor is the region a signature's credential scope names:
+// <access key>/<date>/<region>/s3/aws4_request.
+func signedFor(credential string) string {
+	if parts := strings.Split(credential, "/"); len(parts) == 5 && parts[3] == "s3" {
+		return parts[2]
+	}
+	return ""
 }
 
 // A listing stopped part way, by the caller or by an error, leaves nothing

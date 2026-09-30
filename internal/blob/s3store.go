@@ -3,12 +3,16 @@ package blob
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
+	"github.com/minio/minio-go/v7/pkg/s3utils"
 )
 
 // S3Config reaches any S3-compatible store: AWS, MinIO, Ceph, R2.
@@ -19,6 +23,18 @@ type S3Config struct {
 	SecretKey string
 	Region    string
 	UseSSL    bool
+	// BucketLookup is how a request names the bucket (S3_BUCKET_LOOKUP):
+	// "path" after the endpoint (endpoint/bucket/key), "dns" in the host
+	// name (bucket.endpoint/key, virtual-hosted style), or "auto", as
+	// empty is, which is dns for AWS, Google Cloud Storage and Alibaba
+	// Cloud OSS and path for anything else. A service that takes only
+	// virtual-hosted requests needs dns.
+	BucketLookup string
+}
+
+// bucketLookups are the values S3Config.BucketLookup may take.
+var bucketLookups = map[string]minio.BucketLookupType{
+	"": minio.BucketLookupAuto, "auto": minio.BucketLookupAuto, "path": minio.BucketLookupPath, "dns": minio.BucketLookupDNS,
 }
 
 // S3Store hands out presigned URLs straight to the object store. The bytes
@@ -28,19 +44,87 @@ type S3Store struct {
 	bucket string
 }
 
-func NewS3Store(cfg S3Config) (*S3Store, error) {
+func NewS3Store(cfg S3Config) (*S3Store, error) { return newS3Store(cfg, nil) }
+
+// newS3Store is NewS3Store with the transport requests go through: nil for
+// the default one, and in tests one that answers them itself.
+func newS3Store(cfg S3Config, transport http.RoundTripper) (*S3Store, error) {
 	if cfg.Endpoint == "" || cfg.Bucket == "" {
 		return nil, errors.New("blob: S3 needs an endpoint and a bucket")
 	}
-	c, err := minio.New(cfg.Endpoint, &minio.Options{
-		Creds:  credentials.NewStaticV4(cfg.AccessKey, cfg.SecretKey, ""),
-		Secure: cfg.UseSSL,
-		Region: cfg.Region,
-	})
+	lookup, ok := bucketLookups[cfg.BucketLookup]
+	if !ok {
+		return nil, fmt.Errorf("blob: the bucket lookup %q is not auto, path or dns", cfg.BucketLookup)
+	}
+	// Requests are signed for the region given (S3_REGION); given one,
+	// minio-go never asks the store where the bucket is.
+	opts := minio.Options{
+		Creds:        credentials.NewStaticV4(cfg.AccessKey, cfg.SecretKey, ""),
+		Secure:       cfg.UseSSL,
+		Region:       cfg.Region,
+		BucketLookup: lookup,
+		Transport:    transport,
+	}
+	c, err := minio.New(cfg.Endpoint, &opts)
 	if err != nil {
 		return nil, err
 	}
+	if err := sendToRegion(c, cfg, opts); err != nil {
+		return nil, err
+	}
 	return &S3Store{client: c, bucket: cfg.Bucket}, nil
+}
+
+// usEast1 are where minio-go sends a request for AWS in a region its table
+// of regions does not have: us-east-1's endpoint, or its dual-stack one.
+var usEast1 = []string{"s3.us-east-1.amazonaws.com", "s3.dualstack.us-east-1.amazonaws.com"}
+
+// sendToRegion has requests for AWS sent to the region they are signed for.
+//
+// minio-go signs a request for the region it is given, but sends one for AWS
+// to the host its own table of regions gives that region, and one for a
+// region the table does not have, as a region newer than the release does
+// not, to us-east-1, which refuses a request signed for another. Where it
+// would, the store sends them to S3_ENDPOINT, if that names the region, or
+// else to the region's own endpoint. Whether it would is asked of minio-go
+// itself, by a URL presigned without asking the store anything, so that a
+// region the table has, or comes to have, is sent where minio-go sends it.
+// (It is presigned by a client of its own, with credentials of its own, as
+// minio-go presigns nothing without them.) The host is named by the one
+// means minio-go has of sending AWS requests to a host of the caller's
+// choosing, the one transfer acceleration uses; nothing else about a
+// request changes.
+func sendToRegion(c *minio.Client, cfg S3Config, opts minio.Options) error {
+	if cfg.Region == "" || cfg.Region == "us-east-1" {
+		return nil
+	}
+	opts.Creds = credentials.NewStaticV4("region-probe", "region-probe", "")
+	prober, err := minio.New(cfg.Endpoint, &opts)
+	if err != nil {
+		return err
+	}
+	probe, err := prober.PresignedGetObject(context.Background(), cfg.Bucket, "aishie-region-probe", time.Minute, nil)
+	if err != nil {
+		return err
+	}
+	if !slices.Contains(usEast1, strings.TrimPrefix(probe.Hostname(), cfg.Bucket+".")) {
+		return nil
+	}
+	host := "s3." + cfg.Region + ".amazonaws.com"
+	if strings.HasPrefix(cfg.Region, "cn-") {
+		host += ".cn"
+	}
+	if endpoint, err := url.Parse("//" + cfg.Endpoint); err == nil && s3utils.GetRegionFromURL(*endpoint) == cfg.Region {
+		host = endpoint.Host
+	}
+	// minio-go sends no bucket whose name has a dot to a host so named:
+	// the name would not match the host's certificate.
+	if strings.Contains(cfg.Bucket, ".") {
+		return fmt.Errorf("blob: requests for S3_REGION %s cannot be sent to %s for a bucket whose name has a dot; use a bucket without one",
+			cfg.Region, host)
+	}
+	c.SetS3TransferAccelerate(host)
+	return nil
 }
 
 // EnsureBucket creates the bucket if it is missing. For development and
