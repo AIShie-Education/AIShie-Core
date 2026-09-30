@@ -44,10 +44,13 @@ func SignerFrom(s *signing.Signer) *Signer { return &Signer{s: s} }
 // hold a file for this purpose.
 //
 // It is checked twice. When the bytes are PUT, it must not have expired: the
-// upload window is short. When the upload is attached to a document, expiry is
-// not checked: a proposal carrying a feedback file may be approved days later,
-// and the file it names is no less the proposer's for that. What stops reuse
-// is the database — a storage key is unique across document versions.
+// upload window is short. When the upload is attached to a document or a
+// message, expiry is not checked: a proposal carrying a feedback file may be
+// approved days later, and the file it names is no less the proposer's for
+// that. What stops reuse is the database: an upload is not attached while the
+// key it was uploaded under, or the key it would be attached under, is any
+// version's or message's file (claimUpload, in package tools). What stops an
+// upload lying about for ever is the orphan sweep.
 type UploadClaim struct {
 	Key         string    `json:"k"`
 	CourseID    uuid.UUID `json:"c"`

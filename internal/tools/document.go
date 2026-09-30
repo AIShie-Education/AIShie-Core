@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"errors"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -337,18 +338,31 @@ func claimUpload(ctx context.Context, d Deps, q dbq.Querier, m *domain.Member, c
 	// makes "is it attached already?" and the move one step: without it a
 	// second attach, racing the first, could copy different bytes over an
 	// object a committed version already points at.
+	//
+	// Attached is asked of the upload's own key as well as its final key.
+	// The disk's final key is the upload's own, so what was attached there
+	// is recorded under it, and when the files are moved to a bucket they
+	// keep their keys: there the same upload's final key is another, which
+	// nothing names. Asked of that alone, a token replayed after the move
+	// would be let by, and attaching would move the object a version points
+	// at to the final key and delete it from under the version.
 	final := d.Blob.FinalKey(c.Key)
-	if err := q.LockStorageKey(ctx, final); err != nil {
-		return upload{}, err
-	}
-	if used, err := q.StorageKeyInUse(ctx, &final); err != nil {
-		return upload{}, err
-	} else if used {
-		to := "a document"
-		if kind == kindAttachment {
-			to = "a message"
+	keys := lockStorageKeys(c.Key, final)
+	for _, key := range keys {
+		if err := q.LockStorageKey(ctx, key); err != nil {
+			return upload{}, err
 		}
-		return upload{}, apperr.Conflicts("that upload is already attached to %s", to).With("reason", "already_attached")
+	}
+	for _, key := range keys {
+		if used, err := q.StorageKeyInUse(ctx, &key); err != nil {
+			return upload{}, err
+		} else if used {
+			to := "a document"
+			if kind == kindAttachment {
+				to = "a message"
+			}
+			return upload{}, apperr.Conflicts("that upload is already attached to %s", to).With("reason", "already_attached")
+		}
 	}
 	staged, err := d.Blob.Stat(ctx, c.Key)
 	if errors.Is(err, blob.ErrNotFound) {
@@ -404,6 +418,16 @@ func claimUpload(ctx context.Context, d Deps, q dbq.Querier, m *domain.Member, c
 		info.ContentType = c.ContentType
 	}
 	return upload{key: final, info: info}, nil
+}
+
+// lockStorageKeys are the keys an attach locks, each once and in one order,
+// the same for every caller, so that two attaching the same upload at once
+// wait for each other and never each for the other. The sweep locks one key
+// at a time.
+func lockStorageKeys(keys ...string) []string {
+	keys = slices.Clone(keys)
+	slices.Sort(keys)
+	return slices.Compact(keys)
 }
 
 // errNotUploaded refuses a token whose upload URL has had nothing PUT to it.

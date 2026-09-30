@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -259,6 +260,74 @@ func TestAMessagesFilesAreHeldToWhatAMessageMayCarry(t *testing.T) {
 	// A new conversation starts with room of its own.
 	b.do(t, b.yuki, "conversation.open", m{"course_id": b.course, "respondent_member_id": b.tutorM, "body": "Once more",
 		"attachments": []m{file(16, "a"), file(16, "b")}})
+}
+
+// A message's files moved from this server's disk to a bucket are where
+// the disk kept them, under the keys they were uploaded to, which is what
+// their rows record. Their tokens replayed in the bucket are refused as
+// attached, by a call or by a proposal, and the files stay where their
+// messages point.
+func TestAMessagesFilesAttachedOnDiskAreNotAttachedAgainOnceInABucket(t *testing.T) {
+	var store testkit.MovingStore
+	b := buildOn(t, testkit.NewPlatformWithStore(t, func(fs *blob.FSStore) blob.Store {
+		store = testkit.NewMovingStore(fs)
+		return store
+	}))
+	essay, marked := []byte("%PDF-1.7 my essay"), []byte("%PDF-1.7 marked up")
+	asked := b.attachment(t, b.yuki, "application/pdf", essay)
+	opened := testkit.Result[tools.ConversationOpenOut](t, b.do(t, b.yuki, "conversation.open", m{"course_id": b.course,
+		"respondent_member_id": b.tutorM, "body": "Is my essay on track?", "attachments": []m{{"upload_token": asked, "filename": "essay.pdf"}}}))
+	conv, question := opened.ConversationID, *opened.MessageID
+	answered := b.attachment(t, b.tutor, "application/pdf", marked)
+	b.do(t, b.tutor, "conversation.answer", m{"course_id": b.course, "conversation_id": conv, "in_reply_to_message_id": question,
+		"body": "Marked up.", "attachments": []m{{"upload_token": answered, "filename": "marked.pdf"}}})
+	keys := map[string]bool{}
+	for _, token := range []string{asked, answered} {
+		c, err := b.Uploads.VerifyUpload(token)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n := b.Count(`SELECT count(*) FROM conversation_attachment WHERE storage_key = $1`, c.Key); n != 1 {
+			t.Fatalf("the disk recorded %d files under the key %s was uploaded to, want 1", n, c.Key)
+		}
+		keys[c.Key] = true
+	}
+
+	store.Move()
+
+	b.refusedAs(t, b.yuki, "conversation.ask", m{"course_id": b.course, "conversation_id": conv, "body": "Again",
+		"attachments": []m{{"upload_token": asked, "filename": "essay.pdf"}}}, apperr.Conflict, "already_attached")
+	b.refusedAs(t, b.yuki, "conversation.open", m{"course_id": b.course, "respondent_member_id": b.tutorM, "body": "Once more",
+		"attachments": []m{{"upload_token": asked, "filename": "essay.pdf"}}}, apperr.Conflict, "already_attached")
+	followUp := b.ask(t, b.yuki, conv, "And the conclusion?")
+	b.refusedAs(t, b.tutor, "conversation.answer", m{"course_id": b.course, "conversation_id": conv, "in_reply_to_message_id": followUp,
+		"body": "Again.", "attachments": []m{{"upload_token": answered, "filename": "marked.pdf"}}}, apperr.Conflict, "already_attached")
+	// A proposal naming one is refused as it is made.
+	b.do(t, b.sato, "member.update_perms", m{"course_id": b.course, "member_id": b.tutorM, "perms": m{"conversation_answer": "confirm_required"}})
+	b.refusedAs(t, b.tutor, "conversation.answer", m{"course_id": b.course, "conversation_id": conv, "in_reply_to_message_id": followUp,
+		"body": "Again, for approval.", "attachments": []m{{"upload_token": answered, "filename": "marked.pdf"}}}, apperr.Conflict, "already_attached")
+
+	// Each file is where its message points, as it was, and nothing was
+	// moved to where the bucket attaches an upload.
+	for key := range keys {
+		if _, err := b.Blob.Stat(context.Background(), store.FinalKey(key)); !errors.Is(err, blob.ErrNotFound) {
+			t.Fatalf("an attached file was copied to %s: %v", store.FinalKey(key), err)
+		}
+	}
+	var read int
+	for _, msg := range b.messages(t, b.yuki, conv) {
+		for _, file := range msg.Attachments {
+			got := b.attachmentOf(t, b.yuki, file.ID)
+			body, _ := b.fetch(t, got.DownloadURL)
+			if want := map[string][]byte{"essay.pdf": essay, "marked.pdf": marked}[file.Filename]; !bytes.Equal(body, want) {
+				t.Fatalf("%s downloads as %q, want %q", file.Filename, body, want)
+			}
+			read++
+		}
+	}
+	if read != len(keys) || b.Count(`SELECT count(*) FROM conversation_attachment WHERE conversation_id = $1`, conv) != len(keys) {
+		t.Fatalf("Yuki reads %d files, want the %d the disk attached", read, len(keys))
+	}
 }
 
 // The limit on a file is never more than what this server's own disk takes
