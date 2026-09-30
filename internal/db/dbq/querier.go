@@ -155,7 +155,9 @@ type Querier interface {
 	// The service's queue
 	// ---------------------------------------------------------------------------
 	// What has been claimed max_attempts times and not finished fails, rather
-	// than be claimed for ever: a file the service cannot get through.
+	// than be claimed for ever: a file the service cannot get through. SKIP
+	// LOCKED, as a claim: what another call holds is its to change, and two
+	// claims at once never wait for each other here.
 	ExhaustTexts(ctx context.Context, arg ExhaustTextsParams) error
 	// Moves a proposal to its end state. The status guard makes a lost race
 	// between two deciders, or a decider and the expiry sweep, a no-op.

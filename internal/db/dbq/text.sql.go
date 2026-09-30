@@ -141,8 +141,11 @@ const exhaustTexts = `-- name: ExhaustTexts :exec
 
 UPDATE document_version_text
 SET status = 'failed', reason = 'attempts_exhausted', lease_id = NULL, claimed_until = NULL, updated_at = $1
-WHERE attempts >= $2::int
-  AND (status = 'pending' OR (status = 'working' AND claimed_until <= $1))
+WHERE version_id IN (
+    SELECT x.version_id FROM document_version_text x
+    WHERE x.attempts >= $2::int
+      AND (x.status = 'pending' OR (x.status = 'working' AND x.claimed_until <= $1))
+    FOR UPDATE SKIP LOCKED)
 `
 
 type ExhaustTextsParams struct {
@@ -154,7 +157,9 @@ type ExhaustTextsParams struct {
 // The service's queue
 // ---------------------------------------------------------------------------
 // What has been claimed max_attempts times and not finished fails, rather
-// than be claimed for ever: a file the service cannot get through.
+// than be claimed for ever: a file the service cannot get through. SKIP
+// LOCKED, as a claim: what another call holds is its to change, and two
+// claims at once never wait for each other here.
 func (q *Queries) ExhaustTexts(ctx context.Context, arg ExhaustTextsParams) error {
 	_, err := q.db.Exec(ctx, exhaustTexts, arg.Now, arg.MaxAttempts)
 	return err

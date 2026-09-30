@@ -77,11 +77,16 @@ RETURNING revision;
 
 -- name: ExhaustTexts :exec
 -- What has been claimed max_attempts times and not finished fails, rather
--- than be claimed for ever: a file the service cannot get through.
+-- than be claimed for ever: a file the service cannot get through. SKIP
+-- LOCKED, as a claim: what another call holds is its to change, and two
+-- claims at once never wait for each other here.
 UPDATE document_version_text
 SET status = 'failed', reason = 'attempts_exhausted', lease_id = NULL, claimed_until = NULL, updated_at = sqlc.arg(now)
-WHERE attempts >= sqlc.arg(max_attempts)::int
-  AND (status = 'pending' OR (status = 'working' AND claimed_until <= sqlc.arg(now)));
+WHERE version_id IN (
+    SELECT x.version_id FROM document_version_text x
+    WHERE x.attempts >= sqlc.arg(max_attempts)::int
+      AND (x.status = 'pending' OR (x.status = 'working' AND x.claimed_until <= sqlc.arg(now)))
+    FOR UPDATE SKIP LOCKED);
 
 -- name: ClaimTexts :many
 -- Up to max_rows text versions waiting, or whose claim has lapsed, claimed for

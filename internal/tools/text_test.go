@@ -151,6 +151,20 @@ func TestATextIsReadAsItsVersionIs(t *testing.T) {
 	if _, err := b.readText(t, b.yuki, m{"document_id": doc, "version_id": v1}); !apperr.Is(err, apperr.NotFound) {
 		t.Fatalf("a student naming an unpublished version: %v", err)
 	}
+	// News of a draft's text is for those who read drafts.
+	told := func(who uuid.UUID, typ string) int {
+		n := 0
+		for _, e := range feed(t, b, who) {
+			if e.Type == typ && e.SubjectID != nil && *e.SubjectID == doc {
+				n++
+			}
+		}
+		return n
+	}
+	if told(b.sato, tools.EventDraftTextUpdated) != 1 || told(b.yuki, tools.EventDraftTextUpdated) != 0 {
+		t.Fatalf("news of the draft's text: the instructor %d, the student %d", told(b.sato, tools.EventDraftTextUpdated),
+			told(b.yuki, tools.EventDraftTextUpdated))
+	}
 
 	// Published: the student reads it, in document.get too.
 	b.do(t, b.sato, "document.publish", m{"course_id": b.course, "document_id": doc})
@@ -412,9 +426,13 @@ func TestRetranscribingKeepsStaffTextUnlessToldTo(t *testing.T) {
 		t.Fatalf("retranscribing staff's text without discard_edit: %+v", out)
 	}
 	args["discard_edit"] = true
-	back := testkit.Result[tools.DocumentTextChangeOut](t, b.do(t, b.sato, "document.text_retranscribe", args))
-	if !back.Changed || back.Status != "pending" {
-		t.Fatalf("retranscribed: %+v", back)
+	sent := b.MustCall(b.sato, "document.text_retranscribe", args, "again-discarding")
+	back := testkit.Result[tools.DocumentTextChangeOut](t, sent)
+	if sent.Status != domain.StatusExecuted || !back.Changed || back.Status != "pending" {
+		t.Fatalf("retranscribed: %+v", sent)
+	}
+	if replay := b.MustCall(b.sato, "document.text_retranscribe", args, "again-discarding"); !replay.Replayed || *replay.ActionID != *sent.ActionID {
+		t.Fatalf("retranscribing, retried: %+v", replay)
 	}
 	got, _ := b.readText(t, b.sato, m{"document_id": doc})
 	if got.Text.Status != "pending" || got.Text.Body != nil || got.Text.Source != nil || got.Parts != 0 {
