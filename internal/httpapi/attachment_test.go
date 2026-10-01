@@ -84,13 +84,14 @@ func TestAMessagesFileOverHTTP(t *testing.T) {
 		t.Fatalf("Ken reading Yuki's conversation: %d %s", r.Status, r.Raw)
 	}
 
-	// Past the limits, the refusal says why.
+	// Past the limits, the refusal says why; past their number, as the
+	// call is read, recording nothing.
 	var many []m
 	for i := range 11 {
 		many = append(many, m{"upload_token": upload("text/plain", []byte("x")), "filename": fmt.Sprintf("%d.txt", i)})
 	}
 	if r := a.do(nil, "POST", course+"/conversations/"+conv+"/ask", yuki, m{"body": "Eleven files", "attachments": many},
-		"Idempotency-Key", "ask-11"); r.Status != 400 || r.str("status") != "failed" || r.str("error", "details", "reason") != "too_many_attachments" {
+		"Idempotency-Key", "ask-11"); r.Status != 400 || r.str("action_id") != "" || r.str("error", "details", "reason") != "too_many_attachments" {
 		t.Fatalf("eleven files: %d %s", r.Status, r.Raw)
 	}
 	big := a.do(nil, "GET", course+"/conversations/upload-url?content_type=application/zip", yuki, nil)

@@ -500,7 +500,8 @@ type ListLiveSeatsByRoleParams struct {
 }
 
 // LockLiveSeatsByRole without the lock: the seats a member.update_perms_bulk
-// proposed now would change, each of which it is held to before it waits.
+// made now would change, each of which it is held to before it is carried
+// out, proposed or approved.
 func (q *Queries) ListLiveSeatsByRole(ctx context.Context, arg ListLiveSeatsByRoleParams) ([]uuid.UUID, error) {
 	rows, err := q.db.Query(ctx, listLiveSeatsByRole,
 		arg.CourseID,

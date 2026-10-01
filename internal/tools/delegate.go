@@ -186,14 +186,10 @@ func delegateReach(callerKind string, callerList func() ([]uuid.UUID, error),
 }
 
 // agentOf checks that actor is an agent the caller owns, active, and not
-// seated here already, and returns it (ownAgent). Someone else's agent, or
-// anyone who is not an agent of the caller's, is not found: the caller
-// learns nothing about actors that are not theirs.
-//
-// now is the pipeline's clock when there is one. Validate has none, and
-// passes nil: a seat that has an expiry is then left for seat() to judge
-// when the call runs, rather than judged by another clock.
-func agentOf(ctx context.Context, q dbq.Querier, owner, actor, courseID uuid.UUID, now *time.Time) (dbq.Actor, error) {
+// seated here already at now, and returns it (ownAgent). Someone else's
+// agent, or anyone who is not an agent of the caller's, is not found: the
+// caller learns nothing about actors that are not theirs.
+func agentOf(ctx context.Context, q dbq.Querier, owner, actor, courseID uuid.UUID, now time.Time) (dbq.Actor, error) {
 	a, err := ownAgent(ctx, q, owner, actor)
 	if err != nil {
 		return a, err
@@ -208,14 +204,11 @@ func agentOf(ctx context.Context, q dbq.Querier, owner, actor, courseID uuid.UUI
 	default:
 		// A seat past its expiry, or orphaned, is removed when the new one
 		// is made (seat); any other is in the way.
-		if live.ExpiresAt != nil && now == nil {
-			break
-		}
-		orphaned, err := q.SeatOrphaned(ctx, dbq.SeatOrphanedParams{MemberID: live.ID, Now: now})
+		orphaned, err := q.SeatOrphaned(ctx, dbq.SeatOrphanedParams{MemberID: live.ID, Now: &now})
 		if err != nil {
 			return a, err
 		}
-		if !orphaned && (live.ExpiresAt == nil || live.ExpiresAt.After(*now)) {
+		if !orphaned && (live.ExpiresAt == nil || live.ExpiresAt.After(now)) {
 			return a, errSeated
 		}
 	}
@@ -251,12 +244,20 @@ func memberAddDelegate() tool.Tool {
 			// Validate, which knows who is calling.
 			return tool.Target{CourseID: in.CourseID, Type: "actor", ID: &in.ActorID}, nil
 		},
-		Validate: func(ctx context.Context, q dbq.Querier, m *domain.Member, in MemberAddDelegateIn) error {
-			if _, err := resolveDelegateSeat(ctx, q, m, in); err != nil {
+		// The seat, and the agent, as seat() is held to them at now: one
+		// seated already, and an expiry already past, are refused.
+		Validate: func(ctx context.Context, q dbq.Querier, m *domain.Member, now time.Time, in MemberAddDelegateIn) error {
+			s, err := resolveDelegateSeat(ctx, q, m, in)
+			if err != nil {
 				return err
 			}
-			_, err := agentOf(ctx, q, m.ActorID, in.ActorID, in.CourseID, nil)
-			return err
+			if _, err := agentOf(ctx, q, m.ActorID, in.ActorID, in.CourseID, now); err != nil {
+				return err
+			}
+			if s.expiresAt != nil && !s.expiresAt.After(now) {
+				return errExpiresInPast
+			}
+			return nil
 		},
 		// A proposal stores the seat as it would be made now, every level and
 		// list written out, so that what is approved is what was asked for:
@@ -295,7 +296,7 @@ func memberAddDelegate() tool.Tool {
 			if err != nil {
 				return MemberIDOut{}, err
 			}
-			if _, err := agentOf(ctx, ec.Q, ec.Actor.ID, in.ActorID, in.CourseID, &ec.Now); err != nil {
+			if _, err := agentOf(ctx, ec.Q, ec.Actor.ID, in.ActorID, in.CourseID, ec.Now); err != nil {
 				return MemberIDOut{}, err
 			}
 			id, err := seat(ctx, ec, s)

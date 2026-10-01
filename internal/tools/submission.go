@@ -290,7 +290,7 @@ func submissionCreate() tool.Tool {
 			// the call runs; Execute checks their scope itself.
 			return t, nil
 		},
-		Validate: func(ctx context.Context, q dbq.Querier, m *domain.Member, in SubmissionCreateIn) error {
+		Validate: func(ctx context.Context, q dbq.Querier, m *domain.Member, _ time.Time, in SubmissionCreateIn) error {
 			student, err := submitter(ctx, q, m, in)
 			if err != nil {
 				return err
@@ -381,7 +381,7 @@ func submissionUpdateDraft() tool.Tool {
 		Resolve: func(ctx context.Context, q dbq.Querier, in SubmissionUpdateDraftIn) (tool.Target, error) {
 			return submissionTarget(ctx, q, in.CourseID, in.SubmissionID)
 		},
-		Validate: func(ctx context.Context, q dbq.Querier, _ *domain.Member, in SubmissionUpdateDraftIn) error {
+		Validate: func(ctx context.Context, q dbq.Querier, _ *domain.Member, _ time.Time, in SubmissionUpdateDraftIn) error {
 			sub, err := q.GetSubmissionInCourse(ctx, dbq.GetSubmissionInCourseParams{ID: in.SubmissionID, CourseID: in.CourseID})
 			if err == nil && sub.State != stateDraft {
 				return errNoLongerDraft
@@ -551,7 +551,7 @@ func submissionSubmit() tool.Tool {
 			in.Body, in.Files, in.InstructionsVersionID = &text, files, inForce
 			return in, nil
 		},
-		Validate: func(ctx context.Context, q dbq.Querier, _ *domain.Member, in SubmissionSubmitIn) error {
+		Validate: func(ctx context.Context, q dbq.Querier, _ *domain.Member, _ time.Time, in SubmissionSubmitIn) error {
 			sub, err := q.GetSubmissionFull(ctx, dbq.GetSubmissionFullParams{ID: in.SubmissionID, CourseID: in.CourseID})
 			if err != nil {
 				return err
@@ -643,7 +643,7 @@ func submissionSetLateness() tool.Tool {
 		Resolve: func(ctx context.Context, q dbq.Querier, in SubmissionSetLatenessIn) (tool.Target, error) {
 			return submissionTarget(ctx, q, in.CourseID, in.SubmissionID)
 		},
-		Validate: func(ctx context.Context, q dbq.Querier, _ *domain.Member, in SubmissionSetLatenessIn) error {
+		Validate: func(ctx context.Context, q dbq.Querier, _ *domain.Member, _ time.Time, in SubmissionSetLatenessIn) error {
 			sub, err := q.GetSubmissionInCourse(ctx, dbq.GetSubmissionInCourseParams{ID: in.SubmissionID, CourseID: in.CourseID})
 			if err != nil {
 				return err
@@ -736,7 +736,7 @@ func submissionRecordMissing() tool.Tool {
 			t.Scope.StudentMemberIDs = []uuid.UUID{in.StudentMemberID}
 			return t, nil
 		},
-		Validate: func(ctx context.Context, q dbq.Querier, m *domain.Member, in SubmissionRecordMissingIn) error {
+		Validate: func(ctx context.Context, q dbq.Querier, m *domain.Member, _ time.Time, in SubmissionRecordMissingIn) error {
 			a, err := q.GetAssignmentInCourse(ctx, dbq.GetAssignmentInCourseParams{ID: in.AssignmentID, CourseID: in.CourseID})
 			if err != nil {
 				return err

@@ -496,7 +496,7 @@ func joinLinkRevoke() tool.Tool {
 			}
 			return tool.Target{CourseID: in.CourseID, Type: "course_join_link", ID: &in.LinkID}, nil
 		},
-		Validate: func(ctx context.Context, q dbq.Querier, _ *domain.Member, in JoinLinkRevokeIn) error {
+		Validate: func(ctx context.Context, q dbq.Querier, _ *domain.Member, _ time.Time, in JoinLinkRevokeIn) error {
 			l, err := q.GetJoinLinkInCourse(ctx, dbq.GetJoinLinkInCourseParams{ID: in.LinkID, CourseID: in.CourseID})
 			if err == nil && l.RevokedAt != nil {
 				return errLinkRevoked

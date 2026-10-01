@@ -717,12 +717,15 @@ func TestNobodyClosesTheirOwnEscalationAtOneRemove(t *testing.T) {
 		t.Fatalf("Sato approving the escalation: %+v", v)
 	}
 	refused("Sato closing an escalation he approved", review(c.Sato, graded2.ActionID, "reviewed", "sato2-close"))
+	// Nor does the agent that proposed it: approving its review would refuse
+	// it, and so nobody is asked to.
+	refused("the agent closing the escalation it proposed", review(triage, graded2.ActionID, "reviewed", "close2-own"))
 	// Approving someone else's no to a review that would close it is saying
 	// no too.
-	closing2 := review(triage, graded2.ActionID, "reviewed", "close2")
-	status("the agent's review", closing2, domain.StatusProposed)
-	no := decide(second, closing2.ActionID, "reject", "second2-no")
-	status("the second agent's rejection", no, domain.StatusProposed)
+	closing2 := review(second, graded2.ActionID, "reviewed", "close2")
+	status("the second agent's review", closing2, domain.StatusProposed)
+	no := decide(triage, closing2.ActionID, "reject", "triage2-no")
+	status("the agent's rejection", no, domain.StatusProposed)
 	if yes := decide(c.Sato, no.ActionID, "approve", "sato2-no"); yes.Status != domain.StatusExecuted || testkit.Result[pipeline.DecideOut](t, yes).Outcome != domain.StatusExecuted {
 		t.Fatalf("Sato approving the rejection: %+v", yes)
 	}
@@ -748,8 +751,8 @@ func TestNobodyClosesTheirOwnEscalationAtOneRemove(t *testing.T) {
 // its owner and it, and any other agent of the owner's, as one party: none
 // decides or reviews another's action, at any remove, nor closes an
 // escalation another raised. Anyone else may. An agent decides and reviews
-// only by proposal, so what one of the party would decide waits for a
-// person, and is refused once that person confirms it. The one exception,
+// only by proposal, and what one of the party would decide is refused at
+// once, as confirming it would refuse it: nobody is asked to. The one exception,
 // an owner deciding what they could have done themselves, is not in play
 // here: Sato's own grades wait for a confirmation too
 // (TestAnOwnerDecidesWhatTheyCouldHaveDoneThemselves).
@@ -797,14 +800,16 @@ func TestOneOwnersAgentsAndTheOwnerAreOneParty(t *testing.T) {
 		}
 	}
 	// confirmed is what an agent's decision or review comes to: a proposal,
-	// which the other reviewer, outside both parties, confirms.
-	confirmed := func(what string, out pipeline.Outcome, want domain.ActionStatus) {
+	// which the other reviewer, outside both parties, confirms. One that
+	// confirming it would refuse is refused at once instead (refused), and
+	// nobody is asked to.
+	confirmed := func(what string, out pipeline.Outcome) {
 		t.Helper()
 		if out.Status != domain.StatusProposed {
 			t.Fatalf("%s, which an agent only proposes: %+v", what, out)
 		}
 		v := testkit.Result[pipeline.DecideOut](t, decide(other, out.ActionID, "confirm-"+out.ActionID.String()))
-		if v.Outcome != want || (want == domain.StatusFailed && (v.Error == nil || v.Error.Code != apperr.Forbidden)) {
+		if v.Outcome != domain.StatusExecuted {
 			t.Fatalf("%s, once confirmed: %+v", what, v)
 		}
 	}
@@ -817,7 +822,7 @@ func TestOneOwnersAgentsAndTheOwnerAreOneParty(t *testing.T) {
 		t.Fatalf("Sato's agent grading: %+v", fromBot)
 	}
 	refused("Sato approving his agent's proposal", decide(c.Sato, fromBot.ActionID, "sato"))
-	confirmed("Sato's other agent approving it", decide(satoBot2, fromBot.ActionID, "bot2"), domain.StatusFailed)
+	refused("Sato's other agent approving it", decide(satoBot2, fromBot.ActionID, "bot2"))
 	// Nor at one remove: someone else's approval of it that waits for a
 	// person is not Sato's to confirm.
 	nested := decide(triage, fromBot.ActionID, "triage")
@@ -825,7 +830,7 @@ func TestOneOwnersAgentsAndTheOwnerAreOneParty(t *testing.T) {
 		t.Fatalf("the triage agent's approval: %+v", nested)
 	}
 	refused("Sato confirming an approval of his agent's proposal", decide(c.Sato, nested.ActionID, "sato-nested"))
-	confirmed("Sato's other agent confirming it", decide(satoBot2, nested.ActionID, "bot2-nested"), domain.StatusFailed)
+	refused("Sato's other agent confirming it", decide(satoBot2, nested.ActionID, "bot2-nested"))
 	executed("Mori confirming it", decide(mori, nested.ActionID, "mori-nested"))
 
 	// An agent does not approve its owner's proposal.
@@ -833,8 +838,8 @@ func TestOneOwnersAgentsAndTheOwnerAreOneParty(t *testing.T) {
 	if fromMori.Status != domain.StatusProposed {
 		t.Fatalf("Mori grading: %+v", fromMori)
 	}
-	confirmed("Mori's agent approving Mori's proposal", decide(moriBot, fromMori.ActionID, "moribot"), domain.StatusFailed)
-	confirmed("Sato's agent approving Mori's", decide(satoBot, fromMori.ActionID, "satobot"), domain.StatusExecuted)
+	refused("Mori's agent approving Mori's proposal", decide(moriBot, fromMori.ActionID, "moribot"))
+	confirmed("Sato's agent approving Mori's", decide(satoBot, fromMori.ActionID, "satobot"))
 
 	// Nor reviews it, and an escalation one of the party raised is for
 	// someone outside it to close.
@@ -843,14 +848,14 @@ func TestOneOwnersAgentsAndTheOwnerAreOneParty(t *testing.T) {
 	if underReview.ReviewState != domain.ReviewPending {
 		t.Fatalf("Mori's grade under review: %+v", underReview)
 	}
-	confirmed("Mori's agent reviewing Mori's grade", review(moriBot, underReview.ActionID, "reviewed", "moribot-review"), domain.StatusFailed)
+	refused("Mori's agent reviewing Mori's grade", review(moriBot, underReview.ActionID, "reviewed", "moribot-review"))
 	executed("Sato escalating Mori's grade", review(c.Sato, underReview.ActionID, "escalated", "sato-escalate"))
-	confirmed("Sato's agent closing Sato's escalation", review(satoBot, underReview.ActionID, "reviewed", "satobot-close"), domain.StatusFailed)
+	refused("Sato's agent closing Sato's escalation", review(satoBot, underReview.ActionID, "reviewed", "satobot-close"))
 	closing := review(triage, underReview.ActionID, "reviewed", "triage-close")
 	if closing.Status != domain.StatusProposed {
 		t.Fatalf("the triage agent's review: %+v", closing)
 	}
-	confirmed("Sato's agent approving a review that closes Sato's escalation", decide(satoBot2, closing.ActionID, "bot2-close"), domain.StatusFailed)
+	refused("Sato's agent approving a review that closes Sato's escalation", decide(satoBot2, closing.ActionID, "bot2-close"))
 	executed("someone outside both parties closing it", decide(other, closing.ActionID, "other-close"))
 	if n := c.Count(`SELECT count(*) FROM action WHERE id = $1 AND review_state = 'reviewed'`, *underReview.ActionID); n != 1 {
 		t.Fatal("Mori's grade was not closed by someone outside the parties")
@@ -916,16 +921,13 @@ func TestAnOwnerDecidesWhatTheyCouldHaveDoneThemselves(t *testing.T) {
 			t.Fatalf("%s: %+v", what, out)
 		}
 	}
-	// An agent decides and reviews only by proposal: what the sibling would
-	// decide waits for a person, Mori, and is refused once he confirms it.
-	refusedOnceConfirmed := func(what string, out pipeline.Outcome) {
+	// An agent decides and reviews only by proposal, and what the sibling
+	// would decide is refused at once, as a person confirming it would
+	// refuse it: nobody is asked to.
+	refusedAtOnce := func(what string, out pipeline.Outcome) {
 		t.Helper()
-		if out.Status != domain.StatusProposed {
-			t.Fatalf("%s, which an agent only proposes: %+v", what, out)
-		}
-		v := decided(what+", confirmed by Mori", decide(mori, out.ActionID, "approve", "mori-"+out.ActionID.String()), domain.StatusFailed, false)
-		if v.Error == nil || v.Error.Code != apperr.Forbidden {
-			t.Fatalf("%s, once confirmed: %+v", what, v)
+		if out.Status != domain.StatusFailed || out.Error == nil || out.Error.Code != apperr.Forbidden {
+			t.Fatalf("%s, refused before anyone is asked to confirm it: %+v", what, out)
 		}
 	}
 	yours := func(actor uuid.UUID, queue string, action *uuid.UUID) bool {
@@ -964,10 +966,10 @@ func TestAnOwnerDecidesWhatTheyCouldHaveDoneThemselves(t *testing.T) {
 
 	// His other agent decides nothing of it, nor an agent its owner's.
 	sib := propose(bot, 1, "p1")
-	refusedOnceConfirmed("Sato's other agent approving", decide(sibling, sib, "approve", "sib-1"))
+	refusedAtOnce("Sato's other agent approving", decide(sibling, sib, "approve", "sib-1"))
 	set(c.SatoM, domain.PermGradeSubmit, domain.ConfirmRequired)
 	own := propose(c.Sato, 9, "sato-own")
-	refusedOnceConfirmed("Sato's agent approving Sato's grade", decide(sibling, own, "approve", "sib-own"))
+	refusedAtOnce("Sato's agent approving Sato's grade", decide(sibling, own, "approve", "sib-own"))
 
 	// Where Sato's own grades wait for a confirmation, or a review, his
 	// agent's are not his to decide, either way.
@@ -1059,7 +1061,7 @@ func TestAnOwnerDecidesWhatTheyCouldHaveDoneThemselves(t *testing.T) {
 		t.Fatal("yours_to_decide on a review while Sato's own grades are under review")
 	}
 	refused("Sato reviewing, his own grades under review", review(c.Sato, unchecked, "sato-8"), "owner_not_autonomous")
-	refusedOnceConfirmed("Sato's other agent reviewing", review(sibling, unchecked, "sib-8"))
+	refusedAtOnce("Sato's other agent reviewing", review(sibling, unchecked, "sib-8"))
 	if out := review(mori, unchecked, "mori-8"); out.Status != domain.StatusExecuted || testkit.Result[pipeline.ReviewOut](t, out).ByOwner {
 		t.Fatalf("Mori reviewing it: %+v", out)
 	}
@@ -1470,7 +1472,7 @@ func TestAnApprovalThatLosesADeadlockLeavesTheProposalWaiting(t *testing.T) {
 		Resolve: func(_ context.Context, _ dbq.Querier, in flakyIn) (tool.Target, error) {
 			return tool.Target{CourseID: in.CourseID, Type: "course"}, nil
 		},
-		Validate: func(context.Context, dbq.Querier, *domain.Member, flakyIn) error {
+		Validate: func(context.Context, dbq.Querier, *domain.Member, time.Time, flakyIn) error {
 			if flaky {
 				return &pgconn.PgError{Code: "40P01", Message: "deadlock detected"}
 			}
@@ -1522,7 +1524,7 @@ func TestACallThatLosesADeadlockIsMadeAgain(t *testing.T) {
 		Resolve: func(_ context.Context, _ dbq.Querier, in onceIn) (tool.Target, error) {
 			return tool.Target{CourseID: in.CourseID, Type: "course"}, nil
 		},
-		Validate: func(_ context.Context, _ dbq.Querier, _ *domain.Member, in onceIn) error {
+		Validate: func(_ context.Context, _ dbq.Querier, _ *domain.Member, _ time.Time, in onceIn) error {
 			return lose("validate", in)
 		},
 		Pin: func(_ context.Context, _ dbq.Querier, _ *domain.Member, _ time.Time, in onceIn) (onceIn, error) {

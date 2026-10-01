@@ -475,9 +475,9 @@ var errSeated = apperr.Conflicts("the actor already has a seat in this course; c
 
 // seatedNow refuses a seat for actor while it holds a live one in the
 // course that is neither past its expiry at now nor orphaned, which seat()
-// would remove first: member.add asks it as a seat is proposed (Pin), and
-// seat() as it seats the actor, where it may take the seat that is in the
-// way.
+// would remove first: member.add asks it before a seat is proposed or given
+// (Validate), and seat() as it seats the actor, where it may take the seat
+// that is in the way.
 func seatedNow(ctx context.Context, q dbq.Querier, courseID, actor uuid.UUID, now time.Time) error {
 	live, err := q.GetLiveMembership(ctx, dbq.GetLiveMembershipParams{CourseID: courseID, ActorID: actor})
 	if errors.Is(err, pgx.ErrNoRows) {

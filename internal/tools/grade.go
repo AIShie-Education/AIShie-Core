@@ -49,8 +49,9 @@ func (f FeedbackFile) content() Content {
 	return Content{UploadToken: &token}
 }
 
-// checkFeedbackFiles verifies each file without recording anything.
-func checkFeedbackFiles(ctx context.Context, d Deps, q dbq.Querier, m *domain.Member, courseID uuid.UUID, files []FeedbackFile) error {
+// checkFeedbackArgs is what a grade's feedback files say alone (Check):
+// each has a title, and no upload is listed twice.
+func checkFeedbackArgs(files []FeedbackFile) error {
 	seen := map[string]bool{}
 	for _, f := range files {
 		if strings.TrimSpace(f.Title) == "" {
@@ -60,6 +61,15 @@ func checkFeedbackFiles(ctx context.Context, d Deps, q dbq.Querier, m *domain.Me
 			return apperr.Invalid("the same upload is listed twice")
 		}
 		seen[f.UploadToken] = true
+	}
+	return nil
+}
+
+// checkFeedbackFiles verifies each file, of files checkFeedbackArgs has
+// taken, without recording anything: each is an upload of m's, there, and
+// one a feedback document may hold.
+func checkFeedbackFiles(ctx context.Context, d Deps, q dbq.Querier, m *domain.Member, courseID uuid.UUID, files []FeedbackFile) error {
+	for _, f := range files {
 		named, err := f.content().named(d, f.Title)
 		if err != nil {
 			return err
@@ -321,9 +331,10 @@ func pinContent(ctx context.Context, q dbq.Querier, s gradeSubject, c *GradeCont
 }
 
 // check holds a grade to what it may say whatever it is a grade of: no
-// score or breakdown points below zero, and a rubric version named or none,
-// not both. It is grade.submit's and grade.regrade's Check; checkContent
-// holds it to the work.
+// score or breakdown points below zero, a rubric version named or none, not
+// both, and feedback files each with a title, none listed twice. It is
+// grade.submit's and grade.regrade's Check; checkContent holds it to the
+// work, and checkFeedbackFiles its files to the uploads.
 func (c GradeContent) check() error {
 	if c.Score.IsNegative() {
 		return apperr.Invalid("score cannot be negative")
@@ -336,7 +347,7 @@ func (c GradeContent) check() error {
 	if c.NoRubric && c.RubricVersionID != nil {
 		return apperr.Invalid("give rubric_version_id or no_rubric, not both")
 	}
-	return nil
+	return checkFeedbackArgs(c.FeedbackFiles)
 }
 
 // checkContent holds the rules about the grade itself, and returns the rubric
@@ -414,7 +425,7 @@ func gradeSubmit(d Deps) tool.Tool {
 			}
 			return in.check()
 		},
-		Validate: func(ctx context.Context, q dbq.Querier, m *domain.Member, in GradeSubmitIn) error {
+		Validate: func(ctx context.Context, q dbq.Querier, m *domain.Member, _ time.Time, in GradeSubmitIn) error {
 			s, err := load(ctx, q, in)
 			if err != nil {
 				return err
@@ -600,6 +611,10 @@ type GradePostOut struct {
 	Snapshots int         `json:"snapshots" jsonschema:"how many rolled-up totals were written or changed"`
 }
 
+// errPostOneOf refuses a post that names no grades, or, made as a call,
+// both grades and an assignment.
+var errPostOneOf = apperr.Invalid("give exactly one of grade_ids and assignment_id")
+
 // pinned reports whether in is what a proposal to post an assignment
 // stores: the assignment, and beside it the drafts that were waiting for it
 // when the proposal was made. Pin is the only thing that writes both; a call
@@ -613,7 +628,7 @@ func (in GradePostIn) pinned() bool {
 // post, it is authorized over all of them, as it was when it was made.
 func gradesToPost(ctx context.Context, q dbq.Querier, in GradePostIn) ([]dbq.GetGradesInCourseRow, error) {
 	if len(in.GradeIDs) == 0 && in.AssignmentID == nil {
-		return nil, apperr.Invalid("give exactly one of grade_ids and assignment_id")
+		return nil, errPostOneOf // as Check refuses it
 	}
 	idsToPost := in.GradeIDs
 	if in.AssignmentID != nil {
@@ -677,6 +692,21 @@ func gradePost() tool.Tool {
 		Gate: tool.Gate{Perms: []domain.Perm{domain.PermGradePost}},
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/grades/post"},
 
+		// A call gives one of grade_ids and assignment_id. A proposal to
+		// post an assignment stores both (Pin), and is read back with
+		// both: that a call may not is CheckCall's.
+		Check: func(in GradePostIn) error {
+			if len(in.GradeIDs) == 0 && in.AssignmentID == nil {
+				return errPostOneOf
+			}
+			return nil
+		},
+		CheckCall: func(in GradePostIn) error {
+			if in.pinned() {
+				return errPostOneOf
+			}
+			return nil
+		},
 		Resolve: func(ctx context.Context, q dbq.Querier, in GradePostIn) (tool.Target, error) {
 			rows, err := gradesToPost(ctx, q, in)
 			if err != nil {
@@ -696,7 +726,7 @@ func gradePost() tool.Tool {
 			}
 			return t, nil
 		},
-		Validate: func(ctx context.Context, q dbq.Querier, _ *domain.Member, in GradePostIn) error {
+		Validate: func(ctx context.Context, q dbq.Querier, _ *domain.Member, _ time.Time, in GradePostIn) error {
 			rows, err := gradesToPost(ctx, q, in)
 			if err != nil {
 				return err
@@ -704,11 +734,10 @@ func gradePost() tool.Tool {
 			// Drafts named by id, alone or beside the assignment as Pin
 			// records them, are checked in Execute: it is the one place
 			// that can tell an approval, which passes over one posted
-			// meanwhile, from a call, which is told that it is posted or
-			// refused for giving both. Pin checks them for a proposal as it
-			// is made. Execute runs straight after this, for a call and an
-			// approval alike, and refuses there what would have been
-			// refused here.
+			// meanwhile, from a call, which is told that it is posted.
+			// Pin checks them for a proposal as it is made. Execute runs
+			// straight after this, for a call and an approval alike, and
+			// refuses there what would have been refused here.
 			if len(in.GradeIDs) > 0 {
 				return nil
 			}
@@ -734,9 +763,6 @@ func gradePost() tool.Tool {
 				}
 				return in, checkPostable(ctx, q, rows)
 			}
-			if len(in.GradeIDs) > 0 {
-				return in, apperr.Invalid("give exactly one of grade_ids and assignment_id")
-			}
 			rows, err := gradesToPost(ctx, q, in)
 			if err != nil {
 				return in, err
@@ -755,13 +781,10 @@ func gradePost() tool.Tool {
 		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in GradePostIn) (GradePostOut, error) {
 			// Grade ids beside the assignment are what Pin stores, and a
-			// call giving both is refused. Approving a proposal, whether it
-			// named its drafts or had them pinned, passes over one posted
-			// meanwhile; a call naming a grade that is already posted is
-			// told so by checkPostable.
-			if in.pinned() && !ec.Approved {
-				return GradePostOut{}, apperr.Invalid("give exactly one of grade_ids and assignment_id")
-			}
+			// call giving both was refused as it was read (CheckCall).
+			// Approving a proposal, whether it named its drafts or had them
+			// pinned, passes over one posted meanwhile; a call naming a
+			// grade that is already posted is told so by checkPostable.
 			rows, err := gradesToPost(ctx, ec.Q, in)
 			if err != nil {
 				return GradePostOut{}, err
@@ -961,7 +984,7 @@ func gradeRegrade(d Deps) tool.Tool {
 			}
 			return t, nil
 		},
-		Validate: func(ctx context.Context, q dbq.Querier, m *domain.Member, in GradeRegradeIn) error {
+		Validate: func(ctx context.Context, q dbq.Querier, m *domain.Member, _ time.Time, in GradeRegradeIn) error {
 			g, s, err := load(ctx, q, in)
 			if err != nil {
 				return err
@@ -1272,7 +1295,7 @@ func gradeOverrideTotal() tool.Tool {
 		Resolve: func(ctx context.Context, q dbq.Querier, in GradeOverrideTotalIn) (tool.Target, error) {
 			return resolveTotal(ctx, q, in.TotalIn)
 		},
-		Validate: func(ctx context.Context, q dbq.Querier, _ *domain.Member, in GradeOverrideTotalIn) error {
+		Validate: func(ctx context.Context, q dbq.Querier, _ *domain.Member, _ time.Time, in GradeOverrideTotalIn) error {
 			_, err := in.total(ctx, q)
 			return err
 		},
@@ -1322,7 +1345,7 @@ func gradeClearOverride() tool.Tool {
 		Resolve: func(ctx context.Context, q dbq.Querier, in TotalIn) (tool.Target, error) {
 			return resolveTotal(ctx, q, in)
 		},
-		Validate: func(ctx context.Context, q dbq.Querier, _ *domain.Member, in TotalIn) error {
+		Validate: func(ctx context.Context, q dbq.Querier, _ *domain.Member, _ time.Time, in TotalIn) error {
 			_, err := in.total(ctx, q)
 			return err
 		},
@@ -1367,7 +1390,7 @@ func gradeCommentTotal() tool.Tool {
 		Resolve: func(ctx context.Context, q dbq.Querier, in GradeCommentTotalIn) (tool.Target, error) {
 			return resolveTotal(ctx, q, in.TotalIn)
 		},
-		Validate: func(ctx context.Context, q dbq.Querier, _ *domain.Member, in GradeCommentTotalIn) error {
+		Validate: func(ctx context.Context, q dbq.Querier, _ *domain.Member, _ time.Time, in GradeCommentTotalIn) error {
 			_, err := in.total(ctx, q)
 			return err
 		},
@@ -1461,7 +1484,7 @@ func gradeUndoUngradedAsZero() tool.Tool {
 			}
 			return t, nil
 		},
-		Validate: func(ctx context.Context, q dbq.Querier, _ *domain.Member, in GradeUndoUngradedAsZeroIn) error {
+		Validate: func(ctx context.Context, q dbq.Querier, _ *domain.Member, _ time.Time, in GradeUndoUngradedAsZeroIn) error {
 			students, err := countedAsZero(ctx, q, in)
 			if err != nil {
 				return err

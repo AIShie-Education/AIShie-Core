@@ -178,7 +178,8 @@ SELECT EXISTS (
 
 -- name: ListLiveSeatsByRole :many
 -- LockLiveSeatsByRole without the lock: the seats a member.update_perms_bulk
--- proposed now would change, each of which it is held to before it waits.
+-- made now would change, each of which it is held to before it is carried
+-- out, proposed or approved.
 SELECT id FROM course_member
 WHERE course_id = $1 AND role = sqlc.arg(role) AND status <> 'removed'
   AND (expires_at IS NULL OR expires_at > sqlc.arg(now)) AND id <> sqlc.arg(except_member_id)

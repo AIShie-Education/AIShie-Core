@@ -560,6 +560,76 @@ func (q *Queries) ListLiveComponentScores(ctx context.Context, studentMemberID u
 	return items, nil
 }
 
+const listLiveEnteredGradeScoresOfAssignment = `-- name: ListLiveEnteredGradeScoresOfAssignment :many
+SELECT g.id, g.score
+FROM grade g
+JOIN submission s ON s.id = g.submission_id
+WHERE s.assignment_id = $1 AND g.origin = 'entered' AND g.superseded_by IS NULL
+ORDER BY g.id
+`
+
+type ListLiveEnteredGradeScoresOfAssignmentRow struct {
+	ID    uuid.UUID
+	Score decimal.Decimal
+}
+
+// LockLiveEnteredGradesOfAssignment's grades, by their scores, without the
+// lock: what a change of the assignment's points is held to before it is
+// carried out, proposed or approved.
+func (q *Queries) ListLiveEnteredGradeScoresOfAssignment(ctx context.Context, assignmentID uuid.UUID) ([]ListLiveEnteredGradeScoresOfAssignmentRow, error) {
+	rows, err := q.db.Query(ctx, listLiveEnteredGradeScoresOfAssignment, assignmentID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListLiveEnteredGradeScoresOfAssignmentRow
+	for rows.Next() {
+		var i ListLiveEnteredGradeScoresOfAssignmentRow
+		if err := rows.Scan(&i.ID, &i.Score); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listLiveEnteredGradeScoresOfComponent = `-- name: ListLiveEnteredGradeScoresOfComponent :many
+SELECT g.id, g.score
+FROM grade g
+WHERE g.component_id = $1 AND g.origin = 'entered' AND g.superseded_by IS NULL
+ORDER BY g.id
+`
+
+type ListLiveEnteredGradeScoresOfComponentRow struct {
+	ID    uuid.UUID
+	Score decimal.Decimal
+}
+
+// LockLiveEnteredGradesOfComponent's grades, by their scores, without the
+// lock, as ListLiveEnteredGradeScoresOfAssignment.
+func (q *Queries) ListLiveEnteredGradeScoresOfComponent(ctx context.Context, componentID *uuid.UUID) ([]ListLiveEnteredGradeScoresOfComponentRow, error) {
+	rows, err := q.db.Query(ctx, listLiveEnteredGradeScoresOfComponent, componentID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListLiveEnteredGradeScoresOfComponentRow
+	for rows.Next() {
+		var i ListLiveEnteredGradeScoresOfComponentRow
+		if err := rows.Scan(&i.ID, &i.Score); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listLiveTotalComponents = `-- name: ListLiveTotalComponents :many
 SELECT component_id
 FROM grade

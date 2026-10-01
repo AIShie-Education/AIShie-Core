@@ -263,7 +263,7 @@ func assignmentCreate() tool.Tool {
 		Resolve: func(_ context.Context, _ dbq.Querier, in AssignmentCreateIn) (tool.Target, error) {
 			return tool.Target{CourseID: in.CourseID, Type: "assignment"}, nil
 		},
-		Validate: func(ctx context.Context, q dbq.Querier, _ *domain.Member, in AssignmentCreateIn) error {
+		Validate: func(ctx context.Context, q dbq.Querier, _ *domain.Member, _ time.Time, in AssignmentCreateIn) error {
 			a := dbq.GetAssignmentInCourseRow{CourseID: in.CourseID}
 			in.applyTo(&a)
 			return checkAssignment(ctx, q, in.CourseID, a, false)
@@ -374,19 +374,28 @@ func assignmentUpdate() tool.Tool {
 			}
 			return t, nil
 		},
-		Validate: func(ctx context.Context, q dbq.Querier, _ *domain.Member, in AssignmentUpdateIn) error {
+		Validate: func(ctx context.Context, q dbq.Querier, _ *domain.Member, _ time.Time, in AssignmentUpdateIn) error {
 			before, err := q.GetAssignmentInCourse(ctx, dbq.GetAssignmentInCourseParams{ID: in.AssignmentID, CourseID: in.CourseID})
 			if err != nil {
 				return err
 			}
 			a := in.updated(before)
-			if points, _ := movesInScheme(before, a); points && in.ExistingGrades == nil {
-				graded, err := q.ListStudentsGradedOnAssignment(ctx, a.ID)
+			if points, _ := movesInScheme(before, a); points {
+				graded, err := q.ListLiveEnteredGradeScoresOfAssignment(ctx, a.ID)
 				if err != nil {
 					return err
 				}
-				if len(graded) > 0 {
+				switch {
+				case len(graded) > 0 && in.ExistingGrades == nil:
 					return errExistingGradesRequired
+				case len(graded) > 0:
+					scores := make([]gradeScore, len(graded))
+					for i, g := range graded {
+						scores[i] = gradeScore{id: g.ID, score: g.Score}
+					}
+					if err := rebaseRefusal(scores, before.PointsPossible, a.PointsPossible, *in.ExistingGrades); err != nil {
+						return err
+					}
 				}
 			}
 			return checkAssignment(ctx, q, in.CourseID, a, false)
@@ -479,7 +488,7 @@ func assignmentPublish() tool.Tool {
 		Resolve: func(ctx context.Context, q dbq.Querier, in AssignmentIDIn) (tool.Target, error) {
 			return assignmentTarget(ctx, q, in.CourseID, in.AssignmentID)
 		},
-		Validate: func(ctx context.Context, q dbq.Querier, _ *domain.Member, in AssignmentIDIn) error {
+		Validate: func(ctx context.Context, q dbq.Querier, _ *domain.Member, _ time.Time, in AssignmentIDIn) error {
 			a, err := q.GetAssignmentInCourse(ctx, dbq.GetAssignmentInCourseParams{ID: in.AssignmentID, CourseID: in.CourseID})
 			if err != nil {
 				return err
@@ -524,7 +533,7 @@ func assignmentUnpublish() tool.Tool {
 		Resolve: func(ctx context.Context, q dbq.Querier, in AssignmentIDIn) (tool.Target, error) {
 			return assignmentTarget(ctx, q, in.CourseID, in.AssignmentID)
 		},
-		Validate: func(ctx context.Context, q dbq.Querier, _ *domain.Member, in AssignmentIDIn) error {
+		Validate: func(ctx context.Context, q dbq.Querier, _ *domain.Member, _ time.Time, in AssignmentIDIn) error {
 			a, err := q.GetAssignmentInCourse(ctx, dbq.GetAssignmentInCourseParams{ID: in.AssignmentID, CourseID: in.CourseID})
 			if err != nil {
 				return err

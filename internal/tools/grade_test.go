@@ -898,13 +898,19 @@ func TestAnApprovedPostPassesOverDraftsPostedMeanwhile(t *testing.T) {
 	mid := testkit.Result[tools.GradeSubmitOut](t, b.do(t, b.sato, "grade.submit",
 		m{"course_id": b.course, "component_id": b.midterm, "student_member_id": b.yukiM, "score": 50})).GradeID
 	both := m{"course_id": b.course, "assignment_id": b.hw3, "grade_ids": []uuid.UUID{yukis, mid}}
+	// Only a proposal stores drafts beside the assignment: a call giving
+	// both is refused as it is read, recording nothing, whether it would
+	// have been carried out or proposed.
 	for _, by := range []struct {
 		what  string
 		actor uuid.UUID
 	}{{"a call", b.sato}, {"a proposal", bot}} {
-		if out := b.MustCall(by.actor, "grade.post", both, "both"); out.Status != domain.StatusFailed ||
-			out.Error.Code != apperr.InvalidArgument || !strings.Contains(out.Error.Message, "exactly one") {
-			t.Fatalf("%s giving drafts beside the assignment: %+v", by.what, out)
+		out, err := b.Call(by.actor, "grade.post", both, "both")
+		if e, ok := apperr.As(err); !ok || e.Code != apperr.InvalidArgument || !strings.Contains(e.Message, "exactly one") {
+			t.Fatalf("%s giving drafts beside the assignment: %+v %v", by.what, out, err)
+		}
+		if n := b.Count(`SELECT count(*) FROM action WHERE actor_id = $1 AND idempotency_key = 'both'`, by.actor); n != 0 {
+			t.Fatalf("%s giving drafts beside the assignment is recorded", by.what)
 		}
 	}
 	if posted(mid) {

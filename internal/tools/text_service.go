@@ -332,7 +332,8 @@ type TextCompleteOut struct {
 	Revision  int32     `json:"revision"`
 }
 
-// checkCompletion holds what the service writes back to its shape.
+// checkCompletion holds what the service writes back to its shape:
+// document_text.complete's Check.
 func checkCompletion(in TextCompleteIn) error {
 	text := func(what string, s *string, most int) error {
 		if s == nil || strings.TrimSpace(*s) == "" || utf8.RuneCountInString(*s) > most {
@@ -381,13 +382,8 @@ func textComplete() tool.Tool {
 		Resolve: func(ctx context.Context, q dbq.Querier, in TextCompleteIn) (tool.Target, error) {
 			return serviceText(ctx, q, in.VersionID)
 		},
-		Validate: func(_ context.Context, _ dbq.Querier, _ *domain.Member, in TextCompleteIn) error {
-			return checkCompletion(in)
-		},
+		Check: checkCompletion,
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in TextCompleteIn) (TextCompleteOut, error) {
-			if err := checkCompletion(in); err != nil {
-				return TextCompleteOut{}, err
-			}
 			r, err := ec.Q.GetTextForService(ctx, in.VersionID)
 			if errors.Is(err, pgx.ErrNoRows) {
 				return TextCompleteOut{}, apperr.Missing("no such text version") // purged meanwhile

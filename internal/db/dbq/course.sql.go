@@ -24,19 +24,6 @@ func (q *Queries) ComponentHasGrades(ctx context.Context, componentID *uuid.UUID
 	return exists, err
 }
 
-const componentHasLiveEnteredGrades = `-- name: ComponentHasLiveEnteredGrades :one
-SELECT EXISTS (SELECT 1 FROM grade WHERE component_id = $1 AND origin = 'entered' AND superseded_by IS NULL)
-`
-
-// Whether a grade entered directly on the component, draft or posted, is
-// live: what LockLiveEnteredGradesOfComponent would hold, asked without it.
-func (q *Queries) ComponentHasLiveEnteredGrades(ctx context.Context, componentID *uuid.UUID) (bool, error) {
-	row := q.db.QueryRow(ctx, componentHasLiveEnteredGrades, componentID)
-	var exists bool
-	err := row.Scan(&exists)
-	return exists, err
-}
-
 const courseCodeTaken = `-- name: CourseCodeTaken :one
 SELECT EXISTS (SELECT 1 FROM course WHERE term_id = $1 AND code = $2 AND section = $3)
 `

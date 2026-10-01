@@ -608,7 +608,7 @@ func documentCreate(d Deps) tool.Tool {
 			if (in.Kind == kindSubmission || in.Kind == kindFeedback) && in.empty() {
 				return apperr.Invalid("a %s file has one version and needs its content now: body_md or files", in.Kind)
 			}
-			return nil
+			return in.check(d)
 		},
 		Resolve: func(ctx context.Context, q dbq.Querier, in DocumentCreateIn) (tool.Target, error) {
 			t := tool.Target{CourseID: in.CourseID, Type: "document", Perms: []domain.Perm{writePerm(in.Kind)}}
@@ -649,13 +649,32 @@ func documentCreate(d Deps) tool.Tool {
 			}
 			return t, nil
 		},
-		Validate: func(_ context.Context, _ dbq.Querier, _ *domain.Member, in DocumentCreateIn) error {
-			return in.check(d)
+		// What the document is to belong to, and the files: asked before it
+		// is made or proposed, and when a proposal is approved.
+		Validate: func(ctx context.Context, q dbq.Querier, m *domain.Member, _ time.Time, in DocumentCreateIn) error {
+			switch in.Kind {
+			case kindSubmission:
+				s, err := q.GetSubmissionFull(ctx, dbq.GetSubmissionFullParams{ID: *in.SubmissionID, CourseID: in.CourseID})
+				if err != nil {
+					return err
+				}
+				if s.State != stateDraft {
+					return errFileNotToADraft(s.State)
+				}
+			case kindFeedback:
+				g, err := q.GetGradeFull(ctx, dbq.GetGradeFullParams{ID: *in.GradeID, CourseID: in.CourseID})
+				if err != nil {
+					return err
+				}
+				if g.SupersededBy != nil {
+					return errFeedbackToAReplacedGrade
+				}
+			}
+			return checkVersionFiles(ctx, d, q, m, in.CourseID, in.Kind, in.Title, in.Content)
 		},
-		// The files must be ones a version may hold, and still be there when
-		// the proposal is approved.
-		Pin: func(ctx context.Context, q dbq.Querier, m *domain.Member, now time.Time, in DocumentCreateIn) (DocumentCreateIn, error) {
-			return in, checkProposedVersion(ctx, d, q, m, now, in.CourseID, in.Kind, in.Title, in.Content)
+		// The files must still be there when the proposal is approved.
+		Pin: func(ctx context.Context, _ dbq.Querier, _ *domain.Member, now time.Time, in DocumentCreateIn) (DocumentCreateIn, error) {
+			return in, checkUploadAge(ctx, d, now, in.uploads()...)
 		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in DocumentCreateIn) (DocumentCreateOut, error) {
 			ev := events.Event{Type: EventDocumentCreated, CourseID: &in.CourseID, SubjectType: "document", Payload: map[string]any{"kind": in.Kind}}
@@ -671,7 +690,7 @@ func documentCreate(d Deps) tool.Tool {
 					return DocumentCreateOut{}, err
 				}
 				if s.State != stateDraft {
-					return DocumentCreateOut{}, apperr.Conflicts("the submission is %s; files are added to a draft, and a new attempt is a new draft", s.State)
+					return DocumentCreateOut{}, errFileNotToADraft(s.State)
 				}
 				ev.Type, ev.StudentMemberID, ev.AssignmentID = EventSubmissionFileAdded, &s.StudentMemberID, &s.AssignmentID
 			case kindFeedback:
@@ -683,7 +702,7 @@ func documentCreate(d Deps) tool.Tool {
 				// whoever posts may say something about it (grade.comment_total),
 				// and the totals written for it later carry them on.
 				if g.SupersededBy != nil {
-					return DocumentCreateOut{}, apperr.Conflicts("that grade has been replaced; attach feedback to the grade that replaced it")
+					return DocumentCreateOut{}, errFeedbackToAReplacedGrade
 				}
 				ev.Type, ev.StudentMemberID, ev.AssignmentID = EventFeedbackFileAdded, &g.StudentMemberID, g.AssignmentID
 			}
@@ -711,6 +730,16 @@ func documentCreate(d Deps) tool.Tool {
 		},
 	})
 }
+
+// errFileNotToADraft refuses a file for a submission that is state, not a
+// draft.
+func errFileNotToADraft(state string) *apperr.Error {
+	return apperr.Conflicts("the submission is %s; files are added to a draft, and a new attempt is a new draft", state)
+}
+
+// errFeedbackToAReplacedGrade refuses a feedback file for a grade that has
+// been replaced.
+var errFeedbackToAReplacedGrade = apperr.Conflicts("that grade has been replaced; attach feedback to the grade that replaced it")
 
 // ---------------------------------------------------------------------------
 // document.add_version, publish, archive
@@ -744,35 +773,31 @@ func documentAddVersion(d Deps) tool.Tool {
 			if in.empty() {
 				return apperr.Invalid("a version needs content: body_md or files")
 			}
-			return nil
+			return in.check(d)
 		},
 		Resolve: func(ctx context.Context, q dbq.Querier, in DocumentAddVersionIn) (tool.Target, error) {
 			return documentTarget(ctx, q, in.CourseID, in.DocumentID, writePerm)
 		},
-		Validate: func(_ context.Context, _ dbq.Querier, _ *domain.Member, in DocumentAddVersionIn) error {
-			return in.check(d)
+		// The document, and the files: asked before a version is added or
+		// proposed, and when a proposal is approved.
+		Validate: func(ctx context.Context, q dbq.Querier, m *domain.Member, _ time.Time, in DocumentAddVersionIn) error {
+			doc, err := versionable(ctx, q, in)
+			if err != nil {
+				return err
+			}
+			return checkVersionFiles(ctx, d, q, m, in.CourseID, doc.Kind, doc.Title, in.Content)
 		},
 		// As document.create.
-		Pin: func(ctx context.Context, q dbq.Querier, m *domain.Member, now time.Time, in DocumentAddVersionIn) (DocumentAddVersionIn, error) {
-			doc, err := loadDocument(ctx, q, in.CourseID, in.DocumentID)
-			if err != nil {
-				return in, err
-			}
-			return in, checkProposedVersion(ctx, d, q, m, now, in.CourseID, doc.Kind, doc.Title, in.Content)
+		Pin: func(ctx context.Context, _ dbq.Querier, _ *domain.Member, now time.Time, in DocumentAddVersionIn) (DocumentAddVersionIn, error) {
+			return in, checkUploadAge(ctx, d, now, in.uploads()...)
 		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in DocumentAddVersionIn) (DocumentVersionOut, error) {
 			if err := ec.Q.LockDocument(ctx, in.DocumentID); err != nil {
 				return DocumentVersionOut{}, err
 			}
-			doc, err := loadDocument(ctx, ec.Q, in.CourseID, in.DocumentID)
+			doc, err := versionable(ctx, ec.Q, in)
 			if err != nil {
 				return DocumentVersionOut{}, err
-			}
-			switch {
-			case !courseLevel(doc.Kind):
-				return DocumentVersionOut{}, apperr.Precondition("a %s file has exactly one version; replace it by archiving it and adding another", doc.Kind)
-			case doc.Status != "active":
-				return DocumentVersionOut{}, apperr.Conflicts("the document is archived")
 			}
 			last, err := ec.Q.MaxVersionSeq(ctx, doc.ID)
 			if err != nil {
@@ -795,6 +820,23 @@ func documentAddVersion(d Deps) tool.Tool {
 			return out, nil
 		},
 	})
+}
+
+// versionable is the document in names, if a version may be added to it:
+// one of the course's material, instructions or rubrics, not archived.
+// document.add_version asks it before a version is added or proposed
+// (Validate), and again holding the document.
+func versionable(ctx context.Context, q dbq.Querier, in DocumentAddVersionIn) (dbq.GetDocumentWithOwnerRow, error) {
+	doc, err := loadDocument(ctx, q, in.CourseID, in.DocumentID)
+	switch {
+	case err != nil:
+		return doc, err
+	case !courseLevel(doc.Kind):
+		return doc, apperr.Precondition("a %s file has exactly one version; replace it by archiving it and adding another", doc.Kind)
+	case doc.Status != "active":
+		return doc, apperr.Conflicts("the document is archived")
+	}
+	return doc, nil
 }
 
 // publish moves the pointer. That is all publishing is: the versions are all
@@ -845,7 +887,7 @@ func documentPublish() tool.Tool {
 			in.VersionID = &v.ID
 			return in, nil
 		},
-		Validate: func(ctx context.Context, q dbq.Querier, _ *domain.Member, in DocumentPublishIn) error {
+		Validate: func(ctx context.Context, q dbq.Querier, _ *domain.Member, _ time.Time, in DocumentPublishIn) error {
 			_, _, err := toPublish(ctx, q, in)
 			return err
 		},
@@ -912,7 +954,7 @@ func documentArchive() tool.Tool {
 		Resolve: func(ctx context.Context, q dbq.Querier, in DocumentIDIn) (tool.Target, error) {
 			return documentTarget(ctx, q, in.CourseID, in.DocumentID, writePerm)
 		},
-		Validate: func(ctx context.Context, q dbq.Querier, _ *domain.Member, in DocumentIDIn) error {
+		Validate: func(ctx context.Context, q dbq.Querier, _ *domain.Member, _ time.Time, in DocumentIDIn) error {
 			doc, err := loadDocument(ctx, q, in.CourseID, in.DocumentID)
 			if err != nil {
 				return err
@@ -1053,7 +1095,7 @@ func documentUpdate() tool.Tool {
 		Resolve: func(ctx context.Context, q dbq.Querier, in DocumentUpdateIn) (tool.Target, error) {
 			return documentTarget(ctx, q, in.CourseID, in.DocumentID, writePerm)
 		},
-		Validate: func(ctx context.Context, q dbq.Querier, _ *domain.Member, in DocumentUpdateIn) error {
+		Validate: func(ctx context.Context, q dbq.Querier, _ *domain.Member, _ time.Time, in DocumentUpdateIn) error {
 			doc, err := loadDocument(ctx, q, in.CourseID, in.DocumentID)
 			if err != nil {
 				return err
@@ -1114,7 +1156,7 @@ func documentUnarchive() tool.Tool {
 		Resolve: func(ctx context.Context, q dbq.Querier, in DocumentIDIn) (tool.Target, error) {
 			return documentTarget(ctx, q, in.CourseID, in.DocumentID, writePerm)
 		},
-		Validate: func(ctx context.Context, q dbq.Querier, _ *domain.Member, in DocumentIDIn) error {
+		Validate: func(ctx context.Context, q dbq.Querier, _ *domain.Member, _ time.Time, in DocumentIDIn) error {
 			doc, err := loadDocument(ctx, q, in.CourseID, in.DocumentID)
 			if err != nil {
 				return err

@@ -50,7 +50,7 @@ func TestSeveralFilesOverHTTP(t *testing.T) {
 	}
 	both := a.do(nil, "POST", course+"/documents", sato, m{"kind": "material", "title": "Week 3", "files": named[:1],
 		"upload_token": named[1]["upload_token"]}, "Idempotency-Key", "both")
-	if both.Status != 400 || both.str("status") != "failed" || both.str("error", "details", "reason") != "files_and_upload_token" {
+	if both.Status != 400 || both.str("action_id") != "" || both.str("error", "details", "reason") != "files_and_upload_token" {
 		t.Fatalf("files and upload_token: %d %s", both.Status, both.Raw)
 	}
 	made := a.do(nil, "POST", course+"/documents", sato, m{"kind": "material", "title": "Week 3", "body_md": "Slides first.",

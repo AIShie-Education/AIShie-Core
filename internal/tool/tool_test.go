@@ -162,6 +162,30 @@ func TestDecodeChecksWhatTheArgumentsSay(t *testing.T) {
 	}
 }
 
+// CheckCall is a call's alone: Decode refuses what it refuses, after Check;
+// Parse, which a stored proposal is read back with, and Check take it.
+func TestCheckCallIsACallsAlone(t *testing.T) {
+	s := valid()
+	s.Pin = func(_ context.Context, _ dbq.Querier, _ *domain.Member, _ time.Time, i in) (in, error) {
+		i.Score = decimal.NewFromInt(100) // what a proposal stores, and no call says
+		return i, nil
+	}
+	s.CheckCall = func(i in) error {
+		if i.Score.Equal(decimal.NewFromInt(100)) {
+			return apperr.Invalid("a hundred is a proposal's")
+		}
+		return nil
+	}
+	tl := tool.Define(s)
+	stored := []byte(`{"course_id": "` + uuid.NewString() + `", "score": 100}`)
+	if _, err := tl.Decode(stored); err == nil || err.Error() != "invalid_argument: a hundred is a proposal's" {
+		t.Fatalf("Decode: %v", err)
+	}
+	if v, err := tl.Parse(stored); err != nil || tl.Check != nil || tl.CheckCall(v) == nil {
+		t.Fatalf("Parse: %+v %v", v, err)
+	}
+}
+
 func TestDefineRefusesMalformedTools(t *testing.T) {
 	cases := map[string]func(*tool.Spec[in, out]){
 		"name is not noun.verb":       func(s *tool.Spec[in, out]) { s.Name = "DoThing" },
@@ -178,10 +202,13 @@ func TestDefineRefusesMalformedTools(t *testing.T) {
 			s.Kind, s.Pin = tool.Ephemeral, func(_ context.Context, _ dbq.Querier, _ *domain.Member, _ time.Time, i in) (in, error) { return i, nil }
 		},
 		"ephemeral with a validation": func(s *tool.Spec[in, out]) {
-			s.Kind, s.Validate = tool.Ephemeral, func(context.Context, dbq.Querier, *domain.Member, in) error { return nil }
+			s.Kind, s.Validate = tool.Ephemeral, func(context.Context, dbq.Querier, *domain.Member, time.Time, in) error { return nil }
 		},
 		"ephemeral with a check": func(s *tool.Spec[in, out]) {
 			s.Kind, s.Check = tool.Ephemeral, func(in) error { return nil }
+		},
+		"a call's check without a pin": func(s *tool.Spec[in, out]) {
+			s.CheckCall = func(in) error { return nil }
 		},
 		"read with a check": func(s *tool.Spec[in, out]) {
 			s.Kind, s.Execute, s.Check = tool.Read, nil, func(in) error { return nil }

@@ -595,12 +595,11 @@ type ConversationOpenOut struct {
 	MessageID      *uuid.UUID `json:"message_id,omitempty" jsonschema:"the first question's, when body was given"`
 }
 
-// checkOpen is conversation.open's rule without writing anything: for a
-// proposal, when it is queued; for a call, when it runs, with the
-// respondent's seat held. A person is refused first, as nobody's to ask;
-// then whom one may address; and only then whether that agent is asked here
-// at all.
-func checkOpen(ctx context.Context, q dbq.Querier, m, respondent *domain.Member, now time.Time, in ConversationOpenIn) error {
+// checkOpenArgs is what conversation.open's arguments say alone (Check): a
+// title and a first question each within its length, files only with a
+// question, and no more of them than a message carries, each named as a
+// file may be.
+func checkOpenArgs(d Deps, in ConversationOpenIn) error {
 	if _, err := optionalText("title", in.Title, maxTitleChars); err != nil {
 		return err
 	}
@@ -611,6 +610,28 @@ func checkOpen(ctx context.Context, q dbq.Querier, m, respondent *domain.Member,
 	} else if len(in.Attachments) > 0 {
 		return errAttachmentsNeedBody
 	}
+	_, err := shapeAttachments(d, in.Attachments)
+	return err
+}
+
+// checkMessageArgs is what a message's arguments say alone (Check), for
+// conversation.ask and conversation.answer: some text, within its length,
+// and files a message may carry, each named as a file may be.
+func checkMessageArgs(d Deps, body string, files []AttachmentIn) error {
+	if err := checkBody(body); err != nil {
+		return err
+	}
+	_, err := shapeAttachments(d, files)
+	return err
+}
+
+// checkOpen is conversation.open's rule without writing anything, on
+// arguments checkOpenArgs has taken: before a call is carried out or
+// proposed, and when a proposal is approved (Validate); and as it runs,
+// with the respondent's seat held. A person is refused first, as nobody's
+// to ask; then whom one may address; and only then whether that agent is
+// asked here at all.
+func checkOpen(ctx context.Context, q dbq.Querier, m, respondent *domain.Member, now time.Time) error {
 	notAgent, elsewhere, err := askable(ctx, q, now, respondent)
 	switch {
 	case err != nil:
@@ -643,40 +664,46 @@ func conversationOpen(d Deps) tool.Tool {
 			"as the course's tutor, may repeat to them what you write.",
 		Kind: tool.Write, Gate: asks,
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/conversations"},
+		Check: func(in ConversationOpenIn) error {
+			return checkOpenArgs(d, in)
+		},
 		Resolve: func(ctx context.Context, q dbq.Querier, in ConversationOpenIn) (tool.Target, error) {
 			if _, err := resolveMember(ctx, q, in.CourseID, in.RespondentMemberID); err != nil {
 				return tool.Target{}, err
 			}
 			return tool.Target{CourseID: in.CourseID, Type: "conversation"}, nil
 		},
-		// The writes here check their rules in Execute, where the other
-		// participant's seat is held, and, for a call that waits for a
-		// decision, in Pin as well, so that nobody is asked to approve what
-		// could never run. Not in Validate: whether a seat is live is a
-		// matter of the pipeline's clock, which Validate is not given.
-		Pin: func(ctx context.Context, q dbq.Querier, m *domain.Member, now time.Time, in ConversationOpenIn) (ConversationOpenIn, error) {
+		// The writes here check their rules before a call is carried out or
+		// proposed, and when a proposal is approved (Validate), so that
+		// nobody is asked to approve what could never run; and again in
+		// Execute, where the other participant's seat is held.
+		Validate: func(ctx context.Context, q dbq.Querier, m *domain.Member, now time.Time, in ConversationOpenIn) error {
 			respondent, err := authz.LoadMember(ctx, q, in.RespondentMemberID)
 			if err != nil {
-				return in, err
+				return err
 			}
-			if err := checkOpen(ctx, q, m, respondent, now, in); err != nil {
-				return in, err
+			if err := checkOpen(ctx, q, m, respondent, now); err != nil {
+				return err
 			}
-			return in, checkProposedFiles(ctx, d, q, m, in.CourseID, nil, now, in.Attachments)
+			return checkMessageFiles(ctx, d, q, m, in.CourseID, nil, in.Attachments)
+		},
+		// The files, which a proposal must outlast.
+		Pin: func(ctx context.Context, _ dbq.Querier, _ *domain.Member, now time.Time, in ConversationOpenIn) (ConversationOpenIn, error) {
+			return in, checkUploadAge(ctx, d, now, tokensOf(in.Attachments)...)
 		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in ConversationOpenIn) (ConversationOpenOut, error) {
 			respondent, err := holdSeat(ctx, ec.Q, in.RespondentMemberID)
 			if err != nil {
 				return ConversationOpenOut{}, err
 			}
-			if err := checkOpen(ctx, ec.Q, ec.Member, respondent, ec.Now, in); err != nil {
+			if err := checkOpen(ctx, ec.Q, ec.Member, respondent, ec.Now); err != nil {
 				return ConversationOpenOut{}, err
 			}
 			files, err := claimAttachments(ctx, d, ec, in.CourseID, in.Attachments)
 			if err != nil {
 				return ConversationOpenOut{}, err
 			}
-			title, _ := optionalText("title", in.Title, maxTitleChars)
+			title, _ := optionalText("title", in.Title, maxTitleChars) // as Check took it
 			c := dbq.Conversation{ID: ids.New(), CourseID: in.CourseID, OpenerMemberID: ec.Member.ID,
 				RespondentMemberID: respondent.ID, Title: title, Status: "open", CreatedAt: ec.Now}
 			if err := ec.Q.InsertConversation(ctx, dbq.InsertConversationParams{ID: c.ID, CourseID: c.CourseID,
@@ -709,19 +736,17 @@ type MessageIDOut struct {
 	MessageID uuid.UUID `json:"message_id"`
 }
 
-// checkAsk is conversation.ask's rule: the caller opened the conversation,
-// it is open, its respondent is an agent (every conversation with a person
-// was closed by migration 0018, and the database opens none), the caller
-// may still address it, and it still takes conversations in the site.
-func checkAsk(ctx context.Context, q dbq.Querier, m, respondent *domain.Member, now time.Time, c dbq.Conversation, body string) error {
+// checkAsk is conversation.ask's rule, on arguments checkMessageArgs has
+// taken: the caller opened the conversation, it is open, its respondent is
+// an agent (every conversation with a person was closed by migration 0018,
+// and the database opens none), the caller may still address it, and it
+// still takes conversations in the site.
+func checkAsk(ctx context.Context, q dbq.Querier, m, respondent *domain.Member, now time.Time, c dbq.Conversation) error {
 	if c.OpenerMemberID != m.ID {
 		return errNotOpener
 	}
 	if c.Status != "open" {
 		return errClosed
-	}
-	if err := checkBody(body); err != nil {
-		return err
 	}
 	notAgent, elsewhere, err := askable(ctx, q, now, respondent)
 	switch {
@@ -750,22 +775,30 @@ func conversationAsk(d Deps) tool.Tool {
 			"site's runtime does not run now (agent_not_hosted). What was written stays readable.",
 		Kind: tool.Write, Gate: asks,
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/conversations/{conversation_id}/ask"},
+		Check: func(in ConversationAskIn) error {
+			return checkMessageArgs(d, in.Body, in.Attachments)
+		},
 		Resolve: func(ctx context.Context, q dbq.Querier, in ConversationAskIn) (tool.Target, error) {
 			return conversationTarget(ctx, q, in.CourseID, in.ConversationID)
 		},
-		Pin: func(ctx context.Context, q dbq.Querier, m *domain.Member, now time.Time, in ConversationAskIn) (ConversationAskIn, error) {
+		// As conversation.open.
+		Validate: func(ctx context.Context, q dbq.Querier, m *domain.Member, now time.Time, in ConversationAskIn) error {
 			c, err := findConversation(ctx, q, in.CourseID, in.ConversationID)
 			if err != nil {
-				return in, err
+				return err
 			}
 			respondent, err := authz.LoadMember(ctx, q, c.RespondentMemberID)
 			if err != nil {
-				return in, err
+				return err
 			}
-			if err := checkAsk(ctx, q, m, respondent, now, c, in.Body); err != nil {
-				return in, err
+			if err := checkAsk(ctx, q, m, respondent, now, c); err != nil {
+				return err
 			}
-			return in, checkProposedFiles(ctx, d, q, m, in.CourseID, &c.ID, now, in.Attachments)
+			return checkMessageFiles(ctx, d, q, m, in.CourseID, &c.ID, in.Attachments)
+		},
+		// As conversation.open.
+		Pin: func(ctx context.Context, _ dbq.Querier, _ *domain.Member, now time.Time, in ConversationAskIn) (ConversationAskIn, error) {
+			return in, checkUploadAge(ctx, d, now, tokensOf(in.Attachments)...)
 		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in ConversationAskIn) (MessageIDOut, error) {
 			c, err := findConversation(ctx, ec.Q, in.CourseID, in.ConversationID)
@@ -779,7 +812,7 @@ func conversationAsk(d Deps) tool.Tool {
 			if err != nil {
 				return MessageIDOut{}, err
 			}
-			if err := checkAsk(ctx, ec.Q, ec.Member, respondent, ec.Now, c, in.Body); err != nil {
+			if err := checkAsk(ctx, ec.Q, ec.Member, respondent, ec.Now, c); err != nil {
 				return MessageIDOut{}, err
 			}
 			files, err := claimAttachments(ctx, d, ec, in.CourseID, in.Attachments)
@@ -800,20 +833,17 @@ type ConversationAnswerIn struct {
 	Attachments        []AttachmentIn `json:"attachments,omitempty" jsonschema:"files the answer carries, in the order they are shown, each uploaded first with conversation.upload_url"`
 }
 
-// checkAnswer is conversation.answer's rule, all but whether a newer
-// question has come (newerQuestion), which is asked under the
-// conversation's lock: the caller is the respondent, the conversation is
-// open, its opener may still address the caller, and in_reply_to is a
-// message of the opener's in it.
+// checkAnswer is conversation.answer's rule, on arguments checkMessageArgs
+// has taken, all but whether a newer question has come (newerQuestion),
+// which a message being written asks under the conversation's lock: the
+// caller is the respondent, the conversation is open, its opener may still
+// address the caller, and in_reply_to is a message of the opener's in it.
 func checkAnswer(ctx context.Context, q dbq.Querier, m, opener *domain.Member, now time.Time, c dbq.Conversation, in ConversationAnswerIn) error {
 	if c.RespondentMemberID != m.ID {
 		return errNotRespondent
 	}
 	if c.Status != "open" {
 		return errClosed
-	}
-	if err := checkBody(in.Body); err != nil {
-		return err
 	}
 	why, err := newAddressing(q, now).refusal(ctx, opener, m)
 	if err != nil {
@@ -885,27 +915,44 @@ func conversationAnswer(d Deps) tool.Tool {
 		// is what judging an answer is.
 		OwnerJudgedBy: []domain.Perm{domain.PermActionDecide},
 		HTTP:          tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/conversations/{conversation_id}/answer"},
+		Check: func(in ConversationAnswerIn) error {
+			return checkMessageArgs(d, in.Body, in.Attachments)
+		},
 		Resolve: func(ctx context.Context, q dbq.Querier, in ConversationAnswerIn) (tool.Target, error) {
 			return conversationTarget(ctx, q, in.CourseID, in.ConversationID)
 		},
-		// A proposal is the answer as asked: the question it answers is in
-		// it already, and is checked again when it is approved.
+		// As conversation.open, and whether the question it answers is
+		// still the one waiting: a proposal is the answer as asked, and
+		// when the opener has written again, or withdrawn the question,
+		// approving it is refused, and its owner is not asked to.
+		Validate: func(ctx context.Context, q dbq.Querier, m *domain.Member, now time.Time, in ConversationAnswerIn) error {
+			c, err := findConversation(ctx, q, in.CourseID, in.ConversationID)
+			if err != nil {
+				return err
+			}
+			opener, err := authz.LoadMember(ctx, q, c.OpenerMemberID)
+			if err != nil {
+				return err
+			}
+			if err := checkAnswer(ctx, q, m, opener, now, c, in); err != nil {
+				return err
+			}
+			if err := newerQuestion(ctx, q, c, in.InReplyToMessageID); err != nil {
+				return err
+			}
+			return checkMessageFiles(ctx, d, q, m, in.CourseID, &c.ID, in.Attachments)
+		},
 		Pin: func(ctx context.Context, q dbq.Querier, m *domain.Member, now time.Time, in ConversationAnswerIn) (ConversationAnswerIn, error) {
 			// Taken as writing a message takes it, so that a draft being
 			// written meanwhile is deleted below, or finds the answer
-			// waiting for approval and is not written.
+			// waiting for approval and is not written; and so that the
+			// question it answers, asked again under it, has not moved on
+			// since Validate asked.
 			if err := q.LockConversationForAnswer(ctx, in.ConversationID); err != nil {
 				return in, err
 			}
 			c, err := findConversation(ctx, q, in.CourseID, in.ConversationID)
 			if err != nil {
-				return in, err
-			}
-			opener, err := authz.LoadMember(ctx, q, c.OpenerMemberID)
-			if err != nil {
-				return in, err
-			}
-			if err := checkAnswer(ctx, q, m, opener, now, c, in); err != nil {
 				return in, err
 			}
 			if err := newerQuestion(ctx, q, c, in.InReplyToMessageID); err != nil {
@@ -921,7 +968,7 @@ func conversationAnswer(d Deps) tool.Tool {
 			if pending {
 				return in, apperr.Conflicts("an answer of yours to that message already waits for a decision").With("reason", "answer_pending")
 			}
-			if err := checkProposedFiles(ctx, d, q, m, in.CourseID, &c.ID, now, in.Attachments); err != nil {
+			if err := checkUploadAge(ctx, d, now, tokensOf(in.Attachments)...); err != nil {
 				return in, err
 			}
 			// Proposed, the answer takes its draft's place: whoever reads
@@ -999,7 +1046,7 @@ func conversationClose() tool.Tool {
 		Resolve: func(ctx context.Context, q dbq.Querier, in ConversationCloseIn) (tool.Target, error) {
 			return conversationTarget(ctx, q, in.CourseID, in.ConversationID)
 		},
-		Validate: func(ctx context.Context, q dbq.Querier, m *domain.Member, in ConversationCloseIn) error {
+		Validate: func(ctx context.Context, q dbq.Querier, m *domain.Member, _ time.Time, in ConversationCloseIn) error {
 			c, err := closable(ctx, q, m, in)
 			if err == nil && c.Status != "open" {
 				return errClosedAlready
@@ -1071,7 +1118,7 @@ func conversationRetract() tool.Tool {
 			}
 			return tool.Target{CourseID: in.CourseID, Type: "conversation_message", ID: &in.MessageID}, nil
 		},
-		Validate: func(ctx context.Context, q dbq.Querier, m *domain.Member, in ConversationRetractIn) error {
+		Validate: func(ctx context.Context, q dbq.Querier, m *domain.Member, _ time.Time, in ConversationRetractIn) error {
 			msg, err := retractable(ctx, q, m, in)
 			if err != nil {
 				return err
@@ -1163,7 +1210,7 @@ func conversationMarkRead() tool.Tool {
 			return nil
 		},
 		// A message is a conversation's for good.
-		Validate: func(ctx context.Context, q dbq.Querier, _ *domain.Member, in ConversationMarkReadIn) error {
+		Validate: func(ctx context.Context, q dbq.Querier, _ *domain.Member, _ time.Time, in ConversationMarkReadIn) error {
 			if in.UpToMessageID == nil {
 				return nil
 			}

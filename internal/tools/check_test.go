@@ -3,6 +3,7 @@ package tools_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -74,8 +75,11 @@ func TestArgumentsAreCheckedBeforeAnythingIsProposed(t *testing.T) {
 			valid:   in(m{"action_id": graded.ActionID, "decision": "reject"}),
 			invalid: in(m{"action_id": graded.ActionID, "decision": "maybe"}),
 			message: `decision must be "approve" or "reject"`},
+		// Sato's grade is not under review: Tanaka's review of it, which
+		// says nothing wrong, is refused as approving it would refuse it
+		// (Validate), recorded, where the invalid one is not.
 		{tool: "action.review",
-			valid:   in(m{"action_id": reviewed.ActionID, "outcome": "reviewed"}),
+			valid: in(m{"action_id": reviewed.ActionID, "outcome": "reviewed"}), wantValid: domain.StatusFailed,
 			invalid: in(m{"action_id": reviewed.ActionID, "outcome": "fine"}),
 			message: `outcome must be "reviewed" or "escalated"`},
 		{tool: "assignment.create",
@@ -246,6 +250,66 @@ func TestArgumentsAreCheckedBeforeAnythingIsProposed(t *testing.T) {
 			valid:   in(m{"submission_id": kenWork, "state": "late"}),
 			invalid: in(m{"submission_id": kenWork, "state": "early"}),
 			message: "state must be submitted or late"},
+		// A conversation's messages: what they say, and the files they
+		// carry, by how many and what they are called. Tanaka may address
+		// no agent here, which the course tells (Validate).
+		{tool: "conversation.open",
+			valid: in(m{"respondent_member_id": b.tutorM, "body": "What is a thesis?"}), wantValid: domain.StatusFailed,
+			invalid: in(m{"respondent_member_id": b.tutorM, "body": "  "}),
+			message: "the message is empty"},
+		{tool: "conversation.open",
+			invalid: in(m{"respondent_member_id": b.tutorM, "title": strings.Repeat("t", 201)}),
+			message: "the title is longer than 200 characters"},
+		{tool: "conversation.open",
+			invalid: in(m{"respondent_member_id": b.tutorM, "attachments": []m{{"upload_token": "t", "filename": "a.txt"}}}),
+			message: "files come with a message: give body as well as attachments"},
+		{tool: "conversation.open",
+			invalid: in(m{"respondent_member_id": b.tutorM, "body": "Two?", "attachments": []m{
+				{"upload_token": "t", "filename": "a.txt"}, {"upload_token": "t", "filename": "b.txt"}}}),
+			message: "the same upload is named twice"},
+		{tool: "conversation.ask",
+			invalid: in(m{"conversation_id": conv, "body": ""}),
+			message: "the message is empty"},
+		{tool: "conversation.ask",
+			invalid: in(m{"conversation_id": conv, "body": "Look", "attachments": []m{{"upload_token": "t", "filename": "../a.txt"}}}),
+			message: "a file's name is 1 to 255 characters on one line, a name and not a path"},
+		{tool: "conversation.answer",
+			invalid: in(m{"conversation_id": conv, "in_reply_to_message_id": question, "body": strings.Repeat("a", 20001)}),
+			message: "the message is 20001 characters long; the most is 20000"},
+		// A grade's feedback files, and a post's drafts: a call gives the
+		// drafts or the assignment, and a proposal to post the assignment
+		// stores both (CheckCall).
+		{tool: "grade.submit",
+			invalid: in(m{"submission_id": kenWork, "score": 5, "feedback_files": []m{{"title": " ", "upload_token": "t"}}}),
+			message: "every feedback file needs a title"},
+		{tool: "grade.regrade",
+			invalid: in(m{"grade_id": midtermGrade, "score": 85, "feedback_files": []m{
+				{"title": "Notes", "upload_token": "t"}, {"title": "More notes", "upload_token": "t"}}}),
+			message: "the same upload is listed twice"},
+		{tool: "grade.post",
+			invalid: in(m{"assignment_id": b.hw3, "grade_ids": []uuid.UUID{midtermGrade}}),
+			message: "give exactly one of grade_ids and assignment_id"},
+		{tool: "grade.post",
+			invalid: in(m{}),
+			message: "give exactly one of grade_ids and assignment_id"},
+		// A version's files, and a text version's text.
+		{tool: "document.create",
+			invalid: in(m{"kind": "material", "title": "Slides", "files": []m{
+				{"upload_token": "t", "filename": "a.pdf"}, {"upload_token": "t", "filename": "b.pdf"}}}),
+			message: "the same upload is named twice"},
+		{tool: "document.add_version",
+			invalid: in(m{"document_id": notes, "upload_token": "t", "files": []m{{"upload_token": "u", "filename": "a.pdf"}}}),
+			message: "give files, or upload_token for one file, not both"},
+		{tool: "document.text_update",
+			invalid: in(m{"document_id": notes, "version_id": uuid.New(), "body": " \n "}),
+			message: "the text is empty"},
+		// The site's services: what they write back.
+		{tool: "agent_runtime.rendition_complete",
+			invalid: m{"rendition_id": uuid.New(), "lease_id": uuid.New(), "status": "done", "page_count": 3},
+			message: "done needs upload_token"},
+		{tool: "document_text.complete",
+			invalid: m{"version_id": uuid.New(), "lease_id": uuid.New(), "status": "failed"},
+			message: "reason is 1 to 500 characters"},
 	}
 
 	// Every tool with a Check is here, so that one added later is too.
@@ -254,7 +318,7 @@ func TestArgumentsAreCheckedBeforeAnythingIsProposed(t *testing.T) {
 		covered[tc.tool] = true
 	}
 	for _, tl := range b.P.Registry().All() {
-		if tl.Check != nil && !covered[tl.Name] {
+		if (tl.Check != nil || tl.CheckCall != nil) && !covered[tl.Name] {
 			t.Errorf("%s checks its arguments, and has no case here", tl.Name)
 		}
 	}
@@ -408,6 +472,81 @@ func TestAProposalThatWouldBeRefusedIsNotItsOwnersToDecide(t *testing.T) {
 	b.do(t, ito, "action.withdraw", m{"course_id": b.course, "action_id": itoProposed.ActionID})
 }
 
+// What the moment refuses, and what changes while a proposal waits, is
+// asked of it again for its owner as approving it now would ask it
+// (tool.Spec.Validate, given the moment): an agent's change of a seat's
+// expiry that has passed meanwhile, and an agent's answer to a question its
+// opener has asked again since, are not their owner's to decide. Someone
+// else may still reject them, and the owner take them back.
+func TestWhatApprovingWouldRefuseNowIsNotItsOwnersToDecide(t *testing.T) {
+	b := build(t)
+	tanaka := b.person(t, "Tanaka", "")
+	b.do(t, b.sato, "member.add", m{"course_id": b.course, "actor_id": tanaka, "preset": "instructor"})
+	refusedAs := func(what string, out pipeline.Outcome, code apperr.Code, check func(*apperr.Error) bool) {
+		t.Helper()
+		refusal, _ := out.Error.Details["refusal"].(*apperr.Error)
+		if out.Status != domain.StatusFailed || out.Error.Details["reason"] != "owner_would_be_refused" ||
+			refusal == nil || refusal.Code != code || !check(refusal) {
+			t.Fatalf("%s: %+v", what, out)
+		}
+	}
+
+	// Sato's agent manages the course's members for him, by proposal: it
+	// asks for Ken's seat to end in two days.
+	bot := b.agent(t, b.sato, "Sato's registrar")
+	b.delegate(t, b.sato, bot, m{"preset": "ta", "perms": m{"member_manage": "confirm_required"}})
+	rescope := b.MustCall(bot, "member.rescope", m{"course_id": b.course, "member_id": b.kenM,
+		"expires_at": time.Now().Add(48 * time.Hour)}, "bot-rescopes")
+	if rescope.Status != domain.StatusProposed {
+		t.Fatalf("Sato's agent ending Ken's seat in two days: %+v", rescope)
+	}
+	if q := b.queue(t, b.sato, "action.list_proposed"); !q[*rescope.ActionID] {
+		t.Fatalf("Sato's queue, an expiry he could set himself: %v", q)
+	}
+	// The two days pass while it waits.
+	b.Exec(`UPDATE action SET payload = jsonb_set(payload, '{expires_at}', to_jsonb($2::text)) WHERE id = $1`,
+		*rescope.ActionID, time.Now().Add(-time.Hour).UTC().Format(time.RFC3339Nano))
+	if q := b.queue(t, b.sato, "action.list_proposed"); q[*rescope.ActionID] {
+		t.Fatalf("Sato's queue, an expiry passed while it waited: %v", q)
+	}
+	if q := b.queue(t, tanaka, "action.list_proposed"); !q[*rescope.ActionID] {
+		t.Fatalf("Tanaka's queue: %v", q)
+	}
+	refusedAs("Sato approving an expiry that has passed",
+		b.MustCall(b.sato, "action.decide", m{"course_id": b.course, "action_id": rescope.ActionID, "decision": "approve"}, "sato-rescope"),
+		apperr.InvalidArgument, func(e *apperr.Error) bool {
+			return e.Message == "expires_at is in the past; to end a membership now, remove it"
+		})
+	b.do(t, b.sato, "action.withdraw", m{"course_id": b.course, "action_id": rescope.ActionID})
+
+	// Sato's course tutor answers Ken by proposal; Ken asks again before
+	// anyone decides it, and the answer is to a question no longer the
+	// latest.
+	tutor := b.runtimeAgent(t, b.sato, "Course tutor")
+	tutorM := b.delegate(t, b.sato, tutor, m{"preset": "course_tutor", "perms": m{"conversation_answer": "confirm_required"}})
+	b.Host(tutor)
+	conv, question := b.open(t, b.ken, tutorM, "Is HW3 due on Friday?")
+	answer := b.MustCall(tutor, "conversation.answer", answerArgs(b, conv, question, "Yes."), "tutor-answers")
+	if answer.Status != domain.StatusProposed {
+		t.Fatalf("the tutor's answer: %+v", answer)
+	}
+	if q := b.queue(t, b.sato, "action.list_proposed"); !q[*answer.ActionID] {
+		t.Fatalf("Sato's queue, his tutor's answer: %v", q)
+	}
+	b.ask(t, b.ken, conv, "Or is it Monday?")
+	if q := b.queue(t, b.sato, "action.list_proposed"); q[*answer.ActionID] {
+		t.Fatalf("Sato's queue, an answer to a question asked again since: %v", q)
+	}
+	refusedAs("Sato approving his tutor's answer to a question asked again since",
+		b.MustCall(b.sato, "action.decide", m{"course_id": b.course, "action_id": answer.ActionID, "decision": "approve"}, "sato-answer"),
+		apperr.Conflict, func(e *apperr.Error) bool { return e.Details["reason"] == "moved_on" })
+	d := testkit.Result[pipeline.DecideOut](t, b.do(t, tanaka, "action.decide",
+		m{"course_id": b.course, "action_id": answer.ActionID, "decision": "reject"}))
+	if d.Outcome != domain.StatusRejected {
+		t.Fatalf("Tanaka rejecting it: %+v", d)
+	}
+}
+
 // What the course says of a call, or the caller's seat, is asked before it
 // is proposed too (tool.Spec.Validate), and what the moment says as it is
 // proposed (tool.Spec.Pin): a call that approving would refuse is recorded
@@ -430,12 +569,14 @@ func TestACallTheCourseWouldRefuseIsNotProposed(t *testing.T) {
 
 	// Ken's HW3 is graded, and Yuki's total is written down; Ken has none.
 	kenWork := b.submit(t, b.ken, "Ken's essay")
-	b.do(t, b.sato, "grade.submit", m{"course_id": b.course, "submission_id": kenWork, "score": 70})
+	kenGrading := b.do(t, b.sato, "grade.submit", m{"course_id": b.course, "submission_id": kenWork, "score": 70})
+	kenGraded, kenGrade := kenGrading.ActionID, testkit.Result[tools.GradeSubmitOut](t, kenGrading).GradeID
 	midterm := testkit.Result[tools.GradeSubmitOut](t, b.do(t, b.sato, "grade.submit",
 		m{"course_id": b.course, "component_id": b.midterm, "student_member_id": b.yukiM, "score": 80})).GradeID
 	b.do(t, b.sato, "grade.post", m{"course_id": b.course, "grade_ids": []uuid.UUID{midterm}})
-	notes := testkit.Result[tools.DocumentCreateOut](t, b.do(t, b.sato, "document.create",
-		m{"course_id": b.course, "kind": "material", "title": "Notes", "body_md": "Read chapter 1."})).DocumentID
+	notesDoc := testkit.Result[tools.DocumentCreateOut](t, b.do(t, b.sato, "document.create",
+		m{"course_id": b.course, "kind": "material", "title": "Notes", "body_md": "Read chapter 1."}))
+	notes, notesVersion := notesDoc.DocumentID, *notesDoc.VersionID
 	conv, _ := b.open(t, b.yuki, b.tutorM, "What is a thesis?")
 	newcomer := b.person(t, "Mori", "")
 	bot := b.agent(t, b.sato, "Sato's marker")
@@ -453,8 +594,9 @@ func TestACallTheCourseWouldRefuseIsNotProposed(t *testing.T) {
 	syllabus := testkit.Result[tools.DocumentCreateOut](t, b.do(t, b.sato, "document.create",
 		m{"course_id": b.course, "kind": "material", "title": "Syllabus", "body_md": "Week 1."}))
 	b.do(t, b.sato, "document.publish", m{"course_id": b.course, "document_id": syllabus.DocumentID})
-	old := testkit.Result[tools.DocumentCreateOut](t, b.do(t, b.sato, "document.create",
-		m{"course_id": b.course, "kind": "material", "title": "Last year", "body_md": "Old."})).DocumentID
+	lastYear := testkit.Result[tools.DocumentCreateOut](t, b.do(t, b.sato, "document.create",
+		m{"course_id": b.course, "kind": "material", "title": "Last year", "body_md": "Old."}))
+	old := lastYear.DocumentID
 	b.do(t, b.sato, "document.archive", m{"course_id": b.course, "document_id": old})
 	// Yuki has handed in an essay as a file; Ken has started a second
 	// attempt and written nothing in it yet.
@@ -468,6 +610,20 @@ func TestACallTheCourseWouldRefuseIsNotProposed(t *testing.T) {
 	b.do(t, b.yuki, "conversation.retract", m{"course_id": b.course, "message_id": withdrawn})
 	link := testkit.Result[tools.JoinLinkCreateOut](t, b.do(t, b.sato, "course.join_link_create", m{"course_id": b.course})).LinkID
 	b.do(t, b.sato, "course.join_link_revoke", m{"course_id": b.course, "link_id": link})
+	// The grader proposes a grade for Yuki's essay, which waits.
+	graderProposal := b.MustCall(b.grader, "grade.submit", m{"course_id": b.course, "submission_id": yukiDraft, "score": 60}, "grader-yuki")
+	if graderProposal.Status != domain.StatusProposed {
+		t.Fatalf("the grader's grade: %+v", graderProposal)
+	}
+	// Sato's handout: its Word file converted, its PDF never.
+	handout := b.handout(t, false)
+	b.convert(t, b.claimRenditions(t, m{})[0], pdfOf("the handout"), 1)
+	// Yuki's question carries a text file, which has no rendition.
+	opened := testkit.Result[tools.ConversationOpenOut](t, b.do(t, b.yuki, "conversation.open", m{"course_id": b.course,
+		"respondent_member_id": b.tutorM, "body": "My notes?", "attachments": []m{
+			{"upload_token": b.attachment(t, b.yuki, "text/plain", []byte("notes")), "filename": "notes.txt"}}}))
+	notesFile := b.messages(t, b.yuki, opened.ConversationID)[0].Attachments[0].ID
+	tanakaBot := b.agent(t, tanaka, "Tanaka's helper")
 	in := func(args m) m {
 		args["course_id"] = b.course
 		return args
@@ -579,6 +735,51 @@ func TestACallTheCourseWouldRefuseIsNotProposed(t *testing.T) {
 			apperr.Conflict, "the student's totals do not count ungraded work as zero"},
 		{"grade.undo_ungraded_as_zero", in(m{"all_students": true}),
 			apperr.FailedPrecondition, "no student's totals count ungraded work as zero"},
+		// The actions themselves: a decision, a review or a withdrawal of
+		// one that is not the caller's to make, or not waiting for it.
+		{"action.decide", in(m{"action_id": kenGraded, "decision": "approve"}),
+			apperr.Conflict, "the action is executed, not awaiting a decision"},
+		{"action.review", in(m{"action_id": kenGraded, "outcome": "reviewed"}),
+			apperr.Conflict, "the action is not awaiting review"},
+		{"action.withdraw", in(m{"action_id": graderProposal.ActionID}),
+			apperr.Forbidden, "only whoever proposed it, or the owner of the agent that did, withdraws a proposal"},
+		{"action.withdraw", in(m{"action_id": kenGraded}),
+			apperr.Forbidden, "only whoever proposed it, or the owner of the agent that did, withdraws a proposal"},
+		// A file's rendition: none for a PDF, and done for the Word file.
+		{"document.rendition_retry", in(m{"document_id": handout.DocumentID, "file_id": handout.FileIDs[1]}),
+			apperr.NotFound, "that file has no PDF rendition: only an Office or OpenDocument file has one"},
+		{"document.rendition_retry", in(m{"document_id": handout.DocumentID, "file_id": handout.FileIDs[0]}),
+			apperr.FailedPrecondition, "the PDF is there already; it is made once"},
+		{"conversation.rendition_retry", in(m{"attachment_id": notesFile}),
+			apperr.NotFound, "that file has no PDF rendition: only an Office or OpenDocument file has one"},
+		// A conversation, which Tanaka did not open.
+		{"conversation.ask", in(m{"conversation_id": conv, "body": "And?"}),
+			apperr.Forbidden, "only whoever opened a conversation asks in it; the member it is addressed to answers, with conversation.answer"},
+		// What the work's grades would become: Ken's 70 kept out of 50,
+		// Yuki's 80 on the midterm too.
+		{"assignment.update", in(m{"assignment_id": b.hw3, "points_possible": 50, "existing_grades": "keep_scores"}),
+			apperr.FailedPrecondition, fmt.Sprintf("grade %s is 70, which was within the 100 points it was given out of and is above the 50 it would be out of; rescale, or regrade it first", kenGrade)},
+		{"component.update", in(m{"component_id": b.midterm, "points_possible": 50, "existing_grades": "keep_scores"}),
+			apperr.FailedPrecondition, fmt.Sprintf("grade %s is 80, which was within the 100 points it was given out of and is above the 50 it would be out of; rescale, or regrade it first", midterm)},
+		// A document's versions and files, and their texts.
+		{"document.add_version", in(m{"document_id": old, "body_md": "New."}),
+			apperr.Conflict, "the document is archived"},
+		{"document.add_version", in(m{"document_id": essay, "body_md": "New."}),
+			apperr.FailedPrecondition, "a submission file has exactly one version; replace it by archiving it and adding another"},
+		{"document.create", in(m{"kind": "submission", "title": "more.txt", "submission_id": yukiDraft, "body_md": "More."}),
+			apperr.Conflict, "the submission is submitted; files are added to a draft, and a new attempt is a new draft"},
+		{"document.create", in(m{"kind": "material", "title": "Slides", "upload_token": "not a token"}),
+			apperr.InvalidArgument, "upload_token is not valid"},
+		{"document.text_update", in(m{"document_id": old, "version_id": lastYear.VersionID, "body": "Old, corrected."}),
+			apperr.Conflict, "the document is archived"},
+		{"document.text_update", in(m{"document_id": notes, "version_id": notesVersion, "body": "Chapter 1."}),
+			apperr.NotFound, "this version has no text version: only a file of a version of material, instructions or a rubric has one"},
+		{"document.text_retranscribe", in(m{"document_id": handout.DocumentID, "version_id": *handout.VersionID,
+			"file_id": handout.FileIDs[0], "base_revision": 99}),
+			apperr.Conflict, "the text has changed since revision 99; it is at revision 1"},
+		// An agent of Tanaka's, to be seated already gone.
+		{"member.add_delegate", in(m{"actor_id": tanakaBot, "expires_at": past}),
+			apperr.InvalidArgument, "expires_at is in the past"},
 	}
 	for i, tc := range cases {
 		out := b.MustCall(tanaka, tc.tool, tc.args, "refuse-"+uuid.NewString())

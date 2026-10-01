@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -148,7 +149,7 @@ func componentCreate() tool.Tool {
 			t.ID = nil
 			return t, err
 		},
-		Validate: func(ctx context.Context, q dbq.Querier, _ *domain.Member, in ComponentCreateIn) error {
+		Validate: func(ctx context.Context, q dbq.Querier, _ *domain.Member, _ time.Time, in ComponentCreateIn) error {
 			return parentTakesChildren(ctx, q, in.CourseID, in.ParentID)
 		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in ComponentCreateIn) (IDOut, error) {
@@ -235,15 +236,20 @@ func (in ComponentUpdateIn) check(ctx context.Context, q dbq.Querier, c dbq.GetC
 	case in.PointsPossible != nil && c.PointsPossible.Valid && !c.PointsPossible.Decimal.Equal(*in.PointsPossible):
 		// Already graded directly, and worth something else now. As for an
 		// assignment: once a grade has been entered, the change says what
-		// becomes of it.
-		if in.ExistingGrades != nil {
-			return nil
-		}
-		if has, err := q.ComponentHasLiveEnteredGrades(ctx, &c.ID); err != nil {
+		// becomes of it, and what it says must be able to become of them.
+		graded, err := q.ListLiveEnteredGradeScoresOfComponent(ctx, &c.ID)
+		switch {
+		case err != nil:
 			return err
-		} else if has {
+		case len(graded) > 0 && in.ExistingGrades == nil:
 			return apperr.Precondition("grades have been entered for %q; say what becomes of them when its points change: existing_grades rescale or keep_scores", c.Name).
 				With("reason", "existing_grades_required")
+		case len(graded) > 0:
+			scores := make([]gradeScore, len(graded))
+			for i, g := range graded {
+				scores[i] = gradeScore{id: g.ID, score: g.Score}
+			}
+			return rebaseRefusal(scores, c.PointsPossible.Decimal, *in.PointsPossible, *in.ExistingGrades)
 		}
 	case in.PointsPossible != nil:
 		// Becoming directly graded: it must be a leaf with nothing
@@ -322,7 +328,7 @@ func componentUpdate() tool.Tool {
 			}
 			return t, nil
 		},
-		Validate: func(ctx context.Context, q dbq.Querier, _ *domain.Member, in ComponentUpdateIn) error {
+		Validate: func(ctx context.Context, q dbq.Querier, _ *domain.Member, _ time.Time, in ComponentUpdateIn) error {
 			c, err := q.GetComponentInCourse(ctx, dbq.GetComponentInCourseParams{ID: in.ComponentID, CourseID: in.CourseID})
 			if err != nil {
 				return err
@@ -480,7 +486,7 @@ func componentMove() tool.Tool {
 			}
 			return t, nil
 		},
-		Validate: func(ctx context.Context, q dbq.Querier, _ *domain.Member, in ComponentMoveIn) error {
+		Validate: func(ctx context.Context, q dbq.Querier, _ *domain.Member, _ time.Time, in ComponentMoveIn) error {
 			_, err := in.check(ctx, q)
 			return err
 		},
