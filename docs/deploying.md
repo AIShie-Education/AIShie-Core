@@ -589,30 +589,37 @@ Run all of these as root on the server.
   converted again, and the sweep removes the PDFs made before.
 - **Migration 0027, what 0023 and 0025 kept for one release goes:** a
   version's own file columns (`document_version.storage_key`,
-  `content_type`, `byte_size`, `checksum`) and `actor.site_chat_credential_id`
-  are dropped, with what kept them in step for the release before 0023 and
-  0025; `me.site_chat` is gone; `document.create` and `document.add_version`
-  take a version's files in `files` alone, never `upload_token`;
-  `document.get` and `document.versions` say nothing of a version's first
-  file but in `files`; every call about a text names its file (`file_id`);
-  `agent.update` takes no `site_chat`; and an agent registered naming no
-  hosting is refused. It needs nothing of the operator, and changes no row
-  but by dropping those columns: a purged version no longer says what type
-  and size its file was. **Deploy it only once every server runs a release
-  with migrations 0023 and 0025**, and the agent runtime and the front end
-  read and send none of the above (they do not since AIShie-Core #49 and
-  #52). Unlike every migration before it, it does not leave the release
-  before working: that release writes and reads the columns it drops. While
-  it goes in, until this release has started, the release before fails what
-  reads an actor or a version, a moment on a school's site; and if this
-  release does not come up, starting the release before again does not
-  help, whether `aishie-deploy` does it here or AIShie-Deploy's
-  `aishie-update` does it on its stack, after a health check that failed.
-  To roll back, migrate down once with this release's image before running
-  the release before (Rolling back, below): it loses
-  nothing the release before reads, putting back each version's first file
-  in its own columns and each runtime agent's runtime token as its site
-  chat credential.
+  `content_type`, `byte_size`, `checksum`) and
+  `actor.site_chat_credential_id` are dropped, with what kept them in step
+  for the release before 0023 and 0025; `me.site_chat` is gone;
+  `document.create` and `document.add_version` take a version's files in
+  `files` alone, never `upload_token`; `document.get` and
+  `document.versions` say nothing of a version's first file but in `files`;
+  every call about a text names its file (`file_id`); `agent.update` takes
+  no `site_chat`; and an agent registered naming no hosting is refused. It
+  changes no row but by dropping those columns: a purged version no longer
+  says what type and size its file was. **Deploy it only once every server
+  runs a release with migrations 0023 and 0025, and an agent runtime that
+  names a file (`file_id`) when it tries a transcription credential**
+  (AIShie-Agent-Runtime's change for AIShie-Core #54). The runtime tries
+  one, when an administrator sets or replaces it, by a renewal that this
+  release refuses if it names no file, so an older runtime refuses every
+  good credential (`credential_rejected`) until it is updated. The front end
+  sends none of the above since AIShie-Core #49 and #52. A proposal waiting
+  at the upgrade that gives a version its file by `upload_token` alone no
+  longer reads as a call of this release: when someone decides it, it is
+  cancelled (`tool_removed`), and its agent proposes it again with `files`.
+  Unlike every migration before it, it does not leave the release before
+  working: that release writes and reads the columns it drops. While it goes
+  in, until this release has started, the release before fails what reads an
+  actor or a version, a moment on a school's site; and if this release does
+  not come up, starting the release before again does not help, whether
+  `aishie-deploy` does it here or AIShie-Deploy's `aishie-update` does it on
+  its stack, after a health check that failed. To roll back, migrate down
+  once with this release's image before running the release before (Rolling
+  back, below): it loses nothing the release before reads, putting back each
+  version's first file in its own columns and each runtime agent's runtime
+  token as its site chat credential.
 - **Migration 0013, `member_invite`:** the permission that makes a course's
   join links. Every seat a person holds got it at its level of
   `member_manage`, and every seat an agent holds got it `denied`, whatever it
@@ -660,7 +667,10 @@ Run all of these as root on the server.
   is started again, with the env file as it is now, and the last line says
   whether it came up. If it did not, or if the same image was deployed again
   (most likely after a change to the env file), nothing healthy is running:
-  fix the env file and deploy again.
+  fix the env file and deploy again. If the new version brought migration
+  0027, though, the version before, started again, does not work on its
+  schema: stop it, migrate down with the new image, and deploy the version
+  before, as under Rolling back, below.
 - **Rolling back** to the release before is a deploy of its image. The new
   schema is left as it is, and the release before works with it. Never run
   `migrate down`: it deletes data. Going back further than one release means
@@ -671,10 +681,15 @@ Run all of these as root on the server.
   ```
 
   Rolling back from the release with migration 0027 is the exception: the
-  release before does not work on its schema. Take the schema down one
-  migration with this release's image, then deploy the release before:
+  release before does not work on its schema, and this release does not
+  work on the schema the down puts back (it fails to record a version with
+  files, or to purge one). Stop this release, take the schema down one
+  migration with its image, then deploy the release before. The site is
+  down from the stop until the release before has started, which includes
+  the backup `aishie-deploy` takes first:
 
   ```
+  docker stop aishie
   docker run --rm --network host --env-file /etc/aishie/aishie.env \
     ghcr.io/aishie-education/aishie-core:<this release> migrate down --yes
   aishie-deploy ghcr.io/aishie-education/aishie-core:<the release before>

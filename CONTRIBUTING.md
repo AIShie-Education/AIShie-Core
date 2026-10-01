@@ -46,10 +46,11 @@ running while the new schema goes in, so a migration must leave the previous
 release working: add a column in one release, stop using the old one in the
 next, drop it in the one after.
 
-Migration 0027 is the one exception: the columns it drops, which 0023 and
-0025 kept for the release before them, are still written and read by the
-release before it. It goes out in a release of its own, once every server
-runs a release with 0023 and 0025, and a rollback past it migrates down
+Migration 0027 is the one exception: the columns it drops, which 0023 and 0025
+kept for the release before them, are still written and read by the release
+before it. It goes out in a release of its own, once every server runs a
+release with 0023 and 0025 and an agent runtime that names a file (`file_id`)
+when it tries a transcription credential, and a rollback past it migrates down
 first, with its own image (docs/deploying.md, Rolling back); its down puts
 back everything the release before reads.
 
