@@ -397,6 +397,12 @@ identity is never linked to another account (`unique(provider, subject)`), and l
 to the same one revives it, whoever sets the provider up again under the same id. Each is an
 action. `sso.test` is a read: it fetches an issuer's discovery document and key set, following
 no redirect and sending no secret, and says what it found and what would stop a sign-in.
+What the server fetches of a provider of the site's (its discovery document, its key set, and at
+a sign-in its token endpoint) it fetches from public addresses only, checked on the address
+each connection is made to once the name is resolved, unless the operator sets
+`SSO_ALLOW_PRIVATE_ISSUERS` (README, Single sign-on): an issuer plainly elsewhere is refused as
+it is set up (`issuer_address_not_allowed`), and a name that resolves elsewhere is reached never.
+The operator's provider is the operator's setting, and is reached wherever it is.
 Changing a provider's issuer keeps the identities linked at it: whoever the new issuer vouches
 for under the same subject signs in as them.
 
@@ -2599,7 +2605,8 @@ respondent's `conversation_answer` decides is who is shown its text.
   or log line; a sign-in goes through the provider its state names, as it is now, and one
   switched off signs nobody in; the operator's provider wins over a site's of its name; linking
   by email asks every one of its questions again in the link's transaction (§2.1, Single
-  sign-on).
+  sign-on); unless `SSO_ALLOW_PRIVATE_ISSUERS`, the server connects to no address of a site's
+  provider's that is not public, checked on the address dialled (package `sso`, `Public`).
 - The *transitions* between `action.status` values. The database checks that a row at rest is
   consistent with its `authz_result`; the order things happen in is application logic.
 - Idempotent replay: same key and same `payload_hash` returns the stored result, same key and

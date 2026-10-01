@@ -281,6 +281,22 @@ Run all of these as root on the server.
   again under the new key and says how many, and then remove the old key.
   Register `https://lms-test.example.edu/v1/auth/sso/callback` with every
   provider: it is the same for all of them.
+  The providers administrators add are reached at public addresses only,
+  checked on the address each connection is made to (README, Single
+  sign-on): an issuer written as an address on the server's machine, on a
+  private or link-local network or at the cloud's metadata address, or as
+  `localhost`, is refused as it is set up (`issuer_address_not_allowed`);
+  one whose name resolves to such an address is taken, but nothing is
+  fetched from it, so `sso.test` reports it and a sign-in through it fails.
+  A site whose provider is on its own network, such as an ADFS whose name
+  resolves to a `10.` address, a server that reaches the internet only
+  through a proxy, or one whose DNS answers through a transparent proxy
+  with `198.18.` addresses (a fake-IP mode) sets
+  `SSO_ALLOW_PRIVATE_ISSUERS=true` in the env file, and the server says so
+  in its log as it starts. A provider set up on such an address before this
+  check stays listed and switched on, and a sign-in through it fails
+  (`sso_provider_unavailable`, the reason in the log) until the setting is
+  made. The operator's provider (`OIDC_ISSUER`) is reached wherever it is.
   `OIDC_DISPLAY_NAME` is what the front end's sign-in button calls the
   provider; without it, the front end uses words of its own. Like every value
   in the file it takes no quotes, even with a space in it:
