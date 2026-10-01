@@ -935,8 +935,9 @@ func TestAnApprovedPostPassesOverDraftsPostedMeanwhile(t *testing.T) {
 // A proposal that names its drafts by id is approved as one that has them
 // pinned for an assignment: a draft posted by hand while it waits is out
 // already, as proposed, and the approval posts the rest; one replaced
-// meanwhile fails it, without sending the approver to regrade. A call naming
-// a posted grade is still told it is posted, and a proposal naming one is
+// meanwhile fails it, without sending the approver to regrade, and so does
+// every one having been posted meanwhile, with nothing left to post. A call
+// naming a posted grade is still told it is posted, and a proposal naming one is
 // refused as it is made.
 func TestAnApprovedPostOfNamedDraftsPassesOverOnesPostedMeanwhile(t *testing.T) {
 	b := build(t)
@@ -990,11 +991,35 @@ func TestAnApprovedPostOfNamedDraftsPassesOverOnesPostedMeanwhile(t *testing.T) 
 	yukis, kens = draft(b.submit(t, b.yuki, "revised"), 85), draft(kensWork, 75)
 	proposal = propose("post-again", yukis, kens)
 	replacement := draft(kensWork, 78)
-	if v := approve(proposal); v.Outcome != domain.StatusFailed || !strings.Contains(v.Error.Message, "replaced") || strings.Contains(v.Error.Message, "regrade") {
+	if v := approve(proposal); v.Outcome != domain.StatusFailed || v.Error.Code != apperr.Conflict ||
+		!strings.HasSuffix(v.Error.Message, "has been replaced since it was proposed; propose posting again") {
 		t.Fatalf("approving after Ken's draft was replaced: %+v", v.Error)
 	}
 	if posted(yukis) || posted(kens) || posted(replacement) {
 		t.Fatal("a draft was posted by an approval that failed")
+	}
+
+	// Every draft a proposal names, or has pinned for the assignment, is
+	// posted by hand while it waits: approving it has nothing left to
+	// post, and does not send the approver to regrade.
+	b.do(t, b.sato, "grade.post", m{"course_id": b.course, "grade_ids": []uuid.UUID{yukis, replacement}})
+	for _, by := range []struct {
+		what string
+		args func(grades ...uuid.UUID) m
+	}{
+		{"naming its drafts", func(grades ...uuid.UUID) m { return m{"course_id": b.course, "grade_ids": grades} }},
+		{"for an assignment", func(...uuid.UUID) m { return m{"course_id": b.course, "assignment_id": b.hw3} }},
+	} {
+		yukis, replacement = draft(b.submit(t, b.yuki, by.what), 86), draft(b.submit(t, b.ken, by.what), 76)
+		out := b.MustCall(bot, "grade.post", by.args(yukis, replacement), "post-all-"+by.what)
+		if out.Status != domain.StatusProposed {
+			t.Fatalf("the bot's proposal %s: %+v", by.what, out)
+		}
+		b.do(t, b.sato, "grade.post", m{"course_id": b.course, "grade_ids": []uuid.UUID{yukis, replacement}})
+		if v := approve(out.ActionID); v.Outcome != domain.StatusFailed || v.Error.Code != apperr.FailedPrecondition ||
+			!strings.Contains(v.Error.Message, "there is nothing left for it to post") {
+			t.Fatalf("approving the proposal %s after every draft was posted by hand: %+v", by.what, v.Error)
+		}
 	}
 }
 

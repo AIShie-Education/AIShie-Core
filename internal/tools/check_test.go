@@ -491,7 +491,7 @@ func TestAProposalThatWouldBeRefusedIsNotItsOwnersToDecide(t *testing.T) {
 // (tool.Spec.Validate, given the moment, and tool.Spec.Since, given when it
 // was proposed): an agent's change of a seat's expiry that has passed
 // meanwhile, a change to a seat that has ended since, a grade with a newer
-// draft entered since, a post of a draft replaced since, and an agent's
+// draft entered since, a post of a draft replaced or posted since, and an agent's
 // answer to a question its opener has asked again since, are not their
 // owner's to decide. Someone else may still reject them, and the owner take
 // them back.
@@ -590,14 +590,32 @@ func TestWhatApprovingWouldRefuseNowIsNotItsOwnersToDecide(t *testing.T) {
 	if q := b.queue(t, b.sato, "action.list_proposed"); !q[*posting.ActionID] {
 		t.Fatalf("Sato's queue, a draft he could post himself: %v", q)
 	}
-	b.do(t, b.sato, "grade.submit", m{"course_id": b.course, "submission_id": yukiWork, "score": 85})
+	yukiDraft = testkit.Result[tools.GradeSubmitOut](t, b.do(t, b.sato, "grade.submit",
+		m{"course_id": b.course, "submission_id": yukiWork, "score": 85})).GradeID
 	if q := b.queue(t, b.sato, "action.list_proposed"); q[*posting.ActionID] {
 		t.Fatalf("Sato's queue, posting a draft replaced since: %v", q)
 	}
 	refusedAs("Sato approving the posting of a draft replaced since",
 		b.MustCall(b.sato, "action.decide", m{"course_id": b.course, "action_id": posting.ActionID, "decision": "approve"}, "sato-posts"),
 		apperr.Conflict, func(e *apperr.Error) bool {
-			return e.Message == fmt.Sprintf("grade %s has been replaced by a newer draft", yukiDraft)
+			return strings.HasSuffix(e.Message, "has been replaced since it was proposed; propose posting again")
+		})
+	b.do(t, b.sato, "action.withdraw", m{"course_id": b.course, "action_id": posting.ActionID})
+
+	// It proposes posting the new draft, and Sato posts it by hand
+	// meanwhile: there is nothing left for the proposal to post.
+	posting = b.MustCall(bot, "grade.post", m{"course_id": b.course, "grade_ids": []uuid.UUID{yukiDraft}}, "bot-posts-again")
+	if posting.Status != domain.StatusProposed {
+		t.Fatalf("Sato's agent posting Yuki's new draft: %+v", posting)
+	}
+	b.do(t, b.sato, "grade.post", m{"course_id": b.course, "grade_ids": []uuid.UUID{yukiDraft}})
+	if q := b.queue(t, b.sato, "action.list_proposed"); q[*posting.ActionID] {
+		t.Fatalf("Sato's queue, posting a draft posted since: %v", q)
+	}
+	refusedAs("Sato approving the posting of a draft posted since",
+		b.MustCall(b.sato, "action.decide", m{"course_id": b.course, "action_id": posting.ActionID, "decision": "approve"}, "sato-posts-again"),
+		apperr.FailedPrecondition, func(e *apperr.Error) bool {
+			return strings.Contains(e.Message, "there is nothing left for it to post")
 		})
 	b.do(t, b.sato, "action.withdraw", m{"course_id": b.course, "action_id": posting.ActionID})
 
@@ -880,6 +898,12 @@ func TestACallTheCourseWouldRefuseIsNotProposed(t *testing.T) {
 		// An agent of Tanaka's, to be seated already gone.
 		{"member.add_delegate", in(m{"actor_id": tanakaBot, "expires_at": past}),
 			apperr.InvalidArgument, "expires_at is in the past"},
+		// ... to reach someone who is no student, or an assignment the
+		// course does not have.
+		{"member.add_delegate", in(m{"actor_id": tanakaBot, "student_scope": "listed", "listed_students": []uuid.UUID{b.graderM}}),
+			apperr.FailedPrecondition, "listed_students must all be current students of this course"},
+		{"member.add_delegate", in(m{"actor_id": tanakaBot, "assignment_scope": "listed", "listed_assignments": []uuid.UUID{uuid.New()}}),
+			apperr.FailedPrecondition, "listed_assignments must all be assignments of this course"},
 	}
 	for i, tc := range cases {
 		out := b.MustCall(tanaka, tc.tool, tc.args, "refuse-"+uuid.NewString())

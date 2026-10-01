@@ -304,7 +304,8 @@ type Spec[In, Out any] struct {
 	Validate func(ctx context.Context, q dbq.Querier, m *domain.Member, now time.Time, in In) error
 	// Since checks a stored proposal, made at proposedAt, for what has
 	// changed since then that approving it must not pass over: a newer draft
-	// of the grade grade.submit would replace, entered while it waited. No
+	// of the grade grade.submit would replace, entered while it waited; a
+	// draft grade.post names replaced, or every one posted, meanwhile. No
 	// call is refused for that, and Validate, asked of a call and an
 	// approval alike, is not told when the proposal was made. It runs, after
 	// Validate and writing nothing, when a proposal is approved and when its

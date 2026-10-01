@@ -693,20 +693,17 @@ func stillWaiting(rows []dbq.GetGradesInCourseRow) ([]dbq.GetGradesInCourseRow, 
 }
 
 // postableNamed is what Validate holds named drafts to, whether a call or
-// an approval names them: none replaced, and those not yet posted postable;
-// when every one is posted, what checkPostable says of the first.
+// an approval names them: those still waiting postable. It passes over one
+// posted or replaced already, and finds nothing to refuse when none waits.
+// A call naming one is told so by Execute, and a proposal being made by
+// Pin; an approval is, in its own words, by Since (stillWaiting), which
+// alone knows the drafts were named when it was proposed.
 func postableNamed(ctx context.Context, q dbq.Querier, rows []dbq.GetGradesInCourseRow) error {
 	waiting := make([]dbq.GetGradesInCourseRow, 0, len(rows))
 	for _, g := range rows {
-		switch {
-		case g.SupersededBy != nil:
-			return apperr.Conflicts("grade %s has been replaced by a newer draft", g.ID)
-		case g.PostedAt == nil:
+		if g.SupersededBy == nil && g.PostedAt == nil {
 			waiting = append(waiting, g)
 		}
-	}
-	if len(waiting) == 0 {
-		return checkPostable(ctx, q, rows)
 	}
 	return checkPostable(ctx, q, waiting)
 }
@@ -761,11 +758,11 @@ func gradePost() tool.Tool {
 				return err
 			}
 			// Drafts named by id, alone or beside the assignment as Pin
-			// records them, are held to what an approval is: one replaced
-			// refuses it, and the rest are postable, less any posted
-			// already, which an approval passes over. A call is refused all
-			// that, and told besides of one posted already, by Execute;
-			// Pin tells a proposal being made so.
+			// records them: those still waiting are postable. One posted or
+			// replaced already is passed over here, since Validate is not
+			// told whether it is asked for a call or an approval. A call is
+			// refused it by Execute, a proposal being made by Pin, and an
+			// approval by Since, each in its own words.
 			if len(in.GradeIDs) > 0 {
 				return postableNamed(ctx, q, rows)
 			}
@@ -774,6 +771,18 @@ func gradePost() tool.Tool {
 			}
 			return checkPostable(ctx, q, rows)
 		},
+		// Approving a proposal posts the drafts it names still waiting:
+		// one replaced since fails it, and so does every one having been
+		// posted since (stillWaiting). Execute asks it again under the
+		// locks.
+		Since: func(ctx context.Context, q dbq.Querier, _ time.Time, in GradePostIn) error {
+			rows, err := gradesToPost(ctx, q, in)
+			if err != nil {
+				return err
+			}
+			_, err = stillWaiting(rows)
+			return err
+		},
 		// A proposal to post an assignment is about the drafts waiting when
 		// it was made. One entered while it waits has been in front of
 		// nobody who could release it, so the proposal names the drafts it
@@ -781,10 +790,10 @@ func gradePost() tool.Tool {
 		// approving it posts of them.
 		Pin: func(ctx context.Context, q dbq.Querier, _ *domain.Member, _ time.Time, in GradePostIn) (GradePostIn, error) {
 			if in.AssignmentID == nil {
-				// Validate passed over a draft named that is posted
-				// already, as an approval does. A proposal being made is
-				// not an approval, and is held to them as a call is:
-				// nobody is asked to approve posting what is posted.
+				// Validate passed over a draft named that is posted or
+				// replaced already. A proposal being made is held to them
+				// as a call is: nobody is asked to approve posting what is
+				// posted, or what has been replaced.
 				rows, err := gradesToPost(ctx, q, in)
 				if err != nil {
 					return in, err

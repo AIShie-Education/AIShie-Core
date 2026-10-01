@@ -266,6 +266,14 @@ func memberAddDelegate() tool.Tool {
 			if _, err := agentOf(ctx, q, m.ActorID, in.ActorID, in.CourseID, now); err != nil {
 				return err
 			}
+			// What writing the seat's lists asks (writeScope): the
+			// course's current students and its assignments.
+			if err := checkStudentList(ctx, q, in.CourseID, s.studentScope, s.listedStudents); err != nil {
+				return err
+			}
+			if err := checkAssignmentList(ctx, q, in.CourseID, s.assignmentScope, s.listedAssignments); err != nil {
+				return err
+			}
 			if s.expiresAt != nil && !s.expiresAt.After(now) {
 				return errExpiresInPast
 			}
