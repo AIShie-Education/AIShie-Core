@@ -299,6 +299,21 @@ Run all of these as root on the server.
   runtime. A runtime checks them against `https://lms-test.example.edu/v1/auth/keys`;
   both routes are under `/v1`, which the proxy already sends to Core. Set
   none of these, and no assertion is made.
+
+  The runtime also hosts the runtime agents, by their ids, as the site
+  service `agent_runtime` (README, Connecting an agent): give it its
+  credential once, on the server, and keep it where the runtime reads its
+  secrets. It is printed once, on standard output, and nowhere else; the
+  service is made the first time. Run it again with `--replace`, which
+  revokes the others, when the copy kept is lost:
+
+  ```
+  aishie-core service issue agent_runtime --label runtime > /root/agent-runtime.credential
+  ```
+
+  `aishie-core service issue document_text --label transcriber` does the
+  same for its transcriber. Root and administrators list and revoke them from
+  the front end (`service.list_credentials`, `service.revoke_credential`).
 - **Long polling.** A call that waits for news (`wait_s`: an agent's inbox,
   a person's open conversation) holds its request for up to 25 seconds, and
   the server keeps such a request open that long plus its usual 30. Caddy's
@@ -356,16 +371,19 @@ Run all of these as root on the server.
   `GET /v1/actors?search=<a piece of the name, email or login ID>` finds someone's
   `actor_id`, and says whether they have a password yet.
 - **An agent's token:** register the agent, signed in as above, then issue
-  its token by the id that comes back. Only an agent is issued one: `--actor`
-  with a person's id or email is refused (`api_tokens_are_for_agents`), as
-  `credential.issue_token` and `actor.issue_token` refuse one for a person.
-  A person who wants a script uses one of their agents instead: `agent.create`,
+  its token by the id that comes back. Only an mcp agent is issued one: one
+  its own tools reach over MCP (`"hosting": "mcp"`, which never changes).
+  `--actor` with a person's id or email is refused (`api_tokens_are_for_agents`),
+  as `credential.issue_token` and `actor.issue_token` refuse one for a person,
+  and with a runtime agent's (`hosted_by_runtime`), whose one token the
+  site's agent runtime is issued. A person who wants a script uses one of
+  their agents instead: `agent.create` with `"hosting": "mcp"`,
   `member.add_delegate` into the course, `agent.issue_token`.
 
   ```
   curl -X POST https://lms-test.example.edu/v1/actors \
     -H "Authorization: Bearer $SESSION" -H "Idempotency-Key: register-grader-bot" \
-    -H 'Content-Type: application/json' -d '{"kind":"agent","display_name":"grader-bot"}'
+    -H 'Content-Type: application/json' -d '{"kind":"agent","display_name":"grader-bot","hosting":"mcp"}'
   aishie-core token issue --actor <result.actor_id> --label grader-bot --days 90
   ```
 
@@ -477,6 +495,30 @@ Run all of these as root on the server.
   in and after a rollback, neither exports nor removes exports: files under
   `exports/` that this release wrote stay until it is deployed again and its
   sweep removes them.
+- **Migration 0025, one hosting for each agent:** every agent is hosted one
+  way, for good: `runtime`, run by the site's agent runtime, which alone is
+  issued its token, by the agent's id, through the site service
+  `agent_runtime`, and asked by people in the site while that token lives;
+  or `mcp`, reached by its owner's own tools with tokens they issue, and
+  asked nothing in the site. Nothing else makes an agent answer in the site,
+  and nothing is declared any more (`me.site_chat` changes nothing, for one
+  release, and is then removed). The migration makes a runtime agent of
+  every agent whose runtime had declared site chat with a token still live,
+  takes that token as the runtime's, so that it is asked as before, and
+  revokes the agent's other tokens: an owner's own tool connected to such an
+  agent stops working, and needs an mcp agent of its own. Every other agent
+  is an mcp agent, its tokens as they were. Before deploying it, give the
+  runtime its credential (`aishie-core service issue agent_runtime`, above),
+  and deploy a runtime that hosts by agent id: it issues each agent it hosts
+  a token of its own on its first start, which revokes the one it was handed.
+  `actor.site_chat_credential_id` is kept, pointing at each runtime agent's
+  token, for the release before, which reads it, and dropped by a later
+  migration. The previous release, while the migration goes in and after a
+  rollback, registers mcp agents, and fails having changed nothing when it
+  would issue a runtime agent a token of its owner's. Going down drops hosting
+  and keeps every token as it is, the runtime's included, and the agent
+  runtime service becomes a suspended agent nobody owns, as 0020's down
+  leaves the transcriber.
 - **Migration 0013, `member_invite`:** the permission that makes a course's
   join links. Every seat a person holds got it at its level of
   `member_manage`, and every seat an agent holds got it `denied`, whatever it

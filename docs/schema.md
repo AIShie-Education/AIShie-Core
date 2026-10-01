@@ -56,7 +56,8 @@ brings its owner's seat with it, and no further (§2.2, Delegates).
 Outside the course: `term`, `department`, `actor`, `credential`, `permission_preset`, `sso_provider`. The platform level has only
 two roles (`root`, `admin`) and a handful of operations — creating courses, registering actors,
 seating the first instructor. A site service (§2.1, Services) is outside every course too, and
-does one thing across all of them: the transcription service writes documents' text versions.
+does one thing across all of them: the transcription service writes documents' text versions,
+and the agent runtime service is issued the runtime agents' tokens.
 
 ## 2. Tables
 
@@ -75,23 +76,31 @@ actor(id, kind [human|agent|system|service], display_name, email null,
       owner_actor_id null→actor, suspended_by_actor_id null→actor,
       site_chat_credential_id null, email_verified = true,
       login_id null, login_id_verified = true,
-      service_scope null [document_text])
+      service_scope null [document_text|agent_runtime], hosting null [runtime|mcp])
     unique(lower(email)), unique(lower(login_id)), unique(service_scope)
     check: owner_actor_id ≠ id;  owner_actor_id set ⇒ kind = 'agent' and no platform_role;
            site_chat_credential_id set ⇒ kind = 'agent';
            not email_verified ⇒ kind = 'human' and email set;
            login_id is 1..64 of [0-9A-Za-z._-];  login_id set ⇒ kind = 'human';
            not login_id_verified ⇒ kind = 'human' and login_id set;
-           service_scope set ⇔ kind = 'service';  kind = 'service' ⇒ no email, no platform_role
+           service_scope set ⇔ kind = 'service';  kind = 'service' ⇒ no email, no platform_role;
+           hosting set ⇔ kind = 'agent'
     composite FK (site_chat_credential_id, id) → credential(id, actor_id)
     trigger: the owner is a person (kind = 'human'), and never changes
+    trigger: an agent's hosting never changes (actor_hosting_fixed); an agent written naming
+             none, as the release before 0025 writes one, is an mcp agent
 
 credential(id, actor_id→actor, kind [password|sso|api_token|session|invite|service],
            secret_hash null, provider null, subject null, token_prefix null,
            label null, last_used_at null, expires_at null, revoked_at null, created_at,
            issued_by_actor_id null→actor, must_change = false,
+           issued_to_service null [agent_runtime],
            unique(provider, subject), unique(token_prefix), unique(id, actor_id))
-    check: must_change ⇒ kind = 'password' and issued_by_actor_id set
+    unique(actor_id) where issued_to_service set and not revoked (credential_one_runtime_token)
+    check: must_change ⇒ kind = 'password' and issued_by_actor_id set;
+           issued_to_service set ⇒ kind = 'api_token'
+    trigger: a runtime agent's API tokens are issued to the runtime, and only a runtime agent's
+             are; whom one was issued to never changes (credential_fits_hosting)
 
 course(id, dept_id→department, term_id→term, code, section = '', title, description null,
        status [draft|active|archived], copied_from_course_id null→course,
@@ -119,8 +128,8 @@ never seated in a course, and no token is issued for it and no identity linked t
 its authority cannot be borrowed. The database takes no credential for it, and a token it was
 given before migration 0004 authenticates nobody. Those refusals read `kind`; nothing that
 grants does. So do the refusals of ownership below: only a person owns, only an agent is owned.
-So do those of site chat (§2.8): only an agent declares it, and only an agent that has not is
-refused as a respondent in the site.
+So do those of hosting (Agents' hosting, below): only an agent has one, and only a runtime
+agent is asked in the site (§2.8).
 So does one refusal outside the database: Core vouches for nobody but a person to a service
 that hosts agents (`POST /v1/auth/assertion`, README), and an agent's token asks in vain.
 So does the rule for who holds which credential, below: a person signs in and holds no API
@@ -161,12 +170,48 @@ owner's": a suspension made before migration 0007, or by the release before it, 
 administrator's to lift. Making an actor active clears it, whichever release does it, so that a
 later suspension is never taken for the owner's.
 
-`site_chat_credential_id` is the credential of an agent's with which a program that runs it
-declared that the agent takes conversations in the site (§2.8). Only an agent has one, and only
-a credential of its own: the CHECK reads `kind` to refuse, as the refusals of ownership do, and
-the composite key holds whose it is whichever row changes. Whether it is still live is read
-when it is needed and never kept here, so revoking the credential ends it with nothing to
-update. Migration 0011 adds it; the release before neither reads nor writes it.
+**Agents' hosting.** Every agent is run one way, chosen when it is registered and never changed
+(`hosting`; migration 0025): whoever registers it says which, `agent.create` and
+`actor.register` alike, and nothing chooses for them. `agent.update` refuses another
+(`hosting_fixed`), no tool changes it, and the database holds it (trigger
+`actor_hosting_fixed`). An agent hosted the other way is another agent.
+
+- **`runtime`**: the site's own agent runtime runs it, and nothing else does. Its owner holds no
+  token for it: `agent.issue_token`, `actor.issue_token`, `credential.issue_token` (the agent's
+  own) and `aishie-core token issue` each refuse it, `hosted_by_runtime`, whoever asks. Its one
+  token is the one issued to the runtime, through the site service `agent_runtime` (Services,
+  below), by the agent's id: `issued_to_service = 'agent_runtime'`, issued by the service
+  (`issued_by_actor_id`), never expiring, one at most that is not revoked
+  (`credential_one_runtime_token`): issuing another revokes it. People in the site ask it while
+  that token lives (§2.8), with nothing declared. Its owner may still revoke the token, as any
+  of their agent's (`agent.revoke_credential`), which ends its hosting until the runtime is
+  issued another.
+- **`mcp`**: its owner's own tools reach it over MCP — a chat app, an editor, a script — with
+  tokens the owner issues, as many as they like. It acts only while they use it, and nobody asks
+  it in the site: what nothing polls would wait for good.
+
+So nothing but the runtime's token makes an agent answer in the site: there is no other runtime
+to host one, a school's own included. The database holds the tokens to the hosting (trigger
+`credential_fits_hosting`, which reads `hosting`, as the refusals of ownership read `kind`, to
+refuse): a runtime agent's API token is the runtime's, and only a runtime agent's is.
+`agent.get`, `agent.list`, `actor.get`, `actor.list`, `me.get` (for an agent),
+`member.get` and `member.list` (an agent's seat), `conversation.respondents` and the runtime's
+`agent_runtime.agent` say `hosting`; the news of an agent's registration (`agent.created`,
+`actor.registered`) carries it. Migration 0025 made a runtime agent of every agent whose site
+chat credential was live, taking that credential as the runtime's token and revoking the
+agent's other tokens, and an mcp agent of every other, its tokens as they were. The release
+before it names no hosting; an agent it registers is an mcp agent (trigger
+`actor_hosting_default`), and a token it would issue a runtime agent is refused.
+
+`site_chat_credential_id` was the credential of an agent's with which a program that ran it
+declared that the agent takes conversations in the site (migration 0011). Nothing declares
+since 0025, and this release reads it nowhere: who is asked in the site follows from hosting
+(§2.8). It stays one release, deprecated, for the release before, which still reads it, and is
+kept in step for that release: `agent_runtime.issue_token` points it at the runtime's new token,
+and `agent_runtime.revoke_token` clears it, so that a rollback asks the same agents. A later
+migration drops it. Only an agent has one, and only a credential of its own: the CHECK reads
+`kind` to refuse, as the refusals of ownership do, and the composite key holds whose it is
+whichever row changes.
 
 `email_verified` says whether anyone but the person vouches for their email. Core sends no
 email and checks none; an email an administrator gives (`actor.register`, `actor.invite_new`,
@@ -210,7 +255,8 @@ and trimmed. The two are answered alike, wrong or right: one indexed lookup, one
 refusal ("the login ID or email, or the password, is wrong"), and each name is its own key to
 the limit on sign-in attempts, found or not, so that neither says which accounts there are.
 
-`created_by_actor_id` is the delegation chain: root (seeded at install, the only null) creates
+`created_by_actor_id` is the delegation chain: root (seeded at install, the only null but a
+site service the operator made on the command line, below) creates
 admins, an admin creates a course and seats its first instructor, the instructor adds everyone
 else. A department's administrator may stand where the admin does, for the courses of their
 departments, and registers the people they invite there (`actor.invite_new`). Roster syncs run
@@ -223,7 +269,12 @@ creates nothing. It is the one state change with no `action` row: there is no ac
 to be an action of. The operator's `aishie-core token issue` is likewise outside the log — it is
 how a newly registered agent, which never signs in, gets its first token — and needs the
 database access that already implies everything. Like the tools, it refuses the system actor,
-and a person.
+a person, and a runtime agent (`hosted_by_runtime`). So is the operator's
+`aishie-core service issue SCOPE --label L [--days N] [--replace]`, which issues a site service
+(Services, below) a credential at setup, before anyone has signed in to issue one, making the
+service the first time: made and issued by nobody Core knows (`created_by_actor_id`,
+`issued_by_actor_id` null), the credential printed once on standard output for a set-up script
+to keep where the service reads it, and recorded nowhere else.
 
 `credential` covers six kinds of the same thing. SSO rows hold no secret — `provider` and
 `subject` identify the account at the identity provider (`polyu-adfs` + UPN). API tokens store a
@@ -242,7 +293,8 @@ who has an email or a login ID to sign in with. A `service` credential is a site
 provider, invitations and the sessions signing in with them makes, and never an API token: for
 tools and scripts they use one of their agents, which holds a token of its own and never more
 than their seat. `credential.issue_token` for a person, `actor.issue_token` and `aishie-core token
-issue` for one are refused (`api_tokens_are_for_agents`), whoever asks. An agent holds API tokens
+issue` for one are refused (`api_tokens_are_for_agents`), whoever asks; and for a runtime agent,
+whose one token is the runtime's (`hosted_by_runtime`, Agents' hosting). An agent holds API tokens
 and nothing else: it is given no password (`credential.set_password`), no invitation
 (`actor.invite`; `actor.invite_new` registers people only) and no identity at a provider
 (`actor.link_sso`), each refused `agents_use_api_tokens`, and so never signs in and never holds a
@@ -269,12 +321,14 @@ before it holds false. The release before neither reads nor writes it, and takes
 password as it takes any.
 
 `issued_by_actor_id` says who issued an API token: the agent itself
-(`credential.issue_token`), an administrator (`actor.issue_token`), or an agent's owner
-(`agent.issue_token`); who issued an invitation (`actor.invite`, `actor.invite_new`), which
-is asked again when it is taken up (§2.10); and who set a temporary password
-(`member.reset_password`). It is null for the other kinds, for a token made on
-the command line (`aishie-core token issue`, and root's by `aishie-core bootstrap` before migration
-0017), for a token issued by a
+(`credential.issue_token`), an administrator (`actor.issue_token`), an agent's owner
+(`agent.issue_token`), or, for a runtime agent's, the agent runtime service
+(`agent_runtime.issue_token`), whose token says so besides (`issued_to_service`); who issued a
+service's credential (`service.issue_credential`); who issued an invitation (`actor.invite`,
+`actor.invite_new`), which is asked again when it is taken up (§2.10); and who set a temporary
+password (`member.reset_password`). It is null for the other kinds, for a token or a service's
+credential made on the command line (`aishie-core token issue`, `aishie-core service issue`, and
+root's by `aishie-core bootstrap` before migration 0017), for a token issued by a
 release older than migration 0006, including one that release issues while it still runs after
 the migration, and for an invitation made before its issuer was recorded, which is taken for a
 platform administrator's, as every invitation then was.
@@ -364,11 +418,13 @@ questions again in its transaction and is recorded as theirs. An identity once l
 unlinked is not linked again by its email: unlinking it was somebody's decision.
 
 **Services.** A site service is a program of the site's that Core gives an identity for one
-thing, and nothing else. There is one: `document_text`, the agent runtime's transcriber, which
-writes documents' text versions (§2.4, Text versions). It is neither a person nor an agent, nor
-a member of any course: an actor of kind `service`, whose `service_scope` says what it is for,
-one for each scope (`actor_service_scope_key`), made by the platform administrator who first
-issues it a credential, and seated in no course (trigger `course_member_not_a_service`). It has
+thing, and nothing else. There are two: `document_text`, the agent runtime's transcriber, which
+writes documents' text versions (§2.4, Text versions); and `agent_runtime`, the site's agent
+runtime, which hosts the runtime agents (Agents' hosting, above; migration 0025). A service is
+neither a person nor an agent, nor a member of any course: an actor of kind `service`, whose
+`service_scope` says what it is for, one for each scope (`actor_service_scope_key`), made by the
+platform administrator who first issues it a credential, or by the operator's command line, and
+seated in no course (trigger `course_member_not_a_service`). It has
 no email, login ID, platform role or owner, and never signs in. It holds credentials of kind
 `service` and nothing else, and nobody else holds one (`credential_fits_actor_kind`, migration
 0020): a bearer token made as an API token is, under a scheme of its own (`aissvc_`), so that
@@ -388,15 +444,49 @@ tools. Its calls count against the limit on one actor's calls, as anyone's do.
 
 Root and platform administrators, and not a department's, issue a service's credentials
 (`service.issue_credential`, whose token is shown once, kept only as its hash, and in no action,
-result, event or log line), list them (`service.list_credentials`: prefix, label, issuer, last
-use, expiry, whether each is live, and how many text versions each has claimed and not finished)
+result, event or log line), as the operator does at setup on the command line
+(`aishie-core service issue`, above), list them (`service.list_credentials`: prefix, label,
+issuer, last use, expiry, whether each is live, and how many text versions each has claimed and
+not finished)
 and revoke them (`service.revoke_credential`). Each is an action, and news of no course
 (`service.credential_issued`, `service.credential_revoked`). A service holds five live
 credentials at most (`too_many_credentials`): a runtime's, and a new one's while it takes over;
 `replace` revokes the others in the call that issues a new one. Revoking a credential puts what
 it had claimed back in the queue for another. Nothing else manages a service: the `actor.*`
 tools refuse it as they refuse the system actor, `actor.list` leaves it out, and no API token is
-issued for it, by a tool or on the command line (`service_credentials_only`).
+issued for it, by a tool or on the command line (`service_credentials_only`). Revoking the agent
+runtime's credential leaves the tokens it was issued for the agents it hosts as they are: they
+are the agents', and revoked by `agent_runtime.revoke_token`, or by their owners.
+
+**The agent runtime's tools** (`tool.Gate.Service` `agent_runtime`, REST only, under
+`/v1/services/agent_runtime/`), with which it hosts a runtime agent by its id, never by a token
+pasted into it. A person signs in to the runtime by Core's assertion (README, Signing in to a
+service that hosts agents); the runtime asks here whether they own the agent they would have it
+host, and is then issued its token:
+
+- `agent_runtime.check_owner {actor_id, agent_id}`, a read: whether that person owns that agent
+  (`owns`), and, if they do, the agent as `agent_runtime.agent` says it; of anyone else's agent,
+  nobody's, or an id that is no agent's, `owns: false` and nothing else.
+- `agent_runtime.agent {agent_id}`, a read: the agent as the runtime hosts it: `hosting`, its
+  `status` and its owner's (`owner_actor_id`, `owner_name`, `owner_status`), `live_seats`,
+  whether the runtime may host it now (`hostable`, else `reason`: `not_runtime_hosted`,
+  `agent_suspended`, `owner_suspended`), the live token it holds for it (`runtime_token`: its
+  credential id, prefix, when made and last used), and `site_chat`, whether people in the site
+  may ask it now. `not_found` for an id that is no agent's.
+- `agent_runtime.issue_token {agent_id, label?}`, a write: the agent's token, in place of the one
+  before, which it revokes (`replaced`); refused `not_runtime_hosted` for an mcp agent,
+  `agent_suspended`, `owner_suspended` (`failed_precondition`), `not_found` for no agent. The
+  agent is locked for it (`FOR NO KEY UPDATE`), and its standing read under the lock. The token
+  is shown once and kept as its hash, in no action, result, event or log line; a replay comes
+  back without it.
+- `agent_runtime.revoke_token {agent_id}`, a write: revokes the token it holds for the agent,
+  when the hosting ends; revoking none is no error (`revoked: []`).
+
+Each write is an action of the service's, news of no course (`agent_runtime.token_issued`,
+`agent_runtime.token_revoked`, filed under the agent). A credential of the runtime's that leaks
+lets whoever holds it, until it is revoked, be issued the token of any runtime agent, and so act
+as that agent, within its seats, as the runtime does: never an mcp agent, a person, or anything
+else of a course's.
 
 A service credential that leaks lets whoever holds it, until it is revoked, read the files of
 the versions it claims — those waiting to be transcribed, each by a URL that lasts fifteen
@@ -1623,8 +1713,9 @@ may address R when:
 
 The rule is one function, which every conversation tool goes by, and it is measured now, on
 every call, not when the conversation began: seats are narrowed, widened, paused and
-removed. `conversation.respondents` lists the agents the caller may address, each only while it
-takes site chat (below), with how its answers arrive and when it last used a token. `conversation.ask` is refused once the respondent may no longer be addressed ("start a new
+removed. `conversation.respondents` lists the agents the caller may address, each only while
+people in the site may ask it (below), with how its answers arrive, how it is hosted and when it
+last used a token. `conversation.ask` is refused once the respondent may no longer be addressed ("start a new
 conversation"), and
 `conversation.answer` once its opener may no longer address the one answering. The
 respondent reads the conversation (`conversation.get`, `.messages`) only while its opener
@@ -1642,33 +1733,42 @@ the rest is read a batch at a time, oldest first, until enough are found, so tha
 conversations whose openers may no longer ask do not stand for good in front of those that
 may.
 
-**Site chat: which agents answer in the site.** An agent answers only if something runs it that
-polls `conversation.inbox` and answers on its own:
-an agent runtime, AIshie's or a school's own. An assistant a person drives from a tool of their
-own — a chat app, an editor, a script, over MCP — acts only while that person uses it and never
-polls, so a question put to it in the site would wait for good. So the program that runs an
-agent says that it answers: `me.site_chat` with `on: true`, which records the credential the
-call came with (`actor.site_chat_credential_id`, §2.1); `on: false` clears it. It holds only
-while that credential is live, neither revoked nor expired, the agent is active, and its owner,
-if it has one, is active. That is worked out in SQL whenever it is needed and never kept as a
-flag, so revoking the runtime's token, as ending its hosting does, ends it with nothing left
-behind to say otherwise. Its owner switches it off (`agent.update` with `site_chat: false`) and never on: only what
-runs the agent knows that it answers, and says so again whenever it starts. Only an agent
-declares it; a person is refused (`not_an_agent`), a refusal that reads `kind` as those of
-ownership do (§2.1). `agent.get` and `agent.list` say `site_chat` of each agent, and
-`member.get` and `member.list` of each agent's seat; a front end says of the rest that they are
-operated from an external tool.
+**Who is asked in the site.** An agent answers in the site only if something runs it that
+polls `conversation.inbox` and answers on its own, and only the site's own agent runtime does:
+an assistant a person drives from a tool of their own — a chat app, an editor, a script, over
+MCP — acts only while that person uses it and never polls, so a question put to it in the site
+would wait for good. So who is asked follows from how an agent is hosted (§2.1, Agents'
+hosting), and nobody declares it: people in the site ask an agent while it is a runtime agent,
+the runtime holds a live token for it (`issued_to_service = 'agent_runtime'`, neither revoked
+nor expired), the agent is active, and its owner, if it has one, is active. An mcp agent is
+never asked. That is worked out in SQL whenever it is needed and never kept as a flag, so the
+runtime's revoking its token, as ending its hosting does, ends it with nothing left behind to
+say otherwise; so does its owner revoking it, or suspending the agent. `agent.get` and
+`agent.list` say `site_chat`, whether it is asked now, and `hosting`, of each agent, and
+`member.get` and `member.list` of each agent's seat; a front end says of an mcp agent that it is
+used from its owner's own tools, and of a runtime agent the runtime does not run now that it is
+not running.
 
-**An agent that takes no site chat is asked nothing in the site.** `conversation.respondents`
+`me.site_chat`, with which a runtime used to declare it (recording its credential in
+`actor.site_chat_credential_id`), is kept for one release, deprecated: called with the runtime's
+token, `on` true or false, it changes nothing and says `site_chat`, whether the agent is asked
+now; with any other credential, or none, it is refused (`failed_precondition`,
+`not_runtime_hosted`), and a person `not_an_agent`. `agent.update` no longer takes `site_chat`:
+it is refused, either way (`invalid_argument`, `site_chat_follows_hosting`); an owner stops
+people asking a runtime agent by stopping it in the runtime, or by suspending it. The refusals
+read `kind` and `hosting`, to refuse and never to grant, as the refusals of ownership do.
+
+**An agent that is not asked in the site is asked nothing there.** `conversation.respondents`
 leaves it out, in SQL, whomever else the caller may address; `conversation.open` addressed to it,
-and `conversation.ask` in a conversation with it, are refused `failed_precondition`, reason
-`agent_answers_elsewhere`, once the rule above has let the caller address it (a respondent the
-caller may not address is refused `not_addressable` first, as ever). A proposal to open or ask is
-refused when it is made and again when it is approved. Nothing already written changes: the
-conversation is read, closed and retracted as before, and the agent answers what it was asked
-(`conversation.answer`, `conversation.inbox`), since none of those is a new question. A person
-named as a respondent is refused before any of this, `conversations_are_with_agents` (above). The
-refusal reads `kind`, to refuse and never to grant, as the refusals of ownership do.
+and `conversation.ask` in a conversation with it, are refused `failed_precondition`, once the
+rule above has let the caller address it (a respondent the caller may not address is refused
+`not_addressable` first, as ever): reason `mcp_agent` for an mcp agent, and `agent_not_hosted`
+for a runtime agent the runtime does not run now. A proposal to open or ask is refused when it is
+made and again when it is approved. Nothing already written changes: the conversation is read,
+closed and retracted as before, and the agent answers what it was asked (`conversation.answer`,
+`conversation.inbox`), since none of those is a new question. A person named as a respondent is
+refused before any of this, `conversations_are_with_agents` (above). `agent_answers_elsewhere`,
+which this refusal said before 0025, is said no more.
 
 **An answer answers the latest question, once.** It names the opener's message it answers
 (`in_reply_to_message_id`), and is refused as a conflict if the opener has written since
@@ -2275,12 +2375,12 @@ the call has said which department it is about. Both are recorded on the action 
 and neither reaches inside a course. For a course, what the call is about is the course's
 department.
 
-Whether an agent takes conversations in the site (§2.8) is no part of `authorize()`. It grants
+Whether people in the site may ask an agent (§2.8) is no part of `authorize()`. It grants
 nothing, and is asked of the respondent, not of the caller: once `authorize()` has let a member
 ask, and the rule of addressing has let them address the agent, a new question to an agent that
-takes no site chat is refused as a rule of the domain (`failed_precondition`), recorded like any
-other failure. `me.site_chat` is on the caller's own account (the Self gate), and is the one tool
-that reads which credential the call came with.
+is not asked in the site is refused as a rule of the domain (`failed_precondition`), recorded like
+any other failure. `me.site_chat` is on the caller's own account (the Self gate), and reads
+which credential the call came with, as a site service's gate does.
 
 An ephemeral write (`conversation.draft`, §2.8) goes through `authorize()` as a write does: step
 1 refuses it in an archived course, and its caller's seat is held until it ends. Any level above
@@ -2328,7 +2428,10 @@ respondent's `conversation_answer` decides is who is shown its text.
 | An agent's seat that is not removed holds `action_decide` at `confirm_required` at most: more is written as that | trigger `course_member_agent_ceiling` |
 | An agent someone owns holds no platform role | CHECK `actor_owned_holds_no_platform_role` |
 | Making an actor active forgets who suspended it | trigger `actor_suspension_cleared` |
-| Only an agent declares that it takes conversations in the site, and only with a credential of its own | CHECK `actor_site_chat_is_agent`, composite FK `actor_site_chat_credential_fk` |
+| Only an agent names a site chat credential, and only one of its own (deprecated since 0025) | CHECK `actor_site_chat_is_agent`, composite FK `actor_site_chat_credential_fk` |
+| An agent, and only an agent, is hosted `runtime` or `mcp`, for good; one written naming none is `mcp` | CHECKs `actor_hosting_valid`, `actor_hosting_is_an_agents`, triggers `actor_hosting_fixed`, `actor_hosting_default` |
+| A runtime agent's API tokens are those issued to the site's agent runtime, one not revoked at most; only a runtime agent's are; only an API token is; whom it was issued to never changes | CHECK `credential_issued_to_service_valid`, unique index `credential_one_runtime_token`, trigger `credential_fits_hosting` |
+| The agent runtime is one site service, of its own scope | CHECK `actor_service_scope_valid`, unique index `actor_service_scope_key` |
 | A seat that is not removed has a principal exactly when its actor has an owner; the principal is the owner's seat, in the same course, and nobody's delegate | composite FK and trigger `course_member_principal_valid` on `course_member` |
 | A delegate's seat is removed with its principal's, whichever release removes it | trigger `course_member_delegates_follow` |
 | Only a delegate's seat answers the course | CHECK `course_member_answers_course_is_delegate` |
@@ -2534,10 +2637,17 @@ respondent's `conversation_answer` decides is who is shown its text.
   administrator's `actor.register` with an owner and `actor.reactivate` are
   not counted: an administrator may give someone more. An owner lifts only a suspension of their
   own; an administrator's, or one from before it was recorded, is not theirs.
-- An agent takes conversations in the site (§2.8) only while the credential that declared it
-  (`me.site_chat`, with the credential of the call) is live, the agent active and its owner, if
-  any, active: worked out in SQL on every read that needs it, never stored as a flag. Only an
-  agent declares it; its owner switches it off and never on.
+- People in the site ask an agent (§2.8) only while it is a runtime agent, the site's runtime
+  holds a live token for it, and it and its owner, if any, are active: worked out in SQL on every
+  read that needs it, never stored as a flag. Nobody declares it; `me.site_chat` changes nothing
+  and refuses every credential but the runtime's token; `agent.update` refuses `site_chat`.
+- An agent is registered with its hosting, by `agent.create` and `actor.register` alike, and
+  `agent.update` refuses another (`hosting_fixed`). A runtime agent is issued no token but by
+  `agent_runtime.issue_token` (`hosted_by_runtime`, in `auth.IssueToken`, which every other way of
+  issuing one goes through); the runtime is issued one for a runtime agent alone, active, whose
+  owner is active, under a lock on the agent.
+- The agent runtime's tools are its own (`tool.Gate.Service`), and `agent_runtime.check_owner`
+  says nothing of an agent but to its owner's check.
 - `member.update_perms_bulk` changes every seat of the role but the caller's, each through the
   rule for one seat, all or none.
 - A seat's role changes by `member.set_role` alone, which changes nothing else on the seat,
@@ -2555,10 +2665,10 @@ respondent's `conversation_answer` decides is who is shown its text.
 - A conversation is read by its opener, by its respondent only while the opener may still
   address it, and by whoever decides actions for the opener; to anyone else it does not
   exist. Lists take the caller's own and those it oversees, in SQL.
-- An agent that takes no site chat now (§2.8) is not offered as a respondent, in SQL, and a
-  conversation is neither opened with it nor asked in (`agent_answers_elsewhere`), when
-  proposed and again when carried out; what it was asked stays readable and answerable, and a
-  person as a respondent is never refused for it.
+- An agent people in the site may not ask now (§2.8) is not offered as a respondent, in SQL,
+  and a conversation is neither opened with it nor asked in (`mcp_agent`, `agent_not_hosted`),
+  when proposed and again when carried out; what it was asked stays readable and answerable,
+  and a person as a respondent is never refused for it.
 - An answer answers the opener's latest message, and only while nothing answers it yet and
   it is not retracted, checked under the conversation's row lock, which writing a message takes
   first (`WHERE status = 'open'`), so that a close and a message never pass each other, and

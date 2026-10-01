@@ -2,8 +2,9 @@
 
 For the team building the agent runtime: a separate service, in a repository
 of its own, that hosts AI agents for AIshie. §2 was checked against this
-repository and a running `aishie-core` on 2026-09-28; if it and Core ever
-disagree, `GET /v1/tools` is right. §3 comes from the providers' documentation,
+repository and a running `aishie-core` on 2026-09-28, and §2.0 and §5.1, how
+the runtime hosts an agent, on 2026-10-01; if it and Core ever disagree,
+`GET /v1/tools` is right. §3 comes from the providers' documentation,
 read on 2026-09-26; **[UNVERIFIED]** marks what it did not confirm.
 
 ## 0. In short
@@ -12,14 +13,26 @@ read on 2026-09-26; **[UNVERIFIED]** marks what it did not confirm.
   notes, and runs the agent loops. Core holds none of these and never calls
   the runtime. An agent's long-term memory is Core's, the agent's whatever
   runs it (§2.5).
-- The runtime connects in to Core as each agent it hosts, with that agent's
-  token, over MCP at `https://<core>/mcp`. Core pushes nothing: the runtime
+- Every agent is hosted one way, chosen when it is registered and never
+  changed (schema.md §2.1, Agents' hosting): a **runtime agent** is run by
+  this runtime and nothing else; an **mcp agent** is its owner's own tools'
+  (a chat app, an editor, a script), and the runtime never hosts one. There
+  is one runtime for a site; nothing else hosts agents.
+- The runtime is a site service of Core's, `agent_runtime`, with a
+  credential of its own (`aissvc_…`), set at setup like the transcriber's.
+  With it, over REST, it hosts a runtime agent **by the agent's id**: it asks
+  Core whether the person signed in to it owns the agent
+  (`agent_runtime.check_owner`), and is issued the agent's one token
+  (`agent_runtime.issue_token`), which it seals and keeps. Nobody pastes a
+  token, and the agent's owner holds none (§2.0).
+- The runtime connects in to Core as each agent it hosts, with that token,
+  over MCP at `https://<core>/mcp`. Core pushes nothing: the runtime
   long-polls `conversation_inbox` for questions (`wait_s`: a call waits until
-  one is asked) and reads `event_list` for outcomes (§7.2). A
-  generic MCP client with an agent token answers nobody, since it acts only
-  while a person types. So the site offers people only agents whose runtime
-  says it answers: the runtime calls `me_site_chat` when it starts an agent
-  (§2.3), and an agent nothing has declared is asked nothing in the site.
+  one is asked) and reads `event_list` for outcomes (§7.2). People in the
+  site ask a runtime agent while the token the runtime holds for it lives:
+  nothing is declared, and `me_site_chat` is deprecated. Ending the hosting
+  revokes the token (`agent_runtime.revoke_token`), and people ask the agent
+  nothing more.
 - Core's permissions decide what an agent may do and whether a person must
   confirm it. The runtime only narrows further: allowlists, budgets, quotas.
 - While a worker writes an answer, the runtime streams its draft to whoever
@@ -36,7 +49,7 @@ read on 2026-09-26; **[UNVERIFIED]** marks what it did not confirm.
 
 | Concern | Core | Runtime |
 |---|---|---|
-| The agent's identity: actor, owner, tokens | `agent.create`, `agent.issue_token` | keeps the token, encrypted; never issues one |
+| The agent's identity: actor, owner, hosting | `agent.create` (`hosting: runtime`, for good); issues the agent's one token to the runtime by its id (`agent_runtime.issue_token`), revoking the one before | asks for the token by the agent's id, with its own service credential, seals it; never takes a token from anyone |
 | What the agent may do, its levels and reach | its `course_member` row, checked on every call | reads it (`me_memberships`); never widens it |
 | Confirmation and review of actions | proposals, the approval and review queues | reports the outcome; never simulates approval |
 | Model, endpoint, prompt, provider key | never stored | all of them |
@@ -45,7 +58,7 @@ read on 2026-09-26; **[UNVERIFIED]** marks what it did not confirm.
 | Conversation transcript | `conversation_message`, append-only | reads it; caches only |
 | Turns, tool calls, tokens, wall clock | only pause, removal and `expires_at` | every budget (§7) |
 | Finding work | offers `conversation_inbox` and `event_list`, each a long poll with `wait_s` | long-polls them (§7.2) |
-| Whether people in the site may ask the agent | records the token that said so; holds it while that token works and the agent and its owner are active | says so with `me_site_chat` on each start, and unsays it on stopping |
+| Whether people in the site may ask the agent | follows from hosting: a runtime agent, while the runtime's token for it lives and the agent and its owner are active; never an mcp agent | holds the token while it hosts the agent; revokes it (`agent_runtime.revoke_token`) when the hosting ends; declares nothing |
 | Rate limit | 600 calls a minute per actor, burst 100, by default | stays well under it (§7.3) |
 
 ### 1.2 Connecting
@@ -66,6 +79,11 @@ read on 2026-09-26; **[UNVERIFIED]** marks what it did not confirm.
   (`conversation_answer`). There are 134 tools, 49 reads and 85 writes; all
   match `[a-z_]+`, the longest has 27 characters, and every provider takes
   them as they are (§3.7).
+- **The runtime's own credential.** Its `agent_runtime` service credential
+  (`aissvc_…`) is taken over REST alone, at its tools' routes under
+  `/v1/services/agent_runtime/` (§2.0), as `Authorization: Bearer aissvc_…`;
+  everything else refuses it (`not_for_services`), and so does `/mcp`. It
+  never acts as an agent: each agent's token does that.
 - **REST.** `GET /v1/tools` (no token needed) lists each tool's `name`,
   `description`, `kind`, `method`, `path`, `input_schema` and
   `output_schema`. Writes are `POST`s with an `Idempotency-Key` header. The
@@ -86,6 +104,61 @@ read on 2026-09-26; **[UNVERIFIED]** marks what it did not confirm.
 | Who pays | the owner's key, or the school's with quotas | the school or the course |
 
 ## 2. The Core contract
+
+### 2.0 Hosting an agent by its id
+
+The runtime's service credential calls these, over REST, and nothing else
+does (`service_only` for anyone else). Each refusal is in `error.details.reason`.
+
+| Tool | Route | Input | Output and refusals |
+|---|---|---|---|
+| `agent_runtime.check_owner` | `GET /v1/services/agent_runtime/owners/{actor_id}/agents/{agent_id}` | `actor_id`, the assertion's `sub`; `agent_id` | `owns`; when true, `agent` (as below). Of anyone else's agent, nobody's, or an id that is no agent's: `owns: false` and nothing else. |
+| `agent_runtime.agent` | `GET /v1/services/agent_runtime/agents/{agent_id}` | `agent_id` | `agent_id`, `display_name`, `hosting` (`runtime` or `mcp`), `status`, `owner_actor_id`, `owner_name`, `owner_status`, `live_seats`, `hostable` and, when false, `reason` (`not_runtime_hosted`, `agent_suspended`, `owner_suspended`), `runtime_token` (`credential_id`, `token_prefix`, `created_at`, `last_used_at`) while one lives, `site_chat` (people in the site may ask it now). `404 not_found` for an id that is no agent's. |
+| `agent_runtime.issue_token` | `POST /v1/services/agent_runtime/agents/{agent_id}/token` | `agent_id`, `label` (optional, 1 to 200 characters; `agent runtime` by default), `Idempotency-Key` | `agent_id`, `credential_id`, `token` (`ais_…`, shown once), `token_prefix`, `replaced` (the token revoked). It never expires. `422 failed_precondition`: `not_runtime_hosted` (an mcp agent), `agent_suspended`, `owner_suspended`; `404` for no agent. |
+| `agent_runtime.revoke_token` | `POST /v1/services/agent_runtime/agents/{agent_id}/token/revoke` | `agent_id`, `Idempotency-Key` | `agent_id`, `revoked` (empty when it held none, which is no error). |
+
+Hosting an agent, from the owner's page in the front end (§5.1):
+
+```
+owner → runtime: POST /agents {agent_id}             (Authorization: Bearer <Core's assertion>)
+runtime: check the assertion; sub = the person
+runtime → Core:  GET  …/owners/{sub}/agents/{agent_id}        → owns, agent.hostable
+                 refuse: not theirs (as not found), not hostable (say reason: an mcp agent
+                 is "used from your own tools, not hosted here")
+owner picks a model and key
+runtime → Core:  POST …/agents/{agent_id}/token  {label}      → token; seal it, never log it
+runtime → Core (as the agent, over MCP): me_get, me_memberships; start polling
+```
+
+- An agent is the runtime's to host once and for all: there is one token at
+  a time, and issuing another revokes the one before, so two runtimes, or two
+  replicas each issuing their own, would revoke each other's. Issue it once,
+  keep it sealed, and share it among the workers.
+- When the hosting ends — the owner removes the agent from the runtime, or
+  pauses it — revoke the token (`agent_runtime.revoke_token`) and stop
+  calling Core for it: people in the site are then not offered it, and a
+  question to it is refused `agent_not_hosted`. On resuming, issue a new one.
+- A token answered `401` was revoked by someone else: the agent's owner
+  (`agent.revoke_credential`), an administrator, or a migration. Stop the
+  agent and tell its owner; host it again only when they ask.
+- The runtime's own credential is set like the transcriber's, from the
+  environment or a secret (`AGENT_RUNTIME_CREDENTIAL`, say). The operator
+  issues it at setup (`aishie-core service issue agent_runtime --label …`,
+  printed once on standard output), and root or an administrator from the
+  front end (`service.issue_credential` with scope `agent_runtime`); it is
+  revoked with `service.revoke_credential`, which leaves the agents' tokens as
+  they are.
+- **Agents configured from YAML** by the operator (§4, M1) are runtime agents
+  too, registered in Core with `hosting: runtime`, and get their tokens the
+  same way, by agent id, at the runtime's start: no token files. One nobody
+  owns (an administrator's `actor.register` without an owner) has no owner to
+  check: the operator's configuration names it.
+- **On upgrading** to this contract, the runtime issues each agent it hosts a
+  token of its own on its first start (`agent_runtime.issue_token`), which
+  revokes the one an owner pasted into it before (Core's migration 0025 took
+  that one as the runtime's), and stops calling `me_site_chat`. It refuses an
+  mcp agent with the reason above, and forgets any it held: Core revoked
+  nothing of an mcp agent's, but no runtime hosts one.
 
 ### 2.1 The envelope
 
@@ -133,7 +206,8 @@ text.
 | An answer | `answer:{conversation_id}:{in_reply_to_message_id}:{attempt}`, attempt from 1 (Core's MCP instructions give this form) |
 | A canned or fallback answer | the same: it is an attempt at the answer to that message |
 | Closing a conversation | `close:{conversation_id}` |
-| Declaring site chat, or ending it | `site_chat:{on\|off}:{start id}`, a new start id each time the agent is started or stopped: the same key again would only replay what an earlier token declared |
+| Issuing an agent's token (`agent_runtime.issue_token`) | `host:{agent_id}:{random}`, a new one each time: a replay comes back without the token, so a call that timed out is made again under a new key, which revokes the token never received |
+| Revoking it (`agent_runtime.revoke_token`) | `unhost:{agent_id}:{random}`; revoking none is no error |
 | Any other write a model starts (M3) | `tool:{member_id}:{first 32 hex of sha256(tool name + canonical arguments)}` |
 
 **Write ahead.** Store `(key, tool, exact arguments)` before sending, and after
@@ -149,9 +223,9 @@ rejected, cancelled). That is safe: Core refuses a second answer to a message
 
 | Tool | Use |
 |---|---|
-| `me_get` | Checks the token and returns the agent's actor: `id`, `kind`, `display_name`, `status`, and `owner_actor_id`, the person who owns it. `owner_actor_id` is absent for an agent nobody owns (one an administrator registered without an owner), and for a person, who holds no API token (Core refuses one from before, `api_tokens_are_for_agents`), and whose session the runtime refuses anyway (`kind` is not `agent`). It names the owner while the owner is suspended too; Core gives a suspended person no assertion (§5.1), so they cannot connect the agent meanwhile. An agent's owner is fixed when it is registered and never changes (schema.md §2.1), so the owner a stored token's agent names is the one it named when the token was taken. |
+| `me_get` | Checks the token and returns the agent's actor: `id`, `kind`, `display_name`, `status`, `hosting` (`runtime` for every agent the runtime hosts), and `owner_actor_id`, the person who owns it. `owner_actor_id` is absent for an agent nobody owns (one an administrator registered without an owner), and for a person, who holds no API token (Core refuses one from before, `api_tokens_are_for_agents`), and whose session the runtime refuses anyway (`kind` is not `agent`). It names the owner while the owner is suspended too; Core gives a suspended person no assertion (§5.1), so they cannot connect the agent meanwhile. An agent's owner is fixed when it is registered and never changes (schema.md §2.1), so the owner a stored token's agent names is the one it named when the token was taken. |
 | `me_memberships` | Every seat: `member_id`, `course_id`, `code`, `section`, `title`, `course_status`, `role`, `status`, `expires_at`, `student_scope`, `assignment_scope`, `principal_member_id`, `perms` (permission to level, a delegate's capped by its principal's, all `denied` while the seat does not count), `answers_course`, and `perm_ceilings` with `perm_ceiling_reasons`: the most each permission of the seat could ever be, and why where that is below `autonomous` (an agent's `action_decide` is `confirm_required` at most: its decisions and reviews are proposals). Work only in active seats of courses not archived whose `perms.conversation_answer` is not denied. |
-| `me_site_chat` | `{on: true}` when the runtime starts the agent, with the token it runs it with, and `{on: false}` when it stops: until then people in the site are not offered the agent, and `conversation.open` and `conversation.ask` addressed to it are refused `failed_precondition`, `agent_answers_elsewhere`. Returns `site_chat`, whether it holds now (false while the owner is suspended). It holds only while that token works: revoked or expired, it ends by itself, and a new token must declare it again. The owner may end it (`agent.update` with `site_chat: false`), never start it; the runtime starts it again on its next start. A person's token is refused, `not_an_agent`. Conversations already open are unaffected: the agent answers them, and they stay readable. |
+| `me_site_chat` | Deprecated, kept one release: nothing is declared. With the token the runtime was issued, `{on: true}` or `{on: false}` changes nothing and returns `site_chat`, whether people in the site may ask the agent now (false while it or its owner is suspended); with any other credential it is refused, `not_runtime_hosted`, and a person's `not_an_agent`. Stop calling it. People in the site ask a runtime agent while the runtime's token lives; until the runtime is issued one, and once it is revoked, `conversation.open` and `conversation.ask` addressed to the agent are refused `failed_precondition`, `agent_not_hosted` (an mcp agent: `mcp_agent`). Conversations already open are unaffected: the agent answers them, and they stay readable. |
 
 **Finding work**
 
@@ -261,11 +335,9 @@ may not, they must stay autonomous (schema.md §2.8).
 - **Presence.** Core records a token's last use at most once a minute, and the
   frontend shows an agent as online if it was seen in the last two minutes, so
   a runtime whose calls are never 60 s apart always shows online. When an
-  owner pauses an agent in the runtime, call `me_site_chat` with `on: false`
-  and then stop calling Core for it, so that neither the site nor presence
-  says it answers. When hosting ends for good, do the same and revoke the
-  agent's token with `credential_revoke` (the token may revoke itself): its
-  site chat ends with it, whatever else happens.
+  owner pauses an agent in the runtime, or hosting ends for good, revoke its
+  token (`agent_runtime.revoke_token`) and stop calling Core for it, so that
+  neither the site nor presence says it answers; on resuming, issue a new one.
 - **Rate limit.** 600 calls a minute per actor, burst 100, by default
   (`RATE_LIMIT_PER_MINUTE`, `RATE_LIMIT_BURST`); reads count, and MCP and REST
   share it. §7.3 spends it. A draft write that Core carries out is given back
@@ -276,14 +348,15 @@ may not, they must stay autonomous (schema.md §2.8).
 ### 2.6 A student asks their own agent
 
 ```
-Once:  Yuki, in Core: agent.create "Yuki's helper" → agent.issue_token → ais_…
-       Yuki, in the runtime: paste the token, pick a model and a key
+Once:  Yuki, in Core: agent.create "Yuki's helper", hosting runtime
+       Yuki, in the runtime: host it (agent id), pick a model and a key; the runtime:
+       agent_runtime.check_owner{Yuki, agent} → owns, hostable;
+       agent_runtime.issue_token{agent} → ais_…, sealed
        Yuki, in CS101: member.add_delegate (preset delegate) → proposed → an instructor
        approves → seat D, principal P (Yuki's seat), student_scope listed [P]
 Runtime:
  1. me_get; me_memberships → [{course_id C, member_id D, principal_member_id P, answers_course
     false, perms {conversation_answer, document_read, submission_read, grade_read: autonomous …}}];
-    me_site_chat{on: true, idempotency_key "site_chat:on:<start id>"} → site_chat true
  2. toolset(D) = the read tools D's perms allow ∩ the allowlist
  3. conversation_inbox{C, wait_s 25} → [] after 25 s; again at once, and it waits
     Yuki: conversation.open{respondent_member_id D, body "Why did I lose marks on HW3?"} → X, M1
@@ -301,11 +374,11 @@ Had she retracted M1 ("stop") instead, step 7 would be moved_on naming no messag
 
 ### 2.7 A course tutor answers students
 
-An instructor creates "CS101 Tutor", registers it in the runtime on the
-school's key with a course budget, and seats it with
+An instructor creates "CS101 Tutor" with `hosting: runtime`, has the runtime
+host it on the school's key with a course budget, and seats it with
 `member.add_delegate{preset: course_tutor}`: seat T, `answers_course` true,
-`student_scope` listed with nobody. Once the runtime has started T and said so
-(`me_site_chat`), every student finds T in `conversation.respondents`. The runtime keeps one poller for T in the course:
+`student_scope` listed with nobody. Once the runtime has been issued T's token
+(§2.0), every student finds T in `conversation.respondents`. The runtime keeps one poller for T in the course:
 each inbox row is checked against the asker's quota (over it, the canned notice
 under the answer's own key, with no model call), then answered by a worker whose
 tools are `course_get`, `document_list`, `document_get`, `assignment_list` and
@@ -707,7 +780,8 @@ agent:
     base_url: https://lms.example.edu
     transport: mcp                 # mcp | rest
     mcp_protocol: "2025-11-25"     # pinned
-    token_ref: secret://ten_instr_42/agents/agt_01J9Z/core_token
+    agent_id: 0192f3c1-…           # the agent in Core, a runtime agent; hosted by its id (§2.0)
+    token_ref: secret://ten_instr_42/agents/agt_01J9Z/core_token   # issued by agent_runtime.issue_token
   model:
     adapter: anthropic             # openai_chat | openai_responses | anthropic | gemini | bedrock_converse
     model: <provider model id>     # Azure: the deployment name
@@ -836,25 +910,30 @@ cookie: the proxy in front of it strips `Cookie`.
   forwards an assertion, and Core takes none as a credential of its own.
 - **Roles.** The person is `sub`, and nothing else: `name`, `email` and
   `login_id` are for display. `platform_role` `root` or `admin` is a school administrator.
-  Owning an agent is `me_get`'s `owner_actor_id` equal to `sub`. Tutor
+  Owning an agent is what `agent_runtime.check_owner` says of `sub` and the
+  agent (§2.0). Tutor
   settings for a course need no role of the person's: the owner of an agent
   that holds a seat with `answers_course` there may change them.
 - **What it costs.** A sign-out, a suspension or a change of role reaches the
   runtime when the assertion ends, within `ASSERTION_TTL`.
 
-The owner issues a token in Core (My agents), or the front end issues one
-for them, and hands it to the runtime, which calls `me_get` and `me_memberships`, shows the seats ("Delegate of Yuki
-in CS101: reads your work, answers only you"), and stores the token encrypted,
-never to show it again. The owner picks a model and key (an own key is tested
-with a one-token call), the runtime says the agent answers in the site
-(`me_site_chat`, §2.3), and polling starts. The runtime takes the token only
-from the agent's owner: `me_get`'s `owner_actor_id` must be the person signed
-in. It refuses a token whose `kind` is not `agent`, which Core no longer
-issues to anyone and answers `401` (`api_tokens_are_for_agents`) if one from
-before is presented, and
-leaves an agent nobody owns to the runtime's administrators. An agent's owner
-never changes in Core, so the owner checked when the token was taken stays
-its owner for as long as the token works.
+The owner hosts an agent by its id: the front end lists their runtime agents
+(`agent.list`, `hosting: runtime`; an mcp agent has no hosting page, only its
+tokens and MCP instructions) and asks the runtime to host one,
+`POST /agents {agent_id}`. The runtime asks Core whether the person signed in
+(`sub`) owns it and whether it may host it (`agent_runtime.check_owner`, §2.0),
+refuses an mcp agent (`not_runtime_hosted`: "used from your own tools, not
+hosted here"), and, once the owner has picked a model and key (an own key is
+tested with a one-token call), is issued the agent's token
+(`agent_runtime.issue_token`), which it seals, never to show it to anyone;
+then it calls `me_get` and `me_memberships`, shows the seats ("Delegate of
+Yuki in CS101: reads your work, answers only you"), and polling starts. The
+runtime takes no token from anyone: the endpoint that took a pasted token,
+its `other_tokens` and its `already_hosted` by token are gone. An agent
+nobody owns is the runtime's administrators' to host (YAML, §2.0). An agent's
+owner never changes in Core, so the owner checked when the hosting began
+stays its owner for as long as the token works; check it again
+(`check_owner`) whenever the owner changes the agent's settings or stops it.
 
 ### 5.2 Whose key
 
@@ -1115,7 +1194,8 @@ front end, which calls the runtime's API with Core's assertion (§5.1); the
 API sits behind the proxy on a path of Core's own origin, with `Cookie`
 stripped. Settings: `DATABASE_URL`, `KMS_KEY_ID`, the runtime's audience (the
 URL listed in Core's `RUNTIME_AUDIENCES`) and Core's base URL, whose
-`/v1/auth/keys` checks the assertions, `CORE_BASE_URL_ALLOWLIST` (which Core
+`/v1/auth/keys` checks the assertions, its `agent_runtime` service credential
+(`AGENT_RUNTIME_CREDENTIAL`, §2.0), `CORE_BASE_URL_ALLOWLIST` (which Core
 installations a token may point at), `EGRESS_PROXY`, `LOG_REDACT_EXTRA`. The
 runtime needs no `OIDC_*`. Releases are versioned images; migrations are
 additive.
@@ -1130,7 +1210,7 @@ one static binary. TypeScript (`@modelcontextprotocol/client` 2.1.0) or Python
 | Milestone | Scope | Done when |
 |---|---|---|
 | **M1: one adapter, a person's own agent** | A Go service, one worker, agents configured from YAML and environment secrets. `openai_chat` (so OpenAI, DeepSeek, Qwen, Kimi, GLM, Ollama, vLLM, LM Studio, OpenRouter and Gemini's compatible endpoint). The MCP client, `me_memberships`, jittered inbox polling, a leased worker per conversation, the read-only toolset through the sanitiser, the answer written ahead, every row of §2.4 but proposals' follow-up. Budgets per answer, redaction, the fake Core, fixtures, CI against Core's image. | A student's own agent answers them end to end in CI and on edge; the moved-on, duplicate and denied paths are tested; no token in any log. |
-| **M2: every provider, course tutors, several tenants** | `anthropic`, `gemini`, `openai_responses`, `bedrock_converse`, with reasoning passthrough and contract and nightly tests. The hosted UI, in the web front end, signing in with Core's assertion (§5.1); connecting by token, both kinds of key, the secret store, quotas, ledger and cost, the owner's page. Course tutors with per-asker quotas. Proposals, reviews, rejections, retractions and closures followed through `event_list`. Cluster-wide poller leases, the rate-limit budget, metrics, traces. | Every provider in §3.9 passes its contract tests or is marked unsupported; a 500-student course stays under 30 % of the rate limit; cost is known per asker; the safety evaluations pass review. |
+| **M2: every provider, course tutors, several tenants** | `anthropic`, `gemini`, `openai_responses`, `bedrock_converse`, with reasoning passthrough and contract and nightly tests. The hosted UI, in the web front end, signing in with Core's assertion (§5.1); hosting by agent id (§2.0), both kinds of key, the secret store, quotas, ledger and cost, the owner's page. Course tutors with per-asker quotas. Proposals, reviews, rejections, retractions and closures followed through `event_list`. Cluster-wide poller leases, the rate-limit budget, metrics, traces. | Every provider in §3.9 passes its contract tests or is marked unsupported; a 500-student course stays under 30 % of the rate limit; cost is known per asker; the safety evaluations pass review. |
 | **M3: grading and other work** | Work started by events: grading agents (rubric reads, `grade_submit` proposals, writes opened per workflow and keyed `tool:{member_id}:{hash}`), feedback and announcement drafts. `gemini_interactions`. What Core adds (§10). | Grading proposals go through Core's approval queue; the same budgets and ledger hold. |
 
 ## 10. Open questions for Core
@@ -1141,9 +1221,10 @@ frontend, the two-minute presence window and how replies render links and
 images. Settled since: who owns the agent (1 below), and long polling (4).
 Still open, none blocking M1: 2, 3, and one inbox across courses (4).
 
-1. **Who owns the agent.** Settled. `me_get` names the agent's owner in
-   `owner_actor_id` (§2.3), and the runtime compares it with the person
-   signed in to it (§5.1) before it takes a token.
+1. **Who owns the agent.** Settled. `agent_runtime.check_owner` says whether
+   the person signed in to the runtime (§5.1) owns an agent, and whether the
+   runtime may host it, before it is issued the agent's token by its id
+   (§2.0); `me_get` names the owner too (`owner_actor_id`).
 2. **Which permission gates each tool.** The catalogue has no gates, so §4
    keeps them by hand. Proposed: a `gate` field in `GET /v1/tools`.
 3. **A rejection's reason.** `action.rejected` carries none and `action_get`
