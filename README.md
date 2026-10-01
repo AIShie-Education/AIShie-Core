@@ -319,12 +319,12 @@ kinds (docs/schema.md §2.1, Single sign-on):
 
 - the operator's: set `OIDC_ISSUER`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`
   and `SIGNING_KEY`. The defaults are for ADFS: accounts are known by their
-  `upn` claim (`OIDC_SUBJECT_CLAIM`). The provider is recorded as
-  `OIDC_PROVIDER_NAME`, such as `school-adfs`, which every identity linked
-  at it is recorded under: set it before anyone is linked, and never change
-  it after, or nobody linked can sign in. Unset, it is `polyu-adfs`, a
-  default that stays for the installations that rely on it. It is
-  discovered when the server starts, and administrators see it read-only.
+  `upn` claim (`OIDC_SUBJECT_CLAIM`). Its id is `OIDC_PROVIDER_NAME`, such
+  as `school-adfs`, under which every identity linked at it is recorded: set
+  it before anyone is linked, and never change it after, or nobody linked
+  can sign in. Unset, it is `polyu-adfs`, a default that stays for the
+  installations that rely on it. The provider is discovered when the server
+  starts, and administrators see it read-only.
 - the site's: root and the platform's administrators set them up from the
   front end, with the `sso.*` tools, kept in the database with their client
   secrets sealed under `SECRETS_KEY` (32 random bytes in base64: `openssl

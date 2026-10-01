@@ -37,6 +37,13 @@ and `build` green. CI also runs `test (s3 against minio)` and `vuln`.
   then its delegates (docs/schema.md §3).
 - SQL lives in `internal/db/queries/*.sql`; run `make sqlc` after editing it.
   List queries filter by scope **in SQL**, never afterwards.
+- Examples, descriptions, error texts, comments, tests and fixtures name
+  **no real school**. A provider is `school-adfs` or `university-sso`, its
+  label `School NetID`, an email `name@example.edu` and a domain
+  `example.edu` (or a name under it, such as `campus.example.edu`).
+  `polyu-adfs` stays only as `OIDC_PROVIDER_NAME`'s default
+  (`config.DefaultOIDCProviderName`), where that default is defined, tested
+  or documented.
 
 ## Migrations
 
