@@ -319,9 +319,12 @@ kinds (docs/schema.md §2.1, Single sign-on):
 
 - the operator's: set `OIDC_ISSUER`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`
   and `SIGNING_KEY`. The defaults are for ADFS: accounts are known by their
-  `upn` claim (`OIDC_SUBJECT_CLAIM`) and the provider is recorded as
-  `polyu-adfs` (`OIDC_PROVIDER_NAME`). It is discovered when the server
-  starts, and administrators see it read-only.
+  `upn` claim (`OIDC_SUBJECT_CLAIM`). The provider is recorded as
+  `OIDC_PROVIDER_NAME`, such as `school-adfs`, which every identity linked
+  at it is recorded under: set it before anyone is linked, and never change
+  it after, or nobody linked can sign in. Unset, it is `polyu-adfs`, a
+  default that stays for the installations that rely on it. It is
+  discovered when the server starts, and administrators see it read-only.
 - the site's: root and the platform's administrators set them up from the
   front end, with the `sso.*` tools, kept in the database with their client
   secrets sealed under `SECRETS_KEY` (32 random bytes in base64: `openssl
@@ -353,8 +356,8 @@ credential:
 ```
 {"password": true, "password_accepts": ["login_id", "email"], "sso": null, "sso_providers": []}
 {"password": true, "password_accepts": ["login_id", "email"],
- "sso": {"label": "PolyU NetID", "start": "/v1/auth/sso/start"},
- "sso_providers": [{"id": "polyu-adfs", "label": "PolyU NetID", "start": "/v1/auth/sso/start/polyu-adfs"}]}
+ "sso": {"label": "School NetID", "start": "/v1/auth/sso/start"},
+ "sso_providers": [{"id": "school-adfs", "label": "School NetID", "start": "/v1/auth/sso/start/school-adfs"}]}
 ```
 
 `sso_providers` are the providers a sign-in may go through now: the

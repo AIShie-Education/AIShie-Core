@@ -277,7 +277,7 @@ service the first time: made and issued by nobody Core knows (`created_by_actor_
 to keep where the service reads it, and recorded nowhere else.
 
 `credential` covers six kinds of the same thing. SSO rows hold no secret — `provider` and
-`subject` identify the account at the identity provider (`polyu-adfs` + UPN). API tokens store a
+`subject` identify the account at the identity provider (`school-adfs` + UPN). API tokens store a
 hash plus a `token_prefix` so the row can be found before the hash is checked. A browser
 `session` is a short-lived token minted at login and is stored exactly like an API token, so
 there is one verification path and no session table; unlike an API token it must carry an
@@ -342,9 +342,11 @@ revokes its tokens the same way (`agent.list_credentials`, `agent.revoke_credent
 identity linked to their account: a `credential` of kind `sso`, whose `provider` names the
 provider and `subject` the account there (`actor.link_sso`). Providers come from two places.
 One is the server's operator's, set in its environment (`OIDC_ISSUER`, `OIDC_CLIENT_ID`,
-`OIDC_CLIENT_SECRET`, `OIDC_PROVIDER_NAME` — `polyu-adfs` unless set —, `OIDC_SUBJECT_CLAIM`,
-`OIDC_SCOPES`, `OIDC_DISPLAY_NAME`), discovered when the server starts, which does not start if
-it cannot reach it. The others are the site's, which its administrators — root and the
+`OIDC_CLIENT_SECRET`, `OIDC_PROVIDER_NAME`, `OIDC_SUBJECT_CLAIM`, `OIDC_SCOPES`,
+`OIDC_DISPLAY_NAME`), discovered when the server starts, which does not start if it cannot
+reach it. `OIDC_PROVIDER_NAME` is its id, which its identities' `provider` holds, so it never
+changes once anyone is linked; unset, it is `polyu-adfs`, a default kept for the installations
+that rely on it. The others are the site's, which its administrators — root and the
 platform's, never a department's, since a provider signs people in to the whole site — set up
 from the front end, each a row of `sso_provider` (migration 0022). The operator's is listed with
 them, read-only (`source: operator`): the tools refuse to change it (`set_by_operator`) and
