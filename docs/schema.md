@@ -1635,13 +1635,15 @@ has someone check them too, and so their agent: someone outside the party decide
 rest of the party; so it is where the target is beyond their reach, or gone, and where approving
 the proposal now would be refused for what it asks: by the tool's check of its arguments
 (`Check`), or by the tool's own rules (`Validate`), run as approving it runs them, as the
-proposer's — a grade proposed out of the points the work was worth then, say. They could not
-have made it themselves either. An owner who holds `perm_action_decide` is refused it saying why
-(`owner_would_be_refused`, the refusal approving it would meet in `details.refusal`); one who
-decides nothing else is refused as anyone without it is (`permission_denied`), and the queues
-tell both so (`yours_to_decide` false). Either takes it back, or someone else rejects it. What
-only the moment refuses (`Pin`'s, below) is not asked again here: approving such a proposal
-fails. Where whether approving it would be refused cannot be told, a file store that does not
+proposer's and at the moment the owner asks — a grade proposed out of the points the work was
+worth then, an expiry that has passed while it waited, an answer to a question its opener has
+asked again since, say. They could not have made it themselves either. An owner who holds
+`perm_action_decide` is refused it saying why (`owner_would_be_refused`, the refusal approving it
+would meet in `details.refusal`); one who decides nothing else is refused as anyone without it is
+(`permission_denied`), and the queues tell both so (`yours_to_decide` false). Either takes it
+back, or someone else rejects it. Not asked here is what a tool asks only as it carries a
+proposal out, measured against when it was proposed (§4, Enforced by the application, lists
+it): approving such a proposal fails all the same. Where whether approving it would be refused cannot be told, a file store that does not
 answer while a grade's feedback files are looked at, say, the owner's decision fails with nothing
 recorded, as approving it would, and the same call made again once it can be told is decided; the
 queues say such a proposal is not theirs meanwhile, rather than failing. An answer
@@ -2620,27 +2622,44 @@ respondent's `conversation_answer` decides is who is shown its text.
   their TTL.
 - A tool's check of what a call's arguments say alone (`tool.Spec.Check`) runs as they are
   decoded, after the schema and before anything else: a name left blank, a number below zero, a
-  value that is not one of those allowed, two fields given that exclude each other. A call it
-  refuses is never an attempt: nothing is recorded, whoever makes it and at whatever level. What
-  needs the course or the caller's seat to tell is the tool's `Validate`, which runs before a
-  proposal is queued as well as before the call is carried out, recording the call failed, and
-  again, as the proposer's, when a proposal is approved: the course tools that may be proposed
-  hold their rules there — a member's grants within the granter's own, an assignment's documents
-  and bucket, the grading scheme's shape, a total there to change; an assignment or a version of a
-  document published already, or not yet, a document archived, or not, a submission handed in or
-  still a draft, a student who has a submission already, a conversation closed, a message
-  retracted, a join link revoked, totals that do not count ungraded work as zero — so that nobody
-  is asked to approve what approving would refuse. Five are not: `action.decide`,
-  `action.review` and `action.withdraw`, whose rules about the action they are about are the
-  pipeline's (§2.6), asked as they are carried out; and `document.rendition_retry` and
-  `conversation.rendition_retry`, which refuse a rendition done already, or a file with none,
-  only as they are carried out. What needs the moment is asked as a proposal is made
-  (`tool.Spec.Pin`) and again as it is carried out: a membership's `expires_at` already past
-  (`member.add`, `member.rescope`), an actor seated already by a seat neither expired nor
-  orphaned (`member.add`), and the seats a roster role takes in now
-  (`member.update_perms_bulk`). A rule left to `Execute` alone is found only when someone
-  approves the proposal. A proposal stored before its tool's `Check` refused what it says fails
-  when it is approved, with that refusal.
+  value that is not one of those allowed, two fields given that exclude each other, a message
+  empty or too long, a file named twice or not named as a file may be. A call it refuses is never
+  an attempt: nothing is recorded, whoever makes it and at whatever level. It is asked of a stored
+  proposal too, when it is approved and for its owner (§2.6): a proposal stored before its tool's
+  `Check` refused what it says fails when it is approved, with that refusal. What only a call may
+  not say, and a stored proposal may, is `tool.Spec.CheckCall`'s, asked of calls alone:
+  `grade.post`'s `grade_ids` beside `assignment_id`, which a proposal to post an assignment stores.
+- What needs the course, the caller's seat or the moment to tell is the tool's `Validate`, given
+  the moment it is asked at. It runs before a call is carried out and before a proposal is
+  queued, recording the call failed, with its error's own status, if it refuses; again, as the
+  proposer's, when a proposal is approved; and for an agent's owner, as the proposer's, when they
+  are told whether its proposal is theirs to decide (§2.6). Every course tool that may be proposed
+  holds its rules there, so that nobody is asked to approve what approving would refuse: a
+  member's grants within the granter's own, an expiry already past, an actor or an agent seated
+  already, the seats a roster role takes in; an assignment's documents and bucket, the grading
+  scheme's shape, what a change of points does to the grades entered, a total there to change; a
+  document or a version published already, or not yet, archived, or not, purged, a text changed
+  since the revision a change was made from, a file's rendition done already or a file with none;
+  a submission handed in or still a draft, a student who has a submission already; whom one may
+  address, a conversation closed, a question the opener has asked again since or withdrawn, a
+  message retracted, files a message or a version may hold; a join link revoked; totals that do
+  not count ungraded work as zero; and of `action.decide`, `action.review` and `action.withdraw`
+  whether the action waits for it and is the caller's to decide, review or take back, at any
+  remove. `Execute` asks its rules again under its locks. What is true of a proposal and of no
+  call is asked as one is made (`tool.Spec.Pin`): an upload too old to outlast it, an answer of
+  the proposer's to the same question waiting already, a call that is never made by proposal
+  (`member.reset_password`, `course.join_link_create`).
+- What `Validate` asks, it asks of the course as it stands then. What changes while a proposal
+  waits — an expiry that passes, a question asked again, a rendition done, a proposal decided by
+  someone else — is found when it is approved, and by its owner's question meanwhile; between
+  `Validate` and `Execute` in one call, what another call changes is found by `Execute`. Two
+  rules are asked only as a proposal is carried out, so that an owner may be told a proposal is
+  theirs to decide and approving it then fails. Both measure what has changed since it was
+  proposed, which `Validate`, not told whether it asks for a call or for an approval, leaves to
+  `Execute`: a newer draft entered for the work since a grade was proposed (`grade.submit`); and a
+  draft a proposal to post names replaced since, every one of them posted since, or, among those
+  still waiting, one a call would be refused (`grade.post`, whose `Pin` holds a proposal being
+  made to them as a call is held).
 - Nobody decides or reviews their own action from another seat (§2.6): the CHECKs compare seats,
   and the application compares actors, so an actor removed and seated again is still refused.
 - Nobody decides or reviews their own action at one remove (§2.6): a decision or review that is

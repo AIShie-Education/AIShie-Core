@@ -21,13 +21,16 @@ and `build` green. CI also runs `test (s3 against minio)` and `vuln`.
 - A rule about what a call's **arguments** say alone — a blank name, a number
   below zero, two fields that exclude each other — goes in the tool's `Check`,
   so that the call is refused before anything is recorded or proposed,
-  whoever makes it, with the error `Execute` would have given. A rule that
-  needs the course or the caller's seat to tell goes in `Validate`, which runs
-  before a proposal is queued as well as before `Execute`, and again, as the
-  proposer's, when it is approved; one that needs the moment, such as an
-  expiry already past, goes in `Pin` as well, which runs as a proposal is
-  made. A rule left to `Execute` alone is found only when someone approves
-  the proposal.
+  whoever makes it, with the error `Execute` would have given. `Check` is
+  asked of a stored proposal too, so it takes whatever `Pin` stores; what a
+  call may not say and a stored proposal may goes in `CheckCall`. A rule that
+  needs the course, the caller's seat or the moment to tell — an expiry
+  already past among them — goes in `Validate`, which is given the moment and
+  runs before a proposal is queued as well as before `Execute`, again, as the
+  proposer's, when it is approved, and for an agent's owner deciding whether
+  it is theirs to decide. `Pin` refuses only what is true of a proposal and of
+  no call, such as an upload too old to outlast it. A rule left to `Execute`
+  alone is found only when someone approves the proposal.
 - A new **tool** is one `tool.Define` in `internal/tools`. It gets its REST
   route and its MCP tool from that declaration; there is nothing to add in
   `httpapi` or `mcpapi`. If it emits a new event type, give the type a row in
