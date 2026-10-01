@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"slices"
 	"strings"
@@ -90,8 +92,12 @@ type discovery struct {
 
 // Inspect reads issuer's discovery document and its key set with client,
 // which follows no redirect, and says what it found and what of it would
-// stop, or may trouble, a sign-in asking for want.
-func Inspect(ctx context.Context, client *http.Client, issuer string, want Want) Report {
+// stop, or may trouble, a sign-in asking for want. Unless private, the
+// provider is one of the site's, held to public addresses (NewClient): an
+// issuer plainly elsewhere is a problem, and so is a document or key set
+// client refuses to connect to for its address, and a token endpoint, which
+// is not fetched, at no public address.
+func Inspect(ctx context.Context, client *http.Client, private bool, issuer string, want Want) Report {
 	rep := Report{Issuer: issuer, Problems: []string{}, Warnings: []string{}, SigningKeys: []FoundKey{},
 		SigningAlgorithms: []string{}, ScopesSupported: []string{}, ClaimsSupported: []string{}, ResponseTypesSupported: []string{},
 		GrantTypesSupported: []string{}, TokenEndpointAuthMethods: []string{}, SubjectTypesSupported: []string{},
@@ -100,7 +106,7 @@ func Inspect(ctx context.Context, client *http.Client, issuer string, want Want)
 		rep.OK = len(rep.Problems) == 0
 		return rep
 	}
-	if _, err := CheckIssuer(issuer); err != nil {
+	if _, err := CheckIssuer(issuer, private); err != nil {
 		rep.Problems = append(rep.Problems, describe(err))
 		return finish()
 	}
@@ -140,6 +146,8 @@ func Inspect(ctx context.Context, client *http.Client, issuer string, want Want)
 	}
 	if strings.HasPrefix(doc.TokenEndpoint, "http://") && !loopbackURL(doc.TokenEndpoint) {
 		rep.Problems = append(rep.Problems, "its token_endpoint is http: the client secret would cross the network in the clear")
+	} else if u, err := url.Parse(doc.TokenEndpoint); !private && err == nil && webURL(doc.TokenEndpoint) && !reachable(ctx, u.Hostname()) {
+		rep.Problems = append(rep.Problems, fmt.Sprintf("its token_endpoint, %q, is %s", clip(doc.TokenEndpoint), notPublicWhy))
 	}
 	for _, s := range want.Scopes {
 		if len(doc.Scopes) > 0 && !slices.Contains(doc.Scopes, s) {
@@ -208,6 +216,9 @@ func fetchJSON(ctx context.Context, client *http.Client, u string, v any) error 
 	resp, err := c.Do(req)
 	if err != nil {
 		var ue *url.Error
+		if IsAddressNotAllowed(err) {
+			return fmt.Errorf("%s is %s", clip(u), notPublicWhy)
+		}
 		if errors.As(err, &ue) && ue.Timeout() {
 			return fmt.Errorf("%s did not answer in time", clip(u))
 		}
@@ -232,6 +243,25 @@ func fetchJSON(ctx context.Context, client *http.Client, u string, v any) error 
 		return fmt.Errorf("%s is not the JSON object it should be", clip(u))
 	}
 	return nil
+}
+
+// lookup resolves a name to its addresses.
+var lookup = net.DefaultResolver.LookupNetIP
+
+// reachable reports whether a provider of the site's held to public
+// addresses may be reached at host: one publicHost refuses is not, and a
+// name is when one of its addresses is Public, as a connection is made to
+// the first of them it may be. A name that does not resolve is left to the
+// sign-in, which says it as it goes.
+func reachable(ctx context.Context, host string) bool {
+	if !publicHost(host) {
+		return false
+	}
+	if _, err := netip.ParseAddr(host); err == nil {
+		return true
+	}
+	addrs, err := lookup(ctx, "ip", host)
+	return err != nil || len(addrs) == 0 || slices.ContainsFunc(addrs, Public)
 }
 
 func webURL(v string) bool {

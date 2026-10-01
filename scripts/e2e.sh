@@ -51,10 +51,14 @@
 # page is told how a person signs in: by password alone, and then, restarted
 # with single sign-on against a stand-in provider, by that too, under its name.
 # Last, root finds no provider of the site's can be added without
-# SECRETS_KEY; restarted with one, tests a stand-in provider that signs
-# people in, sets it up, switches it on over the version read and is told
-# its secret nowhere; the instructor, linked at it, signs in through it; and
-# root cannot remove it while he is linked, and then, forced, does.
+# SECRETS_KEY; restarted with one, finds the server reaches none on this
+# machine, where the stand-in is, while the operator's is tested as before;
+# restarted with SSO_ALLOW_PRIVATE_ISSUERS too, tests a stand-in provider
+# that signs people in, sets it up, switches it on over the version read and
+# is told its secret nowhere; the instructor, linked at it, signs in through
+# it; restarted without the setting, the server reaches it no more, saying
+# why in its log; and root cannot remove it while he is linked, and then,
+# forced, does.
 #
 #   make e2e            (builds first)
 #   scripts/e2e.sh      (expects bin/aishie-core)
@@ -167,6 +171,8 @@ else
 fi
 export HTTP_ADDR="127.0.0.1:$PORT"
 export BLOB_FS_ROOT="$WORK/blobs" PUBLIC_URL="$BASE"
+# Set below, where the site's provider on this machine is to be reached.
+unset SSO_ALLOW_PRIVATE_ISSUERS
 # Small limits on the files a message carries, so that going past them
 # costs nothing: 4 KiB a file, three to a message, 8 KiB in a conversation.
 export ATTACHMENT_MAX_BYTES=4096 ATTACHMENT_MAX_PER_MESSAGE=3 ATTACHMENT_MAX_CONVERSATION_BYTES=8192
@@ -1191,16 +1197,44 @@ call 200 GET /v1/sso/providers "$ROOT"
   "False secrets_key_missing [('polyu-adfs', 'operator', True, 'offered')]" ] || fail "the providers: $(cat "$WORK/body")"
 [ "$(json "$WORK/body" 'd["result"]["redirect_uri"]')" = "$BASE/v1/auth/sso/callback" ] || fail "the redirect URI: $(cat "$WORK/body")"
 SITE="{\"id\":\"campus\",\"display_name\":\"Campus ID\",\"issuer\":\"$SITE_ISSUER\",\"client_id\":\"aishie-site\",\"client_secret\":\"$SITE_SECRET\"}"
-call 422 POST /v1/sso/providers "$ROOT" "$SITE"
+# At an issuer elsewhere than this machine: one here, where the stand-in is,
+# would be refused for that first (below).
+call 422 POST /v1/sso/providers "$ROOT" "${SITE/"$SITE_ISSUER"/https://idp.example.edu/site}"
 [ "$(reason)" = secrets_key_missing ] || fail "refused, but not for want of a key: $(cat "$WORK/body")"
 
-step "Restarted with SECRETS_KEY, root tests the site's provider, sets it up and switches it on over the version read; its secret is said nowhere"
+# urlencoded VALUE — VALUE escaped for a query string.
+urlencoded() { python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$1"; }
+
+step "Restarted with SECRETS_KEY, root finds the server reaches no provider of the site's on this machine; the operator's, there too, is tested as before"
 SECRETS_KEY=$(python3 -c 'import base64, os; print(base64.b64encode(os.urandom(32)).decode())')
 export SECRETS_KEY
 kill "$SERVER_PID"
 wait "$SERVER_PID" 2>/dev/null || true
 start
-call 200 GET "/v1/sso/test?issuer=$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$SITE_ISSUER")" "$ROOT"
+for at in "$SITE_ISSUER" "http://localhost:$IDP_PORT/site" "https://169.254.169.254/latest"; do
+  call 200 GET "/v1/sso/test?issuer=$(urlencoded "$at")" "$ROOT"
+  [ "$(json "$WORK/body" 'd["result"]["ok"], "issuer_address_not_allowed" in d["result"]["problems"][0], d["result"]["discovery_url"]')" = "False True " ] ||
+    fail "the test of an issuer on this machine: $(cat "$WORK/body")"
+done
+call 400 POST /v1/sso/providers "$ROOT" "$SITE"
+[ "$(json "$WORK/body" 'd["error"]["details"]["reason"], d["error"]["details"]["field"]')" = "issuer_address_not_allowed issuer" ] ||
+  fail "a provider on this machine set up: $(cat "$WORK/body")"
+# The stand-in serves the operator's discovery document and no key set: what
+# matters here is that the document is read.
+call 200 GET /v1/sso/test?provider_id=polyu-adfs "$ROOT"
+[ "$(json "$WORK/body" 'd["result"]["token_endpoint"], any("issuer_address_not_allowed" in p for p in d["result"]["problems"])')" = \
+  "$ISSUER/oauth2/token False" ] || fail "the test of the operator's provider: $(cat "$WORK/body")"
+ALLOWED='administrators may have this server reach identity providers on this machine'
+grep -q "$ALLOWED" "$WORK/server.log" && fail "the server says private issuers are allowed, unasked"
+echo "  refused for its address as it is tested and set up, saying nothing of it; the operator's provider is not held to it"
+
+step "Restarted with SSO_ALLOW_PRIVATE_ISSUERS too, root tests the site's provider, sets it up and switches it on over the version read; its secret is said nowhere"
+export SSO_ALLOW_PRIVATE_ISSUERS=1
+kill "$SERVER_PID"
+wait "$SERVER_PID" 2>/dev/null || true
+start
+grep -q "$ALLOWED" "$WORK/server.log" || fail "the server does not say private issuers are allowed"
+call 200 GET "/v1/sso/test?issuer=$(urlencoded "$SITE_ISSUER")" "$ROOT"
 [ "$(json "$WORK/body" 'd["result"]["ok"], len(d["result"]["signing_keys"]), d["result"]["token_endpoint"]')" = "True 1 $SITE_ISSUER/token" ] ||
   fail "the test of the site's provider: $(cat "$WORK/body")"
 call 200 GET "/v1/sso/test?issuer=http://127.0.0.1:$IDP_PORT/nothing" "$ROOT"
@@ -1265,6 +1299,19 @@ call 200 GET /v1/me "$MORI"
 [ "$(curl -s -o "$WORK/body" -D "$WORK/h.again" -w '%{http_code}' -H "Cookie: ais_sso=$STATE" "$BACK")" = 401 ] ||
   fail "a replayed callback: $(cat "$WORK/body")"
 [ -z "$(cookie "$WORK/h.again" ais_session)" ] || fail "a replayed callback set a session"
+
+step "Restarted without SSO_ALLOW_PRIVATE_ISSUERS, the server reaches the site's provider on this machine no more, as it dials it, and says why in its log; the operator's still starts"
+unset SSO_ALLOW_PRIVATE_ISSUERS
+kill "$SERVER_PID"
+wait "$SERVER_PID" 2>/dev/null || true
+LOGGED=$(wc -l <"$WORK/server.log")
+start
+call 422 GET "/v1/auth/sso/start/campus?return_to=/courses" ""
+[ "$(reason)" = sso_provider_unavailable ] || fail "a sign-in through the provider on this machine: $(cat "$WORK/body")"
+tail -n +$((LOGGED + 1)) "$WORK/server.log" | grep -q 'issuer_address_not_allowed' || fail "the log does not say why: $(tail -5 "$WORK/server.log")"
+[[ "$(curl -s -o /dev/null -w '%{http_code} %{redirect_url}' "$BASE/v1/auth/sso/start/polyu-adfs?return_to=/courses")" == "302 $ISSUER/oauth2/authorize?"* ]] ||
+  fail "the operator's provider does not start a sign-in"
+N=$((N + 1))
 
 step "Root cannot remove the provider while Mori is linked at it; forced, it goes, and his identity is unlinked"
 call 409 POST /v1/sso/providers/campus/delete "$ROOT" '{}'

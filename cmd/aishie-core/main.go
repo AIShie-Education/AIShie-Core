@@ -131,6 +131,12 @@ Environment:
   SECRETS_KEY_PREVIOUS older keys, comma separated, which open what they sealed and seal
                        nothing: set the new key in SECRETS_KEY and the old one here, run
                        aishie-core secrets rewrap, then remove the old one
+  SSO_ALLOW_PRIVATE_ISSUERS  false (default) or true; whether the identity providers administrators
+                       add may be on this machine (over http too) or on a private, link-local or
+                       other address that is not public. False, the server fetches nothing of
+                       theirs from such an address, checked on the address it connects to
+                       (issuer_address_not_allowed); for development, tests, and a provider on
+                       the site's own network. The operator's provider is reached wherever it is
   JOIN_LINK_REGISTRATION  on (default) or off; whether someone with no account may register
                        through a course's join link. Off, people sign in (by single sign-on,
                        say) and then join; GET /v1/join/{token} says registration is false
@@ -335,6 +341,9 @@ func ssoProviders(ctx context.Context, pool *pgxpool.Pool, cfg config.Config, lo
 	if err != nil {
 		return nil, err
 	}
+	// The operator's provider is the operator's own setting, reached
+	// wherever it is; the site's, which administrators set, are held to
+	// public addresses unless SSO_ALLOW_PRIVATE_ISSUERS (sso.NewClient).
 	client := &http.Client{Timeout: sso.DefaultTimeout}
 	var op *sso.Operator
 	if cfg.OIDC.Enabled() {
@@ -348,13 +357,19 @@ func ssoProviders(ctx context.Context, pool *pgxpool.Pool, cfg config.Config, lo
 		}
 		op = &sso.Operator{ID: cfg.OIDC.ProviderName, DisplayName: cfg.OIDC.DisplayName, Issuer: cfg.OIDC.Issuer,
 			ClientID: cfg.OIDC.ClientID, SecretHint: secrets.Hint(cfg.OIDC.ClientSecret), Scopes: cfg.OIDC.Scopes,
-			SubjectClaim: cfg.OIDC.SubjectClaim, IdP: idp}
+			SubjectClaim: cfg.OIDC.SubjectClaim, IdP: idp, Client: client}
 	}
 	if keys != nil {
 		// The key's id is public, and says which key sealed what.
 		log.Info("secrets key", "key_id", keys.KeyID(), "previous", len(cfg.SecretsKeysPrevious))
 	}
-	return sso.New(sso.Config{Pool: pool, Operator: op, Keys: keys, PublicURL: cfg.PublicURL, Client: client, Log: log}), nil
+	if cfg.SSOAllowPrivateIssuers {
+		// Said once, so that it is not set unknowingly.
+		log.Info("SSO_ALLOW_PRIVATE_ISSUERS: administrators may have this server reach identity providers on this machine " +
+			"and on private and link-local addresses")
+	}
+	return sso.New(sso.Config{Pool: pool, Operator: op, Keys: keys, PublicURL: cfg.PublicURL, PrivateIssuers: cfg.SSOAllowPrivateIssuers,
+		Log: log}), nil
 }
 
 // keyring is SECRETS_KEY with SECRETS_KEY_PREVIOUS, or nil without them.
