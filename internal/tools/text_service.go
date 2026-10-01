@@ -24,8 +24,7 @@ import (
 // the site: a claim holds the text version of one file of a version for it
 // alone until its lease runs out, and hands it the file, by a short-lived
 // URL, as document.get hands one to a reader. A call about a claim names its
-// version and its lease, and the file (file_id); one that names no file
-// means the file its lease is of, or the version's one file. It writes the text back while its claim holds: done,
+// version, its file (file_id) and its lease. It writes the text back while its claim holds: done,
 // with the text, or failed or skipped, saying why; never over staff's text.
 // Nothing else is its to read or write: no course, no seat, no person, and
 // no file but those of what it has claimed.
@@ -187,20 +186,13 @@ func errLeaseLost() *apperr.Error {
 }
 
 // lockClaimed holds the text version a call of the service's is about: the
-// named file's; where it names none, the one of the version's files the
-// caller's lease is of, or the version's one file. A version with several
-// files none of which the lease is of says the claim no longer holds.
-func lockClaimed(ctx context.Context, q dbq.Querier, version uuid.UUID, file *uuid.UUID, lease uuid.UUID) (dbq.DocumentVersionText, error) {
-	rows, err := q.LockTextsForService(ctx, dbq.LockTextsForServiceParams{VersionID: version, FileID: file, LeaseID: lease})
-	switch {
-	case err != nil:
-		return dbq.DocumentVersionText{}, err
-	case len(rows) == 0:
-		return dbq.DocumentVersionText{}, apperr.Missing("no such text version")
-	case len(rows) > 1 && (rows[0].LeaseID == nil || *rows[0].LeaseID != lease):
-		return dbq.DocumentVersionText{}, errLeaseLost()
+// named file's. Whether the caller's claim still holds it, leaseHeld says.
+func lockClaimed(ctx context.Context, q dbq.Querier, version, file uuid.UUID) (dbq.DocumentVersionText, error) {
+	t, err := q.LockTextForService(ctx, dbq.LockTextForServiceParams{VersionID: version, FileID: file})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return t, apperr.Missing("no such text version")
 	}
-	return rows[0], nil
+	return t, err
 }
 
 // leaseHeld says whether the caller's claim still holds the text version,
@@ -217,9 +209,9 @@ func leaseHeld(t dbq.DocumentVersionText, lease uuid.UUID) error {
 }
 
 type TextLeaseIn struct {
-	VersionID uuid.UUID  `json:"version_id"`
-	LeaseID   uuid.UUID  `json:"lease_id" jsonschema:"the claim's, from document_text.queue"`
-	FileID    *uuid.UUID `json:"file_id,omitempty" jsonschema:"the claim's file, from document_text.queue; if omitted, the file the lease is of"`
+	VersionID uuid.UUID `json:"version_id"`
+	LeaseID   uuid.UUID `json:"lease_id" jsonschema:"the claim's, from document_text.queue"`
+	FileID    uuid.UUID `json:"file_id" jsonschema:"the claim's file, from document_text.queue"`
 }
 
 type TextFileOut struct {
@@ -271,10 +263,10 @@ func textFile(d Deps) tool.Tool {
 }
 
 type TextRenewIn struct {
-	VersionID uuid.UUID  `json:"version_id"`
-	LeaseID   uuid.UUID  `json:"lease_id" jsonschema:"the claim's, from document_text.queue"`
-	FileID    *uuid.UUID `json:"file_id,omitempty" jsonschema:"the claim's file, from document_text.queue; if omitted, the file the lease is of"`
-	LeaseS    int        `json:"lease_s,omitempty" jsonschema:"how long the claim holds from now, 60 to 3600 seconds; 600 if omitted"`
+	VersionID uuid.UUID `json:"version_id"`
+	LeaseID   uuid.UUID `json:"lease_id" jsonschema:"the claim's, from document_text.queue"`
+	FileID    uuid.UUID `json:"file_id" jsonschema:"the claim's file, from document_text.queue"`
+	LeaseS    int       `json:"lease_s,omitempty" jsonschema:"how long the claim holds from now, 60 to 3600 seconds; 600 if omitted"`
 }
 
 type TextRenewOut struct {
@@ -297,7 +289,7 @@ func textRenew() tool.Tool {
 			if err != nil {
 				return TextRenewOut{}, err
 			}
-			t, err := lockClaimed(ctx, ec.Q, in.VersionID, in.FileID, in.LeaseID)
+			t, err := lockClaimed(ctx, ec.Q, in.VersionID, in.FileID)
 			if err != nil {
 				return TextRenewOut{}, err
 			}
@@ -315,14 +307,14 @@ func textRenew() tool.Tool {
 }
 
 type TextCompleteIn struct {
-	VersionID uuid.UUID  `json:"version_id"`
-	LeaseID   uuid.UUID  `json:"lease_id" jsonschema:"the claim's, from document_text.queue"`
-	FileID    *uuid.UUID `json:"file_id,omitempty" jsonschema:"the claim's file, from document_text.queue; if omitted, the file the lease is of"`
-	Status    string     `json:"status" jsonschema:"done, with the text; failed, when it could not be transcribed; skipped, when it was not to be"`
-	Body      *string    `json:"body,omitempty" jsonschema:"for done: the whole text, Markdown, at most 2 MiB"`
-	Pages     *int32     `json:"pages,omitempty" jsonschema:"for done: how many pages or slides the file has, 1 to 100000"`
-	Model     *string    `json:"model,omitempty" jsonschema:"for done: the model that transcribed it, as staff are to be shown it, 1 to 200 characters"`
-	Reason    *string    `json:"reason,omitempty" jsonschema:"for failed and skipped: why, 1 to 500 characters, as staff are to be shown it"`
+	VersionID uuid.UUID `json:"version_id"`
+	LeaseID   uuid.UUID `json:"lease_id" jsonschema:"the claim's, from document_text.queue"`
+	FileID    uuid.UUID `json:"file_id" jsonschema:"the claim's file, from document_text.queue"`
+	Status    string    `json:"status" jsonschema:"done, with the text; failed, when it could not be transcribed; skipped, when it was not to be"`
+	Body      *string   `json:"body,omitempty" jsonschema:"for done: the whole text, Markdown, at most 2 MiB"`
+	Pages     *int32    `json:"pages,omitempty" jsonschema:"for done: how many pages or slides the file has, 1 to 100000"`
+	Model     *string   `json:"model,omitempty" jsonschema:"for done: the model that transcribed it, as staff are to be shown it, 1 to 200 characters"`
+	Reason    *string   `json:"reason,omitempty" jsonschema:"for failed and skipped: why, 1 to 500 characters, as staff are to be shown it"`
 }
 
 type TextCompleteOut struct {
@@ -404,7 +396,7 @@ func textComplete() tool.Tool {
 			if status != "active" {
 				return TextCompleteOut{}, apperr.Conflicts("the document is archived").With("reason", "document_archived")
 			}
-			t, err := lockClaimed(ctx, ec.Q, in.VersionID, in.FileID, in.LeaseID)
+			t, err := lockClaimed(ctx, ec.Q, in.VersionID, in.FileID)
 			if err != nil {
 				return TextCompleteOut{}, err
 			}

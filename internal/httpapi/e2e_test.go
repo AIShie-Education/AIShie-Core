@@ -243,15 +243,9 @@ func TestTheRuntimeHostsAnAgentByItsIDOverREST(t *testing.T) {
 		t.Fatalf("the tutor, as the runtime reads it: %d %s", view.Status, view.Raw)
 	}
 
-	// me.site_chat, kept for one release, changes nothing; a person's is
-	// refused.
-	on := a.do(nil, "POST", "/v1/me/site-chat", token, m{"on": true}, "Idempotency-Key", "start-1")
-	if got, _ := on.Body["result"].(map[string]any); on.Status != http.StatusOK || got["site_chat"] != true {
+	// Nothing is declared: me.site_chat is gone (0027).
+	if on := a.do(nil, "POST", "/v1/me/site-chat", token, m{"on": true}, "Idempotency-Key", "start-1"); on.Status != http.StatusNotFound {
 		t.Fatalf("me.site_chat: %d %s", on.Status, on.Raw)
-	}
-	person := a.do(nil, "POST", "/v1/me/site-chat", a.tokenFor(c.Students[0].Actor), m{"on": true}, "Idempotency-Key", "mine")
-	if person.Status != http.StatusUnprocessableEntity || person.str("error", "details", "reason") != "not_an_agent" {
-		t.Fatalf("a person declaring site chat: %d %s", person.Status, person.Raw)
 	}
 
 	// Its owner is issued no token for it; for the mcp agent, as ever.
@@ -822,7 +816,8 @@ func TestFileUploadOverHTTP(t *testing.T) {
 		t.Fatalf("GET on a PUT URL: %d", res.StatusCode)
 	}
 
-	made := a.do(nil, "POST", course+"/documents", sato, m{"kind": "material", "title": "Slides", "upload_token": token}, "Idempotency-Key", "doc-1")
+	made := a.do(nil, "POST", course+"/documents", sato, m{"kind": "material", "title": "Slides",
+		"files": []m{{"upload_token": token, "filename": "Slides.pdf"}}}, "Idempotency-Key", "doc-1")
 	if made.Status != 200 {
 		t.Fatalf("document.create: %d %s", made.Status, made.Raw)
 	}
@@ -835,7 +830,11 @@ func TestFileUploadOverHTTP(t *testing.T) {
 	if read.Status != 200 {
 		t.Fatalf("document.get: %d %s", read.Status, read.Raw)
 	}
-	res, got := a.raw("GET", a.here(read.str("result", "version", "download_url")), "", nil)
+	first, _ := read.Body["result"].(map[string]any)["version"].(map[string]any)["files"].([]any)
+	if len(first) != 1 {
+		t.Fatalf("document.get: %s", read.Raw)
+	}
+	res, got := a.raw("GET", a.here(first[0].(map[string]any)["download_url"].(string)), "", nil)
 	if res.StatusCode != 200 || !bytes.Equal(got, pdf) || res.Header.Get("Content-Type") != "application/pdf" {
 		t.Fatalf("download: %d %q %s", res.StatusCode, res.Header.Get("Content-Type"), got)
 	}
@@ -850,7 +849,8 @@ func TestFileUploadOverHTTP(t *testing.T) {
 	if res, _ := a.raw("PUT", a.here(big.str("result", "upload_url")), "application/zip", bytes.Repeat([]byte("z"), testkit.MaxUploadBytes+1)); res.StatusCode != 400 {
 		t.Fatalf("oversized PUT: %d", res.StatusCode)
 	}
-	attach := a.do(nil, "POST", course+"/documents", sato, m{"kind": "material", "title": "Big", "upload_token": big.str("result", "upload_token")}, "Idempotency-Key", "doc-2")
+	attach := a.do(nil, "POST", course+"/documents", sato, m{"kind": "material", "title": "Big",
+		"files": []m{{"upload_token": big.str("result", "upload_token"), "filename": "big.zip"}}}, "Idempotency-Key", "doc-2")
 	if attach.Status != 422 {
 		t.Fatalf("attaching an upload that was refused: %d %s", attach.Status, attach.Raw)
 	}

@@ -295,8 +295,6 @@ type AgentUpdateIn struct {
 	ActorID     uuid.UUID       `json:"actor_id"`
 	DisplayName *string         `json:"display_name,omitempty" jsonschema:"its new name; omit to keep the one it has"`
 	Hosting     *domain.Hosting `json:"hosting,omitempty" jsonschema:"never changes: another than it has is refused (hosting_fixed); register another agent for the other"`
-	// Deprecated: people ask an agent in the site by its hosting alone.
-	SiteChat *bool `json:"site_chat,omitempty" jsonschema:"deprecated, and refused (site_chat_follows_hosting): people in the site ask a runtime agent while the site's runtime hosts it, and never an mcp agent. To stop them asking a runtime agent, stop it in the runtime, or suspend it (agent.suspend)"`
 }
 
 var (
@@ -307,19 +305,13 @@ var (
 	// errHostingFixed refuses to change how an agent is run.
 	errHostingFixed = apperr.Precondition("an agent's hosting is chosen when it is registered and never changes: register "+
 		"another agent for the other").With("reason", "hosting_fixed")
-	// errSiteChatFollowsHosting refuses an owner's word on site chat, which
-	// is no longer anyone's to say: it follows from how the agent is hosted.
-	errSiteChatFollowsHosting = apperr.Invalid("site_chat is not set any more: people in the site ask a runtime agent while "+
-		"the site's agent runtime hosts it, and never an mcp agent. To stop them asking a runtime agent, stop it in the "+
-		"runtime, or suspend it (agent.suspend)").With("reason", "site_chat_follows_hosting")
 )
 
 func agentUpdate() tool.Tool {
 	return tool.Define(tool.Spec[AgentUpdateIn, OK]{
 		Name: "agent.update",
-		Description: "Rename one of your agents. How it is hosted never changes (hosting_fixed). site_chat is deprecated " +
-			"and refused (site_chat_follows_hosting): people in the site ask a runtime agent while the site's runtime hosts " +
-			"it, and never an mcp agent.",
+		Description: "Rename one of your agents. How it is hosted never changes (hosting_fixed). Whether people in the " +
+			"site ask it is set by nobody: they ask a runtime agent while the site's runtime hosts it, and never an mcp agent.",
 		Kind: tool.Write, Gate: self,
 		HTTP:    tool.Route{Method: "POST", Pattern: "/v1/me/agents/{actor_id}"},
 		Resolve: agentTarget(func(in AgentUpdateIn) uuid.UUID { return in.ActorID }),
@@ -329,8 +321,6 @@ func agentUpdate() tool.Tool {
 				return OK{}, err
 			}
 			switch {
-			case in.SiteChat != nil:
-				return OK{}, errSiteChatFollowsHosting
 			case in.Hosting != nil && (a.Hosting == nil || string(*in.Hosting) != *a.Hosting):
 				return OK{}, errHostingFixed
 			case in.DisplayName == nil:

@@ -31,7 +31,7 @@ func TestAServiceCredentialOverHTTP(t *testing.T) {
 		t.Fatalf("PUT: %d", res.StatusCode)
 	}
 	made := a.do(nil, "POST", course+"/documents", sato, m{"kind": "material", "title": "Week 1",
-		"upload_token": ask.str("result", "upload_token")}, "Idempotency-Key", "slides")
+		"files": []m{{"upload_token": ask.str("result", "upload_token"), "filename": "week1.pdf"}}}, "Idempotency-Key", "slides")
 	doc := made.str("result", "document_id")
 	a.do(nil, "POST", course+"/documents/"+doc+"/publish", sato, nil, "Idempotency-Key", "publish")
 
@@ -45,26 +45,27 @@ func TestAServiceCredentialOverHTTP(t *testing.T) {
 		t.Fatalf("the service claiming: %d %s", claimed.Status, claimed.Raw)
 	}
 	claim := claims[0].(map[string]any)
-	version, lease := claim["version_id"].(string), claim["lease_id"].(string)
+	version, fileID, lease := claim["version_id"].(string), claim["file_id"].(string), claim["lease_id"].(string)
 	if res, body := a.raw("GET", a.here(claim["download_url"].(string)), "", nil); res.StatusCode != 200 || string(body) != "%PDF slides" {
 		t.Fatalf("the claimed file: %d %q", res.StatusCode, body)
 	}
-	file := a.do(nil, "GET", "/v1/services/document_text/versions/"+version+"/file?lease_id="+lease, svc, nil)
+	file := a.do(nil, "GET", "/v1/services/document_text/versions/"+version+"/file?lease_id="+lease+"&file_id="+fileID, svc, nil)
 	if file.Status != 200 || file.str("result", "download_url") == "" {
 		t.Fatalf("the file again: %d %s", file.Status, file.Raw)
 	}
 	// More than a megabyte of text, which no other call carries.
 	text := "## Page 1\n\n" + strings.Repeat("字", 500_000)
 	done := a.do(nil, "POST", "/v1/services/document_text/versions/"+version+"/complete", svc,
-		m{"lease_id": lease, "status": "done", "body": text, "pages": 1, "model": "A model"}, "Idempotency-Key", "done")
+		m{"lease_id": lease, "file_id": fileID, "status": "done", "body": text, "pages": 1, "model": "A model"}, "Idempotency-Key", "done")
 	if done.Status != 200 {
 		t.Fatalf("done: %d %.300s", done.Status, done.Raw)
 	}
-	read := a.do(nil, "GET", course+"/documents/"+doc+"/text?part=1", yuki, nil)
+	read := a.do(nil, "GET", course+"/documents/"+doc+"/text?part=1&file_id="+fileID, yuki, nil)
 	if read.Status != 200 || read.str("result", "text", "source") != "ai" || !strings.HasPrefix(read.str("result", "text", "body"), "## Page 1") {
 		t.Fatalf("the student reading the text: %d %.300s", read.Status, read.Raw)
 	}
-	edit := a.do(nil, "POST", course+"/documents/"+doc+"/versions/"+version+"/text", sato, m{"body": text + "\n"}, "Idempotency-Key", "edit")
+	edit := a.do(nil, "POST", course+"/documents/"+doc+"/versions/"+version+"/text", sato, m{"body": text + "\n", "file_id": fileID},
+		"Idempotency-Key", "edit")
 	if edit.Status != 200 {
 		t.Fatalf("the instructor writing a long text: %d %.300s", edit.Status, edit.Raw)
 	}

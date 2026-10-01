@@ -103,7 +103,7 @@ func newSearchWorld(t *testing.T) *searchWorld {
 	t.Helper()
 	w := &searchWorld{pool: testdb.New(t), agent: ids.New(), action: ids.New(), owner: ids.New()}
 	w.exec(t, `INSERT INTO actor (id, kind, display_name) VALUES ($1, 'human', 'Yuki')`, w.owner)
-	w.exec(t, `INSERT INTO actor (id, kind, display_name, owner_actor_id) VALUES ($1, 'agent', 'helper', $2)`, w.agent, w.owner)
+	w.exec(t, `INSERT INTO actor (id, kind, display_name, owner_actor_id, hosting) VALUES ($1, 'agent', 'helper', $2, 'mcp')`, w.agent, w.owner)
 	w.exec(t, `INSERT INTO action (id, actor_id, action_type, target_type, payload_hash, idempotency_key, authz_result, status, executed_at)
 	           VALUES ($1, $2, 'memory.write', 'memory', repeat('0', 64), 'k', 'autonomous', 'executed', now())`, w.action, w.agent)
 	return w
