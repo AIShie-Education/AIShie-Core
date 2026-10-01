@@ -1638,11 +1638,11 @@ the proposal now would be refused for what it asks: by the tool's check of its a
 proposer's and at the moment the owner asks, or by what has changed since it was proposed
 (`Since`) — a grade proposed out of the points the work was worth then, an expiry that has
 passed while it waited, an answer to a question its opener has asked again since, a newer draft
-of the grade entered meanwhile, say. They could not have made it themselves either. An owner who
-holds `perm_action_decide` is refused it saying why (`owner_would_be_refused`, the refusal
-approving it would meet in `details.refusal`); one who decides nothing else is refused as anyone
-without it is (`permission_denied`), and the queues tell both so (`yours_to_decide` false).
-Either takes it back, or someone else rejects it. Where whether approving it would be refused
+of the grade entered meanwhile, a draft to post replaced meanwhile, say. They could not have
+made it themselves either. An owner who holds `perm_action_decide` is refused it saying why
+(`owner_would_be_refused`, the refusal approving it would meet in `details.refusal`); one who
+decides nothing else is refused as anyone without it is (`permission_denied`), and the queues
+tell both so (`yours_to_decide` false). Either takes it back, or someone else rejects it. Where whether approving it would be refused
 cannot be told, a file store that does not answer while a grade's feedback files are looked at,
 say, the owner's decision fails with nothing recorded, as approving it would, and the same call
 made again once it can be told is decided; the queues say such a proposal is not theirs
@@ -2652,16 +2652,18 @@ respondent's `conversation_answer` decides is who is shown its text.
   by proposal (`member.reset_password`, `course.join_link_create`). It also holds the proposal to
   the rules `Execute` holds a call to and an approval passes over on purpose: a grade given
   `no_rubric` while a rubric is published (`grade.submit`, `grade.regrade`), the draft handed in
-  and the instructions in force (`submission.submit`), a draft named to post that is posted
-  already (`grade.post`).
+  and the instructions in force (`submission.submit`), a draft named to post that is posted or
+  replaced already (`grade.post`).
 - What `Validate` asks, it asks of the course as it stands then. What changes while a proposal
-  waits — an expiry that passes, a question asked again, a rendition done, a draft a proposal to
-  post names replaced, a proposal decided by someone else — is found when it is approved, and by
-  its owner's question meanwhile; between `Validate` and `Execute` in one call, what another
-  call changes is found by `Execute`. What has changed since a proposal was made, and that no
-  call is refused for, is its tool's `tool.Spec.Since`, given when it was proposed and asked
-  after `Validate` as the proposal is approved and for its owner: a newer draft entered for the
-  work since a grade was proposed (`grade.submit`), which `Execute` asks again under its lock.
+  waits — an expiry that passes, a question asked again, a rendition done, a proposal decided by
+  someone else — is found when it is approved, and by its owner's question meanwhile; between
+  `Validate` and `Execute` in one call, what another call changes is found by `Execute`. What
+  has changed since a proposal was made, and that no call is refused for, is its tool's
+  `tool.Spec.Since`, given when it was proposed and asked after `Validate` as the proposal is
+  approved and for its owner: a newer draft entered for the work since a grade was proposed
+  (`grade.submit`); a draft a proposal to post names replaced since, or every one of them posted
+  since (`grade.post`, whose `Validate` holds those still waiting to what a call is held to and
+  passes over the rest). `Execute` asks them again under its locks.
 - Nobody decides or reviews their own action from another seat (§2.6): the CHECKs compare seats,
   and the application compares actors, so an actor removed and seated again is still refused.
 - Nobody decides or reviews their own action at one remove (§2.6): a decision or review that is
