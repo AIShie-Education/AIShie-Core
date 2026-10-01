@@ -1,5 +1,13 @@
 # Deploying AIshie Core
 
+A site runs Core with the agent runtime and the web front end, as one stack
+per server, from
+[AIShie-Deploy](https://github.com/AIShie-Education/AIShie-Deploy), which
+keeps itself up to date: that is the way to run one. This document is the
+older way, a server of Core's own, deployed over SSH by this repository's
+Deploy workflow, which the agent runtime and the web front end join by
+scripts of their own repositories, the same way.
+
 One server per environment: edge first, the test site every green push to
 `main` reaches, and stable, the site a school runs on releases, when edge
 has earned it. On each server, [Caddy](https://caddyserver.com) serves HTTPS
@@ -72,20 +80,8 @@ The scripts in [`deploy/`](../deploy) do the work:
    client secrets of the identity providers administrators set up are sealed
    with it and open with nothing else (rotating it: below, Single sign-on).
 
-2. Let the server pull the image. The package is private, and GitHub's
-   registry takes only a personal access token (classic), not a fine-grained
-   one. Make the token with `read:packages` only. A classic token reads every
-   package its owner can read, and Docker keeps it unencrypted in
-   `/root/.docker/config.json`. So make it on an account of its own, one that
-   can read this repository and nothing else. Give it a long expiry and put
-   the date in a calendar. Once it expires, deploys fail at the pull, and the
-   running version is not touched. Then, as root:
-
-   ```
-   docker login ghcr.io -u <that account's user name>
-   ```
-
-3. Start it. Every green push to `main` publishes
+2. Start it. The image is public: the server pulls it with no login. Every
+   green push to `main` publishes
    `ghcr.io/aishie-education/aishie-core:sha-<commit>`: the CI run's
    `publish / image` job names it, and so does the package's page. A release
    publishes `:X.Y.Z`. Stable takes only releases.
@@ -94,7 +90,7 @@ The scripts in [`deploy/`](../deploy) do the work:
    aishie-deploy ghcr.io/aishie-education/aishie-core:sha-de4f548
    ```
 
-4. Create the first administrator, root, with a password and the email it
+3. Create the first administrator, root, with a password and the email it
    signs in with (or `--login-id`, a staff number, instead or as well).
    `bootstrap` prints no API token: people hold none. It prints root's and the
    system actor's ids on standard error, and nothing on standard output; sign
@@ -110,15 +106,12 @@ The scripts in [`deploy/`](../deploy) do the work:
    curl https://lms-test.example.edu/healthz
    ```
 
-5. The day after, check that the nightly backup ran:
+4. The day after, check that the nightly backup ran:
    `ls -l /var/backups/aishie/daily-*`.
 
-These scripts set up a server of Core's own. The
-[AIShie-Deploy](https://github.com/AIShie-Education/AIShie-Deploy)
-repository is another way, the whole of AIshie (Core, the agent runtime and
-the web front end) in one stack updated by its `aishie-update`, and it keeps
-files of its own in `/etc/aishie` and `/var/backups/aishie`: never set up both
-on one server.
+These scripts set up a server of Core's own. AIShie-Deploy's stack keeps
+files of its own in `/etc/aishie` and `/var/backups/aishie` too: never set up
+both on one server.
 
 ### A server set up before the rename
 
@@ -161,7 +154,7 @@ For stable, the names end in `_STABLE`. SSH on a port other than 22 is
 `ssh://deploy@host:2222` in the target and `[host]:2222 ssh-ed25519 …` in
 the host key line. Settings added before edge and stable had those names
 end in `_STAGING` and `_PRODUCTION`: they are read, with a warning, until a
-later release ([README.md](../README.md#renaming-the-settings)).
+later release ([below](#settings-from-before-the-rename)).
 
 From then on, every green push to `main` deploys to edge, and a
 pre-release tag (`v1.2.3-rc.1`) does too. To try the connection without a
@@ -176,15 +169,62 @@ Deploy by hand, from a release's tag
 The key only runs `aishie-deploy`, but that script deploys any image of
 this repository. Anyone with write access to the repository can run a
 workflow that reads the secret, or copy the key out. They can also push an
-image of their own under this repository's name and deploy it. On GitHub
-Free, nothing narrows that down to a branch or to people: write access is
-access to everything on the servers. When someone loses write access,
+image of their own under this repository's name and deploy it. The secret
+is the repository's, not an environment's, so no environment's rule narrows
+that down to a branch or to people: write access is access to everything on
+the servers. When someone loses write access,
 replace the key and delete any package versions they pushed.
 
 To replace the key: on the server, delete `~deploy/.ssh/authorized_keys` and
 any `/root/aishie-deploy-key*` left, run `setup-server.sh` again as in step
 1, with the server's name and its environment, and put the new key it prints
 into the secret it names.
+
+### Settings from before the rename
+
+The environments were called `staging` and `production`, and are `edge` and
+`stable` now. Deploy reads each of its settings by the new name first and,
+until a later release that removes this, by the old one, with a warning in
+the run that names the setting to add; so deploys go on while the settings
+are renamed. In the repository's settings, before merging the rename if you
+can:
+
+1. **Environments** (Settings → Environments → New environment): make `edge`
+   with the rules `staging` has, and `stable` with the rules `production`
+   has: its required reviewers, and Deployment branches and tags (`edge`:
+   branch `main` and tags `v*`; `stable`: tags `v*` only). **Give `stable`
+   production's protection before its first deploy.** GitHub neither renames
+   environments nor carries their rules over: the first run that names
+   `stable` creates it with no protection at all, and then nothing but
+   Deploy's own check that it runs from a stable release's tag stands
+   between write access to this repository and the schools' sites.
+2. **Variables and secrets** (Settings → Secrets and variables → Actions):
+   add each one that is set under its new name, with the same value, then
+   delete the old one.
+
+   | Kind | Old name | New name |
+   | --- | --- | --- |
+   | Variable | `DEPLOY_TARGET_STAGING` | `DEPLOY_TARGET_EDGE` |
+   | Variable | `DEPLOY_KNOWN_HOSTS_STAGING` | `DEPLOY_KNOWN_HOSTS_EDGE` |
+   | Secret | `DEPLOY_SSH_KEY_STAGING` | `DEPLOY_SSH_KEY_EDGE` |
+   | Variable | `DEPLOY_TARGET_PRODUCTION` | `DEPLOY_TARGET_STABLE` |
+   | Variable | `DEPLOY_KNOWN_HOSTS_PRODUCTION` | `DEPLOY_KNOWN_HOSTS_STABLE` |
+   | Secret | `DEPLOY_SSH_KEY_PRODUCTION` | `DEPLOY_SSH_KEY_STABLE` |
+
+   A variable's value can be copied from its page. A secret's cannot be read
+   back: paste the key from wherever a copy is kept or, with none, give the
+   server a new key ([above](#connecting-the-deploy-workflow),
+   to replace the key), which `setup-server.sh` prints under the new name.
+3. Once a deploy to each environment runs without a warning, the
+   environments `staging` and `production` can be deleted, with the
+   deployments they recorded.
+
+The Deploy form offers `edge` and `stable` alone, as GitHub takes nothing
+but a choice's options there; a workflow that calls Deploy with `staging`
+or `production` has them taken as `edge` and `stable`, with a warning.
+Servers need nothing: `deploy/setup-server.sh` takes `edge` or `stable`, or
+their old names until the same later release, only to name the settings it
+prints.
 
 ## Day to day
 

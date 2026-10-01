@@ -36,7 +36,7 @@ case $ENVIRONMENT in
   staging | production)
     old=$ENVIRONMENT
     if [ "$old" = staging ]; then ENVIRONMENT=edge; else ENVIRONMENT=stable; fi
-    echo "notice: $old is called $ENVIRONMENT now: setting this server up for $ENVIRONMENT (README.md, Renaming the settings)" >&2
+    echo "notice: $old is called $ENVIRONMENT now: setting this server up for $ENVIRONMENT (docs/deploying.md, Settings from before the rename)" >&2
     ;;
   *) usage ;;
 esac
@@ -213,17 +213,16 @@ rm -f /etc/sudoers.d/aishiteru-deploy
 upper=$(echo "$ENVIRONMENT" | tr '[:lower:]' '[:upper:]')
 say "Done. What is left"
 cat <<DONE
-1. Let this server pull the image (a GitHub token, classic, with read:packages):
-     docker login ghcr.io -u <GitHub user name>
-2. Start it, with the image of the latest green push to main (the CI run's
-   publish / image job, or the package's page, names it), or of a release:
+1. Start it, with the image of the latest green push to main (the CI run's
+   publish / image job, or the package's page, names it), or of a release.
+   The image is public: this server pulls it with no login.
      aishie-deploy ghcr.io/aishie-education/aishie-core:sha-<commit>
-3. Create the first administrator, then restart so the background jobs start.
+2. Create the first administrator, then restart so the background jobs start.
    It prints no API token: sign in at the site with that email and password.
      read -rsp 'Password (10 characters or more): ' PW; echo
      printf '%s\n' "\$PW" | aishie-core bootstrap --name "Your Name" --email you@example.edu --password-stdin; unset PW
      docker restart $NAME
-4. For the Deploy workflow, in the repository's Settings → Secrets and variables → Actions:
+3. For the Deploy workflow, in the repository's Settings → Secrets and variables → Actions:
      variable DEPLOY_TARGET_$upper       deploy@$HOST
      variable DEPLOY_KNOWN_HOSTS_$upper  $HOST $(cut -d' ' -f1,2 /etc/ssh/ssh_host_ed25519_key.pub)
 DONE
