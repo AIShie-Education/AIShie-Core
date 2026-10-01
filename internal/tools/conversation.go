@@ -63,7 +63,7 @@ func conversationTools(d Deps) []tool.Tool {
 	return []tool.Tool{conversationRespondents(), conversationOpen(d), conversationAsk(d), conversationAnswer(d),
 		conversationClose(), conversationRetract(), conversationMarkRead(), conversationList(), conversationGet(),
 		conversationMessages(), conversationInbox(), conversationDraft(d.Drafts), conversationUploadURL(d),
-		conversationAttachment(d)}
+		conversationAttachment(d), conversationExport(d), conversationExportFile(d)}
 }
 
 // ToolConversationAnswer is the answer's action type, which the views look
@@ -1441,7 +1441,7 @@ type ConversationIDIn struct {
 
 type ConversationGetOut struct {
 	ConversationView
-	VisibleTo []string   `json:"visible_to" jsonschema:"who can read what is written here, as codes: participants, the two who take part; overseers, course staff who decide actions for the opener; action_record, anyone who decides actions in the course, through the record of each message's action; respondent_answers_others, the respondent answers other members too and may repeat to them what is written here"`
+	VisibleTo []string   `json:"visible_to" jsonschema:"who can read what is written here, as codes: participants, the two who take part; overseers, course staff who decide actions for the opener; action_record, anyone who decides actions in the course, through the record of each message's action; respondent_answers_others, the respondent answers other members too and may repeat to them what is written here; audit_export, the site's administrators, and those of the course's department, who may export it for audit, retracted messages included"`
 	Draft     *DraftView `json:"draft" jsonschema:"the answer being written, while the conversation waits for it: what the respondent is doing (steps) and the text so far, where you may see it; null for none"`
 }
 
@@ -1452,19 +1452,24 @@ const (
 	VisibleToOverseers         = "overseers"
 	VisibleToActionRecord      = "action_record"
 	VisibleToRespondentsOthers = "respondent_answers_others"
+	// VisibleToAuditExport is said of every conversation: administrators
+	// may export it for audit (conversation.export), what was retracted
+	// in it with the rest.
+	VisibleToAuditExport = "audit_export"
 )
 
 // visibleTo is said with every conversation, so that nobody writes in one
 // thinking it more private than it is. A respondent that is not the
 // opener's own delegate may answer others as well — the course's tutor, a
 // tutor listed for several students, staff — and what it is told it may
-// repeat to them.
+// repeat to them. And the site's administrators, and those of the course's
+// department, may export any conversation for audit, which is said last.
 func visibleTo(v ConversationView) []string {
 	out := []string{VisibleToParticipants, VisibleToOverseers, VisibleToActionRecord}
 	if !v.Respondent.IsDelegateOfOpener {
 		out = append(out, VisibleToRespondentsOthers)
 	}
-	return out
+	return append(out, VisibleToAuditExport)
 }
 
 // readable finds a conversation the caller may read (mayRead), and answers a

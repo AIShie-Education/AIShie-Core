@@ -118,6 +118,26 @@ func TestS3Store(t *testing.T) {
 	_ = s.Delete(ctx, key) // the orphan the second PUT left
 	key = final
 
+	// What the server writes itself, an export, is streamed in, and is
+	// what was written; past its limit, nothing is kept.
+	export := "exports/" + uuid.NewString() + ".csv"
+	written := bytes.Repeat([]byte("對話,"), 1000)
+	put, err := s.Put(ctx, export, "text/csv; charset=utf-8", bytes.NewReader(written), 1<<20)
+	if err != nil || put.Size != int64(len(written)) || !strings.HasPrefix(put.Checksum, "sha256:") {
+		t.Fatalf("put: %+v %v", put, err)
+	}
+	defer func() { _ = s.Delete(ctx, export) }()
+	if got, err := s.Stat(ctx, export); err != nil || got.Size != int64(len(written)) || got.ContentType != "text/csv; charset=utf-8" {
+		t.Fatalf("stat of what was put: %+v %v", got, err)
+	}
+	tooLarge := "exports/" + uuid.NewString() + ".csv"
+	if _, err := s.Put(ctx, tooLarge, "text/csv", bytes.NewReader(written), 100); !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("put past its limit: %v", err)
+	}
+	if _, err := s.Stat(ctx, tooLarge); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("what was put past its limit is kept: %v", err)
+	}
+
 	getURL, err := s.PresignGet(ctx, key, time.Minute)
 	if err != nil {
 		t.Fatal(err)

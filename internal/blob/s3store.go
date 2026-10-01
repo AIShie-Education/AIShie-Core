@@ -2,8 +2,11 @@ package blob
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"slices"
@@ -221,6 +224,48 @@ func (s *S3Store) List(ctx context.Context, prefix, after string, fn func(key st
 	// A cancelled context ends the iterator between pages without a word,
 	// which is not the end of the listing.
 	return ctx.Err()
+}
+
+// putPartSize is how much of an object Put holds in memory at a time: one
+// part of a multipart upload. Of an object whose size is not known before
+// it is written, minio-go would otherwise hold a part large enough for the
+// largest object S3 takes, over 500 MiB; at 16 MiB, one Put holds 16 MiB,
+// and writes an object of up to 156 GiB in S3's 10,000 parts.
+const putPartSize = 16 << 20
+
+// Put streams the object to the store, a part at a time, as it is read. An
+// object past maxBytes is not completed: the upload is abandoned, and
+// nothing is kept under key.
+func (s *S3Store) Put(ctx context.Context, key, contentType string, r io.Reader, maxBytes int64) (Info, error) {
+	h := sha256.New()
+	limited := &capped{r: io.TeeReader(r, h), left: maxBytes}
+	up, err := s.client.PutObject(ctx, s.bucket, key, limited, -1,
+		minio.PutObjectOptions{ContentType: contentType, PartSize: putPartSize})
+	if errors.Is(err, ErrTooLarge) || limited.over {
+		return Info{}, ErrTooLarge
+	}
+	if err != nil {
+		return Info{}, err
+	}
+	return Info{Size: up.Size, ContentType: contentType, Checksum: "sha256:" + hex.EncodeToString(h.Sum(nil)),
+		Modified: up.LastModified}, nil
+}
+
+// capped reads from r until more than left bytes have come, and then fails
+// with ErrTooLarge, which abandons the upload reading it.
+type capped struct {
+	r    io.Reader
+	left int64
+	over bool
+}
+
+func (c *capped) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	if c.left -= int64(n); c.left < 0 {
+		c.over = true
+		return 0, ErrTooLarge
+	}
+	return n, err
 }
 
 func (s *S3Store) Delete(ctx context.Context, key string) error {

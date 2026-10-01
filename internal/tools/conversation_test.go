@@ -315,8 +315,8 @@ func TestAnAnswerAnswersTheLatestQuestion(t *testing.T) {
 		msgs[0].Seq != 1 || msgs[2].Seq != 3 || msgs[2].AuthorMemberID != b.tutorM || msgs[2].Body == nil || *msgs[2].Body != "A sentence or two." {
 		t.Fatalf("the conversation: %+v", msgs)
 	}
-	if got := b.conversation(t, b.yuki, conv); got.State != tools.StateAnswered || len(got.VisibleTo) != 4 ||
-		got.VisibleTo[3] != tools.VisibleToRespondentsOthers {
+	if got := b.conversation(t, b.yuki, conv); got.State != tools.StateAnswered || len(got.VisibleTo) != 5 ||
+		got.VisibleTo[3] != tools.VisibleToRespondentsOthers || got.VisibleTo[4] != tools.VisibleToAuditExport {
 		t.Fatalf("the conversation, answered: %+v", got)
 	}
 	if in := b.inbox(t, b.tutor); len(in) != 0 {
@@ -820,7 +820,7 @@ func TestOverseeingConversations(t *testing.T) {
 	// One's own agent is one's own.
 	own, oq := b.open(t, b.yuki, c.yukiBot, "Summarise my feedback")
 	if got := b.conversation(t, b.yuki, own); !got.Respondent.IsDelegateOfOpener || got.Respondent.OwnerName == nil ||
-		len(got.VisibleTo) != 3 || got.VisibleTo[0] != tools.VisibleToParticipants {
+		len(got.VisibleTo) != 4 || got.VisibleTo[0] != tools.VisibleToParticipants || got.VisibleTo[3] != tools.VisibleToAuditExport {
 		t.Fatalf("Yuki's conversation with her agent: %+v", got)
 	}
 	if in := b.inbox(t, c.bot); len(in) != 1 || in[0].ID != own {

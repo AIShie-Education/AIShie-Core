@@ -1175,3 +1175,60 @@ func TestAnAssignmentWhoseDueDateMovedUnderTheSweepIsSweptWhenItComesBack(t *tes
 		})
 	}
 }
+
+// An export of conversations is kept a day, and then its files are gone:
+// they are personal data, made to be taken away. The sweep removes them by
+// their age, whatever runs it, recording nothing, and leaves alone what an
+// export did not write; the export's record stays.
+func TestAnExportsFilesAreRemovedOnceTheyAreADayOld(t *testing.T) {
+	f := setup(t, 1)
+	f.runner = jobs.New(f.Pool, f.P, f.system, jobs.Config{Blob: f.Blob}, nil)
+	out := f.MustCall(f.Root, "conversation.export", m{"course_id": f.Course}, "export")
+	if out.Status != domain.StatusExecuted {
+		t.Fatalf("the export: %+v", out)
+	}
+	export := testkit.Result[tools.ConversationExportOut](t, out).ExportID
+	ctx := context.Background()
+	stray := tools.ExportPrefix + "notes.txt"
+	if _, err := f.Blob.Put(ctx, stray, "text/plain", strings.NewReader("not an export's"), 1<<10); err != nil {
+		t.Fatal(err)
+	}
+	long := time.Now().Add(-30 * 24 * time.Hour)
+	if err := os.Chtimes(filepath.Join(f.Blob.Root(), filepath.FromSlash(stray)), long, long); err != nil {
+		t.Fatal(err)
+	}
+	kept := func() int {
+		t.Helper()
+		n := 0
+		for _, format := range []string{tools.ExportJSONL, tools.ExportCSV} {
+			if _, err := f.Blob.Stat(ctx, tools.ExportKey(export, format)); err == nil {
+				n++
+			} else if !errors.Is(err, blob.ErrNotFound) {
+				t.Fatal(err)
+			}
+		}
+		return n
+	}
+	if rep := f.sweep(t); rep.ExportFilesRemoved != 0 || kept() != 2 {
+		t.Fatalf("a new export's files were removed: %+v", rep)
+	}
+	f.now = f.now.Add(23 * time.Hour)
+	if rep := f.sweep(t); rep.ExportFilesRemoved != 0 || kept() != 2 {
+		t.Fatalf("an export's files were removed within the day: %+v", rep)
+	}
+	f.now = f.now.Add(2 * time.Hour)
+	if rep := f.sweep(t); rep.ExportFilesRemoved != 2 || kept() != 0 {
+		t.Fatalf("a day-old export's files: %+v, %d kept", rep, kept())
+	}
+	if _, err := f.Blob.Stat(ctx, stray); err != nil {
+		t.Fatalf("what an export did not write was removed: %v", err)
+	}
+	if n := f.Count(`SELECT count(*) FROM action WHERE id = $1 AND status = 'executed'`, export); n != 1 {
+		t.Fatal("the export's record went with its files")
+	}
+	// Its maker is told so, and given nothing.
+	got, err := f.Call(f.Root, "conversation.export_file", m{"export_id": export, "format": "csv"}, "")
+	if e, ok := apperr.As(err); err == nil || !ok || e.Details["reason"] != "export_expired" {
+		t.Fatalf("a removed export's file: %+v %v", got, err)
+	}
+}

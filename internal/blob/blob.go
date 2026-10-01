@@ -50,6 +50,15 @@ type Store interface {
 	// Stat describes the object, or returns ErrNotFound.
 	Stat(ctx context.Context, key string) (Info, error)
 	Delete(ctx context.Context, key string) error
+	// Put writes what r gives under key, from this server itself rather
+	// than through an upload URL: a file the server makes, an export of
+	// conversations, or, for the filesystem store, what a PUT to one of its
+	// upload URLs brings. It is read as it is written, never whole into
+	// memory, and refused past maxBytes (ErrTooLarge), when nothing of it
+	// is kept. The filesystem store writes a key once (ErrExists); an
+	// object store keeps the last write, so a caller writes under a key
+	// nobody else writes under.
+	Put(ctx context.Context, key, contentType string, r io.Reader, maxBytes int64) (Info, error)
 
 	// FinalKey and Finalize make an uploaded object immutable before a
 	// document version points at it.
@@ -96,7 +105,6 @@ type Local interface {
 	// PresignDownload, and says the name the file is to be saved under, if
 	// it was given one.
 	RedeemDownload(token string) (key, filename string, err error)
-	Put(ctx context.Context, key, contentType string, r io.Reader, maxBytes int64) (Info, error)
 	Open(ctx context.Context, key string) (io.ReadCloser, Info, error)
 }
 

@@ -38,7 +38,10 @@ In place so far:
   what they have not read yet; while an agent writes an answer, whoever reads
   the conversation watches it come — what the agent is doing, and the text
   where the answer would be shown — through a draft that is no action and
-  that the answer, posted, replaces;
+  that the answer, posted, replaces; and root and the administrators of the
+  site, and of a department for its courses, export conversations for
+  audit, retracted messages included, as files kept a day, each export
+  itself on record;
 - agents' memory, kept in Core whatever runs the agent (off unless
   `MEMORY=on`): about its owner, about each person who asks it in a course,
   reached only through that person's conversation, and a course's shared
@@ -74,7 +77,10 @@ student registers and a registered one joins, and which seats nobody once
 revoked; a student with no email registers through another with her student
 number as her login ID and signs in with it, is given a temporary password by
 the instructor when she forgets hers, and sets her own before anything else,
-and the instructor cannot reset a TA's; Core vouches for the instructor to an agent runtime, and the
+and the instructor cannot reset a TA's; root exports the course's
+conversations for audit and downloads both files, the question the student
+withdrew in them, marked, a department's administrator exports only what is
+beneath her, and the instructor, the student and an agent are refused; Core vouches for the instructor to an agent runtime, and the
 key it publishes checks the assertion; the sign-in page is told whether
 to offer single sign-on, with it off and then, against a stand-in provider,
 on; last, root sets up a provider of the site's against a stand-in provider
@@ -216,7 +222,8 @@ message (10), each at most `ATTACHMENT_MAX_BYTES` (50 MiB, and never more than
 conversation (500 MiB). The server keeps its files under `documents/`,
 `courses/` (documents' uploads from before a version held several files) and
 `conversations/` (with S3, `attached/documents/`, `attached/courses/` and
-`attached/conversations/` as well) and leaves anything else in the directory
+`attached/conversations/` as well), and exports of conversations for audit
+under `exports/`, and leaves anything else in the directory
 or bucket alone, uploads
 under a course its database does not have included. The files may be moved from
 the disk to a bucket by copying each to the key it has on the disk (its path
@@ -510,6 +517,32 @@ never in the action log, and a secret is refused. `MEMORY_MAX_*` bound what an
 agent keeps and `MEMORY_WRITES_PER_HOUR` (60) and `_PER_DAY` (300) how fast it
 writes (docs/schema.md §2.9). It is off by default for now; memory tools
 answer `memory_unavailable` while it is.
+
+### Exporting conversations for audit
+
+Root and the platform's administrators export the site's conversations for
+audit, and a department's administrators those of the courses of the
+departments they administer and beneath them; nobody else, and never an
+agent (`people_only`), whatever role it holds. `conversation.export` (`POST
+/v1/conversation-exports`) takes a course (`course_id`) or a department and
+everything beneath it (`within_dept_id`), or neither for the whole site's,
+which only a platform administrator exports; a participant
+(`participant_actor_id`); and a span of time (`from`, `before`). It holds
+every message of the conversations it chooses, a retracted one with its
+text, marked `retracted`; what files each carries, described and never their
+bytes; and the answers and questions proposed and never posted. It is two
+files: the conversations as JSON Lines, one to a line with their messages,
+and the messages as CSV, one to a row, in UTF-8 with a byte order mark so
+that a spreadsheet opens Chinese as written. The answer gives a URL for
+each, which downloads it for fifteen minutes and is kept nowhere;
+`conversation.export_file` (`GET /v1/conversation-exports/{export_id}/{format}`,
+`jsonl` or `csv`) gives another, to whoever made the export alone. Every
+export is an action, its filters and counts on record. The files hold
+personal data: they are kept under `exports/` for `EXPORT_TTL` (24 hours)
+and then removed, and links to them expire. Past `EXPORT_MAX_MESSAGES`
+(100,000) messages or `EXPORT_MAX_BYTES` (256 MiB) of their text an export is
+refused, `export_too_large`, saying how much it would hold: narrow it.
+docs/schema.md §2.8 has the whole of it.
 
 ### Signing in to a service that hosts agents
 

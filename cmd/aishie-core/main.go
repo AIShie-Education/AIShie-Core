@@ -92,6 +92,11 @@ Environment:
                            carries, never more than MAX_UPLOAD_BYTES
   ATTACHMENT_MAX_PER_MESSAGE         default 10, at most 100; the files one message carries
   ATTACHMENT_MAX_CONVERSATION_BYTES  default 524288000 (500 MiB); the files of one conversation, in all
+  EXPORT_MAX_MESSAGES  default 100000; the messages one export of conversations holds, answers and
+                       questions proposed and never posted counted with them (conversation.export)
+  EXPORT_MAX_BYTES     default 268435456 (256 MiB); the text of those messages, in all
+  EXPORT_TTL           default 24h, from 15m to 168h; how long an export's files are kept, under
+                       exports/ in the file store, before the sweep removes them
   AGENT_SELF_SERVICE   on (default) or off; whether people may register agents of their own
   AGENT_MAX_PER_OWNER  default 5; the agents one person may have that are not suspended
   S3_ENDPOINT, S3_BUCKET, S3_ACCESS_KEY, S3_SECRET_KEY, S3_USE_SSL
@@ -235,6 +240,7 @@ func serve(cfg config.Config) error {
 		Attachments: tools.AttachmentLimits{MaxBytes: cfg.AttachmentMaxBytes, PerMessage: cfg.AttachmentMaxPerMessage,
 			ConversationBytes: cfg.AttachmentMaxConversationBytes},
 		Documents:               tools.DocumentLimits{FilesPerVersion: cfg.DocumentMaxFilesPerVersion, VersionBytes: cfg.DocumentMaxVersionBytes},
+		Exports:                 tools.ExportLimits{MaxMessages: cfg.ExportMaxMessages, MaxBytes: cfg.ExportMaxBytes, TTL: cfg.ExportTTL},
 		DisableAgentSelfService: !cfg.AgentSelfService, MaxAgentsPerOwner: cfg.AgentMaxPerOwner, Memory: cfg.Memory})
 
 	// The sweeps act as the system actor, which bootstrap creates. Before
@@ -246,7 +252,7 @@ func serve(cfg config.Config) error {
 			log.Warn("background jobs are off: there is no system actor yet; run `aishie-core bootstrap`, then restart")
 		} else {
 			jobsDone = make(chan struct{})
-			runner := jobs.New(pool, pl, system, jobs.Config{Interval: cfg.JobsInterval, Blob: store}, log)
+			runner := jobs.New(pool, pl, system, jobs.Config{Interval: cfg.JobsInterval, Blob: store, ExportTTL: cfg.ExportTTL}, log)
 			go func() { defer close(jobsDone); runner.Run(ctx) }()
 		}
 	}
