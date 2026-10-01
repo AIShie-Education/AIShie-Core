@@ -845,38 +845,55 @@ func documentPublish() tool.Tool {
 			in.VersionID = &v.ID
 			return in, nil
 		},
+		Validate: func(ctx context.Context, q dbq.Querier, _ *domain.Member, in DocumentPublishIn) error {
+			_, _, err := toPublish(ctx, q, in)
+			return err
+		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in DocumentPublishIn) (DocumentVersionOut, error) {
-			doc, err := loadDocument(ctx, ec.Q, in.CourseID, in.DocumentID)
+			doc, v, err := toPublish(ctx, ec.Q, in)
 			if err != nil {
 				return DocumentVersionOut{}, err
-			}
-			if !courseLevel(doc.Kind) {
-				return DocumentVersionOut{}, apperr.Precondition("a %s file is not published; it is visible to whoever may see its owner", doc.Kind)
-			}
-			if doc.Status != "active" {
-				return DocumentVersionOut{}, apperr.Conflicts("the document is archived")
-			}
-			var v dbq.DocumentVersion
-			if in.VersionID != nil {
-				v, err = ec.Q.GetVersionOfDocument(ctx, dbq.GetVersionOfDocumentParams{ID: *in.VersionID, DocumentID: doc.ID})
-			} else {
-				v, err = ec.Q.GetLatestVersion(ctx, doc.ID)
-			}
-			if errors.Is(err, pgx.ErrNoRows) {
-				return DocumentVersionOut{}, apperr.Precondition("there is no such version of this document to publish")
-			}
-			if err != nil {
-				return DocumentVersionOut{}, err
-			}
-			if doc.PublishedVersionID != nil && *doc.PublishedVersionID == v.ID {
-				return DocumentVersionOut{}, apperr.Conflicts("that version is already the published one")
-			}
-			if v.PurgedAt != nil {
-				return DocumentVersionOut{}, apperr.Precondition("that version was purged and holds nothing to publish").With("reason", "purged")
 			}
 			return DocumentVersionOut{VersionID: v.ID, Seq: v.Seq, Published: true}, publish(ctx, ec, in.CourseID, doc, v.ID)
 		},
 	})
+}
+
+// toPublish is the document in names and the version of it to publish,
+// or what refuses publishing it: a document of a kind that is not
+// published, one archived, a version that is not the document's, one
+// published already, or one purged. document.publish asks it before a
+// proposal is queued (Validate), and again as it publishes.
+func toPublish(ctx context.Context, q dbq.Querier, in DocumentPublishIn) (dbq.GetDocumentWithOwnerRow, dbq.DocumentVersion, error) {
+	var v dbq.DocumentVersion
+	doc, err := loadDocument(ctx, q, in.CourseID, in.DocumentID)
+	if err != nil {
+		return doc, v, err
+	}
+	if !courseLevel(doc.Kind) {
+		return doc, v, apperr.Precondition("a %s file is not published; it is visible to whoever may see its owner", doc.Kind)
+	}
+	if doc.Status != "active" {
+		return doc, v, apperr.Conflicts("the document is archived")
+	}
+	if in.VersionID != nil {
+		v, err = q.GetVersionOfDocument(ctx, dbq.GetVersionOfDocumentParams{ID: *in.VersionID, DocumentID: doc.ID})
+	} else {
+		v, err = q.GetLatestVersion(ctx, doc.ID)
+	}
+	if errors.Is(err, pgx.ErrNoRows) {
+		return doc, v, apperr.Precondition("there is no such version of this document to publish")
+	}
+	if err != nil {
+		return doc, v, err
+	}
+	if doc.PublishedVersionID != nil && *doc.PublishedVersionID == v.ID {
+		return doc, v, apperr.Conflicts("that version is already the published one")
+	}
+	if v.PurgedAt != nil {
+		return doc, v, apperr.Precondition("that version was purged and holds nothing to publish").With("reason", "purged")
+	}
+	return doc, v, nil
 }
 
 type DocumentIDIn struct {
@@ -895,6 +912,19 @@ func documentArchive() tool.Tool {
 		Resolve: func(ctx context.Context, q dbq.Querier, in DocumentIDIn) (tool.Target, error) {
 			return documentTarget(ctx, q, in.CourseID, in.DocumentID, writePerm)
 		},
+		Validate: func(ctx context.Context, q dbq.Querier, _ *domain.Member, in DocumentIDIn) error {
+			doc, err := loadDocument(ctx, q, in.CourseID, in.DocumentID)
+			if err != nil {
+				return err
+			}
+			if err := draftOnly(ctx, q, in.CourseID, doc, false); err != nil {
+				return err
+			}
+			if doc.Status == "archived" {
+				return errArchived
+			}
+			return nil
+		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in DocumentIDIn) (OK, error) {
 			doc, err := loadDocument(ctx, ec.Q, in.CourseID, in.DocumentID)
 			if err != nil {
@@ -904,21 +934,15 @@ func documentArchive() tool.Tool {
 			// draft, and the state is read under the submission's lock, as
 			// document.create reads it: an archive during the hand-in waits
 			// for it, rather than taking away a file the hand-in counted.
-			if doc.SubmissionID != nil {
-				s, err := ec.Q.GetSubmissionFullForUpdate(ctx, dbq.GetSubmissionFullForUpdateParams{ID: *doc.SubmissionID, CourseID: in.CourseID})
-				if err != nil {
-					return OK{}, err
-				}
-				if s.State != stateDraft {
-					return OK{}, apperr.Conflicts("the submission has been handed in; its files no longer change")
-				}
+			if err := handedIn(ctx, ec, in.CourseID, doc); err != nil {
+				return OK{}, err
 			}
 			n, err := ec.Q.SetDocumentStatus(ctx, dbq.SetDocumentStatusParams{ID: doc.ID, Status: "archived"})
 			if err != nil {
 				return OK{}, err
 			}
 			if n == 0 {
-				return OK{}, apperr.Conflicts("the document is already archived")
+				return OK{}, errArchived
 			}
 			if err := emitFileEvent(ctx, ec, in.CourseID, doc, EventDocumentArchived, EventSubmissionFileArchived, EventFeedbackFileArchived, nil); err != nil {
 				return OK{}, err
@@ -949,19 +973,41 @@ func emitFileEvent(ctx context.Context, ec *tool.ExecCtx, courseID uuid.UUID, do
 	return emitDocumentEvent(ctx, ec, doc.Kind, ev)
 }
 
+var (
+	errArchived    = apperr.Conflicts("the document is already archived")
+	errNotArchived = apperr.Conflicts("the document is not archived")
+	errHandedIn    = apperr.Conflicts("the submission has been handed in; its files no longer change")
+
+	errPurgedStaysArchived = apperr.Precondition("the document was purged, and stays archived").With("reason", "purged")
+)
+
 // handedIn refuses a change to a submitted file once its submission has
 // been handed in: its files are frozen with it. The state is read under the
 // submission's lock, the one the hand-in takes, as document.create reads it.
 func handedIn(ctx context.Context, ec *tool.ExecCtx, courseID uuid.UUID, doc dbq.GetDocumentWithOwnerRow) error {
+	return draftOnly(ctx, ec.Q, courseID, doc, true)
+}
+
+// draftOnly is handedIn, read under the submission's lock when lock says so,
+// and without it otherwise: for a tool's Validate, which asks it before a
+// proposal is queued, and whose tool asks it again, locked, as it is carried
+// out.
+func draftOnly(ctx context.Context, q dbq.Querier, courseID uuid.UUID, doc dbq.GetDocumentWithOwnerRow, lock bool) error {
 	if doc.SubmissionID == nil {
 		return nil
 	}
-	s, err := ec.Q.GetSubmissionFullForUpdate(ctx, dbq.GetSubmissionFullForUpdateParams{ID: *doc.SubmissionID, CourseID: courseID})
+	var s dbq.Submission
+	var err error
+	if lock {
+		s, err = q.GetSubmissionFullForUpdate(ctx, dbq.GetSubmissionFullForUpdateParams{ID: *doc.SubmissionID, CourseID: courseID})
+	} else {
+		s, err = q.GetSubmissionFull(ctx, dbq.GetSubmissionFullParams{ID: *doc.SubmissionID, CourseID: courseID})
+	}
 	if err != nil {
 		return err
 	}
 	if s.State != stateDraft {
-		return apperr.Conflicts("the submission has been handed in; its files no longer change")
+		return errHandedIn
 	}
 	return nil
 }
@@ -1006,6 +1052,13 @@ func documentUpdate() tool.Tool {
 		},
 		Resolve: func(ctx context.Context, q dbq.Querier, in DocumentUpdateIn) (tool.Target, error) {
 			return documentTarget(ctx, q, in.CourseID, in.DocumentID, writePerm)
+		},
+		Validate: func(ctx context.Context, q dbq.Querier, _ *domain.Member, in DocumentUpdateIn) error {
+			doc, err := loadDocument(ctx, q, in.CourseID, in.DocumentID)
+			if err != nil {
+				return err
+			}
+			return draftOnly(ctx, q, in.CourseID, doc, false)
 		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in DocumentUpdateIn) (DocumentChangeOut, error) {
 			doc, err := loadDocument(ctx, ec.Q, in.CourseID, in.DocumentID)
@@ -1061,6 +1114,22 @@ func documentUnarchive() tool.Tool {
 		Resolve: func(ctx context.Context, q dbq.Querier, in DocumentIDIn) (tool.Target, error) {
 			return documentTarget(ctx, q, in.CourseID, in.DocumentID, writePerm)
 		},
+		Validate: func(ctx context.Context, q dbq.Querier, _ *domain.Member, in DocumentIDIn) error {
+			doc, err := loadDocument(ctx, q, in.CourseID, in.DocumentID)
+			if err != nil {
+				return err
+			}
+			if err := draftOnly(ctx, q, in.CourseID, doc, false); err != nil {
+				return err
+			}
+			if doc.PurgedAt != nil {
+				return errPurgedStaysArchived
+			}
+			if doc.Status != "archived" {
+				return errNotArchived
+			}
+			return nil
+		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in DocumentIDIn) (OK, error) {
 			doc, err := loadDocument(ctx, ec.Q, in.CourseID, in.DocumentID)
 			if err != nil {
@@ -1076,14 +1145,14 @@ func documentUnarchive() tool.Tool {
 				return OK{}, err
 			}
 			if doc.PurgedAt != nil {
-				return OK{}, apperr.Precondition("the document was purged, and stays archived").With("reason", "purged")
+				return OK{}, errPurgedStaysArchived
 			}
 			n, err := ec.Q.SetDocumentStatus(ctx, dbq.SetDocumentStatusParams{ID: doc.ID, Status: "active"})
 			if err != nil {
 				return OK{}, err
 			}
 			if n == 0 {
-				return OK{}, apperr.Conflicts("the document is not archived")
+				return OK{}, errNotArchived
 			}
 			return OK{OK: true}, emitFileEvent(ctx, ec, in.CourseID, doc,
 				EventDocumentUnarchived, EventSubmissionFileRestored, EventFeedbackFileRestored, nil)

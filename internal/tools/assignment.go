@@ -479,6 +479,13 @@ func assignmentPublish() tool.Tool {
 		Resolve: func(ctx context.Context, q dbq.Querier, in AssignmentIDIn) (tool.Target, error) {
 			return assignmentTarget(ctx, q, in.CourseID, in.AssignmentID)
 		},
+		Validate: func(ctx context.Context, q dbq.Querier, _ *domain.Member, in AssignmentIDIn) error {
+			a, err := q.GetAssignmentInCourse(ctx, dbq.GetAssignmentInCourseParams{ID: in.AssignmentID, CourseID: in.CourseID})
+			if err != nil {
+				return err
+			}
+			return publishable(ctx, q, a)
+		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in AssignmentIDIn) (OK, error) {
 			// Under the row's lock too, so that the instructions checked are
 			// the ones it is published with. An update pointing them at a
@@ -489,21 +496,15 @@ func assignmentPublish() tool.Tool {
 			if err != nil {
 				return OK{}, err
 			}
-			if a.InstructionsDocumentID != nil {
-				v, err := ec.Q.GetDocumentPublishedVersion(ctx, *a.InstructionsDocumentID)
-				if err != nil {
-					return OK{}, err
-				}
-				if v == nil {
-					return OK{}, apperr.Precondition("the instructions have no published version yet; students would see an assignment with nothing to read")
-				}
+			if err := publishable(ctx, ec.Q, a); err != nil {
+				return OK{}, err
 			}
 			n, err := ec.Q.PublishAssignment(ctx, dbq.PublishAssignmentParams{ID: a.ID, PublishedAt: &ec.Now})
 			if err != nil {
 				return OK{}, err
 			}
 			if n == 0 {
-				return OK{}, apperr.Conflicts("the assignment is already published")
+				return OK{}, errPublished
 			}
 			ec.Emit(events.Event{Type: EventAssignmentPublished, CourseID: &in.CourseID, SubjectType: "assignment", SubjectID: &a.ID, AssignmentID: &a.ID})
 			return OK{OK: true}, nil
@@ -523,32 +524,75 @@ func assignmentUnpublish() tool.Tool {
 		Resolve: func(ctx context.Context, q dbq.Querier, in AssignmentIDIn) (tool.Target, error) {
 			return assignmentTarget(ctx, q, in.CourseID, in.AssignmentID)
 		},
+		Validate: func(ctx context.Context, q dbq.Querier, _ *domain.Member, in AssignmentIDIn) error {
+			a, err := q.GetAssignmentInCourse(ctx, dbq.GetAssignmentInCourseParams{ID: in.AssignmentID, CourseID: in.CourseID})
+			if err != nil {
+				return err
+			}
+			return unpublishable(ctx, q, a.ID, a.PublishedAt)
+		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in AssignmentIDIn) (OK, error) {
 			a, err := ec.Q.LockAssignmentForUnpublish(ctx, dbq.LockAssignmentForUnpublishParams{ID: in.AssignmentID, CourseID: in.CourseID})
 			if err != nil {
 				return OK{}, err
 			}
-			if a.PublishedAt == nil {
-				return OK{}, apperr.Conflicts("the assignment is not published")
-			}
-			// Once someone has started, their work hangs on the assignment
-			// being there; so does a grade for a 'missing' placeholder.
-			if started, err := ec.Q.AssignmentHasSubmissions(ctx, a.ID); err != nil {
+			if err := unpublishable(ctx, ec.Q, a.ID, a.PublishedAt); err != nil {
 				return OK{}, err
-			} else if started {
-				return OK{}, apperr.Precondition("it already has submissions — a draft, a hand-in, or the 'missing' rows recorded by hand or when its due date passed — so it can no longer be unpublished")
 			}
 			n, err := ec.Q.UnpublishAssignment(ctx, a.ID)
 			if err != nil {
 				return OK{}, err
 			}
 			if n == 0 {
-				return OK{}, apperr.Conflicts("the assignment is not published")
+				return OK{}, errNotPublished
 			}
 			ec.Emit(events.Event{Type: EventAssignmentUnpublished, CourseID: &in.CourseID, SubjectType: "assignment", SubjectID: &a.ID, AssignmentID: &a.ID})
 			return OK{OK: true}, nil
 		},
 	})
+}
+
+var (
+	errPublished    = apperr.Conflicts("the assignment is already published")
+	errNotPublished = apperr.Conflicts("the assignment is not published")
+)
+
+// publishable refuses publishing a as it stands: its instructions, if it
+// has any, must have a version students can read, and it must not be
+// published already. assignment.publish asks it before a proposal is queued
+// (Validate), and again under the assignment's lock as it publishes.
+func publishable(ctx context.Context, q dbq.Querier, a dbq.GetAssignmentInCourseRow) error {
+	if a.InstructionsDocumentID != nil {
+		v, err := q.GetDocumentPublishedVersion(ctx, *a.InstructionsDocumentID)
+		if err != nil {
+			return err
+		}
+		if v == nil {
+			return apperr.Precondition("the instructions have no published version yet; students would see an assignment with nothing to read")
+		}
+	}
+	if a.PublishedAt != nil {
+		return errPublished
+	}
+	return nil
+}
+
+// unpublishable refuses taking back the assignment id, published at
+// publishedAt, once anyone has started on it. assignment.unpublish asks it
+// before a proposal is queued (Validate), and again under the assignment's
+// lock as it takes it back.
+func unpublishable(ctx context.Context, q dbq.Querier, id uuid.UUID, publishedAt *time.Time) error {
+	if publishedAt == nil {
+		return errNotPublished
+	}
+	// Once someone has started, their work hangs on the assignment
+	// being there; so does a grade for a 'missing' placeholder.
+	if started, err := q.AssignmentHasSubmissions(ctx, id); err != nil {
+		return err
+	} else if started {
+		return apperr.Precondition("it already has submissions — a draft, a hand-in, or the 'missing' rows recorded by hand or when its due date passed — so it can no longer be unpublished")
+	}
+	return nil
 }
 
 // lockAssignment reads an assignment and holds it until the transaction

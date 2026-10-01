@@ -788,6 +788,10 @@ type Querier interface {
 	ListStudentsWithoutSubmission(ctx context.Context, arg ListStudentsWithoutSubmissionParams) ([]uuid.UUID, error)
 	ListSubmissionDocuments(ctx context.Context, submissionID *uuid.UUID) ([]ListSubmissionDocumentsRow, error)
 	ListSubmissions(ctx context.Context, arg ListSubmissionsParams) ([]ListSubmissionsRow, error)
+	// LockSubmissionsOf, not locked: what a tool's Validate reads of a
+	// student's attempts before a proposal is queued, which the tool reads again
+	// under the lock when it is carried out.
+	ListSubmissionsOf(ctx context.Context, arg ListSubmissionsOfParams) ([]ListSubmissionsOfRow, error)
 	ListTerms(ctx context.Context) ([]Term, error)
 	// The text versions of the files of a document's versions, without their
 	// text.
@@ -993,6 +997,7 @@ type Querier interface {
 	MaxVersionSeq(ctx context.Context, documentID uuid.UUID) (int32, error)
 	// Whether an agent's owner lets it keep memory: no row is yes.
 	MemoryEnabled(ctx context.Context, holderActorID uuid.UUID) (bool, error)
+	MessageRetracted(ctx context.Context, messageID uuid.UUID) (bool, error)
 	MessageSeqIn(ctx context.Context, arg MessageSeqInParams) (int32, error)
 	// A grade's feedback files go with it when it is written again without
 	// being graded again: a total worked out anew, a score rescaled.

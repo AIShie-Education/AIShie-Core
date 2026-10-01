@@ -954,6 +954,17 @@ func (q *Queries) MarkConversationRead(ctx context.Context, arg MarkConversation
 	return last_read_seq, err
 }
 
+const messageRetracted = `-- name: MessageRetracted :one
+SELECT EXISTS (SELECT 1 FROM conversation_message_retraction WHERE message_id = $1)::bool AS retracted
+`
+
+func (q *Queries) MessageRetracted(ctx context.Context, messageID uuid.UUID) (bool, error) {
+	row := q.db.QueryRow(ctx, messageRetracted, messageID)
+	var retracted bool
+	err := row.Scan(&retracted)
+	return retracted, err
+}
+
 const messageSeqIn = `-- name: MessageSeqIn :one
 SELECT m.seq FROM conversation_message m WHERE m.id = $1 AND m.conversation_id = $2
 `

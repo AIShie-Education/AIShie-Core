@@ -1426,6 +1426,11 @@ func countedAsZero(ctx context.Context, q dbq.Querier, in GradeUndoUngradedAsZer
 	return q.ListStudentsCountedAsZero(ctx, in.CourseID)
 }
 
+var (
+	errNotCountedAsZero  = apperr.Conflicts("the student's totals do not count ungraded work as zero").With("reason", "not_counted_as_zero")
+	errNoneCountedAsZero = apperr.Precondition("no student's totals count ungraded work as zero").With("reason", "not_counted_as_zero")
+)
+
 // gradeUndoUngradedAsZero takes back posting as final: a student's totals,
 // written with ungraded work counted as zero, which every post and regrade
 // beneath them then kept counting so, are written again as a grade so far,
@@ -1456,6 +1461,24 @@ func gradeUndoUngradedAsZero() tool.Tool {
 			}
 			return t, nil
 		},
+		Validate: func(ctx context.Context, q dbq.Querier, _ *domain.Member, in GradeUndoUngradedAsZeroIn) error {
+			students, err := countedAsZero(ctx, q, in)
+			if err != nil {
+				return err
+			}
+			if in.StudentMemberID == nil {
+				if len(students) == 0 {
+					return errNoneCountedAsZero
+				}
+				return nil
+			}
+			if final, err := q.StudentCountedAsZero(ctx, *in.StudentMemberID); err != nil {
+				return err
+			} else if !final {
+				return errNotCountedAsZero
+			}
+			return nil
+		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in GradeUndoUngradedAsZeroIn) (GradeUndoUngradedAsZeroOut, error) {
 			students, err := countedAsZero(ctx, ec.Q, in)
 			if err != nil {
@@ -1483,8 +1506,7 @@ func gradeUndoUngradedAsZero() tool.Tool {
 				}
 				if !final {
 					if in.StudentMemberID != nil {
-						return GradeUndoUngradedAsZeroOut{}, apperr.Conflicts("the student's totals do not count ungraded work as zero").
-							With("reason", "not_counted_as_zero")
+						return GradeUndoUngradedAsZeroOut{}, errNotCountedAsZero
 					}
 					continue
 				}
@@ -1507,7 +1529,7 @@ func gradeUndoUngradedAsZero() tool.Tool {
 					StudentMemberID: &s})
 			}
 			if out.Students == 0 {
-				return out, apperr.Precondition("no student's totals count ungraded work as zero").With("reason", "not_counted_as_zero")
+				return out, errNoneCountedAsZero
 			}
 			return out, nil
 		},

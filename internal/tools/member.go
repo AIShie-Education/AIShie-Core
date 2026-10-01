@@ -319,7 +319,7 @@ func memberAdd() tool.Tool {
 		// Everything the seat is held to that the course can tell before it
 		// is made, so that nobody is asked to approve a seat that could
 		// never be given: whether the actor holds a live seat already is
-		// the moment's, and left to seat().
+		// the moment's, asked by Pin and seat().
 		Validate: func(ctx context.Context, q dbq.Querier, m *domain.Member, in MemberAddIn) error {
 			s, err := memberAddSeating(ctx, q, m, in)
 			if err != nil {
@@ -342,9 +342,14 @@ func memberAdd() tool.Tool {
 			}
 			return checkAssignmentList(ctx, q, in.CourseID, s.assignmentScope, s.listedAssignments)
 		},
-		// An expiry already past when the seat is proposed is past when it is
-		// approved: refused now, so that nobody is asked to approve it.
-		Pin: func(_ context.Context, _ dbq.Querier, _ *domain.Member, now time.Time, in MemberAddIn) (MemberAddIn, error) {
+		// An actor seated already, by a seat neither past its expiry nor
+		// orphaned, and an expiry already past when the seat is proposed,
+		// are refused now, as seat() refuses them, so that nobody is asked
+		// to approve it: the expiry is past when it is approved too.
+		Pin: func(ctx context.Context, q dbq.Querier, _ *domain.Member, now time.Time, in MemberAddIn) (MemberAddIn, error) {
+			if err := seatedNow(ctx, q, in.CourseID, in.ActorID, now); err != nil {
+				return in, err
+			}
 			if e := asStored(in.ExpiresAt); e != nil && !e.After(now) {
 				return in, errExpiresInPast
 			}

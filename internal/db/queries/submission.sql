@@ -24,6 +24,14 @@ WHERE assignment_id = $1 AND student_member_id = $2
 ORDER BY attempt DESC
 FOR UPDATE;
 
+-- name: ListSubmissionsOf :many
+-- LockSubmissionsOf, not locked: what a tool's Validate reads of a
+-- student's attempts before a proposal is queued, which the tool reads again
+-- under the lock when it is carried out.
+SELECT id, attempt, state FROM submission
+WHERE assignment_id = $1 AND student_member_id = $2
+ORDER BY attempt DESC;
+
 -- name: ReopenMissingSubmission :exec
 -- A 'missing' row is a placeholder written when the due date passed with
 -- nothing handed in. Late work takes it over rather than sitting beside it.

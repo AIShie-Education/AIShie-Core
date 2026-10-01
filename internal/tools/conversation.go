@@ -340,6 +340,45 @@ func (a *addressing) mayRead(ctx context.Context, m *domain.Member, c dbq.Conver
 // caller may not read, both answer: the same, so that nobody learns which.
 var errNoConversation = apperr.Missing("no such conversation in this course")
 
+var (
+	errClosedAlready = apperr.Conflicts("the conversation is closed already")
+	errRetracted     = apperr.Conflicts("the message is retracted already")
+)
+
+// closable is the conversation in names, if m takes part in it and so may
+// close it. conversation.close asks it before a proposal is queued
+// (Validate), and again as it closes it.
+func closable(ctx context.Context, q dbq.Querier, m *domain.Member, in ConversationCloseIn) (dbq.Conversation, error) {
+	c, err := findConversation(ctx, q, in.CourseID, in.ConversationID)
+	if err != nil {
+		return c, err
+	}
+	if m.ID != c.OpenerMemberID && m.ID != c.RespondentMemberID {
+		return c, apperr.Forbid("only the two who take part in a conversation close it")
+	}
+	return c, nil
+}
+
+// retractable is the message in names, if m wrote it or oversees the
+// conversation's opener, and so may retract it. conversation.retract asks
+// it before a proposal is queued (Validate), and again as it retracts it.
+func retractable(ctx context.Context, q dbq.Querier, m *domain.Member, in ConversationRetractIn) (dbq.GetConversationMessageRow, error) {
+	msg, err := q.GetConversationMessage(ctx, dbq.GetConversationMessageParams{ID: in.MessageID, CourseID: in.CourseID})
+	if err != nil {
+		return msg, err
+	}
+	if msg.AuthorMemberID != m.ID {
+		staff, err := oversees(ctx, q, m, msg.OpenerMemberID)
+		if err != nil {
+			return msg, err
+		}
+		if !staff {
+			return msg, apperr.Forbid("only its author, or someone who decides actions for the conversation's opener, retracts a message")
+		}
+	}
+	return msg, nil
+}
+
 func findConversation(ctx context.Context, q dbq.Querier, courseID, id uuid.UUID) (dbq.Conversation, error) {
 	c, err := q.GetConversationInCourse(ctx, dbq.GetConversationInCourseParams{ID: id, CourseID: courseID})
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -960,13 +999,17 @@ func conversationClose() tool.Tool {
 		Resolve: func(ctx context.Context, q dbq.Querier, in ConversationCloseIn) (tool.Target, error) {
 			return conversationTarget(ctx, q, in.CourseID, in.ConversationID)
 		},
+		Validate: func(ctx context.Context, q dbq.Querier, m *domain.Member, in ConversationCloseIn) error {
+			c, err := closable(ctx, q, m, in)
+			if err == nil && c.Status != "open" {
+				return errClosedAlready
+			}
+			return err
+		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in ConversationCloseIn) (OK, error) {
-			c, err := findConversation(ctx, ec.Q, in.CourseID, in.ConversationID)
+			c, err := closable(ctx, ec.Q, ec.Member, in)
 			if err != nil {
 				return OK{}, err
-			}
-			if ec.Member.ID != c.OpenerMemberID && ec.Member.ID != c.RespondentMemberID {
-				return OK{}, apperr.Forbid("only the two who take part in a conversation close it")
 			}
 			reason, _ := optionalText("reason", in.Reason, maxReasonChars)
 			n, err := ec.Q.CloseConversation(ctx, dbq.CloseConversationParams{ID: c.ID, Reason: reason})
@@ -974,7 +1017,7 @@ func conversationClose() tool.Tool {
 				return OK{}, err
 			}
 			if n == 0 {
-				return OK{}, apperr.Conflicts("the conversation is closed already")
+				return OK{}, errClosedAlready
 			}
 			if err := ec.Q.DeleteDraft(ctx, c.ID); err != nil {
 				return OK{}, err
@@ -1028,19 +1071,22 @@ func conversationRetract() tool.Tool {
 			}
 			return tool.Target{CourseID: in.CourseID, Type: "conversation_message", ID: &in.MessageID}, nil
 		},
+		Validate: func(ctx context.Context, q dbq.Querier, m *domain.Member, in ConversationRetractIn) error {
+			msg, err := retractable(ctx, q, m, in)
+			if err != nil {
+				return err
+			}
+			if retracted, err := q.MessageRetracted(ctx, msg.ID); err != nil {
+				return err
+			} else if retracted {
+				return errRetracted
+			}
+			return nil
+		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in ConversationRetractIn) (OK, error) {
-			msg, err := ec.Q.GetConversationMessage(ctx, dbq.GetConversationMessageParams{ID: in.MessageID, CourseID: in.CourseID})
+			msg, err := retractable(ctx, ec.Q, ec.Member, in)
 			if err != nil {
 				return OK{}, err
-			}
-			if msg.AuthorMemberID != ec.Member.ID {
-				staff, err := oversees(ctx, ec.Q, ec.Member, msg.OpenerMemberID)
-				if err != nil {
-					return OK{}, err
-				}
-				if !staff {
-					return OK{}, apperr.Forbid("only its author, or someone who decides actions for the conversation's opener, retracts a message")
-				}
 			}
 			reason, _ := optionalText("reason", in.Reason, maxReasonChars)
 			conversation := msg.ConversationID
@@ -1056,7 +1102,7 @@ func conversationRetract() tool.Tool {
 				return OK{}, err
 			}
 			if n == 0 {
-				return OK{}, apperr.Conflicts("the message is retracted already")
+				return OK{}, errRetracted
 			}
 			if asked {
 				// The opener's latest message retracted, the question is

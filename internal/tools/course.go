@@ -473,6 +473,29 @@ func (s seating) listsItself() bool {
 // or was given longer while seat() looked at it.
 var errSeated = apperr.Conflicts("the actor already has a seat in this course; change it, or remove it and add again for a fresh start")
 
+// seatedNow refuses a seat for actor while it holds a live one in the
+// course that is neither past its expiry at now nor orphaned, which seat()
+// would remove first: member.add asks it as a seat is proposed (Pin), and
+// seat() as it seats the actor, where it may take the seat that is in the
+// way.
+func seatedNow(ctx context.Context, q dbq.Querier, courseID, actor uuid.UUID, now time.Time) error {
+	live, err := q.GetLiveMembership(ctx, dbq.GetLiveMembershipParams{CourseID: courseID, ActorID: actor})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if live.ExpiresAt != nil && !live.ExpiresAt.After(now) {
+		return nil
+	}
+	orphaned, err := q.SeatOrphaned(ctx, dbq.SeatOrphanedParams{MemberID: live.ID, Now: &now})
+	if err != nil || orphaned {
+		return err
+	}
+	return errSeated
+}
+
 // seatable holds the actor a seat is for, and what the seat would hold, to
 // what anyone may be seated with: an active actor that is seated at all, an
 // owned agent only as its owner's delegate, and no level above what the seat

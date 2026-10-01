@@ -478,6 +478,8 @@ type JoinLinkRevokeIn struct {
 	LinkID uuid.UUID `json:"link_id"`
 }
 
+var errLinkRevoked = apperr.Conflicts("the join link is revoked already")
+
 func joinLinkRevoke() tool.Tool {
 	return tool.Define(tool.Spec[JoinLinkRevokeIn, OK]{
 		Name: "course.join_link_revoke",
@@ -494,6 +496,13 @@ func joinLinkRevoke() tool.Tool {
 			}
 			return tool.Target{CourseID: in.CourseID, Type: "course_join_link", ID: &in.LinkID}, nil
 		},
+		Validate: func(ctx context.Context, q dbq.Querier, _ *domain.Member, in JoinLinkRevokeIn) error {
+			l, err := q.GetJoinLinkInCourse(ctx, dbq.GetJoinLinkInCourseParams{ID: in.LinkID, CourseID: in.CourseID})
+			if err == nil && l.RevokedAt != nil {
+				return errLinkRevoked
+			}
+			return err
+		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in JoinLinkRevokeIn) (OK, error) {
 			// Held as a join holds it: a join in flight finishes first, and
 			// one after this finds the link revoked.
@@ -505,7 +514,7 @@ func joinLinkRevoke() tool.Tool {
 				return OK{}, err
 			}
 			if n == 0 {
-				return OK{}, apperr.Conflicts("the join link is revoked already")
+				return OK{}, errLinkRevoked
 			}
 			ec.Emit(events.Event{Type: EventJoinLinkRevoked, CourseID: &in.CourseID, SubjectType: "course_join_link", SubjectID: &in.LinkID})
 			return OK{OK: true}, nil
