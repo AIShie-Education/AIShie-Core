@@ -135,8 +135,11 @@ Environment:
                        add may be on this machine (over http too) or on a private, link-local or
                        other address that is not public. False, the server fetches nothing of
                        theirs from such an address, checked on the address it connects to
-                       (issuer_address_not_allowed); for development, tests, and a provider on
-                       the site's own network. The operator's provider is reached wherever it is
+                       (issuer_address_not_allowed), and through no proxy (HTTPS_PROXY). For
+                       development, tests, a provider on the site's own network, and a server
+                       that reaches the internet only through a proxy, or through a DNS that
+                       answers with 198.18. addresses (fake-IP). The operator's provider is
+                       reached wherever it is
   JOIN_LINK_REGISTRATION  on (default) or off; whether someone with no account may register
                        through a course's join link. Off, people sign in (by single sign-on,
                        say) and then join; GET /v1/join/{token} says registration is false
