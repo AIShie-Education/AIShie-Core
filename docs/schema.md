@@ -1642,11 +1642,11 @@ of the grade entered meanwhile, a draft to post replaced meanwhile, say. They co
 made it themselves either. An owner who holds `perm_action_decide` is refused it saying why
 (`owner_would_be_refused`, the refusal approving it would meet in `details.refusal`); one who
 decides nothing else is refused as anyone without it is (`permission_denied`), and the queues
-tell both so (`yours_to_decide` false). Either takes it back, or someone else rejects it. Where whether approving it would be refused
-cannot be told, a file store that does not answer while a grade's feedback files are looked at,
-say, the owner's decision fails with nothing recorded, as approving it would, and the same call
-made again once it can be told is decided; the queues say such a proposal is not theirs
-meanwhile, rather than failing. An answer
+tell both so (`yours_to_decide` false). Either takes it back, or someone else rejects it. Where
+whether approving it would be refused cannot be told, a file store that does not answer while a
+grade's feedback files are looked at, say, the owner's decision fails with nothing recorded, as
+approving it would, and the same call made again once it can be told is decided; the queues say
+such a proposal is not theirs meanwhile, rather than failing. An answer
 (`conversation.answer`) is the one action no person could have made, since a person answers no
 conversation (§2.8): for it the owner is measured by what judging an answer is,
 `perm_action_decide` (`tool.Spec.OwnerJudgedBy`), so an instructor who decides actions without
