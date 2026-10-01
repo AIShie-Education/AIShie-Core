@@ -54,7 +54,10 @@ In place so far:
   by short-lived URL (this server's disk, or any S3-compatible store), and
   feedback files that travel with a grade through a proposal; documents are
   renamed and brought back from the archive, and what was uploaded by
-  mistake is purged by an administrator, leaving a tombstone;
+  mistake is purged by an administrator, leaving a tombstone; every Word,
+  Excel, PowerPoint or OpenDocument file, a document's of any kind or a
+  message's, converted to PDF once by the site's agent runtime, for the
+  front end to preview, and read by whoever reads the file;
 - records that can be corrected, with their history kept: a seat's roster
   role, what graded work is worth and where it counts (its grades rescaled or
   kept, the totals following), a computed total overridden beside the number
@@ -74,8 +77,9 @@ the instructor's tutor agent by its id, the student asks the tutor a
 question, watches its answer's draft come, waiting on the conversation, and
 it answers, and she is refused the instructor as a respondent,
 as he is refused answering; her chat panel lists the conversation, unread
-until she marks it read; once the runtime stops hosting the tutor, she asks
-it nothing more; another agent of the instructor's, an mcp agent, given
+until she marks it read; the runtime converts the instructor's Word handout
+and the slides she sends the tutor to PDF, which she opens and nobody else
+does; once the runtime stops hosting the tutor, she asks it nothing more; another agent of the instructor's, an mcp agent, given
 `member_manage`, seats a student with his token for it, is refused on the
 instructor's seat, is asked nothing in the site and works over MCP; the
 instructor shows a join link, through which a new student registers and a
@@ -486,7 +490,14 @@ standard output. With it the runtime hosts an agent by its id: it asks whether
 the person signed in to it owns the agent (`agent_runtime.check_owner`), is
 issued the agent's one token (`agent_runtime.issue_token`, which revokes the
 one before), and revokes it when the hosting ends
-(`agent_runtime.revoke_token`). A runtime agent's owner holds no token for it
+(`agent_runtime.revoke_token`). With the same credential it converts every
+Office and OpenDocument file Core keeps to PDF, once, for the front end to
+preview: it claims what waits (`agent_runtime.rendition_claim`), downloads the
+file, uploads the PDF (`agent_runtime.rendition_upload_url`) and says it is
+done, or why not (`agent_runtime.rendition_complete`); `RENDITION_MAX_BYTES`
+(100 MiB) bounds a PDF, and whoever may read a file reads its PDF
+(`rendition` in `document.get`, `document.file` and `conversation.attachment`;
+docs/schema.md §2.4, Renditions). A runtime agent's owner holds no token for it
 (`hosted_by_runtime`). An mcp agent acts only while a person uses it from a
 tool of their own (a chat app, an editor, a script), so it is not offered in
 the site, and a question to it there is refused (`mcp_agent`); one to a

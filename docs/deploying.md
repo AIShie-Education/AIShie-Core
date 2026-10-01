@@ -311,6 +311,10 @@ Run all of these as root on the server.
   aishie-core service issue agent_runtime --label runtime > /root/agent-runtime.credential
   ```
 
+  With the same credential the runtime converts every Office and
+  OpenDocument file to PDF, for the front end to preview it (migration
+  0026, below); nothing more is issued for that.
+
   `aishie-core service issue document_text --label transcriber` does the
   same for its transcriber. Root and administrators list and revoke them from
   the front end (`service.list_credentials`, `service.revoke_credential`).
@@ -519,6 +523,30 @@ Run all of these as root on the server.
   and keeps every token as it is, the runtime's included, and the agent
   runtime service becomes a suspended agent nobody owns, as 0020's down
   leaves the transcriber.
+- **Migration 0026, PDF renditions of Office files:** every Word, Excel,
+  PowerPoint or OpenDocument file Core keeps, of a document of any kind or
+  carried by a message, is converted to PDF once, by the site's agent
+  runtime, with the credential it already holds (`agent_runtime`, above),
+  for the front end to show in its PDF viewer; whoever may read the file
+  reads its PDF (docs/schema.md §2.4, Renditions). The migration queues
+  every such file there is, behind every file uploaded after it, the newest
+  first: on a site with years of files, the runtime works through them for a
+  while, one at a time by default, and nothing waits on it meanwhile. It
+  needs nothing of the operator. `RENDITION_MAX_BYTES` (default
+  `104857600`, 100 MiB) is the largest PDF taken; a larger one is skipped,
+  `too_large`, and the file stays a download. Nothing else is configured,
+  and there is no switch: no runtime claiming leaves every rendition
+  `queued`, and the files are downloads, as before. The PDFs are kept in the
+  file store under `renditions/` (on the server's disk,
+  `/srv/aishie/data/blobs/renditions/`; with S3, `attached/renditions/`),
+  beside the uploads, so a move of the files to another store copies it too,
+  and the orphan sweep removes a PDF nothing names. The previous release,
+  while the migration goes in and after a rollback, records files, which are
+  queued as any are, and purges versions, whose renditions go with their
+  files, their PDFs left to this release's sweep; it reads no rendition and
+  never sweeps `renditions/`. Going down drops the renditions and leaves
+  their PDFs in the store: migrated up again, every file is queued and
+  converted again, and the sweep removes the PDFs made before.
 - **Migration 0013, `member_invite`:** the permission that makes a course's
   join links. Every seat a person holds got it at its level of
   `member_manage`, and every seat an agent holds got it `denied`, whatever it

@@ -3,7 +3,8 @@
 For the team building the agent runtime: a separate service, in a repository
 of its own, that hosts AI agents for AIshie. §2 was checked against this
 repository and a running `aishie-core` on 2026-09-28, and §2.0 and §5.1, how
-the runtime hosts an agent, on 2026-10-01; if it and Core ever disagree,
+the runtime hosts an agent, and §2.0.1, how it converts Office files to PDF,
+on 2026-10-01; if it and Core ever disagree,
 `GET /v1/tools` is right. §3 comes from the providers' documentation,
 read on 2026-09-26; **[UNVERIFIED]** marks what it did not confirm.
 
@@ -33,6 +34,9 @@ read on 2026-09-26; **[UNVERIFIED]** marks what it did not confirm.
   nothing is declared, and `me_site_chat` is deprecated. Ending the hosting
   revokes the token (`agent_runtime.revoke_token`), and people ask the agent
   nothing more.
+- With the same credential the runtime converts every Office and
+  OpenDocument file Core keeps to PDF, once, from a queue Core keeps, for the
+  front end to preview it (§2.0.1); whoever may read the file reads the PDF.
 - Core's permissions decide what an agent may do and whether a person must
   confirm it. The runtime only narrows further: allowlists, budgets, quotas.
 - While a worker writes an answer, the runtime streams its draft to whoever
@@ -160,6 +164,49 @@ runtime → Core (as the agent, over MCP): me_get, me_memberships; start polling
   mcp agent with the reason above, and forgets any it held: Core revoked
   nothing of an mcp agent's, but no runtime hosts one.
 
+### 2.0.1 Converting Office files to PDF
+
+With the same credential the runtime converts every Office and OpenDocument
+file Core keeps — each file of a document's version, of every kind, and each
+file a message carries — to PDF, once, for the front end to show in its PDF
+viewer (docs/schema.md §2.4, Renditions). Core queues each as it is recorded,
+and queued every one there was when renditions came in; the runtime takes them
+from a queue under a lease, as the transcriber takes texts. Which files: an
+extension among `doc dot docx docm dotx xls xlt xlsx xlsm xltx ppt pps pot pptx
+pptm ppsx potx odt ods odp odg rtf`, and a declared type that is an Office or
+OpenDocument type, RTF, `application/octet-stream`, `application/zip`,
+`application/x-zip-compressed` or `application/vnd.ms-office`
+(`file_rendition_convertible`, migration 0026); the runtime's converter holds
+the same table.
+
+| Tool | Route | Input | Output and refusals |
+|---|---|---|---|
+| `agent_runtime.rendition_claim` | `POST /v1/services/agent_runtime/renditions/claim` | `max` (1 to 10, 1 by default), `lease_s` (60 to 3600, 600 by default), `wait_s` (0 to 25) | `claimed`: each `rendition_id`, `lease_id`, `lease_expires_at`, `attempt`, `backfill`, `course_id`, `source` (`document_file` with `file_id`, or `attachment` with `attachment_id`), `filename`, `content_type`, `byte_size`, `checksum`, `download_url` and `download_expires_at` (fifteen minutes), `max_bytes` (the largest PDF taken). Uploads first, the oldest first, then the backfill, the newest first. Empty when nothing waits; with `wait_s`, it waits for a file to be queued. No key: recorded nowhere. |
+| `agent_runtime.rendition_file` | `GET /v1/services/agent_runtime/renditions/{rendition_id}/file?lease_id=` | `rendition_id`, `lease_id` | another `download_url` for the file, with `lease_expires_at`. `409 lease_lost` once the claim no longer holds. |
+| `agent_runtime.rendition_renew` | `POST /v1/services/agent_runtime/renditions/{rendition_id}/renew` | `rendition_id`, `lease_id`, `lease_s` | `lease_expires_at`, from now. `409 lease_lost`: stop the work. No key. |
+| `agent_runtime.rendition_upload_url` | `GET /v1/services/agent_runtime/renditions/{rendition_id}/upload-url?lease_id=` | `rendition_id`, `lease_id` | `upload_url` (PUT the PDF, once, within `expires_at`, fifteen minutes), `headers` (`Content-Type: application/pdf`), `upload_token`, `max_bytes`. A new key each call. `409 lease_lost`. |
+| `agent_runtime.rendition_complete` | `POST /v1/services/agent_runtime/renditions/{rendition_id}/complete` | `rendition_id`, `lease_id`, `status`: `done` with `upload_token` and `page_count` (1 to 100000); `failed` or `skipped` with `reason` (`password_protected`, `timeout`, `conversion_failed`, `too_large`, `unsupported`); `Idempotency-Key` | `rendition_id`, `state`, and for done the PDF's `byte_size` and `checksum`. `400`: the wrong shape, `bad_upload_token`; `403 not_your_upload` (another claim's upload); `422`: `not_uploaded`, `not_a_pdf` (it does not begin `%PDF-`), `rendition_too_large` (past `max_bytes`) — the upload is removed and the claim holds; `409 lease_lost`. |
+
+The worker, on by default wherever the converter is and the credential is set:
+
+```
+loop:  POST …/renditions/claim {max: 1, wait_s: 25}          → claimed (or nothing: claim again)
+       GET  download_url, at most byte_size, into the sandbox
+       convert (internal/office), renewing …/renew every lease_s/2 while it runs
+       too large, encrypted, or not to be converted → complete {skipped, reason}
+       failed or timed out                          → complete {failed, reason}
+       PDF larger than max_bytes                    → complete {skipped, too_large}
+       else GET …/upload-url; PUT the PDF with its headers; complete {done, upload_token, page_count}
+       on 409 lease_lost: drop the work; on 422 not_a_pdf: complete {failed, conversion_failed}
+```
+
+Say `skipped` for what will not convert however often it is tried
+(`password_protected`, `unsupported`, `too_large`) and `failed` for what went
+wrong this time (`conversion_failed`, `timeout`): staff send either back to be
+converted again (`document.rendition_retry`, `conversation.rendition_retry`).
+A rendition claimed five times and never completed is failed by Core,
+`attempts_exhausted`. Never log a URL, an upload token or the credential.
+
 ### 2.1 The envelope
 
 Every MCP `tools/call` returns one JSON envelope twice: as `structuredContent`,
@@ -208,6 +255,7 @@ text.
 | Closing a conversation | `close:{conversation_id}` |
 | Issuing an agent's token (`agent_runtime.issue_token`) | `host:{agent_id}:{random}`, a new one each time: a replay comes back without the token, so a call that timed out is made again under a new key, which revokes the token never received |
 | Revoking it (`agent_runtime.revoke_token`) | `unhost:{agent_id}:{random}`; revoking none is no error |
+| Completing a rendition (`agent_runtime.rendition_complete`) | `rendition:{rendition_id}:{lease_id}:{attempt}`, attempt from 1: the same key after a timeout; the next number after a refusal that leaves the claim held (`not_a_pdf`, `not_uploaded`), with a new upload |
 | Any other write a model starts (M3) | `tool:{member_id}:{first 32 hex of sha256(tool name + canonical arguments)}` |
 
 **Write ahead.** Store `(key, tool, exact arguments)` before sending, and after
