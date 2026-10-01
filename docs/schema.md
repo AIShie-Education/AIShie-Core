@@ -1641,7 +1641,10 @@ have made it themselves either. An owner who holds `perm_action_decide` is refus
 decides nothing else is refused as anyone without it is (`permission_denied`), and the queues
 tell both so (`yours_to_decide` false). Either takes it back, or someone else rejects it. What
 only the moment refuses (`Pin`'s, below) is not asked again here: approving such a proposal
-fails. An answer
+fails. Where whether approving it would be refused cannot be told, a file store that does not
+answer while a grade's feedback files are looked at, say, the owner's decision fails with nothing
+recorded, as approving it would, and the same call made again once it can be told is decided; the
+queues say such a proposal is not theirs meanwhile, rather than failing. An answer
 (`conversation.answer`) is the one action no person could have made, since a person answers no
 conversation (§2.8): for it the owner is measured by what judging an answer is,
 `perm_action_decide` (`tool.Spec.OwnerJudgedBy`), so an instructor who decides actions without
@@ -2623,10 +2626,18 @@ respondent's `conversation_answer` decides is who is shown its text.
   proposal is queued as well as before the call is carried out, recording the call failed, and
   again, as the proposer's, when a proposal is approved: the course tools that may be proposed
   hold their rules there — a member's grants within the granter's own, an assignment's documents
-  and bucket, the grading scheme's shape, a total there to change — so that nobody is asked to
-  approve what approving would refuse. What needs the moment is asked as a proposal is made
+  and bucket, the grading scheme's shape, a total there to change; an assignment or a version of a
+  document published already, or not yet, a document archived, or not, a submission handed in or
+  still a draft, a student who has a submission already, a conversation closed, a message
+  retracted, a join link revoked, totals that do not count ungraded work as zero — so that nobody
+  is asked to approve what approving would refuse. Five are not: `action.decide`,
+  `action.review` and `action.withdraw`, whose rules about the action they are about are the
+  pipeline's (§2.6), asked as they are carried out; and `document.rendition_retry` and
+  `conversation.rendition_retry`, which refuse a rendition done already, or a file with none,
+  only as they are carried out. What needs the moment is asked as a proposal is made
   (`tool.Spec.Pin`) and again as it is carried out: a membership's `expires_at` already past
-  (`member.add`, `member.rescope`), and the seats a roster role takes in now
+  (`member.add`, `member.rescope`), an actor seated already by a seat neither expired nor
+  orphaned (`member.add`), and the seats a roster role takes in now
   (`member.update_perms_bulk`). A rule left to `Execute` alone is found only when someone
   approves the proposal. A proposal stored before its tool's `Check` refused what it says fails
   when it is approved, with that refusal.
