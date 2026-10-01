@@ -5,9 +5,9 @@
 -- each version's own file columns, naming its first file; each runtime
 -- agent's site chat credential, naming the runtime token it holds that is
 -- not revoked; and the rules 0023 and 0025 kept for the release before
--- them, as they were. Lost: what type and size the first file of a version
--- purged since 0027 was, which a purged version said; its columns are left
--- empty.
+-- them, as they were. Lost: what type and size the first file of a purged
+-- version was, which a purged version said and the up dropped, whenever it
+-- was purged (its files went with its purge); its columns are left empty.
 
 BEGIN;
 

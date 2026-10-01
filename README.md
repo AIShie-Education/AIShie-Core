@@ -682,7 +682,8 @@ and documents. The server keeps itself up to date: every five minutes it
 looks at the tag each service follows, `:edge` on a test site and the
 release its operator names on a school's, and deploys a new image by a safe
 sequence (a backup, `migrate up`, the switch, the health check, and a
-rollback if it fails). Nothing in this repository reaches a server.
+rollback if it fails, though one past migration 0027 has to migrate down
+first: docs/deploying.md). Nothing in this repository reaches a server.
 
 The older way, a server of Core alone, is still here:
 [deploy/setup-server.sh](deploy/setup-server.sh) sets one up, and

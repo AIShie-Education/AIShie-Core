@@ -607,19 +607,23 @@ Run all of these as root on the server.
   good credential (`credential_rejected`) until it is updated. The front end
   sends none of the above since AIShie-Core #49 and #52. A proposal waiting
   at the upgrade that gives a version its file by `upload_token` alone no
-  longer reads as a call of this release: when someone decides it, it is
-  cancelled (`tool_removed`), and its agent proposes it again with `files`.
+  longer reads as a call of this release: when someone approves it, it is
+  cancelled (`tool_removed`), and its agent proposes it again with `files`;
+  rejected, it is rejected as before.
   Unlike every migration before it, it does not leave the release before
   working: that release writes and reads the columns it drops. While it goes
   in, until this release has started, the release before fails what reads an
   actor or a version, a moment on a school's site; and if this release does
   not come up, starting the release before again does not help, whether
   `aishie-deploy` does it here or AIShie-Deploy's `aishie-update` does it on
-  its stack, after a health check that failed. To roll back, migrate down
-  once with this release's image before running the release before (Rolling
-  back, below): it loses nothing the release before reads, putting back each
-  version's first file in its own columns and each runtime agent's runtime
-  token as its site chat credential.
+  its stack, after a health check that failed: that release reports itself
+  healthy, and fails every call that reads an actor or a version. To roll
+  back, migrate down once with this release's image before running the
+  release before (Rolling back, below). The down puts back each version's
+  first file in its own columns and each runtime agent's runtime token as its
+  site chat credential; what it cannot put back is the type and size of a
+  purged version's file, which the release before shows and nothing keeps
+  once 0027 has dropped them.
 - **Migration 0013, `member_invite`:** the permission that makes a course's
   join links. Every seat a person holds got it at its level of
   `member_manage`, and every seat an agent holds got it `denied`, whatever it

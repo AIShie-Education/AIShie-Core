@@ -92,7 +92,9 @@ stable): that is the decision to deploy and to migrate. Going back is
 pinning the release before (its README, Rolling back): `migrate up` leaves
 a schema a newer release migrated as it is, and a migration keeps the
 release before it working. A release further back may need what a later
-migration has dropped.
+migration has dropped. Going back past migration 0027 is the exception
+(Migrations, above): its release's image migrates down first, which the
+stack's own rollback after a failed health check does not do.
 
 To a server of Core's own (the older way,
 [docs/deploying.md](docs/deploying.md)), somebody runs **Deploy** for it
