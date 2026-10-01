@@ -18,6 +18,12 @@ and `build` green. CI also runs `test (s3 against minio)` and `vuln`.
 - A rule the **database** can hold goes in a migration, with a check in
   `src/tests/constraints_test.sql`. A rule it cannot goes in the tool, with a
   Go test, and a line under "Enforced by the application" in `docs/schema.md`.
+- A rule about what a call's **arguments** say alone — a blank name, a number
+  below zero, two fields that exclude each other — goes in the tool's `Check`,
+  never in `Execute` alone, so that the call is refused before anything is
+  recorded or proposed, with the error `Execute` would have given. A rule that
+  needs the course to tell goes in `Validate`, which runs before a proposal is
+  queued too; one left to `Execute` is found only when someone approves it.
 - A new **tool** is one `tool.Define` in `internal/tools`. It gets its REST
   route and its MCP tool from that declaration; there is nothing to add in
   `httpapi` or `mcpapi`. If it emits a new event type, give the type a row in

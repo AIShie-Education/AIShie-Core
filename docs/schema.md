@@ -1632,7 +1632,12 @@ reviewing and reading them (`action.get`, any of them), and the queues listing t
 anything else is denied as it is to anyone who does not hold it, an action id that does not exist
 included. Where their own level is `confirm_required` or `pending_review`, the course
 has someone check them too, and so their agent: someone outside the party decides it, as for the
-rest of the party; so it is where the target is beyond their reach, or gone. An answer
+rest of the party; so it is where the target is beyond their reach, or gone, and where approving
+the proposal now would be refused for what it asks: its arguments refused by what they say
+alone, or the tool's own rules (`Validate`), run as approving it runs them, as the proposer's —
+a grade proposed out of the points the work was worth then, say. They could not have made it
+themselves either, and the refusal they are given says why; they take it back, or someone else
+rejects it. An answer
 (`conversation.answer`) is the one action no person could have made, since a person answers no
 conversation (§2.8): for it the owner is measured by what judging an answer is,
 `perm_action_decide` (`tool.Spec.OwnerJudgedBy`), so an instructor who decides actions without
@@ -2606,6 +2611,16 @@ respondent's `conversation_answer` decides is who is shown its text.
   a different hash is refused.
 - Re-authorizing the proposer when a proposal is approved, and cancelling proposals past
   their TTL.
+- A call's arguments are held to what they may say alone as they are decoded, after the schema
+  and before anything else (`tool.Spec.Check`): a name left blank, a number below zero, a value
+  that is not one of those allowed, two fields given that exclude each other. A call refused for
+  them is never an attempt: nothing is recorded, whoever makes it and at whatever level, so none
+  waits as a proposal for someone to approve what could never be carried out. What needs the
+  course to tell is the tool's `Validate`, which runs before a proposal is queued as well and
+  records the call failed, and again on approval. A proposal stored before its tool refused what
+  it says fails when it is approved, with that refusal. One rule is the moment's, not the
+  arguments': a membership's `expires_at` already past (`member.rescope`) is refused when the
+  change is carried out.
 - Nobody decides or reviews their own action from another seat (§2.6): the CHECKs compare seats,
   and the application compares actors, so an actor removed and seated again is still refused.
 - Nobody decides or reviews their own action at one remove (§2.6): a decision or review that is
@@ -2752,7 +2767,8 @@ respondent's `conversation_answer` decides is who is shown its text.
   other agents are one, in `action.decide`, `action.review`, at any remove and for escalations.
   One exception, at no remove: an owner approves, rejects or reviews their own agent's action
   where their own seat, as `authorize()` finds it for the same call when they decide, holds it at
-  `autonomous` and reaches its target; `yours_to_decide` is worked out the same way, and the
+  `autonomous` and reaches its target, and, deciding a proposal, approving it now would not be
+  refused for what it asks; `yours_to_decide` is worked out the same way, and the
   decision and its event say `by_owner`. That takes no `perm_action_decide` and is `autonomous`
   whatever the owner holds of it (`tool.Gate.OwnAgents`); without it, an owner reaches their own
   agents' actions alone, in `action.decide`, `.review`, `.get` and the queues, and is denied the
