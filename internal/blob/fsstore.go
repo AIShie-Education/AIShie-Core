@@ -68,6 +68,21 @@ func (s *FSStore) PresignDownload(_ context.Context, key, filename string, ttl t
 	return s.baseURL + BlobPath + s.signer.signDownload(key, filename, ttl, s.now()), nil
 }
 
+func (s *FSStore) PresignPutUpTo(_ context.Context, key, contentType string, maxBytes int64, ttl time.Duration) (string, map[string]string, error) {
+	if _, err := s.path(key); err != nil {
+		return "", nil, err
+	}
+	url := s.baseURL + BlobPath + s.signer.signPutUpTo(key, contentType, maxBytes, ttl, s.now())
+	return url, map[string]string{"Content-Type": contentType}, nil
+}
+
+func (s *FSStore) PresignView(_ context.Context, key, filename, contentType string, ttl time.Duration) (string, error) {
+	if _, err := s.path(key); err != nil {
+		return "", err
+	}
+	return s.baseURL + BlobPath + s.signer.signView(key, filename, contentType, ttl, s.now()), nil
+}
+
 func (s *FSStore) Redeem(token, method string) (string, string, error) {
 	c, err := s.signer.verifyURL(token, method, s.now())
 	return c.Key, c.ContentType, err
@@ -76,6 +91,14 @@ func (s *FSStore) Redeem(token, method string) (string, string, error) {
 func (s *FSStore) RedeemDownload(token string) (string, string, error) {
 	c, err := s.signer.verifyURL(token, "GET", s.now())
 	return c.Key, c.Filename, err
+}
+
+func (s *FSStore) Grant(token, method string) (Grant, error) {
+	c, err := s.signer.verifyURL(token, method, s.now())
+	if err != nil {
+		return Grant{}, err
+	}
+	return Grant{Key: c.Key, ContentType: c.ContentType, Filename: c.Filename, MaxBytes: c.MaxBytes, Inline: c.Inline}, nil
 }
 
 // path maps a key to a file, and refuses any key that would leave the root.
@@ -170,6 +193,20 @@ func (s *FSStore) Open(ctx context.Context, key string) (io.ReadCloser, Info, er
 	p, _ := s.path(key)
 	f, err := os.Open(p) //nolint:gosec // as above
 	return f, info, err
+}
+
+func (s *FSStore) Head(ctx context.Context, key string, n int) ([]byte, error) {
+	rc, _, err := s.Open(ctx, key)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rc.Close() }()
+	head := make([]byte, n)
+	got, err := io.ReadFull(rc, head)
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		err = nil
+	}
+	return head[:got], err
 }
 
 // FinalKey is the staging key itself: a file here is created with O_EXCL, so

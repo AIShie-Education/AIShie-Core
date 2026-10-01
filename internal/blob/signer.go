@@ -18,8 +18,9 @@ type Signer struct {
 }
 
 const (
-	purposeUpload = "blob.upload"
-	purposeURL    = "blob.url"
+	purposeUpload    = "blob.upload"
+	purposeURL       = "blob.url"
+	purposeRendition = "blob.rendition"
 )
 
 var (
@@ -79,13 +80,46 @@ func (s *Signer) VerifyUpload(token string) (UploadClaim, error) {
 	return c, nil
 }
 
+// RenditionUpload says: this key was given to this claim (Lease) of this
+// rendition, for the agent runtime to upload the PDF it made to. It is
+// signed for its purpose alone, so that it is never taken for a member's
+// upload token, nor one of those for it. Like an upload token, it is
+// checked without its expiry when the PDF is recorded: the claim is what
+// must still hold then.
+type RenditionUpload struct {
+	Key       string    `json:"k"`
+	Rendition uuid.UUID `json:"r"`
+	Lease     uuid.UUID `json:"l"`
+	Expires   int64     `json:"e"`
+}
+
+// SignRendition issues a rendition's upload token.
+func (s *Signer) SignRendition(c RenditionUpload) string { return s.s.Sign(purposeRendition, c) }
+
+// VerifyRendition checks a rendition's upload token's signature, and not its
+// expiry; see RenditionUpload.
+func (s *Signer) VerifyRendition(token string) (RenditionUpload, error) {
+	var c RenditionUpload
+	if err := s.s.Open(purposeRendition, token, &c); err != nil {
+		return RenditionUpload{}, err
+	}
+	if c.Key == "" || c.Rendition == uuid.Nil || c.Lease == uuid.Nil {
+		return RenditionUpload{}, ErrBadToken
+	}
+	return c, nil
+}
+
 // urlClaim is what a filesystem-store URL carries: one method, one key, for
-// a while; for a download, the name it is saved under, if it has one.
+// a while; for a download, the name it is saved under, if it has one; for a
+// view, that it is one and the type it is served as; for an upload larger
+// than an upload is otherwise, how large.
 type urlClaim struct {
 	Key         string `json:"k"`
 	Method      string `json:"v"`
 	ContentType string `json:"t,omitempty"`
 	Filename    string `json:"f,omitempty"`
+	MaxBytes    int64  `json:"x,omitempty"`
+	Inline      bool   `json:"i,omitempty"`
 	Expires     int64  `json:"e"`
 }
 
@@ -93,8 +127,18 @@ func (s *Signer) signURL(key, method, contentType string, ttl time.Duration, now
 	return s.s.Sign(purposeURL, urlClaim{Key: key, Method: method, ContentType: contentType, Expires: now.Add(ttl).Unix()})
 }
 
+func (s *Signer) signPutUpTo(key, contentType string, maxBytes int64, ttl time.Duration, now time.Time) string {
+	return s.s.Sign(purposeURL, urlClaim{Key: key, Method: "PUT", ContentType: contentType, MaxBytes: maxBytes,
+		Expires: now.Add(ttl).Unix()})
+}
+
 func (s *Signer) signDownload(key, filename string, ttl time.Duration, now time.Time) string {
 	return s.s.Sign(purposeURL, urlClaim{Key: key, Method: "GET", Filename: filename, Expires: now.Add(ttl).Unix()})
+}
+
+func (s *Signer) signView(key, filename, contentType string, ttl time.Duration, now time.Time) string {
+	return s.s.Sign(purposeURL, urlClaim{Key: key, Method: "GET", Filename: filename, ContentType: contentType, Inline: true,
+		Expires: now.Add(ttl).Unix()})
 }
 
 func (s *Signer) verifyURL(token, method string, now time.Time) (urlClaim, error) {

@@ -47,6 +47,22 @@ type Store interface {
 	// the same, and saved under that name (Disposition). An empty name is
 	// PresignGet.
 	PresignDownload(ctx context.Context, key, filename string, ttl time.Duration) (string, error)
+	// PresignPutUpTo is PresignPut for an object that may be as large as
+	// maxBytes, which this server's own disk then takes as it arrives where
+	// it would stop a larger upload otherwise: a rendition's PDF, which may
+	// be larger than any file uploaded. An object store's URL takes a PUT of
+	// any size, as PresignPut's does, and whoever records the object checks
+	// its size.
+	PresignPutUpTo(ctx context.Context, key, contentType string, maxBytes int64, ttl time.Duration) (url string, headers map[string]string, err error)
+	// PresignView returns a URL that serves the object for a while to be
+	// viewed where it is opened (inline), as contentType whatever it was
+	// stored as, and under filename (InlineDisposition). It is for what the
+	// server has checked is what it says, a rendition's PDF, and never for
+	// what an uploader declared, which is served as a download.
+	PresignView(ctx context.Context, key, filename, contentType string, ttl time.Duration) (string, error)
+	// Head returns the first n bytes of the object, fewer when it is shorter,
+	// or ErrNotFound: enough to tell what it is, without reading it whole.
+	Head(ctx context.Context, key string, n int) ([]byte, error)
 	// Stat describes the object, or returns ErrNotFound.
 	Stat(ctx context.Context, key string) (Info, error)
 	Delete(ctx context.Context, key string) error
@@ -105,7 +121,27 @@ type Local interface {
 	// PresignDownload, and says the name the file is to be saved under, if
 	// it was given one.
 	RedeemDownload(token string) (key, filename string, err error)
+	// Grant checks a URL token issued for method by any of the Presign
+	// methods, and says all it grants.
+	Grant(token, method string) (Grant, error)
 	Open(ctx context.Context, key string) (io.ReadCloser, Info, error)
+}
+
+// Grant is what a URL of this server's own disk lets its holder do: one
+// method, on one key.
+type Grant struct {
+	Key string
+	// ContentType is what a PUT must send; for a view, what it is served
+	// as.
+	ContentType string
+	// Filename is the name a GET serves the file under, if any.
+	Filename string
+	// MaxBytes, for a PUT, is the most it takes, where the URL says
+	// (PresignPutUpTo); zero for the server's own limit on an upload.
+	MaxBytes int64
+	// Inline, for a GET, serves the file to be viewed where it is opened
+	// (PresignView), rather than as a download.
+	Inline bool
 }
 
 // ErrTooLarge means an upload went past the limit.
@@ -113,6 +149,18 @@ var ErrTooLarge = errors.New("blob: upload is larger than allowed")
 
 // ErrExists means the key has been written already: a key is written once.
 var ErrExists = errors.New("blob: the object already exists; a key is written once")
+
+// InlineDisposition is the Content-Disposition a file served to be viewed is
+// served with (PresignView): shown where it is opened, and saved, if it is
+// saved, under its name, written as Disposition writes it.
+func InlineDisposition(filename string) string {
+	if filename != "" {
+		if d := mime.FormatMediaType("inline", map[string]string{"filename": filename}); d != "" {
+			return d
+		}
+	}
+	return "inline"
+}
 
 // Disposition is the Content-Disposition a stored file is served with:
 // always a download, never a page, and under its name when it has one, in

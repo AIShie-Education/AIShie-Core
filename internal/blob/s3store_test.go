@@ -193,6 +193,23 @@ func TestS3Store(t *testing.T) {
 	if cd := res.Header.Get("Content-Disposition"); res.StatusCode != http.StatusOK || cd != Disposition("作業 3.pdf") {
 		t.Fatalf("a named download: %d, Content-Disposition %q", res.StatusCode, cd)
 	}
+	// A rendition's PDF is viewed where it is opened, as a PDF, whatever it
+	// was stored as; and its first bytes are read alone.
+	viewURL, err := s.PresignView(ctx, key, "講義 3.pdf", "application/pdf", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res, err = http.Get(viewURL); err != nil {
+		t.Fatal(err)
+	}
+	res.Body.Close()
+	if res.StatusCode != http.StatusOK || res.Header.Get("Content-Disposition") != InlineDisposition("講義 3.pdf") ||
+		res.Header.Get("Content-Type") != "application/pdf" {
+		t.Fatalf("a view: %d, %v", res.StatusCode, res.Header)
+	}
+	if head, err := s.Head(ctx, key, 4); err != nil || !bytes.Equal(head, body[:4]) {
+		t.Fatalf("the head: %q %v", head, err)
+	}
 	if err := s.Delete(ctx, key); err != nil {
 		t.Fatal(err)
 	}

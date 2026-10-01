@@ -21,17 +21,24 @@ import (
 
 func (s *server) blobPut(local blob.Local) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		key, contentType, err := local.Redeem(r.PathValue("token"), http.MethodPut)
+		grant, err := local.Grant(r.PathValue("token"), http.MethodPut)
 		if err != nil {
 			s.writeError(w, r, apperr.Forbid("the upload URL is not valid, or has expired"))
 			return
 		}
+		key, contentType := grant.Key, grant.ContentType
 		// What was signed is what is stored. A client that sends a different
 		// type is refused rather than silently overridden: a PDF slot must
 		// not end up holding HTML.
 		if got := r.Header.Get("Content-Type"); got != contentType {
 			s.writeError(w, r, apperr.Invalid("this URL takes Content-Type %q, not %q", contentType, got))
 			return
+		}
+		// An upload is held to the server's limit on one, unless its URL
+		// says another: a rendition's PDF, to the limit on those.
+		most := s.MaxUploadBytes
+		if grant.MaxBytes > 0 {
+			most = grant.MaxBytes
 		}
 		// A file takes longer to arrive than a JSON body does. The answer
 		// then has as long as any other, from when the file is in: the time
@@ -41,11 +48,11 @@ func (s *server) blobPut(local blob.Local) http.HandlerFunc {
 		rc := http.NewResponseController(w)
 		_ = rc.SetReadDeadline(time.Now().Add(s.TransferTimeout))
 		body := &uploadBody{Reader: r.Body}
-		info, err := local.Put(r.Context(), key, contentType, body, s.MaxUploadBytes)
+		info, err := local.Put(r.Context(), key, contentType, body, most)
 		_ = rc.SetWriteDeadline(time.Now().Add(s.BodyTimeout))
 		switch {
 		case errors.Is(err, blob.ErrTooLarge):
-			s.writeError(w, r, apperr.Invalid("the file is larger than %d bytes", s.MaxUploadBytes))
+			s.writeError(w, r, apperr.Invalid("the file is larger than %d bytes", most))
 		case errors.Is(err, blob.ErrExists):
 			s.writeError(w, r, apperr.Conflicts("this URL has been uploaded to already; a file is written once"))
 		case body.err != nil:
@@ -97,12 +104,12 @@ func readFault(err error) error {
 
 func (s *server) blobGet(local blob.Local) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		key, filename, err := local.RedeemDownload(r.PathValue("token"))
+		grant, err := local.Grant(r.PathValue("token"), http.MethodGet)
 		if err != nil {
 			s.writeError(w, r, apperr.Forbid("the download URL is not valid, or has expired"))
 			return
 		}
-		f, info, err := local.Open(r.Context(), key)
+		f, info, err := local.Open(r.Context(), grant.Key)
 		if errors.Is(err, blob.ErrNotFound) {
 			s.writeError(w, r, apperr.Missing("there is no such file"))
 			return
@@ -114,16 +121,27 @@ func (s *server) blobGet(local blob.Local) http.HandlerFunc {
 		defer func() { _ = f.Close() }()
 		_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(s.TransferTimeout))
 		h := w.Header()
-		h.Set("Content-Type", info.ContentType)
 		h.Set("Content-Length", strconv.FormatInt(info.Size, 10))
-		// Uploaded files are other people's bytes served from the API's own
-		// origin. They are downloads, never pages: a student's "essay.html"
-		// must not run as script with the viewer's session. One with a name
-		// of its own, a conversation's attachment, is saved under it.
-		h.Set("Content-Disposition", blob.Disposition(filename))
 		h.Set("X-Content-Type-Options", "nosniff")
-		h.Set("Content-Security-Policy", "default-src 'none'; sandbox")
 		h.Set("Cache-Control", "private, no-store")
+		if grant.Inline {
+			// A view (PresignView) is of what the server checked is what it
+			// says, a rendition's PDF, and is served as the type its URL
+			// says, never as it was stored, to be shown where it is opened.
+			// It is not sandboxed: a browser's PDF viewer does not run in a
+			// sandboxed page.
+			h.Set("Content-Type", grant.ContentType)
+			h.Set("Content-Disposition", blob.InlineDisposition(grant.Filename))
+		} else {
+			// Uploaded files are other people's bytes served from the API's
+			// own origin. They are downloads, never pages: a student's
+			// "essay.html" must not run as script with the viewer's session.
+			// One with a name of its own, a conversation's attachment, is
+			// saved under it.
+			h.Set("Content-Type", info.ContentType)
+			h.Set("Content-Disposition", blob.Disposition(grant.Filename))
+			h.Set("Content-Security-Policy", "default-src 'none'; sandbox")
+		}
 		_, _ = io.Copy(w, f)
 	}
 }
