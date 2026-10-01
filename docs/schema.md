@@ -2811,12 +2811,12 @@ respondent's `conversation_answer` decides is who is shown its text.
   One exception, at no remove: an owner approves, rejects or reviews their own agent's action
   where their own seat, as `authorize()` finds it for the same call when they decide, holds it at
   `autonomous` and reaches its target, and, deciding a proposal, the tool's `Check` and
-  `Validate`, run as approving it now would run them, do not refuse it; `yours_to_decide` is
-  worked out the same way, and the
-  decision and its event say `by_owner`. That takes no `perm_action_decide` and is `autonomous`
-  whatever the owner holds of it (`tool.Gate.OwnAgents`); without it, an owner reaches their own
-  agents' actions alone, in `action.decide`, `.review`, `.get` and the queues, and is denied the
-  rest as anyone without it is.
+  `Validate`, run as approving it now would run them, and its `Since`, of what changed since it
+  was proposed, do not refuse it; `yours_to_decide` is worked out the same way, and the decision
+  and its event say `by_owner`. That takes no `perm_action_decide` and is `autonomous` whatever
+  the owner holds of it (`tool.Gate.OwnAgents`); without it, an owner reaches their own agents'
+  actions alone, in `action.decide`, `.review`, `.get` and the queues, and is denied the rest as
+  anyone without it is.
 - Only an agent's owner acts on it through `agent.*`, and to anyone else it does not exist.
   What an owner does for themselves is capped: `agent.create`, and `agent.reactivate` of one they
   suspended, are refused once they have `AGENT_MAX_PER_OWNER` agents that are not suspended,

@@ -52,18 +52,28 @@ func ownAgentsAction(d Deps, judge bool) tool.OwnAgentsFunc {
 		if err != nil {
 			return domain.Denied, err
 		}
-		if judge {
-			if may, err := d.Pipeline.OwnerMayJudge(ctx, q, caller, seat.ID, a, now); err != nil || !may {
-				return domain.Denied, err
-			}
-			return domain.Autonomous, nil
-		}
+		// Whose it is comes first, and an agent's owner never changes: no
+		// one else's call waits on the proposal below.
 		did, err := q.GetActor(ctx, a.ActorID)
 		if err != nil {
 			return domain.Denied, err
 		}
 		if did.OwnerActorID == nil || *did.OwnerActorID != caller.ID {
 			return domain.Denied, nil
+		}
+		if judge {
+			if a.Status == string(domain.StatusProposed) {
+				// Taken as a decision about it takes it, before what
+				// asking whether approving it would be refused locks
+				// (pipeline.LockProposal): an approval under way holds it
+				// and goes on to take those.
+				if a, err = pipeline.LockProposal(ctx, q, target.CourseID, a.ID); err != nil {
+					return domain.Denied, err
+				}
+			}
+			if may, err := d.Pipeline.OwnerMayJudge(ctx, q, caller, seat.ID, a, now); err != nil || !may {
+				return domain.Denied, err
+			}
 		}
 		return domain.Autonomous, nil
 	}

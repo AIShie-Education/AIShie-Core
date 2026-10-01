@@ -138,9 +138,9 @@ func (p *Pipeline) refuseDecision(ctx context.Context, q dbq.Querier, actor doma
 // ValidateDecision is action.decide's Validate: what Decide would refuse the
 // decision in, made from seat m at now, before anything of it is decided
 // (refuseDecision), asked of the proposal under the lock Decide takes it
-// with (lockProposal), which the call keeps.
+// with (LockProposal), which the call keeps.
 func (p *Pipeline) ValidateDecision(ctx context.Context, q dbq.Querier, m *domain.Member, now time.Time, in DecideIn) error {
-	prop, err := lockProposal(ctx, q, in.CourseID, in.ActionID)
+	prop, err := LockProposal(ctx, q, in.CourseID, in.ActionID)
 	if err != nil {
 		return err
 	}
@@ -161,7 +161,7 @@ func seatActor(ctx context.Context, q dbq.Querier, m *domain.Member) (domain.Act
 	return authz.LoadActor(ctx, q, m.ActorID)
 }
 
-// lockProposal takes proposal id of course for a decision about it: the
+// LockProposal takes proposal id of course for a decision about it: the
 // proposer's seat first, then the proposal, the order a removal of that seat
 // takes them in (the seat, then its proposals) and the order every write
 // takes its caller's seat in. A pause, narrowing or removal of the proposer
@@ -174,8 +174,12 @@ func seatActor(ctx context.Context, q dbq.Querier, m *domain.Member) (domain.Act
 // Decide takes it so, and ValidateDecision before it, ahead of whatever the
 // proposed tool's Validate locks as it asks whether approving would be
 // refused (ownerJudges): an approval takes the proposal and then those, and
-// an owner's decision must not take them the other way round.
-func lockProposal(ctx context.Context, q dbq.Querier, course, id uuid.UUID) (dbq.Action, error) {
+// an owner's decision must not take them the other way round. So does the
+// gate of an owner below autonomous for action_decide (Gate.OwnAgents),
+// once it has found the proposal to be their own agent's and before it asks
+// the same: that is asked as the call is authorized, before
+// ValidateDecision. Anyone else that gate meets is denied without it.
+func LockProposal(ctx context.Context, q dbq.Querier, course, id uuid.UUID) (dbq.Action, error) {
 	if ahead, err := q.GetActionInCourse(ctx, dbq.GetActionInCourseParams{ID: id, CourseID: &course}); err == nil && ahead.MemberID != nil {
 		if err := q.ShareSeats(ctx, []uuid.UUID{*ahead.MemberID}); err != nil {
 			return dbq.Action{}, err
@@ -201,7 +205,7 @@ func lockProposal(ctx context.Context, q dbq.Querier, course, id uuid.UUID) (dbq
 // action.decide, inside that action's savepoint, on a decision CheckDecision
 // has taken.
 func (p *Pipeline) Decide(ctx context.Context, ec *tool.ExecCtx, in DecideIn) (DecideOut, error) {
-	prop, err := lockProposal(ctx, ec.Q, in.CourseID, in.ActionID)
+	prop, err := LockProposal(ctx, ec.Q, in.CourseID, in.ActionID)
 	if err != nil {
 		return DecideOut{}, err
 	}

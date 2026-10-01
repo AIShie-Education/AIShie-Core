@@ -1506,6 +1506,45 @@ func TestAnApprovalHoldsTheProposersSeat(t *testing.T) {
 	}
 }
 
+// An agent's owner who decides nothing but their agent's proposals takes the
+// proposal before asking whether approving it would be refused, which takes
+// what approving it locks: the order anyone approving it takes the two in.
+// Ito's agent proposes Yuki's midterm grade, whose Validate takes the
+// course's tree lock; while an approval of it holds the proposal, Ito's
+// decision waits for the proposal holding nothing that the approval goes on
+// to take. Yuki, who decides nothing and owns no agent, is denied at once:
+// she does not wait on a proposal that is not her agent's.
+func TestAnOwnersDecisionTakesTheProposalBeforeWhatApprovingItLocks(t *testing.T) {
+	b := build(t)
+	ito := b.person(t, "Ito", "")
+	b.do(t, b.sato, "member.add", m{"course_id": b.course, "actor_id": ito, "preset": "instructor", "perms": m{"action_decide": "denied"}})
+	bot := b.agent(t, ito, "Ito's marker")
+	b.delegate(t, ito, bot, m{"preset": "ta", "perms": m{"grade_submit": "confirm_required"}})
+	prop := b.MustCall(bot, "grade.submit", m{"course_id": b.course, "component_id": b.midterm,
+		"student_member_id": b.yukiM, "score": 80}, "bot-grades")
+	if prop.Status != domain.StatusProposed {
+		t.Fatalf("Ito's agent grading: %+v", prop)
+	}
+	release := heldBy(t, b, `SELECT 1 FROM action WHERE id = $1 FOR UPDATE`, prop.ActionID)
+	select {
+	case r := <-b.inFlight(b.yuki, "action.decide", m{"course_id": b.course, "action_id": prop.ActionID, "decision": "approve"}, "yuki-approves"):
+		if r.err != nil || r.out.Status != domain.StatusDenied {
+			t.Fatalf("Yuki's approval: %v %+v", r.err, r.out)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Yuki's approval waits for a proposal that is not her agent's")
+	}
+	decision := b.inFlight(ito, "action.decide", m{"course_id": b.course, "action_id": prop.ActionID, "decision": "approve"}, "ito-approves")
+	b.waitingFor(t, 1, decision)
+	if b.Count(`SELECT count(*) WHERE pg_try_advisory_xact_lock(hashtextextended('component-tree:' || $1::uuid::text, 0))`, b.course) != 1 {
+		t.Fatal("Ito's decision holds the course's tree lock while it waits for the proposal")
+	}
+	release()
+	if out := settled(t, decision); out.Status != domain.StatusExecuted || !strings.Contains(string(out.Result), `"outcome":"executed"`) {
+		t.Fatalf("Ito's approval: %+v", out)
+	}
+}
+
 // Changing a student's seat and writing an event that names the student do
 // not deadlock: the event's writer takes the seat before the course's event
 // stream, so it never holds the stream while it waits for the seat.
