@@ -1175,7 +1175,13 @@ IDP_CLIENT_ID=aishie-site IDP_CLIENT_SECRET=$SITE_SECRET IDP_REDIRECT_URI="$BASE
   IDP_SUBJECT=mori@campus.example IDP_EMAIL=mori@example.edu \
   python3 "$(dirname "$0")/e2e-idp.py" "$IDP_PORT" >"$WORK/idp.log" 2>&1 &
 IDP_PID=$!
-for _ in $(seq 1 100); do curl -sf "$ISSUER/.well-known/openid-configuration" >/dev/null 2>&1 && break; sleep 0.1; done
+# It makes its RSA key in Python as it starts: a second or two, and on a busy
+# machine half a minute.
+for _ in $(seq 1 600); do
+  curl -sf "$ISSUER/.well-known/openid-configuration" >/dev/null 2>&1 && break
+  kill -0 "$IDP_PID" 2>/dev/null || break
+  sleep 0.1
+done
 curl -sf "$ISSUER/.well-known/openid-configuration" >/dev/null || fail "the stand-in provider did not come up: $(cat "$WORK/idp.log")"
 export OIDC_ISSUER="$ISSUER" OIDC_CLIENT_ID=aishie-e2e OIDC_DISPLAY_NAME="PolyU NetID"
 # A name the button cannot show as it is, and the server does not start.
