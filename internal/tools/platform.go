@@ -894,8 +894,8 @@ func actorInviteNew() tool.Tool {
 
 type ActorLinkSSOIn struct {
 	ActorID  uuid.UUID `json:"actor_id"`
-	Provider string    `json:"provider" jsonschema:"this installation's name for the identity provider, e.g. polyu-adfs"`
-	Subject  string    `json:"subject" jsonschema:"the account at the provider: for ADFS, the UPN, e.g. yuki@connect.polyu.hk"`
+	Provider string    `json:"provider" jsonschema:"this installation's name for the identity provider, e.g. school-adfs"`
+	Subject  string    `json:"subject" jsonschema:"the account at the provider: for ADFS, the UPN, e.g. name@example.edu"`
 }
 
 type CredentialIDOut struct {

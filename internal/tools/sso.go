@@ -46,7 +46,7 @@ type SSOActor struct {
 // SSOProviderView is a provider as administrators read it. Never its client
 // secret: a hint of it.
 type SSOProviderView struct {
-	ID                  string     `json:"id" jsonschema:"the provider's id, such as polyu-adfs: what actor.link_sso names, and what a sign-in through it starts with; it never changes"`
+	ID                  string     `json:"id" jsonschema:"the provider's id, such as school-adfs: what actor.link_sso names, and what a sign-in through it starts with; it never changes"`
 	Source              string     `json:"source" jsonschema:"site: set up by the site's administrators; operator: set by the server's operator in its environment (OIDC_*), read-only here"`
 	ReadOnly            bool       `json:"read_only" jsonschema:"true for the operator's provider, which only the operator changes"`
 	DisplayName         *string    `json:"display_name" jsonschema:"the name on the sign-in button; null for the operator's when OIDC_DISPLAY_NAME is not set, and the front end then uses words of its own"`
@@ -198,7 +198,7 @@ func ssoList(d Deps) tool.Tool {
 }
 
 type SSOProviderIDIn struct {
-	ProviderID string `json:"provider_id" jsonschema:"the provider's id, such as polyu-adfs"`
+	ProviderID string `json:"provider_id" jsonschema:"the provider's id, such as school-adfs"`
 }
 
 func ssoGet(d Deps) tool.Tool {
@@ -235,15 +235,15 @@ func readSSOProvider(ctx context.Context, d Deps, q dbq.Querier, id string) (SSO
 // ---------------------------------------------------------------------------
 
 type SSOCreateIn struct {
-	ID                  string   `json:"id" jsonschema:"the provider's id: 1 to 64 lower-case letters, digits and hyphens, such as hainanu-cas; what actor.link_sso names, and what it is known by for good"`
-	DisplayName         string   `json:"display_name" jsonschema:"the name on the sign-in button, such as PolyU NetID: 1 to 64 printable characters"`
+	ID                  string   `json:"id" jsonschema:"the provider's id: 1 to 64 lower-case letters, digits and hyphens, such as university-sso; what actor.link_sso names, and what it is known by for good"`
+	DisplayName         string   `json:"display_name" jsonschema:"the name on the sign-in button, such as School NetID: 1 to 64 printable characters"`
 	Issuer              string   `json:"issuer" jsonschema:"the provider's issuer, exactly as its discovery document writes it: an https URL (http only for this machine), such as https://adfs.example.edu/adfs"`
 	ClientID            string   `json:"client_id" jsonschema:"the client id the provider gave this site"`
 	ClientSecret        string   `json:"client_secret" jsonschema:"the client secret the provider gave this site: sealed before it is kept, never recorded and never shown again but as its hint"`
 	Scopes              []string `json:"scopes,omitempty" jsonschema:"what a sign-in asks for, openid among them; default openid profile email"`
 	SubjectClaim        string   `json:"subject_claim,omitempty" jsonschema:"the claim an account is known by, as actor.link_sso's subject; default sub (ADFS: upn)"`
 	EmailClaim          *string  `json:"email_claim,omitempty" jsonschema:"the claim holding the person's email, for link_by_email; default none, or email with link_by_email"`
-	AllowedEmailDomains []string `json:"allowed_email_domains,omitempty" jsonschema:"the domains an email may be linked from, such as polyu.edu.hk; required with link_by_email"`
+	AllowedEmailDomains []string `json:"allowed_email_domains,omitempty" jsonschema:"the domains an email may be linked from, such as example.edu; required with link_by_email"`
 	LinkByEmail         bool     `json:"link_by_email,omitempty" jsonschema:"link someone the provider vouches for, whose identity is linked to nobody, to the active person whose email here is the one the provider vouches for (email_verified), in allowed_email_domains; never an account with a platform role. Default false: only accounts already linked (actor.link_sso) sign in"`
 	Enabled             bool     `json:"enabled,omitempty" jsonschema:"offer it on the sign-in page at once; default false, so that it can be tested (sso.test) and switched on (sso.set_enabled)"`
 	Position            *int     `json:"position,omitempty" jsonschema:"its place on the sign-in page, 0 to 10000, lowest first; default after every other"`

@@ -11,8 +11,8 @@ import (
 	"golang.org/x/oauth2"
 )
 
-// OIDCConfig describes an OpenID Connect provider. For PolyU's ADFS the
-// issuer is https://<adfs-host>/adfs and the subject claim is "upn".
+// OIDCConfig describes an OpenID Connect provider. For ADFS the issuer is
+// https://<adfs-host>/adfs and the subject claim is "upn".
 type OIDCConfig struct {
 	// Name is what this installation calls the provider; it is what
 	// credential.provider holds.

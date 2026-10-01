@@ -15,9 +15,9 @@ import (
 //	GET /v1/auth/methods → {"password": true, "password_accepts": ["login_id", "email"],
 //	                        "sso": null, "sso_providers": []}
 //	                     → {"password": true, "password_accepts": ["login_id", "email"],
-//	                        "sso": {"label": "PolyU NetID", "start": "/v1/auth/sso/start"},
-//	                        "sso_providers": [{"id": "polyu-adfs", "label": "PolyU NetID",
-//	                                           "start": "/v1/auth/sso/start/polyu-adfs"}]}
+//	                        "sso": {"label": "School NetID", "start": "/v1/auth/sso/start"},
+//	                        "sso_providers": [{"id": "school-adfs", "label": "School NetID",
+//	                                           "start": "/v1/auth/sso/start/school-adfs"}]}
 //
 // One web image serves every installation, so whether it shows single
 // sign-on buttons, and what each says, is this server's to say, not the
