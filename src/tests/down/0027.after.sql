@@ -35,8 +35,9 @@ BEGIN
                                                        'actor_hosting_by_default')) <> 3
        OR (SELECT count(*) FROM pg_trigger WHERE tgname IN ('document_version_text_one_file_at_a_time', 'actor_hosting_default')) <> 2
        OR (SELECT count(*) FROM pg_constraint WHERE conname IN ('actor_site_chat_is_agent', 'actor_site_chat_credential_fk',
+                                                                'credential_id_actor_key',
                                                                 'document_version_has_content', 'document_version_file_described',
-                                                                'document_version_storage_key_key', 'document_version_purged_empty')) <> 6 THEN
+                                                                'document_version_storage_key_key', 'document_version_purged_empty')) <> 7 THEN
         RAISE EXCEPTION 'FAIL  0027 down: what the release before relies on is not all back';
     END IF;
     IF (SELECT count(*) FROM document_version_file WHERE version_id = '00000000-0000-0000-0027-0000000000f3') <> 2 THEN

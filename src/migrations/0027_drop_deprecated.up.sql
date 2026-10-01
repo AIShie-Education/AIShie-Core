@@ -28,11 +28,13 @@
 --   (actor_hosting_is_an_agents), as it is by the application.
 --
 -- The release before this one does not keep working on this schema: it
--- writes and reads the columns dropped here. This migration is deployed in
--- a release of its own, only once every server runs a release with 0023
--- and 0025, and while it goes in, until this release starts, the release
--- before fails what reads an actor or a version. To roll back, migrate down
--- with this release's image before deploying the release before
+-- writes and reads the columns dropped here. This migration is deployed in a
+-- release of its own, only once every server runs a release with 0023 and
+-- 0025, and an agent runtime that names a file (file_id) when it tries a
+-- transcription credential, whose renewal naming none is now refused
+-- (docs/deploying.md). While it goes in, until this release starts, the
+-- release before fails what reads an actor or a version. To roll back,
+-- migrate down with this release's image before deploying the release before
 -- (docs/deploying.md): the down puts back everything the release before
 -- reads, from what this one keeps.
 
@@ -172,6 +174,10 @@ ALTER TABLE actor
     DROP CONSTRAINT actor_site_chat_credential_fk,
     DROP CONSTRAINT actor_site_chat_is_agent,
     DROP COLUMN site_chat_credential_id;
+
+-- 0011's key on a credential and whose it is, which only the column above
+-- named.
+ALTER TABLE credential DROP CONSTRAINT credential_id_actor_key;
 
 DROP TRIGGER actor_hosting_default ON actor;
 DROP FUNCTION actor_hosting_by_default();

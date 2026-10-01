@@ -34,6 +34,8 @@ CREATE TRIGGER actor_hosting_default
 
 -- As 0011 had it, naming each runtime agent's runtime token that is not
 -- revoked, as the release before keeps it.
+ALTER TABLE credential ADD CONSTRAINT credential_id_actor_key UNIQUE (id, actor_id);
+
 ALTER TABLE actor
     ADD COLUMN site_chat_credential_id uuid,
     ADD CONSTRAINT actor_site_chat_is_agent CHECK (site_chat_credential_id IS NULL OR kind = 'agent'),

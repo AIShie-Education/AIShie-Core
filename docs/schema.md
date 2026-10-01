@@ -91,7 +91,7 @@ credential(id, actor_id→actor, kind [password|sso|api_token|session|invite|ser
            label null, last_used_at null, expires_at null, revoked_at null, created_at,
            issued_by_actor_id null→actor, must_change = false,
            issued_to_service null [agent_runtime],
-           unique(provider, subject), unique(token_prefix), unique(id, actor_id))
+           unique(provider, subject), unique(token_prefix))
     unique(actor_id) where issued_to_service set and not revoked (credential_one_runtime_token)
     check: must_change ⇒ kind = 'password' and issued_by_actor_id set;
            issued_to_service set ⇒ kind = 'api_token'
@@ -203,8 +203,9 @@ which named none, had its agents made mcp agents until migration 0027.
 it declared that the agent takes conversations in the site (migration 0011). Nothing declares
 since 0025: who is asked in the site follows from hosting (§2.8). The column was kept, pointing
 at each runtime agent's runtime token, for the release before 0025, and migration 0027 drops
-it; its down migration points it again at each runtime agent's runtime token that is not
-revoked.
+it, with the key on a credential and whose it is, `unique(id, actor_id)`, that it pointed
+through; its down migration puts the key back and points the column again at each runtime
+agent's runtime token that is not revoked.
 
 `email_verified` says whether anyone but the person vouches for their email. Core sends no
 email and checks none; an email an administrator gives (`actor.register`, `actor.invite_new`,

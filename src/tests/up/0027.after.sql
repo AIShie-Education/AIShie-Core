@@ -26,6 +26,7 @@ BEGIN
                                                        'actor_hosting_by_default'))
        OR EXISTS (SELECT 1 FROM pg_trigger WHERE tgname IN ('document_version_text_one_file_at_a_time', 'actor_hosting_default'))
        OR EXISTS (SELECT 1 FROM pg_constraint WHERE conname IN ('actor_site_chat_is_agent', 'actor_site_chat_credential_fk',
+                                                                 'credential_id_actor_key',
                                                                  'document_version_has_content', 'document_version_file_described')) THEN
         RAISE EXCEPTION 'FAIL  0027 up: something kept for the release before is still there';
     END IF;
