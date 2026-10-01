@@ -32,8 +32,9 @@
 # hosting it; and have another agent of his, an mcp agent, given member_manage,
 # seat a student with its own token, never be asked in the site, and be
 # refused on his seat, and his own
-# assistant propose an assignment he may make without anyone's confirmation,
-# which he then approves himself, as he does its next version of the
+# assistant be refused at once an assignment worth less than nothing,
+# nothing of it recorded, and propose one he may make without anyone's
+# confirmation, which he then approves himself, as he does its next version of the
 # lecture, with its files. Then he shows a join link: a new student
 # registers through it, a registered one joins, and once he revokes it, it
 # seats nobody; his agents, without member_invite, make none. Then a student
@@ -888,7 +889,7 @@ call 422 POST "/v1/join/$JOIN/register" "" '{"display_name":"Rin","email":"rin@e
 KEY=ren-late call 422 POST "/v1/join/$JOIN" "$REN"
 [ "$(json "$WORK/body" 'd["error"]["details"]["reason"]')" = revoked ] || fail "joining through a revoked link: $(cat "$WORK/body")"
 
-step "Sato's own assistant, an mcp agent nobody asks in the site, proposes HW4, its assignments waiting for a confirmation; Sato, who makes assignments without one, approves it himself and it is made"
+step "Sato's own assistant, an mcp agent nobody asks in the site, proposes HW4, its assignments waiting for a confirmation, one worth less than nothing refused at once and recorded nowhere; Sato, who makes assignments without one, approves it himself and it is made"
 call 200 POST /v1/me/agents "$SATO" '{"display_name":"Assistant","hosting":"mcp"}'
 ASSIST_ID=$(json "$WORK/body" 'd["result"]["actor_id"]')
 call 200 POST "/v1/me/agents/$ASSIST_ID/tokens" "$SATO" '{"label":"e2e"}'
@@ -900,6 +901,9 @@ call 200 GET "$C/conversations/respondents" "$SATO"
 json "$WORK/body" '"'"$ASSIST_M"'" not in [r["member_id"] for r in d["result"]["respondents"]] or sys.exit("an mcp agent is offered in the site")' >/dev/null
 call 422 POST "$C/conversations" "$SATO" "{\"respondent_member_id\":\"$ASSIST_M\",\"body\":\"What is due this week?\"}"
 [ "$(reason)" = mcp_agent ] || fail "refused, but not as an mcp agent: $(cat "$WORK/body")"
+call 400 POST "$C/assignments" "$ASSIST" '{"title":"HW4","points_possible":-100}'
+[ "$(json "$WORK/body" '"action_id" in d, d["error"]["message"]')" = "False points_possible cannot be negative" ] ||
+  fail "a proposal that could never be carried out: $(cat "$WORK/body")"
 call 202 POST "$C/assignments" "$ASSIST" '{"title":"HW4","points_possible":100}'
 HW4_ASK=$(json "$WORK/body" 'd["action_id"]')
 call 200 GET "$C/actions/proposed" "$SATO"

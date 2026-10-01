@@ -130,6 +130,38 @@ func TestDecode(t *testing.T) {
 	}
 }
 
+// Check is held to the arguments as they are decoded, after the schema:
+// Decode refuses what it refuses, with its own error; Parse, which a stored
+// proposal is read back with, takes them as the schema does.
+func TestDecodeChecksWhatTheArgumentsSay(t *testing.T) {
+	s := valid()
+	s.Check = func(i in) error {
+		if i.Score.IsNegative() {
+			return apperr.Invalid("score cannot be negative")
+		}
+		return nil
+	}
+	tl := tool.Define(s)
+	course := uuid.New()
+	below := []byte(`{"course_id": "` + course.String() + `", "score": -1}`)
+	if _, err := tl.Decode(below); err == nil || err.Error() != "invalid_argument: score cannot be negative" {
+		t.Fatalf("Decode: %v", err)
+	}
+	if v, err := tl.Parse(below); err != nil || tl.Check(v) == nil {
+		t.Fatalf("Parse: %+v %v", v, err)
+	}
+	if _, err := tl.Decode([]byte(`{"course_id": "` + course.String() + `", "score": 1}`)); err != nil {
+		t.Fatalf("Decode, a score Check takes: %v", err)
+	}
+	// The schema first: what it refuses is never shown to Check.
+	if _, err := tl.Decode([]byte(`{"score": -1}`)); err == nil || !strings.Contains(err.Error(), "schema") {
+		t.Fatalf("Decode, the schema's refusal: %v", err)
+	}
+	if tool.Define(valid()).Check != nil {
+		t.Fatal("a tool without a Check has one")
+	}
+}
+
 func TestDefineRefusesMalformedTools(t *testing.T) {
 	cases := map[string]func(*tool.Spec[in, out]){
 		"name is not noun.verb":       func(s *tool.Spec[in, out]) { s.Name = "DoThing" },
@@ -147,6 +179,13 @@ func TestDefineRefusesMalformedTools(t *testing.T) {
 		},
 		"ephemeral with a validation": func(s *tool.Spec[in, out]) {
 			s.Kind, s.Validate = tool.Ephemeral, func(context.Context, dbq.Querier, *domain.Member, in) error { return nil }
+		},
+		"ephemeral with a check": func(s *tool.Spec[in, out]) {
+			s.Kind, s.Check = tool.Ephemeral, func(in) error { return nil }
+		},
+		"read with a check": func(s *tool.Spec[in, out]) {
+			s.Kind, s.Execute, s.Check = tool.Read, nil, func(in) error { return nil }
+			s.Query = func(context.Context, *tool.ReadCtx, in) (out, error) { return out{}, nil }
 		},
 		"ephemeral and internal":           func(s *tool.Spec[in, out]) { s.Kind, s.Internal = tool.Ephemeral, true },
 		"a write that bounds its own rate": func(s *tool.Spec[in, out]) { s.BoundsOwnRate = true },
