@@ -17,7 +17,7 @@ BEGIN
     SELECT string_agg(coalesce(f.filename, a.filename) || ':' || r.status || ':' || r.backfill || ':' || r.attempts
                       || ':' || (r.queued_at = coalesce(f.created_at, a.created_at))
                       || ':' || (r.course_id = coalesce(d.course_id, a.course_id)),
-                      ' | ' ORDER BY coalesce(f.filename, a.filename)) INTO got
+                      ' | ' ORDER BY coalesce(f.filename, a.filename) COLLATE "C") INTO got
     FROM file_rendition r
     LEFT JOIN document_version_file f ON f.id = r.file_id
     LEFT JOIN document d ON d.id = f.document_id
