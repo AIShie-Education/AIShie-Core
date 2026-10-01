@@ -2,7 +2,7 @@
 // long, memberships past their expiry, delegates' seats whose principal has
 // gone, assignments whose due date has passed, sessions long dead, answers'
 // drafts nobody writes any more, uploaded files that nothing came to point
-// at.
+// at, and exports of conversations kept as long as they are kept.
 //
 // Nothing here is what makes the system correct. authorize() ignores an
 // expired member from the instant of expiry, and approving a stale proposal
@@ -63,6 +63,9 @@ type Config struct {
 	Batch int32
 	// Blob is the file store to clear of orphans. Nil means none is cleared.
 	Blob blob.Store
+	// ExportTTL is how long an export of conversations is kept, after which
+	// its files are removed from Blob; zero means tools.DefaultExportTTL.
+	ExportTTL time.Duration
 }
 
 type Runner struct {
@@ -76,6 +79,9 @@ type Runner struct {
 	// blobsAt is how far it has got through the store since: the last key
 	// it took on, or empty when the next pass starts from the beginning.
 	blobsAt string
+	// exportsSwept is when this instance last went through the exports'
+	// files to the end.
+	exportsSwept time.Time
 }
 
 // New returns a runner that acts as the given system actor.
@@ -85,6 +91,9 @@ func New(pool *pgxpool.Pool, pl *pipeline.Pipeline, systemActor uuid.UUID, cfg C
 	}
 	if cfg.Batch <= 0 {
 		cfg.Batch = defaultBatch
+	}
+	if cfg.ExportTTL <= 0 {
+		cfg.ExportTTL = tools.DefaultExportTTL
 	}
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
@@ -105,7 +114,8 @@ func (r *Runner) Run(ctx context.Context) {
 		} else if rep.Ran && rep.total() > 0 {
 			r.log.Info("swept", "proposals_expired", rep.ProposalsExpired, "members_expired", rep.MembersExpired, "orphans_removed", rep.OrphansRemoved,
 				"assignments_closed", rep.AssignmentsClosed, "submissions_missing", rep.SubmissionsMissing, "sessions_deleted", rep.SessionsDeleted,
-				"drafts_deleted", rep.DraftsDeleted, "orphan_files_removed", rep.OrphanFilesRemoved)
+				"drafts_deleted", rep.DraftsDeleted, "orphan_files_removed", rep.OrphanFilesRemoved,
+				"export_files_removed", rep.ExportFilesRemoved)
 		}
 		select {
 		case <-ctx.Done():
@@ -129,11 +139,14 @@ type Report struct {
 	// tools.DraftTTL, which reads leave out already.
 	DraftsDeleted      int64
 	OrphanFilesRemoved int
+	// ExportFilesRemoved counts the files of exports of conversations kept
+	// as long as they are kept.
+	ExportFilesRemoved int
 }
 
 func (r Report) total() int64 {
-	return int64(r.ProposalsExpired+r.MembersExpired+r.OrphansRemoved+r.AssignmentsClosed+r.SubmissionsMissing+r.OrphanFilesRemoved) +
-		r.SessionsDeleted + r.DraftsDeleted
+	return int64(r.ProposalsExpired+r.MembersExpired+r.OrphansRemoved+r.AssignmentsClosed+r.SubmissionsMissing+r.OrphanFilesRemoved+
+		r.ExportFilesRemoved) + r.SessionsDeleted + r.DraftsDeleted
 }
 
 // Sweep does one round of everything, if no other instance is doing so.
@@ -240,7 +253,56 @@ func (r *Runner) Sweep(ctx context.Context) (Report, error) {
 	if rep.OrphanFilesRemoved, err = r.sweepBlobs(ctx, now); err != nil {
 		return rep, fmt.Errorf("orphan files: %w", err)
 	}
+	if rep.ExportFilesRemoved, err = r.sweepExports(ctx, now); err != nil {
+		return rep, fmt.Errorf("export files: %w", err)
+	}
 	return rep, nil
+}
+
+// sweepExports removes the files of exports of conversations once they are
+// ExportTTL old, by when the store says they were written: an export is
+// personal data, made to be taken away and not kept here. Its record, the
+// action, stays; conversation.export_file refuses its files once they are
+// as old (export_expired), whether or not the sweep has come yet.
+//
+// A pass goes through exports/ blobSweepEvery, so a file is gone within an
+// hour of its time, and takes on a batch at a time: a full batch is taken
+// up again at the next tick, from the start, since what it removed is no
+// longer listed. Only what an export writes there is looked at
+// (tools.ExportFileShape), and its age is all that is asked: an export's
+// files are kept for no record, and nothing points at them. Removing one
+// records no action, as removing an orphan does not.
+func (r *Runner) sweepExports(ctx context.Context, now time.Time) (int, error) {
+	if r.cfg.Blob == nil || now.Sub(r.exportsSwept) < blobSweepEvery {
+		return 0, nil
+	}
+	cutoff := now.Add(-r.cfg.ExportTTL)
+	batch := int(r.cfg.Batch)
+	var old []string
+	err := r.cfg.Blob.List(ctx, tools.ExportPrefix, "", func(key string, modified time.Time) error {
+		if !tools.ExportFileShape(strings.TrimPrefix(key, tools.ExportPrefix)) || !modified.Before(cutoff) {
+			return nil
+		}
+		if old = append(old, key); len(old) >= batch {
+			return blob.ErrStopList
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	removed := 0
+	for _, key := range old {
+		if err := r.cfg.Blob.Delete(ctx, key); err != nil {
+			r.log.Error("sweep step failed", "step", "export file", "key", key, "err", err)
+			continue
+		}
+		removed++
+	}
+	if len(old) < batch {
+		r.exportsSwept = now
+	}
+	return removed, nil
 }
 
 // sweepBlobs removes files that no document version, as one of its files or

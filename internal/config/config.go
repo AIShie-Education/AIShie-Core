@@ -100,6 +100,15 @@ type Config struct {
 	// MaxUploadBytes as ever.
 	DocumentMaxFilesPerVersion int
 	DocumentMaxVersionBytes    int64
+	// The exports of conversations administrators make for audit
+	// (docs/schema.md §2.8, Exporting conversations for audit): how many
+	// messages one holds at most (EXPORT_MAX_MESSAGES, 100,000, answers and
+	// questions proposed and never posted counted with them), how much of
+	// their text (EXPORT_MAX_BYTES, 256 MiB), and how long its files are
+	// kept (EXPORT_TTL, 24 hours, from 15 minutes to 7 days).
+	ExportMaxMessages int
+	ExportMaxBytes    int64
+	ExportTTL         time.Duration
 
 	// OIDC is the identity provider the server's operator sets: single
 	// sign-on through it is off unless OIDC_ISSUER is set. Administrators
@@ -246,6 +255,9 @@ func FromEnv() (Config, error) {
 		return Config{}, err
 	}
 	if err := c.readAttachments(); err != nil {
+		return Config{}, err
+	}
+	if err := c.readExports(); err != nil {
 		return Config{}, err
 	}
 	switch c.BlobStore {
@@ -396,6 +408,43 @@ func (c *Config) readDocumentLimits() error {
 			return fmt.Errorf("DOCUMENT_MAX_VERSION_BYTES: %q is not a positive number of bytes", v)
 		}
 		c.DocumentMaxVersionBytes = n
+	}
+	return nil
+}
+
+// The bounds of EXPORT_TTL. An export's files are kept at least as long as
+// a URL to download them lasts, and never more than a week: they are
+// personal data, made to be taken away, not kept here.
+const (
+	MinExportTTL = 15 * time.Minute
+	MaxExportTTL = 7 * 24 * time.Hour
+)
+
+// readExports reads the limits on an export of conversations, each a whole
+// number, one or more, and how long its files are kept; one not set is its
+// default.
+func (c *Config) readExports() error {
+	c.ExportMaxMessages, c.ExportMaxBytes, c.ExportTTL = 100000, 256<<20, 24*time.Hour
+	if v := os.Getenv("EXPORT_MAX_MESSAGES"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			return fmt.Errorf("EXPORT_MAX_MESSAGES: %q is not a number, one or more", v)
+		}
+		c.ExportMaxMessages = n
+	}
+	if v := os.Getenv("EXPORT_MAX_BYTES"); v != "" {
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil || n <= 0 {
+			return fmt.Errorf("EXPORT_MAX_BYTES: %q is not a positive number of bytes", v)
+		}
+		c.ExportMaxBytes = n
+	}
+	if v := os.Getenv("EXPORT_TTL"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d < MinExportTTL || d > MaxExportTTL {
+			return fmt.Errorf("EXPORT_TTL: %q is not a duration from %s to %s, such as 24h", v, MinExportTTL, MaxExportTTL)
+		}
+		c.ExportTTL = d
 	}
 	return nil
 }

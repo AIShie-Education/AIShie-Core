@@ -126,6 +126,9 @@ var visibility = map[string][]domain.Perm{
 	EventDepartmentCreated: nil, EventDepartmentUpdated: nil, EventDepartmentMoved: nil,
 	EventDepartmentAdminAdded: nil, EventDepartmentAdminRemoved: nil,
 	EventServiceCredentialIssued: nil, EventServiceCredentialRevoked: nil,
+	// An export of conversations is an administrator's, of no course, and
+	// is told to nobody's feed: its record is its action.
+	EventConversationExported: nil,
 }
 
 // KnownEventTypes lists every event type that has a visibility rule.
