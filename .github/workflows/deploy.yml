@@ -45,7 +45,7 @@ name: Deploy
 # release, which removes this, a setting not yet added by its new name is
 # read by its old one (DEPLOY_*_STAGING, DEPLOY_*_PRODUCTION), with a warning
 # that names the one to add, and an environment given by its old name is
-# taken as the new one (README.md, Renaming the settings). GitHub's
+# taken as the new one (docs/deploying.md, Settings from before the rename). GitHub's
 # environments are not renamed with them: the first run for stable creates
 # an environment of that name with no protection rules, unless it has been
 # given production's first.
@@ -214,7 +214,7 @@ jobs:
             new=${setting}_$NAME old=${setting}_$OLD
             if [ -z "${!new}" ] && [ -n "${!old}" ]; then
               printf -v "$new" '%s' "${!old}"
-              echo "::warning::$old is read by its old name: add $new, with the same value, then delete $old (README.md, Renaming the settings). A later release stops reading $old."
+              echo "::warning::$old is read by its old name: add $new, with the same value, then delete $old (docs/deploying.md, Settings from before the rename). A later release stops reading $old."
             elif [ -n "${!old}" ]; then
               echo "::notice::$new is set, and $old is no longer read: delete $old."
             fi

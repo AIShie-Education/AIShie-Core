@@ -245,5 +245,5 @@ jobs:
             echo
             echo "This run built it as \`$IMAGE_REF\`; Deploy shows the digest it resolves to before it goes on."
             echo
-            echo "Stable was called production until the environments were renamed: GitHub does not carry production's protection rules over to \`stable\`, so give \`stable\` the same rules before its first deploy (README.md, Renaming the settings)."
+            echo "Stable was called production until the environments were renamed: GitHub does not carry production's protection rules over to \`stable\`, so give \`stable\` the same rules before its first deploy (docs/deploying.md, Settings from before the rename)."
           } | tee -a "$GITHUB_STEP_SUMMARY"
