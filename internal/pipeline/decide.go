@@ -377,7 +377,8 @@ func (p *Pipeline) ownerJudges(ctx context.Context, q dbq.Querier, actor domain.
 
 // unsure is a fault met while asking whether approving a proposal would be
 // refused (refusal): a decision fails on it, as approving would, while a
-// queue does not say the proposal is the owner's to decide (OwnerMayJudge).
+// queue does not say the proposal is the owner's to decide
+// (OwnerMayJudgeListed).
 type unsure struct{ err error }
 
 func (u unsure) Error() string { return u.err.Error() }
@@ -413,22 +414,33 @@ func refusal(ctx context.Context, q dbq.Querier, t tool.Tool, a dbq.Action, args
 	return nil, nil
 }
 
-// OwnerMayJudge is ownerJudges for the approval and review queues, which say
-// of each action whether it is the caller's to decide (yours_to_decide): true
-// when the caller, from seat, is the owner of the agent that did a and could
-// have done it themselves just now without anyone's confirmation, and, for a
-// proposal, approving it now would not be refused for what it asks.
-//
-// A fault outside the database met while asking whether approving it would
-// be refused — a file store that does not answer while a grade's feedback
-// files are looked at, say — leaves it not theirs, rather than failing the
-// whole queue; approving it would meet the same. One of the database's is
-// returned, as any other is: the transaction it was met in may be over.
+// OwnerMayJudge is ownerJudges for the gate of a decision or a review about
+// one action (action.decide, action.review): true when the caller, from
+// seat, is the owner of the agent that did a and could have done it
+// themselves just now without anyone's confirmation, and, for a proposal,
+// approving it now would not be refused for what it asks. A fault met on
+// the way is returned, whatever it is, so that the call fails with nothing
+// recorded, as Decide's own asking fails it: a denial recorded for a file
+// store that did not answer would be replayed to a retry under the same key
+// long after it answers again.
 func (p *Pipeline) OwnerMayJudge(ctx context.Context, q dbq.Querier, actor domain.Actor, seat uuid.UUID, a dbq.Action, now time.Time) (bool, error) {
 	_, may, _, err := p.ownerJudges(ctx, q, actor, seat, a, now)
+	return may, err
+}
+
+// OwnerMayJudgeListed is OwnerMayJudge for the approval and review queues,
+// which say of each action whether it is the caller's to decide
+// (yours_to_decide) and record nothing. A fault outside the database met
+// while asking whether approving a proposal would be refused — a file store
+// that does not answer while a grade's feedback files are looked at, say —
+// leaves it not theirs, rather than failing the whole queue: deciding it
+// would fail on the same fault. One of the database's is returned, as any
+// other is: the transaction it was met in may be over.
+func (p *Pipeline) OwnerMayJudgeListed(ctx context.Context, q dbq.Querier, actor domain.Actor, seat uuid.UUID, a dbq.Action, now time.Time) (bool, error) {
+	may, err := p.OwnerMayJudge(ctx, q, actor, seat, a, now)
 	var u unsure
 	var pgErr *pgconn.PgError
-	if errors.As(err, &u) && !errors.As(err, &pgErr) {
+	if errors.As(err, &u) && !errors.As(u.err, &pgErr) {
 		return false, nil
 	}
 	return may, err

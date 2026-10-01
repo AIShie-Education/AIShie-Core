@@ -1,13 +1,17 @@
 package tools_test
 
 import (
+	"context"
+	"errors"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
 
 	"github.com/AIShie-Education/AIShie-Core/internal/apperr"
+	"github.com/AIShie-Education/AIShie-Core/internal/blob"
 	"github.com/AIShie-Education/AIShie-Core/internal/domain"
 	"github.com/AIShie-Education/AIShie-Core/internal/members"
 	"github.com/AIShie-Education/AIShie-Core/internal/pipeline"
@@ -482,5 +486,72 @@ func TestACallTheCourseWouldRefuseIsNotProposed(t *testing.T) {
 	}
 	if n := b.Count(`SELECT count(*) FROM action WHERE actor_id = $1 AND status = 'proposed'`, tanaka); n != 0 {
 		t.Fatalf("%d of Tanaka's calls wait for someone to approve them", n)
+	}
+}
+
+// downStore is a file store whose Stat stops answering while down is set.
+type downStore struct {
+	*blob.FSStore
+	down *atomic.Bool
+}
+
+func (s downStore) Stat(ctx context.Context, key string) (blob.Info, error) {
+	if s.down.Load() {
+		return blob.Info{}, errors.New("the file store does not answer")
+	}
+	return s.FSStore.Stat(ctx, key)
+}
+
+// Whether approving an agent's grade would be refused is asked of its
+// feedback files, which are in the file store. While the store does not
+// answer, the queue still answers, and says the grade is not its owner's
+// to decide; and an owner's decision fails with nothing recorded, whether
+// they hold action_decide or decide nothing but their agents' proposals,
+// so that the same call, made again once the store answers, is carried out.
+func TestAnOwnersDecisionFailsUnrecordedWhileTheFileStoreDoesNotAnswer(t *testing.T) {
+	var down atomic.Bool
+	b := buildOn(t, testkit.NewPlatformWithStore(t, func(fs *blob.FSStore) blob.Store {
+		return downStore{FSStore: fs, down: &down}
+	}))
+	ito := b.person(t, "Ito", "")
+	b.do(t, b.sato, "member.add", m{"course_id": b.course, "actor_id": ito, "preset": "instructor", "perms": m{"action_decide": "denied"}})
+	proposals := map[string]uuid.UUID{}
+	for owner, actor := range map[string]uuid.UUID{"sato": b.sato, "ito": ito} {
+		bot := b.agent(t, actor, owner+"'s marker")
+		b.delegate(t, actor, bot, m{"preset": "ta", "perms": m{"grade_submit": "confirm_required"}})
+		work := b.submit(t, map[string]uuid.UUID{"sato": b.ken, "ito": b.yuki}[owner], "an essay")
+		notes := b.upload(t, bot, "feedback", "text/plain", []byte("well argued"))
+		out := b.MustCall(bot, "grade.submit", m{"course_id": b.course, "submission_id": work, "score": 80,
+			"feedback_files": []m{{"title": "notes.txt", "upload_token": notes}}}, owner+"-bot-grades")
+		if out.Status != domain.StatusProposed {
+			t.Fatalf("%s's agent grading with feedback: %+v", owner, out)
+		}
+		proposals[owner] = *out.ActionID
+	}
+	owners := map[string]uuid.UUID{"sato": b.sato, "ito": ito}
+
+	down.Store(true)
+	for owner, actor := range owners {
+		if q := b.queue(t, actor, "action.list_proposed"); q[proposals[owner]] {
+			t.Fatalf("%s's queue while the file store does not answer: %v", owner, q)
+		}
+		key := owner + "-approves"
+		if out, err := b.Call(actor, "action.decide", m{"course_id": b.course, "action_id": proposals[owner], "decision": "approve"}, key); err == nil {
+			t.Fatalf("%s approving while the file store does not answer: %+v", owner, out)
+		}
+		if n := b.Count(`SELECT count(*) FROM action WHERE actor_id = $1 AND idempotency_key = $2`, actor, key); n != 0 {
+			t.Fatalf("%s's failed approval is recorded %d times", owner, n)
+		}
+	}
+
+	down.Store(false)
+	for owner, actor := range owners {
+		if q := b.queue(t, actor, "action.list_proposed"); !q[proposals[owner]] {
+			t.Fatalf("%s's queue once the file store answers: %v", owner, q)
+		}
+		out := b.MustCall(actor, "action.decide", m{"course_id": b.course, "action_id": proposals[owner], "decision": "approve"}, owner+"-approves")
+		if d := testkit.Result[pipeline.DecideOut](t, out); out.Replayed || d.Outcome != domain.StatusExecuted {
+			t.Fatalf("%s approving again under the same key once the file store answers: %+v %+v", owner, out, d)
+		}
 	}
 }

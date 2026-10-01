@@ -209,7 +209,8 @@ func actionPage(rows []dbq.Action, limit int32) ActionListOut {
 // pipeline.Review), which the queue lists all the same, since it is the
 // course's queue and someone else's to clear; but for the caller's own
 // agent's, where the caller could have done it themselves without anyone's
-// confirmation (pipeline.OwnerMayJudge), measured now as a decision would be.
+// confirmation (pipeline.OwnerMayJudgeListed), measured now as a decision
+// would be.
 func queuePage(ctx context.Context, rc *tool.ReadCtx, p *pipeline.Pipeline, rows []dbq.Action, limit int32) (ActionListOut, error) {
 	out := actionPage(rows, limit)
 	if len(rows) == 0 {
@@ -226,7 +227,7 @@ func queuePage(ctx context.Context, rc *tool.ReadCtx, p *pipeline.Pipeline, rows
 	for i, r := range rows {
 		yours := !slices.Contains(ours, r.ActorID)
 		if !yours && rc.Member != nil {
-			if yours, err = p.OwnerMayJudge(ctx, rc.Q, rc.Actor, rc.Member.ID, r, rc.Now); err != nil {
+			if yours, err = p.OwnerMayJudgeListed(ctx, rc.Q, rc.Actor, rc.Member.ID, r, rc.Now); err != nil {
 				return out, err
 			}
 		}
