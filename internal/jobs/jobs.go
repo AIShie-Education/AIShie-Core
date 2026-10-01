@@ -306,8 +306,10 @@ func (r *Runner) sweepExports(ctx context.Context, now time.Time) (int, error) {
 }
 
 // sweepBlobs removes files that no document version, as one of its files or
-// in its own columns, and no message of a conversation points at, and none
-// will.
+// in its own columns, no message of a conversation and no rendition points
+// at, and none will. A rendition's PDF the agent runtime uploaded and never
+// named, or one whose file was purged by a release that does not know of
+// renditions, is such a file.
 //
 // A file is uploaded first and attached afterwards, so there are always some
 // that are not attached yet, and some never are: the tab was closed, the
@@ -429,11 +431,11 @@ func (r *Runner) sweepBlobs(ctx context.Context, now time.Time) (int, error) {
 
 // blobPrefixes are where the server's files are kept: uploads for documents,
 // under documents/ and, from before a version held several files, courses/,
-// and for messages of conversations, and where attaching moves them, which
-// for a store that moves nothing is the same place.
+// for messages of conversations, and renditions' PDFs, and where attaching
+// moves them, which for a store that moves nothing is the same place.
 func (r *Runner) blobPrefixes() []string {
 	var prefixes []string
-	for _, prefix := range []string{tools.UploadPrefix, tools.DocumentPrefix, tools.AttachmentPrefix} {
+	for _, prefix := range []string{tools.UploadPrefix, tools.DocumentPrefix, tools.AttachmentPrefix, tools.RenditionPrefix} {
 		prefixes = append(prefixes, prefix)
 		if final := r.cfg.Blob.FinalKey(prefix); final != prefix {
 			prefixes = append(prefixes, final)
@@ -450,7 +452,8 @@ type upload struct {
 }
 
 // ownKey reports whether name, what follows the prefix a key was listed
-// under, is what document.upload_url or conversation.upload_url puts there:
+// under, is what document.upload_url, conversation.upload_url or
+// agent_runtime.rendition_upload_url puts there:
 // <course>/<upload>, two UUIDs spelt as the server spells them, and if so
 // which course it names. Anything else under the prefix was put there by
 // someone else, and is left alone.
@@ -482,8 +485,8 @@ func orphansAmong(ctx context.Context, q *dbq.Queries, uploads []upload) ([]uplo
 	return found, err
 }
 
-// removeIfOrphan deletes one object unless a version or a message points at
-// it, or it is another deployment's. The page it was listed in said it was neither, but
+// removeIfOrphan deletes one object unless a version, a message or a
+// rendition points at it, or it is another deployment's. The page it was listed in said it was neither, but
 // an attach may have committed since: it asks again, holding the lock that
 // attaching takes on the same key, so that "is it attached?" and the
 // deletion are one step. An attach in flight either commits first, and the

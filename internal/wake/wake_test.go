@@ -45,6 +45,8 @@ func TestAWaiterIsWokenByItsNewsAlone(t *testing.T) {
 		RespondentMemberID: seat}
 	queue := wake.Filter{AnyCourse: true, Kinds: []string{wake.KindTextQueued}}
 	queued := wake.Note{CourseID: course, Kind: wake.KindTextQueued}
+	renditions := wake.Filter{AnyCourse: true, Kinds: []string{wake.KindRenditionQueued}}
+	rendition := wake.Note{CourseID: course, Kind: wake.KindRenditionQueued}
 
 	cases := []struct {
 		name string
@@ -77,6 +79,14 @@ func TestAWaiterIsWokenByItsNewsAlone(t *testing.T) {
 		{"other news, for the service's claim", queue, posted, false},
 		{"a text queued, for the course's feed", feed, queued, false},
 		{"a text queued, for a reader", reader, queued, false},
+		// So does a rendition queued the agent runtime's, and nobody else's.
+		{"a rendition queued, for the runtime's claim", renditions, rendition, true},
+		{"a rendition queued in another course, for the runtime's claim", renditions,
+			func() wake.Note { n := rendition; n.CourseID = other; return n }(), true},
+		{"a text queued, for the runtime's claim", renditions, queued, false},
+		{"a rendition queued, for the service's claim", queue, rendition, false},
+		{"a rendition queued, for the course's feed", feed, rendition, false},
+		{"a rendition queued, for a reader", reader, rendition, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

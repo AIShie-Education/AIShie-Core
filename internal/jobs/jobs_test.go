@@ -900,6 +900,112 @@ func TestTheSweepKeepsEveryFileOfAVersion(t *testing.T) {
 	}
 }
 
+// A rendition's PDF is a file of the server's like any other: one a rendition
+// names is kept; one the agent runtime uploaded and never named is removed
+// once it is as old as an upload nothing attached; and so is one whose file
+// the release before purged, which takes the rendition's row with the file
+// and leaves its PDF in the store, knowing nothing of it.
+func TestTheSweepKeepsWhatRenditionsName(t *testing.T) {
+	for name, wrap := range stores {
+		t.Run(name, func(t *testing.T) {
+			f := setupWith(t, 0, wrap)
+			store := wrap(f.Blob)
+			f.runner = jobs.New(f.Pool, f.P, f.system, jobs.Config{Blob: store}, nil)
+			ctx := context.Background()
+			lecture := func(title string) uuid.UUID {
+				u := testkit.Result[tools.UploadURLOut](t, f.MustCall(f.Sato, "document.upload_url", m{"course_id": f.Course,
+					"kind": "material", "content_type": "application/msword"}, ""))
+				key, ct, err := f.Blob.Redeem(strings.TrimPrefix(u.UploadURL, "http://lms.test"+blob.BlobPath), "PUT")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := f.Blob.Put(ctx, key, ct, strings.NewReader("a Word file"), 1<<20); err != nil {
+					t.Fatal(err)
+				}
+				out := f.MustCall(f.Sato, "document.create", m{"course_id": f.Course, "kind": "material", "title": title,
+					"files": []m{{"upload_token": u.UploadToken, "filename": title + ".doc"}}}, "create-"+title)
+				if out.Status != domain.StatusExecuted {
+					t.Fatalf("%+v", out)
+				}
+				return *testkit.Result[tools.DocumentCreateOut](t, out).VersionID
+			}
+			runtime := func(name string, args m) pipeline.Outcome {
+				out, err := f.CallWith(f.AsRuntime(), name, args, "rt-"+uuid.NewString())
+				if err != nil || out.Status != domain.StatusExecuted {
+					t.Fatalf("%s: %+v %v", name, out, err)
+				}
+				return out
+			}
+			// put uploads a PDF for a claim, and says its token and where it is.
+			put := func(c tools.ClaimedRendition) (token, key string) {
+				u := testkit.Result[tools.RenditionUploadURLOut](t, runtime("agent_runtime.rendition_upload_url",
+					m{"rendition_id": c.RenditionID, "lease_id": c.LeaseID}))
+				key, ct, err := f.Blob.Redeem(strings.TrimPrefix(u.UploadURL, "http://lms.test"+blob.BlobPath), "PUT")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !strings.HasPrefix(key, tools.RenditionPrefix+f.Course.String()+"/") {
+					t.Fatalf("a rendition's PDF is uploaded to %s", key)
+				}
+				if _, err := f.Blob.Put(ctx, key, ct, strings.NewReader("%PDF-1.7 the lecture"), 1<<20); err != nil {
+					t.Fatal(err)
+				}
+				return u.UploadToken, key
+			}
+			kept, purged := lecture("Week 1"), lecture("Week 2")
+			claimed := testkit.Result[tools.RenditionClaimOut](t, runtime("agent_runtime.rendition_claim", m{"max": 2})).Claimed
+			if len(claimed) != 2 {
+				t.Fatalf("claimed %+v", claimed)
+			}
+			// The first PDF uploaded for Week 1's claim is never named: the
+			// runtime uploads again, and names the second.
+			_, unnamed := put(claimed[0])
+			var pdfs []string
+			for _, c := range claimed {
+				token, key := put(c)
+				runtime("agent_runtime.rendition_complete", m{"rendition_id": c.RenditionID, "lease_id": c.LeaseID, "status": "done",
+					"upload_token": token, "page_count": 1})
+				pdfs = append(pdfs, store.FinalKey(key))
+			}
+			var keptPDF, purgedPDF string
+			if err := f.Pool.QueryRow(ctx, `SELECT r.storage_key FROM file_rendition r JOIN document_version_file f ON f.id = r.file_id
+				WHERE f.version_id = $1`, kept).Scan(&keptPDF); err != nil {
+				t.Fatal(err)
+			}
+			for _, k := range pdfs {
+				if k != keptPDF {
+					purgedPDF = k
+				}
+			}
+			// The release before purges Week 2: its file and rendition go
+			// from the database, the PDF stays in the store.
+			f.Exec(`UPDATE document_version SET storage_key = NULL, checksum = NULL, purged_at = now(), purged_by_actor_id = $2,
+			        purge_reason = 'by mistake' WHERE id = $1`, purged, f.Root)
+			if n := f.Count(`SELECT count(*) FROM file_rendition`); n != 1 {
+				t.Fatalf("%d renditions after the purge", n)
+			}
+
+			if rep := f.sweep(t); rep.OrphanFilesRemoved != 0 {
+				t.Fatalf("%+v: removed what is not old yet", rep)
+			}
+			f.now = f.now.Add(pipeline.DefaultProposalTTL + tools.OrphanGrace + time.Hour)
+			// Week 2's PDF, the PDF never named, and Week 2's file, which the
+			// release before would have deleted itself.
+			if rep := f.sweep(t); rep.OrphanFilesRemoved != 3 {
+				t.Fatalf("%+v, want the purged file's PDF, the PDF never named and the purged file removed", rep)
+			}
+			for _, key := range []string{purgedPDF, unnamed} {
+				if _, err := f.Blob.Stat(ctx, key); !errors.Is(err, blob.ErrNotFound) {
+					t.Fatalf("%s is still there: %v", key, err)
+				}
+			}
+			if _, err := f.Blob.Stat(ctx, keptPDF); err != nil {
+				t.Fatalf("the PDF a rendition names was removed: %v", err)
+			}
+		})
+	}
+}
+
 // A sweep takes on a batch of orphans at a time. Most old files are not
 // orphans — they are attached, or another deployment's — and they must not
 // use up the batch: were they to, a pass through a store of many of them

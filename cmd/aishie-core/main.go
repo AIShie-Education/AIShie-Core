@@ -102,6 +102,8 @@ Environment:
   EXPORT_MAX_BYTES     default 268435456 (256 MiB); the text of those messages, in all
   EXPORT_TTL           default 24h, from 15m to 168h; how long an export's files are kept, under
                        exports/ in the file store, before the sweep removes them
+  RENDITION_MAX_BYTES  default 104857600 (100 MiB); the largest PDF an Office file is converted into
+                       by the agent runtime (agent_runtime.rendition_complete)
   AGENT_SELF_SERVICE   on (default) or off; whether people may register agents of their own
   AGENT_MAX_PER_OWNER  default 5; the agents one person may have that are not suspended
   S3_ENDPOINT, S3_BUCKET, S3_ACCESS_KEY, S3_SECRET_KEY, S3_USE_SSL
@@ -248,6 +250,7 @@ func serve(cfg config.Config) error {
 			ConversationBytes: cfg.AttachmentMaxConversationBytes},
 		Documents:               tools.DocumentLimits{FilesPerVersion: cfg.DocumentMaxFilesPerVersion, VersionBytes: cfg.DocumentMaxVersionBytes},
 		Exports:                 tools.ExportLimits{MaxMessages: cfg.ExportMaxMessages, MaxBytes: cfg.ExportMaxBytes, TTL: cfg.ExportTTL},
+		Renditions:              tools.RenditionLimits{MaxBytes: cfg.RenditionMaxBytes},
 		DisableAgentSelfService: !cfg.AgentSelfService, MaxAgentsPerOwner: cfg.AgentMaxPerOwner, Memory: cfg.Memory})
 
 	// The sweeps act as the system actor, which bootstrap creates. Before

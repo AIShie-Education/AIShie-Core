@@ -37,6 +37,9 @@ type Deps struct {
 	// Exports bounds an export of conversations, and says how long its
 	// files are kept; a zero limit is its default.
 	Exports ExportLimits
+	// Renditions bounds the PDFs Office files are converted into; a zero
+	// limit is its default.
+	Renditions RenditionLimits
 	// DisableAgentSelfService stops people registering agents of their own
 	// (agent.create): administrators still do, with actor.register. What is
 	// already registered is left as it is. The zero value, self-service on,
@@ -71,6 +74,7 @@ func RegisterAll(reg *tool.Registry, d Deps) {
 	d.Attachments = d.Attachments.withDefaults(d.MaxUploadBytes)
 	d.Documents = d.Documents.withDefaults()
 	d.Exports = d.Exports.withDefaults()
+	d.Renditions = d.Renditions.withDefaults()
 	if d.MaxAgentsPerOwner <= 0 {
 		d.MaxAgentsPerOwner = DefaultMaxAgentsPerOwner
 	}
@@ -99,6 +103,7 @@ func RegisterAll(reg *tool.Registry, d Deps) {
 	reg.Register(textTools(d)...)
 	reg.Register(serviceTools()...)
 	reg.Register(agentRuntimeTools()...)
+	reg.Register(renditionTools(d)...)
 	reg.Register(gradeTools(d)...)
 	reg.Register(gradeReadTools()...)
 	reg.Register(actionTools(d)...)

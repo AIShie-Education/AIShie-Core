@@ -449,6 +449,7 @@ func post(ctx context.Context, d Deps, ec *tool.ExecCtx, c dbq.Conversation, inR
 	// Each file is dated as its message is: written with it, never added to
 	// it afterwards (conversation_attachment_with_its_message).
 	news := make([]map[string]any, 0, len(files))
+	fileIDs := make([]uuid.UUID, 0, len(files))
 	for i, f := range files {
 		file := ids.New()
 		if err := ec.Q.InsertConversationAttachment(ctx, dbq.InsertConversationAttachmentParams{ID: file, MessageID: id,
@@ -457,6 +458,12 @@ func post(ctx context.Context, d Deps, ec *tool.ExecCtx, c dbq.Conversation, inR
 			return uuid.Nil, err
 		}
 		news = append(news, map[string]any{"id": file, "filename": f.filename, "content_type": f.info.ContentType, "byte_size": f.info.Size})
+		fileIDs = append(fileIDs, file)
+	}
+	// An Office file is queued for its PDF as it is recorded, by the
+	// database; the agent runtime is woken to take it.
+	if err := queuedAttachments(ctx, ec.Q, c.CourseID, fileIDs); err != nil {
+		return uuid.Nil, err
 	}
 	conversation := c.ID
 	payload := map[string]any{"conversation_id": c.ID, "message_id": id, "author_member_id": author,
@@ -1664,6 +1671,9 @@ func conversationMessages() tool.Tool {
 			}
 			files, err := attachmentsOf(ctx, rc.Q, shown)
 			if err != nil {
+				return out, err
+			}
+			if err := withRenditions(ctx, rc.Q, files); err != nil {
 				return out, err
 			}
 			for i, v := range out.Messages {
