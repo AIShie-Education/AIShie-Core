@@ -225,6 +225,7 @@ WHERE EXISTS (SELECT 1 FROM course c WHERE c.id = o.course_id)
   AND NOT EXISTS (SELECT 1 FROM document_version v WHERE v.storage_key = k.storage_key)
   AND NOT EXISTS (SELECT 1 FROM document_version_file f WHERE f.storage_key = k.storage_key)
   AND NOT EXISTS (SELECT 1 FROM conversation_attachment a WHERE a.storage_key = k.storage_key)
+  AND NOT EXISTS (SELECT 1 FROM file_rendition r WHERE r.storage_key = k.storage_key)
 ORDER BY k.n
 `
 
@@ -240,16 +241,16 @@ type ListOrphanUploadsRow struct {
 
 // Which of these uploads, each given with the course its key names, are
 // this deployment's and attached to nothing? The course must be one this
-// database has. document.upload_url and conversation.upload_url issue keys
-// only under courses that exist, and a course is never deleted, so a key
-// under any other course was written by another deployment keeping its
-// files in the same place: it is not ours to remove, however old it is and
-// whatever points at it there. Attached is attached to a version of a
-// document, as any of its files or in its own columns, or to a message of a
-// conversation. What is left comes back in
-// the order it was given. The orphan sweep puts a page of listed files at a
-// time to it, and asks again about each one it removes, under the lock
-// attaching takes.
+// database has. document.upload_url, conversation.upload_url and
+// agent_runtime.rendition_upload_url issue keys only under courses that
+// exist, and a course is never deleted, so a key under any other course was
+// written by another deployment keeping its files in the same place: it is
+// not ours to remove, however old it is and whatever points at it there.
+// Attached is attached to a version of a document, as any of its files or
+// in its own columns, or to a message of a conversation, or a rendition's
+// PDF. What is left comes back in the order it was given. The orphan sweep
+// puts a page of listed files at a time to it, and asks again about each
+// one it removes, under the lock attaching takes.
 func (q *Queries) ListOrphanUploads(ctx context.Context, arg ListOrphanUploadsParams) ([]ListOrphanUploadsRow, error) {
 	rows, err := q.db.Query(ctx, listOrphanUploads, arg.StorageKeys, arg.CourseIds)
 	if err != nil {

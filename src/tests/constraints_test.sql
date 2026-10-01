@@ -52,7 +52,7 @@ END $$;
 --      7x assignments · ex documents · fx versions · ax submissions
 --      bx actions · dx grades · cx conversations · cxx their messages
 --      1cx credentials · 1ax join links · cax attachments
---      22xx files of versions · 25xx agents' hosting
+--      22xx files of versions · 25xx agents' hosting · 26xx renditions
 INSERT INTO term (id, name, starts_on, ends_on)
 VALUES ('00000000-0000-0000-0000-000000000011', '2026 Autumn', '2026-09-01', '2026-12-20');
 INSERT INTO department (id, name) VALUES ('00000000-0000-0000-0000-000000000021', 'Computing');
@@ -1383,7 +1383,7 @@ SELECT pg_temp.fails('files are kept as they are: no rename', '23001', $q$
 SELECT pg_temp.fails('no delete, retracted or not', '23001', $q$
     DELETE FROM conversation_attachment WHERE id = '00000000-0000-0000-0000-000000000ca2' $q$);
 SELECT pg_temp.fails('no truncate', '23001', $q$
-    TRUNCATE conversation_attachment $q$);
+    TRUNCATE conversation_attachment CASCADE $q$);
 -- Conversations are between a person and an agent: a person answers none.
 SELECT pg_temp.fails('a conversation''s respondent is an agent''s seat, never a person''s', '23514', $q$
     INSERT INTO conversation (course_id, opener_member_id, respondent_member_id)
@@ -2079,6 +2079,138 @@ SELECT pg_temp.fails('nor moved to a runtime agent', '23514', $q$
     UPDATE credential SET actor_id = '00000000-0000-0000-0000-0000000025a1' WHERE id = '00000000-0000-0000-0000-0000000025c3' $q$);
 SELECT pg_temp.ok('revoking a runtime''s token passes', $q$
     UPDATE credential SET revoked_at = now() WHERE id = '00000000-0000-0000-0000-0000000025c2' $q$);
+
+-- Renditions: an Office file's PDF -----------------------------------------------
+-- 26e1 a handout (material) · 26f1 its version of three files, 26d1..26d3 · ca2 Yuki's Word file on c11
+SELECT pg_temp.ok('an Office file of a version is queued for its PDF as it is recorded; a PDF, and a .csv called an Excel file, are not', $q$
+    INSERT INTO document (id, course_id, kind, title) VALUES
+        ('00000000-0000-0000-0000-0000000026e1', '00000000-0000-0000-0000-000000000041', 'material', 'Handout');
+    INSERT INTO document_version (id, document_id, seq, storage_key, content_type, byte_size, author_member_id, created_at)
+    VALUES ('00000000-0000-0000-0000-0000000026f1', '00000000-0000-0000-0000-0000000026e1', 1, 'k/26d1', 'application/msword', 10,
+            '00000000-0000-0000-0000-000000000051', '2026-09-30 09:00:00+00');
+    INSERT INTO document_version_file (id, version_id, document_id, position, filename, storage_key, content_type, byte_size,
+                                       created_at) VALUES
+        ('00000000-0000-0000-0000-0000000026d1', '00000000-0000-0000-0000-0000000026f1', '00000000-0000-0000-0000-0000000026e1', 1,
+         'handout.doc', 'k/26d1', 'application/msword', 10, '2026-09-30 09:00:00+00'),
+        ('00000000-0000-0000-0000-0000000026d2', '00000000-0000-0000-0000-0000000026f1', '00000000-0000-0000-0000-0000000026e1', 2,
+         'slides.pdf', 'k/26d2', 'application/pdf', 10, '2026-09-30 09:00:00+00'),
+        ('00000000-0000-0000-0000-0000000026d3', '00000000-0000-0000-0000-0000000026f1', '00000000-0000-0000-0000-0000000026e1', 3,
+         'marks.csv', 'k/26d3', 'application/vnd.ms-excel', 10, '2026-09-30 09:00:00+00');
+    DO $chk$
+    BEGIN
+        IF (SELECT string_agg(f.filename || ':' || r.status || ':' || r.backfill, ' ')
+            FROM file_rendition r JOIN document_version_file f ON f.id = r.file_id
+            WHERE f.version_id = '00000000-0000-0000-0000-0000000026f1') IS DISTINCT FROM 'handout.doc:queued:false' THEN
+            RAISE EXCEPTION 'the Office file alone was not queued';
+        END IF;
+    END $chk$ $q$);
+SELECT pg_temp.ok('and so is a message''s Office file, with its message', $q$
+    DO $chk$
+    BEGIN
+        IF NOT EXISTS (SELECT 1 FROM file_rendition WHERE attachment_id = '00000000-0000-0000-0000-000000000ca2'
+                       AND status = 'queued' AND course_id = '00000000-0000-0000-0000-000000000041')
+           OR EXISTS (SELECT 1 FROM file_rendition WHERE attachment_id = '00000000-0000-0000-0000-000000000ca1') THEN
+            RAISE EXCEPTION 'the Word file alone was not queued';
+        END IF;
+    END $chk$ $q$);
+SELECT pg_temp.ok('which files are converted: an Office name, of an Office type or of none in particular', $q$
+    DO $chk$
+    BEGIN
+        IF NOT file_rendition_convertible('Lecture 3.PPTX', 'application/vnd.openxmlformats-officedocument.presentationml.presentation')
+           OR NOT file_rendition_convertible('a.xlsm', 'Application/vnd.ms-excel.sheet.macroEnabled.12; charset=binary')
+           OR NOT file_rendition_convertible('a.odg', 'application/octet-stream')
+           OR NOT file_rendition_convertible('a.docx', 'application/zip')
+           OR NOT file_rendition_convertible('a.rtf', 'text/rtf')
+           OR file_rendition_convertible('a.pdf', 'application/pdf')
+           OR file_rendition_convertible('a.docx', 'text/html')
+           OR file_rendition_convertible('a.zip', 'application/zip')
+           OR file_rendition_convertible('docx', 'application/msword')
+           OR file_rendition_convertible('a.docx.png', 'image/png')
+           OR file_rendition_convertible(NULL, NULL) THEN
+            RAISE EXCEPTION 'the table converts the wrong files';
+        END IF;
+    END $chk$ $q$);
+SELECT pg_temp.fails('one rendition to a file', '23505', $q$
+    INSERT INTO file_rendition (course_id, file_id)
+    VALUES ('00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-0000000026d1') $q$);
+SELECT pg_temp.fails('of one file, a version''s or a message''s', '23514', $q$
+    INSERT INTO file_rendition (course_id, file_id, attachment_id)
+    VALUES ('00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-0000000026d3', '00000000-0000-0000-0000-000000000ca1') $q$);
+SELECT pg_temp.fails('and of no file that is not converted', '23514', $q$
+    INSERT INTO file_rendition (course_id, file_id)
+    VALUES ('00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-0000000026d2') $q$);
+SELECT pg_temp.fails('made queued, never claimed or done', '23514', $q$
+    INSERT INTO file_rendition (course_id, attachment_id, status, reason)
+    VALUES ('00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000000ca1', 'failed', 'unsupported') $q$);
+SELECT pg_temp.fails('a claim holds a lease', '23514', $q$
+    UPDATE file_rendition SET status = 'claimed', attempts = 1 WHERE file_id = '00000000-0000-0000-0000-0000000026d1' $q$);
+SELECT pg_temp.fails('made with a credential', '23514', $q$
+    UPDATE file_rendition SET status = 'claimed', lease_id = gen_random_uuid(), claimed_until = now() + interval '10 minutes',
+                              attempts = 1
+    WHERE file_id = '00000000-0000-0000-0000-0000000026d1' $q$);
+SELECT pg_temp.ok('claimed, with a lease and the credential that made it', $q$
+    UPDATE file_rendition SET status = 'claimed', lease_id = gen_random_uuid(), claimed_until = now() + interval '10 minutes',
+                              claimed_by_credential_id = '00000000-0000-0000-0000-0000000020c1', claimed_at = now(), attempts = 1
+    WHERE file_id = '00000000-0000-0000-0000-0000000026d1' $q$);
+SELECT pg_temp.fails('done has its PDF', '23514', $q$
+    UPDATE file_rendition SET status = 'done', lease_id = NULL, claimed_until = NULL
+    WHERE file_id = '00000000-0000-0000-0000-0000000026d1' $q$);
+SELECT pg_temp.fails('and its page count', '23514', $q$
+    UPDATE file_rendition SET status = 'done', lease_id = NULL, claimed_until = NULL, storage_key = 'renditions/26d1',
+                              byte_size = 100, produced_at = now()
+    WHERE file_id = '00000000-0000-0000-0000-0000000026d1' $q$);
+SELECT pg_temp.fails('a PDF is five bytes at least', '23514', $q$
+    UPDATE file_rendition SET status = 'done', lease_id = NULL, claimed_until = NULL, storage_key = 'renditions/26d1',
+                              byte_size = 4, page_count = 1, produced_at = now()
+    WHERE file_id = '00000000-0000-0000-0000-0000000026d1' $q$);
+SELECT pg_temp.fails('nothing but done has a PDF', '23514', $q$
+    UPDATE file_rendition SET status = 'failed', reason = 'timeout', lease_id = NULL, claimed_until = NULL,
+                              storage_key = 'renditions/26d1', byte_size = 100, page_count = 1, produced_at = now()
+    WHERE file_id = '00000000-0000-0000-0000-0000000026d1' $q$);
+SELECT pg_temp.fails('failed says why', '23514', $q$
+    UPDATE file_rendition SET status = 'failed', lease_id = NULL, claimed_until = NULL
+    WHERE file_id = '00000000-0000-0000-0000-0000000026d1' $q$);
+SELECT pg_temp.fails('in one of its words', '23514', $q$
+    UPDATE file_rendition SET status = 'skipped', reason = 'it was too hard', lease_id = NULL, claimed_until = NULL
+    WHERE file_id = '00000000-0000-0000-0000-0000000026d1' $q$);
+SELECT pg_temp.fails('and nothing else does', '23514', $q$
+    UPDATE file_rendition SET reason = 'timeout' WHERE file_id = '00000000-0000-0000-0000-0000000026d1' $q$);
+SELECT pg_temp.ok('done, with its PDF', $q$
+    UPDATE file_rendition SET status = 'done', lease_id = NULL, claimed_until = NULL, storage_key = 'renditions/26d1',
+                              byte_size = 100, checksum = 'sha256:26', page_count = 3, produced_at = now()
+    WHERE file_id = '00000000-0000-0000-0000-0000000026d1' $q$);
+SELECT pg_temp.fails('and kept as it was made', '23001', $q$
+    UPDATE file_rendition SET page_count = 4 WHERE file_id = '00000000-0000-0000-0000-0000000026d1' $q$);
+SELECT pg_temp.fails('nor queued again', '23001', $q$
+    UPDATE file_rendition SET status = 'queued', storage_key = NULL, byte_size = NULL, checksum = NULL, page_count = NULL,
+                              produced_at = NULL
+    WHERE file_id = '00000000-0000-0000-0000-0000000026d1' $q$);
+SELECT pg_temp.fails('one PDF to a key', '23505', $q$
+    UPDATE file_rendition SET status = 'done', storage_key = 'renditions/26d1', byte_size = 100, page_count = 1,
+                              produced_at = now()
+    WHERE attachment_id = '00000000-0000-0000-0000-000000000ca2' $q$);
+SELECT pg_temp.fails('a rendition stays its file''s', '23001', $q$
+    UPDATE file_rendition SET attachment_id = NULL, file_id = '00000000-0000-0000-0000-0000000026d1'
+    WHERE attachment_id = '00000000-0000-0000-0000-000000000ca2' $q$);
+SELECT pg_temp.ok('a failed one is queued again', $q$
+    UPDATE file_rendition SET status = 'failed', reason = 'conversion_failed' WHERE attachment_id = '00000000-0000-0000-0000-000000000ca2';
+    UPDATE file_rendition SET status = 'queued', reason = NULL, attempts = 0, queued_at = now()
+    WHERE attachment_id = '00000000-0000-0000-0000-000000000ca2' $q$);
+SELECT pg_temp.fails('a rendition goes only with its file', '23001', $q$
+    DELETE FROM file_rendition WHERE attachment_id = '00000000-0000-0000-0000-000000000ca2' $q$);
+SELECT pg_temp.fails('nor all at once', '23001', $q$
+    TRUNCATE file_rendition $q$);
+SELECT pg_temp.ok('a version''s files'' renditions go with them when it is purged', $q$
+    UPDATE document_version SET storage_key = NULL, checksum = NULL, purged_at = now(),
+                                purged_by_actor_id = '00000000-0000-0000-0000-000000000032', purge_reason = 'personal data'
+    WHERE id = '00000000-0000-0000-0000-0000000026f1';
+    DO $chk$
+    BEGIN
+        IF EXISTS (SELECT 1 FROM file_rendition WHERE file_id = '00000000-0000-0000-0000-0000000026d1')
+           OR EXISTS (SELECT 1 FROM document_version_file WHERE version_id = '00000000-0000-0000-0000-0000000026f1') THEN
+            RAISE EXCEPTION 'the rendition of a purged version''s file is still there';
+        END IF;
+    END $chk$ $q$);
 
 \o
 ROLLBACK;

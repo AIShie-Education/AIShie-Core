@@ -219,10 +219,12 @@ ORDER BY id;
 
 -- name: ListServiceCredentials :many
 -- A service's credentials, newest first, revoked ones included, and how many
--- claims each holds now. Never the hash.
+-- claims each holds now: text versions the transcriber's, renditions the
+-- agent runtime's. Never the hash.
 SELECT c.id, c.token_prefix, c.label, c.last_used_at, c.expires_at, c.revoked_at, c.created_at,
        c.issued_by_actor_id, i.display_name AS issued_by_name,
-       (SELECT count(*) FROM document_version_text t WHERE t.claimed_by_credential_id = c.id AND t.status = 'working')::int AS claims_held
+       ((SELECT count(*) FROM document_version_text t WHERE t.claimed_by_credential_id = c.id AND t.status = 'working')
+        + (SELECT count(*) FROM file_rendition r WHERE r.claimed_by_credential_id = c.id AND r.status = 'claimed'))::int AS claims_held
 FROM credential c
 LEFT JOIN actor i ON i.id = c.issued_by_actor_id
 WHERE c.actor_id = $1 AND c.kind = 'service'

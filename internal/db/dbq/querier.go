@@ -31,6 +31,12 @@ type Querier interface {
 	// Any row at all: a draft, a hand-in, a 'missing' placeholder.
 	AssignmentHasSubmissions(ctx context.Context, assignmentID uuid.UUID) (bool, error)
 	CancelProposal(ctx context.Context, arg CancelProposalParams) (int64, error)
+	// Up to max_rows renditions waiting, or whose claim has lapsed, claimed for
+	// the caller until claimed_until: what was queued as its file was recorded
+	// first, the oldest first, then the backfill, the newest first. SKIP
+	// LOCKED: two claims at once never take the same one. Each comes with its
+	// file, a version's or a message's.
+	ClaimRenditions(ctx context.Context, arg ClaimRenditionsParams) ([]ClaimRenditionsRow, error)
 	// Up to max_rows text versions waiting, or whose claim has lapsed, claimed for
 	// the caller until claimed_until: uploads first, oldest first, then the
 	// backfill, newest first; a version's files in order. SKIP LOCKED: two
@@ -160,6 +166,13 @@ type Querier interface {
 	// approved it.
 	EscalatedBy(ctx context.Context, arg EscalatedByParams) (bool, error)
 	// ---------------------------------------------------------------------------
+	// The runtime's queue
+	// ---------------------------------------------------------------------------
+	// What has been claimed max_attempts times and not finished fails, rather
+	// than be claimed for ever: a file the runtime cannot get through. SKIP
+	// LOCKED, as a claim: what another call holds is its to change.
+	ExhaustRenditions(ctx context.Context, arg ExhaustRenditionsParams) error
+	// ---------------------------------------------------------------------------
 	// The service's queue
 	// ---------------------------------------------------------------------------
 	// What has been claimed max_attempts times and not finished fails, rather
@@ -189,6 +202,10 @@ type Querier interface {
 	// Moves a proposal to its end state. The status guard makes a lost race
 	// between two deciders, or a decider and the expiry sweep, a no-op.
 	FinishProposal(ctx context.Context, arg FinishProposalParams) (int64, error)
+	// The PDF: done, kept as it is from now on.
+	FinishRenditionDone(ctx context.Context, arg FinishRenditionDoneParams) error
+	// The runtime could not, or would not: failed or skipped, saying why.
+	FinishRenditionUndone(ctx context.Context, arg FinishRenditionUndoneParams) error
 	// The service's text: done, the model's, made now.
 	FinishTextDone(ctx context.Context, arg FinishTextDoneParams) (int32, error)
 	// The service could not, or would not: failed or skipped, saying why.
@@ -256,6 +273,8 @@ type Querier interface {
 	// The file of a text version the caller's claim holds: the one named, or
 	// whichever of the version's the claim is of.
 	GetClaimedFile(ctx context.Context, arg GetClaimedFileParams) (GetClaimedFileRow, error)
+	// A rendition the caller's claim holds, with its file.
+	GetClaimedRendition(ctx context.Context, arg GetClaimedRenditionParams) (GetClaimedRenditionRow, error)
 	GetComponentInCourse(ctx context.Context, arg GetComponentInCourseParams) (GetComponentInCourseRow, error)
 	GetComponentParent(ctx context.Context, id uuid.UUID) (*uuid.UUID, error)
 	// One file, with its message's author, whether the message is retracted,
@@ -346,6 +365,8 @@ type Querier interface {
 	// change (must_change).
 	GetPasswordCredential(ctx context.Context, actorID uuid.UUID) (GetPasswordCredentialRow, error)
 	GetPreset(ctx context.Context, id uuid.UUID) (PermissionPreset, error)
+	// What a call of the runtime's is about: the rendition's course.
+	GetRenditionForService(ctx context.Context, id uuid.UUID) (GetRenditionForServiceRow, error)
 	// Roster facts about a member. This is not authorization: that a grade can
 	// only be given to someone on the roster as a student is a rule about grades.
 	GetRosterEntry(ctx context.Context, arg GetRosterEntryParams) (GetRosterEntryRow, error)
@@ -550,6 +571,8 @@ type Querier interface {
 	ListDepartments(ctx context.Context) ([]ListDepartmentsRow, error)
 	// The files of every version of a document, each version's in order.
 	ListDocumentFiles(ctx context.Context, documentID uuid.UUID) ([]DocumentVersionFile, error)
+	// Where the renditions of the files of every version of a document stand.
+	ListDocumentRenditionStates(ctx context.Context, documentID uuid.UUID) ([]ListDocumentRenditionStatesRow, error)
 	// The live drafts waiting to be posted for one assignment.
 	ListDraftGradeIDsForAssignment(ctx context.Context, arg ListDraftGradeIDsForAssignmentParams) ([]uuid.UUID, error)
 	// What a sign-in reads: the providers switched on, in the sign-in page's
@@ -648,16 +671,16 @@ type Querier interface {
 	ListMyConversations(ctx context.Context, arg ListMyConversationsParams) ([]ListMyConversationsRow, error)
 	// Which of these uploads, each given with the course its key names, are
 	// this deployment's and attached to nothing? The course must be one this
-	// database has. document.upload_url and conversation.upload_url issue keys
-	// only under courses that exist, and a course is never deleted, so a key
-	// under any other course was written by another deployment keeping its
-	// files in the same place: it is not ours to remove, however old it is and
-	// whatever points at it there. Attached is attached to a version of a
-	// document, as any of its files or in its own columns, or to a message of a
-	// conversation. What is left comes back in
-	// the order it was given. The orphan sweep puts a page of listed files at a
-	// time to it, and asks again about each one it removes, under the lock
-	// attaching takes.
+	// database has. document.upload_url, conversation.upload_url and
+	// agent_runtime.rendition_upload_url issue keys only under courses that
+	// exist, and a course is never deleted, so a key under any other course was
+	// written by another deployment keeping its files in the same place: it is
+	// not ours to remove, however old it is and whatever points at it there.
+	// Attached is attached to a version of a document, as any of its files or
+	// in its own columns, or to a message of a conversation, or a rendition's
+	// PDF. What is left comes back in the order it was given. The orphan sweep
+	// puts a page of listed files at a time to it, and asks again about each
+	// one it removes, under the lock attaching takes.
 	ListOrphanUploads(ctx context.Context, arg ListOrphanUploadsParams) ([]ListOrphanUploadsRow, error)
 	// Seats that count for nothing for good (SeatOrphaned), not yet removed: a
 	// delegate's whose principal is removed or past its expiry, and seats that
@@ -690,6 +713,16 @@ type Querier interface {
 	// after which the row is read again as it left it: an assignment unpublished
 	// meanwhile is not listed, and the event goes out under its unreleased name.
 	ListPublishedAssignmentsUsingDocument(ctx context.Context, documentID *uuid.UUID) ([]uuid.UUID, error)
+	// The renditions of the given files of messages.
+	ListRenditionsOfAttachments(ctx context.Context, attachmentIds []uuid.UUID) ([]FileRendition, error)
+	// Renditions (docs/schema.md §2.4, Renditions): the PDF an Office or
+	// OpenDocument file is converted into, once, by the site's agent runtime.
+	// One to a file, of a version (file_id) or of a message (attachment_id),
+	// queued by the database as the file is recorded. Who may read one is who
+	// may read its file, which the application decides.
+	// The renditions of the given files of versions; a file that has none is
+	// not converted.
+	ListRenditionsOfFiles(ctx context.Context, fileIds []uuid.UUID) ([]FileRendition, error)
 	// The seats that might answer a caller: agents' seats, live, held by an
 	// active actor, with conversation_answer not denied on the row, and, for a
 	// delegate, either the caller's own or one that answers the course, whose
@@ -716,7 +749,8 @@ type Querier interface {
 	// name of the preset it was copied from.
 	ListSeatsOfActor(ctx context.Context, actorID uuid.UUID) ([]ListSeatsOfActorRow, error)
 	// A service's credentials, newest first, revoked ones included, and how many
-	// claims each holds now. Never the hash.
+	// claims each holds now: text versions the transcriber's, renditions the
+	// agent runtime's. Never the hash.
 	ListServiceCredentials(ctx context.Context, actorID uuid.UUID) ([]ListServiceCredentialsRow, error)
 	// What the background sweeps look for. Each returns a small batch; the sweep
 	// runs again on the next tick. None of these is what makes the system
@@ -902,6 +936,12 @@ type Querier interface {
 	// or the call waits for it and, reading the row again here, sees what it
 	// did.
 	LockPrincipalForAuthz(ctx context.Context, id uuid.UUID) (LockPrincipalForAuthzRow, error)
+	// A rendition, held for a call of the runtime's about it.
+	LockRendition(ctx context.Context, id uuid.UUID) (FileRendition, error)
+	// A message's file's rendition, held for a change to it.
+	LockRenditionOfAttachment(ctx context.Context, attachmentID *uuid.UUID) (FileRendition, error)
+	// A file's rendition, held for a change to it.
+	LockRenditionOfFile(ctx context.Context, fileID *uuid.UUID) (FileRendition, error)
 	// A provider, held for the change a write makes to it: two writes made over
 	// the same version meet here, and the second finds the version moved on.
 	LockSSOProvider(ctx context.Context, id string) (LockSSOProviderRow, error)
@@ -1010,13 +1050,24 @@ type Querier interface {
 	ReleaseJobLock(ctx context.Context, key int64) (bool, error)
 	// What a revoked credential had claimed, back in the queue for another,
 	// that claim not counted. The courses come back, to wake whoever waits.
+	ReleaseRenditions(ctx context.Context, arg ReleaseRenditionsParams) ([]uuid.UUID, error)
+	// What a revoked credential had claimed, back in the queue for another,
+	// that claim not counted. The courses come back, to wake whoever waits.
 	ReleaseTexts(ctx context.Context, arg ReleaseTextsParams) ([]uuid.UUID, error)
 	RenameDepartment(ctx context.Context, arg RenameDepartmentParams) error
+	// The PDFs of the files of these versions, which go from the file store
+	// when the versions are purged.
+	RenditionKeysOfVersions(ctx context.Context, versionIds []uuid.UUID) ([]string, error)
+	// A claim held longer, from now; its own and nobody else's.
+	RenewRenditionLease(ctx context.Context, arg RenewRenditionLeaseParams) (*time.Time, error)
 	// A claim held longer, from now; its own and nobody else's.
 	RenewTextLease(ctx context.Context, arg RenewTextLeaseParams) (*time.Time, error)
 	// A 'missing' row is a placeholder written when the due date passed with
 	// nothing handed in. Late work takes it over rather than sitting beside it.
 	ReopenMissingSubmission(ctx context.Context, arg ReopenMissingSubmissionParams) error
+	// Back to the queue, as an upload is queued: why it failed goes, and its
+	// attempts start again.
+	RequeueRendition(ctx context.Context, arg RequeueRenditionParams) error
 	// Back to the queue, as an upload is queued: whatever it said goes, a claim
 	// of it ends, and its attempts start again.
 	RequeueText(ctx context.Context, arg RequeueTextParams) (int32, error)
