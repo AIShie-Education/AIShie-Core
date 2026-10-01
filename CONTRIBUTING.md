@@ -28,9 +28,14 @@ and `build` green. CI also runs `test (s3 against minio)` and `vuln`.
   already past among them — goes in `Validate`, which is given the moment and
   runs before a proposal is queued as well as before `Execute`, again, as the
   proposer's, when it is approved, and for an agent's owner deciding whether
-  it is theirs to decide. `Pin` refuses only what is true of a proposal and of
-  no call, such as an upload too old to outlast it. A rule left to `Execute`
-  alone is found only when someone approves the proposal.
+  it is theirs to decide. What changed since a proposal was made, which no
+  call is refused for — a newer draft of the grade it would replace — goes in
+  `Since`, given when it was proposed and asked when it is approved and for
+  its owner. `Pin` refuses what is true of a proposal and of no call, such as
+  an upload too old to outlast it, and the rules `Execute` holds a call to and
+  an approval passes over on purpose, such as `no_rubric` while a rubric is
+  published. A rule left to `Execute` alone is found only when someone
+  approves the proposal.
 - A new **tool** is one `tool.Define` in `internal/tools`. It gets its REST
   route and its MCP tool from that declaration; there is nothing to add in
   `httpapi` or `mcpapi`. If it emits a new event type, give the type a row in
