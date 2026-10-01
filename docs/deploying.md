@@ -546,7 +546,7 @@ Run all of these as root on the server.
   or `mcp`, reached by its owner's own tools with tokens they issue, and
   asked nothing in the site. Nothing else makes an agent answer in the site,
   and nothing is declared any more (`me.site_chat` changes nothing, for one
-  release, and is then removed). The migration makes a runtime agent of
+  release, and migration 0027 removes it). The migration makes a runtime agent of
   every agent whose runtime had declared site chat with a token still live,
   takes that token as the runtime's, so that it is asked as before, and
   revokes the agent's other tokens: an owner's own tool connected to such an
@@ -556,8 +556,8 @@ Run all of these as root on the server.
   and deploy a runtime that hosts by agent id: it issues each agent it hosts
   a token of its own on its first start, which revokes the one it was handed.
   `actor.site_chat_credential_id` is kept, pointing at each runtime agent's
-  token, for the release before, which reads it, and dropped by a later
-  migration. The previous release, while the migration goes in and after a
+  token, for the release before, which reads it, and dropped by migration
+  0027. The previous release, while the migration goes in and after a
   rollback, registers mcp agents, and fails having changed nothing when it
   would issue a runtime agent a token of its owner's. Going down drops hosting
   and keeps every token as it is, the runtime's included, and the agent
@@ -587,6 +587,32 @@ Run all of these as root on the server.
   never sweeps `renditions/`. Going down drops the renditions and leaves
   their PDFs in the store: migrated up again, every file is queued and
   converted again, and the sweep removes the PDFs made before.
+- **Migration 0027, what 0023 and 0025 kept for one release goes:** a
+  version's own file columns (`document_version.storage_key`,
+  `content_type`, `byte_size`, `checksum`) and `actor.site_chat_credential_id`
+  are dropped, with what kept them in step for the release before 0023 and
+  0025; `me.site_chat` is gone; `document.create` and `document.add_version`
+  take a version's files in `files` alone, never `upload_token`;
+  `document.get` and `document.versions` say nothing of a version's first
+  file but in `files`; every call about a text names its file (`file_id`);
+  `agent.update` takes no `site_chat`; and an agent registered naming no
+  hosting is refused. It needs nothing of the operator, and changes no row
+  but by dropping those columns: a purged version no longer says what type
+  and size its file was. **Deploy it only once every server runs a release
+  with migrations 0023 and 0025**, and the agent runtime and the front end
+  read and send none of the above (they do not since AIShie-Core #49 and
+  #52). Unlike every migration before it, it does not leave the release
+  before working: that release writes and reads the columns it drops. While
+  it goes in, until this release has started, the release before fails what
+  reads an actor or a version, a moment on a school's site; and if this
+  release does not come up, starting the release before again does not
+  help, whether `aishie-deploy` does it here or AIShie-Deploy's
+  `aishie-update` does it on its stack, after a health check that failed.
+  To roll back, migrate down once with this release's image before running
+  the release before (Rolling back, below): it loses
+  nothing the release before reads, putting back each version's first file
+  in its own columns and each runtime agent's runtime token as its site
+  chat credential.
 - **Migration 0013, `member_invite`:** the permission that makes a course's
   join links. Every seat a person holds got it at its level of
   `member_manage`, and every seat an agent holds got it `denied`, whatever it
@@ -642,6 +668,16 @@ Run all of these as root on the server.
 
   ```
   aishie-deploy ghcr.io/aishie-education/aishie-core:1.2.2
+  ```
+
+  Rolling back from the release with migration 0027 is the exception: the
+  release before does not work on its schema. Take the schema down one
+  migration with this release's image, then deploy the release before:
+
+  ```
+  docker run --rm --network host --env-file /etc/aishie/aishie.env \
+    ghcr.io/aishie-education/aishie-core:<this release> migrate down --yes
+  aishie-deploy ghcr.io/aishie-education/aishie-core:<the release before>
   ```
 
   Rolled back past migration 0007, the release before knows nothing of the

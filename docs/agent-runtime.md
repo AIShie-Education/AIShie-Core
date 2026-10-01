@@ -31,7 +31,8 @@ read on 2026-09-26; **[UNVERIFIED]** marks what it did not confirm.
   long-polls `conversation_inbox` for questions (`wait_s`: a call waits until
   one is asked) and reads `event_list` for outcomes (§7.2). People in the
   site ask a runtime agent while the token the runtime holds for it lives:
-  nothing is declared, and `me_site_chat` is deprecated. Ending the hosting
+  nothing is declared, and there is no tool to declare it with
+  (`me_site_chat`, gone since Core's migration 0027). Ending the hosting
   revokes the token (`agent_runtime.revoke_token`), and people ask the agent
   nothing more.
 - With the same credential the runtime converts every Office and
@@ -160,7 +161,8 @@ runtime → Core (as the agent, over MCP): me_get, me_memberships; start polling
 - **On upgrading** to this contract, the runtime issues each agent it hosts a
   token of its own on its first start (`agent_runtime.issue_token`), which
   revokes the one an owner pasted into it before (Core's migration 0025 took
-  that one as the runtime's), and stops calling `me_site_chat`. It refuses an
+  that one as the runtime's), and never calls `me_site_chat`, which Core no
+  longer has (migration 0027). It refuses an
   mcp agent with the reason above, and forgets any it held: Core revoked
   nothing of an mcp agent's, but no runtime hosts one.
 
@@ -273,7 +275,14 @@ rejected, cancelled). That is safe: Core refuses a second answer to a message
 |---|---|
 | `me_get` | Checks the token and returns the agent's actor: `id`, `kind`, `display_name`, `status`, `hosting` (`runtime` for every agent the runtime hosts), and `owner_actor_id`, the person who owns it. `owner_actor_id` is absent for an agent nobody owns (one an administrator registered without an owner), and for a person, who holds no API token (Core refuses one from before, `api_tokens_are_for_agents`), and whose session the runtime refuses anyway (`kind` is not `agent`). It names the owner while the owner is suspended too; Core gives a suspended person no assertion (§5.1), so they cannot connect the agent meanwhile. An agent's owner is fixed when it is registered and never changes (schema.md §2.1), so the owner a stored token's agent names is the one it named when the token was taken. |
 | `me_memberships` | Every seat: `member_id`, `course_id`, `code`, `section`, `title`, `course_status`, `role`, `status`, `expires_at`, `student_scope`, `assignment_scope`, `principal_member_id`, `perms` (permission to level, a delegate's capped by its principal's, all `denied` while the seat does not count), `answers_course`, and `perm_ceilings` with `perm_ceiling_reasons`: the most each permission of the seat could ever be, and why where that is below `autonomous` (an agent's `action_decide` is `confirm_required` at most: its decisions and reviews are proposals). Work only in active seats of courses not archived whose `perms.conversation_answer` is not denied. |
-| `me_site_chat` | Deprecated, kept one release: nothing is declared. With the token the runtime was issued, `{on: true}` or `{on: false}` changes nothing and returns `site_chat`, whether people in the site may ask the agent now (false while it or its owner is suspended); with any other credential it is refused, `not_runtime_hosted`, and a person's `not_an_agent`. Stop calling it. People in the site ask a runtime agent while the runtime's token lives; until the runtime is issued one, and once it is revoked, `conversation.open` and `conversation.ask` addressed to the agent are refused `failed_precondition`, `agent_not_hosted` (an mcp agent: `mcp_agent`). Conversations already open are unaffected: the agent answers them, and they stay readable. |
+
+People in the site ask a runtime agent while the token the runtime was issued
+for it lives, and nothing declares it (Core's `me_site_chat`, which changed
+nothing for one release, is gone since migration 0027). Until the runtime is
+issued one, and once it is revoked, `conversation.open` and `conversation.ask`
+addressed to the agent are refused `failed_precondition`, `agent_not_hosted`
+(an mcp agent: `mcp_agent`). Conversations already open are unaffected: the
+agent answers them, and they stay readable.
 
 **Finding work**
 
@@ -605,9 +614,10 @@ Rules:
    (`document_file{file_id}` for a fresh one once it has lapsed) and passes a
    file part (Anthropic `document`, OpenAI `input_file`, Gemini `inlineData`),
    or extracted text. Cap the size, per file and per version; never give the
-   model a URL. The version's own `download_url`, `content_type`, `byte_size`
-   and `text` are its first file's, kept for the runtimes of the release
-   before: read `files`. A text version is kept by its file's id, which never
+   model a URL. The version says nothing of a file but in `files`: the
+   fields of its own that named its first file went with Core's migration
+   0027, and a call about a text names its file. A text version is kept by its
+   file's id, which never
    changes, and dropped when its news (`document.text_updated`, with
    `file_id`) says it has. A question's files go the same way (§2.9), their
    URLs from `conversation_attachment`.
@@ -1038,7 +1048,7 @@ stays its owner for as long as the token works; check it again
 
 **Never offered to a model** in M1 and M2: `agent_*`, `credential_*`,
 `actor_*`, `member_*`, `action_decide`, `action_review`, `action_withdraw`,
-`conversation_*` and `me_site_chat` (the runtime calls those itself,
+`conversation_*` (the runtime calls those itself,
 `conversation_attachment` and `conversation_upload_url` among them;
 `conversation_draft` above all, which writes what people watch and records
 nothing: name it in the built-in list, whatever pattern matches it), `preset_*`,

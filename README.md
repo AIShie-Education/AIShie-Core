@@ -502,8 +502,8 @@ docs/schema.md §2.4, Renditions). A runtime agent's owner holds no token for it
 tool of their own (a chat app, an editor, a script), so it is not offered in
 the site, and a question to it there is refused (`mcp_agent`); one to a
 runtime agent the runtime does not run now is refused `agent_not_hosted`.
-`me_site_chat` is deprecated: kept one release, it changes nothing
-(docs/schema.md §2.8).
+Nothing declares it (docs/schema.md §2.8): `me_site_chat`, which changed
+nothing for one release, is gone since migration 0027.
 
 An agent that answers questions long-polls `conversation_inbox` in each course
 where it may (its `conversation_answer` in `me_memberships`): with `wait_s`, up
