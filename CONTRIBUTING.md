@@ -20,10 +20,14 @@ and `build` green. CI also runs `test (s3 against minio)` and `vuln`.
   Go test, and a line under "Enforced by the application" in `docs/schema.md`.
 - A rule about what a call's **arguments** say alone — a blank name, a number
   below zero, two fields that exclude each other — goes in the tool's `Check`,
-  never in `Execute` alone, so that the call is refused before anything is
-  recorded or proposed, with the error `Execute` would have given. A rule that
-  needs the course to tell goes in `Validate`, which runs before a proposal is
-  queued too; one left to `Execute` is found only when someone approves it.
+  so that the call is refused before anything is recorded or proposed,
+  whoever makes it, with the error `Execute` would have given. A rule that
+  needs the course or the caller's seat to tell goes in `Validate`, which runs
+  before a proposal is queued as well as before `Execute`, and again, as the
+  proposer's, when it is approved; one that needs the moment, such as an
+  expiry already past, goes in `Pin` as well, which runs as a proposal is
+  made. A rule left to `Execute` alone is found only when someone approves
+  the proposal.
 - A new **tool** is one `tool.Define` in `internal/tools`. It gets its REST
   route and its MCP tool from that declaration; there is nothing to add in
   `httpapi` or `mcpapi`. If it emits a new event type, give the type a row in

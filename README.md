@@ -613,15 +613,16 @@ with the same body again and you get the first answer back
 different body and you get `409 idempotency_conflict`. The response says what
 became of the call. A call that was attempted is recorded, and the answer
 names the action in a top-level `action_id`: `200` executed, `202` proposed
-(it now waits for a human; watch the action id), `403` denied, and a failure
+(it now waits for a human; watch the action id; one its tool's rules refuse as
+the course stands fails at once instead), `403` denied, and a failure
 with its error's own status, `400`, `403`, `404`, `409` or `422`, or `429`, with
 `Retry-After`, for an agent writing to its memory faster than it may. A proposal
 replayed says what has become of it: `202` while it waits, `200` executed,
 `409` rejected, `422` cancelled, or its failure's status. An answer with no
 top-level `action_id` recorded nothing, whatever its status: among them every
 `401` and every other `429`, a `400` or `404` for a call that was never attempted (its
-arguments refused, whether by the schema or by what they say alone, such as a blank name or a
-score below zero, whoever makes it: nothing is proposed that could never be carried out), a `403`
+arguments refused by the schema, or by its tool's check of what they say alone, such as a
+score below zero on a grade, whoever makes it), a `403`
 for a browser's `POST` from another origin not in `TRUSTED_ORIGINS`, a `405`,
 a `500`, every read, and every draft, whose writes are bounded per
 conversation, ten a second, then `429`, and cost nothing of the rate limit
