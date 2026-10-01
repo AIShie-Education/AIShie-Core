@@ -68,26 +68,10 @@ func (q *Queries) CountRootActors(ctx context.Context) (int64, error) {
 	return count, err
 }
 
-const endSiteChatByOwner = `-- name: EndSiteChatByOwner :exec
-UPDATE actor SET site_chat_credential_id = NULL
-WHERE id = $1 AND owner_actor_id = $2
-`
-
-type EndSiteChatByOwnerParams struct {
-	ID           uuid.UUID
-	OwnerActorID *uuid.UUID
-}
-
-// Its owner switches it off: only its owner, who is its owner for good.
-func (q *Queries) EndSiteChatByOwner(ctx context.Context, arg EndSiteChatByOwnerParams) error {
-	_, err := q.db.Exec(ctx, endSiteChatByOwner, arg.ID, arg.OwnerActorID)
-	return err
-}
-
 const getActor = `-- name: GetActor :one
 SELECT id, kind, display_name, email, status, platform_role, created_by_actor_id, created_at,
        owner_actor_id, suspended_by_actor_id, site_chat_credential_id, email_verified, login_id, login_id_verified,
-       service_scope
+       service_scope, hosting
 FROM actor
 WHERE id = $1
 `
@@ -113,6 +97,7 @@ func (q *Queries) GetActor(ctx context.Context, id uuid.UUID) (Actor, error) {
 		&i.LoginID,
 		&i.LoginIDVerified,
 		&i.ServiceScope,
+		&i.Hosting,
 	)
 	return i, err
 }
@@ -158,7 +143,7 @@ func (q *Queries) GetActorByLoginID(ctx context.Context, lower string) (GetActor
 const getActorForShare = `-- name: GetActorForShare :one
 SELECT id, kind, display_name, email, status, platform_role, created_by_actor_id, created_at,
        owner_actor_id, suspended_by_actor_id, site_chat_credential_id, email_verified, login_id, login_id_verified,
-       service_scope
+       service_scope, hosting
 FROM actor
 WHERE id = $1
 FOR SHARE
@@ -188,6 +173,73 @@ func (q *Queries) GetActorForShare(ctx context.Context, id uuid.UUID) (Actor, er
 		&i.LoginID,
 		&i.LoginIDVerified,
 		&i.ServiceScope,
+		&i.Hosting,
+	)
+	return i, err
+}
+
+const getAgentForRuntime = `-- name: GetAgentForRuntime :one
+SELECT a.id, a.display_name, coalesce(a.hosting, '')::text AS hosting, a.status, a.owner_actor_id,
+       o.status AS owner_status, o.display_name AS owner_name,
+       (SELECT count(*) FROM course_member m
+         WHERE m.actor_id = a.id AND m.status = 'active'
+           AND (m.expires_at IS NULL OR m.expires_at > $1)) AS live_seats,
+       rt.id AS runtime_credential_id, rt.token_prefix AS runtime_token_prefix, rt.created_at AS runtime_token_created_at,
+       rt.last_used_at AS runtime_token_last_used_at,
+       (a.hosting = 'runtime' AND a.status = 'active' AND (o.id IS NULL OR o.status = 'active')
+        AND rt.id IS NOT NULL)::bool AS site_chat
+FROM actor a
+LEFT JOIN actor o ON o.id = a.owner_actor_id
+LEFT JOIN credential rt ON rt.actor_id = a.id AND rt.issued_to_service = 'agent_runtime' AND rt.revoked_at IS NULL
+                       AND (rt.expires_at IS NULL OR rt.expires_at > $1)
+WHERE a.id = $2 AND a.kind = 'agent'
+`
+
+type GetAgentForRuntimeParams struct {
+	Now *time.Time
+	ID  uuid.UUID
+}
+
+type GetAgentForRuntimeRow struct {
+	ID                     uuid.UUID
+	DisplayName            string
+	Hosting                string
+	Status                 string
+	OwnerActorID           *uuid.UUID
+	OwnerStatus            *string
+	OwnerName              *string
+	LiveSeats              int64
+	RuntimeCredentialID    *uuid.UUID
+	RuntimeTokenPrefix     *string
+	RuntimeTokenCreatedAt  *time.Time
+	RuntimeTokenLastUsedAt *time.Time
+	SiteChat               bool
+}
+
+// An agent as the site's agent runtime needs it to host it by its id: how
+// it is hosted, its standing and its owner's, how many seats it holds that
+// count now, its runtime token if one is live, and whether people in the
+// site may ask it now, by the rule of SiteChatOf. Only an agent: anyone
+// else is no row.
+// One row at most: an agent's runtime tokens that are not revoked are one at
+// most (credential_one_runtime_token).
+func (q *Queries) GetAgentForRuntime(ctx context.Context, arg GetAgentForRuntimeParams) (GetAgentForRuntimeRow, error) {
+	row := q.db.QueryRow(ctx, getAgentForRuntime, arg.Now, arg.ID)
+	var i GetAgentForRuntimeRow
+	err := row.Scan(
+		&i.ID,
+		&i.DisplayName,
+		&i.Hosting,
+		&i.Status,
+		&i.OwnerActorID,
+		&i.OwnerStatus,
+		&i.OwnerName,
+		&i.LiveSeats,
+		&i.RuntimeCredentialID,
+		&i.RuntimeTokenPrefix,
+		&i.RuntimeTokenCreatedAt,
+		&i.RuntimeTokenLastUsedAt,
+		&i.SiteChat,
 	)
 	return i, err
 }
@@ -205,8 +257,8 @@ func (q *Queries) GetSystemActor(ctx context.Context) (uuid.UUID, error) {
 
 const insertActor = `-- name: InsertActor :exec
 INSERT INTO actor (id, kind, display_name, email, status, platform_role, created_by_actor_id, created_at, owner_actor_id,
-                   login_id)
-VALUES ($1, $2, $3, $4, 'active', $5, $6, $7, $8, $9)
+                   login_id, hosting)
+VALUES ($1, $2, $3, $4, 'active', $5, $6, $7, $8, $9, $10)
 `
 
 type InsertActorParams struct {
@@ -219,10 +271,12 @@ type InsertActorParams struct {
 	CreatedAt        time.Time
 	OwnerActorID     *uuid.UUID
 	LoginID          *string
+	Hosting          *string
 }
 
 // A login ID an administrator gives is one they vouch for (login_id_verified,
-// by its default).
+// by its default). An agent's hosting is given, and only an agent's
+// (actor_hosting_is_an_agents).
 func (q *Queries) InsertActor(ctx context.Context, arg InsertActorParams) error {
 	_, err := q.db.Exec(ctx, insertActor,
 		arg.ID,
@@ -234,6 +288,7 @@ func (q *Queries) InsertActor(ctx context.Context, arg InsertActorParams) error 
 		arg.CreatedAt,
 		arg.OwnerActorID,
 		arg.LoginID,
+		arg.Hosting,
 	)
 	return err
 }
@@ -296,11 +351,12 @@ func (q *Queries) InvitableBy(ctx context.Context, arg InvitableByParams) (Invit
 
 const listAgentsOf = `-- name: ListAgentsOf :many
 SELECT a.id, a.display_name, a.status, a.suspended_by_actor_id, a.created_at, seen.last_used_at AS last_seen_at,
-       (a.status = 'active'
+       coalesce(a.hosting, '')::text AS hosting,
+       (a.hosting = 'runtime' AND a.status = 'active'
         AND (a.owner_actor_id IS NULL OR EXISTS (SELECT 1 FROM actor o WHERE o.id = a.owner_actor_id AND o.status = 'active'))
-        AND EXISTS (SELECT 1 FROM credential sc
-                     WHERE sc.id = a.site_chat_credential_id AND sc.actor_id = a.id AND sc.revoked_at IS NULL
-                       AND (sc.expires_at IS NULL OR sc.expires_at > $1)))::bool AS site_chat,
+        AND EXISTS (SELECT 1 FROM credential rt
+                     WHERE rt.actor_id = a.id AND rt.issued_to_service = 'agent_runtime' AND rt.revoked_at IS NULL
+                       AND (rt.expires_at IS NULL OR rt.expires_at > $1)))::bool AS site_chat,
        (SELECT count(*) FROM course_member m
          WHERE m.actor_id = a.id AND m.status = 'active'
            AND (m.expires_at IS NULL OR m.expires_at > $1)) AS live_seats,
@@ -329,16 +385,17 @@ type ListAgentsOfRow struct {
 	SuspendedByActorID *uuid.UUID
 	CreatedAt          time.Time
 	LastSeenAt         *time.Time
+	Hosting            string
 	SiteChat           bool
 	LiveSeats          int64
 	PendingRequests    int64
 }
 
 // A person's agents, oldest first, with what their owner needs to see at a
-// glance: when one last used a token that still works, how many seats it
-// holds that count now, how many requests of the owner's to seat it wait
-// for a decision, and whether it takes conversations in the site now, by
-// the rule of SiteChatOf.
+// glance: how each is hosted, when one last used a token that still works,
+// how many seats it holds that count now, how many requests of the owner's
+// to seat it wait for a decision, and whether people in the site may ask it
+// now, by the rule of SiteChatOf.
 func (q *Queries) ListAgentsOf(ctx context.Context, arg ListAgentsOfParams) ([]ListAgentsOfRow, error) {
 	rows, err := q.db.Query(ctx, listAgentsOf, arg.Now, arg.OwnerActorID)
 	if err != nil {
@@ -355,6 +412,7 @@ func (q *Queries) ListAgentsOf(ctx context.Context, arg ListAgentsOfParams) ([]L
 			&i.SuspendedByActorID,
 			&i.CreatedAt,
 			&i.LastSeenAt,
+			&i.Hosting,
 			&i.SiteChat,
 			&i.LiveSeats,
 			&i.PendingRequests,
@@ -554,6 +612,18 @@ func (q *Queries) LockActorForPasswordReset(ctx context.Context, id uuid.UUID) e
 	return err
 }
 
+const lockAgentForHosting = `-- name: LockAgentForHosting :exec
+SELECT 1 FROM actor WHERE id = $1 FOR NO KEY UPDATE
+`
+
+// An agent's runtime token is issued and revoked one call at a time, and
+// its standing read under the lock. NO KEY UPDATE, as LockOwnerForAgents,
+// not UPDATE: every action row naming the agent holds KEY SHARE on the row.
+func (q *Queries) LockAgentForHosting(ctx context.Context, id uuid.UUID) error {
+	_, err := q.db.Exec(ctx, lockAgentForHosting, id)
+	return err
+}
+
 const lockOwnerForAgents = `-- name: LockOwnerForAgents :exec
 SELECT 1 FROM actor WHERE id = $1 FOR NO KEY UPDATE
 `
@@ -678,30 +748,32 @@ func (q *Queries) ReactivateAgentByOwner(ctx context.Context, arg ReactivateAgen
 	return result.RowsAffected(), nil
 }
 
-const setSiteChat = `-- name: SetSiteChat :exec
+const setSiteChatCredential = `-- name: SetSiteChatCredential :exec
 UPDATE actor SET site_chat_credential_id = $1 WHERE id = $2
 `
 
-type SetSiteChatParams struct {
+type SetSiteChatCredentialParams struct {
 	CredentialID *uuid.UUID
 	ID           uuid.UUID
 }
 
-// The credential an agent calls with declares that it takes conversations
-// in the site, in place of any that did before; null, that it takes none.
+// The release before this one reads who is asked in the site from the
+// credential an agent declared with (actor.site_chat_credential_id); this
+// one reads it nowhere, and keeps it naming a runtime agent's live runtime
+// token, null once there is none, so that a rollback asks the same agents.
 // The key holds a credential to the agent's own (actor_site_chat_credential_fk).
-func (q *Queries) SetSiteChat(ctx context.Context, arg SetSiteChatParams) error {
-	_, err := q.db.Exec(ctx, setSiteChat, arg.CredentialID, arg.ID)
+func (q *Queries) SetSiteChatCredential(ctx context.Context, arg SetSiteChatCredentialParams) error {
+	_, err := q.db.Exec(ctx, setSiteChatCredential, arg.CredentialID, arg.ID)
 	return err
 }
 
 const siteChatOf = `-- name: SiteChatOf :many
-SELECT a.id, (a.kind = 'agent')::bool AS agent,
-       (a.status = 'active'
+SELECT a.id, (a.kind = 'agent')::bool AS agent, coalesce(a.hosting, '')::text AS hosting,
+       (a.hosting = 'runtime' AND a.status = 'active'
         AND (a.owner_actor_id IS NULL OR EXISTS (SELECT 1 FROM actor o WHERE o.id = a.owner_actor_id AND o.status = 'active'))
-        AND EXISTS (SELECT 1 FROM credential sc
-                     WHERE sc.id = a.site_chat_credential_id AND sc.actor_id = a.id AND sc.revoked_at IS NULL
-                       AND (sc.expires_at IS NULL OR sc.expires_at > $1)))::bool AS site_chat
+        AND EXISTS (SELECT 1 FROM credential rt
+                     WHERE rt.actor_id = a.id AND rt.issued_to_service = 'agent_runtime' AND rt.revoked_at IS NULL
+                       AND (rt.expires_at IS NULL OR rt.expires_at > $1)))::bool AS site_chat
 FROM actor a
 WHERE a.id = ANY($2::uuid[])
 `
@@ -714,17 +786,19 @@ type SiteChatOfParams struct {
 type SiteChatOfRow struct {
 	ID       uuid.UUID
 	Agent    bool
+	Hosting  string
 	SiteChat bool
 }
 
-// Whether each of the given actors takes conversations in the site now
-// (docs/schema.md §2.8): an agent does while the credential with which a
-// program that runs it declared so (me.site_chat) is live, neither revoked
-// nor expired, the agent is active, and its owner, if it has one, is
-// active. A person or the system actor never does; agent says which is
-// which, so that a view can leave people out. ListAgentsOf and
-// ListRespondentCandidates hold the same rule: a change to one is a change
-// to all three.
+// Whether people in the site may ask each of the given actors now
+// (docs/schema.md §2.8): a runtime agent may be asked while a token issued
+// to the site's agent runtime for it (agent_runtime.issue_token) is live,
+// neither revoked nor expired, the agent is active, and its owner, if it
+// has one, is active. An mcp agent, a person or the system actor never may;
+// agent says which is an agent, so that a view can leave people out, and
+// hosting how it is hosted, so that a refusal can say why. ListAgentsOf,
+// ListRespondentCandidates and GetAgentForRuntime hold the same rule: a
+// change to one is a change to all four.
 func (q *Queries) SiteChatOf(ctx context.Context, arg SiteChatOfParams) ([]SiteChatOfRow, error) {
 	rows, err := q.db.Query(ctx, siteChatOf, arg.Now, arg.ActorIds)
 	if err != nil {
@@ -734,7 +808,12 @@ func (q *Queries) SiteChatOf(ctx context.Context, arg SiteChatOfParams) ([]SiteC
 	var items []SiteChatOfRow
 	for rows.Next() {
 		var i SiteChatOfRow
-		if err := rows.Scan(&i.ID, &i.Agent, &i.SiteChat); err != nil {
+		if err := rows.Scan(
+			&i.ID,
+			&i.Agent,
+			&i.Hosting,
+			&i.SiteChat,
+		); err != nil {
 			return nil, err
 		}
 		items = append(items, i)

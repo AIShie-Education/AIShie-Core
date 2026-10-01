@@ -225,7 +225,7 @@ func TestAVersionsFilesAreHeldToItsLimits(t *testing.T) {
 // outlive.
 func TestAProposedVersionKeepsItsFilesUntilItIsDecided(t *testing.T) {
 	b := build(t)
-	editor := testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", m{"kind": "agent", "display_name": "editor"})).ActorID
+	editor := testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", m{"kind": "agent", "hosting": "mcp", "display_name": "editor"})).ActorID
 	b.do(t, b.sato, "member.add", m{"course_id": b.course, "actor_id": editor, "preset": "ta", "perms": m{"document_write": "confirm_required"}})
 	doc := testkit.Result[tools.DocumentCreateOut](t, b.do(t, b.sato, "document.create",
 		m{"course_id": b.course, "kind": "material", "title": "Week 5", "body_md": "v1"})).DocumentID
@@ -404,7 +404,7 @@ func TestEachFileHasATextVersionOfItsOwn(t *testing.T) {
 		t.Fatalf("renewing a finished claim: %v", err)
 	}
 	// A proposal of an edit names the file it is about.
-	editor := testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", m{"kind": "agent", "display_name": "editor"})).ActorID
+	editor := testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", m{"kind": "agent", "hosting": "mcp", "display_name": "editor"})).ActorID
 	b.do(t, b.sato, "member.add", m{"course_id": b.course, "actor_id": editor, "preset": "ta", "perms": m{"document_write": "confirm_required"}})
 	proposed := b.MustCall(editor, "document.text_update", m{"course_id": b.course, "document_id": made.DocumentID, "version_id": version,
 		"file_id": made.FileIDs[1], "body": "## Page 1\n\nThe handout, read."}, "edit")

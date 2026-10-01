@@ -33,7 +33,10 @@ In place so far:
   asks an agent — the course's tutor agent, their own agent — questions, and
   it answers them, each message an action; a person answers none, and people
   talk to people elsewhere; nobody may ask an agent that can see or do more
-  than they can, nor one unless what runs it says it answers in the site; a
+  than they can, nor one the site's own agent runtime does not host: every
+  agent is hosted one way for good, a runtime agent by the runtime, which
+  alone is issued its token, by its id, and asked in the site, or an mcp
+  agent, its owner's own tools', which is asked nothing there; a
   person's conversations in every course are one list, newest first, saying
   what they have not read yet; while an agent writes an answer, whoever reads
   the conversation watches it come — what the agent is doing, and the text
@@ -65,15 +68,18 @@ given a token, and nobody gives a person one; an agent grades an essay, a person
 sees the grade; the instructor renames the course, halves the assignment's
 points with the grade rescaled, overrides the student's total and takes the
 override off, renames the slides and brings them back from the archive, and
-makes the student a TA and a student again; then, once its runtime says it
-answers in the site, the student asks the instructor's tutor agent a
+makes the student a TA and a student again; then, once the site's agent
+runtime, given its credential on the command line, is issued the token of
+the instructor's tutor agent by its id, the student asks the tutor a
 question, watches its answer's draft come, waiting on the conversation, and
 it answers, and she is refused the instructor as a respondent,
 as he is refused answering; her chat panel lists the conversation, unread
-until she marks it read; another agent of the instructor's, given
-`member_manage`, seats a student with its own token and is refused on the
-instructor's seat; the instructor shows a join link, through which a new
-student registers and a registered one joins, and which seats nobody once
+until she marks it read; once the runtime stops hosting the tutor, she asks
+it nothing more; another agent of the instructor's, an mcp agent, given
+`member_manage`, seats a student with his token for it, is refused on the
+instructor's seat, is asked nothing in the site and works over MCP; the
+instructor shows a join link, through which a new student registers and a
+registered one joins, and which seats nobody once
 revoked; a student with no email registers through another with her student
 number as her login ID and signs in with it, is given a temporary password by
 the instructor when she forgets hers, and sets her own before anything else,
@@ -424,10 +430,15 @@ refuses (`registration_disabled`), and people sign in and then join.
 
 ### Connecting an agent
 
-Register the agent and give it a token (`actor.register`, `actor.issue_token`,
-or `aishie-core token issue`; only an agent is given one), seat it in a course (`member.add` with a preset
-such as `grader` or `tutor`), and point its MCP client at
-`https://<host>/mcp` with `Authorization: Bearer <token>`. Tool names are the
+Every agent is hosted one way, chosen when it is registered and never changed
+(`hosting`): `runtime`, run by the site's own agent runtime, which alone is
+issued its token, by the agent's id, and asked by people in the site; or
+`mcp`, reached by tools of its own over MCP, with tokens issued here, and
+asked nothing in the site. For an mcp agent, register it and give it a token
+(`actor.register` with `"hosting": "mcp"`, `actor.issue_token`, or
+`aishie-core token issue`; only an mcp agent is given one), seat it in a
+course (`member.add` with a preset such as `grader` or `tutor`), and point its
+MCP client at `https://<host>/mcp` with `Authorization: Bearer <token>`. Tool names are the
 registry's with the dot turned to an underscore (`grade_submit`). Every tool
 that changes something takes an `idempotency_key` argument. A result whose
 status is `proposed` is not an error: the action waits for a person, and the
@@ -445,8 +456,10 @@ service that hosts agents: what it calls, how it finds questions and answers
 them, and how it works with the mainstream model APIs.
 
 A person may also have agents of their own, with no administrator involved:
-`agent.create` registers one they own, `agent.issue_token` gives it a token,
-and `member.add_delegate` brings it into a course where they are seated, as
+`agent.create` registers one they own, saying how it is hosted (`hosting`,
+required: `runtime` or `mcp`, for good); `agent.issue_token` gives an mcp agent
+a token for their own tools, and the site's runtime is given a runtime
+agent's (below); and `member.add_delegate` brings it into a course where they are seated, as
 their delegate (a student's request waits for an instructor's approval by
 default). There it can do nothing the person cannot, reach no one the person
 cannot, and last no longer than the person's seat. The agent of someone who
@@ -462,14 +475,24 @@ themselves; an administrator registering one is not counted.
 owner is fixed when it is registered: nobody changes it afterwards, and an
 agent registered with no owner stays nobody's.
 
-People in the site ask an agent only while what runs it says it answers
-there: an agent runtime calls `me_site_chat` with `on: true`, with the token it
-runs the agent with, each time it starts it, and that holds while the token
-works and the agent and its owner are active. An agent operated from an
-external tool (a chat app, an editor, a script over MCP) acts only while a
-person uses it, so it is not offered in the site, and a question to it there is
-refused (`agent_answers_elsewhere`). Its owner may switch it off
-(`agent.update`), never on.
+People in the site ask a runtime agent, and only a runtime agent, while the
+site's agent runtime hosts it: while a token issued to the runtime for it
+lives, and the agent and its owner are active. Nothing is declared. The
+runtime is a site service (scope `agent_runtime`, like the transcriber's
+`document_text`), whose credential root or an administrator issues
+(`service.issue_credential`), or the operator at setup:
+`aishie-core service issue agent_runtime --label runtime` prints it once on
+standard output. With it the runtime hosts an agent by its id: it asks whether
+the person signed in to it owns the agent (`agent_runtime.check_owner`), is
+issued the agent's one token (`agent_runtime.issue_token`, which revokes the
+one before), and revokes it when the hosting ends
+(`agent_runtime.revoke_token`). A runtime agent's owner holds no token for it
+(`hosted_by_runtime`). An mcp agent acts only while a person uses it from a
+tool of their own (a chat app, an editor, a script), so it is not offered in
+the site, and a question to it there is refused (`mcp_agent`); one to a
+runtime agent the runtime does not run now is refused `agent_not_hosted`.
+`me_site_chat` is deprecated: kept one release, it changes nothing
+(docs/schema.md §2.8).
 
 An agent that answers questions long-polls `conversation_inbox` in each course
 where it may (its `conversation_answer` in `me_memberships`): with `wait_s`, up
@@ -594,7 +617,8 @@ when they are carried out; `429` carries `Retry-After`. A
 `error.details.action_id` and records nothing either, so a call corrected
 after a recorded failure needs a new key. Every answer, including the one for
 a path that does not exist, is JSON. Agents authenticate with
-`Authorization: Bearer <token>`, their API token; people sign in at `POST /v1/auth/login` (or
+`Authorization: Bearer <token>`, their API token, and a site service with its
+own credential (`aissvc_`), at its own tools' routes alone; people sign in at `POST /v1/auth/login` (or
 through single sign-on, or by taking up an invitation at `POST /v1/auth/invite`)
 and carry a session cookie, which may also be sent as a bearer token. A person
 holds no API token: one issued before migration 0017, which revoked them, is

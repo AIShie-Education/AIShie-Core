@@ -94,7 +94,7 @@ func TestMemberManagementCannotEscalate(t *testing.T) {
 	b.do(t, b.sato, "member.add", m{"course_id": b.course, "actor_id": helper, "preset": "ta",
 		"perms":         m{"member_manage": "autonomous", "grade_submit": "confirm_required"},
 		"student_scope": "listed", "listed_students": []uuid.UUID{b.yukiM}})
-	puppet := testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", m{"kind": "agent", "display_name": "Puppet"})).ActorID
+	puppet := testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", m{"kind": "agent", "hosting": "mcp", "display_name": "Puppet"})).ActorID
 
 	add := func(args m) m {
 		args["course_id"], args["actor_id"] = b.course, puppet
@@ -455,7 +455,7 @@ func TestSameCourseRules(t *testing.T) {
 	foreignHW := testkit.Result[tools.IDOut](t, b.do(t, b.sato, "assignment.create", m{"course_id": cs205.CourseID, "title": "PS1", "points_possible": 10})).ID
 
 	t.Run("scope rows name members and assignments of the same course", func(t *testing.T) {
-		someone := testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", m{"kind": "agent", "display_name": "x"})).ActorID
+		someone := testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", m{"kind": "agent", "hosting": "mcp", "display_name": "x"})).ActorID
 		b.try(t, b.sato, "member.add", m{"course_id": b.course, "actor_id": someone, "preset": "tutor", "listed_students": []uuid.UUID{foreignStudent}}, apperr.FailedPrecondition)
 		b.try(t, b.sato, "member.add", m{"course_id": b.course, "actor_id": someone, "preset": "grader", "listed_assignments": []uuid.UUID{foreignHW}}, apperr.FailedPrecondition)
 		// A listed "student" must be a student: listing the instructor is refused.
@@ -575,7 +575,7 @@ func TestPlatformRules(t *testing.T) {
 
 	// Platform tools check platform_role and nothing else. An instructor is
 	// nobody here, and the refusal is on record with no course attached.
-	out := b.MustCall(b.sato, "actor.register", m{"kind": "agent", "display_name": "mine"}, "sato-registers")
+	out := b.MustCall(b.sato, "actor.register", m{"kind": "agent", "hosting": "mcp", "display_name": "mine"}, "sato-registers")
 	if out.Status != domain.StatusDenied {
 		t.Fatalf("an instructor registering an actor: %+v", out)
 	}
@@ -654,7 +654,7 @@ func TestPlatformRules(t *testing.T) {
 		"perms": m{"document_read": "autonomous", "submission_read": "autonomous", "grade_submit": "pending_review"}}
 	presetID := testkit.Result[tools.IDOut](t, b.do(t, b.admin, "preset.create", body)).ID
 	b.try(t, b.admin, "preset.create", body, apperr.Conflict)
-	agent := testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", m{"kind": "agent", "display_name": "grader-v3"})).ActorID
+	agent := testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", m{"kind": "agent", "hosting": "mcp", "display_name": "grader-v3"})).ActorID
 	seated := testkit.Result[tools.MemberIDOut](t, b.do(t, b.sato, "member.add", m{"course_id": b.course, "actor_id": agent, "preset": "grader", "listed_assignments": []uuid.UUID{b.hw3}})).MemberID
 	got := testkit.Result[tools.MemberView](t, b.do(t, b.sato, "member.get", m{"course_id": b.course, "member_id": seated}))
 	if got.Perms["grade_submit"] != "pending_review" || got.PresetID == nil || *got.PresetID != presetID || len(got.ListedAssignments) != 1 {
@@ -1193,7 +1193,11 @@ func TestAnArchivedCourseIssuesNoUploadURLs(t *testing.T) {
 func TestAWideningChangeIsAGrantOfTheWhole(t *testing.T) {
 	b := build(t)
 	register := func(kind, name string) uuid.UUID {
-		return testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", m{"kind": kind, "display_name": name})).ActorID
+		args := m{"kind": kind, "display_name": name}
+		if kind == "agent" {
+			args["hosting"] = "mcp"
+		}
+		return testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", args)).ActorID
 	}
 	seat := func(as uuid.UUID, actor uuid.UUID, args m) uuid.UUID {
 		args["course_id"], args["actor_id"] = b.course, actor
@@ -1262,7 +1266,7 @@ func TestATemporaryManagerHandsOutNothingPermanent(t *testing.T) {
 	temp := testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", m{"kind": "human", "display_name": "Temp"})).ActorID
 	tempM := testkit.Result[tools.MemberIDOut](t, b.do(t, b.sato, "member.add", m{"course_id": b.course, "actor_id": temp, "preset": "ta",
 		"perms": m{"member_manage": "autonomous"}, "expires_at": friday})).MemberID
-	puppet := testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", m{"kind": "agent", "display_name": "Puppet"})).ActorID
+	puppet := testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", m{"kind": "agent", "hosting": "mcp", "display_name": "Puppet"})).ActorID
 
 	seat := m{"course_id": b.course, "actor_id": puppet, "preset": "ta", "perms": m{"member_manage": "autonomous"}}
 	b.try(t, temp, "member.add", seat, apperr.Forbidden) // no expiry: for ever
@@ -1307,7 +1311,7 @@ func TestAnExpiryIsMeasuredAsTheDatabaseKeepsIt(t *testing.T) {
 	temp := testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", m{"kind": "human", "display_name": "Temp"})).ActorID
 	b.do(t, b.sato, "member.add", m{"course_id": b.course, "actor_id": temp, "preset": "ta",
 		"perms": m{"member_manage": "autonomous"}, "expires_at": friday})
-	puppet := testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", m{"kind": "agent", "display_name": "Puppet"})).ActorID
+	puppet := testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", m{"kind": "agent", "hosting": "mcp", "display_name": "Puppet"})).ActorID
 
 	puppetM := testkit.Result[tools.MemberIDOut](t, b.do(t, temp, "member.add", m{"course_id": b.course, "actor_id": puppet, "preset": "ta",
 		"perms": m{"member_manage": "autonomous"}, "expires_at": friday})).MemberID
@@ -1322,7 +1326,7 @@ func TestAnExpiryIsMeasuredAsTheDatabaseKeepsIt(t *testing.T) {
 func TestConcurrentEditsToASeatTakeTurns(t *testing.T) {
 	b := build(t)
 	for round := range 6 {
-		actor := testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", m{"kind": "agent", "display_name": "a" + strconv.Itoa(round)})).ActorID
+		actor := testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", m{"kind": "agent", "hosting": "mcp", "display_name": "a" + strconv.Itoa(round)})).ActorID
 		seated := testkit.Result[tools.MemberIDOut](t, b.do(t, b.sato, "member.add", m{"course_id": b.course, "actor_id": actor, "preset": "ta",
 			"perms": m{"grade_post": "autonomous"}, "student_scope": "listed", "listed_students": []uuid.UUID{b.yukiM, b.kenM}})).MemberID
 		calls := []struct {
@@ -1448,7 +1452,7 @@ func settled(t *testing.T, c <-chan callResult) pipeline.Outcome {
 // while it waited for the first call's key would deadlock with it.
 func TestARetryWaitsForItsCallHoldingNothing(t *testing.T) {
 	b := build(t)
-	helper := testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", m{"kind": "agent", "display_name": "Helper"})).ActorID
+	helper := testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", m{"kind": "agent", "hosting": "mcp", "display_name": "Helper"})).ActorID
 	b.do(t, b.sato, "member.add", m{"course_id": b.course, "actor_id": helper, "preset": "ta", "perms": m{"member_manage": "confirm_required"}})
 	prop := b.MustCall(helper, "member.update_perms", m{"course_id": b.course, "member_id": b.satoM, "perms": m{"grade_post": "confirm_required"}}, "narrow-sato")
 	if prop.Status != domain.StatusProposed {

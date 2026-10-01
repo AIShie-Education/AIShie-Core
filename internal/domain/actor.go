@@ -41,7 +41,29 @@ const (
 	// ServiceDocumentText is the service that writes documents' text
 	// versions: the runtime's transcriber.
 	ServiceDocumentText = "document_text"
+	// ServiceAgentRuntime is the site's agent runtime, which hosts the
+	// runtime agents: it is issued each one's token by the agent's id.
+	ServiceAgentRuntime = "agent_runtime"
 )
+
+// Hosting is how an agent is run, chosen when it is registered and never
+// changed (actor.hosting). It is read to say what may be done with the
+// agent's tokens and whether it is asked in the site, never to grant
+// anything in a course.
+type Hosting string
+
+const (
+	// HostingRuntime: the site's own agent runtime runs the agent, with the
+	// one token it is issued for it (agent_runtime.issue_token); its owner
+	// holds none, and people in the site ask it while that token lives.
+	HostingRuntime Hosting = "runtime"
+	// HostingMCP: its owner's own tools reach it over MCP, with tokens the
+	// owner issues; nobody asks it in the site.
+	HostingMCP Hosting = "mcp"
+)
+
+// Valid says the value is one of the two.
+func (h Hosting) Valid() bool { return h == HostingRuntime || h == HostingMCP }
 
 // Member is one actor's seat in one course: permissions and scope. The
 // roster role is left out for the same reason Actor leaves out its type.

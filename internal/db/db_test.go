@@ -533,3 +533,127 @@ func TestMemberInviteStartsWhereMemberManageIsForPeopleOnly(t *testing.T) {
 		t.Fatalf("up again: %v", err)
 	}
 }
+
+// Migration 0025 makes a runtime agent of each agent whose site chat
+// credential is live, taking that credential as the runtime's token and
+// revoking the agent's others, and an mcp agent of every other, its tokens
+// as they were. The release before keeps working: an agent it registers is
+// an mcp agent, and a token it would issue a runtime agent's owner is
+// refused. Going down and up again comes back to the same.
+func TestAgentHostingBackfillsAndKeepsThePreviousReleaseWorking(t *testing.T) {
+	pool, url := testdb.NewEmpty(t)
+	ctx := context.Background()
+	m, err := db.NewMigrator(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	// Up to the migration before it, as many steps as there are before it
+	// in order: golang-migrate counts steps, not versions, which may skip.
+	entries, err := fs.ReadDir(dbfiles.FS, dbfiles.MigrationsDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, found := 0, false
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), "_agent_hosting.up.sql") {
+			found = true
+			break
+		}
+		if strings.HasSuffix(e.Name(), ".up.sql") {
+			before++
+		}
+	}
+	if !found {
+		t.Fatal("no agent hosting migration")
+	}
+	if err := m.Steps(before); err != nil {
+		t.Fatalf("up to the one before 0025: %v", err)
+	}
+	exec := func(sql string, args ...any) error {
+		t.Helper()
+		_, err := pool.Exec(ctx, sql, args...)
+		return err
+	}
+	must := func(sql string, args ...any) {
+		t.Helper()
+		if err := exec(sql, args...); err != nil {
+			t.Fatalf("%v\n%s", err, sql)
+		}
+	}
+	owner := seatID(1)
+	must(`INSERT INTO actor (id, kind, display_name) VALUES ($1, 'human', 'Mei')`, owner)
+	// 2 hosted by a runtime, declared with a live token (12), beside her
+	// laptop's (13) · 3 declared with a revoked token (14), and an editor's
+	// (15) · 4 never declared (16)
+	for _, a := range []int{2, 3, 4} {
+		must(`INSERT INTO actor (id, kind, display_name, owner_actor_id) VALUES ($1, 'agent', $2, $3)`, seatID(a), fmt.Sprint("agent ", a), owner)
+	}
+	token := func(id, agent int, revoked bool) {
+		t.Helper()
+		must(`INSERT INTO credential (id, actor_id, kind, secret_hash, token_prefix, revoked_at)
+			VALUES ($1, $2, 'api_token', 'h', $3, CASE WHEN $4 THEN now() END)`, seatID(id), seatID(agent), fmt.Sprint("pfx", id), revoked)
+	}
+	token(12, 2, false)
+	token(13, 2, false)
+	token(14, 3, true)
+	token(15, 3, false)
+	token(16, 4, false)
+	must(`UPDATE actor SET site_chat_credential_id = $1 WHERE id = $2`, seatID(12), seatID(2))
+	must(`UPDATE actor SET site_chat_credential_id = $1 WHERE id = $2`, seatID(14), seatID(3))
+	if err := m.Steps(1); err != nil {
+		t.Fatalf("up to 0025: %v", err)
+	}
+
+	state := func() string {
+		t.Helper()
+		var got string
+		if err := pool.QueryRow(ctx, `SELECT string_agg(x, ' ' ORDER BY x) FROM (
+			SELECT right(id::text, 1) || '=' || hosting AS x FROM actor WHERE kind = 'agent'
+			UNION ALL
+			SELECT right(id::text, 2) || ':' || coalesce(issued_to_service, '-') || ':' || CASE WHEN revoked_at IS NULL THEN 'live' ELSE 'revoked' END
+			FROM credential) s`).Scan(&got); err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	want := "12:agent_runtime:live 13:-:revoked 14:-:revoked 15:-:live 16:-:live 2=runtime 3=mcp 4=mcp"
+	if got := state(); got != want {
+		t.Fatalf("after 0025:\n got %s\nwant %s", got, want)
+	}
+
+	// The release before registers an agent naming no hosting: an mcp
+	// agent, whose owner issues it tokens.
+	must(`INSERT INTO actor (id, kind, display_name, owner_actor_id) VALUES ($1, 'agent', 'new', $2)`, seatID(5), owner)
+	must(`INSERT INTO credential (id, actor_id, kind, secret_hash, token_prefix) VALUES ($1, $2, 'api_token', 'h', 'pfx17')`, seatID(17), seatID(5))
+	// And is refused a token for a runtime agent's owner, a hosting
+	// changed, or a second token for the runtime.
+	for what, sql := range map[string]string{
+		"an owner's token for a runtime agent": `INSERT INTO credential (actor_id, kind, secret_hash, token_prefix) VALUES ('` + seatID(2) + `', 'api_token', 'h', 'pfx18')`,
+		"a hosting changed":                    `UPDATE actor SET hosting = 'runtime' WHERE id = '` + seatID(4) + `'`,
+		"a second runtime token": `INSERT INTO credential (actor_id, kind, secret_hash, token_prefix, issued_to_service)
+			VALUES ('` + seatID(2) + `', 'api_token', 'h', 'pfx19', 'agent_runtime')`,
+	} {
+		if err := exec(sql); err == nil {
+			t.Errorf("%s was taken", what)
+		}
+	}
+
+	if err := m.Steps(-1); err != nil {
+		t.Fatalf("down from 0025: %v", err)
+	}
+	var declared string
+	if err := pool.QueryRow(ctx, `SELECT site_chat_credential_id::text FROM actor WHERE id = $1`, seatID(2)).Scan(&declared); err != nil ||
+		declared != seatID(12) {
+		t.Fatalf("after going down, the runtime agent's site chat credential: %s %v", declared, err)
+	}
+	if err := m.Steps(1); err != nil {
+		t.Fatalf("up again: %v", err)
+	}
+	// The same, and the agent the release before registered, an mcp agent
+	// still, with its token.
+	want = "12:agent_runtime:live 13:-:revoked 14:-:revoked 15:-:live 16:-:live 17:-:live 2=runtime 3=mcp 4=mcp 5=mcp"
+	if got := state(); got != want {
+		t.Fatalf("up again:\n got %s\nwant %s", got, want)
+	}
+}

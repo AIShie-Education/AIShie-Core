@@ -456,9 +456,9 @@ func TestAMessagesFilesAreOneWithItsAction(t *testing.T) {
 // her panel's conversation as in any other.
 func TestAPersonsOwnAgentReadsTheFileItIsAskedWith(t *testing.T) {
 	b := build(t)
-	helper := b.agent(t, b.yuki, "Yuki's helper")
+	helper := b.runtimeAgent(t, b.yuki, "Yuki's helper")
 	seat := b.delegate(t, b.yuki, helper, m{})
-	b.SiteChat(helper)
+	b.Host(helper)
 	plan := []byte("week 1: loops")
 	opened := testkit.Result[tools.ConversationOpenOut](t, b.do(t, b.yuki, "conversation.open", m{"course_id": b.course,
 		"respondent_member_id": seat, "body": "Plan my week", "attachments": []m{

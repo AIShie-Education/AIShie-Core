@@ -9,7 +9,6 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/AIShie-Education/AIShie-Core/internal/auth"
 	"github.com/AIShie-Education/AIShie-Core/internal/blob"
 	"github.com/AIShie-Education/AIShie-Core/internal/domain"
 	"github.com/AIShie-Education/AIShie-Core/internal/ids"
@@ -157,6 +156,10 @@ type Platform struct {
 	// Blob keeps files in the test's own temporary directory.
 	Blob    *blob.FSStore
 	Uploads *blob.Signer
+
+	// The site's agent runtime, once RuntimeService has made it.
+	runtimeService, runtimeCredential uuid.UUID
+	runtimeToken                      string
 }
 
 // MaxUploadBytes is small, so that a test can exceed it.
@@ -226,23 +229,50 @@ func (c *Platform) CallWith(caller pipeline.Caller, name string, args any, key s
 	return c.P.Invoke(context.Background(), caller, name, raw, key)
 }
 
-// SiteChat has a program take agent's conversations in the site, as an
-// agent runtime does when it starts the agent: it is given a token of the
-// agent's, as the operator's command line gives one, and declares with it
-// that the agent takes them (me.site_chat). It returns the token's
-// credential: revoking it ends site chat.
-func (c *Platform) SiteChat(agent uuid.UUID) uuid.UUID {
+// RuntimeService is the site's agent runtime, a site service, and a live
+// credential of its own, made the first time it is asked for, as root
+// makes them (service.issue_credential): the service's actor, its
+// credential's id and the credential itself.
+func (c *Platform) RuntimeService() (actor, credential uuid.UUID, token string) {
 	c.T.Helper()
-	_, credential, err := auth.IssueToken(context.Background(), c.Q, agent, nil, "runtime", nil, time.Now())
-	if err != nil {
-		c.T.Fatalf("a token for the runtime: %v", err)
+	if c.runtimeService == uuid.Nil {
+		out, err := tools.IssueServiceCredential(context.Background(), c.Q, tools.ServiceCredentialArgs{
+			Scope: domain.ServiceAgentRuntime, Label: "runtime", IssuedBy: &c.Root, Now: time.Now()})
+		if err != nil {
+			c.T.Fatalf("the agent runtime's credential: %v", err)
+		}
+		c.runtimeService, c.runtimeCredential, c.runtimeToken = out.ServiceActorID, out.CredentialID, out.Token
 	}
-	out, err := c.CallWith(pipeline.Caller{ActorID: agent, CredentialID: credential}, "me.site_chat", map[string]any{"on": true},
-		"site-chat-"+credential.String())
-	if err != nil || out.Status != domain.StatusExecuted {
-		c.T.Fatalf("me.site_chat: %+v %v", out, err)
-	}
+	return c.runtimeService, c.runtimeCredential, c.runtimeToken
+}
+
+// AsRuntime is the site's agent runtime calling, with its credential.
+func (c *Platform) AsRuntime() pipeline.Caller {
+	c.T.Helper()
+	actor, credential, _ := c.RuntimeService()
+	return pipeline.Caller{ActorID: actor, CredentialID: credential}
+}
+
+// Host has the site's agent runtime host a runtime agent, as it does when
+// its owner asks it to: it is issued the agent's token by the agent's id
+// (agent_runtime.issue_token), which revokes the one before, and people in
+// the site may ask the agent while it lives. It returns the token's
+// credential: revoking it ends the hosting.
+func (c *Platform) Host(agent uuid.UUID) uuid.UUID {
+	c.T.Helper()
+	credential, _ := c.HostToken(agent)
 	return credential
+}
+
+// HostToken is Host, with the token the runtime runs the agent with.
+func (c *Platform) HostToken(agent uuid.UUID) (uuid.UUID, string) {
+	c.T.Helper()
+	out, err := c.CallWith(c.AsRuntime(), "agent_runtime.issue_token", map[string]any{"agent_id": agent}, "host-"+ids.New().String())
+	if err != nil || out.Status != domain.StatusExecuted {
+		c.T.Fatalf("agent_runtime.issue_token: %+v %v", out, err)
+	}
+	issued := Result[tools.RuntimeIssueTokenOut](c.T, out)
+	return issued.CredentialID, issued.Token
 }
 
 // MustCall is Call for calls that are expected to be attempted: it fails the

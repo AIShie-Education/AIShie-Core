@@ -70,6 +70,17 @@ var (
 	errAgentSignsIn = apperr.New(apperr.Unauthenticated, agentsUseTokens).With("reason", ReasonAgentsUseTokens)
 )
 
+// ReasonHostedByRuntime refuses a runtime agent any token but the one the
+// site's agent runtime is issued for it (docs/schema.md §2.1, Agents'
+// hosting): its owner, an administrator or the command line issue it none,
+// nor does it issue itself one.
+const ReasonHostedByRuntime = "hosted_by_runtime"
+
+// ErrHostedByRuntime refuses to issue a runtime agent a token, whoever asks.
+var ErrHostedByRuntime = apperr.Forbid("this agent is hosted by the site's agent runtime, which alone holds its token: nobody "+
+	"else is issued one, its owner included. An agent used from your own tools over MCP is another agent, registered with "+
+	"hosting mcp").With("reason", ReasonHostedByRuntime)
+
 // ReasonServiceCredentialsOnly refuses a site service anything but a
 // service credential (service.issue_credential).
 const ReasonServiceCredentialsOnly = "service_credentials_only"
@@ -318,8 +329,10 @@ func (a *Authenticator) Logout(ctx context.Context, p Principal) error {
 // issue tokens and by the operator's command line. Nobody else is given one
 // (MayHoldToken): a person signs in instead, and is refused
 // api_tokens_are_for_agents, whoever asks; and the system actor's token would
-// act as the sweeps do. issuedBy is the actor who asked for it, nil when no
-// actor did (the command line).
+// act as the sweeps do. A runtime agent is refused too, hosted_by_runtime:
+// its one token is the site's runtime's (IssueRuntimeToken), and the
+// database holds the same (credential_fits_hosting). issuedBy is the actor
+// who asked for it, nil when no actor did (the command line).
 func IssueToken(ctx context.Context, q *dbq.Queries, actorID uuid.UUID, issuedBy *uuid.UUID, label string, expiresAt *time.Time, now time.Time) (Token, uuid.UUID, error) {
 	actor, err := q.GetActor(ctx, actorID)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -330,6 +343,9 @@ func IssueToken(ctx context.Context, q *dbq.Queries, actorID uuid.UUID, issuedBy
 	}
 	if err := MayHoldToken(actor.Kind); err != nil {
 		return Token{}, uuid.Nil, err
+	}
+	if HostedByRuntime(actor) {
+		return Token{}, uuid.Nil, ErrHostedByRuntime
 	}
 	tok, err := NewToken()
 	if err != nil {
@@ -347,6 +363,36 @@ func IssueToken(ctx context.Context, q *dbq.Queries, actorID uuid.UUID, issuedBy
 		return Token{}, uuid.Nil, err
 	}
 	return tok, id, nil
+}
+
+// HostedByRuntime says whether an actor is a runtime agent, whose one token
+// is the one the site's agent runtime is issued for it.
+func HostedByRuntime(a dbq.Actor) bool {
+	return a.Hosting != nil && domain.Hosting(*a.Hosting) == domain.HostingRuntime
+}
+
+// IssueRuntimeToken creates the token of a runtime agent's that the site's
+// agent runtime runs it with (agent_runtime.issue_token), issued by service,
+// the agent_runtime service, in place of the one before, which it revokes:
+// a runtime agent holds one at most that is not revoked. It never expires;
+// revoking it ends the hosting. The caller has locked the agent
+// (LockAgentForHosting) and asked whether it may be hosted. It returns the
+// token, its credential and the credentials it revoked.
+func IssueRuntimeToken(ctx context.Context, q *dbq.Queries, agent, service uuid.UUID, label string, now time.Time) (Token, uuid.UUID, []uuid.UUID, error) {
+	revoked, err := q.RevokeRuntimeTokens(ctx, dbq.RevokeRuntimeTokensParams{ActorID: agent, Now: &now})
+	if err != nil {
+		return Token{}, uuid.Nil, nil, err
+	}
+	tok, err := NewToken()
+	if err != nil {
+		return Token{}, uuid.Nil, nil, err
+	}
+	id := ids.New()
+	if err := q.InsertRuntimeToken(ctx, dbq.InsertRuntimeTokenParams{ID: id, ActorID: agent, SecretHash: &tok.Hash,
+		TokenPrefix: &tok.Prefix, Label: &label, CreatedAt: now, IssuedByActorID: &service}); err != nil {
+		return Token{}, uuid.Nil, nil, err
+	}
+	return tok, id, revoked, nil
 }
 
 // SetPassword replaces a person's password. Older passwords are revoked, not

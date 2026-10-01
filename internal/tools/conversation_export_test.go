@@ -97,13 +97,13 @@ func auditOn(t *testing.T, p *testkit.Platform) *audit {
 	b.Appoint(a.history, a.dan, b.Root)
 
 	// Sato's course tutor, whose answers wait for a person's approval, and
-	// Yuki's own agent; something runs each, and says so.
-	a.courseTutor = b.agent(t, b.sato, "Course tutor")
+	// Yuki's own agent; the site's agent runtime hosts each.
+	a.courseTutor = b.runtimeAgent(t, b.sato, "Course tutor")
 	a.courseTutorM = b.delegate(t, b.sato, a.courseTutor, m{"preset": "course_tutor", "perms": m{"conversation_answer": "confirm_required"}})
-	a.bot = b.agent(t, b.yuki, "Yuki's helper")
+	a.bot = b.runtimeAgent(t, b.yuki, "Yuki's helper")
 	a.botM = b.delegate(t, b.yuki, a.bot, m{})
-	b.SiteChat(a.courseTutor)
-	b.SiteChat(a.bot)
+	b.Host(a.courseTutor)
+	b.Host(a.bot)
 
 	// c1, ten days ago: Yuki asks the tutor, her essay attached; it
 	// answers; she asks again, and takes it back.
@@ -150,9 +150,9 @@ func auditOn(t *testing.T, p *testkit.Platform) *audit {
 	b.do(t, b.admin, "course.activate", m{"course_id": a.his101})
 	a.lin = person("Lin")
 	linM := b.Member(a.his101, a.lin, "student")
-	hisTutor := b.Actor("agent", "History tutor")
+	hisTutor := b.RuntimeAgent("History tutor")
 	hisTutorM := b.Member(a.his101, hisTutor, "course_tutor")
-	b.SiteChat(hisTutor)
+	b.Host(hisTutor)
 	a.c4 = testkit.Result[tools.ConversationOpenOut](t, b.do(t, a.lin, "conversation.open",
 		m{"course_id": a.his101, "respondent_member_id": hisTutorM, "body": historyQuestion})).ConversationID
 	_ = linM
@@ -477,7 +477,7 @@ func TestWhoMayExportWhat(t *testing.T) {
 	a := newAudit(t)
 	// An agent nobody owns, given a platform role by root.
 	adminAgent := testkit.Result[tools.ActorOut](t, a.do(t, a.Root, "actor.register",
-		m{"kind": "agent", "display_name": "Audit bot", "platform_role": "admin"})).ActorID
+		m{"kind": "agent", "display_name": "Audit bot", "platform_role": "admin", "hosting": "mcp"})).ActorID
 
 	allowed := []struct {
 		name     string

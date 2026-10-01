@@ -129,6 +129,7 @@ var visibility = map[string][]domain.Perm{
 	// An export of conversations is an administrator's, of no course, and
 	// is told to nobody's feed: its record is its action.
 	EventConversationExported: nil,
+	EventRuntimeTokenIssued:   nil, EventRuntimeTokenRevoked: nil,
 }
 
 // KnownEventTypes lists every event type that has a visibility rule.

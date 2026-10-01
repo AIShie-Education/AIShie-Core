@@ -52,7 +52,7 @@ END $$;
 --      7x assignments · ex documents · fx versions · ax submissions
 --      bx actions · dx grades · cx conversations · cxx their messages
 --      1cx credentials · 1ax join links · cax attachments
---      22xx files of versions
+--      22xx files of versions · 25xx agents' hosting
 INSERT INTO term (id, name, starts_on, ends_on)
 VALUES ('00000000-0000-0000-0000-000000000011', '2026 Autumn', '2026-09-01', '2026-12-20');
 INSERT INTO department (id, name) VALUES ('00000000-0000-0000-0000-000000000021', 'Computing');
@@ -2006,6 +2006,79 @@ SELECT pg_temp.ok('a document''s title makes a file''s name', $q$
             RAISE EXCEPTION 'a title made the wrong name';
         END IF;
     END $chk$ $q$);
+
+-- Hosting: one mode for each agent, for good -----------------------------------
+-- 25a1 Sato's tutor, a runtime agent · 25a2 his script, an mcp agent · 25a3 one the release before registers
+-- · 25a4 the agent runtime service · 25c1.. their tokens
+SELECT pg_temp.ok('an agent is a runtime agent or an mcp agent', $q$
+    INSERT INTO actor (id, kind, display_name, owner_actor_id, created_by_actor_id, hosting) VALUES
+        ('00000000-0000-0000-0000-0000000025a1', 'agent', 'Tutor', '00000000-0000-0000-0000-000000000034',
+         '00000000-0000-0000-0000-000000000034', 'runtime'),
+        ('00000000-0000-0000-0000-0000000025a2', 'agent', 'Script', '00000000-0000-0000-0000-000000000034',
+         '00000000-0000-0000-0000-000000000034', 'mcp') $q$);
+SELECT pg_temp.fails('and nothing else', '23514', $q$
+    INSERT INTO actor (kind, display_name, hosting) VALUES ('agent', 'Elsewhere', 'self_hosted') $q$);
+SELECT pg_temp.ok('an agent registered naming none, as the release before registers one, is an mcp agent', $q$
+    INSERT INTO actor (id, kind, display_name, created_by_actor_id)
+    VALUES ('00000000-0000-0000-0000-0000000025a3', 'agent', 'Old style', '00000000-0000-0000-0000-000000000034');
+    DO $chk$
+    BEGIN
+        IF NOT EXISTS (SELECT 1 FROM actor WHERE id = '00000000-0000-0000-0000-0000000025a3' AND hosting = 'mcp') THEN
+            RAISE EXCEPTION 'it is not an mcp agent';
+        END IF;
+    END $chk$ $q$);
+SELECT pg_temp.fails('a person has no hosting', '23514', $q$
+    INSERT INTO actor (kind, display_name, hosting) VALUES ('human', 'Hosted person', 'mcp') $q$);
+SELECT pg_temp.fails('an agent''s hosting is never taken away', '23001', $q$
+    UPDATE actor SET hosting = NULL WHERE id = '00000000-0000-0000-0000-0000000025a1' $q$);
+SELECT pg_temp.fails('nor changed, from runtime', '23001', $q$
+    UPDATE actor SET hosting = 'mcp' WHERE id = '00000000-0000-0000-0000-0000000025a1' $q$);
+SELECT pg_temp.fails('nor to runtime', '23001', $q$
+    UPDATE actor SET hosting = 'runtime' WHERE id = '00000000-0000-0000-0000-0000000025a2' $q$);
+SELECT pg_temp.ok('an update that leaves it as it is passes', $q$
+    UPDATE actor SET display_name = 'CS101 tutor', hosting = 'runtime' WHERE id = '00000000-0000-0000-0000-0000000025a1' $q$);
+SELECT pg_temp.ok('the agent runtime is a site service', $q$
+    INSERT INTO actor (id, kind, display_name, service_scope, created_by_actor_id)
+    VALUES ('00000000-0000-0000-0000-0000000025a4', 'service', 'Agent runtime', 'agent_runtime',
+            '00000000-0000-0000-0000-000000000032') $q$);
+SELECT pg_temp.fails('a runtime agent holds no token of its owner''s', '23514', $q$
+    INSERT INTO credential (actor_id, kind, secret_hash, token_prefix, issued_by_actor_id)
+    VALUES ('00000000-0000-0000-0000-0000000025a1', 'api_token', 'h', 'host-own-1', '00000000-0000-0000-0000-000000000034') $q$);
+SELECT pg_temp.ok('its token is the one issued to the runtime', $q$
+    INSERT INTO credential (id, actor_id, kind, secret_hash, token_prefix, issued_by_actor_id, issued_to_service)
+    VALUES ('00000000-0000-0000-0000-0000000025c1', '00000000-0000-0000-0000-0000000025a1', 'api_token', 'h', 'host-rt-1',
+            '00000000-0000-0000-0000-0000000025a4', 'agent_runtime') $q$);
+SELECT pg_temp.fails('one at a time', '23505', $q$
+    INSERT INTO credential (actor_id, kind, secret_hash, token_prefix, issued_to_service)
+    VALUES ('00000000-0000-0000-0000-0000000025a1', 'api_token', 'h', 'host-rt-2', 'agent_runtime') $q$);
+SELECT pg_temp.ok('another once the first is revoked', $q$
+    UPDATE credential SET revoked_at = now() WHERE id = '00000000-0000-0000-0000-0000000025c1';
+    INSERT INTO credential (id, actor_id, kind, secret_hash, token_prefix, issued_to_service)
+    VALUES ('00000000-0000-0000-0000-0000000025c2', '00000000-0000-0000-0000-0000000025a1', 'api_token', 'h', 'host-rt-3',
+            'agent_runtime') $q$);
+SELECT pg_temp.fails('and the first is not revived beside it', '23505', $q$
+    UPDATE credential SET revoked_at = NULL WHERE id = '00000000-0000-0000-0000-0000000025c1' $q$);
+SELECT pg_temp.fails('an mcp agent is issued no token for the runtime', '23514', $q$
+    INSERT INTO credential (actor_id, kind, secret_hash, token_prefix, issued_to_service)
+    VALUES ('00000000-0000-0000-0000-0000000025a2', 'api_token', 'h', 'host-rt-4', 'agent_runtime') $q$);
+SELECT pg_temp.ok('and holds its owner''s tokens', $q$
+    INSERT INTO credential (id, actor_id, kind, secret_hash, token_prefix, issued_by_actor_id)
+    VALUES ('00000000-0000-0000-0000-0000000025c3', '00000000-0000-0000-0000-0000000025a2', 'api_token', 'h', 'host-own-2',
+            '00000000-0000-0000-0000-000000000034') $q$);
+SELECT pg_temp.fails('a token is issued to the agent runtime and to no other', '23514', $q$
+    INSERT INTO credential (actor_id, kind, secret_hash, token_prefix, issued_to_service)
+    VALUES ('00000000-0000-0000-0000-0000000025a1', 'api_token', 'h', 'host-rt-5', 'document_text') $q$);
+SELECT pg_temp.fails('only an API token is issued to it', '23514', $q$
+    INSERT INTO credential (actor_id, kind, secret_hash, token_prefix, issued_to_service)
+    VALUES ('00000000-0000-0000-0000-0000000025a4', 'service', 'h', 'host-svc-1', 'agent_runtime') $q$);
+SELECT pg_temp.fails('whom a token was issued to never changes', '23001', $q$
+    UPDATE credential SET issued_to_service = NULL WHERE id = '00000000-0000-0000-0000-0000000025c2' $q$);
+SELECT pg_temp.fails('nor is an owner''s token made the runtime''s', '23001', $q$
+    UPDATE credential SET issued_to_service = 'agent_runtime' WHERE id = '00000000-0000-0000-0000-0000000025c3' $q$);
+SELECT pg_temp.fails('nor moved to a runtime agent', '23514', $q$
+    UPDATE credential SET actor_id = '00000000-0000-0000-0000-0000000025a1' WHERE id = '00000000-0000-0000-0000-0000000025c3' $q$);
+SELECT pg_temp.ok('revoking a runtime''s token passes', $q$
+    UPDATE credential SET revoked_at = now() WHERE id = '00000000-0000-0000-0000-0000000025c2' $q$);
 
 \o
 ROLLBACK;

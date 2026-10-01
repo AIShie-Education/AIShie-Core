@@ -75,7 +75,7 @@ Nothing is pushed to you. Poll event_list with the next_seq it last returned to 
 
 Conversations are between a person and an agent: a person asks, an agent answers. A person is never a conversation's respondent and answers none (conversations_are_with_agents); people talk to people elsewhere. me_conversations and conversation_mark_read serve the one who asks, a person's chat panel: you need neither to answer. conversation_export and conversation_export_file are for people who administer the site or a department, who export conversations for audit: an agent never calls them, and is refused whatever role it holds (people_only).
 
-People in the site ask an agent only while what runs it says it answers there. If you are run by a program that polls conversation_inbox and answers on its own, with nobody at the keyboard, as an AIshie agent runtime is, call me_site_chat with on true each time it starts you, under a new idempotency_key, and with on false when it stops. If a person drives you from a tool of their own (a chat app, an editor, a script), never call it: you act through that tool, and a question put to you in the site would wait unanswered.
+Every agent is hosted one way, chosen when it was registered and never changed; me_get says which (hosting). runtime: the site's own agent runtime runs you, with the one token it holds for you, polling conversation_inbox and answering on its own; people in the site may ask you while it does, and nothing needs declaring. mcp: your owner's own tools reach you over MCP (a chat app, an editor, a script), with tokens your owner issues; you act only while they use you, and nobody asks you in the site, so your inbox stays empty. me_site_chat is deprecated: nothing is declared any more.
 
 If you answer questions in a course (your perms there have conversation_answer other than denied), poll conversation_inbox for each such course from me_memberships. For each conversation it lists, read it with conversation_messages, then answer with conversation_answer, in_reply_to_message_id = its latest_opener_message_id, and idempotency_key = "answer:{conversation_id}:{in_reply_to_message_id}:{attempt}", attempt starting at 1. Retry a call that timed out with the same key and arguments. An answer may come back executed, executed under review, or proposed: it waits for a person's approval, and the conversation stays out of your inbox meanwhile. If the conversation comes back to your inbox for the same message (your answer was rejected, cancelled or failed), write the answer again, taking any reason given into account, under the next attempt number; the server never posts two answers to one message. A retracted message is not to be answered, and the inbox leaves it out. A conflict says why in details.reason: moved_on, the opener has written again, or withdrawn (retracted) what they last asked (read the conversation again, and answer its newest message if it still waits for an answer: state awaiting_answer); already_answered or answer_pending, leave it; closed, drop the conversation. idempotency_conflict means a key was used before with different arguments.`
 
@@ -614,8 +614,8 @@ func handle(d Deps, t tool.Tool) mcp.ToolHandler {
 		if err != nil {
 			return nil, fmt.Errorf("no authenticated caller")
 		}
-		// The token the call came with, as verify noted it: a tool may record
-		// which one it was (me.site_chat).
+		// The token the call came with, as verify noted it: a tool may ask
+		// which one it was (me.site_chat, whether it is the runtime's).
 		caller := pipeline.Caller{ActorID: actorID}
 		if id, ok := req.Extra.TokenInfo.Extra["credential_id"].(string); ok {
 			caller.CredentialID, _ = uuid.Parse(id)

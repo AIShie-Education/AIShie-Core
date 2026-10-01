@@ -791,7 +791,11 @@ func TestAProposalMadeWithNoRubricRecordsNone(t *testing.T) {
 func TestAPostProposalPostsWhatWasWaiting(t *testing.T) {
 	b := build(t)
 	register := func(kind, name string) uuid.UUID {
-		return testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", m{"kind": kind, "display_name": name})).ActorID
+		args := m{"kind": kind, "display_name": name}
+		if kind == "agent" {
+			args["hosting"] = "mcp"
+		}
+		return testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", args)).ActorID
 	}
 	bot, ta := register("agent", "release-bot"), register("human", "TA")
 	b.do(t, b.sato, "member.add", m{"course_id": b.course, "actor_id": bot, "preset": "ta", "perms": m{"grade_post": "confirm_required"}})
@@ -840,7 +844,7 @@ func TestAPostProposalPostsWhatWasWaiting(t *testing.T) {
 // refused.
 func TestAnApprovedPostPassesOverDraftsPostedMeanwhile(t *testing.T) {
 	b := build(t)
-	bot := testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", m{"kind": "agent", "display_name": "release-bot"})).ActorID
+	bot := testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", m{"kind": "agent", "hosting": "mcp", "display_name": "release-bot"})).ActorID
 	b.do(t, b.sato, "member.add", m{"course_id": b.course, "actor_id": bot, "preset": "ta", "perms": m{"grade_post": "confirm_required"}})
 	handIn := func(student, assignment uuid.UUID) uuid.UUID {
 		t.Helper()
@@ -926,7 +930,7 @@ func TestAnApprovedPostPassesOverDraftsPostedMeanwhile(t *testing.T) {
 // refused as it is made.
 func TestAnApprovedPostOfNamedDraftsPassesOverOnesPostedMeanwhile(t *testing.T) {
 	b := build(t)
-	bot := testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", m{"kind": "agent", "display_name": "release-bot"})).ActorID
+	bot := testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", m{"kind": "agent", "hosting": "mcp", "display_name": "release-bot"})).ActorID
 	b.do(t, b.sato, "member.add", m{"course_id": b.course, "actor_id": bot, "preset": "ta", "perms": m{"grade_post": "confirm_required"}})
 	draft := func(work uuid.UUID, score int) uuid.UUID {
 		t.Helper()
@@ -991,7 +995,7 @@ func TestAnApprovedPostOfNamedDraftsPassesOverOnesPostedMeanwhile(t *testing.T) 
 // held open here until the approval is waiting on Yuki's row.
 func TestADraftPostedJustBeforeAnApprovalsLockIsPassedOver(t *testing.T) {
 	b := build(t)
-	bot := testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", m{"kind": "agent", "display_name": "release-bot"})).ActorID
+	bot := testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", m{"kind": "agent", "hosting": "mcp", "display_name": "release-bot"})).ActorID
 	b.do(t, b.sato, "member.add", m{"course_id": b.course, "actor_id": bot, "preset": "ta", "perms": m{"grade_post": "confirm_required"}})
 	draft := func(student uuid.UUID, score int) uuid.UUID {
 		t.Helper()
@@ -1036,7 +1040,7 @@ func TestAPostApprovedOnASlowerClockIsStillAnApproval(t *testing.T) {
 	b := build(t)
 	base := time.Now()
 	clock := func(d time.Duration) { b.P.SetClock(func() time.Time { return base.Add(d) }) }
-	bot := testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", m{"kind": "agent", "display_name": "release-bot"})).ActorID
+	bot := testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", m{"kind": "agent", "hosting": "mcp", "display_name": "release-bot"})).ActorID
 	b.do(t, b.sato, "member.add", m{"course_id": b.course, "actor_id": bot, "preset": "ta", "perms": m{"grade_post": "confirm_required"}})
 	draft := func(student uuid.UUID, score int) uuid.UUID {
 		t.Helper()

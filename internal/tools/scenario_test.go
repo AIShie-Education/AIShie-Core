@@ -59,8 +59,14 @@ func buildOn(t *testing.T, p *testkit.Platform) *built {
 	register := func(kind, name string) uuid.UUID {
 		return testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", m{"kind": kind, "display_name": name})).ActorID
 	}
+	agent := func(name string, hosting domain.Hosting) uuid.UUID {
+		return testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register",
+			m{"kind": "agent", "display_name": name, "hosting": hosting})).ActorID
+	}
 	b.sato, b.yuki, b.ken = register("human", "Sato"), register("human", "Yuki"), register("human", "Ken")
-	b.grader, b.tutor = register("agent", "grader-v2"), register("agent", "tutor")
+	// The grader is reached by the school's own script; the tutor is run by
+	// the site's agent runtime.
+	b.grader, b.tutor = agent("grader-v2", domain.HostingMCP), agent("tutor", domain.HostingRuntime)
 
 	b.term = testkit.Result[tools.IDOut](t, b.do(t, b.admin, "term.create", m{"name": "2026 Autumn", "starts_on": "2026-09-01", "ends_on": "2026-12-20"})).ID
 	b.dept = testkit.Result[tools.IDOut](t, b.do(t, b.admin, "department.create", m{"name": "Computer Science"})).ID
@@ -87,8 +93,9 @@ func buildOn(t *testing.T, p *testkit.Platform) *built {
 	b.kenM = add(b.ken, m{"preset": "student"})
 	b.graderM = add(b.grader, m{"preset": "grader", "listed_assignments": []uuid.UUID{b.hw3}})
 	b.tutorM = add(b.tutor, m{"preset": "tutor", "listed_students": []uuid.UUID{b.yukiM}})
-	// A runtime runs the tutor, and says so: people in the site may ask it.
-	b.SiteChat(b.tutor)
+	// The site's agent runtime hosts the tutor: people in the site may ask
+	// it.
+	b.Host(b.tutor)
 	return b
 }
 

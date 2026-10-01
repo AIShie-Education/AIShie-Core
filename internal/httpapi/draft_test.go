@@ -44,16 +44,16 @@ func TestADraftIsNoActionAndCostsNothingOfTheLimit(t *testing.T) {
 
 	// A tutor, run by something that answers in the site, asked by Yuki.
 	yuki := c.Students[0]
-	tutor := c.Actor("agent", "tutor")
+	tutor := c.RuntimeAgent("tutor")
 	respondent := c.Member(c.Course, tutor, "tutor", testkit.ListedStudents(yuki.Member))
-	c.SiteChat(tutor)
+	_, token := c.HostToken(tutor)
 	opened := c.MustCall(yuki.Actor, "conversation.open", m{"course_id": c.Course, "respondent_member_id": respondent, "body": "Where do I start?"}, "open")
 	if opened.Status != domain.StatusExecuted {
 		t.Fatalf("opening the conversation: %+v", opened)
 	}
 	conv := testkit.Result[tools.ConversationOpenOut](t, opened).ConversationID
 	path := fmt.Sprintf("/v1/courses/%s/conversations/%s/draft", c.Course, conv)
-	token, student := a.tokenFor(tutor), a.tokenFor(yuki.Actor)
+	student := a.tokenFor(yuki.Actor)
 	actions := c.Count(`SELECT count(*) FROM action`)
 
 	// Six drafts, twice the caller's allowance, with no key: each carried

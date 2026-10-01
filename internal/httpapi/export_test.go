@@ -17,10 +17,10 @@ import (
 func TestAConversationExportOverHTTP(t *testing.T) {
 	a := newAPI(t, 2)
 	c := a.c
-	tutor := c.Actor("agent", "Course tutor")
+	tutor := c.RuntimeAgent("Course tutor")
 	tutorM := c.Member(c.Course, tutor, "course_tutor")
-	c.SiteChat(tutor)
-	root, sato, yuki, agent := a.tokenFor(c.Root), a.tokenFor(c.Sato), a.tokenFor(c.Students[0].Actor), a.tokenFor(tutor)
+	_, agent := c.HostToken(tutor)
+	root, sato, yuki := a.tokenFor(c.Root), a.tokenFor(c.Sato), a.tokenFor(c.Students[0].Actor)
 	course := "/v1/courses/" + c.Course.String()
 
 	opened := a.do(nil, "POST", course+"/conversations", yuki, m{"respondent_member_id": tutorM, "body": "這份作業怎麼寫？"},

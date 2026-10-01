@@ -46,7 +46,9 @@ func (w *World) Exec(sql string, args ...any) {
 	}
 }
 
-// Actor registers an actor of the given kind: human, agent or system.
+// Actor registers an actor of the given kind: human, agent or system. An
+// agent is an mcp agent, as the database makes an agent registered naming
+// no hosting; RuntimeAgent registers the other kind.
 func (w *World) Actor(kind, name string) uuid.UUID {
 	w.T.Helper()
 	id := ids.New()
@@ -150,12 +152,33 @@ func (w *World) Member(course, actor uuid.UUID, preset string, opts ...MemberOpt
 	return id
 }
 
-// OwnedAgent registers an agent that owner owns.
+// OwnedAgent registers an agent that owner owns, an mcp agent: its owner's
+// own tools reach it, with tokens the owner issues.
 func (w *World) OwnedAgent(owner uuid.UUID, name string) uuid.UUID {
 	w.T.Helper()
 	id := ids.New()
-	w.Exec(`INSERT INTO actor (id, kind, display_name, owner_actor_id, created_by_actor_id) VALUES ($1, 'agent', $2, $3, $3)`,
+	w.Exec(`INSERT INTO actor (id, kind, display_name, owner_actor_id, created_by_actor_id, hosting) VALUES ($1, 'agent', $2, $3, $3, 'mcp')`,
 		id, name, owner)
+	return id
+}
+
+// OwnedRuntimeAgent registers a runtime agent that owner owns: the site's
+// agent runtime alone is issued its token (Platform.Host).
+func (w *World) OwnedRuntimeAgent(owner uuid.UUID, name string) uuid.UUID {
+	w.T.Helper()
+	id := ids.New()
+	w.Exec(`INSERT INTO actor (id, kind, display_name, owner_actor_id, created_by_actor_id, hosting) VALUES ($1, 'agent', $2, $3, $3, 'runtime')`,
+		id, name, owner)
+	return id
+}
+
+// RuntimeAgent registers a runtime agent nobody owns, as an administrator
+// registers the course's tutor: the site's agent runtime alone is issued its
+// token (Platform.Host). Actor("agent", …) registers an mcp agent.
+func (w *World) RuntimeAgent(name string) uuid.UUID {
+	w.T.Helper()
+	id := ids.New()
+	w.Exec(`INSERT INTO actor (id, kind, display_name, created_by_actor_id, hosting) VALUES ($1, 'agent', $2, $3, 'runtime')`, id, name, w.Root)
 	return id
 }
 

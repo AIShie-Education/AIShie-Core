@@ -807,8 +807,8 @@ func (q *Queries) ListMyConversations(ctx context.Context, arg ListMyConversatio
 }
 
 const listRespondentCandidates = `-- name: ListRespondentCandidates :many
-SELECT m.id, a.display_name, a.kind, m.role, m.principal_member_id, m.answers_course, own.display_name AS owner_name,
-       seen.last_used_at AS last_seen_at
+SELECT m.id, a.display_name, a.kind, coalesce(a.hosting, '')::text AS hosting, m.role, m.principal_member_id,
+       m.answers_course, own.display_name AS owner_name, seen.last_used_at AS last_seen_at
 FROM course_member m
 JOIN actor a ON a.id = m.actor_id
 LEFT JOIN actor own ON own.id = a.owner_actor_id
@@ -823,11 +823,11 @@ WHERE m.course_id = $1 AND m.id <> $3
   AND m.perm_conversation_answer <> 'denied' AND a.status = 'active'
   AND (m.principal_member_id IS NULL OR m.principal_member_id = $3
        OR (m.answers_course AND p.perm_member_manage <> 'denied'))
-  AND a.kind = 'agent'
+  AND a.kind = 'agent' AND a.hosting = 'runtime'
   AND (a.owner_actor_id IS NULL OR EXISTS (SELECT 1 FROM actor o WHERE o.id = a.owner_actor_id AND o.status = 'active'))
-  AND EXISTS (SELECT 1 FROM credential sc
-               WHERE sc.id = a.site_chat_credential_id AND sc.actor_id = a.id AND sc.revoked_at IS NULL
-                 AND (sc.expires_at IS NULL OR sc.expires_at > $2))
+  AND EXISTS (SELECT 1 FROM credential rt
+               WHERE rt.actor_id = a.id AND rt.issued_to_service = 'agent_runtime' AND rt.revoked_at IS NULL
+                 AND (rt.expires_at IS NULL OR rt.expires_at > $2))
 ORDER BY m.id
 LIMIT $4
 `
@@ -843,6 +843,7 @@ type ListRespondentCandidatesRow struct {
 	ID                uuid.UUID
 	DisplayName       string
 	Kind              string
+	Hosting           string
 	Role              string
 	PrincipalMemberID *uuid.UUID
 	AnswersCourse     bool
@@ -854,10 +855,11 @@ type ListRespondentCandidatesRow struct {
 // active actor, with conversation_answer not denied on the row, and, for a
 // delegate, either the caller's own or one that answers the course, whose
 // principal's row holds member_manage. Never a person's: conversations are
-// with agents. An agent's seat only while the agent takes conversations in
-// the site (docs/schema.md §2.8), by the rule of SiteChatOf, its status
-// asked above: one operated from an external tool is asked there, not here.
-// kind is read to leave out, never to let in. Which of them the caller may
+// with agents. An agent's seat only while people in the site may ask it
+// (docs/schema.md §2.8), by the rule of SiteChatOf, its status asked above:
+// a runtime agent while the site's runtime holds a live token for it, and
+// never an mcp agent, which its owner's own tools reach elsewhere. kind and
+// hosting are read to leave out, never to let in. Which of them the caller may
 // address is decided in Go (tools.addressing), which this only narrows to
 // what it could accept: every student's own agent answers, and only its
 // principal. Unpaged: what is left is a course's agents, and the caller's
@@ -880,6 +882,7 @@ func (q *Queries) ListRespondentCandidates(ctx context.Context, arg ListResponde
 			&i.ID,
 			&i.DisplayName,
 			&i.Kind,
+			&i.Hosting,
 			&i.Role,
 			&i.PrincipalMemberID,
 			&i.AnswersCourse,

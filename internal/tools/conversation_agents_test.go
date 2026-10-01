@@ -197,7 +197,7 @@ func TestAPersonsSeatAnswersNothing(t *testing.T) {
 	// someone who manages the members and decides nothing lets none.
 	manager := b.person(t, "Manager", "")
 	b.do(t, b.sato, "member.add", m{"course_id": b.course, "actor_id": manager, "preset": "instructor", "perms": m{"action_decide": "denied"}})
-	helper := testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", m{"kind": "agent", "display_name": "Helper"})).ActorID
+	helper := testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", m{"kind": "agent", "hosting": "mcp", "display_name": "Helper"})).ActorID
 	out := b.MustCall(manager, "member.add", m{"course_id": b.course, "actor_id": helper, "preset": "course_tutor"}, "manager-seats")
 	if out.Status != domain.StatusFailed || out.Error.Code != apperr.Forbidden || out.Error.Details["permission"] != "conversation_answer" {
 		t.Fatalf("someone who decides nothing letting an agent answer: %+v", out)

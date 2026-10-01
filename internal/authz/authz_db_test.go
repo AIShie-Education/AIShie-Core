@@ -152,7 +152,12 @@ func TestAuthorizeIgnoresActorKindAndMemberRole(t *testing.T) {
 		before[ck.name] = run(t, c, ck)
 	}
 
-	c.w.Exec(`UPDATE actor SET kind = CASE kind WHEN 'human' THEN 'agent' WHEN 'agent' THEN 'human' ELSE kind END`)
+	// An agent's hosting goes with its kind, which the database holds to
+	// agents (actor_hosting_is_an_agents), and never changes for one
+	// (actor_hosting_fixed), which this swap is the one exception to.
+	c.w.Exec(`ALTER TABLE actor DISABLE TRIGGER actor_hosting_fixed`)
+	c.w.Exec(`UPDATE actor SET kind = CASE kind WHEN 'human' THEN 'agent' WHEN 'agent' THEN 'human' ELSE kind END,
+	                           hosting = CASE kind WHEN 'human' THEN 'mcp' END`)
 	c.w.Exec(`UPDATE course_member SET role = CASE role
 		WHEN 'student' THEN 'instructor' WHEN 'instructor' THEN 'assistant'
 		WHEN 'assistant' THEN 'observer' ELSE 'student' END`)
