@@ -489,7 +489,7 @@ func seatedNow(ctx context.Context, q dbq.Querier, courseID, actor uuid.UUID, no
 	if live.ExpiresAt != nil && !live.ExpiresAt.After(now) {
 		return nil
 	}
-	orphaned, err := q.SeatOrphaned(ctx, dbq.SeatOrphanedParams{MemberID: live.ID, Now: &now})
+	orphaned, err := q.SeatOrphaned(ctx, dbq.SeatOrphanedParams{MemberID: live.ID, Now: now})
 	if err != nil || orphaned {
 		return err
 	}
@@ -557,7 +557,7 @@ func seat(ctx context.Context, ec *tool.ExecCtx, s seating) (uuid.UUID, error) {
 		return uuid.Nil, err
 	default:
 		expired := live.ExpiresAt != nil && !live.ExpiresAt.After(ec.Now)
-		orphaned, err := ec.Q.SeatOrphaned(ctx, dbq.SeatOrphanedParams{MemberID: live.ID, Now: &ec.Now})
+		orphaned, err := ec.Q.SeatOrphaned(ctx, dbq.SeatOrphanedParams{MemberID: live.ID, Now: ec.Now})
 		if err != nil {
 			return uuid.Nil, err
 		}

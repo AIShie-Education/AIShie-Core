@@ -204,7 +204,7 @@ func agentOf(ctx context.Context, q dbq.Querier, owner, actor, courseID uuid.UUI
 	default:
 		// A seat past its expiry, or orphaned, is removed when the new one
 		// is made (seat); any other is in the way.
-		orphaned, err := q.SeatOrphaned(ctx, dbq.SeatOrphanedParams{MemberID: live.ID, Now: &now})
+		orphaned, err := q.SeatOrphaned(ctx, dbq.SeatOrphanedParams{MemberID: live.ID, Now: now})
 		if err != nil {
 			return a, err
 		}
@@ -243,6 +243,18 @@ func memberAddDelegate() tool.Tool {
 			// found from it (agent.get). Whether it is the caller's is for
 			// Validate, which knows who is calling.
 			return tool.Target{CourseID: in.CourseID, Type: "actor", ID: &in.ActorID}, nil
+		},
+		// What resolveDelegateSeat refuses of the arguments alone. A stored
+		// proposal names its preset by id, and every level and scope it
+		// writes out passes.
+		Check: func(in MemberAddDelegateIn) error {
+			if in.Preset != nil && in.PresetID != nil {
+				return apperr.Invalid("give exactly one of preset and preset_id")
+			}
+			if (in.StudentScope != nil && !validScope(*in.StudentScope)) || (in.AssignmentScope != nil && !validScope(*in.AssignmentScope)) {
+				return apperr.Invalid("a scope is all or listed")
+			}
+			return (permSet{}).apply(in.Perms)
 		},
 		// The seat, and the agent, as seat() is held to them at now: one
 		// seated already, and an expiry already past, are refused.

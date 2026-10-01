@@ -574,16 +574,21 @@ func loadOther(ctx context.Context, ec *tool.ExecCtx, courseID, memberID uuid.UU
 	if err != nil {
 		return m, err
 	}
-	if m.Status == domain.MemberRemoved || (m.ExpiresAt != nil && !m.ExpiresAt.After(ec.Now)) {
-		return m, apperr.Conflicts("the member has been removed; seat the actor again for a fresh start")
+	return m, seatGone(m, ec.Now)
+}
+
+// seatGone refuses a seat that is removed, or whose expiry has passed by
+// now: loadOther's refusal, and otherSeat's.
+func seatGone(m dbq.GetMemberInCourseRow, now time.Time) error {
+	if m.Status == domain.MemberRemoved || (m.ExpiresAt != nil && !m.ExpiresAt.After(now)) {
+		return apperr.Conflicts("the member has been removed; seat the actor again for a fresh start")
 	}
-	return m, nil
+	return nil
 }
 
 // otherSeat is loadOther for Validate: the same refusals, of the seat as it
-// stands, read without a lock. Whether its expiry has passed is the
-// moment's, and is left to loadOther, as the change is made.
-func otherSeat(ctx context.Context, q dbq.Querier, caller *domain.Member, courseID, memberID uuid.UUID) (dbq.GetMemberInCourseRow, error) {
+// stands at now, read without a lock.
+func otherSeat(ctx context.Context, q dbq.Querier, caller *domain.Member, now time.Time, courseID, memberID uuid.UUID) (dbq.GetMemberInCourseRow, error) {
 	if memberID == caller.ID {
 		return dbq.GetMemberInCourseRow{}, apperr.Forbid("not on your own membership")
 	}
@@ -597,10 +602,7 @@ func otherSeat(ctx context.Context, q dbq.Querier, caller *domain.Member, course
 	if err != nil {
 		return m, err
 	}
-	if m.Status == domain.MemberRemoved {
-		return m, apperr.Conflicts("the member has been removed; seat the actor again for a fresh start")
-	}
-	return m, nil
+	return m, seatGone(m, now)
 }
 
 // notYourPrincipals refuses a delegate acting on its principal's seat, or on
@@ -798,8 +800,8 @@ func memberUpdatePerms() tool.Tool {
 		Resolve: func(ctx context.Context, q dbq.Querier, in MemberUpdatePermsIn) (tool.Target, error) {
 			return resolveMember(ctx, q, in.CourseID, in.MemberID)
 		},
-		Validate: func(ctx context.Context, q dbq.Querier, m *domain.Member, _ time.Time, in MemberUpdatePermsIn) error {
-			seat, err := otherSeat(ctx, q, m, in.CourseID, in.MemberID)
+		Validate: func(ctx context.Context, q dbq.Querier, m *domain.Member, now time.Time, in MemberUpdatePermsIn) error {
+			seat, err := otherSeat(ctx, q, m, now, in.CourseID, in.MemberID)
 			if err != nil {
 				return err
 			}
@@ -876,7 +878,7 @@ func memberRescope() tool.Tool {
 		// Whether expires_at has passed is the moment's: asked here at
 		// each, as Execute asks it.
 		Validate: func(ctx context.Context, q dbq.Querier, m *domain.Member, now time.Time, in MemberRescopeIn) error {
-			seat, err := otherSeat(ctx, q, m, in.CourseID, in.MemberID)
+			seat, err := otherSeat(ctx, q, m, now, in.CourseID, in.MemberID)
 			if err != nil {
 				return err
 			}
@@ -979,8 +981,8 @@ func memberSetStatus(name, desc, path, from, to, event string) tool.Tool {
 		Resolve: func(ctx context.Context, q dbq.Querier, in MemberIDIn) (tool.Target, error) {
 			return resolveMember(ctx, q, in.CourseID, in.MemberID)
 		},
-		Validate: func(ctx context.Context, q dbq.Querier, g *domain.Member, _ time.Time, in MemberIDIn) error {
-			m, err := otherSeat(ctx, q, g, in.CourseID, in.MemberID)
+		Validate: func(ctx context.Context, q dbq.Querier, g *domain.Member, now time.Time, in MemberIDIn) error {
+			m, err := otherSeat(ctx, q, g, now, in.CourseID, in.MemberID)
 			if err != nil {
 				return err
 			}
@@ -1054,8 +1056,8 @@ func memberRemove() tool.Tool {
 		Resolve: func(ctx context.Context, q dbq.Querier, in MemberIDIn) (tool.Target, error) {
 			return resolveMember(ctx, q, in.CourseID, in.MemberID)
 		},
-		Validate: func(ctx context.Context, q dbq.Querier, m *domain.Member, _ time.Time, in MemberIDIn) error {
-			_, err := otherSeat(ctx, q, m, in.CourseID, in.MemberID)
+		Validate: func(ctx context.Context, q dbq.Querier, m *domain.Member, now time.Time, in MemberIDIn) error {
+			_, err := otherSeat(ctx, q, m, now, in.CourseID, in.MemberID)
 			return err
 		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in MemberIDIn) (MemberRemoveOut, error) {
@@ -1273,8 +1275,8 @@ func memberSetRole() tool.Tool {
 		Resolve: func(ctx context.Context, q dbq.Querier, in MemberSetRoleIn) (tool.Target, error) {
 			return resolveMember(ctx, q, in.CourseID, in.MemberID)
 		},
-		Validate: func(ctx context.Context, q dbq.Querier, g *domain.Member, _ time.Time, in MemberSetRoleIn) error {
-			m, err := otherSeat(ctx, q, g, in.CourseID, in.MemberID)
+		Validate: func(ctx context.Context, q dbq.Querier, g *domain.Member, now time.Time, in MemberSetRoleIn) error {
+			m, err := otherSeat(ctx, q, g, now, in.CourseID, in.MemberID)
 			if err != nil {
 				return err
 			}

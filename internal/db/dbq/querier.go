@@ -1136,10 +1136,10 @@ type Querier interface {
 	// one comes back. An agent's owner never changes now (migration 0014); the
 	// last kind is a seat an agent kept in an archived course when it changed
 	// hands before that, where only this could find it once the course is
-	// opened again. With no clock (now null), a principal's expiry is not judged:
-	// whoever asks leaves it to seat(), which has one. ListOrphanedSeats is the
-	// same rule for every seat, and the authorization queries' owner_matches
-	// its other half: a change to one is a change to all three.
+	// opened again. A principal's expiry is judged at now, which every caller
+	// gives. ListOrphanedSeats is the same rule for every seat, and the
+	// authorization queries' owner_matches its other half: a change to one is a
+	// change to all three.
 	SeatOrphaned(ctx context.Context, arg SeatOrphanedParams) (bool, error)
 	SetActionReview(ctx context.Context, arg SetActionReviewParams) (int64, error)
 	SetComponentParent(ctx context.Context, arg SetComponentParentParams) error

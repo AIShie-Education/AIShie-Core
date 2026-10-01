@@ -832,7 +832,7 @@ func (q *Queries) PrincipalsSeatsHaveRole(ctx context.Context, arg PrincipalsSea
 
 const seatOrphaned = `-- name: SeatOrphaned :one
 SELECT (CASE WHEN m.principal_member_id IS NULL THEN a.owner_actor_id IS NOT NULL
-             ELSE p.status = 'removed' OR coalesce(p.expires_at <= $1, false)
+             ELSE p.status = 'removed' OR coalesce(p.expires_at <= $1::timestamptz, false)
                   OR a.owner_actor_id IS DISTINCT FROM p.actor_id END)::bool AS orphaned
 FROM course_member m
 JOIN actor a ON a.id = m.actor_id
@@ -841,7 +841,7 @@ WHERE m.id = $2
 `
 
 type SeatOrphanedParams struct {
-	Now      *time.Time
+	Now      time.Time
 	MemberID uuid.UUID
 }
 
@@ -852,10 +852,10 @@ type SeatOrphanedParams struct {
 // one comes back. An agent's owner never changes now (migration 0014); the
 // last kind is a seat an agent kept in an archived course when it changed
 // hands before that, where only this could find it once the course is
-// opened again. With no clock (now null), a principal's expiry is not judged:
-// whoever asks leaves it to seat(), which has one. ListOrphanedSeats is the
-// same rule for every seat, and the authorization queries' owner_matches
-// its other half: a change to one is a change to all three.
+// opened again. A principal's expiry is judged at now, which every caller
+// gives. ListOrphanedSeats is the same rule for every seat, and the
+// authorization queries' owner_matches its other half: a change to one is a
+// change to all three.
 func (q *Queries) SeatOrphaned(ctx context.Context, arg SeatOrphanedParams) (bool, error) {
 	row := q.db.QueryRow(ctx, seatOrphaned, arg.Now, arg.MemberID)
 	var orphaned bool

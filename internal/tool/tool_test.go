@@ -210,6 +210,9 @@ func TestDefineRefusesMalformedTools(t *testing.T) {
 		"a call's check without a pin": func(s *tool.Spec[in, out]) {
 			s.CheckCall = func(in) error { return nil }
 		},
+		"ephemeral with what changed since": func(s *tool.Spec[in, out]) {
+			s.Kind, s.Since = tool.Ephemeral, func(context.Context, dbq.Querier, time.Time, in) error { return nil }
+		},
 		"read with a check": func(s *tool.Spec[in, out]) {
 			s.Kind, s.Execute, s.Check = tool.Read, nil, func(in) error { return nil }
 			s.Query = func(context.Context, *tool.ReadCtx, in) (out, error) { return out{}, nil }

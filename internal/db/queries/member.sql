@@ -42,12 +42,12 @@ SELECT id, status, expires_at FROM course_member WHERE course_id = $1 AND actor_
 -- one comes back. An agent's owner never changes now (migration 0014); the
 -- last kind is a seat an agent kept in an archived course when it changed
 -- hands before that, where only this could find it once the course is
--- opened again. With no clock (now null), a principal's expiry is not judged:
--- whoever asks leaves it to seat(), which has one. ListOrphanedSeats is the
--- same rule for every seat, and the authorization queries' owner_matches
--- its other half: a change to one is a change to all three.
+-- opened again. A principal's expiry is judged at now, which every caller
+-- gives. ListOrphanedSeats is the same rule for every seat, and the
+-- authorization queries' owner_matches its other half: a change to one is a
+-- change to all three.
 SELECT (CASE WHEN m.principal_member_id IS NULL THEN a.owner_actor_id IS NOT NULL
-             ELSE p.status = 'removed' OR coalesce(p.expires_at <= sqlc.arg(now), false)
+             ELSE p.status = 'removed' OR coalesce(p.expires_at <= sqlc.arg(now)::timestamptz, false)
                   OR a.owner_actor_id IS DISTINCT FROM p.actor_id END)::bool AS orphaned
 FROM course_member m
 JOIN actor a ON a.id = m.actor_id

@@ -137,12 +137,10 @@ func (p *Pipeline) refuseDecision(ctx context.Context, q dbq.Querier, actor doma
 
 // ValidateDecision is action.decide's Validate: what Decide would refuse the
 // decision in, made from seat m at now, before anything of it is decided
-// (refuseDecision), asked of the proposal as it stands, without its lock.
+// (refuseDecision), asked of the proposal under the lock Decide takes it
+// with (lockProposal), which the call keeps.
 func (p *Pipeline) ValidateDecision(ctx context.Context, q dbq.Querier, m *domain.Member, now time.Time, in DecideIn) error {
-	prop, err := q.GetActionInCourse(ctx, dbq.GetActionInCourseParams{ID: in.ActionID, CourseID: &in.CourseID})
-	if errors.Is(err, pgx.ErrNoRows) {
-		return errNoAction
-	}
+	prop, err := lockProposal(ctx, q, in.CourseID, in.ActionID)
 	if err != nil {
 		return err
 	}
@@ -163,37 +161,47 @@ func seatActor(ctx context.Context, q dbq.Querier, m *domain.Member) (domain.Act
 	return authz.LoadActor(ctx, q, m.ActorID)
 }
 
+// lockProposal takes proposal id of course for a decision about it: the
+// proposer's seat first, then the proposal, the order a removal of that seat
+// takes them in (the seat, then its proposals) and the order every write
+// takes its caller's seat in. A pause, narrowing or removal of the proposer
+// then waits for the decision, or the decision waits for it and sees what
+// it did. For a delegate's proposal its principal's seat comes second, as a
+// delegate's own calls take the two: whatever the principal loses then
+// applies to the approval too. Whose proposal it is, and whose delegate that
+// seat is, never change, so they are read before anything is locked.
+//
+// Decide takes it so, and ValidateDecision before it, ahead of whatever the
+// proposed tool's Validate locks as it asks whether approving would be
+// refused (ownerJudges): an approval takes the proposal and then those, and
+// an owner's decision must not take them the other way round.
+func lockProposal(ctx context.Context, q dbq.Querier, course, id uuid.UUID) (dbq.Action, error) {
+	if ahead, err := q.GetActionInCourse(ctx, dbq.GetActionInCourseParams{ID: id, CourseID: &course}); err == nil && ahead.MemberID != nil {
+		if err := q.ShareSeats(ctx, []uuid.UUID{*ahead.MemberID}); err != nil {
+			return dbq.Action{}, err
+		}
+		principal, err := q.GetSeatPrincipal(ctx, *ahead.MemberID)
+		if err != nil {
+			return dbq.Action{}, err
+		}
+		if principal != nil {
+			if err := q.ShareSeats(ctx, []uuid.UUID{*principal}); err != nil {
+				return dbq.Action{}, err
+			}
+		}
+	}
+	prop, err := q.GetActionInCourseForUpdate(ctx, dbq.GetActionInCourseForUpdateParams{ID: id, CourseID: &course})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return prop, errNoAction
+	}
+	return prop, err
+}
+
 // Decide approves or rejects a proposal. It runs as the Execute of
 // action.decide, inside that action's savepoint, on a decision CheckDecision
 // has taken.
 func (p *Pipeline) Decide(ctx context.Context, ec *tool.ExecCtx, in DecideIn) (DecideOut, error) {
-	// The proposer's seat first, then the proposal: the order a removal of
-	// that seat takes them in (the seat, then its proposals) and the order
-	// every write takes its caller's seat in. A pause, narrowing or removal
-	// of the proposer then waits for the decision, or the decision waits
-	// for it and sees what it did. For a delegate's proposal its principal's
-	// seat comes second, as a delegate's own calls take the two: whatever
-	// the principal loses then applies to the approval too. Whose proposal
-	// it is, and whose delegate that seat is, never change, so they are read
-	// before anything is locked.
-	if ahead, err := ec.Q.GetActionInCourse(ctx, dbq.GetActionInCourseParams{ID: in.ActionID, CourseID: &in.CourseID}); err == nil && ahead.MemberID != nil {
-		if err := ec.Q.ShareSeats(ctx, []uuid.UUID{*ahead.MemberID}); err != nil {
-			return DecideOut{}, err
-		}
-		principal, err := ec.Q.GetSeatPrincipal(ctx, *ahead.MemberID)
-		if err != nil {
-			return DecideOut{}, err
-		}
-		if principal != nil {
-			if err := ec.Q.ShareSeats(ctx, []uuid.UUID{*principal}); err != nil {
-				return DecideOut{}, err
-			}
-		}
-	}
-	prop, err := ec.Q.GetActionInCourseForUpdate(ctx, dbq.GetActionInCourseForUpdateParams{ID: in.ActionID, CourseID: &in.CourseID})
-	if errors.Is(err, pgx.ErrNoRows) {
-		return DecideOut{}, errNoAction
-	}
+	prop, err := lockProposal(ctx, ec.Q, in.CourseID, in.ActionID)
 	if err != nil {
 		return DecideOut{}, err
 	}
@@ -299,6 +307,16 @@ func (p *Pipeline) Decide(ctx context.Context, ec *tool.ExecCtx, in DecideIn) (D
 				// can work.
 				return DecideOut{}, err
 			}
+			e, ok := isCallerFault(err)
+			if !ok {
+				return DecideOut{}, err
+			}
+			return fail(e)
+		}
+	}
+	// What changed since it was proposed, which no call is refused for.
+	if t.Since != nil {
+		if err := t.Since(ctx, ec.Q, prop.CreatedAt, args); err != nil {
 			e, ok := isCallerFault(err)
 			if !ok {
 				return DecideOut{}, err
@@ -433,9 +451,10 @@ func (u unsure) Unwrap() error { return u.err }
 
 // refusal is what approving proposal a, of tool t with arguments args, would
 // be refused with at now for what it asks, before anything is carried out:
-// the tool's Check, and its Validate, run as approving it runs it, against
-// the proposer's seat. nil when neither refuses it. It writes nothing;
-// Validate may take its locks, which q's transaction, if it has one, keeps.
+// the tool's Check, its Validate, run as approving it runs it, against the
+// proposer's seat, and its Since, of what changed since a was proposed. nil
+// when none refuses it. It writes nothing; Validate may take its locks,
+// which q's transaction, if it has one, keeps.
 func refusal(ctx context.Context, q dbq.Querier, t tool.Tool, a dbq.Action, args any, now time.Time) (*apperr.Error, error) {
 	refused := func(err error) (*apperr.Error, error) {
 		if e, ok := apperr.As(err); ok {
@@ -448,15 +467,19 @@ func refusal(ctx context.Context, q dbq.Querier, t tool.Tool, a dbq.Action, args
 			return refused(err)
 		}
 	}
-	if t.Validate == nil || a.MemberID == nil {
-		return nil, nil
+	if t.Validate != nil && a.MemberID != nil {
+		proposer, err := authz.LoadMember(ctx, q, *a.MemberID)
+		if err != nil {
+			return refused(err)
+		}
+		if err := t.Validate(ctx, q, proposer, now, args); err != nil {
+			return refused(err)
+		}
 	}
-	proposer, err := authz.LoadMember(ctx, q, *a.MemberID)
-	if err != nil {
-		return refused(err)
-	}
-	if err := t.Validate(ctx, q, proposer, now, args); err != nil {
-		return refused(err)
+	if t.Since != nil {
+		if err := t.Since(ctx, q, a.CreatedAt, args); err != nil {
+			return refused(err)
+		}
 	}
 	return nil, nil
 }

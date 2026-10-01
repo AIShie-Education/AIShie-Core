@@ -443,6 +443,15 @@ func gradeSubmit(d Deps) tool.Tool {
 			_, err = checkContent(ctx, q, s, in.GradeContent, true)
 			return err
 		},
+		// A draft entered while the proposal waited has been in front of
+		// nobody who asked for this one to replace it.
+		Since: func(ctx context.Context, q dbq.Querier, proposedAt time.Time, in GradeSubmitIn) error {
+			s, err := load(ctx, q, in)
+			if err != nil {
+				return err
+			}
+			return noNewerDraft(ctx, q, s, proposedAt)
+		},
 		Pin: func(ctx context.Context, q dbq.Querier, _ *domain.Member, now time.Time, in GradeSubmitIn) (GradeSubmitIn, error) {
 			if err := checkUploadAge(ctx, d, now, in.uploads()...); err != nil {
 				return in, err
@@ -482,8 +491,10 @@ func gradeSubmit(d Deps) tool.Tool {
 			// the call that made it. A proposal approved on Wednesday must
 			// not replace a draft somebody entered on Tuesday: the approver
 			// saw the proposal, not the draft.
-			if err := noNewerDraft(ctx, ec, s); err != nil {
-				return GradeSubmitOut{}, err
+			if ec.Approved {
+				if err := noNewerDraft(ctx, ec.Q, s, ec.ActionCreatedAt); err != nil {
+					return GradeSubmitOut{}, err
+				}
 			}
 			id := ids.New()
 			if s.submission != nil {
@@ -569,19 +580,18 @@ func holdWorth(ctx context.Context, q dbq.Querier, courseID uuid.UUID, s gradeSu
 	return q.LockCourseComponents(ctx, courseID)
 }
 
-// noNewerDraft refuses to replace a draft entered after this call was made.
-// A direct call is as new as anything: it applies to a proposal being
-// carried out on its approval.
-func noNewerDraft(ctx context.Context, ec *tool.ExecCtx, s gradeSubject) error {
-	if !ec.Approved {
-		return nil
-	}
+// noNewerDraft refuses to replace a draft entered after the proposal of this
+// grade was made, at proposedAt. A direct call is as new as anything: it
+// applies to a proposal, as it is approved (grade.submit's Since and
+// Execute) and as its proposer's owner is told whether it is theirs to
+// decide.
+func noNewerDraft(ctx context.Context, q dbq.Querier, s gradeSubject, proposedAt time.Time) error {
 	var newest time.Time
 	var err error
 	if s.submission != nil {
-		newest, err = ec.Q.NewestSubmissionDraftAt(ctx, &s.submission.ID)
+		newest, err = q.NewestSubmissionDraftAt(ctx, &s.submission.ID)
 	} else {
-		newest, err = ec.Q.NewestComponentDraftAt(ctx, dbq.NewestComponentDraftAtParams{ComponentID: &s.component.ID, StudentMemberID: s.student})
+		newest, err = q.NewestComponentDraftAt(ctx, dbq.NewestComponentDraftAtParams{ComponentID: &s.component.ID, StudentMemberID: s.student})
 	}
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil
@@ -589,7 +599,7 @@ func noNewerDraft(ctx context.Context, ec *tool.ExecCtx, s gradeSubject) error {
 	if err != nil {
 		return err
 	}
-	if newest.After(ec.ActionCreatedAt) {
+	if newest.After(proposedAt) {
 		return apperr.Precondition("a newer draft was entered for this work after this grade was proposed; look at it, and propose again if it should still be replaced")
 	}
 	return nil
@@ -682,6 +692,25 @@ func stillWaiting(rows []dbq.GetGradesInCourseRow) ([]dbq.GetGradesInCourseRow, 
 	return waiting, nil
 }
 
+// postableNamed is what Validate holds named drafts to, whether a call or
+// an approval names them: none replaced, and those not yet posted postable;
+// when every one is posted, what checkPostable says of the first.
+func postableNamed(ctx context.Context, q dbq.Querier, rows []dbq.GetGradesInCourseRow) error {
+	waiting := make([]dbq.GetGradesInCourseRow, 0, len(rows))
+	for _, g := range rows {
+		switch {
+		case g.SupersededBy != nil:
+			return apperr.Conflicts("grade %s has been replaced by a newer draft", g.ID)
+		case g.PostedAt == nil:
+			waiting = append(waiting, g)
+		}
+	}
+	if len(waiting) == 0 {
+		return checkPostable(ctx, q, rows)
+	}
+	return checkPostable(ctx, q, waiting)
+}
+
 func gradePost() tool.Tool {
 	return tool.Define(tool.Spec[GradePostIn, GradePostOut]{
 		Name: "grade.post",
@@ -732,14 +761,13 @@ func gradePost() tool.Tool {
 				return err
 			}
 			// Drafts named by id, alone or beside the assignment as Pin
-			// records them, are checked in Execute: it is the one place
-			// that can tell an approval, which passes over one posted
-			// meanwhile, from a call, which is told that it is posted.
-			// Pin checks them for a proposal as it is made. Execute runs
-			// straight after this, for a call and an approval alike, and
-			// refuses there what would have been refused here.
+			// records them, are held to what an approval is: one replaced
+			// refuses it, and the rest are postable, less any posted
+			// already, which an approval passes over. A call is refused all
+			// that, and told besides of one posted already, by Execute;
+			// Pin tells a proposal being made so.
 			if len(in.GradeIDs) > 0 {
-				return nil
+				return postableNamed(ctx, q, rows)
 			}
 			if len(rows) == 0 {
 				return apperr.Precondition("there are no draft grades to post")
@@ -753,10 +781,10 @@ func gradePost() tool.Tool {
 		// approving it posts of them.
 		Pin: func(ctx context.Context, q dbq.Querier, _ *domain.Member, _ time.Time, in GradePostIn) (GradePostIn, error) {
 			if in.AssignmentID == nil {
-				// Validate left the drafts named to Execute. A proposal
-				// being made is not an approval, and is held to them as a
-				// call is: nobody is asked to approve posting what could
-				// not be posted.
+				// Validate passed over a draft named that is posted
+				// already, as an approval does. A proposal being made is
+				// not an approval, and is held to them as a call is:
+				// nobody is asked to approve posting what is posted.
 				rows, err := gradesToPost(ctx, q, in)
 				if err != nil {
 					return in, err

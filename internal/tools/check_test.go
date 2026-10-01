@@ -54,6 +54,7 @@ func TestArgumentsAreCheckedBeforeAnythingIsProposed(t *testing.T) {
 		m{"course_id": b.course, "kind": "material", "title": "Notes", "body_md": "Read chapter 1."})).DocumentID
 	conv, question := b.open(t, b.yuki, b.tutorM, "What is a thesis?")
 	newcomer := b.person(t, "Mori", "")
+	helper := b.agent(t, tanaka, "Tanaka's helper")
 	// What an observer reads, at the level Tanaka holds it: she gives no
 	// more than that.
 	waitsToRead := m{"document_read": "confirm_required", "member_read": "confirm_required"}
@@ -157,6 +158,19 @@ func TestArgumentsAreCheckedBeforeAnythingIsProposed(t *testing.T) {
 		{tool: "member.add",
 			invalid: in(m{"actor_id": newcomer}),
 			message: "give exactly one of preset and preset_id"},
+		{tool: "member.add_delegate",
+			valid:   in(m{"actor_id": helper}),
+			invalid: in(m{"actor_id": helper, "perms": m{"grade_everything": "autonomous"}}),
+			message: `there is no permission named "grade_everything"`},
+		{tool: "member.add_delegate",
+			invalid: in(m{"actor_id": helper, "perms": m{"document_read": "sometimes"}}),
+			message: `"sometimes" is not a level; use denied, confirm_required, pending_review or autonomous`},
+		{tool: "member.add_delegate",
+			invalid: in(m{"actor_id": helper, "preset": "delegate", "preset_id": uuid.New()}),
+			message: "give exactly one of preset and preset_id"},
+		{tool: "member.add_delegate",
+			invalid: in(m{"actor_id": helper, "student_scope": "some"}),
+			message: "a scope is all or listed"},
 		{tool: "member.rescope",
 			valid:   in(m{"member_id": b.kenM, "assignment_scope": "all"}),
 			invalid: in(m{"member_id": b.kenM, "assignment_scope": "some"}),
@@ -474,10 +488,13 @@ func TestAProposalThatWouldBeRefusedIsNotItsOwnersToDecide(t *testing.T) {
 
 // What the moment refuses, and what changes while a proposal waits, is
 // asked of it again for its owner as approving it now would ask it
-// (tool.Spec.Validate, given the moment): an agent's change of a seat's
-// expiry that has passed meanwhile, and an agent's answer to a question its
-// opener has asked again since, are not their owner's to decide. Someone
-// else may still reject them, and the owner take them back.
+// (tool.Spec.Validate, given the moment, and tool.Spec.Since, given when it
+// was proposed): an agent's change of a seat's expiry that has passed
+// meanwhile, a change to a seat that has ended since, a grade with a newer
+// draft entered since, a post of a draft replaced since, and an agent's
+// answer to a question its opener has asked again since, are not their
+// owner's to decide. Someone else may still reject them, and the owner take
+// them back.
 func TestWhatApprovingWouldRefuseNowIsNotItsOwnersToDecide(t *testing.T) {
 	b := build(t)
 	tanaka := b.person(t, "Tanaka", "")
@@ -494,7 +511,8 @@ func TestWhatApprovingWouldRefuseNowIsNotItsOwnersToDecide(t *testing.T) {
 	// Sato's agent manages the course's members for him, by proposal: it
 	// asks for Ken's seat to end in two days.
 	bot := b.agent(t, b.sato, "Sato's registrar")
-	b.delegate(t, b.sato, bot, m{"preset": "ta", "perms": m{"member_manage": "confirm_required"}})
+	b.delegate(t, b.sato, bot, m{"preset": "ta", "perms": m{"member_manage": "confirm_required",
+		"grade_submit": "confirm_required", "grade_post": "confirm_required"}})
 	rescope := b.MustCall(bot, "member.rescope", m{"course_id": b.course, "member_id": b.kenM,
 		"expires_at": time.Now().Add(48 * time.Hour)}, "bot-rescopes")
 	if rescope.Status != domain.StatusProposed {
@@ -518,6 +536,70 @@ func TestWhatApprovingWouldRefuseNowIsNotItsOwnersToDecide(t *testing.T) {
 			return e.Message == "expires_at is in the past; to end a membership now, remove it"
 		})
 	b.do(t, b.sato, "action.withdraw", m{"course_id": b.course, "action_id": rescope.ActionID})
+
+	// It asks for Ono's seat to read no more, and Ono's seat ends while it
+	// waits: the sweep has not been by, and the seat is as good as removed.
+	onoM := testkit.Result[tools.MemberIDOut](t, b.do(t, b.sato, "member.add",
+		m{"course_id": b.course, "actor_id": b.person(t, "Ono", ""), "preset": "observer"})).MemberID
+	narrowing := b.MustCall(bot, "member.update_perms", m{"course_id": b.course, "member_id": onoM,
+		"perms": m{"document_read": "denied"}}, "bot-narrows")
+	if narrowing.Status != domain.StatusProposed {
+		t.Fatalf("Sato's agent narrowing Ono's seat: %+v", narrowing)
+	}
+	if q := b.queue(t, b.sato, "action.list_proposed"); !q[*narrowing.ActionID] {
+		t.Fatalf("Sato's queue, a seat he could narrow himself: %v", q)
+	}
+	b.Exec(`UPDATE course_member SET expires_at = now() - interval '1 minute' WHERE id = $1`, onoM)
+	if q := b.queue(t, b.sato, "action.list_proposed"); q[*narrowing.ActionID] {
+		t.Fatalf("Sato's queue, a seat that ended while it waited: %v", q)
+	}
+	refusedAs("Sato approving a change to a seat that has ended",
+		b.MustCall(b.sato, "action.decide", m{"course_id": b.course, "action_id": narrowing.ActionID, "decision": "approve"}, "sato-narrows"),
+		apperr.Conflict, func(e *apperr.Error) bool {
+			return e.Message == "the member has been removed; seat the actor again for a fresh start"
+		})
+	b.do(t, b.sato, "action.withdraw", m{"course_id": b.course, "action_id": narrowing.ActionID})
+
+	// It grades Ken's essay by proposal, and Sato enters a draft of his own
+	// for it meanwhile, which approving the proposal would replace unseen.
+	kenWork := b.submit(t, b.ken, "Ken's essay")
+	grading := b.MustCall(bot, "grade.submit", m{"course_id": b.course, "submission_id": kenWork, "score": 70}, "bot-grades")
+	if grading.Status != domain.StatusProposed {
+		t.Fatalf("Sato's agent grading Ken's essay: %+v", grading)
+	}
+	if q := b.queue(t, b.sato, "action.list_proposed"); !q[*grading.ActionID] {
+		t.Fatalf("Sato's queue, a grade he could give himself: %v", q)
+	}
+	b.do(t, b.sato, "grade.submit", m{"course_id": b.course, "submission_id": kenWork, "score": 75})
+	if q := b.queue(t, b.sato, "action.list_proposed"); q[*grading.ActionID] {
+		t.Fatalf("Sato's queue, a grade with a newer draft entered since: %v", q)
+	}
+	refusedAs("Sato approving a grade with a newer draft entered since",
+		b.MustCall(b.sato, "action.decide", m{"course_id": b.course, "action_id": grading.ActionID, "decision": "approve"}, "sato-grades"),
+		apperr.FailedPrecondition, func(e *apperr.Error) bool { return strings.Contains(e.Message, "a newer draft was entered") })
+	b.do(t, b.sato, "action.withdraw", m{"course_id": b.course, "action_id": grading.ActionID})
+
+	// It proposes posting Yuki's draft, which Sato replaces meanwhile.
+	yukiWork := b.submit(t, b.yuki, "Yuki's essay")
+	yukiDraft := testkit.Result[tools.GradeSubmitOut](t, b.do(t, b.sato, "grade.submit",
+		m{"course_id": b.course, "submission_id": yukiWork, "score": 80})).GradeID
+	posting := b.MustCall(bot, "grade.post", m{"course_id": b.course, "grade_ids": []uuid.UUID{yukiDraft}}, "bot-posts")
+	if posting.Status != domain.StatusProposed {
+		t.Fatalf("Sato's agent posting Yuki's draft: %+v", posting)
+	}
+	if q := b.queue(t, b.sato, "action.list_proposed"); !q[*posting.ActionID] {
+		t.Fatalf("Sato's queue, a draft he could post himself: %v", q)
+	}
+	b.do(t, b.sato, "grade.submit", m{"course_id": b.course, "submission_id": yukiWork, "score": 85})
+	if q := b.queue(t, b.sato, "action.list_proposed"); q[*posting.ActionID] {
+		t.Fatalf("Sato's queue, posting a draft replaced since: %v", q)
+	}
+	refusedAs("Sato approving the posting of a draft replaced since",
+		b.MustCall(b.sato, "action.decide", m{"course_id": b.course, "action_id": posting.ActionID, "decision": "approve"}, "sato-posts"),
+		apperr.Conflict, func(e *apperr.Error) bool {
+			return e.Message == fmt.Sprintf("grade %s has been replaced by a newer draft", yukiDraft)
+		})
+	b.do(t, b.sato, "action.withdraw", m{"course_id": b.course, "action_id": posting.ActionID})
 
 	// Sato's course tutor answers Ken by proposal; Ken asks again before
 	// anyone decides it, and the answer is to a question no longer the
@@ -624,6 +706,11 @@ func TestACallTheCourseWouldRefuseIsNotProposed(t *testing.T) {
 			{"upload_token": b.attachment(t, b.yuki, "text/plain", []byte("notes")), "filename": "notes.txt"}}}))
 	notesFile := b.messages(t, b.yuki, opened.ConversationID)[0].Attachments[0].ID
 	tanakaBot := b.agent(t, tanaka, "Tanaka's helper")
+	// Ono's seat ended an hour ago, and the sweep has not been by: it is
+	// as good as removed.
+	onoM := testkit.Result[tools.MemberIDOut](t, b.do(t, b.sato, "member.add",
+		m{"course_id": b.course, "actor_id": b.person(t, "Ono", ""), "preset": "observer"})).MemberID
+	b.Exec(`UPDATE course_member SET expires_at = now() - interval '1 hour' WHERE id = $1`, onoM)
 	in := func(args m) m {
 		args["course_id"] = b.course
 		return args
@@ -683,8 +770,21 @@ func TestACallTheCourseWouldRefuseIsNotProposed(t *testing.T) {
 			apperr.Conflict, "the member is active, not paused"},
 		{"member.remove", in(m{"member_id": tanakaM}),
 			apperr.Forbidden, "not on your own membership"},
-		{"conversation.mark_read", in(m{"conversation_id": conv, "up_to_message_id": uuid.New()}),
-			apperr.InvalidArgument, "up_to_message_id must name a message of this conversation's"},
+		{"conversation.mark_read", in(m{"conversation_id": conv}),
+			apperr.Forbidden, "only the two who take part in a conversation mark it read; overseeing it keeps no place in it"},
+		// A seat past its expiry, which the sweep has yet to remove.
+		{"member.update_perms", in(m{"member_id": onoM, "perms": m{"document_read": "denied"}}),
+			apperr.Conflict, "the member has been removed; seat the actor again for a fresh start"},
+		{"member.rescope", in(m{"member_id": onoM, "assignment_scope": "all"}),
+			apperr.Conflict, "the member has been removed; seat the actor again for a fresh start"},
+		{"member.set_role", in(m{"member_id": onoM, "role": "ta"}),
+			apperr.Conflict, "the member has been removed; seat the actor again for a fresh start"},
+		{"member.pause", in(m{"member_id": onoM}),
+			apperr.Conflict, "the member has been removed; seat the actor again for a fresh start"},
+		{"member.resume", in(m{"member_id": onoM}),
+			apperr.Conflict, "the member has been removed; seat the actor again for a fresh start"},
+		{"member.remove", in(m{"member_id": onoM}),
+			apperr.Conflict, "the member has been removed; seat the actor again for a fresh start"},
 		{"conversation.close", in(m{"conversation_id": conv}),
 			apperr.Forbidden, "only the two who take part in a conversation close it"},
 		{"conversation.retract", in(m{"message_id": withdrawn}),
@@ -789,6 +889,15 @@ func TestACallTheCourseWouldRefuseIsNotProposed(t *testing.T) {
 	}
 	if n := b.Count(`SELECT count(*) FROM action WHERE actor_id = $1 AND status = 'proposed'`, tanaka); n != 0 {
 		t.Fatalf("%d of Tanaka's calls wait for someone to approve them", n)
+	}
+
+	// Tanaka takes part in no conversation; the tutor, reading by proposal
+	// now, takes part in Yuki's, and marks read up to a message not in it.
+	b.do(t, b.sato, "member.update_perms", m{"course_id": b.course, "member_id": b.tutorM, "perms": m{"document_read": "confirm_required"}})
+	out := b.MustCall(b.tutor, "conversation.mark_read", in(m{"conversation_id": conv, "up_to_message_id": uuid.New()}), "tutor-reads")
+	if out.Status != domain.StatusFailed || out.Error == nil || out.Error.Code != apperr.InvalidArgument ||
+		out.Error.Message != "up_to_message_id must name a message of this conversation's" {
+		t.Fatalf("the tutor marking read up to a message not in the conversation: %+v", out)
 	}
 }
 

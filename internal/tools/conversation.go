@@ -1210,7 +1210,10 @@ func conversationMarkRead() tool.Tool {
 			return nil
 		},
 		// A message is a conversation's for good.
-		Validate: func(ctx context.Context, q dbq.Querier, _ *domain.Member, _ time.Time, in ConversationMarkReadIn) error {
+		Validate: func(ctx context.Context, q dbq.Querier, m *domain.Member, now time.Time, in ConversationMarkReadIn) error {
+			if _, err := markReadable(ctx, q, m, now, in.CourseID, in.ConversationID); err != nil {
+				return err
+			}
 			if in.UpToMessageID == nil {
 				return nil
 			}
@@ -1218,20 +1221,9 @@ func conversationMarkRead() tool.Tool {
 			return err
 		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in ConversationMarkReadIn) (ConversationMarkReadOut, error) {
-			c, err := findConversation(ctx, ec.Q, in.CourseID, in.ConversationID)
+			c, err := markReadable(ctx, ec.Q, ec.Member, ec.Now, in.CourseID, in.ConversationID)
 			if err != nil {
 				return ConversationMarkReadOut{}, err
-			}
-			ok, err := newAddressing(ec.Q, ec.Now).mayRead(ctx, ec.Member, c)
-			if err != nil {
-				return ConversationMarkReadOut{}, err
-			}
-			if !ok {
-				return ConversationMarkReadOut{}, errNoConversation
-			}
-			if ec.Member.ID != c.OpenerMemberID && ec.Member.ID != c.RespondentMemberID {
-				return ConversationMarkReadOut{}, apperr.Forbid("only the two who take part in a conversation mark it read; "+
-					"overseeing it keeps no place in it").With("reason", "not_a_participant")
 			}
 			var seq int32
 			switch {
@@ -1253,6 +1245,27 @@ func conversationMarkRead() tool.Tool {
 			return out, err
 		},
 	})
+}
+
+// markReadable is the conversation m would mark read: one m may read at now,
+// and takes part in.
+func markReadable(ctx context.Context, q dbq.Querier, m *domain.Member, now time.Time, courseID, conversationID uuid.UUID) (dbq.Conversation, error) {
+	c, err := findConversation(ctx, q, courseID, conversationID)
+	if err != nil {
+		return c, err
+	}
+	ok, err := newAddressing(q, now).mayRead(ctx, m, c)
+	if err != nil {
+		return c, err
+	}
+	if !ok {
+		return c, errNoConversation
+	}
+	if m.ID != c.OpenerMemberID && m.ID != c.RespondentMemberID {
+		return c, apperr.Forbid("only the two who take part in a conversation mark it read; "+
+			"overseeing it keeps no place in it").With("reason", "not_a_participant")
+	}
+	return c, nil
 }
 
 // upTo is the seq of message, which must be one of the conversation's.

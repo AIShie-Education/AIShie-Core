@@ -302,18 +302,30 @@ type Spec[In, Out any] struct {
 	// is live, is asked here with it. What the arguments say alone, whatever
 	// the course holds, is Check's.
 	Validate func(ctx context.Context, q dbq.Querier, m *domain.Member, now time.Time, in In) error
+	// Since checks a stored proposal, made at proposedAt, for what has
+	// changed since then that approving it must not pass over: a newer draft
+	// of the grade grade.submit would replace, entered while it waited. No
+	// call is refused for that, and Validate, asked of a call and an
+	// approval alike, is not told when the proposal was made. It runs, after
+	// Validate and writing nothing, when a proposal is approved and when its
+	// proposer's owner is told whether it is theirs to decide; Execute asks
+	// it again under the locks it takes, as it asks what Validate asked.
+	Since func(ctx context.Context, q dbq.Querier, proposedAt time.Time, in In) error
 	// Pin fills in defaults that must be fixed when a proposal is made rather
 	// than when it is approved — the rubric version a grade is against, say,
 	// which may have moved on by then. It runs only for a call that is being
 	// queued as a proposal, by the member m proposing it, and now is when
 	// that is; what it returns is the payload stored with it. It may refuse
-	// the call instead, for what is true of a proposal and of no call:
-	// an upload too old to outlast it, an answer of the proposer's to the
-	// same question waiting already, a call that is never made by proposal.
-	// Approving it would not refuse those, and so nothing but making it
-	// asks them. It runs in the call's transaction,
-	// so it may also clear, as it succeeds, what the proposal takes the
-	// place of: conversation.answer's draft.
+	// the call instead, for what is true of a proposal and of no call: an
+	// upload too old to outlast it, an answer of the proposer's to the same
+	// question waiting already, a call that is never made by proposal. It
+	// also holds a proposal, as it is made, to the rules Execute holds a
+	// call to and an approval passes over on purpose: no_rubric while a
+	// rubric is published, the instructions in force, a named draft posted
+	// already. Approving it would not refuse those, and so nothing but
+	// making it asks them. It runs in the call's transaction, so it may also
+	// clear, as it succeeds, what the proposal takes the place of:
+	// conversation.answer's draft.
 	Pin func(ctx context.Context, q dbq.Querier, m *domain.Member, now time.Time, in In) (In, error)
 	// Execute is set for a Write and an Ephemeral tool, Query for a Read.
 	Execute func(ctx context.Context, ec *ExecCtx, in In) (Out, error)
@@ -398,6 +410,7 @@ type Tool struct {
 	CourseID  func(in any) uuid.UUID
 	Resolve   func(ctx context.Context, q dbq.Querier, in any) (Target, error)
 	Validate  func(ctx context.Context, q dbq.Querier, m *domain.Member, now time.Time, in any) error
+	Since     func(ctx context.Context, q dbq.Querier, proposedAt time.Time, in any) error
 	Pin       func(ctx context.Context, q dbq.Querier, m *domain.Member, now time.Time, in any) (any, error)
 	Execute   func(ctx context.Context, ec *ExecCtx, in any) (any, error)
 	Query     func(ctx context.Context, rc *ReadCtx, in any) (any, error)
@@ -498,14 +511,14 @@ func Define[In, Out any](s Spec[In, Out]) Tool {
 			fail("a Write tool has Execute and no Query")
 		}
 	case Read:
-		if s.Query == nil || s.Execute != nil || s.Validate != nil || s.Check != nil || s.CheckCall != nil {
-			fail("a Read tool has Query, and neither Execute, Validate, Check nor CheckCall")
+		if s.Query == nil || s.Execute != nil || s.Validate != nil || s.Since != nil || s.Check != nil || s.CheckCall != nil {
+			fail("a Read tool has Query, and neither Execute, Validate, Since, Check nor CheckCall")
 		}
 	case Ephemeral:
 		// Nothing of it is recorded, proposed or replayed, so nothing that
 		// is about those applies; and nothing but a caller makes one.
-		if s.Execute == nil || s.Query != nil || s.Validate != nil || s.Pin != nil || s.Check != nil || s.CheckCall != nil {
-			fail("an Ephemeral tool has Execute, and neither Query, Validate, Pin, Check nor CheckCall")
+		if s.Execute == nil || s.Query != nil || s.Validate != nil || s.Since != nil || s.Pin != nil || s.Check != nil || s.CheckCall != nil {
+			fail("an Ephemeral tool has Execute, and neither Query, Validate, Since, Pin, Check nor CheckCall")
 		}
 		if s.Internal || s.Unlisted || len(s.SecretIn) > 0 || len(s.SecretOut) > 0 {
 			fail("an Ephemeral tool is neither Internal nor Unlisted, and records no secret to keep out")
@@ -639,6 +652,11 @@ func Define[In, Out any](s Spec[In, Out]) Tool {
 	if s.Validate != nil {
 		t.Validate = func(ctx context.Context, q dbq.Querier, m *domain.Member, now time.Time, in any) error {
 			return s.Validate(ctx, q, m, now, in.(In))
+		}
+	}
+	if s.Since != nil {
+		t.Since = func(ctx context.Context, q dbq.Querier, proposedAt time.Time, in any) error {
+			return s.Since(ctx, q, proposedAt, in.(In))
 		}
 	}
 	if s.Pin != nil {
