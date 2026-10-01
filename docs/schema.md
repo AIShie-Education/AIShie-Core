@@ -1727,8 +1727,10 @@ plainly to whoever reads a conversation, in `visible_to`, as codes for the reade
 its own words: its `participants`, course staff who decide actions for its opener
 (`overseers`), anyone who decides actions in the course, through the log (`action_record`),
 and, unless the respondent is the opener's own delegate, whomever else the respondent answers
-(`respondent_answers_others`). There is no privacy promised beyond that. `action.list_mine` takes `exclude_types`, so
-that a list of what one has done need not be a transcript.
+(`respondent_answers_others`), and last, of every conversation, the site's administrators and
+those of the course's department, who may export it for audit, what was retracted in it with
+the rest (`audit_export`, below). There is no privacy promised beyond that. `action.list_mine`
+takes `exclude_types`, so that a list of what one has done need not be a transcript.
 
 **A message's files (attachments).** A question — the first, with `conversation.open`, or any
 after it, with `conversation.ask` — and an answer may carry files, of any type: a draft of an
@@ -1766,7 +1768,8 @@ To anyone else a file does not exist. A retracted message's files are withheld f
 as its text is: its view lists none, and `conversation.attachment` answers `not_found`, reason
 `retracted`, to whoever reads the conversation. They are kept, as its text is kept in the action
 that wrote it, whose payload names each file and its upload token: the rows and the files stay,
-for whoever keeps the site to recover, and no tool hands them out. Nothing deletes a message, and
+for whoever keeps the site to recover, and no tool hands them out; an export for audit (below)
+describes them, and holds none of their bytes. Nothing deletes a message, and
 so nothing deletes its files; were a conversation ever purged, its files would go with it. A
 message's news (`conversation.message_posted`) says what it carries: each file's `id`,
 `filename`, `content_type` and `byte_size`, and nothing of where it is kept.
@@ -1869,6 +1872,97 @@ carries, which its news names (above). They are shown to the two
 participants and to nobody else, whatever they hold: not by permission (the visibility table
 lists none for them), and not by the rule that shows a member the events of its own actions,
 so a manager whose removal of a seat closed a conversation is not told of it.
+
+**Exporting conversations for audit.** What was said in the site's conversations is taken away
+for audit by the people who answer for the site: root and the platform's administrators,
+anywhere, and a department's administrators, in the courses of the departments they
+administer and beneath them, as they manage those courses from outside (§2.10) and as nothing
+inside a course reaches. Nobody else exports, whatever they hold in a course: an instructor
+reads the conversations of the students they decide actions for, and exports none. An agent
+never exports, whatever role it was given: taking personal data away is a person's decision to
+answer for, so an agent that the Admin gate lets through, one nobody owns given a platform role,
+is refused `people_only`, reading `kind` to refuse as a password reset does (§2.2). An export is
+never proposed: the gate allows it or denies it, and a denial is recorded as any is.
+
+`conversation.export` (`POST /v1/conversation-exports`) chooses the conversations by its
+filters: a course (`course_id`), or a department and everything beneath it (`within_dept_id`),
+not both, or neither for the whole site's, which only a platform administrator exports; a
+person or agent who took part, as the one who asked or the agent asked (`participant_actor_id`);
+and a span of time (`from`, at or after; `before`, before), which keeps the conversations
+opened in it or with a message written or an answer or question proposed in it, and of those,
+what was written and proposed in it. A department's administrator names a course or a
+department of theirs: one that names neither is refused `platform_role_required`, one beyond
+their appointments `department_out_of_scope`, and the action records the appointment relied
+on (`authority_dept_id`), as for a course of theirs. Every conversation is in a course: site
+chat (above) is which agents answer in the site, not a place conversations are kept, so the site
+chat's conversations are the courses' and are chosen by them.
+
+An export holds, of each conversation, everything written in it as of the moment it is made
+(`as_of`), whoever may read it now: its course, title, status and why it was closed, when it was
+opened and when closed (the time of its `conversation.closed` news); its two participants, each
+a seat with its actor, name, kind and roster role, and of the respondent, whose delegate it is
+and, for an agent a person owns, the owner; every message in order, its author, time, text,
+the message it answers and the action that wrote it, a retracted one with its text as the
+database keeps it, marked `retracted` with when, by whom and why; each file a message carries,
+described by its id, name, type, size and checksum, never its bytes nor where it is kept; and
+the answers and questions proposed in it and never posted, which are actions and no messages
+(§2.6): waiting for a decision, rejected or cancelled, with what each said, the names of the
+files it would carry and never the upload tokens it names them by, who decided it and why. It
+holds no token, password or secret. Its ids are the database's, so that every line of it can
+be followed back to its rows and actions.
+
+It is two files, written to the file store as they are made, a page of conversations at a
+time, never held whole: `exports/<export>.jsonl`, the conversations as JSON Lines, one to a line
+with its messages and proposals nested in it, every field there and null where there is
+nothing; and `exports/<export>.csv`, the messages and proposals one to a row with their
+conversation's columns, in UTF-8 beginning with a byte order mark and with CRLF line ends, so
+that a spreadsheet opens Chinese as it was written, and a cell that a spreadsheet would take
+for a formula (beginning `=`, `+`, `-`, `@`, a tab or a carriage return) begun with an
+apostrophe, so that it is shown and never run, the JSON Lines file keeping the text exactly.
+Two files, not one archive, so that a program reads the one and a spreadsheet opens the other
+as they are.
+
+A line of the JSON Lines file is a conversation: `id`; `course` (`id`, `code`, `section`,
+`title`, `dept_id`, `term_id`); `title`, `status`, `closed_reason`, `created_at`, `closed_at`,
+`last_message_at`; `opener` and `respondent`, each a party (`member_id`, `actor_id`, `name`,
+`kind`, `role`), the respondent with `principal_member_id`, `answers_course` and `owner`
+(`actor_id`, `name`, or null); `messages`, each `id`, `seq`, `author` (a party), `created_at`,
+`in_reply_to_message_id`, `body`, `action_id`, `retracted` (`at`, `by`, `reason`, `action_id`,
+or null) and `attachments` (`id`, `filename`, `content_type`, `byte_size`, `checksum`,
+`created_at`); and `proposals`, each `action_id`, `type`, `status`, `proposed_by`, `created_at`,
+`in_reply_to_message_id`, `body`, `attachment_filenames`, `decided_at`, `decided_by` and
+`reason`. A row of the CSV file has the columns `conversation_id`, `course_id`, `course_code`,
+`course_section`, `course_title`, `conversation_title`, `status` (`posted`, `retracted`,
+`proposed`, `rejected` or `cancelled`), `message_id`, `seq`, `action_id`, `created_at`,
+`author_member_id`, `author_actor_id`, `author_name`, `author_kind`, `author_role`,
+`in_reply_to_message_id`, `body`, `retracted_at`, `retracted_by_name`, `reason`, `decided_at`,
+`decided_by_name`, `attachment_ids` and `attachment_filenames`, in that order, a proposal's row
+naming its proposer as the author, and a cell of several ids or names holding one to a line.
+Every time is RFC 3339, in UTC. The answer gives a URL for each that downloads it for fifteen minutes, as a
+download under its name (`conversations-<export>.jsonl`, `messages-<export>.csv`), never as a
+page; the URLs are in no record (`tool.Spec.SecretOut`), so a call replayed by its idempotency
+key gives none, and `conversation.export_file` (`GET
+/v1/conversation-exports/{export_id}/{format}`) gives another, to whoever made the export and
+nobody else, while their authority still reaches what it is about, and until its files are
+removed. An export is held to `EXPORT_MAX_MESSAGES` messages, answers and questions proposed
+counted with them (100,000), and `EXPORT_MAX_BYTES` of their text (256 MiB), measured before
+anything is written and again as it is: past either it is refused, `export_too_large`, saying how
+many conversations, messages and bytes it would hold, and the store keeps nothing of it. Its
+files are kept `EXPORT_TTL` (24 hours; 15 minutes to 7 days), measured from when it was made:
+`conversation.export_file` refuses them from then on (`export_expired`), and the sweep removes
+them within the hour after, recording nothing, as it removes an orphan; it leaves alone
+anything under `exports/` that an export did not write. They are personal data, made to be
+taken away and not kept here.
+
+Every export is an action, and its own record: who made it and when, in what capacity
+(`authority`, `authority_dept_id`), its filters (its payload), and what it held (its result:
+how many conversations, messages, retracted messages, files and proposals, the bytes of their
+text, each file's size and checksum, when the files go). It names no course (`course_id` null),
+even when it is of one, so that it is no course's action to read in its action views; its news,
+`conversation.exported`, is in no course's feed. A refusal is on record as well: denied, or
+failed with its reason. Migration 0024 indexes the messages by when they were written, so that
+an export of a span of time does not read every message of the site; nothing else of an export
+is kept in the database.
 
 ### 2.9 Memory
 
@@ -2086,8 +2180,9 @@ course's feed.
 **The courses beneath an appointment are its holder's to manage, from outside.** A department
 administrator does to the courses of every department they cover what a platform administrator
 does to any course: `course.create`, `.update`, `.activate`, `.archive`, `.seat_instructor`
-and `.move`, and `document.purge` of what was uploaded to it by mistake (§2.4), the Admin gate
-taking the course's department as what the call is about.
+and `.move`, `document.purge` of what was uploaded to it by mistake (§2.4), and
+`conversation.export` of what was said in it, for audit (§2.8), the Admin gate taking the
+course's department, or the department an export names, as what the call is about.
 `course.list` shows them those courses and no others. A course moves only to a department the
 mover covers as well; it is held while it moves, and where it is then must still be the
 mover's, so that one moved out of their reach meanwhile is not taken back. None of this
@@ -2174,7 +2269,7 @@ first.
 Platform-level operations (`actor.register`, terms, presets, a service's credentials) check
 `actor.platform_role` instead. That is the only place it is read. The operations a department's
 administrators share with platform administrators (§2.10: `course.create`, seating the first
-instructor, the tree) are gated by either: a platform role, anywhere, or an appointment at or
+instructor, the tree, exporting conversations for audit) are gated by either: a platform role, anywhere, or an appointment at or
 above the department the call is about, looked up only for an actor who holds one, and only once
 the call has said which department it is about. Both are recorded on the action (`authority`),
 and neither reaches inside a course. For a course, what the call is about is the course's
@@ -2509,6 +2604,16 @@ respondent's `conversation_answer` decides is who is shown its text.
   written; a proposal naming an upload more than two days old is refused. A file is read by
   whoever may read its version, and to anyone else it does not exist.
 - News of a conversation reaches its two participants and nobody else (`event.list`).
+- A conversation is exported for audit (§2.8, Exporting conversations for audit) only by a
+  person: root or a platform administrator, anywhere, or a department administrator naming a
+  course or a department an appointment of theirs covers; never by an agent (`people_only`),
+  never by proposal. An export holds what its filters choose as of when it is made, retracted
+  messages with their text, marked; files described and never their bytes; proposals with their
+  text and their files' names, never the upload tokens; and no token or secret. It is held to
+  its limits before anything is written and as it is written (`export_too_large`), recorded as
+  an action with its filters and counts, its URLs in no record; its files are given again to
+  its maker alone, while their authority reaches what it is about and until `EXPORT_TTL` has
+  passed, and the sweep removes them then.
 - A read that waits for news (`wait_s`) holds no transaction or connection while it waits, and
   is authorized again each time it reads; every event a transaction writes in a course is
   notified in that transaction, so that a wait is woken on its commit and never on a rollback.

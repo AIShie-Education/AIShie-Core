@@ -313,6 +313,20 @@ Run all of these as root on the server.
   (1000) bounds the calls waiting at once in a server, and
   `LONG_POLL_WAITERS_PER_ACTOR` (16) those of one actor; past either a call
   answers at once, and `0` lets none wait.
+- **Exporting conversations for audit:** root and the administrators of
+  the site, and of a department for its courses, export conversations
+  (`conversation.export`, README, Exporting conversations for audit). The
+  files are written to the file store under `exports/` (on the server's
+  disk, `/srv/aishie/data/blobs/exports/`), kept `EXPORT_TTL` (default `24h`, from
+  `15m` to `168h`) and then removed by the sweep; they hold personal data,
+  so keep the time short, and do not copy `exports/` into backups that
+  outlive it. `EXPORT_MAX_MESSAGES` (100000) and `EXPORT_MAX_BYTES`
+  (268435456, 256 MiB) bound one export; past either it is refused, saying
+  how much it would hold, and the administrator narrows it. A large export
+  takes as long as writing it takes, and the server keeps its request open up
+  to five minutes for it; a proxy that cuts a request sooner loses the answer
+  and not the export: the same call made again with the same idempotency key
+  answers with it, and `conversation.export_file` gives its files.
 - **A person's first sign-in:** register them with their email or their
   login ID (their student or staff number, which they sign in with where they
   have no email), or both, then invite them, in the front end from their page,
@@ -455,6 +469,14 @@ Run all of these as root on the server.
   such a file and be refused when it completes it, until the file is failed
   after five claims. Deploy this release again and send those back with
   `document.text_retranscribe`.
+- **Migration 0024, exporting conversations for audit:** an index of the
+  messages of conversations by when they were written, so that an export of
+  a span of time does not read every message; it needs nothing of the
+  operator, and holds off messages being written while it is built, a
+  moment on a school's site. The previous release, while the migration goes
+  in and after a rollback, neither exports nor removes exports: files under
+  `exports/` that this release wrote stay until it is deployed again and its
+  sweep removes them.
 - **Migration 0013, `member_invite`:** the permission that makes a course's
   join links. Every seat a person holds got it at its level of
   `member_manage`, and every seat an agent holds got it `denied`, whatever it
@@ -541,7 +563,9 @@ The backups above sit on the same disk as the database. Copy these somewhere
 else regularly:
 
 - `/var/backups/aishie/`, the database;
-- `/srv/aishie/data/`, the uploaded files;
+- `/srv/aishie/data/`, the uploaded files, but for `blobs/exports/`, the exports
+  of conversations for audit, which are removed a day after they are made
+  and are not to be kept longer elsewhere;
 - `/etc/aishie/aishie.env`, which holds `SIGNING_KEY`, `SECRETS_KEY` (and
   `ASSERTION_KEY`, if it is set) and the database password. The database's
   backups hold identity providers' client secrets sealed with `SECRETS_KEY`:

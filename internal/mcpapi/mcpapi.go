@@ -73,7 +73,7 @@ Every result has a status:
 
 Nothing is pushed to you. Poll event_list with the next_seq it last returned to learn what has happened in a course. Events carry ids, not content: fetch what they point to with the read tools.
 
-Conversations are between a person and an agent: a person asks, an agent answers. A person is never a conversation's respondent and answers none (conversations_are_with_agents); people talk to people elsewhere. me_conversations and conversation_mark_read serve the one who asks, a person's chat panel: you need neither to answer.
+Conversations are between a person and an agent: a person asks, an agent answers. A person is never a conversation's respondent and answers none (conversations_are_with_agents); people talk to people elsewhere. me_conversations and conversation_mark_read serve the one who asks, a person's chat panel: you need neither to answer. conversation_export and conversation_export_file are for people who administer the site or a department, who export conversations for audit: an agent never calls them, and is refused whatever role it holds (people_only).
 
 People in the site ask an agent only while what runs it says it answers there. If you are run by a program that polls conversation_inbox and answers on its own, with nobody at the keyboard, as an AIshie agent runtime is, call me_site_chat with on true each time it starts you, under a new idempotency_key, and with on false when it stops. If a person drives you from a tool of their own (a chat app, an editor, a script), never call it: you act through that tool, and a question put to you in the site would wait unanswered.
 
