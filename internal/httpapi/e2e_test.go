@@ -205,8 +205,8 @@ func TestEndToEndOverHTTP(t *testing.T) {
 // own credential: it asks whether the person signed in to it owns the agent,
 // is issued the agent's token, and revokes it when the hosting ends. The
 // token acts as the agent, which is told it is a runtime agent; its owner
-// is issued none; me.site_chat with it changes nothing, and a person's is
-// refused. Nobody else calls the runtime's routes, and its credential calls
+// is issued none; nothing is declared with it, me.site_chat being gone
+// (0027). Nobody else calls the runtime's routes, and its credential calls
 // nothing else.
 func TestTheRuntimeHostsAnAgentByItsIDOverREST(t *testing.T) {
 	a := newAPI(t, 1)

@@ -179,9 +179,9 @@ type ExecCtx struct {
 	ActionID uuid.UUID
 	// CredentialID is the token or session the call was made with, for a
 	// tool that asks which one (a service's, whose claims are its
-	// credential's). uuid.Nil when there is
-	// none to speak of: a proposal carried out on approval, whose credential
-	// was the proposer's and is not kept, a sweep, a call made without one.
+	// credential's). uuid.Nil when there is none to speak of: a proposal
+	// carried out on approval, whose credential was the proposer's and is not
+	// kept, a sweep, a call made without one.
 	CredentialID uuid.UUID
 	// Admin is who makes an Admin-gated call, for the tool to limit itself
 	// by. The zero value, which every other call has, covers nothing.

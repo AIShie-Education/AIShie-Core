@@ -24,10 +24,10 @@ import (
 // the site: a claim holds the text version of one file of a version for it
 // alone until its lease runs out, and hands it the file, by a short-lived
 // URL, as document.get hands one to a reader. A call about a claim names its
-// version, its file (file_id) and its lease. It writes the text back while its claim holds: done,
-// with the text, or failed or skipped, saying why; never over staff's text.
-// Nothing else is its to read or write: no course, no seat, no person, and
-// no file but those of what it has claimed.
+// version, its file (file_id) and its lease. It writes the text back while
+// its claim holds: done, with the text, or failed or skipped, saying why;
+// never over staff's text. Nothing else is its to read or write: no course,
+// no seat, no person, and no file but those of what it has claimed.
 
 var transcriber = tool.Gate{Service: domain.ServiceDocumentText}
 

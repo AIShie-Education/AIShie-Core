@@ -246,9 +246,10 @@ type ListOrphanUploadsRow struct {
 // written by another deployment keeping its files in the same place: it is
 // not ours to remove, however old it is and whatever points at it there.
 // Attached is attached to a version of a document, as one of its files, or
-// to a message of a conversation, or a rendition's PDF. What is left comes back in the order it was given. The orphan sweep
-// puts a page of listed files at a time to it, and asks again about each
-// one it removes, under the lock attaching takes.
+// to a message of a conversation, or a rendition's PDF. What is left comes
+// back in the order it was given. The orphan sweep puts a page of listed
+// files at a time to it, and asks again about each one it removes, under the
+// lock attaching takes.
 func (q *Queries) ListOrphanUploads(ctx context.Context, arg ListOrphanUploadsParams) ([]ListOrphanUploadsRow, error) {
 	rows, err := q.db.Query(ctx, listOrphanUploads, arg.StorageKeys, arg.CourseIds)
 	if err != nil {
