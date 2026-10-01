@@ -178,7 +178,7 @@ type ExecCtx struct {
 	Member   *domain.Member
 	ActionID uuid.UUID
 	// CredentialID is the token or session the call was made with, for a
-	// tool that records which one (me.site_chat). uuid.Nil when there is
+	// tool that asks which one (me.site_chat, a service's tools). uuid.Nil when there is
 	// none to speak of: a proposal carried out on approval, whose credential
 	// was the proposer's and is not kept, a sweep, a call made without one.
 	CredentialID uuid.UUID
@@ -614,5 +614,7 @@ var schemaOptions = &jsonschema.ForOptions{
 				"with at most 40 digits either side of the point and an exponent of at most two digits",
 		},
 		reflect.TypeFor[json.RawMessage](): {},
+		// An agent's hosting is one of two, and a schema says which.
+		reflect.TypeFor[domain.Hosting](): {Type: "string", Enum: []any{string(domain.HostingRuntime), string(domain.HostingMCP)}},
 	},
 }

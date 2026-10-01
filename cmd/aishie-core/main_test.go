@@ -198,3 +198,100 @@ func TestTokenIssueIsForAgents(t *testing.T) {
 		}
 	}
 }
+
+// A runtime agent is issued no token on the command line either: its one
+// token is the one the site's agent runtime is issued (hosted_by_runtime).
+func TestTokenIssueRefusesARuntimeAgent(t *testing.T) {
+	pool, url := testdb.NewWithURL(t)
+	cfg := config.Config{DatabaseURL: url}
+	tutor := uuid.Must(uuid.NewV7())
+	if _, err := pool.Exec(context.Background(), `INSERT INTO actor (id, kind, display_name, hosting) VALUES ($1, 'agent', 'tutor', 'runtime')`,
+		tutor); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	err := token(cfg, []string{"issue", "--actor", tutor.String(), "--label", "cli"}, &stdout, &stderr)
+	if e, ok := apperr.As(err); !ok || e.Details["reason"] != auth.ReasonHostedByRuntime || stdout.String() != "" {
+		t.Fatalf("a token for a runtime agent: %v; stdout %q", err, stdout.String())
+	}
+	if n := count(t, pool, `SELECT count(*) FROM credential`); n != 0 {
+		t.Fatalf("%d credentials made", n)
+	}
+}
+
+// The operator issues a site service its credential at setup, before
+// anyone signs in: the service is made by nobody, the credential issued by
+// nobody, printed once on standard output, alone, and nowhere else.
+// --replace revokes the others; without it a service holds five at most.
+func TestServiceIssueGivesASiteServiceItsCredential(t *testing.T) {
+	pool, url := testdb.NewWithURL(t)
+	cfg := config.Config{DatabaseURL: url}
+	issue := func(args ...string) (string, string, error) {
+		t.Helper()
+		var stdout, stderr bytes.Buffer
+		err := service(cfg, append([]string{"issue"}, args...), &stdout, &stderr)
+		return stdout.String(), stderr.String(), err
+	}
+	for name, args := range map[string][]string{
+		"no scope":         {"--label", "runtime"},
+		"no such scope":    {"grading", "--label", "runtime"},
+		"no label":         {"agent_runtime"},
+		"too many days":    {"agent_runtime", "--label", "runtime", "--days", "4000"},
+		"an extra command": {"agent_runtime", "--label", "runtime", "now"},
+	} {
+		if stdout, _, err := issue(args...); err == nil || stdout != "" {
+			t.Errorf("%s: %v, stdout %q", name, err, stdout)
+		}
+	}
+	if n := count(t, pool, `SELECT count(*) FROM actor`); n != 0 {
+		t.Fatalf("refused issues made %d actors", n)
+	}
+
+	stdout, stderr, err := issue("agent_runtime", "--label", "runtime", "--days", "365")
+	tok := strings.TrimSpace(stdout)
+	if err != nil || !strings.HasPrefix(tok, "aissvc_") || strings.Count(stdout, "\n") != 1 || strings.Contains(stderr, tok) {
+		t.Fatalf("%v; stdout %q; stderr %q", err, stdout, stderr)
+	}
+	p, err := auth.NewAuthenticator(pool, time.Hour).Authenticate(context.Background(), tok)
+	if err != nil || !p.Service() || p.ExpiresAt == nil {
+		t.Fatalf("the credential: %+v %v", p, err)
+	}
+	if n := count(t, pool, `SELECT count(*) FROM actor WHERE id = $1 AND kind = 'service' AND service_scope = 'agent_runtime'
+		AND display_name = 'Agent runtime' AND created_by_actor_id IS NULL`, p.ActorID); n != 1 {
+		t.Fatal("the service is not the agent runtime, made by nobody")
+	}
+	if n := count(t, pool, `SELECT count(*) FROM credential WHERE id = $1 AND label = 'runtime' AND issued_by_actor_id IS NULL`, p.CredentialID); n != 1 {
+		t.Fatal("the credential is not labelled, issued by nobody")
+	}
+	if n := count(t, pool, `SELECT count(*) FROM action`); n != 0 {
+		t.Fatalf("%d actions recorded", n)
+	}
+
+	for range 4 {
+		if _, _, err := issue("agent_runtime", "--label", "another"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, _, err := issue("agent_runtime", "--label", "a sixth"); err == nil || !strings.Contains(err.Error(), "live credentials already") {
+		t.Fatalf("a sixth: %v", err)
+	}
+	stdout, stderr, err = issue("agent_runtime", "--label", "set up again", "--replace")
+	if err != nil || !strings.Contains(stderr, "5 other(s) revoked") {
+		t.Fatalf("replacing: %v; stderr %q", err, stderr)
+	}
+	if n := count(t, pool, `SELECT count(*) FROM credential WHERE kind = 'service' AND revoked_at IS NULL`); n != 1 {
+		t.Fatalf("%d live after replacing", n)
+	}
+	if _, err := auth.NewAuthenticator(pool, time.Hour).Authenticate(context.Background(), tok); err == nil {
+		t.Fatal("the first credential still works")
+	}
+	if _, err := auth.NewAuthenticator(pool, time.Hour).Authenticate(context.Background(), strings.TrimSpace(stdout)); err != nil {
+		t.Fatalf("the new one: %v", err)
+	}
+	if _, _, err := issue("document_text", "--label", "transcriber"); err != nil {
+		t.Fatalf("the transcriber's: %v", err)
+	}
+	if n := count(t, pool, `SELECT count(*) FROM actor WHERE kind = 'service'`); n != 2 {
+		t.Fatalf("%d services", n)
+	}
+}

@@ -25,10 +25,18 @@ import (
 // into a course as the owner's delegate and never hold more than the owner's
 // seat there.
 
-// agent registers an agent owner owns, as the owner.
+// agent registers an mcp agent owner owns, as the owner: one their own
+// tools reach, with tokens they issue.
 func (b *built) agent(t *testing.T, owner uuid.UUID, name string) uuid.UUID {
 	t.Helper()
-	return testkit.Result[tools.ActorOut](t, b.do(t, owner, "agent.create", m{"display_name": name})).ActorID
+	return testkit.Result[tools.ActorOut](t, b.do(t, owner, "agent.create", m{"display_name": name, "hosting": "mcp"})).ActorID
+}
+
+// runtimeAgent registers a runtime agent owner owns, as the owner: one the
+// site's agent runtime hosts (Host), and people in the site ask.
+func (b *built) runtimeAgent(t *testing.T, owner uuid.UUID, name string) uuid.UUID {
+	t.Helper()
+	return testkit.Result[tools.ActorOut](t, b.do(t, owner, "agent.create", m{"display_name": name, "hosting": "runtime"})).ActorID
 }
 
 // reason is why a call was denied or failed, as its error says.
@@ -136,8 +144,8 @@ func TestPeopleLookAfterTheirOwnAgents(t *testing.T) {
 	}
 
 	// Agents do not own agents: an agent of Yuki's, or one nobody owns.
-	b.try(t, b.grader, "agent.create", m{"display_name": "Sub-agent"}, apperr.Forbidden)
-	b.try(t, b.yuki, "agent.create", m{"display_name": "  "}, apperr.InvalidArgument)
+	b.try(t, b.grader, "agent.create", m{"display_name": "Sub-agent", "hosting": "mcp"}, apperr.Forbidden)
+	b.try(t, b.yuki, "agent.create", m{"display_name": "  ", "hosting": "mcp"}, apperr.InvalidArgument)
 	b.try(t, b.yuki, "agent.update", m{"actor_id": bot, "display_name": ""}, apperr.InvalidArgument)
 	if n := b.Count(`SELECT count(*) FROM event WHERE type = 'agent.created' AND subject_id = $1 AND course_id IS NULL`, bot); n != 1 {
 		t.Fatal("no platform event for the agent's creation")
@@ -147,9 +155,9 @@ func TestPeopleLookAfterTheirOwnAgents(t *testing.T) {
 // An installation may keep agents an administrator's to register.
 func TestSelfServiceAgentsCanBeTurnedOff(t *testing.T) {
 	b := buildOn(t, testkit.NewPlatformWithDeps(t, func(d *tools.Deps) { d.DisableAgentSelfService = true }))
-	b.try(t, b.yuki, "agent.create", m{"display_name": "Yuki's helper"}, apperr.Forbidden)
+	b.try(t, b.yuki, "agent.create", m{"display_name": "Yuki's helper", "hosting": "mcp"}, apperr.Forbidden)
 	bot := testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register",
-		m{"kind": "agent", "display_name": "Yuki's helper", "owner_actor_id": b.yuki})).ActorID
+		m{"kind": "agent", "hosting": "mcp", "display_name": "Yuki's helper", "owner_actor_id": b.yuki})).ActorID
 	// What is registered is looked after by its owner all the same, and
 	// the list says who registers them.
 	if got := testkit.Result[tools.AgentListOut](t, b.do(t, b.yuki, "agent.list", m{})); len(got.Agents) != 1 || got.Agents[0].ActorID != bot ||
@@ -164,7 +172,7 @@ func TestSelfServiceAgentsCanBeTurnedOff(t *testing.T) {
 func TestAPersonHasALimitedNumberOfAgents(t *testing.T) {
 	b := buildOn(t, testkit.NewPlatformWithDeps(t, func(d *tools.Deps) { d.MaxAgentsPerOwner = 2 }))
 	first, _ := b.agent(t, b.yuki, "one"), b.agent(t, b.yuki, "two")
-	b.try(t, b.yuki, "agent.create", m{"display_name": "three"}, apperr.FailedPrecondition)
+	b.try(t, b.yuki, "agent.create", m{"display_name": "three", "hosting": "mcp"}, apperr.FailedPrecondition)
 	if got := testkit.Result[tools.AgentListOut](t, b.do(t, b.yuki, "agent.list", m{})); got.Limit != 2 || !got.SelfService {
 		t.Fatalf("what the list says of the limit: %+v", got)
 	}
@@ -173,9 +181,9 @@ func TestAPersonHasALimitedNumberOfAgents(t *testing.T) {
 	b.try(t, b.yuki, "agent.reactivate", m{"actor_id": first}, apperr.FailedPrecondition)
 	// Agents an administrator registered for someone count as theirs.
 	for range 2 {
-		b.do(t, b.admin, "actor.register", m{"kind": "agent", "display_name": "issued", "owner_actor_id": b.ken})
+		b.do(t, b.admin, "actor.register", m{"kind": "agent", "hosting": "mcp", "display_name": "issued", "owner_actor_id": b.ken})
 	}
-	b.try(t, b.ken, "agent.create", m{"display_name": "one more"}, apperr.FailedPrecondition)
+	b.try(t, b.ken, "agent.create", m{"display_name": "one more", "hosting": "mcp"}, apperr.FailedPrecondition)
 	b.agent(t, b.sato, "Sato's")
 }
 
@@ -187,7 +195,7 @@ func TestTheAgentLimitHoldsUnderARace(t *testing.T) {
 	outs := make(chan pipeline.Outcome, calls)
 	for i := range calls {
 		wg.Go(func() {
-			out, err := b.Call(b.yuki, "agent.create", m{"display_name": "racer"}, "race-"+string(rune('a'+i)))
+			out, err := b.Call(b.yuki, "agent.create", m{"display_name": "racer", "hosting": "mcp"}, "race-"+string(rune('a'+i)))
 			if err != nil {
 				t.Errorf("agent.create: %v", err)
 			}
@@ -285,9 +293,9 @@ func TestAnAgentsOwnerNeverChanges(t *testing.T) {
 		}
 	}
 	failed("a person with an owner", register(m{"kind": "human", "display_name": "x", "owner_actor_id": b.yuki}), apperr.InvalidArgument)
-	failed("an agent owned by an agent", register(m{"kind": "agent", "display_name": "x", "owner_actor_id": b.grader}), apperr.FailedPrecondition)
-	failed("an agent owned by root, by an admin", register(m{"kind": "agent", "display_name": "x", "owner_actor_id": b.Root}), apperr.Forbidden)
-	bot := testkit.Result[tools.ActorOut](t, register(m{"kind": "agent", "display_name": "Lab bot", "owner_actor_id": b.yuki})).ActorID
+	failed("an agent owned by an agent", register(m{"kind": "agent", "hosting": "mcp", "display_name": "x", "owner_actor_id": b.grader}), apperr.FailedPrecondition)
+	failed("an agent owned by root, by an admin", register(m{"kind": "agent", "hosting": "mcp", "display_name": "x", "owner_actor_id": b.Root}), apperr.Forbidden)
+	bot := testkit.Result[tools.ActorOut](t, register(m{"kind": "agent", "hosting": "mcp", "display_name": "Lab bot", "owner_actor_id": b.yuki})).ActorID
 	own := b.agent(t, b.ken, "Ken's helper")
 
 	if _, ok := b.P.Registry().Get("actor.set_owner"); ok {
@@ -326,7 +334,7 @@ func TestAnAgentsOwnerNeverChanges(t *testing.T) {
 // its owner brings the agent in afresh over it.
 func TestASeatLeftByAnOwnerChangedBefore0014CountsForNothing(t *testing.T) {
 	b := build(t)
-	bot := testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", m{"kind": "agent", "display_name": "Lab bot"})).ActorID
+	bot := testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", m{"kind": "agent", "hosting": "mcp", "display_name": "Lab bot"})).ActorID
 	seat := testkit.Result[tools.MemberIDOut](t, b.do(t, b.sato, "member.add", m{"course_id": b.course, "actor_id": bot, "preset": "tutor"})).MemberID
 	b.do(t, b.admin, "course.archive", m{"course_id": b.course})
 	b.ChangeOwnerAsBefore0014(bot, &b.yuki)
@@ -388,7 +396,7 @@ func TestAnAgentKnowsWhoOwnsIt(t *testing.T) {
 	got, raw = me(token(b.admin, "actor.issue_token", b.grader))
 	names("an agent registered with no owner", got, raw, nil)
 	registered := testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register",
-		m{"kind": "agent", "display_name": "Ken's lab bot", "owner_actor_id": b.ken})).ActorID
+		m{"kind": "agent", "hosting": "mcp", "display_name": "Ken's lab bot", "owner_actor_id": b.ken})).ActorID
 	kens := token(b.admin, "actor.issue_token", registered)
 	got, raw = me(kens)
 	names("an agent an administrator registered for Ken", got, raw, &b.ken)
@@ -409,7 +417,7 @@ func TestAnAgentKnowsWhoOwnsIt(t *testing.T) {
 		t.Fatal(err)
 	}
 	delete(fields, "owner_actor_id")
-	if want := (map[string]any{"id": registered.String(), "kind": "agent", "display_name": "Ken's lab bot", "status": "active"}); !reflect.DeepEqual(fields, want) {
+	if want := (map[string]any{"id": registered.String(), "kind": "agent", "hosting": "mcp", "display_name": "Ken's lab bot", "status": "active"}); !reflect.DeepEqual(fields, want) {
 		t.Fatalf("me.get says more than the agent's own row: %s", raw)
 	}
 
@@ -424,13 +432,13 @@ func TestAnAgentKnowsWhoOwnsIt(t *testing.T) {
 // tokens would be more than a seat.
 func TestAnOwnedAgentHoldsNoPlatformRole(t *testing.T) {
 	b := build(t)
-	out := b.MustCall(b.Root, "actor.register", m{"kind": "agent", "display_name": "Admin bot", "platform_role": "admin", "owner_actor_id": b.yuki}, "reg")
+	out := b.MustCall(b.Root, "actor.register", m{"kind": "agent", "hosting": "mcp", "display_name": "Admin bot", "platform_role": "admin", "owner_actor_id": b.yuki}, "reg")
 	if out.Status != domain.StatusFailed || out.Error.Code != apperr.InvalidArgument {
 		t.Fatalf("an owned agent with a platform role: %+v", out)
 	}
 	// Registered with a platform role and no owner, it is given none later
 	// either (TestAnAgentsOwnerNeverChanges).
-	b.do(t, b.Root, "actor.register", m{"kind": "agent", "display_name": "Admin bot", "platform_role": "admin"})
+	b.do(t, b.Root, "actor.register", m{"kind": "agent", "hosting": "mcp", "display_name": "Admin bot", "platform_role": "admin"})
 }
 
 // A student asks to bring her agent in; an instructor approves; the agent is
@@ -1014,9 +1022,9 @@ func TestAPrincipalsRemovalAndItsDelegatesMeetAtThePrincipal(t *testing.T) {
 // way is waited for, and what it did is seen.
 func TestADelegatesWriteWaitsForItsPrincipal(t *testing.T) {
 	b := build(t)
-	bot := b.agent(t, b.yuki, "Yuki's helper")
+	bot := b.runtimeAgent(t, b.yuki, "Yuki's helper")
 	seat := b.delegate(t, b.yuki, bot, m{})
-	b.SiteChat(bot)
+	b.Host(bot)
 	b.do(t, b.sato, "member.update_perms", m{"course_id": b.course, "member_id": seat, "perms": m{"submission_write": "confirm_required"}})
 	conv, _ := b.open(t, b.yuki, seat, "Hello, helper")
 	pause := `WITH held AS (SELECT id FROM course_member WHERE id = $1 FOR UPDATE)

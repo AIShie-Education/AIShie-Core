@@ -32,10 +32,10 @@ func (c *cast) elsewhere(t *testing.T) elsewhere {
 	b.do(t, b.admin, "course.activate", m{"course_id": e.course})
 	b.do(t, b.admin, "course.seat_instructor", m{"course_id": e.course, "actor_id": b.sato})
 	e.yukiM = testkit.Result[tools.MemberIDOut](t, b.do(t, b.sato, "member.add", m{"course_id": e.course, "actor_id": b.yuki, "preset": "student"})).MemberID
-	e.tutor = b.agent(t, b.sato, "CS102 tutor")
+	e.tutor = b.runtimeAgent(t, b.sato, "CS102 tutor")
 	e.tutorM = testkit.Result[tools.MemberIDOut](t, b.do(t, b.sato, "member.add_delegate",
 		m{"course_id": e.course, "actor_id": e.tutor, "preset": "course_tutor"})).MemberID
-	b.SiteChat(e.tutor)
+	b.Host(e.tutor)
 	return e
 }
 

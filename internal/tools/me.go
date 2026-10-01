@@ -15,7 +15,6 @@ import (
 	"github.com/AIShie-Education/AIShie-Core/internal/authz"
 	"github.com/AIShie-Education/AIShie-Core/internal/db/dbq"
 	"github.com/AIShie-Education/AIShie-Core/internal/domain"
-	"github.com/AIShie-Education/AIShie-Core/internal/events"
 	"github.com/AIShie-Education/AIShie-Core/internal/tool"
 )
 
@@ -52,6 +51,9 @@ type MeOut struct {
 	// agent compares this with the person who hands it the agent's token.
 	// It never changes (docs/schema.md §2.1).
 	OwnerActorID *uuid.UUID `json:"owner_actor_id,omitempty" jsonschema:"for an agent a person owns, that person's actor id, the same for as long as the agent exists; absent for a person, and for an agent nobody owns"`
+	// How an agent is run, which never changes: what it may expect to be
+	// asked, and where.
+	Hosting *string `json:"hosting,omitempty" jsonschema:"for an agent, how it is run, for good: runtime, the site's own agent runtime runs you and people in the site ask you; mcp, your owner's own tools reach you over MCP, and nobody asks you in the site. Absent for a person"`
 	// Absent for everyone who administers nothing, agents always among them,
 	// so that their answer is what it was before there were departments'
 	// administrators.
@@ -69,8 +71,8 @@ func meGet() tool.Tool {
 	return tool.Define(tool.Spec[Empty, MeOut]{
 		Name: "me.get",
 		Description: "Who the caller is: the actor this credential belongs to, with the email and the login ID (a student " +
-			"or staff number) a person signs in with, for an agent a person owns, who owns it, and for a department's " +
-			"administrator, the departments they are appointed to administer.",
+			"or staff number) a person signs in with; for an agent, how it is hosted (runtime or mcp) and, if a person owns " +
+			"it, who; and for a department's administrator, the departments they are appointed to administer.",
 		Kind: tool.Read, Gate: self,
 		HTTP:    tool.Route{Method: "GET", Pattern: "/v1/me"},
 		Resolve: noTarget[Empty]("actor"),
@@ -80,7 +82,7 @@ func meGet() tool.Tool {
 				return MeOut{}, err
 			}
 			out := MeOut{ID: a.ID, Kind: a.Kind, DisplayName: a.DisplayName, Email: a.Email, LoginID: a.LoginID, Status: a.Status,
-				PlatformRole: a.PlatformRole, OwnerActorID: a.OwnerActorID}
+				PlatformRole: a.PlatformRole, OwnerActorID: a.OwnerActorID, Hosting: a.Hosting}
 			if a.Email != nil {
 				out.EmailVerified = &a.EmailVerified
 			}
@@ -171,35 +173,35 @@ func meMemberships() tool.Tool {
 // me.site_chat
 // ---------------------------------------------------------------------------
 
-// Site chat is whether an agent takes conversations in the site: whether
-// people there are offered it to ask, and may ask it (docs/schema.md §2.8).
-// It is for an agent a program runs that answers on its own — an agent
-// runtime, which polls conversation.inbox — and that program says so, with
-// the credential it calls with. An assistant that a person drives from a
-// tool of their own acts only while they use it, and a question put to it in
-// the site would wait for good: it never says so, and is asked nothing
-// there. What was declared holds only while the credential that declared it
-// is live, the agent active and its owner too (SiteChatOf): revoking the
-// runtime's token ends it, with nothing left to say otherwise.
+// Site chat is whether people in the site may ask an agent (docs/schema.md
+// §2.8). It follows from how the agent is hosted, and nobody declares it: a
+// runtime agent is asked while the site's agent runtime holds a live token
+// for it (agent_runtime.issue_token), it is active and its owner too; an mcp
+// agent never is (SiteChatOf). me.site_chat, with which a runtime used to
+// declare it, is kept for one release, deprecated: the runtime's token may
+// still call it, which changes nothing and says whether the agent is asked
+// now; any other credential is refused, not_runtime_hosted.
 
 type SiteChatIn struct {
-	On bool `json:"on" jsonschema:"true: people in the site may start conversations with you and ask you, for as long as the credential you call with works; false: they may not"`
+	On bool `json:"on" jsonschema:"deprecated, and changes nothing either way: people in the site ask a runtime agent while the site's runtime hosts it"`
 }
 
 type SiteChatOut struct {
-	SiteChat bool `json:"site_chat" jsonschema:"whether you take conversations in the site now; with on true, false only while your owner is suspended"`
+	SiteChat bool `json:"site_chat" jsonschema:"whether people in the site may ask you now: while the site's runtime hosts you, and you and your owner are active"`
 }
 
 var (
-	errSiteChatNotAgent = apperr.Precondition("site chat is for agents a program runs; a person asks in the site, and is asked nothing: conversations are with agents").
+	errSiteChatNotAgent = apperr.Precondition("site chat is an agent's; a person asks in the site, and is asked nothing: conversations are with agents").
 				With("reason", "not_an_agent")
-	errSiteChatNoCredential = apperr.Precondition("site chat is declared with the credential the program running you calls with, and this call came with none").
-				With("reason", "no_credential")
+	// errNotRuntimeHosted refuses what only a runtime agent, by the token
+	// the site's runtime holds for it, may do or be given.
+	errNotRuntimeHosted = apperr.Precondition("only a runtime agent is asked in the site, by the token the site's agent runtime "+
+		"holds for it; an mcp agent, reached by its owner's own tools, is asked nothing there").With("reason", "not_runtime_hosted")
 )
 
-// siteChatOf is whether each of the given actors takes conversations in the
-// site now, by id, and whether it is an agent: the rule is SQL's
-// (SiteChatOf).
+// siteChatOf is whether people in the site may ask each of the given actors
+// now, by id, whether it is an agent, and how it is hosted: the rule is
+// SQL's (SiteChatOf).
 func siteChatOf(ctx context.Context, q dbq.Querier, now time.Time, actors []uuid.UUID) (map[uuid.UUID]dbq.SiteChatOfRow, error) {
 	out := map[uuid.UUID]dbq.SiteChatOfRow{}
 	if len(actors) == 0 {
@@ -215,12 +217,10 @@ func siteChatOf(ctx context.Context, q dbq.Querier, now time.Time, actors []uuid
 func meSiteChat() tool.Tool {
 	return tool.Define(tool.Spec[SiteChatIn, SiteChatOut]{
 		Name: "me.site_chat",
-		Description: "Say whether people in the site may start conversations with you and ask you there. Turn it on only if " +
-			"what runs you polls conversation_inbox and answers on its own, as an AIshie agent runtime does, and on each " +
-			"start, under a new idempotency key: it holds while the token you call with works, and ends when that token is " +
-			"revoked. An assistant a person drives from a tool of their own never turns it on: it acts only while they use " +
-			"it, so questions would wait unanswered. Turn it off when you stop answering. Your owner may turn it off, never " +
-			"on. For agents only.",
+		Description: "Deprecated: nothing is declared any more. People in the site ask a runtime agent while the site's " +
+			"agent runtime hosts it, and never an mcp agent; me_get says which you are (hosting). Called with the token the " +
+			"site's runtime holds for you, it changes nothing, on true or false, and says whether people may ask you now; " +
+			"with any other credential it is refused (not_runtime_hosted).",
 		Kind: tool.Write, Gate: self,
 		HTTP:    tool.Route{Method: "POST", Pattern: "/v1/me/site-chat"},
 		Resolve: noTarget[SiteChatIn]("actor"),
@@ -234,18 +234,14 @@ func meSiteChat() tool.Tool {
 			if me.Kind != "agent" {
 				return SiteChatOut{}, errSiteChatNotAgent
 			}
-			var credential *uuid.UUID
-			if in.On {
-				if ec.CredentialID == uuid.Nil {
-					return SiteChatOut{}, errSiteChatNoCredential
-				}
-				credential = &ec.CredentialID
-			}
-			if err := ec.Q.SetSiteChat(ctx, dbq.SetSiteChatParams{ID: me.ID, CredentialID: credential}); err != nil {
+			runtime, err := ec.Q.IsLiveRuntimeToken(ctx, dbq.IsLiveRuntimeTokenParams{CredentialID: ec.CredentialID, ActorID: me.ID,
+				Now: &ec.Now})
+			if err != nil {
 				return SiteChatOut{}, err
 			}
-			ec.Emit(events.Event{Type: EventActorUpdated, SubjectType: "actor", SubjectID: &me.ID,
-				Payload: map[string]any{"site_chat": in.On}})
+			if !runtime {
+				return SiteChatOut{}, errNotRuntimeHosted
+			}
 			now, err := siteChatOf(ctx, ec.Q, ec.Now, []uuid.UUID{me.ID})
 			return SiteChatOut{SiteChat: now[me.ID].SiteChat}, err
 		},
@@ -476,6 +472,7 @@ type CredentialView struct {
 	IssuedByID  *uuid.UUID `json:"issued_by_actor_id,omitempty" jsonschema:"who issued a token: the agent itself, its owner or an administrator; who set a temporary password (member.reset_password); absent for other kinds, for tokens made on the command line, and for tokens issued by a release before this field"`
 	IssuedBy    *string    `json:"issued_by_name,omitempty" jsonschema:"the issuer's display name"`
 	MustChange  bool       `json:"must_change,omitempty" jsonschema:"a password someone else set (member.reset_password): until its person sets their own with credential.set_password, every other call of theirs is refused (password_change_required)"`
+	IssuedTo    *string    `json:"issued_to,omitempty" jsonschema:"for a runtime agent's token, agent_runtime: issued to the site's agent runtime, which runs the agent with it, and to nobody else"`
 }
 
 func viewCredentials(rows []dbq.ListCredentialsForActorRow) CredentialListOut {
@@ -484,7 +481,7 @@ func viewCredentials(rows []dbq.ListCredentialsForActorRow) CredentialListOut {
 		out.Credentials = append(out.Credentials, CredentialView{
 			ID: r.ID, Kind: r.Kind, Provider: r.Provider, Subject: r.Subject, TokenPrefix: r.TokenPrefix,
 			Label: r.Label, LastUsedAt: r.LastUsedAt, ExpiresAt: r.ExpiresAt, RevokedAt: r.RevokedAt, CreatedAt: r.CreatedAt,
-			IssuedByID: r.IssuedByActorID, IssuedBy: r.IssuedByName, MustChange: r.MustChange,
+			IssuedByID: r.IssuedByActorID, IssuedBy: r.IssuedByName, MustChange: r.MustChange, IssuedTo: r.IssuedToService,
 		})
 	}
 	return out
@@ -523,10 +520,11 @@ type IssueTokenOut struct {
 func credentialIssueToken() tool.Tool {
 	return tool.Define(tool.Spec[IssueTokenIn, IssueTokenOut]{
 		Name: "credential.issue_token",
-		Description: "Create an API token for the caller's own account, which must be an agent's. A person is refused " +
+		Description: "Create an API token for the caller's own account, which must be an mcp agent's. A person is refused " +
 			"(api_tokens_are_for_agents): people sign in with a password or single sign-on, and use one of their agents " +
-			"for tools and scripts (agent.create, then agent.issue_token). The token is returned once and only its " +
-			"hash is kept: retrying this call returns the credential but not the token again.",
+			"for tools and scripts (agent.create, then agent.issue_token). A runtime agent is refused too " +
+			"(hosted_by_runtime): its one token is the one the site's agent runtime holds. The token is returned once and " +
+			"only its hash is kept: retrying this call returns the credential but not the token again.",
 		Kind: tool.Write, Gate: self,
 		HTTP:      tool.Route{Method: "POST", Pattern: "/v1/me/credentials/tokens"},
 		SecretOut: []string{"token"},

@@ -209,6 +209,39 @@ func (q *Queries) InsertCredential(ctx context.Context, arg InsertCredentialPara
 	return err
 }
 
+const insertRuntimeToken = `-- name: InsertRuntimeToken :exec
+INSERT INTO credential (id, actor_id, kind, secret_hash, token_prefix, label, created_at, issued_by_actor_id, issued_to_service)
+VALUES ($1, $2, 'api_token', $3, $4, $5,
+        $6, $7, 'agent_runtime')
+`
+
+type InsertRuntimeTokenParams struct {
+	ID              uuid.UUID
+	ActorID         uuid.UUID
+	SecretHash      *string
+	TokenPrefix     *string
+	Label           *string
+	CreatedAt       time.Time
+	IssuedByActorID *uuid.UUID
+}
+
+// A runtime agent's token, issued to the site's agent runtime by the
+// agent_runtime service (issued_by_actor_id): it never expires, and is the
+// agent's one token that is not revoked (credential_one_runtime_token,
+// credential_fits_hosting).
+func (q *Queries) InsertRuntimeToken(ctx context.Context, arg InsertRuntimeTokenParams) error {
+	_, err := q.db.Exec(ctx, insertRuntimeToken,
+		arg.ID,
+		arg.ActorID,
+		arg.SecretHash,
+		arg.TokenPrefix,
+		arg.Label,
+		arg.CreatedAt,
+		arg.IssuedByActorID,
+	)
+	return err
+}
+
 const insertTemporaryPassword = `-- name: InsertTemporaryPassword :exec
 INSERT INTO credential (id, actor_id, kind, secret_hash, label, created_at, issued_by_actor_id, must_change)
 VALUES ($1, $2, 'password', $3, $4, $5,
@@ -239,9 +272,32 @@ func (q *Queries) InsertTemporaryPassword(ctx context.Context, arg InsertTempora
 	return err
 }
 
+const isLiveRuntimeToken = `-- name: IsLiveRuntimeToken :one
+SELECT EXISTS (
+    SELECT 1 FROM credential c
+    WHERE c.id = $1 AND c.actor_id = $2 AND c.issued_to_service = 'agent_runtime'
+      AND c.revoked_at IS NULL AND (c.expires_at IS NULL OR c.expires_at > $3)
+)::bool
+`
+
+type IsLiveRuntimeTokenParams struct {
+	CredentialID uuid.UUID
+	ActorID      uuid.UUID
+	Now          *time.Time
+}
+
+// Whether a credential is the actor's own token, issued to the site's agent
+// runtime, and live: neither revoked nor expired.
+func (q *Queries) IsLiveRuntimeToken(ctx context.Context, arg IsLiveRuntimeTokenParams) (bool, error) {
+	row := q.db.QueryRow(ctx, isLiveRuntimeToken, arg.CredentialID, arg.ActorID, arg.Now)
+	var column_1 bool
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
 const listCredentialsForActor = `-- name: ListCredentialsForActor :many
 SELECT c.id, c.kind, c.provider, c.subject, c.token_prefix, c.label, c.last_used_at, c.expires_at, c.revoked_at,
-       c.created_at, c.issued_by_actor_id, i.display_name AS issued_by_name, c.must_change
+       c.created_at, c.issued_by_actor_id, i.display_name AS issued_by_name, c.must_change, c.issued_to_service
 FROM credential c
 LEFT JOIN actor i ON i.id = c.issued_by_actor_id
 WHERE c.actor_id = $1
@@ -262,6 +318,7 @@ type ListCredentialsForActorRow struct {
 	IssuedByActorID *uuid.UUID
 	IssuedByName    *string
 	MustChange      bool
+	IssuedToService *string
 }
 
 // Never the hash. The issuer's name comes with the row, for an administrator
@@ -289,6 +346,7 @@ func (q *Queries) ListCredentialsForActor(ctx context.Context, actorID uuid.UUID
 			&i.IssuedByActorID,
 			&i.IssuedByName,
 			&i.MustChange,
+			&i.IssuedToService,
 		); err != nil {
 			return nil, err
 		}
@@ -389,6 +447,38 @@ type RevokePasswordCredentialsParams struct {
 func (q *Queries) RevokePasswordCredentials(ctx context.Context, arg RevokePasswordCredentialsParams) error {
 	_, err := q.db.Exec(ctx, revokePasswordCredentials, arg.ActorID, arg.RevokedAt)
 	return err
+}
+
+const revokeRuntimeTokens = `-- name: RevokeRuntimeTokens :many
+UPDATE credential SET revoked_at = $1
+WHERE actor_id = $2 AND issued_to_service = 'agent_runtime' AND revoked_at IS NULL
+RETURNING id
+`
+
+type RevokeRuntimeTokensParams struct {
+	Now     *time.Time
+	ActorID uuid.UUID
+}
+
+// Every runtime token of an agent's that is not revoked: one at most.
+func (q *Queries) RevokeRuntimeTokens(ctx context.Context, arg RevokeRuntimeTokensParams) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, revokeRuntimeTokens, arg.Now, arg.ActorID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const revokeSessions = `-- name: RevokeSessions :execrows

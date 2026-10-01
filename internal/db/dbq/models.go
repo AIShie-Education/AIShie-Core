@@ -98,6 +98,7 @@ type Actor struct {
 	LoginID              *string
 	LoginIDVerified      bool
 	ServiceScope         *string
+	Hosting              *string
 }
 
 type Assignment struct {
@@ -265,6 +266,7 @@ type Credential struct {
 	CreatedAt       time.Time
 	IssuedByActorID *uuid.UUID
 	MustChange      bool
+	IssuedToService *string
 }
 
 type Department struct {

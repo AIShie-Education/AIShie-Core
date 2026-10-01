@@ -54,9 +54,10 @@ type MemberView struct {
 	// A seat a person took through a join link, who was added by whoever
 	// made the link.
 	JoinLinkID *uuid.UUID `json:"join_link_id,omitempty" jsonschema:"for a seat a person took through a join link, the link (course.join_link_list)"`
-	// An agent's seat: whether it is asked in the site at all. Absent for a
-	// person's, who is.
-	SiteChat *bool `json:"site_chat,omitempty" jsonschema:"for an agent's seat: whether people in the site may start conversations with it and ask it, since what runs it, an agent runtime that answers on its own, says so (me.site_chat); false for an agent operated from an external tool. Absent for a person's seat"`
+	// An agent's seat: how the agent is hosted, and whether it is asked in
+	// the site now. Absent for a person's, who is asked nothing.
+	Hosting  *string `json:"hosting,omitempty" jsonschema:"for an agent's seat, how the agent is run, for good: runtime, by the site's own agent runtime; mcp, by its owner's own tools over MCP. Absent for a person's seat"`
+	SiteChat *bool   `json:"site_chat,omitempty" jsonschema:"for an agent's seat: whether people in the site may start conversations with it and ask it now, which a runtime agent's are while the site's agent runtime runs it, and an mcp agent's never. Absent for a person's seat"`
 	// The most the seat may hold of each permission, and why where that is
 	// below autonomous: what a front end offers when it changes the seat.
 	Ceilings
@@ -81,8 +82,8 @@ func withCeilings(ctx context.Context, q dbq.Querier, views []MemberView) error 
 	return nil
 }
 
-// withSiteChat says in each view of an agent's seat whether it takes
-// conversations in the site now.
+// withSiteChat says in each view of an agent's seat how the agent is
+// hosted, and whether people in the site may ask it now.
 func withSiteChat(ctx context.Context, rc *tool.ReadCtx, views []MemberView) error {
 	actors := make([]uuid.UUID, 0, len(views))
 	for _, v := range views {
@@ -94,7 +95,7 @@ func withSiteChat(ctx context.Context, rc *tool.ReadCtx, views []MemberView) err
 	}
 	for i := range views {
 		if c, ok := chat[views[i].ActorID]; ok && c.Agent {
-			views[i].SiteChat = &c.SiteChat
+			views[i].SiteChat, views[i].Hosting = &c.SiteChat, &c.Hosting
 		}
 	}
 	return nil

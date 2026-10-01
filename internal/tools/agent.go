@@ -31,6 +31,13 @@ import (
 //
 // Whose an agent is, is looked at when the call runs, never when its target
 // is resolved: Resolve does not know who is calling.
+//
+// Each agent is hosted one way, chosen when it is registered and never
+// changed (docs/schema.md §2.1, Agents' hosting): a runtime agent is run by
+// the site's own agent runtime, which alone holds its token, issued to it by
+// the agent's id (agent_runtime.*), and people in the site ask it while that
+// token lives; an mcp agent is its owner's own tools', over MCP, with tokens
+// its owner issues here, and nobody asks it in the site.
 
 func agentTools(d Deps) []tool.Tool {
 	return []tool.Tool{agentCreate(d), agentList(d), agentGet(), agentUpdate(), agentSuspend(), agentReactivate(d),
@@ -81,17 +88,20 @@ func withinAgentLimit(ctx context.Context, q *dbq.Queries, owner uuid.UUID, most
 }
 
 type AgentCreateIn struct {
-	DisplayName string `json:"display_name" jsonschema:"what the agent is called wherever it appears"`
+	DisplayName string         `json:"display_name" jsonschema:"what the agent is called wherever it appears"`
+	Hosting     domain.Hosting `json:"hosting" jsonschema:"how it is run, for good, since it never changes: runtime, the site's own agent runtime runs it, people in the site may ask it, and you hold no token for it; mcp, your own tools reach it over MCP (a chat app, an editor, a script) with tokens you issue (agent.issue_token), and nobody asks it in the site"`
 }
 
 func agentCreate(d Deps) tool.Tool {
 	return tool.Define(tool.Spec[AgentCreateIn, ActorOut]{
 		Name: "agent.create",
-		Description: "Register an agent of your own. It runs elsewhere, on whatever you connect to it with a token " +
-			"(agent.issue_token); no endpoint, model or prompt is stored here. It can do nothing until you bring it into a " +
-			"course where you are seated (member.add_delegate), and there it acts only as your delegate, never with more " +
-			"than your own seat. It is yours for good: nobody gives it another owner. A person may have a limited number " +
-			"of agents that are not suspended.",
+		Description: "Register an agent of your own, choosing for good how it is run (hosting): runtime, the site's own " +
+			"agent runtime runs it, people in the site may ask it while the runtime hosts it, and you hold no token for it; " +
+			"or mcp, your own tools reach it over MCP with tokens you issue (agent.issue_token), and nobody asks it in the " +
+			"site. It never changes: for the other, register another agent. No endpoint, model or prompt is stored here. " +
+			"It can do nothing until you bring it into a course where you are seated (member.add_delegate), and there it " +
+			"acts only as your delegate, never with more than your own seat. It is yours for good: nobody gives it another " +
+			"owner. A person may have a limited number of agents that are not suspended.",
 		Kind: tool.Write, Gate: self,
 		HTTP:    tool.Route{Method: "POST", Pattern: "/v1/me/agents"},
 		Resolve: noTarget[AgentCreateIn]("actor"),
@@ -102,6 +112,9 @@ func agentCreate(d Deps) tool.Tool {
 			name := strings.TrimSpace(in.DisplayName)
 			if name == "" {
 				return ActorOut{}, apperr.Invalid("display_name is required")
+			}
+			if !in.Hosting.Valid() {
+				return ActorOut{}, errHostingRequired
 			}
 			me, err := ec.Q.GetActor(ctx, ec.Actor.ID)
 			if err != nil {
@@ -116,12 +129,14 @@ func agentCreate(d Deps) tool.Tool {
 				return ActorOut{}, err
 			}
 			id := ids.New()
+			hosting := string(in.Hosting)
 			if err := ec.Q.InsertActor(ctx, dbq.InsertActorParams{
 				ID: id, Kind: "agent", DisplayName: name, CreatedByActorID: &ec.Actor.ID, CreatedAt: ec.Now, OwnerActorID: &ec.Actor.ID,
+				Hosting: &hosting,
 			}); err != nil {
 				return ActorOut{}, err
 			}
-			ec.Emit(events.Event{Type: EventAgentCreated, SubjectType: "actor", SubjectID: &id})
+			ec.Emit(events.Event{Type: EventAgentCreated, SubjectType: "actor", SubjectID: &id, Payload: map[string]any{"hosting": hosting}})
 			return ActorOut{ActorID: id}, nil
 		},
 	})
@@ -131,11 +146,12 @@ func agentCreate(d Deps) tool.Tool {
 type AgentView struct {
 	ActorID       uuid.UUID  `json:"actor_id"`
 	DisplayName   string     `json:"display_name"`
+	Hosting       string     `json:"hosting" jsonschema:"how it is run, chosen when it was registered and never changed: runtime, by the site's own agent runtime, which alone holds its token; mcp, by your own tools over MCP, with tokens you issue"`
 	Status        string     `json:"status" jsonschema:"active or suspended"`
 	SuspendedByMe bool       `json:"suspended_by_me" jsonschema:"suspended by you, and so yours to reactivate; a suspension an administrator made is theirs"`
 	CreatedAt     time.Time  `json:"created_at"`
 	LastSeenAt    *time.Time `json:"last_seen_at,omitempty" jsonschema:"when it last used a token that still works, to the minute; absent if never"`
-	SiteChat      bool       `json:"site_chat" jsonschema:"whether people in the site may start conversations with it and ask it: what runs it, an agent runtime that answers on its own, said so with a token of the agent's that still works (me.site_chat); false for an agent operated from an external tool, which acts through that tool alone"`
+	SiteChat      bool       `json:"site_chat" jsonschema:"whether people in the site may start conversations with it and ask it now: for a runtime agent, while the site's agent runtime hosts it (holds a live token for it) and it and you are active; always false for an mcp agent"`
 }
 
 type AgentSummary struct {
@@ -166,8 +182,8 @@ func agentList(d Deps) tool.Tool {
 			out := AgentListOut{Agents: make([]AgentSummary, 0, len(rows)), Limit: d.MaxAgentsPerOwner, SelfService: !d.DisableAgentSelfService}
 			for _, r := range rows {
 				out.Agents = append(out.Agents, AgentSummary{
-					AgentView: agentView(rc.Actor.ID, r.ID, r.DisplayName, r.Status, r.SuspendedByActorID, r.CreatedAt, r.LastSeenAt,
-						r.SiteChat),
+					AgentView: agentView(rc.Actor.ID, r.ID, r.DisplayName, r.Hosting, r.Status, r.SuspendedByActorID, r.CreatedAt,
+						r.LastSeenAt, r.SiteChat),
 					LiveSeats:       r.LiveSeats,
 					PendingRequests: r.PendingRequests,
 				})
@@ -177,9 +193,10 @@ func agentList(d Deps) tool.Tool {
 	})
 }
 
-func agentView(owner, id uuid.UUID, name, status string, suspendedBy *uuid.UUID, created time.Time, lastSeen *time.Time, siteChat bool) AgentView {
-	return AgentView{ActorID: id, DisplayName: name, Status: status, CreatedAt: created, LastSeenAt: lastSeen, SiteChat: siteChat,
-		SuspendedByMe: status == domain.ActorSuspended && suspendedBy != nil && *suspendedBy == owner}
+func agentView(owner, id uuid.UUID, name, hosting, status string, suspendedBy *uuid.UUID, created time.Time, lastSeen *time.Time,
+	siteChat bool) AgentView {
+	return AgentView{ActorID: id, DisplayName: name, Hosting: hosting, Status: status, CreatedAt: created, LastSeenAt: lastSeen,
+		SiteChat: siteChat, SuspendedByMe: status == domain.ActorSuspended && suspendedBy != nil && *suspendedBy == owner}
 }
 
 // AgentSeat is a seat one of the caller's agents holds.
@@ -222,8 +239,9 @@ type AgentIDIn struct {
 func agentGet() tool.Tool {
 	return tool.Define(tool.Spec[AgentIDIn, AgentGetOut]{
 		Name: "agent.get",
-		Description: "One of your agents: its standing, when it was last seen, the courses it is seated in with what it " +
-			"may do in each, and the requests to seat it that wait for a decision.",
+		Description: "One of your agents: how it is hosted, its standing, whether people in the site may ask it now, when " +
+			"it was last seen, the courses it is seated in with what it may do in each, and the requests to seat it that " +
+			"wait for a decision.",
 		Kind: tool.Read, Gate: self,
 		HTTP:    tool.Route{Method: "GET", Pattern: "/v1/me/agents/{actor_id}"},
 		Resolve: agentTarget(func(in AgentIDIn) uuid.UUID { return in.ActorID }),
@@ -244,8 +262,8 @@ func agentGet() tool.Tool {
 			if err != nil {
 				return AgentGetOut{}, err
 			}
-			out := AgentGetOut{AgentView: agentView(rc.Actor.ID, a.ID, a.DisplayName, a.Status, a.SuspendedByActorID, a.CreatedAt, lastSeen,
-				chat[a.ID].SiteChat), Seats: []AgentSeat{}, Requests: []AgentRequest{}}
+			out := AgentGetOut{AgentView: agentView(rc.Actor.ID, a.ID, a.DisplayName, chat[a.ID].Hosting, a.Status, a.SuspendedByActorID,
+				a.CreatedAt, lastSeen, chat[a.ID].SiteChat), Seats: []AgentSeat{}, Requests: []AgentRequest{}}
 			seats, err := rc.Q.ListSeatsOfActor(ctx, a.ID)
 			if err != nil {
 				return AgentGetOut{}, err
@@ -274,57 +292,58 @@ func agentGet() tool.Tool {
 }
 
 type AgentUpdateIn struct {
-	ActorID     uuid.UUID `json:"actor_id"`
-	DisplayName *string   `json:"display_name,omitempty" jsonschema:"its new name; omit to keep the one it has"`
-	SiteChat    *bool     `json:"site_chat,omitempty" jsonschema:"false: people in the site may no longer start conversations with it or ask it, until what runs it says so again; true is refused, since only what runs it says so (me.site_chat)"`
+	ActorID     uuid.UUID       `json:"actor_id"`
+	DisplayName *string         `json:"display_name,omitempty" jsonschema:"its new name; omit to keep the one it has"`
+	Hosting     *domain.Hosting `json:"hosting,omitempty" jsonschema:"never changes: another than it has is refused (hosting_fixed); register another agent for the other"`
+	// Deprecated: people ask an agent in the site by its hosting alone.
+	SiteChat *bool `json:"site_chat,omitempty" jsonschema:"deprecated, and refused (site_chat_follows_hosting): people in the site ask a runtime agent while the site's runtime hosts it, and never an mcp agent. To stop them asking a runtime agent, stop it in the runtime, or suspend it (agent.suspend)"`
 }
 
-// errSiteChatByOwner refuses an owner who would switch site chat on: whether
-// an agent answers in the site is for the program that runs it to say, with
-// its own credential, since only it knows that it polls and answers.
-var errSiteChatByOwner = apperr.Invalid("site_chat can only be switched off here: the program that runs the agent switches it on, " +
-	"with the agent's own token (me.site_chat)")
+var (
+	// errHostingRequired refuses an agent registered without saying how it
+	// is run: nothing chooses it for the person, since it never changes.
+	errHostingRequired = apperr.Invalid("hosting is required: runtime, run by the site's agent runtime and asked in the site, "+
+		"or mcp, reached by your own tools over MCP; it never changes").With("field", "hosting")
+	// errHostingFixed refuses to change how an agent is run.
+	errHostingFixed = apperr.Precondition("an agent's hosting is chosen when it is registered and never changes: register "+
+		"another agent for the other").With("reason", "hosting_fixed")
+	// errSiteChatFollowsHosting refuses an owner's word on site chat, which
+	// is no longer anyone's to say: it follows from how the agent is hosted.
+	errSiteChatFollowsHosting = apperr.Invalid("site_chat is not set any more: people in the site ask a runtime agent while "+
+		"the site's agent runtime hosts it, and never an mcp agent. To stop them asking a runtime agent, stop it in the "+
+		"runtime, or suspend it (agent.suspend)").With("reason", "site_chat_follows_hosting")
+)
 
 func agentUpdate() tool.Tool {
 	return tool.Define(tool.Spec[AgentUpdateIn, OK]{
 		Name: "agent.update",
-		Description: "Rename one of your agents, or switch off its conversations in the site (site_chat false): people there " +
-			"then no longer start conversations with it or ask it more, until what runs it says it answers again. Only what " +
-			"runs it switches them on (me.site_chat), never you.",
+		Description: "Rename one of your agents. How it is hosted never changes (hosting_fixed). site_chat is deprecated " +
+			"and refused (site_chat_follows_hosting): people in the site ask a runtime agent while the site's runtime hosts " +
+			"it, and never an mcp agent.",
 		Kind: tool.Write, Gate: self,
 		HTTP:    tool.Route{Method: "POST", Pattern: "/v1/me/agents/{actor_id}"},
 		Resolve: agentTarget(func(in AgentUpdateIn) uuid.UUID { return in.ActorID }),
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in AgentUpdateIn) (OK, error) {
-			if _, err := ownAgent(ctx, ec.Q, ec.Actor.ID, in.ActorID); err != nil {
+			a, err := ownAgent(ctx, ec.Q, ec.Actor.ID, in.ActorID)
+			if err != nil {
 				return OK{}, err
 			}
 			switch {
-			case in.DisplayName == nil && in.SiteChat == nil:
-				return OK{}, apperr.Invalid("give display_name, site_chat or both")
-			case in.SiteChat != nil && *in.SiteChat:
-				return OK{}, errSiteChatByOwner
+			case in.SiteChat != nil:
+				return OK{}, errSiteChatFollowsHosting
+			case in.Hosting != nil && (a.Hosting == nil || string(*in.Hosting) != *a.Hosting):
+				return OK{}, errHostingFixed
+			case in.DisplayName == nil:
+				return OK{}, apperr.Invalid("give display_name")
 			}
-			changed := map[string]any{}
-			if in.DisplayName != nil {
-				name := strings.TrimSpace(*in.DisplayName)
-				if name == "" {
-					return OK{}, apperr.Invalid("display_name cannot be empty")
-				}
-				if err := ec.Q.UpdateActor(ctx, dbq.UpdateActorParams{ID: in.ActorID, DisplayName: &name}); err != nil {
-					return OK{}, err
-				}
+			name := strings.TrimSpace(*in.DisplayName)
+			if name == "" {
+				return OK{}, apperr.Invalid("display_name cannot be empty")
 			}
-			if in.SiteChat != nil {
-				if err := ec.Q.EndSiteChatByOwner(ctx, dbq.EndSiteChatByOwnerParams{ID: in.ActorID, OwnerActorID: &ec.Actor.ID}); err != nil {
-					return OK{}, err
-				}
-				changed["site_chat"] = false
+			if err := ec.Q.UpdateActor(ctx, dbq.UpdateActorParams{ID: in.ActorID, DisplayName: &name}); err != nil {
+				return OK{}, err
 			}
-			e := events.Event{Type: EventActorUpdated, SubjectType: "actor", SubjectID: &in.ActorID}
-			if len(changed) > 0 {
-				e.Payload = changed
-			}
-			ec.Emit(e)
+			ec.Emit(events.Event{Type: EventActorUpdated, SubjectType: "actor", SubjectID: &in.ActorID})
 			return OK{OK: true}, nil
 		},
 	})
@@ -390,16 +409,17 @@ func agentReactivate(d Deps) tool.Tool {
 
 type AgentIssueTokenIn struct {
 	ActorID       uuid.UUID `json:"actor_id"`
-	Label         string    `json:"label" jsonschema:"what this token is for, so it can be recognised later: where the agent runs"`
+	Label         string    `json:"label" jsonschema:"what this token is for, so it can be recognised later: the tool you connect the agent with"`
 	ExpiresInDays *int      `json:"expires_in_days,omitempty" jsonschema:"omit for a token that does not expire"`
 }
 
 func agentIssueToken() tool.Tool {
 	return tool.Define(tool.Spec[AgentIssueTokenIn, IssueTokenOut]{
 		Name: "agent.issue_token",
-		Description: "Issue an API token for one of your agents, for whatever runs it to connect with (MCP at /mcp, as a " +
-			"bearer token). The token is returned once and only its hash is kept. Whoever holds it acts as the agent: as " +
-			"your delegate, never with more than your own seat.",
+		Description: "Issue an API token for one of your mcp agents, for your own tools to connect with (MCP at /mcp, as " +
+			"a bearer token). The token is returned once and only its hash is kept. Whoever holds it acts as the agent: as " +
+			"your delegate, never with more than your own seat. A runtime agent is refused (hosted_by_runtime): the site's " +
+			"agent runtime alone holds its token, and you hold none.",
 		Kind: tool.Write, Gate: self,
 		HTTP:      tool.Route{Method: "POST", Pattern: "/v1/me/agents/{actor_id}/tokens"},
 		SecretOut: []string{"token"},
@@ -423,9 +443,11 @@ func agentIssueToken() tool.Tool {
 
 func agentListCredentials() tool.Tool {
 	return tool.Define(tool.Spec[AgentIDIn, CredentialListOut]{
-		Name:        "agent.list_credentials",
-		Description: "One of your agents' tokens, newest first, with their label, prefix, issuer, expiry and last use, revoked ones included. Secrets are never shown.",
-		Kind:        tool.Read, Gate: self,
+		Name: "agent.list_credentials",
+		Description: "One of your agents' tokens, newest first, with their label, prefix, issuer, expiry and last use, " +
+			"revoked ones included; a runtime agent's are those issued to the site's agent runtime (issued_to agent_runtime). " +
+			"Secrets are never shown.",
+		Kind: tool.Read, Gate: self,
 		HTTP:    tool.Route{Method: "GET", Pattern: "/v1/me/agents/{actor_id}/credentials"},
 		Resolve: agentTarget(func(in AgentIDIn) uuid.UUID { return in.ActorID }),
 		Query: func(ctx context.Context, rc *tool.ReadCtx, in AgentIDIn) (CredentialListOut, error) {
@@ -446,8 +468,9 @@ type AgentRevokeCredentialIn struct {
 func agentRevokeCredential() tool.Tool {
 	return tool.Define(tool.Spec[AgentRevokeCredentialIn, OK]{
 		Name: "agent.revoke_credential",
-		Description: "Revoke one of your agents' tokens — one that has leaked, or a runtime you no longer use — without " +
-			"suspending the agent. It takes effect on the token's next use.",
+		Description: "Revoke one of your agents' tokens — one that has leaked, or a tool you no longer use — without " +
+			"suspending the agent. It takes effect on the token's next use. Revoking a runtime agent's token stops the " +
+			"site's runtime hosting it, and people asking it in the site, until the runtime is given another.",
 		Kind: tool.Write, Gate: self,
 		HTTP:    tool.Route{Method: "POST", Pattern: "/v1/me/agents/{actor_id}/credentials/{credential_id}/revoke"},
 		Resolve: agentTarget(func(in AgentRevokeCredentialIn) uuid.UUID { return in.ActorID }),

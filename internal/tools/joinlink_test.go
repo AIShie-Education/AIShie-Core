@@ -295,7 +295,7 @@ func TestAJoinLinkIsMadeOnlyForASeatItsMakerCouldGive(t *testing.T) {
 
 	// An agent nobody owns follows its seat: given member_invite, it makes
 	// links, as a roster agent might.
-	bot := testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", m{"kind": "agent", "display_name": "enrolment bot"})).ActorID
+	bot := testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", m{"kind": "agent", "hosting": "mcp", "display_name": "enrolment bot"})).ActorID
 	b.do(t, b.sato, "member.add", m{"course_id": b.course, "actor_id": bot, "preset": "instructor"})
 	b.joinLink(t, bot, m{})
 

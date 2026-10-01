@@ -3,7 +3,7 @@
 -- which leaves kind out on purpose.
 SELECT id, kind, display_name, email, status, platform_role, created_by_actor_id, created_at,
        owner_actor_id, suspended_by_actor_id, site_chat_credential_id, email_verified, login_id, login_id_verified,
-       service_scope
+       service_scope, hosting
 FROM actor
 WHERE id = $1;
 
@@ -15,7 +15,7 @@ WHERE id = $1;
 -- take only KEY SHARE, which this does not conflict with.
 SELECT id, kind, display_name, email, status, platform_role, created_by_actor_id, created_at,
        owner_actor_id, suspended_by_actor_id, site_chat_credential_id, email_verified, login_id, login_id_verified,
-       service_scope
+       service_scope, hosting
 FROM actor
 WHERE id = $1
 FOR SHARE;
@@ -32,10 +32,11 @@ SELECT id, status, kind FROM actor WHERE lower(login_id) = lower($1);
 
 -- name: InsertActor :exec
 -- A login ID an administrator gives is one they vouch for (login_id_verified,
--- by its default).
+-- by its default). An agent's hosting is given, and only an agent's
+-- (actor_hosting_is_an_agents).
 INSERT INTO actor (id, kind, display_name, email, status, platform_role, created_by_actor_id, created_at, owner_actor_id,
-                   login_id)
-VALUES ($1, $2, $3, $4, 'active', $5, $6, $7, sqlc.narg(owner_actor_id), sqlc.narg(login_id));
+                   login_id, hosting)
+VALUES ($1, $2, $3, $4, 'active', $5, $6, $7, sqlc.narg(owner_actor_id), sqlc.narg(login_id), sqlc.narg(hosting));
 
 -- name: CountRootActors :one
 SELECT count(*) FROM actor WHERE platform_role = 'root';
@@ -65,16 +66,17 @@ SELECT count(*) FROM actor WHERE owner_actor_id = $1 AND status <> 'suspended';
 
 -- name: ListAgentsOf :many
 -- A person's agents, oldest first, with what their owner needs to see at a
--- glance: when one last used a token that still works, how many seats it
--- holds that count now, how many requests of the owner's to seat it wait
--- for a decision, and whether it takes conversations in the site now, by
--- the rule of SiteChatOf.
+-- glance: how each is hosted, when one last used a token that still works,
+-- how many seats it holds that count now, how many requests of the owner's
+-- to seat it wait for a decision, and whether people in the site may ask it
+-- now, by the rule of SiteChatOf.
 SELECT a.id, a.display_name, a.status, a.suspended_by_actor_id, a.created_at, seen.last_used_at AS last_seen_at,
-       (a.status = 'active'
+       coalesce(a.hosting, '')::text AS hosting,
+       (a.hosting = 'runtime' AND a.status = 'active'
         AND (a.owner_actor_id IS NULL OR EXISTS (SELECT 1 FROM actor o WHERE o.id = a.owner_actor_id AND o.status = 'active'))
-        AND EXISTS (SELECT 1 FROM credential sc
-                     WHERE sc.id = a.site_chat_credential_id AND sc.actor_id = a.id AND sc.revoked_at IS NULL
-                       AND (sc.expires_at IS NULL OR sc.expires_at > sqlc.arg(now))))::bool AS site_chat,
+        AND EXISTS (SELECT 1 FROM credential rt
+                     WHERE rt.actor_id = a.id AND rt.issued_to_service = 'agent_runtime' AND rt.revoked_at IS NULL
+                       AND (rt.expires_at IS NULL OR rt.expires_at > sqlc.arg(now))))::bool AS site_chat,
        (SELECT count(*) FROM course_member m
          WHERE m.actor_id = a.id AND m.status = 'active'
            AND (m.expires_at IS NULL OR m.expires_at > sqlc.arg(now))) AS live_seats,
@@ -172,33 +174,60 @@ FROM actor a
 WHERE a.id = sqlc.arg(actor_id)::uuid;
 
 -- name: SiteChatOf :many
--- Whether each of the given actors takes conversations in the site now
--- (docs/schema.md §2.8): an agent does while the credential with which a
--- program that runs it declared so (me.site_chat) is live, neither revoked
--- nor expired, the agent is active, and its owner, if it has one, is
--- active. A person or the system actor never does; agent says which is
--- which, so that a view can leave people out. ListAgentsOf and
--- ListRespondentCandidates hold the same rule: a change to one is a change
--- to all three.
-SELECT a.id, (a.kind = 'agent')::bool AS agent,
-       (a.status = 'active'
+-- Whether people in the site may ask each of the given actors now
+-- (docs/schema.md §2.8): a runtime agent may be asked while a token issued
+-- to the site's agent runtime for it (agent_runtime.issue_token) is live,
+-- neither revoked nor expired, the agent is active, and its owner, if it
+-- has one, is active. An mcp agent, a person or the system actor never may;
+-- agent says which is an agent, so that a view can leave people out, and
+-- hosting how it is hosted, so that a refusal can say why. ListAgentsOf,
+-- ListRespondentCandidates and GetAgentForRuntime hold the same rule: a
+-- change to one is a change to all four.
+SELECT a.id, (a.kind = 'agent')::bool AS agent, coalesce(a.hosting, '')::text AS hosting,
+       (a.hosting = 'runtime' AND a.status = 'active'
         AND (a.owner_actor_id IS NULL OR EXISTS (SELECT 1 FROM actor o WHERE o.id = a.owner_actor_id AND o.status = 'active'))
-        AND EXISTS (SELECT 1 FROM credential sc
-                     WHERE sc.id = a.site_chat_credential_id AND sc.actor_id = a.id AND sc.revoked_at IS NULL
-                       AND (sc.expires_at IS NULL OR sc.expires_at > sqlc.arg(now))))::bool AS site_chat
+        AND EXISTS (SELECT 1 FROM credential rt
+                     WHERE rt.actor_id = a.id AND rt.issued_to_service = 'agent_runtime' AND rt.revoked_at IS NULL
+                       AND (rt.expires_at IS NULL OR rt.expires_at > sqlc.arg(now))))::bool AS site_chat
 FROM actor a
 WHERE a.id = ANY(sqlc.arg(actor_ids)::uuid[]);
 
--- name: SetSiteChat :exec
--- The credential an agent calls with declares that it takes conversations
--- in the site, in place of any that did before; null, that it takes none.
+-- name: SetSiteChatCredential :exec
+-- The release before this one reads who is asked in the site from the
+-- credential an agent declared with (actor.site_chat_credential_id); this
+-- one reads it nowhere, and keeps it naming a runtime agent's live runtime
+-- token, null once there is none, so that a rollback asks the same agents.
 -- The key holds a credential to the agent's own (actor_site_chat_credential_fk).
 UPDATE actor SET site_chat_credential_id = sqlc.narg(credential_id) WHERE id = sqlc.arg(id);
 
--- name: EndSiteChatByOwner :exec
--- Its owner switches it off: only its owner, who is its owner for good.
-UPDATE actor SET site_chat_credential_id = NULL
-WHERE id = sqlc.arg(id) AND owner_actor_id = sqlc.arg(owner_actor_id);
+-- name: LockAgentForHosting :exec
+-- An agent's runtime token is issued and revoked one call at a time, and
+-- its standing read under the lock. NO KEY UPDATE, as LockOwnerForAgents,
+-- not UPDATE: every action row naming the agent holds KEY SHARE on the row.
+SELECT 1 FROM actor WHERE id = $1 FOR NO KEY UPDATE;
+
+-- name: GetAgentForRuntime :one
+-- An agent as the site's agent runtime needs it to host it by its id: how
+-- it is hosted, its standing and its owner's, how many seats it holds that
+-- count now, its runtime token if one is live, and whether people in the
+-- site may ask it now, by the rule of SiteChatOf. Only an agent: anyone
+-- else is no row.
+SELECT a.id, a.display_name, coalesce(a.hosting, '')::text AS hosting, a.status, a.owner_actor_id,
+       o.status AS owner_status, o.display_name AS owner_name,
+       (SELECT count(*) FROM course_member m
+         WHERE m.actor_id = a.id AND m.status = 'active'
+           AND (m.expires_at IS NULL OR m.expires_at > sqlc.arg(now))) AS live_seats,
+       rt.id AS runtime_credential_id, rt.token_prefix AS runtime_token_prefix, rt.created_at AS runtime_token_created_at,
+       rt.last_used_at AS runtime_token_last_used_at,
+       (a.hosting = 'runtime' AND a.status = 'active' AND (o.id IS NULL OR o.status = 'active')
+        AND rt.id IS NOT NULL)::bool AS site_chat
+FROM actor a
+LEFT JOIN actor o ON o.id = a.owner_actor_id
+-- One row at most: an agent's runtime tokens that are not revoked are one at
+-- most (credential_one_runtime_token).
+LEFT JOIN credential rt ON rt.actor_id = a.id AND rt.issued_to_service = 'agent_runtime' AND rt.revoked_at IS NULL
+                       AND (rt.expires_at IS NULL OR rt.expires_at > sqlc.arg(now))
+WHERE a.id = sqlc.arg(id) AND a.kind = 'agent';
 
 -- name: LockActorForPasswordReset :exec
 -- The person whose password is being reset, for the rest of the reset,

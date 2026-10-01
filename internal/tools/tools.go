@@ -98,6 +98,7 @@ func RegisterAll(reg *tool.Registry, d Deps) {
 	reg.Register(documentTools(d)...)
 	reg.Register(textTools(d)...)
 	reg.Register(serviceTools()...)
+	reg.Register(agentRuntimeTools()...)
 	reg.Register(gradeTools(d)...)
 	reg.Register(gradeReadTools()...)
 	reg.Register(actionTools(d)...)

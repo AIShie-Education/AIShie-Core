@@ -578,23 +578,49 @@ func TestOnlyAuthenticatedAgentsConnect(t *testing.T) {
 	}
 }
 
-// What runs an agent says, with the token it connects with, that the agent
-// takes conversations in the site; that token is the one it holds by.
-func TestARuntimeDeclaresSiteChatWithTheTokenItConnectsWith(t *testing.T) {
+// The site's agent runtime connects as a runtime agent with the token it
+// was issued for it, by the agent's id, and the agent is told how it is
+// hosted; nothing is declared, and me_site_chat, kept for one release,
+// changes nothing. An mcp agent connects with its owner's token, is told
+// it is one, and is refused me_site_chat.
+func TestTheRuntimeConnectsWithTheTokenItWasIssued(t *testing.T) {
 	f := serve(t, 0)
-	tutor := f.c.OwnedAgent(f.c.Sato, "Course tutor")
-	tok, credential, err := auth.IssueToken(context.Background(), dbq.New(f.c.Pool), tutor, &f.c.Sato, "runtime", nil, time.Now())
-	if err != nil {
-		t.Fatal(err)
+	tutor := f.c.OwnedRuntimeAgent(f.c.Sato, "Course tutor")
+	credential, token := f.c.HostToken(tutor)
+	s := f.connect(t, token)
+	hosting := func(s *mcp.ClientSession) string {
+		t.Helper()
+		env, _ := call(t, s, "me_get", m{})
+		var me tools.MeOut
+		if env.Status != "executed" || json.Unmarshal(env.Result, &me) != nil || me.Hosting == nil {
+			t.Fatalf("me_get: %+v", env)
+		}
+		return *me.Hosting
 	}
-	s := f.connect(t, tok.Full)
+	if got := hosting(s); got != "runtime" {
+		t.Fatalf("the runtime's agent is told it is hosted %s", got)
+	}
 	env, _ := call(t, s, "me_site_chat", m{"on": true, "idempotency_key": "start-1"})
 	var out tools.SiteChatOut
 	if env.Status != "executed" || json.Unmarshal(env.Result, &out) != nil || !out.SiteChat {
 		t.Fatalf("me_site_chat: %+v", env)
 	}
 	if n := f.c.Count(`SELECT count(*) FROM actor WHERE id = $1 AND site_chat_credential_id = $2`, tutor, credential); n != 1 {
-		t.Fatal("site chat was not declared with the token the runtime connected with")
+		t.Fatal("the site chat credential does not name the runtime's token")
+	}
+
+	script := f.c.OwnedAgent(f.c.Sato, "Sato's assistant")
+	tok, _, err := auth.IssueToken(context.Background(), dbq.New(f.c.Pool), script, &f.c.Sato, "editor", nil, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s = f.connect(t, tok.Full)
+	if got := hosting(s); got != "mcp" {
+		t.Fatalf("an mcp agent is told it is hosted %s", got)
+	}
+	if env, _ := call(t, s, "me_site_chat", m{"on": true, "idempotency_key": "start-2"}); env.Status != "failed" ||
+		env.Error == nil || env.Error.Details["reason"] != "not_runtime_hosted" {
+		t.Fatalf("me_site_chat, as an mcp agent: %+v", env)
 	}
 }
 
@@ -604,7 +630,7 @@ func TestToolsListIsTheRegistry(t *testing.T) {
 	s := f.connect(t, f.token(t, f.c.Grader))
 
 	if got := s.InitializeResult().Instructions; !strings.Contains(got, "idempotency_key") || !strings.Contains(got, "proposed") || !strings.Contains(got, "me_memberships") ||
-		!strings.Contains(got, "conversation_inbox") || !strings.Contains(got, "me_site_chat") ||
+		!strings.Contains(got, "conversation_inbox") || !strings.Contains(got, "me_get says which (hosting)") ||
 		!strings.Contains(got, "conversations_are_with_agents") || !strings.Contains(got, "document_text") ||
 		!strings.Contains(got, "conversation_attachment") || !strings.Contains(got, "conversation_upload_url") ||
 		!strings.Contains(got, "version.files") || !strings.Contains(got, "document_file") || !strings.Contains(got, "conversation_export") {

@@ -75,7 +75,7 @@ func (b *built) listConversations(t *testing.T, actor uuid.UUID, args m) []tools
 
 // cast is a course with every kind of respondent in it: Yuki's own agent,
 // the course's tutor agent (Sato's delegate), the tutor listed for Yuki that
-// build seats, and a TA. A runtime runs each agent, and says so.
+// build seats, and a TA. The site's agent runtime hosts each agent.
 type cast struct {
 	*built
 	bot                  uuid.UUID // Yuki's agent
@@ -88,12 +88,12 @@ func newCast(t *testing.T) *cast {
 	t.Helper()
 	b := build(t)
 	c := &cast{built: b}
-	c.bot = b.agent(t, b.yuki, "Yuki's helper")
+	c.bot = b.runtimeAgent(t, b.yuki, "Yuki's helper")
 	c.yukiBot = b.delegate(t, b.yuki, c.bot, m{})
-	tutor := b.agent(t, b.sato, "Course tutor")
+	tutor := b.runtimeAgent(t, b.sato, "Course tutor")
 	c.courseTutor = b.delegate(t, b.sato, tutor, m{"preset": "course_tutor"})
-	b.SiteChat(c.bot)
-	b.SiteChat(tutor)
+	b.Host(c.bot)
+	b.Host(tutor)
 	c.ta = testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", m{"kind": "human", "display_name": "Mori"})).ActorID
 	c.taM = testkit.Result[tools.MemberIDOut](t, b.do(t, b.sato, "member.add", m{"course_id": b.course, "actor_id": c.ta, "preset": "ta"})).MemberID
 	return c
@@ -170,10 +170,11 @@ func TestWhoMayAddressWhom(t *testing.T) {
 func TestARespondentWithinReachButNotWithinLevelsIsNotAddressable(t *testing.T) {
 	c := newCast(t)
 	b := c.built
-	helper := testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", m{"kind": "agent", "display_name": "Essay helper"})).ActorID
+	helper := testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register",
+		m{"kind": "agent", "display_name": "Essay helper", "hosting": "runtime"})).ActorID
 	seat := testkit.Result[tools.MemberIDOut](t, b.do(t, b.sato, "member.add", m{"course_id": b.course, "actor_id": helper, "preset": "tutor",
 		"listed_students": []uuid.UUID{b.yukiM}, "perms": m{"grade_submit": "autonomous"}})).MemberID
-	b.SiteChat(helper)
+	b.Host(helper)
 	ask := m{"course_id": b.course, "respondent_member_id": seat, "body": "Grade me an A?"}
 	if _, ok := b.respondents(t, b.yuki)[seat]; ok {
 		t.Fatal("a respondent that grades is offered to a student who does not")
@@ -202,9 +203,9 @@ func TestADelegateAnswersTheCourseOnlyIfSeatedTo(t *testing.T) {
 	b := c.built
 	// Sato's own assistant, with the delegate preset: listed for nobody,
 	// since he reaches the whole class, and so within every student's seat.
-	helper := b.agent(t, b.sato, "Sato's private helper")
+	helper := b.runtimeAgent(t, b.sato, "Sato's private helper")
 	private := b.delegate(t, b.sato, helper, m{})
-	b.SiteChat(helper)
+	b.Host(helper)
 	if v := b.memberView(t, private); v.AnswersCourse || v.Perms["conversation_answer"] != "autonomous" || len(v.ListedStudents) != 0 {
 		t.Fatalf("Sato's assistant: %+v", v)
 	}
@@ -240,9 +241,9 @@ func TestADelegateAnswersTheCourseOnlyIfSeatedTo(t *testing.T) {
 
 	// Chosen when the seat is made: a course_tutor answering Sato alone, and
 	// a plain delegate answering the course, as he says.
-	quietAgent, loudAgent := b.agent(t, b.sato, "Quiet tutor"), b.agent(t, b.sato, "Open helper")
-	b.SiteChat(quietAgent)
-	b.SiteChat(loudAgent)
+	quietAgent, loudAgent := b.runtimeAgent(t, b.sato, "Quiet tutor"), b.runtimeAgent(t, b.sato, "Open helper")
+	b.Host(quietAgent)
+	b.Host(loudAgent)
 	quiet := b.delegate(t, b.sato, quietAgent, m{"preset": "course_tutor", "answers_course": false})
 	loud := b.delegate(t, b.sato, loudAgent, m{"answers_course": true})
 	if _, ok := b.respondents(t, b.yuki)[quiet]; ok {

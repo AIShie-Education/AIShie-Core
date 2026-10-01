@@ -69,7 +69,7 @@ SELECT id, kind FROM credential WHERE id = $1 AND actor_id = $2;
 -- Never the hash. The issuer's name comes with the row, for an administrator
 -- telling one token from another.
 SELECT c.id, c.kind, c.provider, c.subject, c.token_prefix, c.label, c.last_used_at, c.expires_at, c.revoked_at,
-       c.created_at, c.issued_by_actor_id, i.display_name AS issued_by_name, c.must_change
+       c.created_at, c.issued_by_actor_id, i.display_name AS issued_by_name, c.must_change, c.issued_to_service
 FROM credential c
 LEFT JOIN actor i ON i.id = c.issued_by_actor_id
 WHERE c.actor_id = $1
@@ -104,3 +104,27 @@ FROM credential c
 JOIN actor a ON a.id = c.actor_id
 WHERE c.token_prefix = $1 AND c.kind = 'invite'
 FOR UPDATE OF c;
+
+-- name: InsertRuntimeToken :exec
+-- A runtime agent's token, issued to the site's agent runtime by the
+-- agent_runtime service (issued_by_actor_id): it never expires, and is the
+-- agent's one token that is not revoked (credential_one_runtime_token,
+-- credential_fits_hosting).
+INSERT INTO credential (id, actor_id, kind, secret_hash, token_prefix, label, created_at, issued_by_actor_id, issued_to_service)
+VALUES (sqlc.arg(id), sqlc.arg(actor_id), 'api_token', sqlc.arg(secret_hash), sqlc.arg(token_prefix), sqlc.arg(label),
+        sqlc.arg(created_at), sqlc.arg(issued_by_actor_id), 'agent_runtime');
+
+-- name: RevokeRuntimeTokens :many
+-- Every runtime token of an agent's that is not revoked: one at most.
+UPDATE credential SET revoked_at = sqlc.arg(now)
+WHERE actor_id = sqlc.arg(actor_id) AND issued_to_service = 'agent_runtime' AND revoked_at IS NULL
+RETURNING id;
+
+-- name: IsLiveRuntimeToken :one
+-- Whether a credential is the actor's own token, issued to the site's agent
+-- runtime, and live: neither revoked nor expired.
+SELECT EXISTS (
+    SELECT 1 FROM credential c
+    WHERE c.id = sqlc.arg(credential_id) AND c.actor_id = sqlc.arg(actor_id) AND c.issued_to_service = 'agent_runtime'
+      AND c.revoked_at IS NULL AND (c.expires_at IS NULL OR c.expires_at > sqlc.arg(now))
+)::bool;

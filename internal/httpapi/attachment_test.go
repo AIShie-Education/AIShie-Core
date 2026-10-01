@@ -15,10 +15,10 @@ import (
 func TestAMessagesFileOverHTTP(t *testing.T) {
 	a := newAPI(t, 2)
 	c := a.c
-	tutor := c.Actor("agent", "Course tutor")
+	tutor := c.RuntimeAgent("Course tutor")
 	tutorM := c.Member(c.Course, tutor, "course_tutor")
-	c.SiteChat(tutor)
-	yuki, ken, agent := a.tokenFor(c.Students[0].Actor), a.tokenFor(c.Students[1].Actor), a.tokenFor(tutor)
+	_, agent := c.HostToken(tutor)
+	yuki, ken := a.tokenFor(c.Students[0].Actor), a.tokenFor(c.Students[1].Actor)
 	course := "/v1/courses/" + c.Course.String()
 
 	upload := func(contentType string, body []byte) string {

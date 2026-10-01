@@ -54,7 +54,12 @@ Usage:
                                      create the root actor, once, with the password read from
                                      standard input, to sign in with; prints no token
   aishie-core token issue --actor ID|EMAIL --label L [--days N]
-                                     issue an API token for an agent; a person holds none
+                                     issue an API token for an mcp agent; a person holds none, and
+                                     a runtime agent none but the one its runtime is issued
+  aishie-core service issue SCOPE --label L [--days N] [--replace]
+                                     issue a credential for a site service, agent_runtime (the site's
+                                     agent runtime) or document_text (its transcriber), and print it,
+                                     once, on standard output; --replace revokes its others
   aishie-core secrets rewrap         seal again, under SECRETS_KEY, every secret an older key
                                      (SECRETS_KEY_PREVIOUS) sealed: the last step of a rotation
   aishie-core version                print build information
@@ -163,6 +168,8 @@ func run(args []string) error {
 		return bootstrap(cfg, args[1:], os.Stdin, os.Stderr)
 	case "token":
 		return token(cfg, args[1:], os.Stdout, os.Stderr)
+	case "service":
+		return service(cfg, args[1:], os.Stdout, os.Stderr)
 	case "secrets":
 		return secretsCmd(cfg, args[1:], os.Stdout)
 	case "version":
@@ -618,9 +625,10 @@ func secretsCmd(cfg config.Config, args []string, stdout io.Writer) error {
 // token issues an API token for an agent from the command line: a newly
 // registered agent never signs in to ask for its first, so someone with
 // access to the server gives it one. A person is refused: people sign in,
-// and hold no API token. This is an operator's act outside the tool layer
-// and writes no action row; whoever can run it can already write to the
-// database.
+// and hold no API token; so is a runtime agent, whose one token is the one
+// the site's agent runtime is issued (hosted_by_runtime). This is an
+// operator's act outside the tool layer and writes no action row; whoever
+// can run it can already write to the database.
 func token(cfg config.Config, args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 || args[0] != "issue" {
 		return errors.New("token: want `token issue --actor ID|EMAIL --label L`")
@@ -681,5 +689,74 @@ func token(cfg config.Config, args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	_, err = fmt.Fprintln(stdout, tok.Full)
+	return err
+}
+
+// service issues a site service a credential from the command line, as
+// service.issue_credential does: the operator's, at setup, for the site's
+// agent runtime (agent_runtime) or its transcriber (document_text), before
+// anyone has signed in to issue one. The service is made the first time,
+// by nobody Core knows, and the credential is issued by nobody. It prints
+// the credential on standard output, once, alone on its line, for a set-up
+// script to keep where the service reads it, and what it is on standard
+// error. --replace revokes the service's other credentials in the same
+// transaction, as a set-up run again does when it has lost the one it kept.
+// Like `token issue` it is an operator's act outside the tool layer and
+// writes no action row.
+func service(cfg config.Config, args []string, stdout, stderr io.Writer) error {
+	if len(args) < 2 || args[0] != "issue" || strings.HasPrefix(args[1], "-") {
+		return errors.New("service: want `service issue SCOPE --label L`, SCOPE agent_runtime or document_text")
+	}
+	scope := args[1]
+	fs := flag.NewFlagSet("service issue", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	label := fs.String("label", "", "what the credential is for, as administrators see it listed (required)")
+	days := fs.Int("days", 0, "expire after this many days, 1 to 3650; 0 means never")
+	replace := fs.Bool("replace", false, "revoke the service's other credentials")
+	if err := fs.Parse(args[2:]); err != nil {
+		return err
+	}
+	switch {
+	case fs.NArg() > 0:
+		return fmt.Errorf("service issue: unexpected argument %q", fs.Arg(0))
+	case !tools.ServiceScope(scope):
+		return fmt.Errorf("service issue: no site service %q: agent_runtime or document_text", scope)
+	case strings.TrimSpace(*label) == "":
+		return errors.New("service issue: --label is required")
+	case *days < 0 || *days > 3650:
+		return errors.New("service issue: --days is 1 to 3650, or 0 for never")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	pool, err := db.Open(ctx, cfg.DatabaseURL)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+	now := time.Now()
+	var expires *time.Time
+	if *days > 0 {
+		t := now.AddDate(0, 0, *days)
+		expires = &t
+	}
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	out, err := tools.IssueServiceCredential(ctx, dbq.New(tx), tools.ServiceCredentialArgs{Scope: scope, Label: strings.TrimSpace(*label),
+		ExpiresAt: expires, Replace: *replace, Now: now})
+	if err != nil {
+		return fmt.Errorf("service issue: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(stderr, "credential %s (%s) for the site service %s, %d other(s) revoked, shown once:\n",
+		out.CredentialID, out.TokenPrefix, scope, len(out.Revoked)); err != nil {
+		return err
+	}
+	_, err = fmt.Fprintln(stdout, out.Token)
 	return err
 }

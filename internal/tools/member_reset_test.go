@@ -120,7 +120,7 @@ func TestAnInstructorResetsAStudentsPassword(t *testing.T) {
 		{"me.get", m{}}, {"me.memberships", m{}}, {"credential.list", m{}},
 		{"document.list", m{"course_id": b.course}},
 		{"submission.create", m{"course_id": b.course, "assignment_id": b.hw3, "body": "draft"}},
-		{"agent.create", m{"display_name": "her helper"}},
+		{"agent.create", m{"display_name": "her helper", "hosting": "mcp"}},
 	} {
 		out := b.MustCall(b.yuki, call.name, call.args, "pending-"+call.name)
 		if out.Status != domain.StatusDenied || out.Error.Code != apperr.Forbidden || reason(out) != "password_change_required" {
@@ -207,7 +207,7 @@ func TestAPasswordIsResetOnlyForAStudentWhoseAccountReachesNothingMore(t *testin
 		m{"course_id": b.course, "actor_id": tanaka, "preset": "ta"})).MemberID
 	resetRefused(t, b.reset(t, b.sato, tanakaM), domain.StatusFailed, apperr.Forbidden, tools.ResetNotAStudent)
 	// An agent seated as a student is still an agent.
-	bot := testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", m{"kind": "agent", "display_name": "Study bot"})).ActorID
+	bot := testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", m{"kind": "agent", "hosting": "mcp", "display_name": "Study bot"})).ActorID
 	botM := testkit.Result[tools.MemberIDOut](t, b.do(t, b.sato, "member.add", m{"course_id": b.course, "actor_id": bot, "preset": "student"})).MemberID
 	resetRefused(t, b.reset(t, b.sato, botM), domain.StatusFailed, apperr.Forbidden, tools.ResetNotAPerson)
 	// A seat of another course is none of this one's.

@@ -135,7 +135,7 @@ func TestMaterialIsInvisibleUntilPublished(t *testing.T) {
 // in front of the class.
 func TestAPublishProposalPublishesWhatWasProposed(t *testing.T) {
 	b := build(t)
-	editor := testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", m{"kind": "agent", "display_name": "editor"})).ActorID
+	editor := testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", m{"kind": "agent", "hosting": "mcp", "display_name": "editor"})).ActorID
 	b.do(t, b.sato, "member.add", m{"course_id": b.course, "actor_id": editor, "preset": "ta", "perms": m{"document_write": "confirm_required"}})
 	made := testkit.Result[tools.DocumentCreateOut](t, b.do(t, b.sato, "document.create",
 		m{"course_id": b.course, "kind": "material", "title": "Lecture 1", "body_md": "v1: reviewed"}))
@@ -377,7 +377,7 @@ func TestFeedbackFilesTravelWithAProposal(t *testing.T) {
 // held to the same.
 func TestAProposalIsNotMadeAboutAnUploadItMayOutlive(t *testing.T) {
 	b := build(t)
-	editor := testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", m{"kind": "agent", "display_name": "editor"})).ActorID
+	editor := testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", m{"kind": "agent", "hosting": "mcp", "display_name": "editor"})).ActorID
 	b.do(t, b.sato, "member.add", m{"course_id": b.course, "actor_id": editor, "preset": "ta", "perms": m{"document_write": "confirm_required"}})
 	b.do(t, b.sato, "member.update_perms", m{"course_id": b.course, "member_id": b.graderM, "perms": m{"grade_post": "confirm_required"}})
 	lecture := testkit.Result[tools.DocumentCreateOut](t, b.do(t, b.sato, "document.create",
@@ -456,7 +456,7 @@ func TestAProposalIsNotMadeAboutAnUploadItMayOutlive(t *testing.T) {
 // nor does document.upload_url speak of a refusal that will not come.
 func TestWhereProposalsDoNotExpireAnUploadOfAnyAgeMayBeProposed(t *testing.T) {
 	b := buildOn(t, testkit.NewPlatformWithConfig(t, pipeline.Config{}))
-	editor := testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", m{"kind": "agent", "display_name": "editor"})).ActorID
+	editor := testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", m{"kind": "agent", "hosting": "mcp", "display_name": "editor"})).ActorID
 	b.do(t, b.sato, "member.add", m{"course_id": b.course, "actor_id": editor, "preset": "ta", "perms": m{"document_write": "confirm_required"}})
 	token := b.upload(t, editor, "material", "text/plain", []byte("notes"))
 	b.P.SetClock(func() time.Time { return time.Now().Add(tools.OrphanGrace + time.Hour) })

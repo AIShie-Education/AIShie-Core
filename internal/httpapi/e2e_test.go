@@ -201,27 +201,91 @@ func TestEndToEndOverHTTP(t *testing.T) {
 	}
 }
 
-// What runs an agent says over REST, with its token, that the agent takes
-// conversations in the site; that token is the one it holds by. A person is
-// refused.
-func TestSiteChatIsDeclaredWithTheTokenOfTheCall(t *testing.T) {
+// The site's agent runtime hosts an agent by its id, over REST, with its
+// own credential: it asks whether the person signed in to it owns the agent,
+// is issued the agent's token, and revokes it when the hosting ends. The
+// token acts as the agent, which is told it is a runtime agent; its owner
+// is issued none; me.site_chat with it changes nothing, and a person's is
+// refused. Nobody else calls the runtime's routes, and its credential calls
+// nothing else.
+func TestTheRuntimeHostsAnAgentByItsIDOverREST(t *testing.T) {
 	a := newAPI(t, 1)
 	c := a.c
-	tutor := c.OwnedAgent(c.Sato, "Course tutor")
-	tok, credential, err := auth.IssueToken(context.Background(), dbq.New(c.Pool), tutor, &c.Sato, "runtime", nil, time.Now())
-	if err != nil {
-		t.Fatal(err)
+	tutor, script := c.OwnedRuntimeAgent(c.Sato, "Course tutor"), c.OwnedAgent(c.Sato, "Sato's assistant")
+	_, _, svc := c.RuntimeService()
+	sato := a.tokenFor(c.Sato)
+	base := "/v1/services/agent_runtime"
+
+	owns := a.do(nil, "GET", base+"/owners/"+c.Sato.String()+"/agents/"+tutor.String(), svc, nil)
+	if owns.Status != http.StatusOK || owns.Body["result"].(m)["owns"] != true || owns.str("result", "agent", "hosting") != "runtime" {
+		t.Fatalf("whether Sato owns the tutor: %d %s", owns.Status, owns.Raw)
 	}
-	on := a.do(nil, "POST", "/v1/me/site-chat", tok.Full, m{"on": true}, "Idempotency-Key", "start-1")
+	notHis := a.do(nil, "GET", base+"/owners/"+c.Students[0].Actor.String()+"/agents/"+tutor.String(), svc, nil)
+	if notHis.Status != http.StatusOK || notHis.Body["result"].(m)["owns"] != false || notHis.Body["result"].(m)["agent"] != nil {
+		t.Fatalf("whether Yuki owns it: %d %s", notHis.Status, notHis.Raw)
+	}
+
+	issued := a.do(nil, "POST", base+"/agents/"+tutor.String()+"/token", svc, m{}, "Idempotency-Key", "host-1")
+	token := issued.str("result", "token")
+	if issued.Status != http.StatusOK || !strings.HasPrefix(token, "ais_") {
+		t.Fatalf("the tutor's token: %d %s", issued.Status, issued.Raw)
+	}
+	replay := a.do(nil, "POST", base+"/agents/"+tutor.String()+"/token", svc, m{}, "Idempotency-Key", "host-1")
+	if replay.Status != http.StatusOK || strings.Contains(replay.Raw, token) || replay.Header.Get("Idempotency-Replayed") != "true" {
+		t.Fatalf("the replay: %d %s", replay.Status, replay.Raw)
+	}
+	me := a.do(nil, "GET", "/v1/me", token, nil)
+	if me.Status != http.StatusOK || me.str("result", "id") != tutor.String() || me.str("result", "hosting") != "runtime" {
+		t.Fatalf("the tutor, with its token: %d %s", me.Status, me.Raw)
+	}
+	view := a.do(nil, "GET", base+"/agents/"+tutor.String(), svc, nil)
+	if view.Status != http.StatusOK || view.str("result", "runtime_token", "credential_id") != issued.str("result", "credential_id") {
+		t.Fatalf("the tutor, as the runtime reads it: %d %s", view.Status, view.Raw)
+	}
+
+	// me.site_chat, kept for one release, changes nothing; a person's is
+	// refused.
+	on := a.do(nil, "POST", "/v1/me/site-chat", token, m{"on": true}, "Idempotency-Key", "start-1")
 	if got, _ := on.Body["result"].(map[string]any); on.Status != http.StatusOK || got["site_chat"] != true {
 		t.Fatalf("me.site_chat: %d %s", on.Status, on.Raw)
-	}
-	if n := c.Count(`SELECT count(*) FROM actor WHERE id = $1 AND site_chat_credential_id = $2`, tutor, credential); n != 1 {
-		t.Fatal("site chat was not declared with the token of the call")
 	}
 	person := a.do(nil, "POST", "/v1/me/site-chat", a.tokenFor(c.Students[0].Actor), m{"on": true}, "Idempotency-Key", "mine")
 	if person.Status != http.StatusUnprocessableEntity || person.str("error", "details", "reason") != "not_an_agent" {
 		t.Fatalf("a person declaring site chat: %d %s", person.Status, person.Raw)
+	}
+
+	// Its owner is issued no token for it; for the mcp agent, as ever.
+	own := a.do(nil, "POST", "/v1/me/agents/"+tutor.String()+"/tokens", sato, m{"label": "laptop"}, "Idempotency-Key", "own")
+	if own.Status != http.StatusForbidden || own.str("error", "details", "reason") != "hosted_by_runtime" {
+		t.Fatalf("Sato's token for the tutor: %d %s", own.Status, own.Raw)
+	}
+	mcp := a.do(nil, "POST", "/v1/me/agents/"+script.String()+"/tokens", sato, m{"label": "editor"}, "Idempotency-Key", "own-mcp")
+	if mcp.Status != http.StatusOK || !strings.HasPrefix(mcp.str("result", "token"), "ais_") {
+		t.Fatalf("Sato's token for his assistant: %d %s", mcp.Status, mcp.Raw)
+	}
+	refused := a.do(nil, "POST", base+"/agents/"+script.String()+"/token", svc, m{}, "Idempotency-Key", "host-mcp")
+	if refused.Status != http.StatusUnprocessableEntity || refused.str("error", "details", "reason") != "not_runtime_hosted" {
+		t.Fatalf("the runtime hosting an mcp agent: %d %s", refused.Status, refused.Raw)
+	}
+
+	// Nobody else calls its routes, and its credential calls nothing else.
+	for _, who := range []string{sato, token, a.tokenFor(c.Root)} {
+		if r := a.do(nil, "POST", base+"/agents/"+tutor.String()+"/token", who, m{}, "Idempotency-Key", "steal"); r.Status != http.StatusForbidden ||
+			r.str("error", "details", "reason") != "service_only" {
+			t.Fatalf("someone else issuing the tutor's token: %d %s", r.Status, r.Raw)
+		}
+	}
+	if r := a.do(nil, "GET", "/v1/me", svc, nil); r.Status != http.StatusForbidden || r.str("error", "details", "reason") != "not_for_services" {
+		t.Fatalf("the runtime's credential at /v1/me: %d %s", r.Status, r.Raw)
+	}
+
+	// The hosting ends: the token is revoked, and opens nothing.
+	revoked := a.do(nil, "POST", base+"/agents/"+tutor.String()+"/token/revoke", svc, m{}, "Idempotency-Key", "unhost-1")
+	if revoked.Status != http.StatusOK || len(revoked.Body["result"].(m)["revoked"].([]any)) != 1 {
+		t.Fatalf("revoking the tutor's token: %d %s", revoked.Status, revoked.Raw)
+	}
+	if r := a.do(nil, "GET", "/v1/me", token, nil); r.Status != http.StatusUnauthorized {
+		t.Fatalf("the tutor's revoked token: %d %s", r.Status, r.Raw)
 	}
 }
 
@@ -420,7 +484,7 @@ func TestBrowserSession(t *testing.T) {
 	}
 	// A hostile page cannot ride the cookie: a cross-origin POST is refused
 	// before it reaches anything.
-	evil := a.do(browser, "POST", "/v1/me/agents", "", m{"display_name": "stolen"},
+	evil := a.do(browser, "POST", "/v1/me/agents", "", m{"display_name": "stolen", "hosting": "mcp"},
 		"Idempotency-Key", "x", "Origin", "https://evil.example", "Sec-Fetch-Site", "cross-site")
 	if evil.Status != http.StatusForbidden {
 		t.Fatalf("cross-origin POST with the session cookie: %d %s", evil.Status, evil.Raw)
@@ -429,7 +493,7 @@ func TestBrowserSession(t *testing.T) {
 		t.Fatal("the cross-origin request went through")
 	}
 	// The front end's own origin is allowed, and gets CORS headers.
-	bot := a.do(browser, "POST", "/v1/me/agents", "", m{"display_name": "Sato's helper"},
+	bot := a.do(browser, "POST", "/v1/me/agents", "", m{"display_name": "Sato's helper", "hosting": "mcp"},
 		"Idempotency-Key", "bot", "Origin", frontEnd, "Sec-Fetch-Site", "cross-site")
 	if bot.Status != 200 || bot.Header.Get("Access-Control-Allow-Origin") != frontEnd || bot.Header.Get("Access-Control-Allow-Credentials") != "true" {
 		t.Fatalf("trusted origin: %d %v %s", bot.Status, bot.Header, bot.Raw)

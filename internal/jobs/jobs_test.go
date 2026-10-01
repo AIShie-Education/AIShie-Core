@@ -812,9 +812,9 @@ func TestTheSweepKeepsWhatMessagesCarry(t *testing.T) {
 			f.runner = jobs.New(f.Pool, f.P, f.system, jobs.Config{Blob: store}, nil)
 			ctx := context.Background()
 			yuki := f.Students[0]
-			tutor := f.Actor("agent", "tutor")
+			tutor := f.RuntimeAgent("tutor")
 			tutorM := f.Member(f.Course, tutor, "course_tutor")
-			f.SiteChat(tutor)
+			f.Host(tutor)
 			forAMessage := func() (token, key string) {
 				t.Helper()
 				u := testkit.Result[tools.AttachmentUploadURLOut](t, f.MustCall(yuki.Actor, "conversation.upload_url",

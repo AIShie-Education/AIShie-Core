@@ -67,6 +67,9 @@ type ActorRegisterIn struct {
 	LoginID      *string    `json:"login_id,omitempty" jsonschema:"for a person only: their student or staff number, which they sign in with as with an email; 1 to 64 letters, digits, dots, hyphens and underscores, and never an @; unique in any case"`
 	PlatformRole *string    `json:"platform_role,omitempty" jsonschema:"admin; only root may grant it"`
 	OwnerActorID *uuid.UUID `json:"owner_actor_id,omitempty" jsonschema:"for an agent only: the active person who owns it, and whose delegate alone it will be, for good"`
+	// Required for an agent, and refused for a person: a schema cannot say
+	// that, so the tool does.
+	Hosting domain.Hosting `json:"hosting,omitempty" jsonschema:"for an agent, and required for one: how it is run, for good. runtime, the site's own agent runtime runs it, and is issued its one token (nobody else holds one); mcp, tools of its own reach it over MCP with tokens issued here (actor.issue_token), and nobody asks it in the site"`
 }
 
 type ActorOut struct {
@@ -81,7 +84,9 @@ func actorRegister() tool.Tool {
 			"you give here, once they have a password, which they choose through actor.invite, or through " +
 			"single sign-on (actor.link_sso); a person holds no API token. A login ID taken already is refused " +
 			"(login_id_taken). An agent is registered here and runs elsewhere: no endpoint, model or prompt is stored. " +
-			"It never signs in: give it a token with actor.issue_token. An agent may be given an owner, a person: it then acts only as " +
+			"It never signs in, and is hosted one way for good (hosting, required): runtime, the site's own agent runtime " +
+			"runs it and alone is issued its token; mcp, give it tokens with actor.issue_token for whatever reaches it over " +
+			"MCP. An agent may be given an owner, a person: it then acts only as " +
 			"that person's delegate, seated by them (member.add_delegate), never with more than their own seat. " +
 			"The owner is given here or never: nobody changes it or takes it away afterwards, and an agent registered " +
 			"without one stays nobody's.",
@@ -117,6 +122,16 @@ func actorRegister() tool.Tool {
 				}
 				in.LoginID = &id
 			}
+			var hosting *string
+			switch {
+			case in.Kind == "agent" && !in.Hosting.Valid():
+				return ActorOut{}, apperr.Invalid("hosting is required for an agent: runtime or mcp; it never changes").With("field", "hosting")
+			case in.Kind == "agent":
+				h := string(in.Hosting)
+				hosting = &h
+			case in.Hosting != "":
+				return ActorOut{}, apperr.Invalid("only an agent has a hosting").With("field", "hosting")
+			}
 			if in.OwnerActorID != nil {
 				if in.Kind != "agent" {
 					return ActorOut{}, apperr.Invalid("only an agent has an owner")
@@ -134,11 +149,15 @@ func actorRegister() tool.Tool {
 			if err := ec.Q.InsertActor(ctx, dbq.InsertActorParams{
 				ID: id, Kind: in.Kind, DisplayName: in.DisplayName, Email: in.Email,
 				PlatformRole: in.PlatformRole, CreatedByActorID: &ec.Actor.ID, CreatedAt: ec.Now,
-				OwnerActorID: in.OwnerActorID, LoginID: in.LoginID,
+				OwnerActorID: in.OwnerActorID, LoginID: in.LoginID, Hosting: hosting,
 			}); err != nil {
 				return ActorOut{}, loginIDConflict(err)
 			}
-			ec.Emit(events.Event{Type: EventActorRegistered, SubjectType: "actor", SubjectID: &id})
+			e := events.Event{Type: EventActorRegistered, SubjectType: "actor", SubjectID: &id}
+			if hosting != nil {
+				e.Payload = map[string]any{"hosting": *hosting}
+			}
+			ec.Emit(e)
 			return ActorOut{ActorID: id}, nil
 		},
 	})
@@ -222,6 +241,8 @@ type ActorView struct {
 	// Who made the suspension in force; absent for one made before this was
 	// recorded, which is an administrator's.
 	SuspendedByActorID *uuid.UUID `json:"suspended_by_actor_id,omitempty" jsonschema:"while suspended: who suspended them; an agent's owner may lift only a suspension of their own"`
+	// How an agent is run, which never changes.
+	Hosting *string `json:"hosting,omitempty" jsonschema:"for an agent: runtime, run by the site's own agent runtime, which alone holds its token; mcp, reached over MCP with tokens issued here"`
 }
 
 func viewActor(a dbq.GetActorViewRow) ActorView {
@@ -229,7 +250,7 @@ func viewActor(a dbq.GetActorViewRow) ActorView {
 		LoginID: a.LoginID, LoginIDVerified: a.LoginIDVerified, Status: a.Status,
 		PlatformRole: a.PlatformRole, CreatedByActorID: a.CreatedByActorID, CreatedAt: a.CreatedAt,
 		HasPassword: a.HasPassword, HasSSO: a.HasSso, InviteExpiresAt: a.InviteExpiresAt,
-		OwnerActorID: a.OwnerActorID, OwnerName: a.OwnerName}
+		OwnerActorID: a.OwnerActorID, OwnerName: a.OwnerName, Hosting: a.Hosting}
 	if a.Status == domain.ActorSuspended {
 		// Read only while suspended: what it says otherwise is nothing.
 		v.SuspendedByActorID = a.SuspendedByActorID
@@ -522,10 +543,11 @@ type ActorIssueTokenIn struct {
 func actorIssueToken() tool.Tool {
 	return tool.Define(tool.Spec[ActorIssueTokenIn, IssueTokenOut]{
 		Name: "actor.issue_token",
-		Description: "Issue an API token for an agent: how a newly registered agent gets its first credential, since it " +
+		Description: "Issue an API token for an mcp agent: how a newly registered agent gets its first credential, since it " +
 			"never signs in. Only an agent holds one: a person is refused (api_tokens_are_for_agents), since people sign " +
-			"in with a password or single sign-on, and use one of their agents for tools and scripts. The token is " +
-			"returned once and only its hash is kept.",
+			"in with a password or single sign-on, and use one of their agents for tools and scripts. A runtime agent is " +
+			"refused too (hosted_by_runtime): the site's agent runtime alone is issued its token. The token is returned " +
+			"once and only its hash is kept.",
 		Kind: tool.Write, Gate: admins,
 		HTTP:      tool.Route{Method: "POST", Pattern: "/v1/actors/{actor_id}/tokens"},
 		SecretOut: []string{"token"},

@@ -151,8 +151,6 @@ type Querier interface {
 	// for any such call in flight, and every call after it finds the appointment
 	// ended.
 	EndAppointment(ctx context.Context, arg EndAppointmentParams) (int64, error)
-	// Its owner switches it off: only its owner, who is its owner for good.
-	EndSiteChatByOwner(ctx context.Context, arg EndSiteChatByOwnerParams) error
 	// Whether the actor, or anyone of the same party (SameParty), had a hand in
 	// escalating the action, from any seat: made the review that escalated it,
 	// or approved that review, or confirmed that approval, and so on up. An
@@ -231,6 +229,14 @@ type Querier interface {
 	// in. At most one invitation is live (credential_one_live_invite), so the
 	// join adds no row; it may have expired unused.
 	GetActorView(ctx context.Context, id uuid.UUID) (GetActorViewRow, error)
+	// An agent as the site's agent runtime needs it to host it by its id: how
+	// it is hosted, its standing and its owner's, how many seats it holds that
+	// count now, its runtime token if one is live, and whether people in the
+	// site may ask it now, by the rule of SiteChatOf. Only an agent: anyone
+	// else is no row.
+	// One row at most: an agent's runtime tokens that are not revoked are one at
+	// most (credential_one_runtime_token).
+	GetAgentForRuntime(ctx context.Context, arg GetAgentForRuntimeParams) (GetAgentForRuntimeRow, error)
 	// GetAssignmentInCourse for a tool about to add a submission to it. KEY SHARE
 	// holds up nothing but LockAssignmentForUnpublish, which it waits for; then
 	// the assignment is read as that left it.
@@ -387,7 +393,8 @@ type Querier interface {
 	// was allowed in; null for a seat's call, one's own account's, and a denial.
 	InsertAction(ctx context.Context, arg InsertActionParams) (int64, error)
 	// A login ID an administrator gives is one they vouch for (login_id_verified,
-	// by its default).
+	// by its default). An agent's hosting is given, and only an agent's
+	// (actor_hosting_is_an_agents).
 	InsertActor(ctx context.Context, arg InsertActorParams) error
 	// The partial unique index department_admin_one_live refuses a second live
 	// appointment of one person at one department, two made at once included.
@@ -435,6 +442,11 @@ type Querier interface {
 	// vouched for, as there is nothing to doubt.
 	InsertRegisteredPerson(ctx context.Context, arg InsertRegisteredPersonParams) error
 	InsertRetraction(ctx context.Context, arg InsertRetractionParams) (int64, error)
+	// A runtime agent's token, issued to the site's agent runtime by the
+	// agent_runtime service (issued_by_actor_id): it never expires, and is the
+	// agent's one token that is not revoked (credential_one_runtime_token,
+	// credential_fits_hosting).
+	InsertRuntimeToken(ctx context.Context, arg InsertRuntimeTokenParams) error
 	InsertSSOProvider(ctx context.Context, arg InsertSSOProviderParams) error
 	// ---------------------------------------------------------------------------
 	// Services and their credentials
@@ -456,6 +468,9 @@ type Querier interface {
 	// the departments the issuer administers, and beneath them, as ListCourses
 	// finds those.
 	InvitableBy(ctx context.Context, arg InvitableByParams) (InvitableByRow, error)
+	// Whether a credential is the actor's own token, issued to the site's agent
+	// runtime, and live: neither revoked nor expired.
+	IsLiveRuntimeToken(ctx context.Context, arg IsLiveRuntimeTokenParams) (bool, error)
 	// The seq of a conversation's newest message, 0 while it has none; with at,
 	// of the newest written at or before it.
 	LastMessageSeq(ctx context.Context, arg LastMessageSeqParams) (int32, error)
@@ -473,10 +488,10 @@ type Querier interface {
 	// strpos has no wildcards to escape.
 	ListActors(ctx context.Context, arg ListActorsParams) ([]ListActorsRow, error)
 	// A person's agents, oldest first, with what their owner needs to see at a
-	// glance: when one last used a token that still works, how many seats it
-	// holds that count now, how many requests of the owner's to seat it wait
-	// for a decision, and whether it takes conversations in the site now, by
-	// the rule of SiteChatOf.
+	// glance: how each is hosted, when one last used a token that still works,
+	// how many seats it holds that count now, how many requests of the owner's
+	// to seat it wait for a decision, and whether people in the site may ask it
+	// now, by the rule of SiteChatOf.
 	ListAgentsOf(ctx context.Context, arg ListAgentsOfParams) ([]ListAgentsOfRow, error)
 	// The appointments at a department and, with inherited, at every department
 	// above it, whose administrators administer it too: nearest first, then by
@@ -679,10 +694,11 @@ type Querier interface {
 	// active actor, with conversation_answer not denied on the row, and, for a
 	// delegate, either the caller's own or one that answers the course, whose
 	// principal's row holds member_manage. Never a person's: conversations are
-	// with agents. An agent's seat only while the agent takes conversations in
-	// the site (docs/schema.md §2.8), by the rule of SiteChatOf, its status
-	// asked above: one operated from an external tool is asked there, not here.
-	// kind is read to leave out, never to let in. Which of them the caller may
+	// with agents. An agent's seat only while people in the site may ask it
+	// (docs/schema.md §2.8), by the rule of SiteChatOf, its status asked above:
+	// a runtime agent while the site's runtime holds a live token for it, and
+	// never an mcp agent, which its owner's own tools reach elsewhere. kind and
+	// hosting are read to leave out, never to let in. Which of them the caller may
 	// address is decided in Go (tools.addressing), which this only narrows to
 	// what it could accept: every student's own agent answers, and only its
 	// principal. Unpaged: what is left is a course's agents, and the caller's
@@ -754,6 +770,10 @@ type Querier interface {
 	// row FOR SHARE (GetActorForShare), and waits for the reset, or the reset
 	// for it and then counts the seat.
 	LockActorForPasswordReset(ctx context.Context, id uuid.UUID) error
+	// An agent's runtime token is issued and revoked one call at a time, and
+	// its standing read under the lock. NO KEY UPDATE, as LockOwnerForAgents,
+	// not UPDATE: every action row naming the agent holds KEY SHARE on the row.
+	LockAgentForHosting(ctx context.Context, id uuid.UUID) error
 	// FOR UPDATE, not the NO KEY UPDATE of an ordinary update: it conflicts with
 	// the KEY SHARE that inserting a submission takes, and that
 	// GetAssignmentForSubmission takes before it checks that the assignment is
@@ -1010,6 +1030,8 @@ type Querier interface {
 	RevokeInvites(ctx context.Context, arg RevokeInvitesParams) error
 	RevokeJoinLink(ctx context.Context, arg RevokeJoinLinkParams) (int64, error)
 	RevokePasswordCredentials(ctx context.Context, arg RevokePasswordCredentialsParams) error
+	// Every runtime token of an agent's that is not revoked: one at most.
+	RevokeRuntimeTokens(ctx context.Context, arg RevokeRuntimeTokensParams) ([]uuid.UUID, error)
 	// Every live identity linked at a provider that is going. Revoked, not
 	// deleted: an identity once linked to an account is never linked to another
 	// (unique (provider, subject)), and linking it again to the same one revives
@@ -1066,10 +1088,12 @@ type Querier interface {
 	SetMemberStatus(ctx context.Context, arg SetMemberStatusParams) (int64, error)
 	SetPublishedVersion(ctx context.Context, arg SetPublishedVersionParams) error
 	SetSSOProviderEnabled(ctx context.Context, arg SetSSOProviderEnabledParams) (int32, error)
-	// The credential an agent calls with declares that it takes conversations
-	// in the site, in place of any that did before; null, that it takes none.
+	// The release before this one reads who is asked in the site from the
+	// credential an agent declared with (actor.site_chat_credential_id); this
+	// one reads it nowhere, and keeps it naming a runtime agent's live runtime
+	// token, null once there is none, so that a rollback asks the same agents.
 	// The key holds a credential to the agent's own (actor_site_chat_credential_fk).
-	SetSiteChat(ctx context.Context, arg SetSiteChatParams) error
+	SetSiteChatCredential(ctx context.Context, arg SetSiteChatCredentialParams) error
 	SetSubmissionLateness(ctx context.Context, arg SetSubmissionLatenessParams) (int64, error)
 	// Serialising what races -------------------------------------------------------
 	// The assignment a submission's grade is out of, read again and held still
@@ -1097,14 +1121,15 @@ type Querier interface {
 	// has the name, in any case. id is the department being named, left out of
 	// the comparison; a new one's id is not there yet.
 	SiblingNameTaken(ctx context.Context, arg SiblingNameTakenParams) (bool, error)
-	// Whether each of the given actors takes conversations in the site now
-	// (docs/schema.md §2.8): an agent does while the credential with which a
-	// program that runs it declared so (me.site_chat) is live, neither revoked
-	// nor expired, the agent is active, and its owner, if it has one, is
-	// active. A person or the system actor never does; agent says which is
-	// which, so that a view can leave people out. ListAgentsOf and
-	// ListRespondentCandidates hold the same rule: a change to one is a change
-	// to all three.
+	// Whether people in the site may ask each of the given actors now
+	// (docs/schema.md §2.8): a runtime agent may be asked while a token issued
+	// to the site's agent runtime for it (agent_runtime.issue_token) is live,
+	// neither revoked nor expired, the agent is active, and its owner, if it
+	// has one, is active. An mcp agent, a person or the system actor never may;
+	// agent says which is an agent, so that a view can leave people out, and
+	// hosting how it is hosted, so that a refusal can say why. ListAgentsOf,
+	// ListRespondentCandidates and GetAgentForRuntime hold the same rule: a
+	// change to one is a change to all four.
 	SiteChatOf(ctx context.Context, arg SiteChatOfParams) ([]SiteChatOfRow, error)
 	// Whether a file has been attached: to a version of a document, as any of
 	// its files or in its own columns (as the release before 0023 writes it),

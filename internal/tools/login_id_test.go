@@ -48,7 +48,7 @@ func TestAnAdministratorGivesAndCorrectsALoginID(t *testing.T) {
 	for _, bad := range []string{"", "  ", "2023 0001", "wei@hainanu.edu.cn", strings.Repeat("7", 65), "學號2023", "hnu/2023"} {
 		b.try(t, b.admin, "actor.register", m{"kind": "human", "display_name": "Bad", "login_id": bad}, apperr.InvalidArgument)
 	}
-	b.try(t, b.admin, "actor.register", m{"kind": "agent", "display_name": "bot", "login_id": "bot-1"}, apperr.InvalidArgument)
+	b.try(t, b.admin, "actor.register", m{"kind": "agent", "hosting": "mcp", "display_name": "bot", "login_id": "bot-1"}, apperr.InvalidArgument)
 	b.do(t, b.admin, "actor.register", m{"kind": "human", "display_name": "Longest", "login_id": "hnu.2023-00_" + strings.Repeat("7", 52)})
 
 	// Given later, to Yuki, and corrected; nobody else's, and never an

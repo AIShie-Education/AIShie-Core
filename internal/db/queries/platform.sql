@@ -63,7 +63,7 @@ SELECT a.id, a.kind, a.display_name, a.email, a.status, a.platform_role, a.creat
        EXISTS (SELECT 1 FROM credential p WHERE p.actor_id = a.id AND p.kind = 'password' AND p.revoked_at IS NULL) AS has_password,
        EXISTS (SELECT 1 FROM credential s WHERE s.actor_id = a.id AND s.kind = 'sso' AND s.revoked_at IS NULL) AS has_sso,
        i.expires_at AS invite_expires_at, a.owner_actor_id, o.display_name AS owner_name, a.suspended_by_actor_id,
-       a.email_verified, a.login_id, a.login_id_verified
+       a.email_verified, a.login_id, a.login_id_verified, a.hosting
 FROM actor a
 LEFT JOIN credential i ON i.actor_id = a.id AND i.kind = 'invite' AND i.revoked_at IS NULL
 LEFT JOIN actor o ON o.id = a.owner_actor_id
@@ -79,7 +79,7 @@ SELECT a.id, a.kind, a.display_name, a.email, a.status, a.platform_role, a.creat
        EXISTS (SELECT 1 FROM credential p WHERE p.actor_id = a.id AND p.kind = 'password' AND p.revoked_at IS NULL) AS has_password,
        EXISTS (SELECT 1 FROM credential s WHERE s.actor_id = a.id AND s.kind = 'sso' AND s.revoked_at IS NULL) AS has_sso,
        i.expires_at AS invite_expires_at, a.owner_actor_id, o.display_name AS owner_name, a.suspended_by_actor_id,
-       a.email_verified, a.login_id, a.login_id_verified
+       a.email_verified, a.login_id, a.login_id_verified, a.hosting
 FROM actor a
 LEFT JOIN credential i ON i.actor_id = a.id AND i.kind = 'invite' AND i.revoked_at IS NULL
 LEFT JOIN actor o ON o.id = a.owner_actor_id

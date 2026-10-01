@@ -30,7 +30,7 @@ func aboveCeiling(t *testing.T, what string, out pipeline.Outcome, perm, why str
 func TestAnAgentDecidesAndReviewsOnlyByProposal(t *testing.T) {
 	b := build(t)
 	mori := b.mori(t)
-	triage := testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", m{"kind": "agent", "display_name": "triage"})).ActorID
+	triage := testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", m{"kind": "agent", "hosting": "mcp", "display_name": "triage"})).ActorID
 	aide := b.person(t, "Aide", "")
 
 	// Seated with a preset that decides on its own, an agent nobody owns
@@ -53,7 +53,7 @@ func TestAnAgentDecidesAndReviewsOnlyByProposal(t *testing.T) {
 
 	// Named above it, it is refused, however it is asked: seating it,
 	// raising it, raising every seat of its role at once.
-	other := testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", m{"kind": "agent", "display_name": "other"})).ActorID
+	other := testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", m{"kind": "agent", "hosting": "mcp", "display_name": "other"})).ActorID
 	aboveCeiling(t, "seating an agent to decide on its own", b.MustCall(b.sato, "member.add",
 		m{"course_id": b.course, "actor_id": other, "preset": "ta", "perms": m{"action_decide": "autonomous"}}, "add-other"), "action_decide", "agent_decides_by_proposal")
 	for _, level := range []string{"pending_review", "autonomous"} {

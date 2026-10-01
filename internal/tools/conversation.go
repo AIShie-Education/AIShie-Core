@@ -45,11 +45,13 @@ import (
 // who may answer, and whether a respondent may still read what it was asked —
 // and it is measured now, on every call, since seats change.
 //
-// An agent is asked in the site only while what runs it says it answers
-// there (me.site_chat): one operated from an external tool is not offered,
-// and a new question to it is refused, since nothing here would ever answer
-// it (askable). That is asked of a new question alone, never of an answer
-// or a read.
+// An agent is asked in the site only while the site's own agent runtime
+// hosts it: a runtime agent, while the runtime holds a live token for it
+// (agent_runtime.issue_token). An mcp agent, which its owner's own tools
+// reach over MCP, is never offered, and a new question to it is refused,
+// since nothing here would ever answer it; so is one to a runtime agent the
+// runtime does not run now (askable). That is asked of a new question
+// alone, never of an answer or a read.
 //
 // Every message is an action, and its payload holds what was written: the
 // action log shows it to whoever decides actions in the course, unscoped, as
@@ -475,11 +477,16 @@ func notAddressable(prefix, why string) error {
 	return apperr.Forbid("%s: %s", prefix, why).With("reason", "not_addressable")
 }
 
-// errAnswersElsewhere refuses a question to an agent that takes no
-// conversations in the site: nothing runs it that polls its inbox and
-// answers, and the question would wait for good.
-var errAnswersElsewhere = apperr.Precondition("that agent takes no conversations in the site: it is operated from an external tool, and acts there").
-	With("reason", "agent_answers_elsewhere")
+// errMCPAgent refuses a question to an mcp agent: its owner's own tools
+// reach it over MCP, nothing here polls its inbox and answers, and the
+// question would wait for good. It is never asked in the site.
+var errMCPAgent = apperr.Precondition("that agent is never asked in the site: it is used from its owner's own tools, over MCP").
+	With("reason", "mcp_agent")
+
+// errAgentNotHosted refuses a question to a runtime agent the site's agent
+// runtime does not run now: it holds no live token for it.
+var errAgentNotHosted = apperr.Precondition("that agent is not running in the site just now: the site's agent runtime does "+
+	"not host it at the moment; ask again later, or ask its owner").With("reason", "agent_not_hosted")
 
 // errWithAgents refuses a person where only an agent may be: as a
 // conversation's respondent, and answering in one. The reason is the
@@ -503,24 +510,28 @@ func personAnswersNothing(ctx context.Context, q dbq.Querier, caller domain.Acto
 
 // askable says whether a respondent is one a new question may be put to,
 // as far as what it is goes (docs/schema.md §2.8): an agent, since
-// conversations are with agents (errWithAgents), and one that takes
-// conversations in the site now (errAnswersElsewhere; the rule is SQL's,
-// SiteChatOf). It is asked of a new question only, conversation.open's and
-// conversation.ask's, never of an answer or a read: what an agent was asked
-// stays readable and answerable. It reads kind to refuse, as the refusals of
-// ownership do; nothing that grants reads it. The two refusals are returned
-// apart, since whom the caller may address is asked between them.
+// conversations are with agents (errWithAgents), and one people in the site
+// may ask now (the rule is SQL's, SiteChatOf): never an mcp agent
+// (errMCPAgent), and a runtime agent only while the site's runtime hosts it
+// (errAgentNotHosted). It is asked of a new question only,
+// conversation.open's and conversation.ask's, never of an answer or a read:
+// what an agent was asked stays readable and answerable. It reads kind and
+// hosting to refuse, as the refusals of ownership do; nothing that grants
+// reads them. The two refusals are returned apart, since whom the caller may
+// address is asked between them.
 func askable(ctx context.Context, q dbq.Querier, now time.Time, respondent *domain.Member) (notAgent, elsewhere error, err error) {
 	chat, err := siteChatOf(ctx, q, now, []uuid.UUID{respondent.ActorID})
 	if err != nil {
 		return nil, nil, err
 	}
 	c := chat[respondent.ActorID]
-	if !c.Agent {
+	switch {
+	case !c.Agent:
 		return errWithAgents, nil, nil
-	}
-	if !c.SiteChat {
-		return nil, errAnswersElsewhere, nil
+	case domain.Hosting(c.Hosting) != domain.HostingRuntime:
+		return nil, errMCPAgent, nil
+	case !c.SiteChat:
+		return nil, errAgentNotHosted, nil
 	}
 	return nil, nil, nil
 }
@@ -578,8 +589,9 @@ func conversationOpen(d Deps) tool.Tool {
 			"and, if you give body, ask the first question, which may carry files (attachments, each uploaded first with " +
 			"conversation.upload_url). Conversations are between a person and an agent: a person is " +
 			"nobody's respondent (conversations_are_with_agents); people talk to people elsewhere. You may address only " +
-			"an agent that can see and do nothing you cannot, or your own agent, and only while what runs it answers in " +
-			"the site (agent_answers_elsewhere otherwise: it is operated from an external tool): conversation.respondents " +
+			"an agent that can see and do nothing you cannot, or your own agent, and only a runtime agent the site's " +
+			"agent runtime runs now: an mcp agent, used from its owner's own tools, is never asked here (mcp_agent), and a " +
+			"runtime agent the runtime does not run now is not asked either (agent_not_hosted). conversation.respondents " +
 			"lists them. Keep asking with conversation.ask; answers come back as messages (conversation.messages). Both " +
 			"of you, and course staff who decide actions for you, can read it; and an agent that answers others too, such " +
 			"as the course's tutor, may repeat to them what you write.",
@@ -688,8 +700,8 @@ func conversationAsk(d Deps) tool.Tool {
 		Description: "Write in a conversation you opened: a question, or anything more you have to say, which may carry files " +
 			"(attachments, each uploaded first with conversation.upload_url). It is refused once the " +
 			"conversation is closed, or once you may no longer address its respondent; start a new conversation then. It is " +
-			"refused too, as agent_answers_elsewhere, while its respondent is an agent that takes no conversations in the " +
-			"site: what was written stays readable.",
+			"refused too while its respondent is not asked in the site: an mcp agent (mcp_agent), or a runtime agent the " +
+			"site's runtime does not run now (agent_not_hosted). What was written stays readable.",
 		Kind: tool.Write, Gate: asks,
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/conversations/{conversation_id}/ask"},
 		Resolve: func(ctx context.Context, q dbq.Querier, in ConversationAskIn) (tool.Target, error) {
@@ -1289,6 +1301,7 @@ type RespondentView struct {
 	MemberID      uuid.UUID  `json:"member_id"`
 	DisplayName   string     `json:"display_name"`
 	Kind          string     `json:"kind" jsonschema:"agent: a person is nobody's respondent; for display only"`
+	Hosting       string     `json:"hosting" jsonschema:"runtime: the site's own agent runtime runs it; only a runtime agent is asked in the site"`
 	Role          string     `json:"role" jsonschema:"roster fact, for display"`
 	IsMyDelegate  bool       `json:"is_my_delegate" jsonschema:"your own agent, seated as your delegate"`
 	AnswersCourse bool       `json:"answers_course" jsonschema:"an agent seated to answer the course, not its owner alone: it answers other members as well, and may repeat to them what it is told"`
@@ -1310,8 +1323,9 @@ func conversationRespondents() tool.Tool {
 	return tool.Define(tool.Spec[tool.InCourse, RespondentsOut]{
 		Name: "conversation.respondents",
 		Description: "The agents you may start a conversation with here: agents that answer questions and can see and do " +
-			"nothing you cannot — the course's tutor agent, say — and your own agents, each only while what runs it " +
-			"answers in the site. Never a person: conversations are with agents, and people talk to people elsewhere. " +
+			"nothing you cannot — the course's tutor agent, say — and your own agents, each a runtime agent and only while " +
+			"the site's agent runtime runs it; never an mcp agent, used from its owner's own tools. Never a person: " +
+			"conversations are with agents, and people talk to people elsewhere. " +
 			"Each says how its answers arrive, whether it answers others too (answers_course: it may repeat to them what " +
 			"you write), and when it was last seen.",
 		Kind: tool.Read, Gate: asks,
@@ -1355,7 +1369,7 @@ func conversationRespondents() tool.Tool {
 					continue
 				}
 				out.Respondents = append(out.Respondents, RespondentView{MemberID: r.ID, DisplayName: r.DisplayName, Kind: r.Kind,
-					Role: r.Role, IsMyDelegate: r.PrincipalMemberID != nil && *r.PrincipalMemberID == rc.Member.ID,
+					Hosting: r.Hosting, Role: r.Role, IsMyDelegate: r.PrincipalMemberID != nil && *r.PrincipalMemberID == rc.Member.ID,
 					OwnerName: r.OwnerName, AnswerLevel: seat.Perm(domain.PermConversationAnswer).String(), LastSeenAt: r.LastSeenAt,
 					AnswersCourse: seat.AnswersOthers()})
 			}

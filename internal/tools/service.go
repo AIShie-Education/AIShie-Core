@@ -21,11 +21,13 @@ import (
 // A site service (docs/schema.md §2.1, Services) is a program of the site's
 // that Core gives an identity for one thing, and for nothing else: the
 // runtime's transcriber, which writes documents' text versions
-// (document_text.*). It is an actor of kind service, one for each scope,
-// made the first time a credential is issued for it; it is seated in no
-// course, signs in nowhere, and calls its own tools and nothing else. The
-// platform's administrators issue, list and revoke its credentials here;
-// the tools that manage actors do not reach it.
+// (document_text.*), and the site's agent runtime, which hosts the runtime
+// agents (agent_runtime.*). It is an actor of kind service, one for each
+// scope, made the first time a credential is issued for it; it is seated in
+// no course, signs in nowhere, and calls its own tools and nothing else. The
+// platform's administrators issue, list and revoke its credentials here, and
+// the operator issues one on the command line, at setup
+// (IssueServiceCredential); the tools that manage actors do not reach it.
 
 func serviceTools() []tool.Tool {
 	return []tool.Tool{serviceIssueCredential(), serviceListCredentials(), serviceRevokeCredential()}
@@ -41,17 +43,27 @@ const (
 )
 
 // services names each scope's service, as its actions show it.
-var services = map[string]string{domain.ServiceDocumentText: "Transcription service"}
+var services = map[string]string{domain.ServiceDocumentText: "Transcription service", domain.ServiceAgentRuntime: "Agent runtime"}
+
+// errNoSuchScope refuses a scope there is no service for.
+var errNoSuchScope = apperr.Invalid("scope must be %s or %s", domain.ServiceDocumentText, domain.ServiceAgentRuntime).
+	With("field", "scope")
+
+// ServiceScope says whether there is a site service for scope.
+func ServiceScope(scope string) bool {
+	_, ok := services[scope]
+	return ok
+}
 
 func serviceTarget(scope string) (tool.Target, error) {
-	if _, ok := services[scope]; !ok {
-		return tool.Target{}, apperr.Invalid("scope must be %s", domain.ServiceDocumentText)
+	if !ServiceScope(scope) {
+		return tool.Target{}, errNoSuchScope
 	}
 	return tool.Target{Type: "service"}, nil
 }
 
 type ServiceIssueCredentialIn struct {
-	Scope         string `json:"scope" jsonschema:"the service: document_text, the runtime's transcriber, which writes documents' text versions"`
+	Scope         string `json:"scope" jsonschema:"the service: document_text, the runtime's transcriber, which writes documents' text versions; or agent_runtime, the site's agent runtime, which hosts the runtime agents"`
 	Label         string `json:"label" jsonschema:"what this credential is for, so it can be recognised later: the runtime it is given to"`
 	ExpiresInDays *int   `json:"expires_in_days,omitempty" jsonschema:"1 to 3650; omit for a credential that does not expire"`
 	Replace       bool   `json:"replace,omitempty" jsonschema:"revoke the service's other credentials in the same call, and put back in the queue what they had claimed"`
@@ -70,12 +82,14 @@ func serviceIssueCredential() tool.Tool {
 	return tool.Define(tool.Spec[ServiceIssueCredentialIn, ServiceIssueCredentialOut]{
 		Name: "service.issue_credential",
 		Description: "Issue a credential for a site service: document_text, the runtime's transcriber, which takes the " +
-			"versions waiting to be transcribed and writes their text (document_text.queue, .complete). The service calls " +
-			"its own tools with it, over REST, and nothing else: no other tool, and not the agents' MCP door. The service " +
-			"is made the first time; it is seated in no course and signs in nowhere. The credential is returned once and " +
-			"only its hash is kept. replace revokes the service's other credentials at once, and puts back in the queue " +
-			"what they had claimed; without it a service holds at most " + strconv.Itoa(MaxServiceCredentials) + " (too_many_credentials). " +
-			"For platform administrators.",
+			"versions waiting to be transcribed and writes their text (document_text.queue, .complete); or agent_runtime, " +
+			"the site's agent runtime, which hosts the runtime agents by their ids and is issued each one's token " +
+			"(agent_runtime.*). The service calls its own tools with it, over REST, and nothing else: no other tool, and " +
+			"not the agents' MCP door. The service is made the first time; it is seated in no course and signs in " +
+			"nowhere. The credential is returned once and only its hash is kept. replace revokes the service's other " +
+			"credentials at once, and puts back in the queue what they had claimed; without it a service holds at most " +
+			strconv.Itoa(MaxServiceCredentials) + " (too_many_credentials). For platform administrators; the operator issues " +
+			"one at setup on the command line (aishie-core service issue).",
 		Kind: tool.Write, Gate: admins,
 		HTTP:      tool.Route{Method: "POST", Pattern: "/v1/services/{scope}/credentials"},
 		SecretOut: []string{"token"},
@@ -87,60 +101,94 @@ func serviceIssueCredential() tool.Tool {
 			if err != nil {
 				return ServiceIssueCredentialOut{}, err
 			}
-			if err := ec.Q.InsertServiceActor(ctx, dbq.InsertServiceActorParams{ID: ids.New(), DisplayName: services[in.Scope],
-				Scope: &in.Scope, CreatedByActorID: &ec.Actor.ID, CreatedAt: ec.Now}); err != nil {
-				return ServiceIssueCredentialOut{}, err
-			}
-			svc, err := ec.Q.GetServiceActor(ctx, &in.Scope)
-			if err != nil {
-				return ServiceIssueCredentialOut{}, err
-			}
-			// One issue at a time for a service, so that the count holds.
-			if err := ec.Q.LockServiceActor(ctx, svc.ID); err != nil {
-				return ServiceIssueCredentialOut{}, err
-			}
-			live, err := ec.Q.ListLiveServiceCredentials(ctx, dbq.ListLiveServiceCredentialsParams{ActorID: svc.ID, Now: &ec.Now})
-			if err != nil {
-				return ServiceIssueCredentialOut{}, err
-			}
-			out := ServiceIssueCredentialOut{ServiceActorID: svc.ID, ExpiresAt: expires}
-			switch {
-			case in.Replace:
-				for _, id := range live {
-					if _, err := revokeServiceCredential(ctx, ec, svc.ID, in.Scope, id); err != nil {
-						return ServiceIssueCredentialOut{}, err
-					}
-					out.Revoked = append(out.Revoked, id)
-				}
-			case len(live) >= MaxServiceCredentials:
-				return ServiceIssueCredentialOut{}, apperr.Precondition("the service holds %d live credentials already: revoke one, or replace them",
-					len(live)).With("reason", "too_many_credentials")
-			}
-			tok, err := auth.NewServiceToken()
-			if err != nil {
-				return ServiceIssueCredentialOut{}, err
-			}
-			out.CredentialID = ids.New()
-			label := in.Label
-			if err := ec.Q.InsertCredential(ctx, dbq.InsertCredentialParams{ID: out.CredentialID, ActorID: svc.ID, Kind: auth.KindService,
-				SecretHash: &tok.Hash, TokenPrefix: &tok.Prefix, Label: &label, ExpiresAt: expires, CreatedAt: ec.Now,
-				IssuedByActorID: &ec.Actor.ID}); err != nil {
-				return ServiceIssueCredentialOut{}, err
-			}
-			out.Token, out.TokenPrefix = tok.Full, tok.Prefix
-			ec.Emit(events.Event{Type: EventServiceCredentialIssued, SubjectType: "actor", SubjectID: &svc.ID,
-				Payload: map[string]any{"scope": in.Scope, "credential_id": out.CredentialID, "replaced": len(out.Revoked)}})
-			return out, nil
+			return IssueServiceCredential(ctx, ec.Q, ServiceCredentialArgs{Scope: in.Scope, Label: in.Label, ExpiresAt: expires,
+				Replace: in.Replace, IssuedBy: &ec.Actor.ID, Now: ec.Now, Emit: ec.Emit})
 		},
 	})
+}
+
+// ServiceCredentialArgs is what issuing a site service a credential takes.
+type ServiceCredentialArgs struct {
+	Scope     string
+	Label     string
+	ExpiresAt *time.Time
+	// Replace revokes the service's other credentials in the same call.
+	Replace bool
+	// IssuedBy is who issues it, and who makes the service the first time:
+	// nil on the command line, where nobody Core knows does.
+	IssuedBy *uuid.UUID
+	Now      time.Time
+	// Emit tells the feed, nil for nothing: the command line records no
+	// action, and so no news.
+	Emit func(events.Event)
+}
+
+// IssueServiceCredential issues a site service a credential, making the
+// service the first time, in q's transaction: what service.issue_credential
+// does, and the operator's `aishie-core service issue` too, which records no
+// action. The token is in what it returns, once.
+func IssueServiceCredential(ctx context.Context, q *dbq.Queries, a ServiceCredentialArgs) (ServiceIssueCredentialOut, error) {
+	if !ServiceScope(a.Scope) {
+		return ServiceIssueCredentialOut{}, errNoSuchScope
+	}
+	if a.Emit == nil {
+		a.Emit = func(events.Event) {}
+	}
+	if err := q.InsertServiceActor(ctx, dbq.InsertServiceActorParams{ID: ids.New(), DisplayName: services[a.Scope],
+		Scope: &a.Scope, CreatedByActorID: a.IssuedBy, CreatedAt: a.Now}); err != nil {
+		return ServiceIssueCredentialOut{}, err
+	}
+	svc, err := q.GetServiceActor(ctx, &a.Scope)
+	if err != nil {
+		return ServiceIssueCredentialOut{}, err
+	}
+	// One issue at a time for a service, so that the count holds.
+	if err := q.LockServiceActor(ctx, svc.ID); err != nil {
+		return ServiceIssueCredentialOut{}, err
+	}
+	live, err := q.ListLiveServiceCredentials(ctx, dbq.ListLiveServiceCredentialsParams{ActorID: svc.ID, Now: &a.Now})
+	if err != nil {
+		return ServiceIssueCredentialOut{}, err
+	}
+	out := ServiceIssueCredentialOut{ServiceActorID: svc.ID, ExpiresAt: a.ExpiresAt}
+	switch {
+	case a.Replace:
+		for _, id := range live {
+			if _, err := revokeServiceCredential(ctx, q, a.Emit, a.Now, svc.ID, a.Scope, id); err != nil {
+				return ServiceIssueCredentialOut{}, err
+			}
+			out.Revoked = append(out.Revoked, id)
+		}
+	case len(live) >= MaxServiceCredentials:
+		return ServiceIssueCredentialOut{}, apperr.Precondition("the service holds %d live credentials already: revoke one, or replace them",
+			len(live)).With("reason", "too_many_credentials")
+	}
+	tok, err := auth.NewServiceToken()
+	if err != nil {
+		return ServiceIssueCredentialOut{}, err
+	}
+	out.CredentialID = ids.New()
+	label := a.Label
+	if err := q.InsertCredential(ctx, dbq.InsertCredentialParams{ID: out.CredentialID, ActorID: svc.ID, Kind: auth.KindService,
+		SecretHash: &tok.Hash, TokenPrefix: &tok.Prefix, Label: &label, ExpiresAt: a.ExpiresAt, CreatedAt: a.Now,
+		IssuedByActorID: a.IssuedBy}); err != nil {
+		return ServiceIssueCredentialOut{}, err
+	}
+	out.Token, out.TokenPrefix = tok.Full, tok.Prefix
+	a.Emit(events.Event{Type: EventServiceCredentialIssued, SubjectType: "actor", SubjectID: &svc.ID,
+		Payload: map[string]any{"scope": a.Scope, "credential_id": out.CredentialID, "replaced": len(out.Revoked)}})
+	return out, nil
 }
 
 // revokeServiceCredential revokes one of a service's live credentials, and
 // puts back in the queue what it had claimed: its claims end with it, and
 // another credential may take them at once. It says how many it gave back,
-// and whether it revoked anything.
-func revokeServiceCredential(ctx context.Context, ec *tool.ExecCtx, service uuid.UUID, scope string, credential uuid.UUID) (int, error) {
-	n, err := ec.Q.RevokeServiceCredential(ctx, dbq.RevokeServiceCredentialParams{ID: credential, ActorID: service, Now: &ec.Now})
+// and whether it revoked anything. Revoking the agent runtime's credential
+// leaves the tokens it was issued for the agents it hosts as they are: they
+// are the agents', and revoked by agent_runtime.revoke_token.
+func revokeServiceCredential(ctx context.Context, q *dbq.Queries, emit func(events.Event), now time.Time, service uuid.UUID, scope string,
+	credential uuid.UUID) (int, error) {
+	n, err := q.RevokeServiceCredential(ctx, dbq.RevokeServiceCredentialParams{ID: credential, ActorID: service, Now: &now})
 	if err != nil {
 		return 0, err
 	}
@@ -149,20 +197,20 @@ func revokeServiceCredential(ctx context.Context, ec *tool.ExecCtx, service uuid
 	}
 	var released []uuid.UUID
 	if scope == domain.ServiceDocumentText {
-		if released, err = ec.Q.ReleaseTexts(ctx, dbq.ReleaseTextsParams{CredentialID: &credential, Now: ec.Now}); err != nil {
+		if released, err = q.ReleaseTexts(ctx, dbq.ReleaseTextsParams{CredentialID: &credential, Now: now}); err != nil {
 			return 0, err
 		}
-		if err := notifyQueued(ctx, ec.Q, released...); err != nil {
+		if err := notifyQueued(ctx, q, released...); err != nil {
 			return 0, err
 		}
 	}
-	ec.Emit(events.Event{Type: EventServiceCredentialRevoked, SubjectType: "actor", SubjectID: &service,
+	emit(events.Event{Type: EventServiceCredentialRevoked, SubjectType: "actor", SubjectID: &service,
 		Payload: map[string]any{"scope": scope, "credential_id": credential, "claims_released": len(released)}})
 	return len(released), nil
 }
 
 type ServiceScopeIn struct {
-	Scope string `json:"scope" jsonschema:"the service: document_text, the runtime's transcriber, which writes documents' text versions"`
+	Scope string `json:"scope" jsonschema:"the service: document_text, the runtime's transcriber, which writes documents' text versions; or agent_runtime, the site's agent runtime, which hosts the runtime agents"`
 }
 
 type ServiceCredentialView struct {
@@ -176,7 +224,7 @@ type ServiceCredentialView struct {
 	IssuedByID  *uuid.UUID `json:"issued_by_actor_id,omitempty"`
 	IssuedBy    *string    `json:"issued_by_name,omitempty"`
 	Live        bool       `json:"live" jsonschema:"neither revoked nor expired: the service can call with it now"`
-	ClaimsHeld  int32      `json:"claims_held" jsonschema:"how many text versions it has claimed and not finished, now"`
+	ClaimsHeld  int32      `json:"claims_held" jsonschema:"how many text versions it has claimed and not finished, now; 0 for the agent runtime's"`
 }
 
 type ServiceListCredentialsOut struct {
@@ -219,7 +267,7 @@ func serviceListCredentials() tool.Tool {
 }
 
 type ServiceRevokeCredentialIn struct {
-	Scope        string    `json:"scope" jsonschema:"the service: document_text, the runtime's transcriber, which writes documents' text versions"`
+	Scope        string    `json:"scope" jsonschema:"the service: document_text, the runtime's transcriber, which writes documents' text versions; or agent_runtime, the site's agent runtime, which hosts the runtime agents"`
 	CredentialID uuid.UUID `json:"credential_id"`
 }
 
@@ -232,7 +280,8 @@ func serviceRevokeCredential() tool.Tool {
 	return tool.Define(tool.Spec[ServiceRevokeCredentialIn, ServiceRevokeCredentialOut]{
 		Name: "service.revoke_credential",
 		Description: "Revoke a site service's credential: it stops working at once, a call of the service's waiting on it " +
-			"included, and what it had claimed goes back in the queue for another. For platform administrators.",
+			"included, and what it had claimed goes back in the queue for another. The agent runtime's tokens for the " +
+			"agents it hosts stay as they are: agent_runtime.revoke_token revokes those. For platform administrators.",
 		Kind: tool.Write, Gate: admins,
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/services/{scope}/credentials/{credential_id}/revoke"},
 		Resolve: func(_ context.Context, _ dbq.Querier, in ServiceRevokeCredentialIn) (tool.Target, error) {
@@ -251,7 +300,7 @@ func serviceRevokeCredential() tool.Tool {
 			if err := ec.Q.LockServiceActor(ctx, svc.ID); err != nil {
 				return ServiceRevokeCredentialOut{}, err
 			}
-			n, err := revokeServiceCredential(ctx, ec, svc.ID, in.Scope, in.CredentialID)
+			n, err := revokeServiceCredential(ctx, ec.Q, ec.Emit, ec.Now, svc.ID, in.Scope, in.CredentialID)
 			if err != nil {
 				return ServiceRevokeCredentialOut{}, err
 			}
