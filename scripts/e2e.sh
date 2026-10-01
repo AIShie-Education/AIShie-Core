@@ -16,15 +16,18 @@
 # by file, and add a version of two files, and be refused past the limits on
 # a version's files, saying why; and have the service be refused everything
 # else, and everything once its credential is revoked;
-# and have the instructor's own tutor agent answer the student's question,
-# once its runtime says it answers in the site, its inbox and her
-# conversation each waiting to hear what comes next, the answer's draft
-# reaching her while it is written; and answer her question again, her essay
-# attached as a PDF, which it lists and downloads, and the grader cannot,
-# and she withdraws, and which past the limits on files is refused, saying
-# why; and be asked nothing
-# more once he switches that off; and have another agent of his, given member_manage,
-# seat a student with its own token, and be refused on his seat, and his own
+# and have the operator give the site's agent runtime its credential on the
+# command line; have the instructor register a tutor agent hosted by the
+# runtime, for which he holds no token, and the runtime, checking he owns it,
+# be issued its token by its id; have it answer the student's question, its
+# inbox and her conversation each waiting to hear what comes next, the
+# answer's draft reaching her while it is written; and answer her question
+# again, her essay attached as a PDF, which it lists and downloads, and the
+# grader cannot, and she withdraws, and which past the limits on files is
+# refused, saying why; and be asked nothing more once the runtime stops
+# hosting it; and have another agent of his, an mcp agent, given member_manage,
+# seat a student with its own token, never be asked in the site, and be
+# refused on his seat, and his own
 # assistant propose an assignment he may make without anyone's confirmation,
 # which he then approves himself, as he does its next version of the
 # lecture, with its files. Then he shows a join link: a new student
@@ -221,8 +224,8 @@ person() { # BY NAME [MORE_JSON] → sets ACTOR_ID and TOKEN, the session they s
   signin 200 "{\"login\":\"$email\",\"password\":\"$password\"}"
   TOKEN=$SESSION
 }
-agent() { # NAME → sets ACTOR_ID and TOKEN, the API token the admin gives it
-  call 200 POST /v1/actors "$ADMIN" "{\"kind\":\"agent\",\"display_name\":\"$1\"}"
+agent() { # NAME → sets ACTOR_ID and TOKEN, the API token the admin gives it: an mcp agent's
+  call 200 POST /v1/actors "$ADMIN" "{\"kind\":\"agent\",\"display_name\":\"$1\",\"hosting\":\"mcp\"}"
   ACTOR_ID=$(json "$WORK/body" 'd["result"]["actor_id"]')
   call 200 POST "/v1/actors/$ACTOR_ID/tokens" "$ADMIN" '{"label":"e2e"}'
   TOKEN=$(json "$WORK/body" 'd["result"]["token"]')
@@ -496,30 +499,57 @@ call 200 GET "$C/grades" "$YUKI" # her records are hers
 call 403 POST "$C/members/$SATO_M/role" "$SATO" '{"role":"observer"}' # not on one's own seat
 call 200 POST "$C/members/$YUKI_M/role" "$SATO" '{"role":"student"}'
 
-step "Sato brings in a tutor agent of his own; until something runs it that answers, it is asked nothing in the site"
-call 200 POST /v1/me/agents "$SATO" '{"display_name":"Course tutor"}'
+step "The operator gives the site's agent runtime its credential on the command line, printed once, as a set-up script takes it"
+RT=$("$BIN" service issue agent_runtime --label e2e-runtime 2>"$WORK/service.err") || fail "service issue: $(cat "$WORK/service.err")"
+case "$RT" in aissvc_*) ;; *) fail "the runtime's credential: $RT" ;; esac
+grep -qF "$RT" "$WORK/service.err" && fail "service issue printed the credential on standard error"
+"$BIN" service issue grading --label nope >/dev/null 2>&1 && fail "service issue took a scope there is no service for"
+call 200 GET /v1/services/agent_runtime/credentials "$ROOT"
+[ "$(json "$WORK/body" '[(c["label"], c["live"]) for c in d["result"]["credentials"]]')" = "[('e2e-runtime', True)]" ] ||
+  fail "the runtime's credentials: $(cat "$WORK/body")"
+echo "  the agent runtime holds its credential, issued at setup"
+
+step "Sato registers a tutor agent hosted by the runtime: he holds no token for it, and until the runtime hosts it, it is asked nothing in the site"
+call 400 POST /v1/me/agents "$SATO" '{"display_name":"Course tutor"}' # how it is hosted is his to choose, for good
+call 200 POST /v1/me/agents "$SATO" '{"display_name":"Course tutor","hosting":"runtime"}'
 TUTOR_ID=$(json "$WORK/body" 'd["result"]["actor_id"]')
-call 200 POST "/v1/me/agents/$TUTOR_ID/tokens" "$SATO" '{"label":"runtime"}'
-TUTOR=$(json "$WORK/body" 'd["result"]["token"]')
-# What a service hosting it checks before it takes the token: whose agent it is.
-call 200 GET /v1/me "$TUTOR"
-[ "$(json "$WORK/body" 'd["result"].get("owner_actor_id")')" = "$SATO_ID" ] || fail "the tutor agent does not name Sato as its owner"
-call 200 GET /v1/me "$GRADER"
-[ "$(json "$WORK/body" 'd["result"].get("owner_actor_id")')" = None ] || fail "an agent nobody owns names an owner"
+call 403 POST "/v1/me/agents/$TUTOR_ID/tokens" "$SATO" '{"label":"my laptop"}'
+[ "$(reason)" = hosted_by_runtime ] || fail "refused, but not as hosted by the runtime: $(cat "$WORK/body")"
+call 422 POST "/v1/me/agents/$TUTOR_ID" "$SATO" '{"hosting":"mcp"}'
+[ "$(reason)" = hosting_fixed ] || fail "refused, but not as fixed: $(cat "$WORK/body")"
 call 200 POST "$C/delegates" "$SATO" "{\"actor_id\":\"$TUTOR_ID\",\"preset\":\"course_tutor\"}"
 TUTOR_M=$(json "$WORK/body" 'd["result"]["member_id"]')
 call 200 GET "$C/conversations/respondents" "$YUKI"
 json "$WORK/body" '"'"$TUTOR_M"'" not in [r["member_id"] for r in d["result"]["respondents"]] or sys.exit("the tutor is offered to Yuki with nothing running it")' >/dev/null
 call 422 POST "$C/conversations" "$YUKI" "{\"respondent_member_id\":\"$TUTOR_M\",\"body\":\"What does HW3 ask for?\"}"
-[ "$(json "$WORK/body" 'd["error"]["details"]["reason"]')" = agent_answers_elsewhere ] || fail "refused, but not as answering elsewhere: $(cat "$WORK/body")"
+[ "$(reason)" = agent_not_hosted ] || fail "refused, but not as not hosted: $(cat "$WORK/body")"
 call 200 GET "/v1/me/agents/$TUTOR_ID" "$SATO"
-[ "$(json "$WORK/body" 'd["result"]["site_chat"]')" = False ] || fail "Sato is told the tutor takes conversations in the site"
+[ "$(json "$WORK/body" 'd["result"]["hosting"], d["result"]["site_chat"]')" = "runtime False" ] || fail "Sato is told the tutor is asked in the site: $(cat "$WORK/body")"
 
-step "Its runtime says, with its token, that it answers in the site; Yuki asks it; its inbox, waiting, hears the question; Yuki, waiting, watches the answer's draft come, and reads the answer"
+step "Sato asks the runtime to host it; the runtime, checking he owns it, is issued its token by its id; Yuki asks it; its inbox, waiting, hears the question; Yuki, waiting, watches the answer's draft come, and reads the answer"
+call 403 GET "/v1/services/agent_runtime/owners/$SATO_ID/agents/$TUTOR_ID" "$SATO" # the runtime's alone
+[ "$(reason)" = service_only ] || fail "refused, but not as the runtime's: $(cat "$WORK/body")"
+call 200 GET "/v1/services/agent_runtime/owners/$SATO_ID/agents/$TUTOR_ID" "$RT"
+[ "$(json "$WORK/body" 'd["result"]["owns"], d["result"]["agent"]["hosting"], d["result"]["agent"]["hostable"]')" = "True runtime True" ] ||
+  fail "the runtime's check of Sato's tutor: $(cat "$WORK/body")"
+call 200 GET "/v1/services/agent_runtime/owners/$YUKI_ID/agents/$TUTOR_ID" "$RT"
+[ "$(json "$WORK/body" 'd["result"]["owns"], d["result"].get("agent")')" = "False None" ] || fail "Yuki is told she owns the tutor: $(cat "$WORK/body")"
+call 200 POST "/v1/services/agent_runtime/agents/$TUTOR_ID/token" "$RT" '{"label":"e2e runtime"}'
+TUTOR=$(json "$WORK/body" 'd["result"]["token"]')
+case "$TUTOR" in ais_*) ;; *) fail "the tutor's token: $(cat "$WORK/body")" ;; esac
+# The runtime runs the agent with it: whose agent it is, and how it is hosted.
+call 200 GET /v1/me "$TUTOR"
+[ "$(json "$WORK/body" 'd["result"].get("owner_actor_id"), d["result"]["hosting"]')" = "$SATO_ID runtime" ] || fail "the tutor agent, as it is told: $(cat "$WORK/body")"
+call 200 GET /v1/me "$GRADER"
+[ "$(json "$WORK/body" 'd["result"].get("owner_actor_id"), d["result"]["hosting"]')" = "None mcp" ] || fail "the grader, as it is told: $(cat "$WORK/body")"
+call 200 GET "/v1/me/agents/$TUTOR_ID/credentials" "$SATO"
+[ "$(json "$WORK/body" '[(c.get("issued_to"), "revoked_at" in c) for c in d["result"]["credentials"]]')" = "[('agent_runtime', False)]" ] ||
+  fail "the tutor's credentials, as Sato sees them: $(cat "$WORK/body")"
+# me.site_chat, kept for one release, changes nothing: nothing is declared.
 call 200 POST /v1/me/site-chat "$TUTOR" '{"on":true}'
-[ "$(json "$WORK/body" 'd["result"]["site_chat"]')" = True ] || fail "the runtime's declaration did not hold: $(cat "$WORK/body")"
+[ "$(json "$WORK/body" 'd["result"]["site_chat"]')" = True ] || fail "me.site_chat with the runtime's token: $(cat "$WORK/body")"
 call 200 GET "/v1/me/agents/$TUTOR_ID" "$SATO"
-[ "$(json "$WORK/body" 'd["result"]["site_chat"]')" = True ] || fail "Sato is not told the tutor takes conversations in the site"
+[ "$(json "$WORK/body" 'd["result"]["site_chat"]')" = True ] || fail "Sato is not told the tutor is asked in the site"
 call 200 GET "$C/conversations/respondents" "$YUKI"
 json "$WORK/body" '"'"$TUTOR_M"'" in [r["member_id"] for r in d["result"]["respondents"]] or sys.exit("the tutor is not offered to Yuki")' >/dev/null
 call 200 GET "$C/conversations/inbox" "$TUTOR"
@@ -659,21 +689,28 @@ call 200 GET "$C/conversations/$CONV2/messages" "$TUTOR"
 call 200 GET /v1/me/conversations "$YUKI"
 [ "$(json "$WORK/body" '[c["conversation_id"] for c in d["result"]["conversations"]]')" = "['$CONV2', '$CONV']" ] || fail "Yuki's panel: $(cat "$WORK/body")"
 
-step "Sato switches the tutor's site chat off: Yuki asks it nothing more and still reads what it said; only its runtime switches it on"
-call 200 POST "/v1/me/agents/$TUTOR_ID" "$SATO" '{"site_chat":false}'
+step "The runtime stops hosting the tutor, revoking its token by its id: Yuki asks it nothing more and still reads what it said; Sato says nothing of it in Core"
+call 400 POST "/v1/me/agents/$TUTOR_ID" "$SATO" '{"site_chat":false}'
+[ "$(reason)" = site_chat_follows_hosting ] || fail "refused, but not as following hosting: $(cat "$WORK/body")"
+call 200 POST "/v1/services/agent_runtime/agents/$TUTOR_ID/token/revoke" "$RT"
+[ "$(json "$WORK/body" 'len(d["result"]["revoked"])')" = 1 ] || fail "revoking the tutor's token: $(cat "$WORK/body")"
+call 401 GET /v1/me "$TUTOR"
 call 422 POST "$C/conversations/$CONV/ask" "$YUKI" '{"body":"And how long should it be?"}'
-[ "$(json "$WORK/body" 'd["error"]["details"]["reason"]')" = agent_answers_elsewhere ] || fail "refused, but not as answering elsewhere: $(cat "$WORK/body")"
+[ "$(reason)" = agent_not_hosted ] || fail "refused, but not as not hosted: $(cat "$WORK/body")"
 call 200 GET "$C/conversations/$CONV/messages" "$YUKI"
 [ "$(json "$WORK/body" 'len(d["result"]["messages"])')" = 2 ] || fail "Yuki no longer reads the conversation"
-call 400 POST "/v1/me/agents/$TUTOR_ID" "$SATO" '{"site_chat":true}'
 
-step "Sato gives an agent of his own member_manage: with its own token it seats a student, and is refused on Sato's seat"
-call 200 POST /v1/me/agents "$SATO" '{"display_name":"Enrolment helper"}'
+step "Sato gives an mcp agent of his own member_manage: with his token for it, from his own script, it seats a student, and is refused on Sato's seat; the runtime does not host it"
+call 200 POST /v1/me/agents "$SATO" '{"display_name":"Enrolment helper","hosting":"mcp"}'
 HELPER_ID=$(json "$WORK/body" 'd["result"]["actor_id"]')
-call 200 POST "/v1/me/agents/$HELPER_ID/tokens" "$SATO" '{"label":"runtime"}'
+call 200 POST "/v1/me/agents/$HELPER_ID/tokens" "$SATO" '{"label":"my script"}'
 HELPER=$(json "$WORK/body" 'd["result"]["token"]')
 call 200 POST "$C/delegates" "$SATO" "{\"actor_id\":\"$HELPER_ID\",\"preset\":\"instructor\",\"perms\":{\"member_manage\":\"autonomous\"}}"
 HELPER_M=$(json "$WORK/body" 'd["result"]["member_id"]')
+call 422 POST /v1/me/site-chat "$HELPER" '{"on":true}'
+[ "$(reason)" = not_runtime_hosted ] || fail "an mcp agent's me.site_chat refused, but not as not runtime hosted: $(cat "$WORK/body")"
+call 422 POST "/v1/services/agent_runtime/agents/$HELPER_ID/token" "$RT"
+[ "$(reason)" = not_runtime_hosted ] || fail "the runtime hosting an mcp agent refused, but not as not runtime hosted: $(cat "$WORK/body")"
 call 200 GET "$C/members/$HELPER_M" "$SATO"
 [ "$(json "$WORK/body" 'd["result"]["perms"]["member_manage"], d["result"]["perms"]["agent_delegate"]')" = "autonomous denied" ] ||
   fail "the helper's seat: $(cat "$WORK/body")"
@@ -735,12 +772,18 @@ call 422 POST "/v1/join/$JOIN/register" "" '{"display_name":"Rin","email":"rin@e
 KEY=ren-late call 422 POST "/v1/join/$JOIN" "$REN"
 [ "$(json "$WORK/body" 'd["error"]["details"]["reason"]')" = revoked ] || fail "joining through a revoked link: $(cat "$WORK/body")"
 
-step "Sato's own assistant proposes HW4, its assignments waiting for a confirmation; Sato, who makes assignments without one, approves it himself and it is made"
-call 200 POST /v1/me/agents "$SATO" '{"display_name":"Assistant"}'
+step "Sato's own assistant, an mcp agent nobody asks in the site, proposes HW4, its assignments waiting for a confirmation; Sato, who makes assignments without one, approves it himself and it is made"
+call 200 POST /v1/me/agents "$SATO" '{"display_name":"Assistant","hosting":"mcp"}'
 ASSIST_ID=$(json "$WORK/body" 'd["result"]["actor_id"]')
 call 200 POST "/v1/me/agents/$ASSIST_ID/tokens" "$SATO" '{"label":"e2e"}'
 ASSIST=$(json "$WORK/body" 'd["result"]["token"]')
 call 200 POST "$C/delegates" "$SATO" "{\"actor_id\":\"$ASSIST_ID\",\"perms\":{\"assignment_write\":\"confirm_required\",\"document_write\":\"confirm_required\"}}"
+ASSIST_M=$(json "$WORK/body" 'd["result"]["member_id"]')
+# It answers Sato, its principal, and is still never asked in the site: an mcp agent, his tools'.
+call 200 GET "$C/conversations/respondents" "$SATO"
+json "$WORK/body" '"'"$ASSIST_M"'" not in [r["member_id"] for r in d["result"]["respondents"]] or sys.exit("an mcp agent is offered in the site")' >/dev/null
+call 422 POST "$C/conversations" "$SATO" "{\"respondent_member_id\":\"$ASSIST_M\",\"body\":\"What is due this week?\"}"
+[ "$(reason)" = mcp_agent ] || fail "refused, but not as an mcp agent: $(cat "$WORK/body")"
 call 202 POST "$C/assignments" "$ASSIST" '{"title":"HW4","points_possible":100}'
 HW4_ASK=$(json "$WORK/body" 'd["action_id"]')
 call 200 GET "$C/actions/proposed" "$SATO"
@@ -844,7 +887,17 @@ CALL="{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name
 [ "$(json "$WORK/body" 'd["result"]["structuredContent"]["action_id"]')" = "$ACTION" ] || fail "MCP and REST did not reach the same action: $(cat "$WORK/body")"
 [ "$(json "$WORK/body" 'd["result"]["structuredContent"]["replayed"]')" = True ] || fail "not a replay"
 echo "  grade_submit over MCP with REST's idempotency key replays REST's action: one tool layer"
-N=$((N + 3))
+# Sato's mcp agent, which nobody asks in the site, works over MCP with his
+# token for it: told it is an mcp agent, and reading its seat.
+[ "$(mcp "$HELPER" '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"me_get","arguments":{}}}')" = 200 ] || fail "me_get: $(cat "$WORK/body")"
+[ "$(json "$WORK/body" 'd["result"]["structuredContent"]["result"]["hosting"]')" = mcp ] || fail "the mcp agent over MCP: $(cat "$WORK/body")"
+[ "$(mcp "$HELPER" '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"me_memberships","arguments":{}}}')" = 200 ] || fail "me_memberships: $(cat "$WORK/body")"
+[ "$(json "$WORK/body" '[s["member_id"] for s in d["result"]["structuredContent"]["result"]["memberships"]]')" = "['$HELPER_M']" ] ||
+  fail "the mcp agent's seats over MCP: $(cat "$WORK/body")"
+[ "$(mcp "$HELPER" '{"jsonrpc":"2.0","id":5,"method":"tools/list"}')" = 200 ] || fail "tools/list: $(cat "$WORK/body")"
+json "$WORK/body" 'not any(t["name"].startswith("agent_runtime_") for t in d["result"]["tools"]) or sys.exit("the runtime'"'"'s tools are offered over MCP")' >/dev/null
+echo "  Sato's mcp agent works over MCP, told it is one; the runtime's tools are not offered there"
+N=$((N + 6))
 
 step "Root makes Engineering with Software beneath it, and invites Ada, new, who takes it up; root appoints her at Engineering"
 call 200 POST /v1/departments "$ROOT" '{"name":"Engineering"}'
