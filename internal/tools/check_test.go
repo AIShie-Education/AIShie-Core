@@ -100,8 +100,11 @@ func TestArgumentsAreCheckedBeforeAnythingIsProposed(t *testing.T) {
 		{tool: "component.update",
 			invalid: in(m{"component_id": b.midterm, "drop_lowest": -1}),
 			message: "drop_lowest cannot be negative"},
+		// Tanaka takes no part in Yuki's conversation: her call that says
+		// nothing wrong is refused as approving it would refuse it
+		// (Validate), recorded, where the invalid one is not.
 		{tool: "conversation.close",
-			valid:   in(m{"conversation_id": conv, "reason": "Answered."}),
+			valid: in(m{"conversation_id": conv, "reason": "Answered."}), wantValid: domain.StatusFailed,
 			invalid: in(m{"conversation_id": conv, "reason": members.ConversationSeatRemoved}),
 			message: `"seat_removed" is what closing a removed seat's conversations says; give another reason`},
 		{tool: "conversation.retract",
@@ -295,7 +298,8 @@ func TestAProposalThatWouldBeRefusedIsNotItsOwnersToDecide(t *testing.T) {
 	b := build(t)
 	kenWork := b.submit(t, b.ken, "Ken's essay")
 	bot := b.agent(t, b.sato, "Sato's marker")
-	b.delegate(t, b.sato, bot, m{"preset": "ta", "perms": m{"grade_submit": "confirm_required", "grade_post": "confirm_required"}})
+	b.delegate(t, b.sato, bot, m{"preset": "ta", "perms": m{"grade_submit": "confirm_required", "grade_post": "confirm_required",
+		"document_write": "confirm_required"}})
 	tanaka := b.person(t, "Tanaka", "")
 	b.do(t, b.sato, "member.add", m{"course_id": b.course, "actor_id": tanaka, "preset": "instructor"})
 
@@ -375,6 +379,29 @@ func TestAProposalThatWouldBeRefusedIsNotItsOwnersToDecide(t *testing.T) {
 		t.Fatalf("Tanaka approving an override below zero: %+v", d)
 	}
 
+	// What the course must be for a proposal to be carried out is asked
+	// the same way: the agent asks for the notes to be published, and Sato
+	// publishes them himself meanwhile, which approving it would refuse.
+	notes := testkit.Result[tools.DocumentCreateOut](t, b.do(t, b.sato, "document.create",
+		m{"course_id": b.course, "kind": "material", "title": "Notes", "body_md": "Read chapter 1."}))
+	publishing := b.MustCall(bot, "document.publish", m{"course_id": b.course, "document_id": notes.DocumentID}, "bot-publishes")
+	if publishing.Status != domain.StatusProposed {
+		t.Fatalf("Sato's agent publishing the notes: %+v", publishing)
+	}
+	if q := b.queue(t, b.sato, "action.list_proposed"); !q[*publishing.ActionID] {
+		t.Fatalf("Sato's queue, notes he could publish himself: %v", q)
+	}
+	b.do(t, b.sato, "document.publish", m{"course_id": b.course, "document_id": notes.DocumentID, "version_id": notes.VersionID})
+	if q := b.queue(t, b.sato, "action.list_proposed"); q[*publishing.ActionID] {
+		t.Fatalf("Sato's queue, notes published already: %v", q)
+	}
+	out := b.MustCall(b.sato, "action.decide", m{"course_id": b.course, "action_id": publishing.ActionID, "decision": "approve"}, "sato-publishes")
+	if refusal, _ := out.Error.Details["refusal"].(*apperr.Error); out.Status != domain.StatusFailed || out.Error.Details["reason"] != "owner_would_be_refused" ||
+		refusal == nil || refusal.Code != apperr.Conflict || refusal.Message != "that version is already the published one" {
+		t.Fatalf("Sato approving his agent's publishing of notes published already: %+v", out)
+	}
+	b.do(t, b.sato, "action.withdraw", m{"course_id": b.course, "action_id": publishing.ActionID})
+
 	// The grades: each owner takes his back, as an owner may whatever it
 	// asks.
 	b.do(t, b.sato, "action.withdraw", m{"course_id": b.course, "action_id": proposed.ActionID})
@@ -416,6 +443,31 @@ func TestACallTheCourseWouldRefuseIsNotProposed(t *testing.T) {
 	// What Tanaka may give of an observer's.
 	reads := m{"document_read": "confirm_required", "member_read": "confirm_required"}
 	past := time.Now().Add(-48 * time.Hour)
+
+	// HW4 is not published, and could not be: its brief is a draft.
+	brief := testkit.Result[tools.DocumentCreateOut](t, b.do(t, b.sato, "document.create",
+		m{"course_id": b.course, "kind": "instructions", "title": "HW4", "body_md": "tbd"})).DocumentID
+	hw4 := testkit.Result[tools.IDOut](t, b.do(t, b.sato, "assignment.create",
+		m{"course_id": b.course, "title": "HW4", "points_possible": 10, "instructions_document_id": brief})).ID
+	// The syllabus is published; last year's notes are archived.
+	syllabus := testkit.Result[tools.DocumentCreateOut](t, b.do(t, b.sato, "document.create",
+		m{"course_id": b.course, "kind": "material", "title": "Syllabus", "body_md": "Week 1."}))
+	b.do(t, b.sato, "document.publish", m{"course_id": b.course, "document_id": syllabus.DocumentID})
+	old := testkit.Result[tools.DocumentCreateOut](t, b.do(t, b.sato, "document.create",
+		m{"course_id": b.course, "kind": "material", "title": "Last year", "body_md": "Old."})).DocumentID
+	b.do(t, b.sato, "document.archive", m{"course_id": b.course, "document_id": old})
+	// Yuki has handed in an essay as a file; Ken has started a second
+	// attempt and written nothing in it yet.
+	yukiDraft := testkit.Result[tools.SubmissionCreateOut](t, b.do(t, b.yuki, "submission.create", m{"course_id": b.course, "assignment_id": b.hw3})).SubmissionID
+	essay := testkit.Result[tools.DocumentCreateOut](t, b.do(t, b.yuki, "document.create", m{"course_id": b.course, "kind": "submission",
+		"title": "essay.txt", "submission_id": yukiDraft, "upload_token": b.upload(t, b.yuki, "submission", "text/plain", []byte("my essay"))})).DocumentID
+	b.do(t, b.yuki, "submission.submit", m{"course_id": b.course, "submission_id": yukiDraft})
+	kenDraft := testkit.Result[tools.SubmissionCreateOut](t, b.do(t, b.ken, "submission.create", m{"course_id": b.course, "assignment_id": b.hw3})).SubmissionID
+	// Yuki took back a question of hers; Sato revoked a join link.
+	_, withdrawn := b.open(t, b.yuki, b.tutorM, "Never mind")
+	b.do(t, b.yuki, "conversation.retract", m{"course_id": b.course, "message_id": withdrawn})
+	link := testkit.Result[tools.JoinLinkCreateOut](t, b.do(t, b.sato, "course.join_link_create", m{"course_id": b.course})).LinkID
+	b.do(t, b.sato, "course.join_link_revoke", m{"course_id": b.course, "link_id": link})
 	in := func(args m) m {
 		args["course_id"] = b.course
 		return args
@@ -477,6 +529,56 @@ func TestACallTheCourseWouldRefuseIsNotProposed(t *testing.T) {
 			apperr.Forbidden, "not on your own membership"},
 		{"conversation.mark_read", in(m{"conversation_id": conv, "up_to_message_id": uuid.New()}),
 			apperr.InvalidArgument, "up_to_message_id must name a message of this conversation's"},
+		{"conversation.close", in(m{"conversation_id": conv}),
+			apperr.Forbidden, "only the two who take part in a conversation close it"},
+		{"conversation.retract", in(m{"message_id": withdrawn}),
+			apperr.Conflict, "the message is retracted already"},
+		{"member.add", in(m{"actor_id": b.ken, "preset": "observer", "perms": reads}),
+			apperr.Conflict, "the actor already has a seat in this course; change it, or remove it and add again for a fresh start"},
+		{"assignment.publish", in(m{"assignment_id": b.hw3}),
+			apperr.Conflict, "the assignment is already published"},
+		{"assignment.publish", in(m{"assignment_id": hw4}),
+			apperr.FailedPrecondition, "the instructions have no published version yet; students would see an assignment with nothing to read"},
+		{"assignment.unpublish", in(m{"assignment_id": hw4}),
+			apperr.Conflict, "the assignment is not published"},
+		{"assignment.unpublish", in(m{"assignment_id": b.hw3}),
+			apperr.FailedPrecondition, "it already has submissions — a draft, a hand-in, or the 'missing' rows recorded by hand or when its due date passed — so it can no longer be unpublished"},
+		{"document.publish", in(m{"document_id": notes, "version_id": uuid.New()}),
+			apperr.FailedPrecondition, "there is no such version of this document to publish"},
+		{"document.publish", in(m{"document_id": syllabus.DocumentID, "version_id": syllabus.VersionID}),
+			apperr.Conflict, "that version is already the published one"},
+		{"document.publish", in(m{"document_id": old}),
+			apperr.Conflict, "the document is archived"},
+		{"document.publish", in(m{"document_id": essay}),
+			apperr.FailedPrecondition, "a submission file is not published; it is visible to whoever may see its owner"},
+		{"document.archive", in(m{"document_id": old}),
+			apperr.Conflict, "the document is already archived"},
+		{"document.archive", in(m{"document_id": essay}),
+			apperr.Conflict, "the submission has been handed in; its files no longer change"},
+		{"document.unarchive", in(m{"document_id": notes}),
+			apperr.Conflict, "the document is not archived"},
+		{"document.update", in(m{"document_id": essay, "title": "essay-final.txt"}),
+			apperr.Conflict, "the submission has been handed in; its files no longer change"},
+		{"submission.create", in(m{"assignment_id": b.hw3, "student_member_id": b.kenM}),
+			apperr.Conflict, "there is already an open draft; edit or submit that one"},
+		{"submission.create", in(m{"assignment_id": b.hw3, "student_member_id": b.graderM}),
+			apperr.FailedPrecondition, "work is submitted by, or for, a current student of the course"},
+		{"submission.update_draft", in(m{"submission_id": kenWork, "body": "More."}),
+			apperr.Conflict, "the submission is no longer a draft; start a new attempt to submit again"},
+		{"submission.submit", in(m{"submission_id": kenDraft}),
+			apperr.FailedPrecondition, "there is nothing to hand in: the draft has no text and no files"},
+		{"submission.set_lateness", in(m{"submission_id": kenDraft, "state": "late"}),
+			apperr.Conflict, "the submission is draft; only a submitted or late attempt can be switched, and only to the other"},
+		{"submission.record_missing", in(m{"assignment_id": b.hw3, "student_member_id": b.kenM}),
+			apperr.Conflict, "the student already has a submission (draft) for this assignment"},
+		{"submission.record_missing", in(m{"assignment_id": hw4, "student_member_id": b.kenM}),
+			apperr.FailedPrecondition, "the assignment is not published; nobody can have missed it"},
+		{"course.join_link_revoke", in(m{"link_id": link}),
+			apperr.Conflict, "the join link is revoked already"},
+		{"grade.undo_ungraded_as_zero", in(m{"student_member_id": b.kenM}),
+			apperr.Conflict, "the student's totals do not count ungraded work as zero"},
+		{"grade.undo_ungraded_as_zero", in(m{"all_students": true}),
+			apperr.FailedPrecondition, "no student's totals count ungraded work as zero"},
 	}
 	for i, tc := range cases {
 		out := b.MustCall(tanaka, tc.tool, tc.args, "refuse-"+uuid.NewString())
