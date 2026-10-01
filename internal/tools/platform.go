@@ -97,7 +97,9 @@ func actorRegister() tool.Tool {
 			if in.Kind != "human" && in.Kind != "agent" {
 				return ActorOut{}, apperr.Invalid("kind must be human or agent")
 			}
-			if strings.TrimSpace(in.DisplayName) == "" {
+			// Kept trimmed, as every other name is.
+			name := strings.TrimSpace(in.DisplayName)
+			if name == "" {
 				return ActorOut{}, apperr.Invalid("display_name is required")
 			}
 			if in.PlatformRole != nil {
@@ -147,7 +149,7 @@ func actorRegister() tool.Tool {
 			}
 			id := ids.New()
 			if err := ec.Q.InsertActor(ctx, dbq.InsertActorParams{
-				ID: id, Kind: in.Kind, DisplayName: in.DisplayName, Email: in.Email,
+				ID: id, Kind: in.Kind, DisplayName: name, Email: in.Email,
 				PlatformRole: in.PlatformRole, CreatedByActorID: &ec.Actor.ID, CreatedAt: ec.Now,
 				OwnerActorID: in.OwnerActorID, LoginID: in.LoginID, Hosting: hosting,
 			}); err != nil {
@@ -359,8 +361,12 @@ func actorUpdate() tool.Tool {
 			if in.DisplayName == nil && in.Email == nil && in.LoginID == nil {
 				return ActorView{}, apperr.Invalid("give display_name, email, login_id or more than one")
 			}
-			if in.DisplayName != nil && strings.TrimSpace(*in.DisplayName) == "" {
-				return ActorView{}, apperr.Invalid("display_name cannot be empty")
+			if in.DisplayName != nil {
+				name := strings.TrimSpace(*in.DisplayName)
+				if name == "" {
+					return ActorView{}, apperr.Invalid("display_name cannot be empty")
+				}
+				in.DisplayName = &name
 			}
 			if in.Email != nil {
 				email := strings.TrimSpace(*in.Email)
@@ -1096,7 +1102,7 @@ type PresetBody struct {
 
 func (b PresetBody) check() (permSet, error) {
 	if !validRoles[b.Role] {
-		return nil, apperr.Invalid("role must be student, instructor, ta, observer or assistant")
+		return nil, errRole
 	}
 	if !validScope(b.StudentScope) || !validScope(b.AssignmentScope) {
 		return nil, apperr.Invalid("student_scope and assignment_scope are each all or listed")
