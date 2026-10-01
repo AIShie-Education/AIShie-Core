@@ -28,6 +28,8 @@ type ssoSite struct {
 	t          *testing.T
 	admin, dan uuid.UUID
 	keys       *secrets.Keyring
+	// op is the operator's provider, nil in a site with none.
+	op *sso.Operator
 }
 
 const googleSecret = "GOCSPX-a-google-client-secret-1234"
@@ -43,26 +45,29 @@ type ssoOptions struct {
 	// private lets the site's providers be on private addresses, as
 	// SSO_ALLOW_PRIVATE_ISSUERS does: a fake provider is on this machine.
 	private bool
-	// operatorIssuer is the operator's provider's issuer, when not PolyU's.
+	// operatorIssuer, when set, is the operator's provider's issuer in
+	// place of the one it has otherwise.
 	operatorIssuer string
 }
 
 func newSSOSiteWith(t *testing.T, o ssoOptions) *ssoSite {
 	t.Helper()
 	s := &ssoSite{t: t}
-	if o.keys {
+	operator, keys := o.operator, o.keys
+	if keys {
 		k := make([]byte, secrets.KeySize)
 		_, _ = rand.Read(k)
 		s.keys, _ = secrets.NewKeyring(k)
 	}
 	var op *sso.Operator
-	if o.operator {
+	if operator {
 		op = &sso.Operator{ID: "polyu-adfs", DisplayName: "PolyU NetID", Issuer: "https://adfs.polyu.example/adfs", ClientID: "aishie",
 			SecretHint: secrets.Hint("the-operator's-client-secret"), Scopes: sso.DefaultScopes, SubjectClaim: "upn"}
 		if o.operatorIssuer != "" {
 			op.Issuer = o.operatorIssuer
 		}
 	}
+	s.op = op
 	s.Platform = testkit.NewPlatformWithDeps(t, func(d *tools.Deps) {
 		d.SSO = sso.New(sso.Config{Operator: op, Keys: s.keys, PublicURL: "https://lms.example.edu", PrivateIssuers: o.private})
 	})
@@ -341,43 +346,50 @@ func TestAProvidersSettingsAreHeldToTheirRules(t *testing.T) {
 		return out
 	}
 	for name, tc := range map[string]struct {
-		args   m
-		field  string
-		reason string
+		args  m
+		field string
 	}{
-		"an id with upper case":            {with("id", "Google"), "id", ""},
-		"an id with a slash":               {with("id", "a/b"), "id", ""},
-		"an id ending in a hyphen":         {with("id", "google-"), "id", ""},
-		"a name that is white space":       {with("display_name", "   "), "display_name", ""},
-		"a name of two lines":              {with("display_name", "Google\nAccount"), "display_name", ""},
-		"a name of 65 characters":          {with("display_name", strings.Repeat("g", 65)), "display_name", ""},
-		"an issuer over http":              {with("issuer", "http://accounts.google.com"), "issuer", ""},
-		"an issuer with a query":           {with("issuer", "https://accounts.google.com?x=1"), "issuer", ""},
-		"an issuer that is no URL":         {with("issuer", "accounts.google.com"), "issuer", ""},
-		"no client id":                     {with("client_id", " "), "client_id", ""},
-		"a client secret that is no ASCII": {with("client_secret", "GOCSPX-秘密-secret-secret"), "client_secret", ""},
-		"no client secret":                 {with("client_secret", ""), "client_secret", ""},
-		"scopes without openid":            {with("scopes", []any{"profile", "email"}), "scopes", ""},
-		"a scope with a quote":             {with("scopes", []any{"openid", `pro"file`}), "scopes", ""},
-		"a claim with a space":             {with("subject_claim", "user name"), "subject_claim", ""},
-		"a domain that is no domain":       {with("allowed_email_domains", []any{"polyu"}), "allowed_email_domains", ""},
-		"linking by email with no domains": {with("link_by_email", true), "allowed_email_domains", ""},
-		"a position below the page":        {with("position", -1), "position", ""},
-		// Without SSO_ALLOW_PRIVATE_ISSUERS, an issuer plainly not at a
-		// public address is refused as it is set up; a name is checked
-		// when it is fetched (TestAnIssuerOnAPrivateAddressIsNotFetched).
-		"an issuer on this machine over http": {with("issuer", "http://127.0.0.1:5556/dex"), "issuer", sso.ReasonAddressNotAllowed},
-		"an issuer at localhost":              {with("issuer", "https://localhost/adfs"), "issuer", sso.ReasonAddressNotAllowed},
-		"an issuer at a subdomain of localhost": {with("issuer", "https://idp.localhost/adfs"), "issuer",
-			sso.ReasonAddressNotAllowed},
-		"an issuer on a private network":    {with("issuer", "https://10.20.30.40/adfs"), "issuer", sso.ReasonAddressNotAllowed},
-		"an issuer at the cloud's metadata": {with("issuer", "https://169.254.169.254/latest"), "issuer", sso.ReasonAddressNotAllowed},
-		"an issuer on loopback in IPv6":     {with("issuer", "https://[::ffff:127.0.0.1]/adfs"), "issuer", sso.ReasonAddressNotAllowed},
-		"an issuer on a unique local IPv6":  {with("issuer", "https://[fd00:ec2::254]/adfs"), "issuer", sso.ReasonAddressNotAllowed},
+		"an id with upper case":            {with("id", "Google"), "id"},
+		"an id with a slash":               {with("id", "a/b"), "id"},
+		"an id ending in a hyphen":         {with("id", "google-"), "id"},
+		"a name that is white space":       {with("display_name", "   "), "display_name"},
+		"a name of two lines":              {with("display_name", "Google\nAccount"), "display_name"},
+		"a name of 65 characters":          {with("display_name", strings.Repeat("g", 65)), "display_name"},
+		"an issuer over http":              {with("issuer", "http://accounts.google.com"), "issuer"},
+		"an issuer with a query":           {with("issuer", "https://accounts.google.com?x=1"), "issuer"},
+		"an issuer that is no URL":         {with("issuer", "accounts.google.com"), "issuer"},
+		"no client id":                     {with("client_id", " "), "client_id"},
+		"a client secret that is no ASCII": {with("client_secret", "GOCSPX-秘密-secret-secret"), "client_secret"},
+		"no client secret":                 {with("client_secret", ""), "client_secret"},
+		"scopes without openid":            {with("scopes", []any{"profile", "email"}), "scopes"},
+		"a scope with a quote":             {with("scopes", []any{"openid", `pro"file`}), "scopes"},
+		"a claim with a space":             {with("subject_claim", "user name"), "subject_claim"},
+		"a domain that is no domain":       {with("allowed_email_domains", []any{"polyu"}), "allowed_email_domains"},
+		"linking by email with no domains": {with("link_by_email", true), "allowed_email_domains"},
+		"a position below the page":        {with("position", -1), "position"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			e := s.fails(s.admin, "sso.create", tc.args, apperr.InvalidArgument, tc.reason)
+			e := s.fails(s.admin, "sso.create", tc.args, apperr.InvalidArgument, "")
 			if e.Details["field"] != tc.field || strings.Contains(e.Message, "秘密") || strings.Contains(e.Message, googleSecret) {
+				t.Fatalf("%+v", e)
+			}
+		})
+	}
+	// Without SSO_ALLOW_PRIVATE_ISSUERS, an issuer plainly not at a public
+	// address is refused as it is set up, for that; a name is checked when
+	// it is fetched (TestAnIssuerOnAPrivateAddressIsNotFetched).
+	for name, issuer := range map[string]string{
+		"an issuer on this machine over http":   "http://127.0.0.1:5556/dex",
+		"an issuer at localhost":                "https://localhost/adfs",
+		"an issuer at a subdomain of localhost": "https://idp.localhost/adfs",
+		"an issuer on a private network":        "https://10.20.30.40/adfs",
+		"an issuer at the cloud's metadata":     "https://169.254.169.254/latest",
+		"an issuer on loopback in IPv6":         "https://[::ffff:127.0.0.1]/adfs",
+		"an issuer on a unique local IPv6":      "https://[fd00:ec2::254]/adfs",
+	} {
+		t.Run(name, func(t *testing.T) {
+			e := s.fails(s.admin, "sso.create", with("issuer", issuer), apperr.InvalidArgument, sso.ReasonAddressNotAllowed)
+			if e.Details["field"] != "issuer" || strings.Contains(e.Message, googleSecret) {
 				t.Fatalf("%+v", e)
 			}
 		})
@@ -593,7 +605,7 @@ func TestAnIssuerOnAPrivateAddressIsNotFetched(t *testing.T) {
 	s.fails(s.admin, "sso.update", m{"provider_id": "campus", "version": 1, "issuer": issuer}, apperr.InvalidArgument,
 		sso.ReasonAddressNotAllowed)
 
-	if r := test(m{"provider_id": "polyu-adfs"}); !r.OK || len(r.SigningKeys) != 1 || fetched.Load() != 2 {
+	if r := test(m{"provider_id": s.op.ID}); !r.OK || len(r.SigningKeys) != 1 || fetched.Load() != 2 {
 		t.Fatalf("the operator's provider: %+v", r)
 	}
 }

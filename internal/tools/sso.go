@@ -235,8 +235,8 @@ func readSSOProvider(ctx context.Context, d Deps, q dbq.Querier, id string) (SSO
 // ---------------------------------------------------------------------------
 
 type SSOCreateIn struct {
-	ID                  string   `json:"id" jsonschema:"the provider's id: 1 to 64 lower-case letters, digits and hyphens, such as hainanu-cas; what actor.link_sso names, and what it is known by for good"`
-	DisplayName         string   `json:"display_name" jsonschema:"the name on the sign-in button, such as PolyU NetID: 1 to 64 printable characters"`
+	ID                  string   `json:"id" jsonschema:"the provider's id: 1 to 64 lower-case letters, digits and hyphens, such as university-sso; what actor.link_sso names, and what it is known by for good"`
+	DisplayName         string   `json:"display_name" jsonschema:"the name on the sign-in button, such as School NetID: 1 to 64 printable characters"`
 	Issuer              string   `json:"issuer" jsonschema:"the provider's issuer, exactly as its discovery document writes it: an https URL, such as https://adfs.example.edu/adfs, at a public address: localhost, or an address on this machine or a private or link-local one, is refused (issuer_address_not_allowed) unless the server's operator sets SSO_ALLOW_PRIVATE_ISSUERS, and http is taken only then, for this machine; a name that resolves to such an address is taken, and sso.test reports it"`
 	ClientID            string   `json:"client_id" jsonschema:"the client id the provider gave this site"`
 	ClientSecret        string   `json:"client_secret" jsonschema:"the client secret the provider gave this site: sealed before it is kept, never recorded and never shown again but as its hint"`

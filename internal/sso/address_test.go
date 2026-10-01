@@ -58,7 +58,7 @@ func TestOnlyAPublicAddressIsPublic(t *testing.T) {
 // with it, as before, http is for this machine alone.
 func TestAnIssuerIsAtAPublicAddressUnlessPrivateOnesAreAllowed(t *testing.T) {
 	for _, in := range []string{"https://adfs.example.edu/adfs", "https://8.8.8.8/adfs", "https://[2001:4860:4860::8888]/adfs",
-		"https://localhost.example.edu/adfs", "https://理大.example/adfs"} {
+		"https://localhost.example.edu/adfs", "https://示範大學.example/adfs"} {
 		if got, err := CheckIssuer(in, false); err != nil || got != in {
 			t.Errorf("issuer %q: %q %v", in, got, err)
 		}

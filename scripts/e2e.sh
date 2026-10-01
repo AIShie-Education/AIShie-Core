@@ -1203,6 +1203,9 @@ call 200 GET /v1/sso/providers "$ROOT"
   "False secrets_key_missing [('polyu-adfs', 'operator', True, 'offered')]" ] || fail "the providers: $(cat "$WORK/body")"
 [ "$(json "$WORK/body" 'd["result"]["redirect_uri"]')" = "$BASE/v1/auth/sso/callback" ] || fail "the redirect URI: $(cat "$WORK/body")"
 SITE="{\"id\":\"campus\",\"display_name\":\"Campus ID\",\"issuer\":\"$SITE_ISSUER\",\"client_id\":\"aishie-site\",\"client_secret\":\"$SITE_SECRET\"}"
+# The operator's provider, by the id the server gives it: OIDC_PROVIDER_NAME,
+# or its default.
+OPERATOR=$(json "$WORK/body" '[p["id"] for p in d["result"]["providers"] if p["source"] == "operator"][0]')
 # At an issuer elsewhere than this machine: one here, where the stand-in is,
 # would be refused for that first (below).
 call 422 POST /v1/sso/providers "$ROOT" "${SITE/"$SITE_ISSUER"/https://idp.example.edu/site}"
@@ -1227,7 +1230,7 @@ call 400 POST /v1/sso/providers "$ROOT" "$SITE"
   fail "a provider on this machine set up: $(cat "$WORK/body")"
 # The stand-in serves the operator's discovery document and no key set: what
 # matters here is that the document is read.
-call 200 GET /v1/sso/test?provider_id=polyu-adfs "$ROOT"
+call 200 GET "/v1/sso/test?provider_id=$OPERATOR" "$ROOT"
 [ "$(json "$WORK/body" 'd["result"]["token_endpoint"], any("issuer_address_not_allowed" in p for p in d["result"]["problems"])')" = \
   "$ISSUER/oauth2/token False" ] || fail "the test of the operator's provider: $(cat "$WORK/body")"
 ALLOWED='administrators may have this server reach identity providers on this machine'
@@ -1315,7 +1318,7 @@ start
 call 422 GET "/v1/auth/sso/start/campus?return_to=/courses" ""
 [ "$(reason)" = sso_provider_unavailable ] || fail "a sign-in through the provider on this machine: $(cat "$WORK/body")"
 tail -n +$((LOGGED + 1)) "$WORK/server.log" | grep -q 'issuer_address_not_allowed' || fail "the log does not say why: $(tail -5 "$WORK/server.log")"
-[[ "$(curl -s -o /dev/null -w '%{http_code} %{redirect_url}' "$BASE/v1/auth/sso/start/polyu-adfs?return_to=/courses")" == "302 $ISSUER/oauth2/authorize?"* ]] ||
+[[ "$(curl -s -o /dev/null -w '%{http_code} %{redirect_url}' "$BASE/v1/auth/sso/start/$OPERATOR?return_to=/courses")" == "302 $ISSUER/oauth2/authorize?"* ]] ||
   fail "the operator's provider does not start a sign-in"
 N=$((N + 1))
 

@@ -433,7 +433,7 @@ func TestASitesProviderOnAPrivateAddressIsNotReached(t *testing.T) {
 	if r := a.write(root, "/v1/sso/providers", campus); r.Status != http.StatusOK {
 		t.Fatalf("create: %d %s", r.Status, r.Raw)
 	}
-	a.c.MustCall(a.c.Root, "actor.link_sso", m{"actor_id": a.c.Sato, "provider": "campus", "subject": "sato@campus.edu"}, "link")
+	a.c.MustCall(a.c.Root, "actor.link_sso", m{"actor_id": a.c.Sato, "provider": "campus", "subject": "sato@site.example.edu"}, "link")
 	if r := a.do(browser(), "GET", "/v1/auth/sso/start/campus", "", nil); r.Status != http.StatusUnprocessableEntity ||
 		r.str("error", "details", "reason") != "sso_provider_unavailable" || strings.Contains(r.Raw, "127.0.0.1") {
 		t.Fatalf("a sign-in through a provider on this machine: %d %s", r.Status, r.Raw)
@@ -442,8 +442,8 @@ func TestASitesProviderOnAPrivateAddressIsNotReached(t *testing.T) {
 		t.Fatalf("the log does not say why: %s", a.log.String())
 	}
 
-	a.link(a.c.Sato, "sato@polyu.edu.hk")
-	if r := a.signInThrough("/v1/auth/sso/start/polyu-adfs", a.idp, "sato@polyu.edu.hk", nil); r.Status != http.StatusFound || !hasSession(r) {
+	a.link(a.c.Sato, "sato@campus.example.edu")
+	if r := a.signInThrough("/v1/auth/sso/start/"+a.op.ID, a.idp, "sato@campus.example.edu", nil); r.Status != http.StatusFound || !hasSession(r) {
 		t.Fatalf("the operator's provider: %d %s", r.Status, r.Raw)
 	}
 }
