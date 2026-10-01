@@ -79,3 +79,8 @@ SELECT pg_advisory_xact_lock(hashtextextended('component-tree:' || (sqlc.arg(cou
 
 -- name: ComponentHasGrades :one
 SELECT EXISTS (SELECT 1 FROM grade WHERE component_id = $1 AND origin = 'entered');
+
+-- name: ComponentHasLiveEnteredGrades :one
+-- Whether a grade entered directly on the component, draft or posted, is
+-- live: what LockLiveEnteredGradesOfComponent would hold, asked without it.
+SELECT EXISTS (SELECT 1 FROM grade WHERE component_id = $1 AND origin = 'entered' AND superseded_by IS NULL);

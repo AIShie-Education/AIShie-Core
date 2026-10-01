@@ -367,7 +367,8 @@ func TestStatusCodes(t *testing.T) {
 	toCancel := m{"submission_id": yuki.HW3, "score": 70}
 	c.MustCall(c.Grader, "grade.submit", m{"course_id": c.Course, "submission_id": yuki.HW3, "score": 70}, "to-cancel")
 	c.MustCall(c.Sato, "member.remove", m{"course_id": c.Course, "member_id": c.GraderM}, "rm-grader")
-	c.MustCall(c.Sato, "grade.submit", m{"course_id": c.Course, "submission_id": yuki.HW3, "score": -1}, "refused")
+	c.MustCall(c.Sato, "grade.submit", m{"course_id": c.Course, "submission_id": yuki.HW3, "score": 1000}, "refused")
+	newcomer := c.Actor("human", "Mori")
 	c.Exec(`UPDATE assignment SET published_at = NULL WHERE id = $1`, c.HW4)
 
 	cases := []struct {
@@ -396,7 +397,8 @@ func TestStatusCodes(t *testing.T) {
 		{"a page on another site", "POST", course + "/grades", sato, m{"submission_id": yuki.HW3, "score": 1}, append(key("m"), "Origin", "https://evil.example", "Sec-Fetch-Site", "cross-site"), 403, "forbidden", false},
 		{"a method the route does not take", "DELETE", course + "/grades", sato, nil, nil, 405, "method_not_allowed", false},
 		{"denied", "POST", course + "/grades", student, m{"submission_id": yuki.HW3, "score": 100}, key("i"), 403, "forbidden", true},
-		{"an argument the tool refuses", "POST", course + "/grades", sato, m{"submission_id": yuki.HW3, "score": -1}, key("j"), 400, "invalid_argument", true},
+		{"an argument the tool refuses by itself", "POST", course + "/grades", sato, m{"submission_id": yuki.HW3, "score": -1}, key("j"), 400, "invalid_argument", false},
+		{"an argument the course refuses", "POST", course + "/members", sato, m{"actor_id": newcomer, "preset": "observer", "listed_students": []uuid.UUID{yuki.Member}}, key("n"), 400, "invalid_argument", true},
 		{"a key used for another call", "POST", course + "/grades", sato, m{"submission_id": yuki.HW3, "score": 1}, key("refused"), 409, "idempotency_conflict", false},
 		{"something the tool does not find", "POST", course + "/submissions", student, m{"assignment_id": c.HW4}, key("k"), 404, "not_found", true},
 		{"something the tool forbids", "POST", course + "/actions/" + own.ActionID.String() + "/decide", a.tokenFor(ta), m{"decision": "approve"}, key("l"), 403, "forbidden", true},

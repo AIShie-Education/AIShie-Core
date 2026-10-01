@@ -55,6 +55,9 @@ type Querier interface {
 	// removals whose seats share conversations take them in one order.
 	CloseConversationsOf(ctx context.Context, memberIds []uuid.UUID) ([]uuid.UUID, error)
 	ComponentHasGrades(ctx context.Context, componentID *uuid.UUID) (bool, error)
+	// Whether a grade entered directly on the component, draft or posted, is
+	// live: what LockLiveEnteredGradesOfComponent would hold, asked without it.
+	ComponentHasLiveEnteredGrades(ctx context.Context, componentID *uuid.UUID) (bool, error)
 	// Any origin: an entered grade, or a total written down when it was a parent.
 	ComponentHasLivePostedGrades(ctx context.Context, componentID *uuid.UUID) (bool, error)
 	// What a conversation holds in files: every message's, a retracted one's
@@ -650,6 +653,9 @@ type Querier interface {
 	// wait for: the call waits instead for the principal, and then finds it
 	// removed.
 	ListLiveDelegatesOf(ctx context.Context, principalMemberID *uuid.UUID) ([]uuid.UUID, error)
+	// LockLiveSeatsByRole without the lock: the seats a member.update_perms_bulk
+	// proposed now would change, each of which it is held to before it waits.
+	ListLiveSeatsByRole(ctx context.Context, arg ListLiveSeatsByRoleParams) ([]uuid.UUID, error)
 	ListLiveServiceCredentials(ctx context.Context, arg ListLiveServiceCredentialsParams) ([]uuid.UUID, error)
 	// Where the student has a total written down.
 	ListLiveTotalComponents(ctx context.Context, studentMemberID uuid.UUID) ([]*uuid.UUID, error)

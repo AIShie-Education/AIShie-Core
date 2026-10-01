@@ -320,6 +320,25 @@ func pinContent(ctx context.Context, q dbq.Querier, s gradeSubject, c *GradeCont
 	return nil
 }
 
+// check holds a grade to what it may say whatever it is a grade of: no
+// score or breakdown points below zero, and a rubric version named or none,
+// not both. It is grade.submit's and grade.regrade's Check; checkContent
+// holds it to the work.
+func (c GradeContent) check() error {
+	if c.Score.IsNegative() {
+		return apperr.Invalid("score cannot be negative")
+	}
+	for _, b := range c.Breakdown {
+		if b.Points.IsNegative() || b.Max.IsNegative() {
+			return apperr.Invalid("breakdown points cannot be negative")
+		}
+	}
+	if c.NoRubric && c.RubricVersionID != nil {
+		return apperr.Invalid("give rubric_version_id or no_rubric, not both")
+	}
+	return nil
+}
+
 // checkContent holds the rules about the grade itself, and returns the rubric
 // version to pin: the one named, none where no_rubric says the grader was
 // shown none, or the rubric's published version. approved says the grade is
@@ -329,23 +348,12 @@ func pinContent(ctx context.Context, q dbq.Querier, s gradeSubject, c *GradeCont
 // Validate cannot tell the two apart and passes true; Execute, straight
 // after it, holds a call to it, and Pin a proposal as it is made.
 func checkContent(ctx context.Context, q dbq.Querier, s gradeSubject, c GradeContent, approved bool) (*uuid.UUID, error) {
-	if c.Score.IsNegative() {
-		return nil, apperr.Invalid("score cannot be negative")
-	}
 	max := s.pointsPossible()
 	if c.OutOf != nil && !c.OutOf.Equal(max) {
 		return nil, apperr.Precondition("the score was given out of %s, and the work is worth %s now; grade it again out of what it is worth", *c.OutOf, max)
 	}
 	if c.Score.GreaterThan(max) && !c.AllowExtra {
 		return nil, apperr.Precondition("score %s is above the %s points possible; set allow_extra to permit it", c.Score, max)
-	}
-	for _, b := range c.Breakdown {
-		if b.Points.IsNegative() || b.Max.IsNegative() {
-			return nil, apperr.Invalid("breakdown points cannot be negative")
-		}
-	}
-	if c.NoRubric && c.RubricVersionID != nil {
-		return nil, apperr.Invalid("give rubric_version_id or no_rubric, not both")
 	}
 	if s.assignment == nil || s.assignment.RubricDocumentID == nil {
 		if c.RubricVersionID != nil {
@@ -400,10 +408,13 @@ func gradeSubmit(d Deps) tool.Tool {
 			}
 			return s.target(in.CourseID), nil
 		},
-		Validate: func(ctx context.Context, q dbq.Querier, m *domain.Member, in GradeSubmitIn) error {
+		Check: func(in GradeSubmitIn) error {
 			if in.ForMissing != nil && in.SubmissionID == nil {
 				return apperr.Invalid("for_missing is for a grade on a submission")
 			}
+			return in.check()
+		},
+		Validate: func(ctx context.Context, q dbq.Querier, m *domain.Member, in GradeSubmitIn) error {
 			s, err := load(ctx, q, in)
 			if err != nil {
 				return err
@@ -935,6 +946,7 @@ func gradeRegrade(d Deps) tool.Tool {
 		Gate: tool.Gate{Perms: []domain.Perm{domain.PermGradeSubmit, domain.PermGradePost}},
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/grades/{grade_id}/regrade"},
 
+		Check: func(in GradeRegradeIn) error { return in.check() },
 		Resolve: func(ctx context.Context, q dbq.Querier, in GradeRegradeIn) (tool.Target, error) {
 			g, s, err := load(ctx, q, in)
 			if err != nil {
@@ -1169,14 +1181,21 @@ func liveTotal(ctx context.Context, ec *tool.ExecCtx, in TotalIn) (dbq.GetLiveCo
 	if err := ec.Q.LockStudentTotals(ctx, dbq.LockStudentTotalsParams{CourseID: in.CourseID, StudentMemberID: in.StudentMemberID}); err != nil {
 		return dbq.GetLiveComputedGradeRow{}, err
 	}
-	c, err := ec.Q.GetComponentInCourse(ctx, dbq.GetComponentInCourseParams{ID: in.ComponentID, CourseID: in.CourseID})
+	return in.total(ctx, ec.Q)
+}
+
+// total is the student's total on the component as it stands, refused where
+// there is none to change: a total tool's Validate, before the call is
+// carried out or proposed, and liveTotal under the totals' lock.
+func (in TotalIn) total(ctx context.Context, q dbq.Querier) (dbq.GetLiveComputedGradeRow, error) {
+	c, err := q.GetComponentInCourse(ctx, dbq.GetComponentInCourseParams{ID: in.ComponentID, CourseID: in.CourseID})
 	if err != nil {
 		return dbq.GetLiveComputedGradeRow{}, err
 	}
 	if c.PointsPossible.Valid {
 		return dbq.GetLiveComputedGradeRow{}, apperr.Precondition("%q is graded directly: regrade its grade instead", c.Name).With("reason", "graded_directly")
 	}
-	live, err := ec.Q.GetLiveComputedGrade(ctx, dbq.GetLiveComputedGradeParams{ComponentID: &in.ComponentID, StudentMemberID: in.StudentMemberID})
+	live, err := q.GetLiveComputedGrade(ctx, dbq.GetLiveComputedGradeParams{ComponentID: &in.ComponentID, StudentMemberID: in.StudentMemberID})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return live, apperr.Precondition("no total has been written down here for this student yet: one is written when a grade beneath it is posted").
 			With("reason", "no_total")
@@ -1253,6 +1272,10 @@ func gradeOverrideTotal() tool.Tool {
 		Resolve: func(ctx context.Context, q dbq.Querier, in GradeOverrideTotalIn) (tool.Target, error) {
 			return resolveTotal(ctx, q, in.TotalIn)
 		},
+		Validate: func(ctx context.Context, q dbq.Querier, _ *domain.Member, in GradeOverrideTotalIn) error {
+			_, err := in.total(ctx, q)
+			return err
+		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in GradeOverrideTotalIn) (TotalOut, error) {
 			reason := strings.TrimSpace(in.Reason)
 			live, err := liveTotal(ctx, ec, in.TotalIn)
@@ -1299,6 +1322,10 @@ func gradeClearOverride() tool.Tool {
 		Resolve: func(ctx context.Context, q dbq.Querier, in TotalIn) (tool.Target, error) {
 			return resolveTotal(ctx, q, in)
 		},
+		Validate: func(ctx context.Context, q dbq.Querier, _ *domain.Member, in TotalIn) error {
+			_, err := in.total(ctx, q)
+			return err
+		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in TotalIn) (TotalOut, error) {
 			live, err := liveTotal(ctx, ec, in)
 			if err != nil {
@@ -1339,6 +1366,10 @@ func gradeCommentTotal() tool.Tool {
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/gradebook/{student_member_id}/totals/{component_id}/comment"},
 		Resolve: func(ctx context.Context, q dbq.Querier, in GradeCommentTotalIn) (tool.Target, error) {
 			return resolveTotal(ctx, q, in.TotalIn)
+		},
+		Validate: func(ctx context.Context, q dbq.Querier, _ *domain.Member, in GradeCommentTotalIn) error {
+			_, err := in.total(ctx, q)
+			return err
 		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in GradeCommentTotalIn) (TotalOut, error) {
 			live, err := liveTotal(ctx, ec, in.TotalIn)

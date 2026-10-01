@@ -3,6 +3,7 @@ package tools_test
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -41,10 +42,16 @@ func TestArgumentsAreCheckedBeforeAnythingIsProposed(t *testing.T) {
 		t.Fatalf("the grader's grade: %+v", graded)
 	}
 	reviewed := b.do(t, b.sato, "grade.submit", m{"course_id": b.course, "component_id": b.midterm, "student_member_id": b.yukiM, "score": 80})
+	// Posted, it writes Yuki's totals down, which may then be overridden.
+	midtermGrade := testkit.Result[tools.GradeSubmitOut](t, reviewed).GradeID
+	b.do(t, b.sato, "grade.post", m{"course_id": b.course, "grade_ids": []uuid.UUID{midtermGrade}})
 	notes := testkit.Result[tools.DocumentCreateOut](t, b.do(t, b.sato, "document.create",
 		m{"course_id": b.course, "kind": "material", "title": "Notes", "body_md": "Read chapter 1."})).DocumentID
 	conv, question := b.open(t, b.yuki, b.tutorM, "What is a thesis?")
 	newcomer := b.person(t, "Mori", "")
+	// What an observer reads, at the level Tanaka holds it: she gives no
+	// more than that.
+	waitsToRead := m{"document_read": "confirm_required", "member_read": "confirm_required"}
 	in := func(args m) m {
 		args["course_id"] = b.course
 		return args
@@ -130,7 +137,7 @@ func TestArgumentsAreCheckedBeforeAnythingIsProposed(t *testing.T) {
 			invalid: in(m{"student_member_id": b.yukiM, "component_id": b.total, "score": 90, "reason": "  "}),
 			message: "reason is 1 to 500 characters"},
 		{tool: "member.add",
-			valid:   in(m{"actor_id": newcomer, "preset": "observer"}),
+			valid:   in(m{"actor_id": newcomer, "preset": "observer", "perms": waitsToRead}),
 			invalid: in(m{"actor_id": newcomer, "preset": "observer", "role": "dean"}),
 			message: "role or scope is not one of the allowed values"},
 		{tool: "member.add",
@@ -148,16 +155,86 @@ func TestArgumentsAreCheckedBeforeAnythingIsProposed(t *testing.T) {
 			invalid: in(m{"member_id": b.kenM, "role": "dean"}),
 			message: "role must be student, instructor, ta, observer or assistant"},
 		{tool: "member.update_perms",
-			valid:   in(m{"member_id": b.kenM, "perms": m{"document_read": "autonomous"}}),
+			valid:   in(m{"member_id": b.kenM, "perms": m{"document_read": "confirm_required"}}),
 			invalid: in(m{"member_id": b.kenM, "perms": m{}}),
 			message: "perms is empty: nothing to change"},
 		{tool: "member.update_perms",
 			invalid: in(m{"member_id": b.kenM, "perms": m{"grade_everything": "autonomous"}}),
 			message: `there is no permission named "grade_everything"`},
 		{tool: "member.update_perms_bulk",
-			valid:   in(m{"role": "student", "perms": m{"document_read": "autonomous"}}),
+			valid:   in(m{"role": "student", "perms": m{"document_read": "confirm_required"}}),
 			invalid: in(m{"role": "dean", "perms": m{"document_read": "autonomous"}}),
 			message: "role must be student, instructor, ta, observer or assistant"},
+		{tool: "member.add",
+			invalid: in(m{"actor_id": newcomer, "preset": "observer", "student_scope": "all", "listed_students": []uuid.UUID{b.yukiM}}),
+			message: "listed_students only makes sense with student_scope = listed"},
+		{tool: "member.rescope",
+			invalid: in(m{"member_id": b.kenM, "expires_at": time.Now().Add(48 * time.Hour), "clear_expiry": true}),
+			message: "give expires_at or clear_expiry, not both"},
+		{tool: "member.rescope",
+			invalid: in(m{"member_id": b.graderM, "assignment_scope": "all", "listed_assignments": []uuid.UUID{b.hw3}}),
+			message: "listed_assignments only makes sense with assignment_scope = listed"},
+		{tool: "member.update_perms_bulk",
+			invalid: in(m{"role": "student", "perms": m{}}),
+			message: "perms is empty: nothing to change"},
+		{tool: "conversation.close",
+			invalid: in(m{"conversation_id": conv, "reason": tools.ClosedWithAPerson}),
+			message: `"` + tools.ClosedWithAPerson + `" is what closing the conversations people were asked in says; give another reason`},
+		{tool: "conversation.mark_read",
+			invalid: in(m{"conversation_id": conv, "up_to_message_id": question, "up_to": time.Now()}),
+			message: "give up_to_message_id or up_to, not both"},
+		{tool: "course.update_details",
+			invalid: in(m{"title": "  "}),
+			message: "title cannot be empty"},
+		{tool: "document.update",
+			invalid: in(m{"document_id": notes}),
+			message: "give title, sort_order or both"},
+		{tool: "document.purge",
+			invalid: in(m{"document_id": notes, "reason": " "}),
+			message: "reason is 1 to 500 characters"},
+		{tool: "grade.submit",
+			valid:   in(m{"submission_id": kenWork, "score": 75}),
+			invalid: in(m{"submission_id": kenWork, "score": -1}),
+			message: "score cannot be negative"},
+		{tool: "grade.submit",
+			invalid: in(m{"submission_id": kenWork, "score": 5, "breakdown": []m{{"criterion": "Thesis", "points": -1, "max": 5}}}),
+			message: "breakdown points cannot be negative"},
+		{tool: "grade.submit",
+			invalid: in(m{"submission_id": kenWork, "score": 5, "no_rubric": true, "rubric_version_id": uuid.New()}),
+			message: "give rubric_version_id or no_rubric, not both"},
+		{tool: "grade.submit",
+			invalid: in(m{"component_id": b.midterm, "student_member_id": b.kenM, "score": 5, "for_missing": true}),
+			message: "for_missing is for a grade on a submission"},
+		{tool: "grade.regrade",
+			valid:   in(m{"grade_id": midtermGrade, "score": 85}),
+			invalid: in(m{"grade_id": midtermGrade, "score": -5}),
+			message: "score cannot be negative"},
+		// The platform's own tools: the same before anyone is asked whether
+		// the caller may make them.
+		{tool: "actor.register",
+			invalid: m{"kind": "robot", "display_name": "Robo"},
+			message: "kind must be human or agent"},
+		{tool: "actor.register",
+			invalid: m{"kind": "human", "display_name": "   "},
+			message: "display_name is required"},
+		{tool: "actor.register",
+			invalid: m{"kind": "agent", "display_name": "Helper"},
+			message: "hosting is required for an agent: runtime or mcp; it never changes"},
+		{tool: "actor.register",
+			invalid: m{"kind": "human", "display_name": "Hana", "owner_actor_id": b.sato},
+			message: "only an agent has an owner"},
+		{tool: "actor.update",
+			invalid: m{"actor_id": newcomer},
+			message: "give display_name, email, login_id or more than one"},
+		{tool: "actor.update",
+			invalid: m{"actor_id": newcomer, "display_name": " "},
+			message: "display_name cannot be empty"},
+		{tool: "course.create",
+			invalid: m{"dept_id": b.dept, "term_id": b.term, "code": "CS102", "title": " "},
+			message: "code and title are required"},
+		{tool: "course.update",
+			invalid: m{"course_id": b.course, "title": ""},
+			message: "title cannot be empty"},
 		{tool: "submission.set_lateness",
 			valid:   in(m{"submission_id": kenWork, "state": "late"}),
 			invalid: in(m{"submission_id": kenWork, "state": "early"}),
@@ -298,4 +375,112 @@ func TestAProposalThatWouldBeRefusedIsNotItsOwnersToDecide(t *testing.T) {
 	// asks.
 	b.do(t, b.sato, "action.withdraw", m{"course_id": b.course, "action_id": proposed.ActionID})
 	b.do(t, ito, "action.withdraw", m{"course_id": b.course, "action_id": itoProposed.ActionID})
+}
+
+// What the course says of a call, or the caller's seat, is asked before it
+// is proposed too (tool.Spec.Validate), and what the moment says as it is
+// proposed (tool.Spec.Pin): a call that approving would refuse is recorded
+// failed, with the error approving it would give, and nobody is asked to
+// approve it.
+func TestACallTheCourseWouldRefuseIsNotProposed(t *testing.T) {
+	b := build(t)
+
+	// Tanaka teaches the course too, every write of hers waiting for a
+	// confirmation.
+	tanaka := b.person(t, "Tanaka", "")
+	waits := m{}
+	for _, p := range domain.AllPerms {
+		if p != domain.PermConversationAnswer {
+			waits[string(p)] = "confirm_required"
+		}
+	}
+	tanakaM := testkit.Result[tools.MemberIDOut](t, b.do(t, b.sato, "member.add",
+		m{"course_id": b.course, "actor_id": tanaka, "preset": "instructor", "perms": waits})).MemberID
+
+	// Ken's HW3 is graded, and Yuki's total is written down; Ken has none.
+	kenWork := b.submit(t, b.ken, "Ken's essay")
+	b.do(t, b.sato, "grade.submit", m{"course_id": b.course, "submission_id": kenWork, "score": 70})
+	midterm := testkit.Result[tools.GradeSubmitOut](t, b.do(t, b.sato, "grade.submit",
+		m{"course_id": b.course, "component_id": b.midterm, "student_member_id": b.yukiM, "score": 80})).GradeID
+	b.do(t, b.sato, "grade.post", m{"course_id": b.course, "grade_ids": []uuid.UUID{midterm}})
+	notes := testkit.Result[tools.DocumentCreateOut](t, b.do(t, b.sato, "document.create",
+		m{"course_id": b.course, "kind": "material", "title": "Notes", "body_md": "Read chapter 1."})).DocumentID
+	conv, _ := b.open(t, b.yuki, b.tutorM, "What is a thesis?")
+	newcomer := b.person(t, "Mori", "")
+	bot := b.agent(t, b.sato, "Sato's marker")
+	botM := b.delegate(t, b.sato, bot, m{"preset": "ta"})
+	// What Tanaka may give of an observer's.
+	reads := m{"document_read": "confirm_required", "member_read": "confirm_required"}
+	past := time.Now().Add(-48 * time.Hour)
+	in := func(args m) m {
+		args["course_id"] = b.course
+		return args
+	}
+
+	cases := []struct {
+		tool    string
+		args    m
+		code    apperr.Code
+		message string
+	}{
+		{"assignment.create", in(m{"title": "HW5", "points_possible": 10, "component_id": b.midterm}),
+			apperr.FailedPrecondition, `"Midterm" is graded directly; assignments hang from a bucket`},
+		{"assignment.create", in(m{"title": "HW5", "points_possible": 10, "instructions_document_id": notes}),
+			apperr.FailedPrecondition, "that document is of kind material, not instructions"},
+		{"assignment.update", in(m{"assignment_id": b.hw3, "points_possible": 50}),
+			apperr.FailedPrecondition, "grades have been entered for this assignment; say what becomes of them when its points change: existing_grades rescale or keep_scores"},
+		{"component.create", in(m{"parent_id": b.midterm, "name": "Part A"}),
+			apperr.FailedPrecondition, `"Midterm" is graded directly and cannot have sub-components`},
+		{"component.update", in(m{"component_id": b.bucket, "points_possible": 10}),
+			apperr.FailedPrecondition, `"Assignments" holds assignments and cannot be graded directly`},
+		{"component.update", in(m{"component_id": b.midterm, "points_possible": 50}),
+			apperr.FailedPrecondition, `grades have been entered for "Midterm"; say what becomes of them when its points change: existing_grades rescale or keep_scores`},
+		{"component.move", in(m{"component_id": b.bucket, "new_parent_id": b.midterm}),
+			apperr.FailedPrecondition, `"Midterm" is graded directly and cannot have sub-components`},
+		{"component.move", in(m{"component_id": b.total, "new_parent_id": b.bucket}),
+			apperr.FailedPrecondition, "the course total is the root and stays there"},
+		{"grade.override_total", in(m{"student_member_id": b.kenM, "component_id": b.total, "score": 90, "reason": "Illness"}),
+			apperr.FailedPrecondition, "no total has been written down here for this student yet: one is written when a grade beneath it is posted"},
+		{"grade.override_total", in(m{"student_member_id": b.yukiM, "component_id": b.midterm, "score": 90, "reason": "Illness"}),
+			apperr.FailedPrecondition, `"Midterm" is graded directly: regrade its grade instead`},
+		{"grade.clear_override", in(m{"student_member_id": b.kenM, "component_id": b.total}),
+			apperr.FailedPrecondition, "no total has been written down here for this student yet: one is written when a grade beneath it is posted"},
+		{"grade.comment_total", in(m{"student_member_id": b.kenM, "component_id": b.total, "feedback": "Well done."}),
+			apperr.FailedPrecondition, "no total has been written down here for this student yet: one is written when a grade beneath it is posted"},
+		{"member.add", in(m{"actor_id": newcomer, "preset": "observer"}),
+			apperr.Forbidden, "you hold document_read at confirm_required and cannot grant it at autonomous"},
+		{"member.add", in(m{"actor_id": newcomer, "preset": "observer", "perms": reads, "listed_students": []uuid.UUID{b.yukiM}}),
+			apperr.InvalidArgument, "listed_students only makes sense with student_scope = listed"},
+		{"member.add", in(m{"actor_id": newcomer, "preset": "observer", "perms": reads, "expires_at": past}),
+			apperr.InvalidArgument, "expires_at is in the past"},
+		// Raising a level is measured on the whole of what the seat will
+		// hold: Ken reads at autonomous, which Tanaka gives nobody.
+		{"member.update_perms", in(m{"member_id": b.kenM, "perms": m{"grade_post": "autonomous"}}),
+			apperr.Forbidden, "you hold document_read at confirm_required and cannot grant it at autonomous"},
+		{"member.update_perms_bulk", in(m{"role": "student", "perms": m{"grade_post": "autonomous"}}),
+			apperr.Forbidden, "you hold document_read at confirm_required and cannot grant it at autonomous"},
+		{"member.rescope", in(m{"member_id": b.graderM, "listed_students": []uuid.UUID{b.yukiM}}),
+			apperr.InvalidArgument, "listed_students only makes sense with student_scope = listed"},
+		{"member.rescope", in(m{"member_id": b.kenM, "expires_at": past}),
+			apperr.InvalidArgument, "expires_at is in the past; to end a membership now, remove it"},
+		{"member.set_role", in(m{"member_id": botM, "role": "ta"}),
+			apperr.FailedPrecondition, "a delegate's seat is its principal's agent, always assistant, and on no roster"},
+		{"member.pause", in(m{"member_id": tanakaM}),
+			apperr.Forbidden, "not on your own membership"},
+		{"member.resume", in(m{"member_id": b.kenM}),
+			apperr.Conflict, "the member is active, not paused"},
+		{"member.remove", in(m{"member_id": tanakaM}),
+			apperr.Forbidden, "not on your own membership"},
+		{"conversation.mark_read", in(m{"conversation_id": conv, "up_to_message_id": uuid.New()}),
+			apperr.InvalidArgument, "up_to_message_id must name a message of this conversation's"},
+	}
+	for i, tc := range cases {
+		out := b.MustCall(tanaka, tc.tool, tc.args, "refuse-"+uuid.NewString())
+		if out.Status != domain.StatusFailed || out.Error == nil || out.Error.Code != tc.code || out.Error.Message != tc.message {
+			t.Errorf("case %d, %s: %+v, want failed, %s %q, before anyone is asked", i, tc.tool, out, tc.code, tc.message)
+		}
+	}
+	if n := b.Count(`SELECT count(*) FROM action WHERE actor_id = $1 AND status = 'proposed'`, tanaka); n != 0 {
+		t.Fatalf("%d of Tanaka's calls wait for someone to approve them", n)
+	}
 }

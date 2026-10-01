@@ -292,7 +292,7 @@ func TestAnAgentsOwnerNeverChanges(t *testing.T) {
 			t.Fatalf("%s: %+v", what, out)
 		}
 	}
-	failed("a person with an owner", register(m{"kind": "human", "display_name": "x", "owner_actor_id": b.yuki}), apperr.InvalidArgument)
+	b.try(t, b.admin, "actor.register", m{"kind": "human", "display_name": "x", "owner_actor_id": b.yuki}, apperr.InvalidArgument)
 	failed("an agent owned by an agent", register(m{"kind": "agent", "hosting": "mcp", "display_name": "x", "owner_actor_id": b.grader}), apperr.FailedPrecondition)
 	failed("an agent owned by root, by an admin", register(m{"kind": "agent", "hosting": "mcp", "display_name": "x", "owner_actor_id": b.Root}), apperr.Forbidden)
 	bot := testkit.Result[tools.ActorOut](t, register(m{"kind": "agent", "hosting": "mcp", "display_name": "Lab bot", "owner_actor_id": b.yuki})).ActorID
@@ -432,10 +432,8 @@ func TestAnAgentKnowsWhoOwnsIt(t *testing.T) {
 // tokens would be more than a seat.
 func TestAnOwnedAgentHoldsNoPlatformRole(t *testing.T) {
 	b := build(t)
-	out := b.MustCall(b.Root, "actor.register", m{"kind": "agent", "hosting": "mcp", "display_name": "Admin bot", "platform_role": "admin", "owner_actor_id": b.yuki}, "reg")
-	if out.Status != domain.StatusFailed || out.Error.Code != apperr.InvalidArgument {
-		t.Fatalf("an owned agent with a platform role: %+v", out)
-	}
+	b.try(t, b.Root, "actor.register", m{"kind": "agent", "hosting": "mcp", "display_name": "Admin bot", "platform_role": "admin", "owner_actor_id": b.yuki},
+		apperr.InvalidArgument)
 	// Registered with a platform role and no owner, it is given none later
 	// either (TestAnAgentsOwnerNeverChanges).
 	b.do(t, b.Root, "actor.register", m{"kind": "agent", "hosting": "mcp", "display_name": "Admin bot", "platform_role": "admin"})

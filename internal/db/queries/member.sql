@@ -176,6 +176,14 @@ SELECT EXISTS (
       AND (id = sqlc.arg(principal_member_id) OR principal_member_id = sqlc.arg(principal_member_id))
 )::bool;
 
+-- name: ListLiveSeatsByRole :many
+-- LockLiveSeatsByRole without the lock: the seats a member.update_perms_bulk
+-- proposed now would change, each of which it is held to before it waits.
+SELECT id FROM course_member
+WHERE course_id = $1 AND role = sqlc.arg(role) AND status <> 'removed'
+  AND (expires_at IS NULL OR expires_at > sqlc.arg(now)) AND id <> sqlc.arg(except_member_id)
+ORDER BY id;
+
 -- name: LockLiveSeatsByRole :many
 -- Every seat of one roster role that is not removed or past its expiry,
 -- except one, locked in id order: member.update_perms_bulk changes them all

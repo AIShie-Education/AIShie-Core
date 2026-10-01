@@ -157,8 +157,10 @@ func (b AssignmentBody) check() error {
 
 // checkAssignment holds the same-course rules no foreign key covers: the two
 // documents are documents of this course and of the right kind, and the
-// component is a bucket of this course.
-func checkAssignment(ctx context.Context, q dbq.Querier, courseID uuid.UUID, a dbq.GetAssignmentInCourseRow) error {
+// component is a bucket of this course. lock takes the component tree's
+// lock first, as Execute does; Validate asks it of the tree as it stands,
+// before the call is carried out or proposed.
+func checkAssignment(ctx context.Context, q dbq.Querier, courseID uuid.UUID, a dbq.GetAssignmentInCourseRow, lock bool) error {
 	for _, d := range []struct {
 		id   *uuid.UUID
 		kind string
@@ -195,8 +197,10 @@ func checkAssignment(ctx context.Context, q dbq.Querier, courseID uuid.UUID, a d
 		// this check and theirs each see the tree as it was before the other
 		// committed, and a component ends up with both assignments and
 		// children — whose assignments then count toward nothing.
-		if err := q.LockCourseComponents(ctx, courseID); err != nil {
-			return err
+		if lock {
+			if err := q.LockCourseComponents(ctx, courseID); err != nil {
+				return err
+			}
 		}
 		c, err := q.GetComponentInCourse(ctx, dbq.GetComponentInCourseParams{ID: *a.ComponentID, CourseID: courseID})
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -259,10 +263,15 @@ func assignmentCreate() tool.Tool {
 		Resolve: func(_ context.Context, _ dbq.Querier, in AssignmentCreateIn) (tool.Target, error) {
 			return tool.Target{CourseID: in.CourseID, Type: "assignment"}, nil
 		},
+		Validate: func(ctx context.Context, q dbq.Querier, _ *domain.Member, in AssignmentCreateIn) error {
+			a := dbq.GetAssignmentInCourseRow{CourseID: in.CourseID}
+			in.applyTo(&a)
+			return checkAssignment(ctx, q, in.CourseID, a, false)
+		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in AssignmentCreateIn) (IDOut, error) {
 			a := dbq.GetAssignmentInCourseRow{ID: ids.New(), CourseID: in.CourseID}
 			in.applyTo(&a)
-			if err := checkAssignment(ctx, ec.Q, in.CourseID, a); err != nil {
+			if err := checkAssignment(ctx, ec.Q, in.CourseID, a, true); err != nil {
 				return IDOut{}, err
 			}
 			if err := ec.Q.InsertAssignment(ctx, dbq.InsertAssignmentParams{
@@ -365,6 +374,23 @@ func assignmentUpdate() tool.Tool {
 			}
 			return t, nil
 		},
+		Validate: func(ctx context.Context, q dbq.Querier, _ *domain.Member, in AssignmentUpdateIn) error {
+			before, err := q.GetAssignmentInCourse(ctx, dbq.GetAssignmentInCourseParams{ID: in.AssignmentID, CourseID: in.CourseID})
+			if err != nil {
+				return err
+			}
+			a := in.updated(before)
+			if points, _ := movesInScheme(before, a); points && in.ExistingGrades == nil {
+				graded, err := q.ListStudentsGradedOnAssignment(ctx, a.ID)
+				if err != nil {
+					return err
+				}
+				if len(graded) > 0 {
+					return errExistingGradesRequired
+				}
+			}
+			return checkAssignment(ctx, q, in.CourseID, a, false)
+		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in AssignmentUpdateIn) (SchemeChangeOut, error) {
 			// Read under the row's lock. Every column is written back, and a
 			// copy read before another change committed would quietly undo
@@ -391,15 +417,14 @@ func assignmentUpdate() tool.Tool {
 			// it, or a 95 entered out of 100 would be posted out of 50 with
 			// nobody having said so.
 			if points && len(graded) > 0 && in.ExistingGrades == nil {
-				return SchemeChangeOut{}, apperr.Precondition("grades have been entered for this assignment; say what becomes of them when its points change: existing_grades rescale or keep_scores").
-					With("reason", "existing_grades_required")
+				return SchemeChangeOut{}, errExistingGradesRequired
 			}
 			if len(graded) > 0 {
 				if err := checkSchemeScope(ctx, ec, in.CourseID, gradedStudents(graded)); err != nil {
 					return SchemeChangeOut{}, err
 				}
 			}
-			if err := checkAssignment(ctx, ec.Q, in.CourseID, a); err != nil {
+			if err := checkAssignment(ctx, ec.Q, in.CourseID, a, true); err != nil {
 				return SchemeChangeOut{}, err
 			}
 			if err := ec.Q.UpdateAssignment(ctx, dbq.UpdateAssignmentParams{
@@ -438,6 +463,11 @@ func assignmentUpdate() tool.Tool {
 		},
 	})
 }
+
+// errExistingGradesRequired refuses a change of an assignment's points
+// that does not say what becomes of the grades entered for it.
+var errExistingGradesRequired = apperr.Precondition("grades have been entered for this assignment; say what becomes of them when its points change: existing_grades rescale or keep_scores").
+	With("reason", "existing_grades_required")
 
 func assignmentPublish() tool.Tool {
 	return tool.Define(tool.Spec[AssignmentIDIn, OK]{

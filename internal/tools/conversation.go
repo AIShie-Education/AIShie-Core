@@ -1110,11 +1110,19 @@ func conversationMarkRead() tool.Tool {
 		Resolve: func(ctx context.Context, q dbq.Querier, in ConversationMarkReadIn) (tool.Target, error) {
 			return conversationTarget(ctx, q, in.CourseID, in.ConversationID)
 		},
-		Validate: func(_ context.Context, _ dbq.Querier, _ *domain.Member, in ConversationMarkReadIn) error {
+		Check: func(in ConversationMarkReadIn) error {
 			if in.UpToMessageID != nil && in.UpTo != nil {
 				return apperr.Invalid("give up_to_message_id or up_to, not both")
 			}
 			return nil
+		},
+		// A message is a conversation's for good.
+		Validate: func(ctx context.Context, q dbq.Querier, _ *domain.Member, in ConversationMarkReadIn) error {
+			if in.UpToMessageID == nil {
+				return nil
+			}
+			_, err := upTo(ctx, q, in.ConversationID, *in.UpToMessageID)
+			return err
 		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in ConversationMarkReadIn) (ConversationMarkReadOut, error) {
 			c, err := findConversation(ctx, ec.Q, in.CourseID, in.ConversationID)
@@ -1135,11 +1143,7 @@ func conversationMarkRead() tool.Tool {
 			var seq int32
 			switch {
 			case in.UpToMessageID != nil:
-				seq, err = ec.Q.MessageSeqIn(ctx, dbq.MessageSeqInParams{ID: *in.UpToMessageID, ConversationID: c.ID})
-				if errors.Is(err, pgx.ErrNoRows) {
-					return ConversationMarkReadOut{}, apperr.Invalid("up_to_message_id must name a message of this conversation's").
-						With("field", "up_to_message_id")
-				}
+				seq, err = upTo(ctx, ec.Q, c.ID, *in.UpToMessageID)
 			default:
 				seq, err = ec.Q.LastMessageSeq(ctx, dbq.LastMessageSeqParams{ConversationID: c.ID, At: in.UpTo})
 			}
@@ -1156,6 +1160,15 @@ func conversationMarkRead() tool.Tool {
 			return out, err
 		},
 	})
+}
+
+// upTo is the seq of message, which must be one of the conversation's.
+func upTo(ctx context.Context, q dbq.Querier, conversation, message uuid.UUID) (int32, error) {
+	seq, err := q.MessageSeqIn(ctx, dbq.MessageSeqInParams{ID: message, ConversationID: conversation})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, apperr.Invalid("up_to_message_id must name a message of this conversation's").With("field", "up_to_message_id")
+	}
+	return seq, err
 }
 
 // ---------------------------------------------------------------------------

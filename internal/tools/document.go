@@ -1133,6 +1133,12 @@ func documentPurge(d Deps) tool.Tool {
 			"the departments they administer; it works in an archived course too.",
 		Kind: tool.Write, Gate: administrators, OnArchived: true,
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/documents/{document_id}/purge"},
+		Check: func(in DocumentPurgeIn) error {
+			if reason := strings.TrimSpace(in.Reason); reason == "" || utf8.RuneCountInString(reason) > 500 {
+				return apperr.Invalid("reason is 1 to 500 characters")
+			}
+			return nil
+		},
 		Resolve: func(ctx context.Context, q dbq.Querier, in DocumentPurgeIn) (tool.Target, error) {
 			t, err := platformCourse(ctx, q, in.CourseID)
 			if err != nil {
@@ -1146,9 +1152,6 @@ func documentPurge(d Deps) tool.Tool {
 		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in DocumentPurgeIn) (DocumentPurgeOut, error) {
 			reason := strings.TrimSpace(in.Reason)
-			if reason == "" || utf8.RuneCountInString(reason) > 500 {
-				return DocumentPurgeOut{}, apperr.Invalid("reason is 1 to 500 characters")
-			}
 			// The document's lock, as a new version takes it: nothing is
 			// added to it while it is purged.
 			if err := ec.Q.LockDocument(ctx, in.DocumentID); err != nil {

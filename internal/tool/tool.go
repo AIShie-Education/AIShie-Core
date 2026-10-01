@@ -293,7 +293,9 @@ type Spec[In, Out any] struct {
 	// queued as a proposal, by the member m proposing it, and now is when
 	// that is; what it returns is the payload stored with it. It may refuse
 	// the call instead, for what could not wait as long as a proposal may:
-	// an upload too old to outlast it. It runs in the call's transaction,
+	// an upload too old to outlast it; and for what the moment refuses and
+	// Validate, which has no clock, cannot tell: an expiry already past.
+	// It runs in the call's transaction,
 	// so it may also clear, as it succeeds, what the proposal takes the
 	// place of: conversation.answer's draft.
 	Pin func(ctx context.Context, q dbq.Querier, m *domain.Member, now time.Time, in In) (In, error)

@@ -278,7 +278,6 @@ func TestWhatMayBeGraded(t *testing.T) {
 		{"a rolled-up component", m{"component_id": c.Assignments, "student_member_id": yuki.Member, "score": 1}, apperr.FailedPrecondition},
 		{"the course total", m{"component_id": c.Total, "student_member_id": yuki.Member, "score": 1}, apperr.FailedPrecondition},
 		{"someone who is not a student", m{"component_id": c.Midterm, "student_member_id": c.SatoM, "score": 1}, apperr.FailedPrecondition},
-		{"a negative score", m{"submission_id": yuki.HW3, "score": -1}, apperr.InvalidArgument},
 		{"a rubric version from nowhere", m{"submission_id": yuki.HW3, "score": 1, "rubric_version_id": uuid.New()}, apperr.FailedPrecondition},
 	}
 	for i, tc := range cases {
@@ -292,6 +291,11 @@ func TestWhatMayBeGraded(t *testing.T) {
 	}
 	if _, err := c.Call(c.Sato, "grade.submit", m{"course_id": c.Course, "submission_id": yuki.HW3, "student_member_id": yuki.Member, "score": 1}, "z"); !apperr.Is(err, apperr.InvalidArgument) {
 		t.Fatalf("student_member_id with submission_id: %v", err)
+	}
+	// A score below zero is refused as the arguments are read, before
+	// anything is attempted.
+	if _, err := c.Call(c.Sato, "grade.submit", m{"course_id": c.Course, "submission_id": yuki.HW3, "score": -1}, "y"); !apperr.Is(err, apperr.InvalidArgument) {
+		t.Fatalf("a negative score: %v", err)
 	}
 	if n := c.Count(`SELECT count(*) FROM grade`); n != 0 {
 		t.Fatalf("%d grades written by calls that should all have failed", n)

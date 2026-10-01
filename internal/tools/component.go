@@ -101,7 +101,7 @@ func componentTarget(ctx context.Context, q dbq.Querier, courseID, id uuid.UUID)
 
 // canHaveChildren: a parent is rolled up from its children, so it holds
 // neither assignments nor points of its own.
-func canHaveChildren(ctx context.Context, q *dbq.Queries, parent dbq.GetComponentInCourseRow) error {
+func canHaveChildren(ctx context.Context, q dbq.Querier, parent dbq.GetComponentInCourseRow) error {
 	if parent.PointsPossible.Valid {
 		return apperr.Precondition("%q is graded directly and cannot have sub-components", parent.Name)
 	}
@@ -111,6 +111,16 @@ func canHaveChildren(ctx context.Context, q *dbq.Queries, parent dbq.GetComponen
 		return apperr.Precondition("%q holds assignments and cannot also have sub-components", parent.Name)
 	}
 	return nil
+}
+
+// parentTakesChildren reads the component a new one would sit under and
+// holds it to canHaveChildren.
+func parentTakesChildren(ctx context.Context, q dbq.Querier, courseID, parentID uuid.UUID) error {
+	parent, err := q.GetComponentInCourse(ctx, dbq.GetComponentInCourseParams{ID: parentID, CourseID: courseID})
+	if err != nil {
+		return err
+	}
+	return canHaveChildren(ctx, q, parent)
 }
 
 type ComponentCreateIn struct {
@@ -138,15 +148,14 @@ func componentCreate() tool.Tool {
 			t.ID = nil
 			return t, err
 		},
+		Validate: func(ctx context.Context, q dbq.Querier, _ *domain.Member, in ComponentCreateIn) error {
+			return parentTakesChildren(ctx, q, in.CourseID, in.ParentID)
+		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in ComponentCreateIn) (IDOut, error) {
 			if err := ec.Q.LockCourseComponents(ctx, in.CourseID); err != nil {
 				return IDOut{}, err
 			}
-			parent, err := ec.Q.GetComponentInCourse(ctx, dbq.GetComponentInCourseParams{ID: in.ParentID, CourseID: in.CourseID})
-			if err != nil {
-				return IDOut{}, err
-			}
-			if err := canHaveChildren(ctx, ec.Q, parent); err != nil {
+			if err := parentTakesChildren(ctx, ec.Q, in.CourseID, in.ParentID); err != nil {
 				return IDOut{}, err
 			}
 			weight := one
@@ -207,6 +216,67 @@ func componentGraded(ctx context.Context, q dbq.Querier, id uuid.UUID) ([]uuid.U
 	return q.ListStudentsGradedBeneath(ctx, id)
 }
 
+// check holds a change to component c to the rules of the tree and of the
+// grades entered on it: Validate asks it of the component as it stands,
+// before the change is made or proposed, and Execute again under the tree's
+// lock.
+func (in ComponentUpdateIn) check(ctx context.Context, q dbq.Querier, c dbq.GetComponentInCourseRow) error {
+	switch {
+	case in.ClearPointsPossible:
+		// Its grades would be grades on a bucket, where its totals are
+		// written: two live grades for one target, which nothing could
+		// then post over or regrade. Its points may change instead.
+		if has, err := q.ComponentHasGrades(ctx, &c.ID); err != nil {
+			return err
+		} else if has {
+			return apperr.Precondition("%q has grades entered on it and cannot stop being graded directly; change its points instead", c.Name).
+				With("reason", "graded_directly")
+		}
+	case in.PointsPossible != nil && c.PointsPossible.Valid && !c.PointsPossible.Decimal.Equal(*in.PointsPossible):
+		// Already graded directly, and worth something else now. As for an
+		// assignment: once a grade has been entered, the change says what
+		// becomes of it.
+		if in.ExistingGrades != nil {
+			return nil
+		}
+		if has, err := q.ComponentHasLiveEnteredGrades(ctx, &c.ID); err != nil {
+			return err
+		} else if has {
+			return apperr.Precondition("grades have been entered for %q; say what becomes of them when its points change: existing_grades rescale or keep_scores", c.Name).
+				With("reason", "existing_grades_required")
+		}
+	case in.PointsPossible != nil:
+		// Becoming directly graded: it must be a leaf with nothing
+		// hanging from it.
+		if n, err := q.CountComponentChildren(ctx, &c.ID); err != nil {
+			return err
+		} else if n > 0 {
+			return apperr.Precondition("%q has sub-components and cannot be graded directly", c.Name)
+		}
+		if n, err := q.CountComponentAssignments(ctx, &c.ID); err != nil {
+			return err
+		} else if n > 0 {
+			return apperr.Precondition("%q holds assignments and cannot be graded directly", c.Name)
+		}
+		if c.ParentID == nil {
+			return apperr.Precondition("the course total is rolled up, never graded directly")
+		}
+		// A former parent may still carry the totals that were written
+		// down for it when grades beneath it were posted. Those are live
+		// posted grades on this component: an entered grade could then
+		// never be posted over them, nor regraded, and there would be no
+		// way back through the tools.
+		if !c.PointsPossible.Valid {
+			if has, err := q.ComponentHasLivePostedGrades(ctx, &c.ID); err != nil {
+				return err
+			} else if has {
+				return apperr.Precondition("%q has posted totals from when it was rolled up; make a new component for what is graded directly", c.Name)
+			}
+		}
+	}
+	return nil
+}
+
 func componentUpdate() tool.Tool {
 	return tool.Define(tool.Spec[ComponentUpdateIn, SchemeChangeOut]{
 		Name: "component.update",
@@ -252,6 +322,16 @@ func componentUpdate() tool.Tool {
 			}
 			return t, nil
 		},
+		Validate: func(ctx context.Context, q dbq.Querier, _ *domain.Member, in ComponentUpdateIn) error {
+			c, err := q.GetComponentInCourse(ctx, dbq.GetComponentInCourseParams{ID: in.ComponentID, CourseID: in.CourseID})
+			if err != nil {
+				return err
+			}
+			if in.Name != nil {
+				c.Name = *in.Name // as Execute names it
+			}
+			return in.check(ctx, q, c)
+		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in ComponentUpdateIn) (SchemeChangeOut, error) {
 			if err := ec.Q.LockCourseComponents(ctx, in.CourseID); err != nil {
 				return SchemeChangeOut{}, err
@@ -282,24 +362,18 @@ func componentUpdate() tool.Tool {
 			if in.SortOrder != nil {
 				sortOrder = *in.SortOrder
 			}
+			if err := in.check(ctx, ec.Q, c); err != nil {
+				return SchemeChangeOut{}, err
+			}
 			var graded []dbq.LockLiveEnteredGradesOfAssignmentRow
 			from := c.PointsPossible.Decimal
 			switch {
 			case in.ClearPointsPossible:
-				// Its grades would be grades on a bucket, where its totals are
-				// written: two live grades for one target, which nothing could
-				// then post over or regrade. Its points may change instead.
-				if has, err := ec.Q.ComponentHasGrades(ctx, &c.ID); err != nil {
-					return SchemeChangeOut{}, err
-				} else if has {
-					return SchemeChangeOut{}, apperr.Precondition("%q has grades entered on it and cannot stop being graded directly; change its points instead", c.Name).
-						With("reason", "graded_directly")
-				}
 				c.PointsPossible = decimal.NullDecimal{}
 			case in.PointsPossible != nil && c.PointsPossible.Valid && !c.PointsPossible.Decimal.Equal(*in.PointsPossible):
-				// Already graded directly, and worth something else now. As
-				// for an assignment: once a grade has been entered, the
-				// change says what becomes of it. Nobody enters one
+				// Already graded directly, and worth something else now: the
+				// grades entered on it are rescaled or kept as they are, as
+				// in.check has made sure the call says. Nobody enters one
 				// meanwhile: grade.submit on a component takes the tree lock,
 				// and so does grade.regrade.
 				locked, err := ec.Q.LockLiveEnteredGradesOfComponent(ctx, &c.ID)
@@ -309,10 +383,6 @@ func componentUpdate() tool.Tool {
 				for _, r := range locked {
 					graded = append(graded, dbq.LockLiveEnteredGradesOfAssignmentRow(r))
 				}
-				if len(graded) > 0 && in.ExistingGrades == nil {
-					return SchemeChangeOut{}, apperr.Precondition("grades have been entered for %q; say what becomes of them when its points change: existing_grades rescale or keep_scores", c.Name).
-						With("reason", "existing_grades_required")
-				}
 				if len(graded) > 0 {
 					if err := checkSchemeScope(ctx, ec, in.CourseID, gradedStudents(graded)); err != nil {
 						return SchemeChangeOut{}, err
@@ -320,33 +390,6 @@ func componentUpdate() tool.Tool {
 				}
 				c.PointsPossible = nullDecimal(in.PointsPossible)
 			case in.PointsPossible != nil:
-				// Becoming directly graded: it must be a leaf with nothing
-				// hanging from it.
-				if n, err := ec.Q.CountComponentChildren(ctx, &c.ID); err != nil {
-					return SchemeChangeOut{}, err
-				} else if n > 0 {
-					return SchemeChangeOut{}, apperr.Precondition("%q has sub-components and cannot be graded directly", c.Name)
-				}
-				if n, err := ec.Q.CountComponentAssignments(ctx, &c.ID); err != nil {
-					return SchemeChangeOut{}, err
-				} else if n > 0 {
-					return SchemeChangeOut{}, apperr.Precondition("%q holds assignments and cannot be graded directly", c.Name)
-				}
-				if c.ParentID == nil {
-					return SchemeChangeOut{}, apperr.Precondition("the course total is rolled up, never graded directly")
-				}
-				// A former parent may still carry the totals that were written
-				// down for it when grades beneath it were posted. Those are live
-				// posted grades on this component: an entered grade could then
-				// never be posted over them, nor regraded, and there would be no
-				// way back through the tools.
-				if !c.PointsPossible.Valid {
-					if has, err := ec.Q.ComponentHasLivePostedGrades(ctx, &c.ID); err != nil {
-						return SchemeChangeOut{}, err
-					} else if has {
-						return SchemeChangeOut{}, apperr.Precondition("%q has posted totals from when it was rolled up; make a new component for what is graded directly", c.Name)
-					}
-				}
 				c.PointsPossible = nullDecimal(in.PointsPossible)
 			}
 			if err := ec.Q.UpdateComponent(ctx, dbq.UpdateComponentParams{ID: c.ID, Name: c.Name, Weight: c.Weight,
@@ -377,6 +420,39 @@ type ComponentMoveIn struct {
 	NewParentID uuid.UUID `json:"new_parent_id"`
 }
 
+// check reads the component to be moved and holds the move to the tree's
+// rules: Validate asks it of the tree as it stands, before the move is made
+// or proposed, and Execute again under the tree's lock, where two moves
+// cannot each pass it and between them make a cycle.
+func (in ComponentMoveIn) check(ctx context.Context, q dbq.Querier) (dbq.GetComponentInCourseRow, error) {
+	c, err := q.GetComponentInCourse(ctx, dbq.GetComponentInCourseParams{ID: in.ComponentID, CourseID: in.CourseID})
+	if err != nil {
+		return c, err
+	}
+	if c.ParentID == nil {
+		return c, apperr.Precondition("the course total is the root and stays there")
+	}
+	if err := parentTakesChildren(ctx, q, in.CourseID, in.NewParentID); err != nil {
+		return c, err
+	}
+	// The database blocks only a component being its own parent. Anything
+	// longer — A under B under A — is caught here: walk up from the new
+	// parent, and if the walk meets the component, the move would put it
+	// beneath itself.
+	for at, steps := &in.NewParentID, 0; at != nil; steps++ {
+		if *at == c.ID {
+			return c, apperr.Precondition("that would put %q beneath itself", c.Name)
+		}
+		if steps > 1000 {
+			return c, errors.New("component tree is deeper than 1000 levels or already cyclic")
+		}
+		if at, err = q.GetComponentParent(ctx, *at); err != nil {
+			return c, err
+		}
+	}
+	return c, nil
+}
+
 func componentMove() tool.Tool {
 	return tool.Define(tool.Spec[ComponentMoveIn, SchemeChangeOut]{
 		Name: "component.move",
@@ -404,6 +480,10 @@ func componentMove() tool.Tool {
 			}
 			return t, nil
 		},
+		Validate: func(ctx context.Context, q dbq.Querier, _ *domain.Member, in ComponentMoveIn) error {
+			_, err := in.check(ctx, q)
+			return err
+		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in ComponentMoveIn) (SchemeChangeOut, error) {
 			// Two moves could each pass the cycle check and between them
 			// make a cycle; the lock makes the check and the move one step.
@@ -413,34 +493,9 @@ func componentMove() tool.Tool {
 			if err := ec.Q.LockCourseComponents(ctx, in.CourseID); err != nil {
 				return SchemeChangeOut{}, err
 			}
-			c, err := ec.Q.GetComponentInCourse(ctx, dbq.GetComponentInCourseParams{ID: in.ComponentID, CourseID: in.CourseID})
+			c, err := in.check(ctx, ec.Q)
 			if err != nil {
 				return SchemeChangeOut{}, err
-			}
-			if c.ParentID == nil {
-				return SchemeChangeOut{}, apperr.Precondition("the course total is the root and stays there")
-			}
-			parent, err := ec.Q.GetComponentInCourse(ctx, dbq.GetComponentInCourseParams{ID: in.NewParentID, CourseID: in.CourseID})
-			if err != nil {
-				return SchemeChangeOut{}, err
-			}
-			if err := canHaveChildren(ctx, ec.Q, parent); err != nil {
-				return SchemeChangeOut{}, err
-			}
-			// The database blocks only a component being its own parent.
-			// Anything longer — A under B under A — is caught here: walk up
-			// from the new parent, and if the walk meets the component, the
-			// move would put it beneath itself.
-			for at, steps := &in.NewParentID, 0; at != nil; steps++ {
-				if *at == c.ID {
-					return SchemeChangeOut{}, apperr.Precondition("that would put %q beneath itself", c.Name)
-				}
-				if steps > 1000 {
-					return SchemeChangeOut{}, errors.New("component tree is deeper than 1000 levels or already cyclic")
-				}
-				if at, err = ec.Q.GetComponentParent(ctx, *at); err != nil {
-					return SchemeChangeOut{}, err
-				}
 			}
 			// A score is a score in the scheme it was given under, and moving
 			// a component changes what every grade beneath it counts toward:

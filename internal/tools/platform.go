@@ -91,24 +91,34 @@ func actorRegister() tool.Tool {
 			"The owner is given here or never: nobody changes it or takes it away afterwards, and an agent registered " +
 			"without one stays nobody's.",
 		Kind: tool.Write, Gate: admins,
-		HTTP:    tool.Route{Method: "POST", Pattern: "/v1/actors"},
+		HTTP: tool.Route{Method: "POST", Pattern: "/v1/actors"},
+		Check: func(in ActorRegisterIn) error {
+			switch {
+			case in.Kind != "human" && in.Kind != "agent":
+				return apperr.Invalid("kind must be human or agent")
+			case strings.TrimSpace(in.DisplayName) == "":
+				return apperr.Invalid("display_name is required")
+			case in.PlatformRole != nil && *in.PlatformRole != domain.PlatformAdmin:
+				return apperr.Invalid("platform_role can only be admin; root is created once, at bootstrap")
+			case in.Kind == "agent" && !in.Hosting.Valid():
+				return apperr.Invalid("hosting is required for an agent: runtime or mcp; it never changes").With("field", "hosting")
+			case in.Kind != "agent" && in.Hosting != "":
+				return apperr.Invalid("only an agent has a hosting").With("field", "hosting")
+			case in.OwnerActorID != nil && in.Kind != "agent":
+				return apperr.Invalid("only an agent has an owner")
+			case in.OwnerActorID != nil && in.PlatformRole != nil:
+				// Owning an agent, and holding its tokens, gives nobody more
+				// than their own seat; a platform role is not a seat.
+				return apperr.Invalid("an agent someone owns holds no platform role")
+			}
+			return nil
+		},
 		Resolve: noTarget[ActorRegisterIn]("actor"),
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in ActorRegisterIn) (ActorOut, error) {
-			if in.Kind != "human" && in.Kind != "agent" {
-				return ActorOut{}, apperr.Invalid("kind must be human or agent")
-			}
 			// Kept trimmed, as every other name is.
 			name := strings.TrimSpace(in.DisplayName)
-			if name == "" {
-				return ActorOut{}, apperr.Invalid("display_name is required")
-			}
-			if in.PlatformRole != nil {
-				if *in.PlatformRole != domain.PlatformAdmin {
-					return ActorOut{}, apperr.Invalid("platform_role can only be admin; root is created once, at bootstrap")
-				}
-				if ec.Actor.PlatformRole != domain.PlatformRoot {
-					return ActorOut{}, apperr.Forbid("only root makes an admin")
-				}
+			if in.PlatformRole != nil && ec.Actor.PlatformRole != domain.PlatformRoot {
+				return ActorOut{}, apperr.Forbid("only root makes an admin")
 			}
 			if in.Email != nil {
 				if taken, err := ec.Q.EmailTaken(ctx, *in.Email); err != nil {
@@ -125,24 +135,11 @@ func actorRegister() tool.Tool {
 				in.LoginID = &id
 			}
 			var hosting *string
-			switch {
-			case in.Kind == "agent" && !in.Hosting.Valid():
-				return ActorOut{}, apperr.Invalid("hosting is required for an agent: runtime or mcp; it never changes").With("field", "hosting")
-			case in.Kind == "agent":
+			if in.Kind == "agent" {
 				h := string(in.Hosting)
 				hosting = &h
-			case in.Hosting != "":
-				return ActorOut{}, apperr.Invalid("only an agent has a hosting").With("field", "hosting")
 			}
 			if in.OwnerActorID != nil {
-				if in.Kind != "agent" {
-					return ActorOut{}, apperr.Invalid("only an agent has an owner")
-				}
-				// Owning an agent, and holding its tokens, gives nobody more
-				// than their own seat; a platform role is not a seat.
-				if in.PlatformRole != nil {
-					return ActorOut{}, apperr.Invalid("an agent someone owns holds no platform role")
-				}
 				if err := mayOwn(ctx, ec, *in.OwnerActorID); err != nil {
 					return ActorOut{}, err
 				}
@@ -354,25 +351,27 @@ func actorUpdate() tool.Tool {
 			"(login_id_taken).",
 		Kind: tool.Write, Gate: admins,
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/actors/{actor_id}"},
+		Check: func(in ActorUpdateIn) error {
+			switch {
+			case in.DisplayName == nil && in.Email == nil && in.LoginID == nil:
+				return apperr.Invalid("give display_name, email, login_id or more than one")
+			case in.DisplayName != nil && strings.TrimSpace(*in.DisplayName) == "":
+				return apperr.Invalid("display_name cannot be empty")
+			case in.Email != nil && strings.TrimSpace(*in.Email) == "":
+				return apperr.Invalid("email cannot be empty; it can be changed, not removed")
+			}
+			return nil
+		},
 		Resolve: func(ctx context.Context, q dbq.Querier, in ActorUpdateIn) (tool.Target, error) {
 			return resolveActor(ctx, q, ActorIDIn{ActorID: in.ActorID})
 		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in ActorUpdateIn) (ActorView, error) {
-			if in.DisplayName == nil && in.Email == nil && in.LoginID == nil {
-				return ActorView{}, apperr.Invalid("give display_name, email, login_id or more than one")
-			}
 			if in.DisplayName != nil {
 				name := strings.TrimSpace(*in.DisplayName)
-				if name == "" {
-					return ActorView{}, apperr.Invalid("display_name cannot be empty")
-				}
 				in.DisplayName = &name
 			}
 			if in.Email != nil {
 				email := strings.TrimSpace(*in.Email)
-				if email == "" {
-					return ActorView{}, apperr.Invalid("email cannot be empty; it can be changed, not removed")
-				}
 				in.Email = &email
 			}
 			// An administrator's own name and email are theirs to correct;
