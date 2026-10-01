@@ -53,6 +53,8 @@ type ssoOptions struct {
 func newSSOSiteWith(t *testing.T, o ssoOptions) *ssoSite {
 	t.Helper()
 	s := &ssoSite{t: t}
+	// Unpacked so the lines below stay as they were when operator and
+	// keys were parameters, and a change to them merges cleanly.
 	operator, keys := o.operator, o.keys
 	if keys {
 		k := make([]byte, secrets.KeySize)
