@@ -222,6 +222,20 @@ func TestAProposalThatWouldBeRefusedIsNotItsOwnersToDecide(t *testing.T) {
 	if proposed.Status != domain.StatusProposed {
 		t.Fatalf("Sato's agent grading: %+v", proposed)
 	}
+	// Ito teaches it too, and decides nothing but his own agent's
+	// proposals; his agent grades Yuki's HW3 by proposal.
+	ito := b.person(t, "Ito", "")
+	b.do(t, b.sato, "member.add", m{"course_id": b.course, "actor_id": ito, "preset": "instructor", "perms": m{"action_decide": "denied"}})
+	itoBot := b.agent(t, ito, "Ito's marker")
+	b.delegate(t, ito, itoBot, m{"preset": "ta", "perms": m{"grade_submit": "confirm_required"}})
+	yukiWork := b.submit(t, b.yuki, "Yuki's essay")
+	itoProposed := b.MustCall(itoBot, "grade.submit", m{"course_id": b.course, "submission_id": yukiWork, "score": 90}, "ito-bot-grades")
+	if itoProposed.Status != domain.StatusProposed {
+		t.Fatalf("Ito's agent grading: %+v", itoProposed)
+	}
+	if q := b.queue(t, ito, "action.list_proposed"); !q[*itoProposed.ActionID] {
+		t.Fatalf("Ito's queue, a grade he could give himself: %v", q)
+	}
 	if q := b.queue(t, b.sato, "action.list_proposed"); !q[*proposed.ActionID] {
 		t.Fatalf("Sato's queue, a grade he could give himself: %v", q)
 	}
@@ -238,10 +252,19 @@ func TestAProposalThatWouldBeRefusedIsNotItsOwnersToDecide(t *testing.T) {
 	for _, decision := range []string{"approve", "reject"} {
 		out := b.MustCall(b.sato, "action.decide", m{"course_id": b.course, "action_id": proposed.ActionID, "decision": decision}, "sato-"+decision)
 		refusal, _ := out.Error.Details["refusal"].(*apperr.Error)
-		if out.Status != domain.StatusFailed || out.Error.Code != apperr.Forbidden || out.Error.Details["reason"] != "owner_not_autonomous" ||
+		if out.Status != domain.StatusFailed || out.Error.Code != apperr.Forbidden || out.Error.Details["reason"] != "owner_would_be_refused" ||
 			refusal == nil || refusal.Code != apperr.FailedPrecondition {
 			t.Fatalf("Sato deciding (%s) his agent's grade that would be refused: %+v", decision, out)
 		}
+	}
+	// Ito, who decides nothing else, is refused it as anyone without
+	// action_decide is.
+	if q := b.queue(t, ito, "action.list_proposed"); q[*itoProposed.ActionID] {
+		t.Fatalf("Ito's queue, a grade out of points the work is no longer worth: %v", q)
+	}
+	for _, decision := range []string{"approve", "reject"} {
+		deniedOutright(t, "Ito deciding ("+decision+") his agent's grade that would be refused",
+			b.MustCall(ito, "action.decide", m{"course_id": b.course, "action_id": itoProposed.ActionID, "decision": decision}, "ito-"+decision))
 	}
 	if n := b.Count(`SELECT count(*) FROM action WHERE id = $1 AND status = 'proposed'`, *proposed.ActionID); n != 1 {
 		t.Fatal("the proposal is no longer waiting")
@@ -249,7 +272,11 @@ func TestAProposalThatWouldBeRefusedIsNotItsOwnersToDecide(t *testing.T) {
 
 	// A proposal queued before its tool checked what its arguments say
 	// alone is not his either, and approving it fails as Execute would
-	// have failed it.
+	// have failed it. Yuki has a total to override once her midterm is
+	// posted.
+	midterm := testkit.Result[tools.GradeSubmitOut](t, b.do(t, b.sato, "grade.submit",
+		m{"course_id": b.course, "component_id": b.midterm, "student_member_id": b.yukiM, "score": 80})).GradeID
+	b.do(t, b.sato, "grade.post", m{"course_id": b.course, "grade_ids": []uuid.UUID{midterm}})
 	override := b.MustCall(bot, "grade.override_total", m{"course_id": b.course, "student_member_id": b.yukiM,
 		"component_id": b.total, "score": 90, "reason": "Illness"}, "bot-overrides")
 	if override.Status != domain.StatusProposed {
@@ -267,6 +294,8 @@ func TestAProposalThatWouldBeRefusedIsNotItsOwnersToDecide(t *testing.T) {
 		t.Fatalf("Tanaka approving an override below zero: %+v", d)
 	}
 
-	// The grade: Sato takes it back, as an owner may whatever it asks.
+	// The grades: each owner takes his back, as an owner may whatever it
+	// asks.
 	b.do(t, b.sato, "action.withdraw", m{"course_id": b.course, "action_id": proposed.ActionID})
+	b.do(t, ito, "action.withdraw", m{"course_id": b.course, "action_id": itoProposed.ActionID})
 }

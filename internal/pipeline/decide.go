@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/AIShie-Education/AIShie-Core/internal/apperr"
 	"github.com/AIShie-Education/AIShie-Core/internal/authz"
@@ -364,12 +365,23 @@ func (p *Pipeline) ownerJudges(ctx context.Context, q dbq.Querier, actor domain.
 		return true, false, nil, nil
 	}
 	if a.Status == string(domain.StatusProposed) {
-		if refused, err = refusal(ctx, q, t, a, args); err != nil || refused != nil {
-			return true, false, refused, err
+		if refused, err = refusal(ctx, q, t, a, args); err != nil {
+			return true, false, nil, unsure{err}
+		}
+		if refused != nil {
+			return true, false, refused, nil
 		}
 	}
 	return true, true, nil, nil
 }
+
+// unsure is a fault met while asking whether approving a proposal would be
+// refused (refusal): a decision fails on it, as approving would, while a
+// queue does not say the proposal is the owner's to decide (OwnerMayJudge).
+type unsure struct{ err error }
+
+func (u unsure) Error() string { return u.err.Error() }
+func (u unsure) Unwrap() error { return u.err }
 
 // refusal is what approving proposal a, of tool t with arguments args, would
 // be refused with now for what it asks, before anything is carried out: the
@@ -406,8 +418,19 @@ func refusal(ctx context.Context, q dbq.Querier, t tool.Tool, a dbq.Action, args
 // when the caller, from seat, is the owner of the agent that did a and could
 // have done it themselves just now without anyone's confirmation, and, for a
 // proposal, approving it now would not be refused for what it asks.
+//
+// A fault outside the database met while asking whether approving it would
+// be refused — a file store that does not answer while a grade's feedback
+// files are looked at, say — leaves it not theirs, rather than failing the
+// whole queue; approving it would meet the same. One of the database's is
+// returned, as any other is: the transaction it was met in may be over.
 func (p *Pipeline) OwnerMayJudge(ctx context.Context, q dbq.Querier, actor domain.Actor, seat uuid.UUID, a dbq.Action, now time.Time) (bool, error) {
 	_, may, _, err := p.ownerJudges(ctx, q, actor, seat, a, now)
+	var u unsure
+	var pgErr *pgconn.PgError
+	if errors.As(err, &u) && !errors.As(err, &pgErr) {
+		return false, nil
+	}
 	return may, err
 }
 
@@ -421,10 +444,13 @@ func errOwnerNotAutonomous(what string) *apperr.Error {
 
 // errOwnerWouldBeRefused refuses an agent's owner a decision about its
 // proposal that, approved now, would be refused as refused says.
+// Its reason is its own, owner_would_be_refused: the owner may well hold the
+// action at autonomous, and what stands in the way is refusal, which says
+// why.
 func errOwnerWouldBeRefused(refused *apperr.Error) *apperr.Error {
 	return apperr.Forbid("you decide what your agent proposed only where you would do it yourself without anyone's confirmation, "+
 		"and approved now it would be refused (%s); take it back with action.withdraw, or someone else rejects it", refused.Message).
-		With("reason", "owner_not_autonomous").With("refusal", refused)
+		With("reason", "owner_would_be_refused").With("refusal", refused)
 }
 
 // judgesOwn reports whether a is a decision or a review about an action of

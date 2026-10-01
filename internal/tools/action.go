@@ -111,7 +111,8 @@ func actionDecide(d Deps) tool.Tool {
 			"nor their owner's, nor another agent's of their owner, nor a decision someone else proposed about any of those, " +
 			"nor approves closing an escalation they raised or approved. An agent's owner decides its proposal only where " +
 			"they could do the same themselves without anyone's confirmation: their own level for it autonomous, its " +
-			"target within their reach, and nothing in what it asks that approving it now would refuse; by_owner then says so. That needs no action_decide of their own, and is done at " +
+			"target within their reach, and the tool's own checks of what it asks passing as approving it now would run them " +
+			"(otherwise refused, reason owner_would_be_refused, with that refusal); by_owner then says so. That needs no action_decide of their own, and is done at " +
 			"once, as their own doing of it: a student confirms her own agent's drafts of her work.",
 		Kind:  tool.Write,
 		Gate:  ownAgentsGate(d, true),
@@ -167,7 +168,7 @@ type ActionView struct {
 	Result             json.RawMessage `json:"result,omitempty"`
 	CreatedAt          time.Time       `json:"created_at"`
 	// YoursToDecide is set in the approval and review queues.
-	YoursToDecide *bool `json:"yours_to_decide,omitempty" jsonschema:"in the approval and review queues: false when the action is yours, your owner's or another agent's of your owner, and when it is your own agent's and you could not do the same yourself without anyone's confirmation (your own level for it below autonomous, or its target beyond your reach, or, for a proposal, approving it now would be refused for what it asks): someone else decides and reviews those; true otherwise, though a decision about a decision may still be refused at one remove"`
+	YoursToDecide *bool `json:"yours_to_decide,omitempty" jsonschema:"in the approval and review queues: false when the action is yours, your owner's or another agent's of your owner, and when it is your own agent's and you could not do the same yourself without anyone's confirmation (your own level for it below autonomous, or its target beyond your reach, or, for a proposal, the tool's own checks of what it asks refuse it as approving it now would run them): someone else decides and reviews those; true otherwise, though a decision about a decision may still be refused at one remove"`
 }
 
 func viewAction(a dbq.Action) ActionView {
