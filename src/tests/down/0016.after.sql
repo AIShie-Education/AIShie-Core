@@ -24,7 +24,7 @@ BEGIN
                                                 '00000000-0000-0000-0016-000000000037') AND status = 'active') <> 3 THEN
         RAISE EXCEPTION 'FAIL  0016 down: a person did not stay';
     END IF;
-    IF NOT EXISTS (SELECT 1 FROM actor WHERE id = '00000000-0000-0000-0016-000000000037' AND email = 'fang@hainanu.edu.cn') THEN
+    IF NOT EXISTS (SELECT 1 FROM actor WHERE id = '00000000-0000-0000-0016-000000000037' AND email = 'fang@campus.example.edu') THEN
         RAISE EXCEPTION 'FAIL  0016 down: an email did not stay';
     END IF;
     IF NOT EXISTS (SELECT 1 FROM credential WHERE id = '00000000-0000-0000-0016-0000000000c2' AND revoked_at IS NULL

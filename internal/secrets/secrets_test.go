@@ -20,14 +20,14 @@ func key(t *testing.T) []byte {
 	return k
 }
 
-var adfs = secrets.Binding{Purpose: "sso_provider.client_secret", Owner: "polyu-adfs"}
+var adfs = secrets.Binding{Purpose: "sso_provider.client_secret", Owner: "school-adfs"}
 
 func TestASecretOpensWhereItWasSealedAndNowhereElse(t *testing.T) {
 	ring, err := secrets.NewKeyring(key(t))
 	if err != nil {
 		t.Fatal(err)
 	}
-	const plain = "the-client-secret-of-polyu-adfs"
+	const plain = "the-client-secret-of-school-adfs"
 	sealed, err := ring.Seal(adfs, plain)
 	if err != nil {
 		t.Fatal(err)

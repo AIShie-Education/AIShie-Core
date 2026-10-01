@@ -90,7 +90,7 @@ func TestAnAgentIsGivenNoWayToSignIn(t *testing.T) {
 		auth.ReasonAgentsUseTokens)
 	// No identity at a provider.
 	refusedFor(t, "an agent's identity linked", b.MustCall(b.admin, "actor.link_sso",
-		m{"actor_id": b.grader, "provider": "polyu-adfs", "subject": "grader@example.edu"}, "sso"), auth.ReasonAgentsUseTokens)
+		m{"actor_id": b.grader, "provider": "school-adfs", "subject": "grader@example.edu"}, "sso"), auth.ReasonAgentsUseTokens)
 	// No password of its own, whoever owns it.
 	for name, agent := range map[string]uuid.UUID{"an agent nobody owns": b.grader, "an agent Yuki owns": bot} {
 		refusedFor(t, name+" setting a password", b.MustCall(agent, "credential.set_password",
@@ -111,6 +111,6 @@ func TestAnAgentIsGivenNoWayToSignIn(t *testing.T) {
 		t.Fatalf("Yuki, looked up: %+v", found)
 	}
 	b.do(t, b.admin, "actor.invite", m{"actor_id": b.yuki})
-	b.do(t, b.admin, "actor.link_sso", m{"actor_id": b.yuki, "provider": "polyu-adfs", "subject": "yuki@example.edu"})
+	b.do(t, b.admin, "actor.link_sso", m{"actor_id": b.yuki, "provider": "school-adfs", "subject": "yuki@example.edu"})
 	b.do(t, b.yuki, "credential.set_password", m{"password": "yukis own password"})
 }

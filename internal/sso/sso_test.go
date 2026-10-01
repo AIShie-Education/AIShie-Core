@@ -14,7 +14,7 @@ import (
 )
 
 func TestSettingsAreHeldToTheirRules(t *testing.T) {
-	for _, id := range []string{"a", "polyu-adfs", "hainanu-cas", "g2", strings.Repeat("a", 64)} {
+	for _, id := range []string{"a", "school-adfs", "university-sso", "g2", strings.Repeat("a", 64)} {
 		if err := CheckID(id); err != nil {
 			t.Errorf("id %q: %v", id, err)
 		}
@@ -31,7 +31,7 @@ func TestSettingsAreHeldToTheirRules(t *testing.T) {
 		"http://localhost:5556/dex":         "http://localhost:5556/dex",
 		"http://127.0.0.1:18942/adfs":       "http://127.0.0.1:18942/adfs",
 		"http://[::1]:8080/realms/school":   "http://[::1]:8080/realms/school",
-		"https://理大.example/adfs":           "https://理大.example/adfs",
+		"https://示範大學.example/adfs":         "https://示範大學.example/adfs",
 	} {
 		if got, err := CheckIssuer(in); err != nil || got != want {
 			t.Errorf("issuer %q: %q %v", in, got, err)
@@ -58,18 +58,18 @@ func TestSettingsAreHeldToTheirRules(t *testing.T) {
 			t.Errorf("scopes %q taken", bad)
 		}
 	}
-	if got, err := CheckDomains([]string{" @PolyU.edu.hk", "polyu.edu.hk", "connect.polyu.hk"}); err != nil ||
-		strings.Join(got, " ") != "polyu.edu.hk connect.polyu.hk" {
+	if got, err := CheckDomains([]string{" @Campus.Example.edu", "campus.example.edu", "students.example.edu"}); err != nil ||
+		strings.Join(got, " ") != "campus.example.edu students.example.edu" {
 		t.Errorf("domains: %v %v", got, err)
 	}
-	for _, bad := range []string{"polyu", "-a.edu", "a..edu", "a.edu.", "a_b.edu", "polyu.edu.hk/x"} {
+	for _, bad := range []string{"campus", "-a.edu", "a..edu", "a.edu.", "a_b.edu", "campus.example.edu/x"} {
 		if _, err := CheckDomains([]string{bad}); err == nil {
 			t.Errorf("domain %q taken", bad)
 		}
 	}
-	for email, in := range map[string]bool{"a@polyu.edu.hk": true, "A@POLYU.EDU.HK": true, "a@x.polyu.edu.hk": false,
-		"a@polyu.edu.hk.evil.example": false, "@polyu.edu.hk": false, "polyu.edu.hk": false, "a@": false} {
-		if InDomains(email, []string{"polyu.edu.hk"}) != in {
+	for email, in := range map[string]bool{"a@campus.example.edu": true, "A@CAMPUS.EXAMPLE.EDU": true, "a@x.campus.example.edu": false,
+		"a@campus.example.edu.evil.example": false, "@campus.example.edu": false, "campus.example.edu": false, "a@": false} {
+		if InDomains(email, []string{"campus.example.edu"}) != in {
 			t.Errorf("InDomains(%q) != %v", email, in)
 		}
 	}
@@ -84,10 +84,10 @@ func TestSettingsAreHeldToTheirRules(t *testing.T) {
 			t.Errorf("secret %q: %v", s, err)
 		}
 	}
-	if _, err := CheckDisplayName("Poly\u200bU"); err == nil {
+	if _, err := CheckDisplayName("Sch\u200bool"); err == nil {
 		t.Error("a zero-width space taken")
 	}
-	if got, err := CheckDisplayName("  理大 NetID "); err != nil || got != "理大 NetID" {
+	if got, err := CheckDisplayName("  示範大學 NetID "); err != nil || got != "示範大學 NetID" {
 		t.Errorf("display name: %q %v", got, err)
 	}
 }
@@ -102,21 +102,21 @@ func TestTheOperatorsProviderAlone(t *testing.T) {
 	if offered, err := none.Offered(t.Context()); err != nil || len(offered) != 0 {
 		t.Fatalf("a nil registry offers %v %v", offered, err)
 	}
-	r := New(Config{Operator: &Operator{ID: "polyu-adfs", DisplayName: "PolyU NetID"}, PublicURL: "https://lms.example.edu/"})
+	r := New(Config{Operator: &Operator{ID: "school-adfs", DisplayName: "School NetID"}, PublicURL: "https://lms.example.edu/"})
 	if r.RedirectURL() != "https://lms.example.edu/v1/auth/sso/callback" {
 		t.Fatalf("redirect: %s", r.RedirectURL())
 	}
 	offered, err := r.Offered(t.Context())
-	if err != nil || len(offered) != 1 || offered[0].ID != "polyu-adfs" || *offered[0].Label != "PolyU NetID" || offered[0].Source != SourceOperator {
+	if err != nil || len(offered) != 1 || offered[0].ID != "school-adfs" || *offered[0].Label != "School NetID" || offered[0].Source != SourceOperator {
 		t.Fatalf("offered: %+v %v", offered, err)
 	}
-	if p, err := r.Resolve(t.Context(), "polyu-adfs"); err != nil || p.Source != SourceOperator || p.LinkByEmail {
+	if p, err := r.Resolve(t.Context(), "school-adfs"); err != nil || p.Source != SourceOperator || p.LinkByEmail {
 		t.Fatalf("resolve: %+v %v", p, err)
 	}
 	if _, err := r.Resolve(t.Context(), "google"); !errors.Is(err, ErrNotOffered) {
 		t.Fatalf("resolve another: %v", err)
 	}
-	if got := r.SiteStatus("polyu-adfs", true, "v1.x"); got != StatusIDTaken {
+	if got := r.SiteStatus("school-adfs", true, "v1.x"); got != StatusIDTaken {
 		t.Fatalf("a site's provider with its id: %s", got)
 	}
 	if got := r.SiteStatus("google", true, "v1.x"); got != StatusSecretUnavailable {

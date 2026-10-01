@@ -187,7 +187,7 @@ func TestADepartmentAdministratorManagesNoAccountAndNothingPlatformWide(t *testi
 		"actor.reactivate":        {"actor_id": w.Dan},
 		"actor.update":            {"actor_id": w.Dan, "display_name": "Daniel"},
 		"actor.issue_token":       {"actor_id": w.Dan, "label": "mine now"},
-		"actor.link_sso":          {"actor_id": w.Dan, "provider": "polyu-adfs", "subject": "dan@example.edu"},
+		"actor.link_sso":          {"actor_id": w.Dan, "provider": "school-adfs", "subject": "dan@example.edu"},
 		"actor.list":              {},
 		"actor.get":               {"actor_id": w.Dan},
 		"actor.list_credentials":  {"actor_id": w.Dan},
@@ -198,13 +198,13 @@ func TestADepartmentAdministratorManagesNoAccountAndNothingPlatformWide(t *testi
 		"preset.update":           merge(m{"preset_id": preset}, body),
 		"department.create":       {"name": "Law"},
 		"sso.list":                {},
-		"sso.get":                 {"provider_id": "polyu-adfs"},
+		"sso.get":                 {"provider_id": "school-adfs"},
 		"sso.test":                {"issuer": "https://adfs.example.edu/adfs"},
 		"sso.create": {"id": "hers", "display_name": "Hers", "issuer": "https://idp.example.edu", "client_id": "c",
 			"client_secret": "s"},
-		"sso.update":      {"provider_id": "polyu-adfs", "version": 1, "display_name": "Hers"},
-		"sso.set_enabled": {"provider_id": "polyu-adfs", "enabled": false},
-		"sso.delete":      {"provider_id": "polyu-adfs", "force": true},
+		"sso.update":      {"provider_id": "school-adfs", "version": 1, "display_name": "Hers"},
+		"sso.set_enabled": {"provider_id": "school-adfs", "enabled": false},
+		"sso.delete":      {"provider_id": "school-adfs", "force": true},
 	} {
 		t.Run(name, func(t *testing.T) {
 			w := tree{w.DeptTree, t}

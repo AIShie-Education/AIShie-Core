@@ -266,15 +266,15 @@ func TestInvitableByAndLookupByEmail(t *testing.T) {
 		t.Fatalf("a part of an email found someone: %v", err)
 	}
 	// And by his login ID, whole and in any case, once he has one.
-	if _, err := w.Pool.Exec(ctx, `UPDATE actor SET login_id = 'HNU2023007' WHERE id = $1`, w.Ken); err != nil {
+	if _, err := w.Pool.Exec(ctx, `UPDATE actor SET login_id = 'UNI2023007' WHERE id = $1`, w.Ken); err != nil {
 		t.Fatal(err)
 	}
-	for _, id := range []string{"hnu2023007", "HNU2023007"} {
+	for _, id := range []string{"uni2023007", "UNI2023007"} {
 		if got, err := w.Q.LookupActorBySignInName(ctx, dbq.LookupActorBySignInNameParams{LoginID: &id}); err != nil || got.ID != w.Ken {
 			t.Fatalf("Ken by his login ID %q: %+v (%v)", id, got, err)
 		}
 	}
-	for _, part := range []string{"HNU", "2023007", "ken@example.edu"} {
+	for _, part := range []string{"UNI", "2023007", "ken@example.edu"} {
 		if _, err := w.Q.LookupActorBySignInName(ctx, dbq.LookupActorBySignInNameParams{LoginID: &part}); !errors.Is(err, pgx.ErrNoRows) {
 			t.Fatalf("%q, not his whole login ID, found someone: %v", part, err)
 		}

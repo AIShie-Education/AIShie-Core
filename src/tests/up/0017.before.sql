@@ -43,7 +43,7 @@ INSERT INTO credential (id, actor_id, kind, secret_hash, token_prefix, expires_a
     ('00000000-0000-0000-0017-0000000001b4', '00000000-0000-0000-0017-000000000132', 'password', '$argon2id$stand-in', NULL, NULL),
     ('00000000-0000-0000-0017-0000000001b5', '00000000-0000-0000-0017-000000000132', 'session',  'h', 'up17meisess1', now() + interval '12 hours');
 INSERT INTO credential (id, actor_id, kind, provider, subject) VALUES
-    ('00000000-0000-0000-0017-0000000001b6', '00000000-0000-0000-0017-000000000132', 'sso', 'polyu-adfs', 'mei@up0017.example');
+    ('00000000-0000-0000-0017-0000000001b6', '00000000-0000-0000-0017-000000000132', 'sso', 'school-adfs', 'mei@up0017.example');
 -- Lan: 1c1 the invitation she has not taken up
 INSERT INTO credential (id, actor_id, kind, secret_hash, token_prefix, expires_at, issued_by_actor_id) VALUES
     ('00000000-0000-0000-0017-0000000001c1', '00000000-0000-0000-0017-000000000133', 'invite', 'h', 'up17laninv01',
@@ -59,7 +59,7 @@ INSERT INTO credential (id, actor_id, kind, secret_hash, token_prefix, expires_a
     ('00000000-0000-0000-0017-0000000001d3', '00000000-0000-0000-0017-000000000135', 'password', '$argon2id$stand-in', NULL, NULL),
     ('00000000-0000-0000-0017-0000000001d4', '00000000-0000-0000-0017-000000000135', 'session',  'h', 'up17helpsess', now() + interval '12 hours');
 INSERT INTO credential (id, actor_id, kind, provider, subject) VALUES
-    ('00000000-0000-0000-0017-0000000001d5', '00000000-0000-0000-0017-000000000135', 'sso', 'polyu-adfs', 'helper@up0017.example');
+    ('00000000-0000-0000-0017-0000000001d5', '00000000-0000-0000-0017-000000000135', 'sso', 'school-adfs', 'helper@up0017.example');
 -- The enrolment bot: 1e1 its token · 1e2 an invitation to its email
 INSERT INTO credential (id, actor_id, kind, secret_hash, token_prefix, label) VALUES
     ('00000000-0000-0000-0017-0000000001e1', '00000000-0000-0000-0017-000000000136', 'api_token', 'h', 'up17bot00001', 'sync');

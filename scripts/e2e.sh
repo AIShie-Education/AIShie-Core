@@ -1171,15 +1171,15 @@ IDP_CLIENT_ID=aishie-site IDP_CLIENT_SECRET=$SITE_SECRET IDP_REDIRECT_URI="$BASE
 IDP_PID=$!
 for _ in $(seq 1 100); do curl -sf "$ISSUER/.well-known/openid-configuration" >/dev/null 2>&1 && break; sleep 0.1; done
 curl -sf "$ISSUER/.well-known/openid-configuration" >/dev/null || fail "the stand-in provider did not come up: $(cat "$WORK/idp.log")"
-export OIDC_ISSUER="$ISSUER" OIDC_CLIENT_ID=aishie-e2e OIDC_DISPLAY_NAME="PolyU NetID"
+export OIDC_ISSUER="$ISSUER" OIDC_CLIENT_ID=aishie-e2e OIDC_PROVIDER_NAME=school-adfs OIDC_DISPLAY_NAME="School NetID"
 # A name the button cannot show as it is, and the server does not start.
-OIDC_DISPLAY_NAME=$'PolyU\tNetID' "$BIN" serve 2>"$WORK/refused.log" && fail "a server with a tab in OIDC_DISPLAY_NAME started"
+OIDC_DISPLAY_NAME=$'School\tNetID' "$BIN" serve 2>"$WORK/refused.log" && fail "a server with a tab in OIDC_DISPLAY_NAME started"
 grep -q 'OIDC_DISPLAY_NAME' "$WORK/refused.log" || fail "refused, but not for the name: $(cat "$WORK/refused.log")"
 kill "$SERVER_PID"
 wait "$SERVER_PID" 2>/dev/null || true
 start
 call 200 GET /v1/auth/methods ""
-[ "$(json "$WORK/body" 'd == {"password": True, "password_accepts": ["login_id", "email"], "sso": {"label": "PolyU NetID", "start": "/v1/auth/sso/start"}, "sso_providers": [{"id": "polyu-adfs", "label": "PolyU NetID", "start": "/v1/auth/sso/start/polyu-adfs"}]}')" = True ] ||
+[ "$(json "$WORK/body" 'd == {"password": True, "password_accepts": ["login_id", "email"], "sso": {"label": "School NetID", "start": "/v1/auth/sso/start"}, "sso_providers": [{"id": "school-adfs", "label": "School NetID", "start": "/v1/auth/sso/start/school-adfs"}]}')" = True ] ||
   fail "the sign-in methods with single sign-on: $(cat "$WORK/body")"
 [[ "$(curl -s -o /dev/null -w '%{http_code} %{redirect_url}' "$BASE/v1/auth/sso/start?return_to=/courses")" == "302 $ISSUER/oauth2/authorize?"* ]] ||
   fail "where the answer says to start does not send the browser to the provider"
@@ -1188,7 +1188,7 @@ echo "  the answer names the button, says where to start, and says nothing else 
 step "Without SECRETS_KEY, no provider of the site's is added; the operator's is listed, read-only"
 call 200 GET /v1/sso/providers "$ROOT"
 [ "$(json "$WORK/body" 'd["result"]["can_add"], d["result"]["cannot_add_reason"], [(p["id"], p["source"], p["read_only"], p["status"]) for p in d["result"]["providers"]]')" = \
-  "False secrets_key_missing [('polyu-adfs', 'operator', True, 'offered')]" ] || fail "the providers: $(cat "$WORK/body")"
+  "False secrets_key_missing [('school-adfs', 'operator', True, 'offered')]" ] || fail "the providers: $(cat "$WORK/body")"
 [ "$(json "$WORK/body" 'd["result"]["redirect_uri"]')" = "$BASE/v1/auth/sso/callback" ] || fail "the redirect URI: $(cat "$WORK/body")"
 SITE="{\"id\":\"campus\",\"display_name\":\"Campus ID\",\"issuer\":\"$SITE_ISSUER\",\"client_id\":\"aishie-site\",\"client_secret\":\"$SITE_SECRET\"}"
 call 422 POST /v1/sso/providers "$ROOT" "$SITE"
@@ -1210,7 +1210,7 @@ call 403 POST /v1/sso/providers "$ADA" "$SITE" # a department's administrator se
 call 200 POST /v1/sso/providers "$ROOT" "$SITE"
 [ "$(json "$WORK/body" 'd["result"]["status"], d["result"]["version"], d["result"]["client_secret_hint"][-4:]')" = \
   "disabled 1 ${SITE_SECRET: -4}" ] || fail "the provider set up: $(cat "$WORK/body")"
-call 422 POST /v1/sso/providers/polyu-adfs "$ROOT" '{"version":1,"display_name":"Mine now"}'
+call 422 POST /v1/sso/providers/school-adfs "$ROOT" '{"version":1,"display_name":"Mine now"}'
 [ "$(reason)" = set_by_operator ] || fail "the operator's provider was not refused as the operator's: $(cat "$WORK/body")"
 IF_MATCH='"1"' call 200 POST /v1/sso/providers/campus/enabled "$ROOT" '{"enabled":true}'
 [ "$(json "$WORK/body" 'd["result"]["status"], d["result"]["version"]')" = "offered 2" ] || fail "switched on: $(cat "$WORK/body")"
@@ -1219,7 +1219,7 @@ IF_MATCH='"1"' call 409 POST /v1/sso/providers/campus "$ROOT" '{"display_name":"
   fail "a write over an old version: $(cat "$WORK/body")"
 call 200 GET /v1/auth/methods ""
 [ "$(json "$WORK/body" '[(p["id"], p["label"], p["start"]) for p in d["sso_providers"]], d["sso"]["start"]')" = \
-  "[('polyu-adfs', 'PolyU NetID', '/v1/auth/sso/start/polyu-adfs'), ('campus', 'Campus ID', '/v1/auth/sso/start/campus')] /v1/auth/sso/start/polyu-adfs" ] ||
+  "[('school-adfs', 'School NetID', '/v1/auth/sso/start/school-adfs'), ('campus', 'Campus ID', '/v1/auth/sso/start/campus')] /v1/auth/sso/start/school-adfs" ] ||
   fail "the sign-in methods with two providers: $(cat "$WORK/body")"
 call 400 GET "/v1/auth/sso/start?return_to=/courses" "" # two providers: which?
 [ "$(reason)" = provider_required ] || fail "a bare start with two providers: $(cat "$WORK/body")"
@@ -1274,6 +1274,6 @@ call 200 POST /v1/sso/providers/campus/delete "$ROOT" '{"force":true}'
 [ "$(json "$WORK/body" 'd["result"]["unlinked_accounts"]')" = 1 ] || fail "removed: $(cat "$WORK/body")"
 call 404 GET "/v1/auth/sso/start/campus?return_to=/courses" ""
 call 200 GET /v1/auth/methods ""
-[ "$(json "$WORK/body" '[p["id"] for p in d["sso_providers"]]')" = "['polyu-adfs']" ] || fail "the sign-in methods after: $(cat "$WORK/body")"
+[ "$(json "$WORK/body" '[p["id"] for p in d["sso_providers"]]')" = "['school-adfs']" ] || fail "the sign-in methods after: $(cat "$WORK/body")"
 
 printf '\n\033[32mPASS\033[0m %d requests\n' "$N"

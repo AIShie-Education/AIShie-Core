@@ -20,7 +20,7 @@ import (
 )
 
 // ssoSite is a platform whose single sign-on has the operator's provider,
-// polyu-adfs, and a secrets key, unless the test says otherwise; Admin is a
+// school-adfs, and a secrets key, unless the test says otherwise; Admin is a
 // platform administrator and Dan a person with no role.
 type ssoSite struct {
 	*testkit.Platform
@@ -41,7 +41,7 @@ func newSSOSite(t *testing.T, operator, keys bool) *ssoSite {
 	}
 	var op *sso.Operator
 	if operator {
-		op = &sso.Operator{ID: "polyu-adfs", DisplayName: "PolyU NetID", Issuer: "https://adfs.polyu.example/adfs", ClientID: "aishie",
+		op = &sso.Operator{ID: "school-adfs", DisplayName: "School NetID", Issuer: "https://adfs.example.edu/adfs", ClientID: "aishie",
 			SecretHint: secrets.Hint("the-operator's-client-secret"), Scopes: sso.DefaultScopes, SubjectClaim: "upn"}
 	}
 	s.Platform = testkit.NewPlatformWithDeps(t, func(d *tools.Deps) {
@@ -103,8 +103,8 @@ func TestAnAdministratorSetsUpAnIdentityProvider(t *testing.T) {
 		t.Fatalf("list: %+v", l)
 	}
 	op := l.Providers[0]
-	if op.ID != "polyu-adfs" || op.Source != "operator" || !op.ReadOnly || op.Status != "offered" || !op.Enabled || op.Version != nil ||
-		op.DisplayName == nil || *op.DisplayName != "PolyU NetID" || op.ClientSecretHint != "…cret" || op.SubjectClaim != "upn" ||
+	if op.ID != "school-adfs" || op.Source != "operator" || !op.ReadOnly || op.Status != "offered" || !op.Enabled || op.Version != nil ||
+		op.DisplayName == nil || *op.DisplayName != "School NetID" || op.ClientSecretHint != "…cret" || op.SubjectClaim != "upn" ||
 		op.RedirectURI != l.RedirectURI {
 		t.Fatalf("the operator's provider: %+v", op)
 	}
@@ -121,7 +121,7 @@ func TestAnAdministratorSetsUpAnIdentityProvider(t *testing.T) {
 	if got := s.view("sso.get", m{"provider_id": "google"}); got.Issuer != "https://accounts.google.com" || *got.Version != 1 {
 		t.Fatalf("get: %+v", got)
 	}
-	if l := s.list(); len(l.Providers) != 2 || l.Providers[0].ID != "polyu-adfs" || l.Providers[1].ID != "google" {
+	if l := s.list(); len(l.Providers) != 2 || l.Providers[0].ID != "school-adfs" || l.Providers[1].ID != "google" {
 		t.Fatalf("list: %+v", l.Providers)
 	}
 
@@ -245,9 +245,9 @@ func TestSettingUpAProviderTwiceWithOneKeyDoesItOnce(t *testing.T) {
 func TestTheOperatorsProviderIsReadOnly(t *testing.T) {
 	s := newSSOSite(t, true, true)
 	for name, args := range map[string]m{
-		"sso.update":      {"provider_id": "polyu-adfs", "version": 1, "display_name": "Mine now"},
-		"sso.set_enabled": {"provider_id": "polyu-adfs", "enabled": false},
-		"sso.delete":      {"provider_id": "polyu-adfs", "force": true},
+		"sso.update":      {"provider_id": "school-adfs", "version": 1, "display_name": "Mine now"},
+		"sso.set_enabled": {"provider_id": "school-adfs", "enabled": false},
+		"sso.delete":      {"provider_id": "school-adfs", "force": true},
 	} {
 		s.fails(s.admin, name, args, apperr.FailedPrecondition, "set_by_operator")
 	}
@@ -255,7 +255,7 @@ func TestTheOperatorsProviderIsReadOnly(t *testing.T) {
 	for k, v := range google {
 		taken[k] = v
 	}
-	taken["id"] = "polyu-adfs"
+	taken["id"] = "school-adfs"
 	s.fails(s.admin, "sso.create", taken, apperr.Conflict, "id_taken")
 	s.do(s.admin, "sso.create", google)
 	s.fails(s.admin, "sso.create", google, apperr.Conflict, "id_taken")
@@ -263,22 +263,22 @@ func TestTheOperatorsProviderIsReadOnly(t *testing.T) {
 	// A site's provider with its id, from before the operator set theirs
 	// (here, by hand), is listed as such, offered nowhere, and its
 	// identities are the operator's.
-	sealed, err := s.keys.Seal(sso.SecretBinding("polyu-adfs"), "an-old-secret-of-the-sites-own")
+	sealed, err := s.keys.Seal(sso.SecretBinding("school-adfs"), "an-old-secret-of-the-sites-own")
 	if err != nil {
 		t.Fatal(err)
 	}
 	s.Exec(`INSERT INTO sso_provider (id, display_name, issuer, client_id, client_secret_sealed, client_secret_hint, enabled,
-		created_by_actor_id, updated_by_actor_id) VALUES ('polyu-adfs', 'Old ADFS', 'https://old.example/adfs', 'old', $1, '…', true, $2, $2)`,
+		created_by_actor_id, updated_by_actor_id) VALUES ('school-adfs', 'Old ADFS', 'https://old.example/adfs', 'old', $1, '…', true, $2, $2)`,
 		sealed, s.admin)
 	yuki := s.Actor("human", "Yuki")
-	s.do(s.admin, "actor.link_sso", m{"actor_id": yuki, "provider": "polyu-adfs", "subject": "yuki@polyu.edu.hk"})
+	s.do(s.admin, "actor.link_sso", m{"actor_id": yuki, "provider": "school-adfs", "subject": "yuki@campus.example.edu"})
 	l := s.list()
 	if len(l.Providers) != 3 || l.Providers[0].Source != "operator" || l.Providers[0].LinkedAccounts != 1 {
 		t.Fatalf("list: %+v", l.Providers)
 	}
 	var shadowed *tools.SSOProviderView
 	for i, p := range l.Providers {
-		if p.Source == "site" && p.ID == "polyu-adfs" {
+		if p.Source == "site" && p.ID == "school-adfs" {
 			shadowed = &l.Providers[i]
 		}
 	}
@@ -340,7 +340,7 @@ func TestAProvidersSettingsAreHeldToTheirRules(t *testing.T) {
 		"scopes without openid":            {with("scopes", []any{"profile", "email"}), "scopes"},
 		"a scope with a quote":             {with("scopes", []any{"openid", `pro"file`}), "scopes"},
 		"a claim with a space":             {with("subject_claim", "user name"), "subject_claim"},
-		"a domain that is no domain":       {with("allowed_email_domains", []any{"polyu"}), "allowed_email_domains"},
+		"a domain that is no domain":       {with("allowed_email_domains", []any{"campus"}), "allowed_email_domains"},
 		"linking by email with no domains": {with("link_by_email", true), "allowed_email_domains"},
 		"a position below the page":        {with("position", -1), "position"},
 	} {
@@ -356,9 +356,9 @@ func TestAProvidersSettingsAreHeldToTheirRules(t *testing.T) {
 	// told otherwise.
 	local := s.view("sso.create", m{"id": "dev", "display_name": "Dev", "issuer": "http://127.0.0.1:5556/dex", "client_id": "aishie",
 		"client_secret": "x", "scopes": []any{"openid", "email", "openid"}, "link_by_email": true,
-		"allowed_email_domains": []any{"@PolyU.edu.hk", "polyu.edu.hk", "connect.polyu.hk"}})
+		"allowed_email_domains": []any{"@Campus.Example.edu", "campus.example.edu", "students.example.edu"}})
 	if local.Issuer != "http://127.0.0.1:5556/dex" || strings.Join(local.Scopes, " ") != "openid email" || local.EmailClaim == nil ||
-		*local.EmailClaim != "email" || strings.Join(local.AllowedEmailDomains, " ") != "polyu.edu.hk connect.polyu.hk" ||
+		*local.EmailClaim != "email" || strings.Join(local.AllowedEmailDomains, " ") != "campus.example.edu students.example.edu" ||
 		!local.LinkByEmail || local.ClientSecretHint != "…" {
 		t.Fatalf("%+v", local)
 	}

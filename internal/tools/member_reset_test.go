@@ -232,7 +232,7 @@ func TestAPasswordIsResetOnlyForAStudentWhoseAccountReachesNothingMore(t *testin
 
 	// So is one who signs in through the identity provider, holds a platform
 	// role, or administers a department.
-	b.do(t, b.admin, "actor.link_sso", m{"actor_id": b.yuki, "provider": "hainanu-cas", "subject": "20230007"})
+	b.do(t, b.admin, "actor.link_sso", m{"actor_id": b.yuki, "provider": "university-sso", "subject": "20230007"})
 	resetRefused(t, b.reset(t, b.sato, b.yukiM), domain.StatusFailed, apperr.Forbidden, tools.ResetSSOLinked)
 	mei := testkit.Result[tools.ActorOut](t, b.do(t, b.Root, "actor.register",
 		m{"kind": "human", "display_name": "Mei", "login_id": "20230009", "platform_role": "admin"})).ActorID
