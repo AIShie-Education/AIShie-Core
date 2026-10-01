@@ -110,12 +110,13 @@ func actionDecide(d Deps) tool.Tool {
 			"allowed to do it; if not, or if the proposal is too old, it is cancelled instead. Nobody decides their own proposal, " +
 			"nor their owner's, nor another agent's of their owner, nor a decision someone else proposed about any of those, " +
 			"nor approves closing an escalation they raised or approved. An agent's owner decides its proposal only where " +
-			"they could do the same themselves without anyone's confirmation: their own level for it autonomous, and its " +
-			"target within their reach; by_owner then says so. That needs no action_decide of their own, and is done at " +
+			"they could do the same themselves without anyone's confirmation: their own level for it autonomous, its " +
+			"target within their reach, and nothing in what it asks that approving it now would refuse; by_owner then says so. That needs no action_decide of their own, and is done at " +
 			"once, as their own doing of it: a student confirms her own agent's drafts of her work.",
-		Kind: tool.Write,
-		Gate: ownAgentsGate(d, true),
-		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/actions/{action_id}/decide"},
+		Kind:  tool.Write,
+		Gate:  ownAgentsGate(d, true),
+		HTTP:  tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/actions/{action_id}/decide"},
+		Check: pipeline.CheckDecision,
 		Resolve: func(ctx context.Context, q dbq.Querier, in pipeline.DecideIn) (tool.Target, error) {
 			return actionTarget(ctx, q, in.CourseID, in.ActionID)
 		},
@@ -133,9 +134,10 @@ func actionReview(d Deps) tool.Tool {
 			"reviews their own action, their owner's or another agent's of their owner; an agent's owner reviews what it " +
 			"did only where they could do the same themselves without anyone's confirmation, and then needs no " +
 			"action_decide of their own.",
-		Kind: tool.Write,
-		Gate: ownAgentsGate(d, true),
-		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/actions/{action_id}/review"},
+		Kind:  tool.Write,
+		Gate:  ownAgentsGate(d, true),
+		HTTP:  tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/actions/{action_id}/review"},
+		Check: pipeline.CheckReview,
 		Resolve: func(ctx context.Context, q dbq.Querier, in pipeline.ReviewIn) (tool.Target, error) {
 			return actionTarget(ctx, q, in.CourseID, in.ActionID)
 		},
@@ -165,7 +167,7 @@ type ActionView struct {
 	Result             json.RawMessage `json:"result,omitempty"`
 	CreatedAt          time.Time       `json:"created_at"`
 	// YoursToDecide is set in the approval and review queues.
-	YoursToDecide *bool `json:"yours_to_decide,omitempty" jsonschema:"in the approval and review queues: false when the action is yours, your owner's or another agent's of your owner, and when it is your own agent's and you could not do the same yourself without anyone's confirmation (your own level for it below autonomous, or its target beyond your reach): someone else decides and reviews those; true otherwise, though a decision about a decision may still be refused at one remove"`
+	YoursToDecide *bool `json:"yours_to_decide,omitempty" jsonschema:"in the approval and review queues: false when the action is yours, your owner's or another agent's of your owner, and when it is your own agent's and you could not do the same yourself without anyone's confirmation (your own level for it below autonomous, or its target beyond your reach, or, for a proposal, approving it now would be refused for what it asks): someone else decides and reviews those; true otherwise, though a decision about a decision may still be refused at one remove"`
 }
 
 func viewAction(a dbq.Action) ActionView {

@@ -191,16 +191,19 @@ func courseUpdateDetails() tool.Tool {
 			"so (changed: false).",
 		Kind: tool.Write, Gate: tool.Gate{Perms: []domain.Perm{domain.PermMemberManage}},
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/details"},
+		Check: func(in CourseUpdateDetailsIn) error {
+			if in.Title == nil && in.Description == nil {
+				return apperr.Invalid("give title, description or both")
+			}
+			if in.Title != nil && strings.TrimSpace(*in.Title) == "" {
+				return apperr.Invalid("title cannot be empty")
+			}
+			return nil
+		},
 		Resolve: func(_ context.Context, _ dbq.Querier, in CourseUpdateDetailsIn) (tool.Target, error) {
 			return tool.Target{CourseID: in.CourseID, Type: "course", ID: &in.CourseID}, nil
 		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in CourseUpdateDetailsIn) (CourseUpdateDetailsOut, error) {
-			if in.Title == nil && in.Description == nil {
-				return CourseUpdateDetailsOut{}, apperr.Invalid("give title, description or both")
-			}
-			if in.Title != nil && strings.TrimSpace(*in.Title) == "" {
-				return CourseUpdateDetailsOut{}, apperr.Invalid("title cannot be empty")
-			}
 			c, err := ec.Q.LockCourseDetails(ctx, in.CourseID)
 			if err != nil {
 				return CourseUpdateDetailsOut{}, err

@@ -601,6 +601,15 @@ func documentCreate(d Deps) tool.Tool {
 			"order, in files, each with its upload_token and filename; upload_token alone is one file, and is deprecated.",
 		Kind: tool.Write, Gate: anyDocumentWrite,
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/documents"},
+		Check: func(in DocumentCreateIn) error {
+			if strings.TrimSpace(in.Title) == "" {
+				return apperr.Invalid("title is required")
+			}
+			if (in.Kind == kindSubmission || in.Kind == kindFeedback) && in.empty() {
+				return apperr.Invalid("a %s file has one version and needs its content now: body_md or files", in.Kind)
+			}
+			return nil
+		},
 		Resolve: func(ctx context.Context, q dbq.Querier, in DocumentCreateIn) (tool.Target, error) {
 			t := tool.Target{CourseID: in.CourseID, Type: "document", Perms: []domain.Perm{writePerm(in.Kind)}}
 			switch {
@@ -649,9 +658,6 @@ func documentCreate(d Deps) tool.Tool {
 			return in, checkProposedVersion(ctx, d, q, m, now, in.CourseID, in.Kind, in.Title, in.Content)
 		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in DocumentCreateIn) (DocumentCreateOut, error) {
-			if strings.TrimSpace(in.Title) == "" {
-				return DocumentCreateOut{}, apperr.Invalid("title is required")
-			}
 			ev := events.Event{Type: EventDocumentCreated, CourseID: &in.CourseID, SubjectType: "document", Payload: map[string]any{"kind": in.Kind}}
 			switch in.Kind {
 			case kindSubmission:
@@ -680,9 +686,6 @@ func documentCreate(d Deps) tool.Tool {
 					return DocumentCreateOut{}, apperr.Conflicts("that grade has been replaced; attach feedback to the grade that replaced it")
 				}
 				ev.Type, ev.StudentMemberID, ev.AssignmentID = EventFeedbackFileAdded, &g.StudentMemberID, g.AssignmentID
-			}
-			if !courseLevel(in.Kind) && in.empty() {
-				return DocumentCreateOut{}, apperr.Invalid("a %s file has one version and needs its content now: body_md or files", in.Kind)
 			}
 
 			out := DocumentCreateOut{DocumentID: ids.New()}
@@ -737,6 +740,12 @@ func documentAddVersion(d Deps) tool.Tool {
 			"upload_token and filename; upload_token alone is one file, and is deprecated.",
 		Kind: tool.Write, Gate: anyDocumentWrite,
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/documents/{document_id}/versions"},
+		Check: func(in DocumentAddVersionIn) error {
+			if in.empty() {
+				return apperr.Invalid("a version needs content: body_md or files")
+			}
+			return nil
+		},
 		Resolve: func(ctx context.Context, q dbq.Querier, in DocumentAddVersionIn) (tool.Target, error) {
 			return documentTarget(ctx, q, in.CourseID, in.DocumentID, writePerm)
 		},
@@ -764,8 +773,6 @@ func documentAddVersion(d Deps) tool.Tool {
 				return DocumentVersionOut{}, apperr.Precondition("a %s file has exactly one version; replace it by archiving it and adding another", doc.Kind)
 			case doc.Status != "active":
 				return DocumentVersionOut{}, apperr.Conflicts("the document is archived")
-			case in.empty():
-				return DocumentVersionOut{}, apperr.Invalid("a version needs content: body_md or files")
 			}
 			last, err := ec.Q.MaxVersionSeq(ctx, doc.ID)
 			if err != nil {
@@ -988,16 +995,19 @@ func documentUpdate() tool.Tool {
 			"purged document may be renamed as well. Giving what it already is changes nothing (changed: false).",
 		Kind: tool.Write, Gate: anyDocumentWrite,
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/documents/{document_id}"},
+		Check: func(in DocumentUpdateIn) error {
+			if in.Title == nil && in.SortOrder == nil {
+				return apperr.Invalid("give title, sort_order or both")
+			}
+			if in.Title != nil && strings.TrimSpace(*in.Title) == "" {
+				return apperr.Invalid("title cannot be empty")
+			}
+			return nil
+		},
 		Resolve: func(ctx context.Context, q dbq.Querier, in DocumentUpdateIn) (tool.Target, error) {
 			return documentTarget(ctx, q, in.CourseID, in.DocumentID, writePerm)
 		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in DocumentUpdateIn) (DocumentChangeOut, error) {
-			if in.Title == nil && in.SortOrder == nil {
-				return DocumentChangeOut{}, apperr.Invalid("give title, sort_order or both")
-			}
-			if in.Title != nil && strings.TrimSpace(*in.Title) == "" {
-				return DocumentChangeOut{}, apperr.Invalid("title cannot be empty")
-			}
 			doc, err := loadDocument(ctx, ec.Q, in.CourseID, in.DocumentID)
 			if err != nil {
 				return DocumentChangeOut{}, err

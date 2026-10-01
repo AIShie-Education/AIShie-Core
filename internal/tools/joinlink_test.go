@@ -194,7 +194,8 @@ func TestAJoinLinkIsMadeByWhoeverHoldsMemberInviteAndItsTokenIsShownOnce(t *test
 	refused(t, b.MustCall(tanaka, "course.join_link_create", m{"course_id": b.course}, "link-tanaka"), domain.StatusDenied, "permission_denied")
 	refused(t, b.MustCall(tanaka, "course.join_link_list", m{"course_id": b.course}, ""), domain.StatusDenied, "permission_denied")
 
-	// Its limits.
+	// Its limits, which refuse a call before it is attempted: nothing is
+	// recorded.
 	for name, bad := range map[string]m{
 		"no uses":       {"max_uses": 0},
 		"too many uses": {"max_uses": tools.MaxJoinLinkUses + 1},
@@ -210,10 +211,12 @@ func TestAJoinLinkIsMadeByWhoeverHoldsMemberInviteAndItsTokenIsShownOnce(t *test
 		}()},
 	} {
 		bad["course_id"] = b.course
-		out := b.MustCall(b.sato, "course.join_link_create", bad, "bad-"+name)
-		if out.Status != domain.StatusFailed || out.Error.Code != apperr.InvalidArgument {
-			t.Errorf("%s: %+v", name, out)
+		if out, err := b.Call(b.sato, "course.join_link_create", bad, "bad-"+name); !apperr.Is(err, apperr.InvalidArgument) {
+			t.Errorf("%s: %+v %v", name, out, err)
 		}
+	}
+	if n := b.Count(`SELECT count(*) FROM action WHERE idempotency_key LIKE 'bad-%'`); n != 0 {
+		t.Errorf("%d calls refused for their arguments are recorded", n)
 	}
 	// What is kept of a list of domains: lower-case, each once, no @.
 	listed := b.joinLink(t, b.sato, m{"allowed_email_domains": []string{"@Example.EDU", "connect.example.edu", "example.edu"},

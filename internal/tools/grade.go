@@ -1240,17 +1240,21 @@ func gradeOverrideTotal() tool.Tool {
 		Kind: tool.Write,
 		Gate: tool.Gate{Perms: []domain.Perm{domain.PermGradeSubmit, domain.PermGradePost}},
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/gradebook/{student_member_id}/totals/{component_id}/override"},
+		Check: func(in GradeOverrideTotalIn) error {
+			reason := strings.TrimSpace(in.Reason)
+			switch {
+			case in.Score.IsNegative():
+				return apperr.Invalid("score cannot be negative")
+			case reason == "" || utf8.RuneCountInString(reason) > 500:
+				return apperr.Invalid("reason is 1 to 500 characters")
+			}
+			return nil
+		},
 		Resolve: func(ctx context.Context, q dbq.Querier, in GradeOverrideTotalIn) (tool.Target, error) {
 			return resolveTotal(ctx, q, in.TotalIn)
 		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in GradeOverrideTotalIn) (TotalOut, error) {
 			reason := strings.TrimSpace(in.Reason)
-			switch {
-			case in.Score.IsNegative():
-				return TotalOut{}, apperr.Invalid("score cannot be negative")
-			case reason == "" || utf8.RuneCountInString(reason) > 500:
-				return TotalOut{}, apperr.Invalid("reason is 1 to 500 characters")
-			}
 			live, err := liveTotal(ctx, ec, in.TotalIn)
 			if err != nil {
 				return TotalOut{}, err

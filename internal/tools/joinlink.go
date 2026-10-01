@@ -305,6 +305,13 @@ func joinLinkCreate() tool.Tool {
 		Kind: tool.Write, Gate: invitesMembers,
 		HTTP:      tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/join-links"},
 		SecretOut: []string{"token"},
+		Check: func(in JoinLinkCreateIn) error {
+			if in.MaxUses != nil && (*in.MaxUses < 1 || *in.MaxUses > MaxJoinLinkUses) {
+				return apperr.Invalid("max_uses must be from 1 to %d", MaxJoinLinkUses)
+			}
+			_, err := joinDomains(in.AllowedEmailDomains)
+			return err
+		},
 		Resolve: func(_ context.Context, _ dbq.Querier, in JoinLinkCreateIn) (tool.Target, error) {
 			return tool.Target{CourseID: in.CourseID, Type: "course_join_link"}, nil
 		},
@@ -317,13 +324,7 @@ func joinLinkCreate() tool.Tool {
 				"without approval").With("reason", "not_by_proposal")
 		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in JoinLinkCreateIn) (JoinLinkCreateOut, error) {
-			if in.MaxUses != nil && (*in.MaxUses < 1 || *in.MaxUses > MaxJoinLinkUses) {
-				return JoinLinkCreateOut{}, apperr.Invalid("max_uses must be from 1 to %d", MaxJoinLinkUses)
-			}
-			domains, err := joinDomains(in.AllowedEmailDomains)
-			if err != nil {
-				return JoinLinkCreateOut{}, err
-			}
+			domains, _ := joinDomains(in.AllowedEmailDomains) // as Check took them
 			student := "student"
 			preset, err := findPreset(ctx, ec.Q, in.CourseID, &student, nil)
 			if err != nil {

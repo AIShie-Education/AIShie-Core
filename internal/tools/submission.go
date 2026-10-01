@@ -562,13 +562,16 @@ func submissionSetLateness() tool.Tool {
 			"It is the only thing about a submitted attempt that can change, and it is for graders, not for the student.",
 		Kind: tool.Write, Gate: tool.Gate{Perms: []domain.Perm{domain.PermGradeSubmit}},
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/submissions/{submission_id}/lateness"},
+		Check: func(in SubmissionSetLatenessIn) error {
+			if in.State != stateSubmitted && in.State != stateLate {
+				return apperr.Invalid("state must be submitted or late")
+			}
+			return nil
+		},
 		Resolve: func(ctx context.Context, q dbq.Querier, in SubmissionSetLatenessIn) (tool.Target, error) {
 			return submissionTarget(ctx, q, in.CourseID, in.SubmissionID)
 		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in SubmissionSetLatenessIn) (OK, error) {
-			if in.State != stateSubmitted && in.State != stateLate {
-				return OK{}, apperr.Invalid("state must be submitted or late")
-			}
 			s, err := ec.Q.GetSubmissionInCourse(ctx, dbq.GetSubmissionInCourseParams{ID: in.SubmissionID, CourseID: in.CourseID})
 			if err != nil {
 				return OK{}, err

@@ -130,6 +130,9 @@ func componentCreate() tool.Tool {
 			"or, with points_possible, something graded directly such as an exam.",
 		Kind: tool.Write, Gate: writeScheme,
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/components"},
+		Check: func(in ComponentCreateIn) error {
+			return checkComponent(&in.Name, in.Weight, &in.DropLowest, in.PointsPossible)
+		},
 		Resolve: func(ctx context.Context, q dbq.Querier, in ComponentCreateIn) (tool.Target, error) {
 			t, err := componentTarget(ctx, q, in.CourseID, in.ParentID)
 			t.ID = nil
@@ -150,9 +153,6 @@ func componentCreate() tool.Tool {
 			if in.Weight != nil {
 				weight = *in.Weight
 			}
-			if err := checkComponent(in.Name, weight, in.DropLowest, in.PointsPossible); err != nil {
-				return IDOut{}, err
-			}
 			id := ids.New()
 			if err := ec.Q.InsertComponent(ctx, dbq.InsertComponentParams{
 				ID: id, CourseID: in.CourseID, ParentID: &in.ParentID, Name: in.Name, Weight: weight,
@@ -166,13 +166,15 @@ func componentCreate() tool.Tool {
 	})
 }
 
-func checkComponent(name string, weight decimal.Decimal, dropLowest int32, points *decimal.Decimal) error {
+// checkComponent holds what is given of a component to the rules that need
+// nothing else to tell; nil is not given, and stays as it is.
+func checkComponent(name *string, weight *decimal.Decimal, dropLowest *int32, points *decimal.Decimal) error {
 	switch {
-	case strings.TrimSpace(name) == "":
+	case name != nil && strings.TrimSpace(*name) == "":
 		return apperr.Invalid("name is required")
-	case weight.IsNegative():
+	case weight != nil && weight.IsNegative():
 		return apperr.Invalid("weight cannot be negative")
-	case dropLowest < 0:
+	case dropLowest != nil && *dropLowest < 0:
 		return apperr.Invalid("drop_lowest cannot be negative")
 	case points != nil && points.IsNegative():
 		return apperr.Invalid("points_possible cannot be negative")
@@ -216,6 +218,12 @@ func componentUpdate() tool.Tool {
 			"the whole course.",
 		Kind: tool.Write, Gate: writeScheme,
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/components/{component_id}"},
+		Check: func(in ComponentUpdateIn) error {
+			if in.ClearPointsPossible && in.PointsPossible != nil {
+				return apperr.Invalid("give points_possible or clear_points_possible, not both")
+			}
+			return checkComponent(in.Name, in.Weight, in.DropLowest, in.PointsPossible)
+		},
 		Resolve: func(ctx context.Context, q dbq.Querier, in ComponentUpdateIn) (tool.Target, error) {
 			t, err := componentTarget(ctx, q, in.CourseID, in.ComponentID)
 			if err != nil {
@@ -277,8 +285,6 @@ func componentUpdate() tool.Tool {
 			var graded []dbq.LockLiveEnteredGradesOfAssignmentRow
 			from := c.PointsPossible.Decimal
 			switch {
-			case in.ClearPointsPossible && in.PointsPossible != nil:
-				return SchemeChangeOut{}, apperr.Invalid("give points_possible or clear_points_possible, not both")
 			case in.ClearPointsPossible:
 				// Its grades would be grades on a bucket, where its totals are
 				// written: two live grades for one target, which nothing could
@@ -342,9 +348,6 @@ func componentUpdate() tool.Tool {
 					}
 				}
 				c.PointsPossible = nullDecimal(in.PointsPossible)
-			}
-			if err := checkComponent(c.Name, c.Weight, c.DropLowest, in.PointsPossible); err != nil {
-				return SchemeChangeOut{}, err
 			}
 			if err := ec.Q.UpdateComponent(ctx, dbq.UpdateComponentParams{ID: c.ID, Name: c.Name, Weight: c.Weight,
 				DropLowest: c.DropLowest, PointsPossible: c.PointsPossible, SortOrder: sortOrder}); err != nil {

@@ -941,6 +941,22 @@ func conversationClose() tool.Tool {
 			"it stays readable. To carry on, start a new one.",
 		Kind: tool.Write, Gate: converses,
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/conversations/{conversation_id}/close"},
+		Check: func(in ConversationCloseIn) error {
+			reason, err := optionalText("reason", in.Reason, maxReasonChars)
+			if err != nil {
+				return err
+			}
+			// What the system writes when a seat is removed, or when it
+			// closed the conversations people were asked in, is not a
+			// participant's to write: it would read as the system's doing.
+			if reason != nil && strings.EqualFold(*reason, members.ConversationSeatRemoved) {
+				return apperr.Invalid("%q is what closing a removed seat's conversations says; give another reason", *reason)
+			}
+			if reason != nil && strings.EqualFold(*reason, ClosedWithAPerson) {
+				return apperr.Invalid("%q is what closing the conversations people were asked in says; give another reason", *reason)
+			}
+			return nil
+		},
 		Resolve: func(ctx context.Context, q dbq.Querier, in ConversationCloseIn) (tool.Target, error) {
 			return conversationTarget(ctx, q, in.CourseID, in.ConversationID)
 		},
@@ -952,19 +968,7 @@ func conversationClose() tool.Tool {
 			if ec.Member.ID != c.OpenerMemberID && ec.Member.ID != c.RespondentMemberID {
 				return OK{}, apperr.Forbid("only the two who take part in a conversation close it")
 			}
-			reason, err := optionalText("reason", in.Reason, maxReasonChars)
-			if err != nil {
-				return OK{}, err
-			}
-			// What the system writes when a seat is removed, or when it
-			// closed the conversations people were asked in, is not a
-			// participant's to write: it would read as the system's doing.
-			if reason != nil && strings.EqualFold(*reason, members.ConversationSeatRemoved) {
-				return OK{}, apperr.Invalid("%q is what closing a removed seat's conversations says; give another reason", *reason)
-			}
-			if reason != nil && strings.EqualFold(*reason, ClosedWithAPerson) {
-				return OK{}, apperr.Invalid("%q is what closing the conversations people were asked in says; give another reason", *reason)
-			}
+			reason, _ := optionalText("reason", in.Reason, maxReasonChars)
 			n, err := ec.Q.CloseConversation(ctx, dbq.CloseConversationParams{ID: c.ID, Reason: reason})
 			if err != nil {
 				return OK{}, err
@@ -1012,6 +1016,10 @@ func conversationRetract() tool.Tool {
 			"gone.",
 		Kind: tool.Write, Gate: converses,
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/conversation-messages/{message_id}/retract"},
+		Check: func(in ConversationRetractIn) error {
+			_, err := optionalText("reason", in.Reason, maxReasonChars)
+			return err
+		},
 		Resolve: func(ctx context.Context, q dbq.Querier, in ConversationRetractIn) (tool.Target, error) {
 			if _, err := q.GetConversationMessage(ctx, dbq.GetConversationMessageParams{ID: in.MessageID, CourseID: in.CourseID}); errors.Is(err, pgx.ErrNoRows) {
 				return tool.Target{}, apperr.Missing("no such message in this course")
@@ -1034,10 +1042,7 @@ func conversationRetract() tool.Tool {
 					return OK{}, apperr.Forbid("only its author, or someone who decides actions for the conversation's opener, retracts a message")
 				}
 			}
-			reason, err := optionalText("reason", in.Reason, maxReasonChars)
-			if err != nil {
-				return OK{}, err
-			}
+			reason, _ := optionalText("reason", in.Reason, maxReasonChars)
 			conversation := msg.ConversationID
 			asked := msg.AuthorMemberID == msg.OpenerMemberID
 			if asked {

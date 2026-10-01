@@ -299,6 +299,17 @@ func memberAdd() tool.Tool {
 			"brings it in as their delegate, with member.add_delegate.",
 		Kind: tool.Write, Gate: manageMembers,
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/members"},
+		Check: func(in MemberAddIn) error {
+			if (in.Preset == nil) == (in.PresetID == nil) {
+				return apperr.Invalid("give exactly one of preset and preset_id")
+			}
+			// What the preset says is held to the same by the database.
+			if (in.Role != nil && !validRoles[*in.Role]) || (in.StudentScope != nil && !validScope(*in.StudentScope)) ||
+				(in.AssignmentScope != nil && !validScope(*in.AssignmentScope)) {
+				return apperr.Invalid("role or scope is not one of the allowed values")
+			}
+			return (permSet{}).apply(in.Perms)
+		},
 		Resolve: func(_ context.Context, _ dbq.Querier, in MemberAddIn) (tool.Target, error) {
 			return tool.Target{CourseID: in.CourseID, Type: "course_member"}, nil
 		},
@@ -319,9 +330,6 @@ func memberAdd() tool.Tool {
 			}
 			if in.AssignmentScope != nil {
 				s.assignmentScope = *in.AssignmentScope
-			}
-			if !validRoles[s.role] || !validScope(s.studentScope) || !validScope(s.assignmentScope) {
-				return MemberIDOut{}, apperr.Invalid("role or scope is not one of the allowed values")
 			}
 			if err := s.perms.apply(in.Perms); err != nil {
 				return MemberIDOut{}, err
@@ -703,7 +711,8 @@ func memberUpdatePerms() tool.Tool {
 			"for as long as their seat lasts — must be within what you hold yourself, and within what the seat may hold " +
 			"at all (perm_ceilings in member.get; above it the refusal gives the same reason code). Lowering is always allowed.",
 		Kind: tool.Write, Gate: manageMembers,
-		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/members/{member_id}/perms"},
+		HTTP:  tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/members/{member_id}/perms"},
+		Check: func(in MemberUpdatePermsIn) error { return checkPermChange(in.Perms) },
 		Resolve: func(ctx context.Context, q dbq.Querier, in MemberUpdatePermsIn) (tool.Target, error) {
 			return resolveMember(ctx, q, in.CourseID, in.MemberID)
 		},
@@ -711,9 +720,6 @@ func memberUpdatePerms() tool.Tool {
 			m, err := loadOther(ctx, ec, in.CourseID, in.MemberID)
 			if err != nil {
 				return OK{}, err
-			}
-			if len(in.Perms) == 0 {
-				return OK{}, apperr.Invalid("perms is empty: nothing to change")
 			}
 			before, err := shapeOf(ctx, ec.Q, m)
 			if err != nil {
@@ -755,6 +761,19 @@ func memberRescope() tool.Tool {
 			"everything the member will then hold must be within what you hold yourself. Narrowing is always allowed.",
 		Kind: tool.Write, Gate: manageMembers,
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/members/{member_id}/scope"},
+		// Whether expires_at has passed is asked in Execute, of the moment
+		// it runs: one that has not yet passed when it is proposed may
+		// have when it is approved.
+		Check: func(in MemberRescopeIn) error {
+			if in.ClearExpiry && in.ExpiresAt != nil {
+				return apperr.Invalid("give expires_at or clear_expiry, not both")
+			}
+			// What the seat says now is held to the same by the database.
+			if (in.StudentScope != nil && !validScope(*in.StudentScope)) || (in.AssignmentScope != nil && !validScope(*in.AssignmentScope)) {
+				return apperr.Invalid("a scope is all or listed")
+			}
+			return nil
+		},
 		Resolve: func(ctx context.Context, q dbq.Querier, in MemberRescopeIn) (tool.Target, error) {
 			return resolveMember(ctx, q, in.CourseID, in.MemberID)
 		},
@@ -763,10 +782,7 @@ func memberRescope() tool.Tool {
 			if err != nil {
 				return OK{}, err
 			}
-			switch {
-			case in.ClearExpiry && in.ExpiresAt != nil:
-				return OK{}, apperr.Invalid("give expires_at or clear_expiry, not both")
-			case in.ExpiresAt != nil && !in.ExpiresAt.After(ec.Now):
+			if in.ExpiresAt != nil && !in.ExpiresAt.After(ec.Now) {
 				return OK{}, apperr.Invalid("expires_at is in the past; to end a membership now, remove it")
 			}
 			before, err := shapeOf(ctx, ec.Q, m)
@@ -779,9 +795,6 @@ func memberRescope() tool.Tool {
 			}
 			if in.AssignmentScope != nil {
 				after.assignmentScope = *in.AssignmentScope
-			}
-			if !validScope(after.studentScope) || !validScope(after.assignmentScope) {
-				return OK{}, apperr.Invalid("a scope is all or listed")
 			}
 			// A list that was not sent is kept as it is — not re-checked, so
 			// a student who has since left does not make an unrelated change
@@ -948,19 +961,16 @@ func memberUpdatePermsBulk() tool.Tool {
 			"another agent of its principal's.",
 		Kind: tool.Write, Gate: manageMembers,
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/members/bulk-perms"},
+		Check: func(in MemberUpdatePermsBulkIn) error {
+			if !validRoles[in.Role] {
+				return errRole
+			}
+			return checkPermChange(in.Perms)
+		},
 		Resolve: func(_ context.Context, _ dbq.Querier, in MemberUpdatePermsBulkIn) (tool.Target, error) {
 			return tool.Target{CourseID: in.CourseID, Type: "course_member"}, nil
 		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in MemberUpdatePermsBulkIn) (MemberUpdatePermsBulkOut, error) {
-			if !validRoles[in.Role] {
-				return MemberUpdatePermsBulkOut{}, apperr.Invalid("role must be student, instructor, ta, observer or assistant")
-			}
-			if len(in.Perms) == 0 {
-				return MemberUpdatePermsBulkOut{}, apperr.Invalid("perms is empty: nothing to change")
-			}
-			if err := (permSet{}).apply(in.Perms); err != nil {
-				return MemberUpdatePermsBulkOut{}, err
-			}
 			// A delegate's call that would reach its principal's seat, or
 			// another of its principal's agents' (notYourPrincipals), is
 			// refused whole, before any seat is locked: all of them change,
@@ -1066,13 +1076,16 @@ func memberSetRole() tool.Tool {
 			"(not_your_principal). Giving a seat the role it has changes nothing and says so (changed: false).",
 		Kind: tool.Write, Gate: manageMembers,
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/members/{member_id}/role"},
+		Check: func(in MemberSetRoleIn) error {
+			if !validRoles[in.Role] {
+				return errRole
+			}
+			return nil
+		},
 		Resolve: func(ctx context.Context, q dbq.Querier, in MemberSetRoleIn) (tool.Target, error) {
 			return resolveMember(ctx, q, in.CourseID, in.MemberID)
 		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in MemberSetRoleIn) (MemberSetRoleOut, error) {
-			if !validRoles[in.Role] {
-				return MemberSetRoleOut{}, apperr.Invalid("role must be student, instructor, ta, observer or assistant")
-			}
 			m, err := loadOther(ctx, ec, in.CourseID, in.MemberID)
 			if err != nil {
 				return MemberSetRoleOut{}, err

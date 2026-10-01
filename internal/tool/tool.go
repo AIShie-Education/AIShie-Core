@@ -263,12 +263,29 @@ type Spec[In, Out any] struct {
 	SecretIn  []string
 	SecretOut []string
 
+	// Check refuses arguments that no state of the course would take, by
+	// what they say alone: a name left blank, a score below zero, a value
+	// that is not one of those allowed, two fields given that exclude each
+	// other. It is what the schema would say if it could, and is held to
+	// what a schema is: it reads nothing and is given nothing but the
+	// arguments. It runs as they are decoded, after the schema, so a call
+	// it refuses is refused as one the schema refuses: at once, with no
+	// action row, whoever makes it and whatever their level. Nobody is
+	// asked to approve a proposal of it, and a caller at confirm_required
+	// hears what is wrong as one at autonomous does. Its errors are the
+	// tool's own, the ones Execute would give: a rule left to Execute alone
+	// is found only when someone approves the proposal.
+	Check func(in In) error
 	// Resolve finds the target. Returning an apperr not_found ends the call
 	// with no action row: there was nothing to attempt.
 	Resolve func(ctx context.Context, q dbq.Querier, in In) (Target, error)
 	// Validate checks the domain's rules without writing anything. It runs
 	// before Execute, and before a proposal is queued, so that nobody is
-	// asked to approve something that could never run.
+	// asked to approve something that could never run: a call it refuses is
+	// recorded as failed. It runs again, as the proposer's, when a proposal
+	// is approved, and when an agent's owner is told whether its proposal is
+	// theirs to decide (pipeline ownerJudges). What the arguments say alone,
+	// whatever the course holds, is Check's.
 	Validate func(ctx context.Context, q dbq.Querier, m *domain.Member, in In) error
 	// Pin fills in defaults that must be fixed when a proposal is made rather
 	// than when it is approved — the rubric version a grade is against, say,
@@ -347,9 +364,16 @@ type Tool struct {
 	InputSchema  *jsonschema.Schema
 	OutputSchema *jsonschema.Schema
 
-	// Decode validates raw arguments against InputSchema and unmarshals
-	// them. The value it returns is what the other functions take.
-	Decode   func(raw []byte) (any, error)
+	// Decode validates raw arguments against InputSchema, unmarshals them
+	// and checks them (Spec.Check). The value it returns is what the other
+	// functions take.
+	Decode func(raw []byte) (any, error)
+	// Parse is Decode without Check, and Check is Spec.Check, nil for a
+	// tool without one. A proposal is read back with Parse, so that
+	// arguments the schema no longer takes are told from arguments Check
+	// refuses, which approving it then fails as Execute would have.
+	Parse    func(raw []byte) (any, error)
+	Check    func(in any) error
 	CourseID func(in any) uuid.UUID
 	Resolve  func(ctx context.Context, q dbq.Querier, in any) (Target, error)
 	Validate func(ctx context.Context, q dbq.Querier, m *domain.Member, in any) error
@@ -453,14 +477,14 @@ func Define[In, Out any](s Spec[In, Out]) Tool {
 			fail("a Write tool has Execute and no Query")
 		}
 	case Read:
-		if s.Query == nil || s.Execute != nil || s.Validate != nil {
-			fail("a Read tool has Query, and neither Execute nor Validate")
+		if s.Query == nil || s.Execute != nil || s.Validate != nil || s.Check != nil {
+			fail("a Read tool has Query, and neither Execute, Validate nor Check")
 		}
 	case Ephemeral:
 		// Nothing of it is recorded, proposed or replayed, so nothing that
 		// is about those applies; and nothing but a caller makes one.
-		if s.Execute == nil || s.Query != nil || s.Validate != nil || s.Pin != nil {
-			fail("an Ephemeral tool has Execute, and neither Query, Validate nor Pin")
+		if s.Execute == nil || s.Query != nil || s.Validate != nil || s.Pin != nil || s.Check != nil {
+			fail("an Ephemeral tool has Execute, and neither Query, Validate, Pin nor Check")
 		}
 		if s.Internal || s.Unlisted || len(s.SecretIn) > 0 || len(s.SecretOut) > 0 {
 			fail("an Ephemeral tool is neither Internal nor Unlisted, and records no secret to keep out")
@@ -528,7 +552,7 @@ func Define[In, Out any](s Spec[In, Out]) Tool {
 		OwnerJudgedBy: s.OwnerJudgedBy, SecretIn: s.SecretIn, SecretOut: s.SecretOut,
 		InputSchema: inSchema, OutputSchema: outSchema,
 	}
-	t.Decode = func(raw []byte) (any, error) {
+	t.Parse = func(raw []byte) (any, error) {
 		if len(raw) == 0 {
 			raw = []byte("{}")
 		}
@@ -553,6 +577,19 @@ func Define[In, Out any](s Spec[In, Out]) Tool {
 		var in In
 		if err := json.Unmarshal(raw, &in); err != nil {
 			return nil, apperr.Invalid("arguments: %v", err)
+		}
+		return in, nil
+	}
+	if s.Check != nil {
+		t.Check = func(in any) error { return s.Check(in.(In)) }
+	}
+	t.Decode = func(raw []byte) (any, error) {
+		in, err := t.Parse(raw)
+		if err != nil || t.Check == nil {
+			return in, err
+		}
+		if err := t.Check(in); err != nil {
+			return nil, err
 		}
 		return in, nil
 	}

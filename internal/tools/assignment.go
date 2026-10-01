@@ -142,16 +142,23 @@ type AssignmentBody struct {
 	DueAt                  *time.Time       `json:"due_at,omitempty"`
 }
 
+// check holds what is given to the rules of an assignment that need nothing
+// else to tell: a title that says something, and points that are not below
+// zero. What is not given stays as it is, and was held to them before.
+func (b AssignmentBody) check() error {
+	if b.Title != nil && strings.TrimSpace(*b.Title) == "" {
+		return apperr.Invalid("title is required")
+	}
+	if b.PointsPossible != nil && b.PointsPossible.IsNegative() {
+		return apperr.Invalid("points_possible cannot be negative")
+	}
+	return nil
+}
+
 // checkAssignment holds the same-course rules no foreign key covers: the two
 // documents are documents of this course and of the right kind, and the
 // component is a bucket of this course.
 func checkAssignment(ctx context.Context, q dbq.Querier, courseID uuid.UUID, a dbq.GetAssignmentInCourseRow) error {
-	if strings.TrimSpace(a.Title) == "" {
-		return apperr.Invalid("title is required")
-	}
-	if a.PointsPossible.IsNegative() {
-		return apperr.Invalid("points_possible cannot be negative")
-	}
 	for _, d := range []struct {
 		id   *uuid.UUID
 		kind string
@@ -243,13 +250,16 @@ func assignmentCreate() tool.Tool {
 			"assignment.publish. title and points_possible are required.",
 		Kind: tool.Write, Gate: writeAssignments,
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/assignments"},
+		Check: func(in AssignmentCreateIn) error {
+			if in.Title == nil || in.PointsPossible == nil {
+				return apperr.Invalid("title and points_possible are required")
+			}
+			return in.check()
+		},
 		Resolve: func(_ context.Context, _ dbq.Querier, in AssignmentCreateIn) (tool.Target, error) {
 			return tool.Target{CourseID: in.CourseID, Type: "assignment"}, nil
 		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in AssignmentCreateIn) (IDOut, error) {
-			if in.Title == nil || in.PointsPossible == nil {
-				return IDOut{}, apperr.Invalid("title and points_possible are required")
-			}
 			a := dbq.GetAssignmentInCourseRow{ID: ids.New(), CourseID: in.CourseID}
 			in.applyTo(&a)
 			if err := checkAssignment(ctx, ec.Q, in.CourseID, a); err != nil {
@@ -321,7 +331,8 @@ func assignmentUpdate() tool.Tool {
 			"Either rewrites, at once, the posted totals it changes, with history, and so must reach every student who has " +
 			"one, over the whole course. A grade proposed out of the old points is refused when it is approved.",
 		Kind: tool.Write, Gate: writeAssignments,
-		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/assignments/{assignment_id}"},
+		HTTP:  tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/assignments/{assignment_id}"},
+		Check: func(in AssignmentUpdateIn) error { return in.check() },
 		Resolve: func(ctx context.Context, q dbq.Querier, in AssignmentUpdateIn) (tool.Target, error) {
 			t, err := assignmentTarget(ctx, q, in.CourseID, in.AssignmentID)
 			if err != nil {
