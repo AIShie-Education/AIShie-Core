@@ -27,6 +27,11 @@ func TestFromEnv(t *testing.T) {
 		if c.AttachmentMaxBytes != 50<<20 || c.AttachmentMaxPerMessage != 10 || c.AttachmentMaxConversationBytes != 500<<20 {
 			t.Fatalf("attachments' defaults: %d %d %d", c.AttachmentMaxBytes, c.AttachmentMaxPerMessage, c.AttachmentMaxConversationBytes)
 		}
+		// An export holds 100,000 messages and 256 MiB of their text, and
+		// is kept a day.
+		if c.ExportMaxMessages != 100000 || c.ExportMaxBytes != 256<<20 || c.ExportTTL != 24*time.Hour {
+			t.Fatalf("exports' defaults: %d %d %s", c.ExportMaxMessages, c.ExportMaxBytes, c.ExportTTL)
+		}
 		// Memory stays off until what forgets it on time is in place; its
 		// limits are there whether or not.
 		if c.Memory != (memory.Config{}).WithDefaults() || c.Memory.Enabled || c.Memory.MaxOwner != 200 || c.Memory.MaxAsker != 50 ||
@@ -57,6 +62,9 @@ func TestFromEnv(t *testing.T) {
 		t.Setenv("ATTACHMENT_MAX_BYTES", "1048576")
 		t.Setenv("ATTACHMENT_MAX_PER_MESSAGE", "3")
 		t.Setenv("ATTACHMENT_MAX_CONVERSATION_BYTES", "10485760")
+		t.Setenv("EXPORT_MAX_MESSAGES", "5000")
+		t.Setenv("EXPORT_MAX_BYTES", "1048576")
+		t.Setenv("EXPORT_TTL", "2h")
 		c, err := FromEnv()
 		if err != nil {
 			t.Fatal(err)
@@ -73,6 +81,9 @@ func TestFromEnv(t *testing.T) {
 		}
 		if c.AttachmentMaxBytes != 1<<20 || c.AttachmentMaxPerMessage != 3 || c.AttachmentMaxConversationBytes != 10<<20 {
 			t.Fatalf("attachments: %d %d %d", c.AttachmentMaxBytes, c.AttachmentMaxPerMessage, c.AttachmentMaxConversationBytes)
+		}
+		if c.ExportMaxMessages != 5000 || c.ExportMaxBytes != 1<<20 || c.ExportTTL != 2*time.Hour {
+			t.Fatalf("exports: %d %d %s", c.ExportMaxMessages, c.ExportMaxBytes, c.ExportTTL)
 		}
 	})
 	t.Run("a file a message carries is never larger than an upload", func(t *testing.T) {
@@ -111,7 +122,8 @@ func TestFromEnv(t *testing.T) {
 		"AGENT_SELF_SERVICE": "yes", "AGENT_MAX_PER_OWNER": "0", "MEMORY": "true", "MEMORY_MAX_ASKER": "0",
 		"MEMORY_WRITES_PER_DAY": "many", "MEMORY_MAX_PER_AGENT": "-5", "JOIN_LINK_REGISTRATION": "no",
 		"JOIN_REGISTRATIONS_PER_MINUTE": "-1", "LONG_POLL_WAITERS": "lots", "LONG_POLL_WAITERS_PER_ACTOR": "-1",
-		"ATTACHMENT_MAX_BYTES": "0", "ATTACHMENT_MAX_PER_MESSAGE": "101", "ATTACHMENT_MAX_CONVERSATION_BYTES": "lots"} {
+		"ATTACHMENT_MAX_BYTES": "0", "ATTACHMENT_MAX_PER_MESSAGE": "101", "ATTACHMENT_MAX_CONVERSATION_BYTES": "lots",
+		"EXPORT_MAX_MESSAGES": "0", "EXPORT_MAX_BYTES": "-1", "EXPORT_TTL": "10m"} {
 		t.Run("rejects "+key+"="+bad, func(t *testing.T) {
 			t.Setenv(key, bad)
 			if _, err := FromEnv(); err == nil {

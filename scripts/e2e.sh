@@ -36,7 +36,10 @@
 # anything else, and works as before; and he cannot reset a TA's.
 # Then a department's administrator, invited and appointed by root, makes a
 # course beneath her appointment and seats its instructor, found by their
-# email. Then Core vouches for the instructor to an agent runtime, and the key it
+# email. Then root exports CS101's conversations for audit and downloads
+# both files, the question the student withdrew in them, marked; the
+# department's administrator exports only what is beneath her, and the
+# instructor, the student and an agent are refused. Then Core vouches for the instructor to an agent runtime, and the key it
 # publishes checks what it says, before and after a restart. Then the sign-in
 # page is told how a person signs in: by password alone, and then, restarted
 # with single sign-on against a stand-in provider, by that too, under its name.
@@ -874,6 +877,60 @@ call 403 GET /v1/actors "$ADA"
 [ "$(json "$WORK/body" 'd["error"]["details"]["reason"]')" = platform_role_required ] || fail "refused, but not for want of a platform role: $(cat "$WORK/body")"
 call 403 POST "$C" "$ADA" '{"title":"Not hers"}' # CS101 is in Computing, outside her appointment
 [ "$(json "$WORK/body" 'd["error"]["details"]["reason"]')" = department_out_of_scope ] || fail "CS101 refused, but not as out of her reach: $(cat "$WORK/body")"
+
+step "Root exports CS101's conversations for audit: two files, each downloaded with nothing but its URL, the question Yuki withdrew in them with its text, marked; Ada exports what is beneath her and nothing else; Sato, Yuki and the grader are refused"
+KEY=export-cs101 call 200 POST /v1/conversation-exports "$ROOT" "{\"course_id\":\"$COURSE\"}"
+cp "$WORK/body" "$WORK/export.json"
+EXPORT=$(json "$WORK/export.json" 'd["result"]["export_id"]')
+[ "$(json "$WORK/export.json" 'd["action_id"] == d["result"]["export_id"], d["result"]["retracted"] >= 1, sorted(x["format"] for x in d["result"]["downloads"])')" = "True True ['csv', 'jsonl']" ] ||
+  fail "the export: $(cat "$WORK/export.json")"
+for f in jsonl csv; do
+  URL=$(json "$WORK/export.json" '[x["download_url"] for x in d["result"]["downloads"] if x["format"] == "'"$f"'"][0]')
+  got=$(curl -s -D "$WORK/headers" -o "$WORK/export.$f" -w '%{http_code}' "$URL")
+  [ "$got" = 200 ] || fail "downloading the export's $f file → $got"
+  name=$([ "$f" = jsonl ] && echo "conversations-$EXPORT.jsonl" || echo "messages-$EXPORT.csv")
+  { grep -qi "^content-disposition: attachment; filename=$name" "$WORK/headers" && grep -qi '^x-content-type-options: nosniff' "$WORK/headers"; } ||
+    fail "the export's $f file is not a download under its name: $(cat "$WORK/headers")"
+  printf '  %-4s %-62s %s\n' GET "(the export's $f file, by its URL alone)" "$got"
+done
+python3 - "$WORK/export.jsonl" "$CONV" "$CONV2" "$ASKED" <<'PY' || fail "the conversations file: $(head -c 3000 "$WORK/export.jsonl")"
+import json, sys
+lines = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8")]
+ids = [c["id"] for c in lines]
+assert sys.argv[2] in ids and sys.argv[3] in ids, ids
+conv = next(c for c in lines if c["id"] == sys.argv[3])
+asked = next(x for x in conv["messages"] if x["id"] == sys.argv[4])
+assert asked["body"] == "Is my essay on track?" and asked["retracted"]["reason"] == "wrong draft", asked
+assert [a["filename"] for a in asked["attachments"]] == ["essay draft 2.pdf"], asked
+assert conv["respondent"]["kind"] == "agent" and conv["opener"]["name"] == "Yuki", conv
+PY
+python3 - "$WORK/export.csv" "$ASKED" <<'PY' || fail "the messages file: $(head -c 3000 "$WORK/export.csv")"
+import csv, io, sys
+raw = open(sys.argv[1], "rb").read()
+assert raw.startswith(b"\xef\xbb\xbf"), raw[:16]
+rows = list(csv.DictReader(io.StringIO(raw.decode("utf-8-sig"), newline="")))
+asked = [r for r in rows if r["message_id"] == sys.argv[2]]
+assert len(asked) == 1 and asked[0]["status"] == "retracted" and asked[0]["body"] == "Is my essay on track?" and asked[0]["reason"] == "wrong draft", asked
+PY
+echo "  the question Yuki withdrew is in both files, with its text, marked retracted, and its file described"
+# Replayed, it is the same export and gives no URL; its maker is given a file again.
+KEY=export-cs101 call 200 POST /v1/conversation-exports "$ROOT" "{\"course_id\":\"$COURSE\"}"
+[ "$(json "$WORK/body" 'd["result"]["export_id"] == "'"$EXPORT"'", "downloads" in d["result"]')" = "True False" ] ||
+  fail "the export replayed: $(cat "$WORK/body")"
+call 200 GET "/v1/conversation-exports/$EXPORT/csv" "$ROOT"
+[ "$(curl -s -o /dev/null -w '%{http_code}' "$(json "$WORK/body" 'd["result"]["download_url"]')")" = 200 ] || fail "the export's file, given again, does not download"
+call 404 GET "/v1/conversation-exports/$EXPORT/csv" "$ADMIN" # an export is its maker's
+# Ada exports what is beneath her appointment, and nothing else.
+call 200 POST /v1/conversation-exports "$ADA" "{\"within_dept_id\":\"$ENG\"}"
+[ "$(json "$WORK/body" 'd["result"]["conversations"]')" = 0 ] || fail "Ada's export of Engineering: $(cat "$WORK/body")"
+call 403 POST /v1/conversation-exports "$ADA" "{\"course_id\":\"$COURSE\"}"
+[ "$(reason)" = department_out_of_scope ] || fail "CS101's export refused Ada, but not as out of her reach: $(cat "$WORK/body")"
+call 403 POST /v1/conversation-exports "$ADA" '{}'
+[ "$(reason)" = platform_role_required ] || fail "the site's export refused Ada, but not for want of a platform role: $(cat "$WORK/body")"
+for who in "$SATO" "$YUKI" "$GRADER"; do
+  call 403 POST /v1/conversation-exports "$who" "{\"course_id\":\"$COURSE\"}"
+  [ "$(reason)" = platform_role_required ] || fail "an export refused, but not for want of a platform role: $(cat "$WORK/body")"
+done
 
 step "Core vouches for Sato to the agent runtime; the key it publishes checks what it says"
 # jwt PART EXPR — evaluate EXPR against the decoded header (0) or claims (1) of $ASSERTION as d.

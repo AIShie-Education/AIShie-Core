@@ -473,6 +473,29 @@ func TestATreeIsBuiltAndStaffedOverMCP(t *testing.T) {
 	}
 }
 
+// Conversations are exported for audit by people who administer the site
+// or a department. The agents' door offers the tool, as it offers every
+// tool, and an agent calling it is refused: with no role, as anyone without
+// one is; with one, because it is an agent.
+func TestAnAgentExportsNoConversations(t *testing.T) {
+	f := serve(t, 0)
+	c := f.c
+	grader := f.connect(t, f.token(t, c.Grader))
+	if env, res := call(t, grader, "conversation_export", m{"course_id": c.Course, "idempotency_key": "export"}); env.Status != "denied" ||
+		!res.IsError || env.ActionID == nil || env.Error.Details["reason"] != "platform_role_required" {
+		t.Fatalf("an agent exporting: %+v", env)
+	}
+	c.Exec(`UPDATE actor SET platform_role = 'admin' WHERE id = $1`, c.Grader)
+	if env, res := call(t, grader, "conversation_export", m{"course_id": c.Course, "idempotency_key": "export-again"}); env.Status != "failed" ||
+		!res.IsError || env.ActionID == nil || env.Error.Details["reason"] != "people_only" {
+		t.Fatalf("an agent with a platform role exporting: %+v", env)
+	}
+	root := f.connect(t, f.token(t, c.Root))
+	if env, _ := call(t, root, "conversation_export", m{"course_id": c.Course, "idempotency_key": "export"}); env.Status != "executed" {
+		t.Fatalf("root exporting over the same door: %+v", env)
+	}
+}
+
 func TestErrorsAModelCanCorrect(t *testing.T) {
 	f := serve(t, 1)
 	c, yuki := f.c, f.c.Students[0]
@@ -584,7 +607,7 @@ func TestToolsListIsTheRegistry(t *testing.T) {
 		!strings.Contains(got, "conversation_inbox") || !strings.Contains(got, "me_site_chat") ||
 		!strings.Contains(got, "conversations_are_with_agents") || !strings.Contains(got, "document_text") ||
 		!strings.Contains(got, "conversation_attachment") || !strings.Contains(got, "conversation_upload_url") ||
-		!strings.Contains(got, "version.files") || !strings.Contains(got, "document_file") {
+		!strings.Contains(got, "version.files") || !strings.Contains(got, "document_file") || !strings.Contains(got, "conversation_export") {
 		t.Fatalf("the server's instructions do not explain the essentials:\n%s", got)
 	}
 	listed := map[string]*mcp.Tool{}
