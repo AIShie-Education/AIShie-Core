@@ -169,6 +169,25 @@ type Querier interface {
 	// LOCKED, as a claim: what another call holds is its to change, and two
 	// claims at once never wait for each other here.
 	ExhaustTexts(ctx context.Context, arg ExhaustTextsParams) error
+	// Exporting conversations for audit (docs/schema.md §2.8, Exporting
+	// conversations for audit). An administrator's export reads the
+	// conversations its filters choose, whoever took part in them and whatever
+	// anyone may read of them now: a retracted message with its text, marked
+	// retracted, and the answers and questions proposed in them that were never
+	// posted. Who may export what is the Admin gate's, in Go; these queries
+	// read what an export holds, as of the moment it was made.
+	//
+	// The filters, the same in each query that chooses conversations: a course
+	// (course_id), or a department and everything beneath it (within_dept_id);
+	// one person or agent taking part, as the opener or the respondent
+	// (participant_actor_id); and a span of time (from_at, before_at), which
+	// keeps the conversations opened in it, or with a message written or an
+	// answer or question proposed in it, and of those, what was written and
+	// proposed in it. as_of is when the export was made: nothing written after
+	// it is in it.
+	// How much an export would hold: its conversations, their messages and the
+	// answers and questions proposed in them, each with the bytes of its text.
+	ExportSize(ctx context.Context, arg ExportSizeParams) (ExportSizeRow, error)
 	// Moves a proposal to its end state. The status guard makes a lost race
 	// between two deciders, or a decider and the expiry sweep, a no-op.
 	FinishProposal(ctx context.Context, arg FinishProposalParams) (int64, error)
@@ -262,6 +281,9 @@ type Querier interface {
 	// The draft of a conversation, if there is one: written since fresh_after,
 	// and not the end of its attempt.
 	GetDraft(ctx context.Context, arg GetDraftParams) (GetDraftRow, error)
+	// An export, by its id, which is its action's: who made it, over what, and
+	// when it was carried out.
+	GetExport(ctx context.Context, id uuid.UUID) (GetExportRow, error)
 	GetGradeFull(ctx context.Context, arg GetGradeFullParams) (GetGradeFullRow, error)
 	// Grades by id, with the assignment each belongs to (null for a component
 	// grade). A grade's course is its student's course.
@@ -533,6 +555,24 @@ type Querier interface {
 	ListEvents(ctx context.Context, arg ListEventsParams) ([]ListEventsRow, error)
 	// Not only open courses: a draft course takes writes, and its seats expire.
 	ListExpiredMembers(ctx context.Context, arg ListExpiredMembersParams) ([]ListExpiredMembersRow, error)
+	// The conversations an export holds, paged by id, each with its course, its
+	// two participants — who they are, and for an agent someone owns, who owns
+	// it — and, once it is closed, when: the news of its closing says, however
+	// it was closed.
+	ListExportConversations(ctx context.Context, arg ListExportConversationsParams) ([]ListExportConversationsRow, error)
+	// What was written in the given conversations, in the span of time, as of
+	// the export, a page at a time: conversation by conversation, in the order
+	// the conversations were listed, and in each in the order it was written.
+	// A retracted message comes with its text, as it is kept, and with its
+	// retraction: when, by whom and why.
+	ListExportMessages(ctx context.Context, arg ListExportMessagesParams) ([]ListExportMessagesRow, error)
+	// The answers and questions proposed in the given conversations, in the
+	// span of time, as of the export, that were never posted: waiting for a
+	// decision, rejected, or cancelled (withdrawn, expired, or their proposer's
+	// seat gone). What each said is its payload's; of the files it named, their
+	// names alone, never the upload tokens it names them by. Why it was
+	// rejected or cancelled is its result's.
+	ListExportProposals(ctx context.Context, arg ListExportProposalsParams) ([]ListExportProposalsRow, error)
 	ListGradeDocuments(ctx context.Context, gradeID *uuid.UUID) ([]ListGradeDocumentsRow, error)
 	// Assignments that count toward the grade. An unpublished one cannot have a
 	// submission, so it cannot have a grade; it is left out rather than shown to
