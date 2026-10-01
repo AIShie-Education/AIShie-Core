@@ -167,6 +167,49 @@ func (s *S3Store) PresignDownload(ctx context.Context, key, filename string, ttl
 	return u.String(), nil
 }
 
+// PresignPutUpTo is PresignPut: a presigned PUT takes any size, and the
+// size is checked when the object is recorded.
+func (s *S3Store) PresignPutUpTo(ctx context.Context, key, contentType string, _ int64, ttl time.Duration) (string, map[string]string, error) {
+	return s.PresignPut(ctx, key, contentType, ttl)
+}
+
+func (s *S3Store) PresignView(ctx context.Context, key, filename, contentType string, ttl time.Duration) (string, error) {
+	// Served as the type the URL asks for, whatever the object was stored
+	// as, and to be shown where it is opened.
+	view := url.Values{"response-content-disposition": {InlineDisposition(filename)}, "response-content-type": {contentType}}
+	u, err := s.client.PresignedGetObject(ctx, s.bucket, key, ttl, view)
+	if err != nil {
+		return "", err
+	}
+	return u.String(), nil
+}
+
+// Head asks the store for the object's first n bytes alone.
+func (s *S3Store) Head(ctx context.Context, key string, n int) ([]byte, error) {
+	if n <= 0 {
+		return []byte{}, nil
+	}
+	opts := minio.GetObjectOptions{}
+	if err := opts.SetRange(0, int64(n)-1); err != nil {
+		return nil, err
+	}
+	o, err := s.client.GetObject(ctx, s.bucket, key, opts)
+	if err == nil {
+		defer func() { _ = o.Close() }()
+		var head []byte
+		if head, err = io.ReadAll(io.LimitReader(o, int64(n))); err == nil {
+			return head, nil
+		}
+	}
+	switch minio.ToErrorResponse(err).StatusCode {
+	case http.StatusNotFound:
+		return nil, ErrNotFound
+	case http.StatusRequestedRangeNotSatisfiable:
+		return []byte{}, nil // an empty object has no first byte
+	}
+	return nil, err
+}
+
 func (s *S3Store) Stat(ctx context.Context, key string) (Info, error) {
 	o, err := s.client.StatObject(ctx, s.bucket, key, minio.StatObjectOptions{})
 	if err != nil {

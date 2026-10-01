@@ -370,6 +370,29 @@ type Event struct {
 	AssignmentID    *uuid.UUID
 }
 
+type FileRendition struct {
+	ID                    uuid.UUID
+	CourseID              uuid.UUID
+	FileID                *uuid.UUID
+	AttachmentID          *uuid.UUID
+	Status                string
+	Reason                *string
+	Attempts              int32
+	Backfill              bool
+	QueuedAt              time.Time
+	LeaseID               *uuid.UUID
+	ClaimedUntil          *time.Time
+	ClaimedByCredentialID *uuid.UUID
+	ClaimedAt             *time.Time
+	StorageKey            *string
+	ByteSize              *int64
+	Checksum              *string
+	PageCount             *int32
+	ProducedAt            *time.Time
+	CreatedAt             time.Time
+	UpdatedAt             time.Time
+}
+
 type Grade struct {
 	ID                 uuid.UUID
 	StudentMemberID    uuid.UUID

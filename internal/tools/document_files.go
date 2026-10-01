@@ -83,6 +83,8 @@ type FileView struct {
 	Checksum    *string   `json:"checksum,omitempty" jsonschema:"sha256:<hex> where the store worked it out from the bytes, etag:<value> where all it has is an object store's tag"`
 	DownloadURL *string   `json:"download_url,omitempty" jsonschema:"document.get only: a short-lived URL that serves the file as a download, saved under its name; GET it with no Authorization header"`
 	Text        *TextView `json:"text,omitempty" jsonschema:"the file's text version: the file transcribed into Markdown, for a file of material, instructions or a rubric; absent for any other. Its body, in document.get only, while the bodies given with the version come to at most 65536 bytes"`
+	// Rendition is the file's PDF, for an Office or OpenDocument file.
+	Rendition *RenditionView `json:"rendition,omitempty" jsonschema:"the file's PDF rendition, for an Office or OpenDocument file of any kind of document; absent for any other. document.get gives where it stands and, once it is done, its page count, size and a short-lived URL that shows it; document.versions where it stands alone"`
 }
 
 func fileView(f dbq.DocumentVersionFile) FileView {
@@ -311,14 +313,23 @@ func legacyFilename(title, contentType string) string {
 // ---------------------------------------------------------------------------
 
 // versionFiles are a version's files as document.get shows them: each with a
-// URL to download it under its name, and its text version, with its text
-// while the texts given with the version come to at most one part.
-func versionFiles(ctx context.Context, d Deps, q dbq.Querier, version uuid.UUID) ([]FileView, error) {
+// URL to download it under its name, its text version, with its text while
+// the texts given with the version come to at most one part, and its PDF
+// rendition, with a URL that shows it once it is done.
+func versionFiles(ctx context.Context, d Deps, q dbq.Querier, version uuid.UUID, now time.Time) ([]FileView, error) {
 	rows, err := q.ListVersionFiles(ctx, version)
 	if err != nil || len(rows) == 0 {
 		return nil, err
 	}
 	texts, err := q.ListVersionTextViews(ctx, version)
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]uuid.UUID, len(rows))
+	for i, f := range rows {
+		ids[i] = f.ID
+	}
+	renditions, err := renditionsOfFiles(ctx, q, ids)
 	if err != nil {
 		return nil, err
 	}
@@ -336,6 +347,12 @@ func versionFiles(ctx context.Context, d Deps, q dbq.Querier, version uuid.UUID)
 				return nil, err
 			}
 			out[i].DownloadURL = &url
+		}
+		if r, ok := renditions[f.ID]; ok {
+			out[i].Rendition = renditionView(r)
+			if err := d.withURL(ctx, out[i].Rendition, r, f.Filename, now); err != nil {
+				return nil, err
+			}
 		}
 		t, ok := byFile[f.ID]
 		if !ok {
@@ -366,7 +383,8 @@ func versionFiles(ctx context.Context, d Deps, q dbq.Querier, version uuid.UUID)
 }
 
 // documentFiles are the files of every version of a document, by version,
-// each version's in order, with their text versions, without their text.
+// each version's in order, with their text versions, without their text,
+// and where their PDF renditions stand.
 func documentFiles(ctx context.Context, q dbq.Querier, document uuid.UUID) (map[uuid.UUID][]FileView, error) {
 	rows, err := q.ListDocumentFiles(ctx, document)
 	if err != nil {
@@ -376,10 +394,21 @@ func documentFiles(ctx context.Context, q dbq.Querier, document uuid.UUID) (map[
 	if err != nil {
 		return nil, err
 	}
+	states, err := q.ListDocumentRenditionStates(ctx, document)
+	if err != nil {
+		return nil, err
+	}
+	renditions := make(map[uuid.UUID]string, len(states))
+	for _, r := range states {
+		renditions[r.FileID] = r.Status
+	}
 	out := map[uuid.UUID][]FileView{}
 	for _, f := range rows {
 		v := fileView(f)
 		v.Text = texts[f.ID]
+		if state, ok := renditions[f.ID]; ok {
+			v.Rendition = renditionState(state)
+		}
 		out[f.VersionID] = append(out[f.VersionID], v)
 	}
 	return out, nil
@@ -405,12 +434,14 @@ type DocumentFileOut struct {
 	ByteSize    int64     `json:"byte_size"`
 	Checksum    *string   `json:"checksum,omitempty"`
 	Text        *TextView `json:"text,omitempty" jsonschema:"the file's text version, without the text: document.text reads it; absent for a file of a submission or of feedback"`
-	DocumentID  uuid.UUID `json:"document_id"`
-	VersionID   uuid.UUID `json:"version_id"`
-	Seq         int32     `json:"seq" jsonschema:"its version's seq"`
-	Published   bool      `json:"published" jsonschema:"whether its version is the published one"`
-	DownloadURL string    `json:"download_url" jsonschema:"a short-lived URL that serves the file as a download, saved under its name: GET it as it is, with no Authorization header"`
-	ExpiresAt   time.Time `json:"expires_at" jsonschema:"when download_url stops working, about 15 minutes from now; ask again for another"`
+	// Rendition is the file's PDF, for an Office or OpenDocument file.
+	Rendition   *RenditionView `json:"rendition,omitempty" jsonschema:"the file's PDF rendition, for an Office or OpenDocument file of any kind of document: where it stands, and once it is done its page count, size and a short-lived URL that shows it; absent for any other file"`
+	DocumentID  uuid.UUID      `json:"document_id"`
+	VersionID   uuid.UUID      `json:"version_id"`
+	Seq         int32          `json:"seq" jsonschema:"its version's seq"`
+	Published   bool           `json:"published" jsonschema:"whether its version is the published one"`
+	DownloadURL string         `json:"download_url" jsonschema:"a short-lived URL that serves the file as a download, saved under its name: GET it as it is, with no Authorization header"`
+	ExpiresAt   time.Time      `json:"expires_at" jsonschema:"when download_url stops working, about 15 minutes from now; ask again for another"`
 }
 
 // errNoFile is what a file that does not exist, and one of a version the
@@ -424,7 +455,8 @@ func documentFile(d Deps) tool.Tool {
 	return tool.Define(tool.Spec[DocumentFileIn, DocumentFileOut]{
 		Name: "document.file",
 		Description: "One file of a version of a document: its name, type, size and text version (without the text), and a " +
-			"short-lived URL that serves it as a download, under its name. For whoever may read its version, as document.get " +
+			"short-lived URL that serves it as a download, under its name; for an Office or OpenDocument file, its PDF " +
+			"rendition too (rendition: where it stands, and once it is done a URL that shows the PDF). For whoever may read its version, as document.get " +
 			"with that version_id: students the published version's, and the one their own work was handed in under. " +
 			"document.get and document.versions list each version's files, with their ids.",
 		Kind: tool.Read, Gate: anyDocumentRead,
@@ -464,6 +496,16 @@ func documentFile(d Deps) tool.Tool {
 					t.EditedAt, t.UpdatedAt, t.Bytes, t.EditedByName)
 			} else if !errors.Is(err, pgx.ErrNoRows) {
 				return DocumentFileOut{}, err
+			}
+			renditions, err := renditionsOfFiles(ctx, rc.Q, []uuid.UUID{f.ID})
+			if err != nil {
+				return DocumentFileOut{}, err
+			}
+			if r, ok := renditions[f.ID]; ok {
+				out.Rendition = renditionView(r)
+				if err := d.withURL(ctx, out.Rendition, r, f.Filename, rc.Now); err != nil {
+					return DocumentFileOut{}, err
+				}
 			}
 			return out, nil
 		},

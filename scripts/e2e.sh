@@ -24,7 +24,11 @@
 # answer's draft reaching her while it is written; and answer her question
 # again, her essay attached as a PDF, which it lists and downloads, and the
 # grader cannot, and she withdraws, and which past the limits on files is
-# refused, saying why; and be asked nothing more once the runtime stops
+# refused, saying why; and have the runtime, with that credential, convert
+# the instructor's Word handout and the slides the student sends the tutor
+# to PDF, uploading a small PDF in their place, which the student opens,
+# shown where it is opened, and nobody else does, and a failed one the
+# instructor sends back; and be asked nothing more once the runtime stops
 # hosting it; and have another agent of his, an mcp agent, given member_manage,
 # seat a student with its own token, never be asked in the site, and be
 # refused on his seat, and his own
@@ -688,6 +692,118 @@ call 200 GET "$C/conversations/$CONV2/messages" "$TUTOR"
   fail "the retracted question, as the tutor reads it: $(cat "$WORK/body")"
 call 200 GET /v1/me/conversations "$YUKI"
 [ "$(json "$WORK/body" '[c["conversation_id"] for c in d["result"]["conversations"]]')" = "['$CONV2', '$CONV']" ] || fail "Yuki's panel: $(cat "$WORK/body")"
+
+step "Office files are previewed as PDFs: Sato's Word handout and the slides Yuki sends the tutor are queued as they are recorded; the runtime claims each, reads it, uploads the PDF it made and says it is done; Yuki opens each PDF where she reads its file, and nobody else does"
+# A PDF of one page, as the runtime's converter makes one.
+python3 - "$WORK/rendition.pdf" <<'PY'
+import sys
+objs = [b"<< /Type /Catalog /Pages 2 0 R >>", b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] >>"]
+out, offsets = bytearray(b"%PDF-1.4\n"), []
+for i, o in enumerate(objs, 1):
+    offsets.append(len(out))
+    out += b"%d 0 obj\n%s\nendobj\n" % (i, o)
+xref = len(out)
+out += b"xref\n0 %d\n0000000000 65535 f \n" % (len(objs) + 1) + b"".join(b"%010d 00000 n \n" % x for x in offsets)
+out += b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (len(objs) + 1, xref)
+open(sys.argv[1], "wb").write(out)
+PY
+# convert ID LEASE — what the runtime does once it has converted a claimed file: a URL for the PDF, the PDF PUT
+# there, and the rendition said to be done.
+convert() {
+  call 200 GET "/v1/services/agent_runtime/renditions/$1/upload-url?lease_id=$2" "$RT"
+  [ "$(json "$WORK/body" 'd["result"]["headers"]["Content-Type"]')" = application/pdf ] || fail "the PDF's upload URL: $(cat "$WORK/body")"
+  local put token
+  put=$(json "$WORK/body" 'd["result"]["upload_url"]')
+  token=$(json "$WORK/body" 'd["result"]["upload_token"]')
+  [ "$(curl -s -o /dev/null -w '%{http_code}' -X PUT -H 'Content-Type: application/pdf' --data-binary "@$WORK/rendition.pdf" "$put")" = 200 ] ||
+    fail "PUT of the PDF"
+  call 200 POST "/v1/services/agent_runtime/renditions/$1/complete" "$RT" "{\"lease_id\":\"$2\",\"status\":\"done\",\"upload_token\":\"$token\",\"page_count\":1}"
+  [ "$(json "$WORK/body" 'd["result"]["state"], d["result"]["byte_size"]')" = "done $(wc -c <"$WORK/rendition.pdf" | tr -d ' ')" ] ||
+    fail "the rendition done: $(cat "$WORK/body")"
+}
+# opens URL NAME — the PDF behind URL, opened as a browser opens it: a PDF, shown where it is opened, named NAME.
+opens() {
+  [ "$(curl -s -D "$WORK/headers" -o "$WORK/got.pdf" -w '%{http_code}' "$1")" = 200 ] || fail "opening the PDF of $2"
+  cmp -s "$WORK/rendition.pdf" "$WORK/got.pdf" || fail "the PDF of $2 is not what the runtime uploaded"
+  { grep -qi '^content-type: application/pdf' "$WORK/headers" && grep -qi "^content-disposition: inline; filename=$2" "$WORK/headers" &&
+    grep -qi '^x-content-type-options: nosniff' "$WORK/headers"; } || fail "the PDF of $2 is not shown as a PDF named $2: $(cat "$WORK/headers")"
+}
+DOCX=application/vnd.openxmlformats-officedocument.wordprocessingml.document
+printf 'PK\003\004 the handout for week four' >"$WORK/handout.docx"
+docfile "$DOCX" "$WORK/handout.docx" handout.docx
+call 200 POST "$C/documents" "$SATO" "{\"kind\":\"material\",\"title\":\"Week 4\",\"files\":[{\"upload_token\":\"$UPLOAD\"}]}"
+W4=$(json "$WORK/body" 'd["result"]["document_id"]')
+W4_FILE=$(json "$WORK/body" 'd["result"]["file_ids"][0]')
+call 200 POST "$C/documents/$W4/publish" "$SATO"
+call 200 GET "$C/documents/$W4" "$YUKI"
+[ "$(json "$WORK/body" 'd["result"]["version"]["files"][0]["rendition"]["state"]')" = queued ] || fail "the handout's rendition: $(cat "$WORK/body")"
+call 403 POST /v1/services/agent_runtime/renditions/claim "$SATO" '{}' # the runtime's alone
+[ "$(reason)" = service_only ] || fail "refused, but not as the runtime's: $(cat "$WORK/body")"
+call 200 POST /v1/services/agent_runtime/renditions/claim "$RT" '{"max":5,"lease_s":300}'
+[ "$(json "$WORK/body" '[(c["source"], c["file_id"], c["filename"]) for c in d["result"]["claimed"]]')" = "[('document_file', '$W4_FILE', 'handout.docx')]" ] ||
+  fail "the runtime claimed $(cat "$WORK/body")"
+REND=$(json "$WORK/body" 'd["result"]["claimed"][0]["rendition_id"]')
+LEASE=$(json "$WORK/body" 'd["result"]["claimed"][0]["lease_id"]')
+curl -sf -o "$WORK/got" "$(json "$WORK/body" 'd["result"]["claimed"][0]["download_url"]')" || fail "the runtime's download of the handout"
+cmp -s "$WORK/handout.docx" "$WORK/got" || fail "the runtime downloaded a handout that is not what Sato uploaded"
+call 200 GET "/v1/services/agent_runtime/renditions/$REND/file?lease_id=$LEASE" "$RT"
+call 200 POST "/v1/services/agent_runtime/renditions/$REND/renew" "$RT" "{\"lease_id\":\"$LEASE\",\"lease_s\":600}"
+# What is not a PDF is refused, and the claim holds.
+call 200 GET "/v1/services/agent_runtime/renditions/$REND/upload-url?lease_id=$LEASE" "$RT"
+[ "$(curl -s -o /dev/null -w '%{http_code}' -X PUT -H 'Content-Type: application/pdf' --data-binary "@$WORK/handout.docx" "$(json "$WORK/body" 'd["result"]["upload_url"]')")" = 200 ] ||
+  fail "PUT of what is not a PDF"
+call 422 POST "/v1/services/agent_runtime/renditions/$REND/complete" "$RT" "{\"lease_id\":\"$LEASE\",\"status\":\"done\",\"upload_token\":\"$(json "$WORK/body" 'd["result"]["upload_token"]')\",\"page_count\":1}"
+[ "$(reason)" = not_a_pdf ] || fail "what is not a PDF refused, but not as one: $(cat "$WORK/body")"
+convert "$REND" "$LEASE"
+call 409 POST "/v1/services/agent_runtime/renditions/$REND/complete" "$RT" "{\"lease_id\":\"$LEASE\",\"status\":\"failed\",\"reason\":\"timeout\"}"
+[ "$(reason)" = lease_lost ] || fail "done twice refused, but not as the claim gone: $(cat "$WORK/body")"
+call 200 GET "$C/documents/$W4" "$YUKI"
+[ "$(json "$WORK/body" '*(lambda r: (r["state"], r["page_count"], "download_url" in r))(d["result"]["version"]["files"][0]["rendition"])')" = "done 1 True" ] ||
+  fail "the handout's rendition, as Yuki reads it: $(cat "$WORK/body")"
+opens "$(json "$WORK/body" 'd["result"]["version"]["files"][0]["rendition"]["download_url"]')" handout.pdf
+call 200 GET "$C/documents/$W4/files/$W4_FILE" "$YUKI"
+opens "$(json "$WORK/body" 'd["result"]["rendition"]["download_url"]')" handout.pdf
+echo "  Yuki opened the handout's PDF, exactly as the runtime uploaded it, shown where it is opened and named as the handout"
+# A draft's file, and its PDF, are not hers; what failed staff send back.
+printf 'PK\003\004 the handout, corrected' >"$WORK/handout.docx"
+docfile "$DOCX" "$WORK/handout.docx" handout.docx
+call 200 POST "$C/documents/$W4/versions" "$SATO" "{\"files\":[{\"upload_token\":\"$UPLOAD\"}]}"
+W4_V2_FILE=$(json "$WORK/body" 'd["result"]["file_ids"][0]')
+call 404 GET "$C/documents/$W4/files/$W4_V2_FILE" "$YUKI"
+call 200 POST /v1/services/agent_runtime/renditions/claim "$RT" '{}'
+REND=$(json "$WORK/body" 'd["result"]["claimed"][0]["rendition_id"]')
+call 200 POST "/v1/services/agent_runtime/renditions/$REND/complete" "$RT" "{\"lease_id\":\"$(json "$WORK/body" 'd["result"]["claimed"][0]["lease_id"]')\",\"status\":\"failed\",\"reason\":\"password_protected\"}"
+call 200 GET "$C/documents/$W4/files/$W4_V2_FILE" "$SATO"
+[ "$(json "$WORK/body" 'd["result"]["rendition"]["state"], d["result"]["rendition"]["reason"]')" = "failed password_protected" ] ||
+  fail "the corrected handout's rendition, as Sato reads it: $(cat "$WORK/body")"
+call 403 POST "$C/documents/$W4/files/$W4_V2_FILE/rendition/retry" "$YUKI"
+call 200 POST "$C/documents/$W4/files/$W4_V2_FILE/rendition/retry" "$SATO"
+[ "$(json "$WORK/body" 'd["result"]["changed"], d["result"]["state"]')" = "True queued" ] || fail "sent back: $(cat "$WORK/body")"
+call 200 POST /v1/services/agent_runtime/renditions/claim "$RT" '{}'
+convert "$(json "$WORK/body" 'd["result"]["claimed"][0]["rendition_id"]')" "$(json "$WORK/body" 'd["result"]["claimed"][0]["lease_id"]')"
+# Yuki's slides, sent to the tutor.
+PPTX=application/vnd.openxmlformats-officedocument.presentationml.presentation
+printf 'PK\003\004 my slides' >"$WORK/talk.pptx"
+upload "$PPTX" "$WORK/talk.pptx" "$YUKI"
+call 200 POST "$C/conversations" "$YUKI" "{\"respondent_member_id\":\"$TUTOR_M\",\"body\":\"Are my slides clear?\",\"attachments\":[{\"upload_token\":\"$UPLOAD\",\"filename\":\"talk.pptx\"}]}"
+CONV3=$(json "$WORK/body" 'd["result"]["conversation_id"]')
+call 200 GET "$C/conversations/$CONV3/messages" "$YUKI"
+[ "$(json "$WORK/body" 'd["result"]["messages"][0]["attachments"][0]["rendition"]["state"]')" = queued ] || fail "the slides' rendition: $(cat "$WORK/body")"
+TALK=$(json "$WORK/body" 'd["result"]["messages"][0]["attachments"][0]["id"]')
+call 200 POST /v1/services/agent_runtime/renditions/claim "$RT" '{}'
+[ "$(json "$WORK/body" '[(c["source"], c["attachment_id"], c["filename"]) for c in d["result"]["claimed"]]')" = "[('attachment', '$TALK', 'talk.pptx')]" ] ||
+  fail "the runtime claimed $(cat "$WORK/body")"
+convert "$(json "$WORK/body" 'd["result"]["claimed"][0]["rendition_id"]')" "$(json "$WORK/body" 'd["result"]["claimed"][0]["lease_id"]')"
+for who in "$YUKI" "$TUTOR"; do
+  call 200 GET "$C/conversation-attachments/$TALK" "$who"
+  [ "$(json "$WORK/body" 'd["result"]["rendition"]["state"]')" = "done" ] || fail "the slides' rendition: $(cat "$WORK/body")"
+  opens "$(json "$WORK/body" 'd["result"]["rendition"]["download_url"]')" talk.pdf
+done
+call 404 GET "$C/conversation-attachments/$TALK" "$GRADER"
+call 200 POST /v1/services/agent_runtime/renditions/claim "$RT" '{}'
+[ "$(json "$WORK/body" 'len(d["result"]["claimed"])')" = 0 ] || fail "something was left to convert: $(cat "$WORK/body")"
+echo "  Yuki and the tutor opened the slides' PDF; the grader found nothing"
 
 step "The runtime stops hosting the tutor, revoking its token by its id: Yuki asks it nothing more and still reads what it said; Sato says nothing of it in Core"
 call 400 POST "/v1/me/agents/$TUTOR_ID" "$SATO" '{"site_chat":false}'

@@ -79,6 +79,32 @@ func (b *multipartBucket) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		delete(b.uploads, q.Get("uploadId"))
 		w.Header().Set("Content-Type", "application/xml")
 		fmt.Fprintf(w, `<CompleteMultipartUploadResult><Bucket>aishie</Bucket><Key>%s</Key><ETag>"done"</ETag></CompleteMultipartUploadResult>`, key)
+	case r.Method == http.MethodGet && len(q) == 0:
+		object, ok := b.objects[key]
+		if !ok {
+			w.Header().Set("Content-Type", "application/xml")
+			w.WriteHeader(http.StatusNotFound)
+			fmt.Fprintf(w, `<Error><Code>NoSuchKey</Code><Message>no such key</Message><Key>%s</Key></Error>`, key)
+			return
+		}
+		from, to := 0, len(object)-1
+		if rg := r.Header.Get("Range"); rg != "" {
+			if _, err := fmt.Sscanf(rg, "bytes=%d-%d", &from, &to); err != nil || from >= len(object) {
+				w.Header().Set("Content-Type", "application/xml")
+				w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
+				fmt.Fprint(w, `<Error><Code>InvalidRange</Code><Message>no such range</Message></Error>`)
+				return
+			}
+			to = min(to, len(object)-1)
+			w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", from, to, len(object)))
+		}
+		w.Header().Set("Last-Modified", "Mon, 21 Sep 2026 09:00:00 GMT")
+		w.Header().Set("ETag", `"object"`)
+		w.Header().Set("Content-Length", strconv.Itoa(to-from+1))
+		if r.Header.Get("Range") != "" {
+			w.WriteHeader(http.StatusPartialContent)
+		}
+		_, _ = w.Write(object[from : to+1])
 	case r.Method == http.MethodDelete && q.Has("uploadId"):
 		delete(b.uploads, q.Get("uploadId"))
 		b.aborted++
@@ -143,5 +169,29 @@ func TestS3StorePutStreamsAPartAtATime(t *testing.T) {
 	}
 	if _, kept := bucket.objects["exports/b.csv"]; kept || len(bucket.uploads) != 0 || bucket.aborted != 1 {
 		t.Fatalf("past its limit, the store kept %v, %d uploads open, %d abandoned", kept, len(bucket.uploads), bucket.aborted)
+	}
+}
+
+// Head asks the store for the first bytes alone, by a range; of an object
+// shorter than that, what there is, of an empty one nothing, and of none,
+// that there is none.
+func TestS3StoreReadsTheHeadOfAnObject(t *testing.T) {
+	bucket := &multipartBucket{uploads: map[string]map[int][]byte{}, objects: map[string][]byte{
+		"renditions/a.pdf": []byte("%PDF-1.7 a long PDF"), "renditions/short": []byte("%P"), "renditions/empty": {}}}
+	srv := httptest.NewServer(bucket)
+	defer srv.Close()
+	s, err := NewS3Store(S3Config{Endpoint: strings.TrimPrefix(srv.URL, "http://"), Bucket: "aishie", Region: "us-east-1",
+		AccessKey: "access", SecretKey: "secret", BucketLookup: "path"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	for key, want := range map[string]string{"renditions/a.pdf": "%PDF-", "renditions/short": "%P", "renditions/empty": ""} {
+		if got, err := s.Head(ctx, key, 5); err != nil || string(got) != want {
+			t.Fatalf("Head(%s) = %q %v, want %q", key, got, err, want)
+		}
+	}
+	if _, err := s.Head(ctx, "renditions/none", 5); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("the head of nothing: %v", err)
 	}
 }

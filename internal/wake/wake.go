@@ -57,13 +57,21 @@ const KindDraft = "conversation.draft"
 // on the queue (document_text.queue).
 const KindTextQueued = "document_text.queued"
 
+// KindRenditionQueued is the kind of the news that a file's PDF rendition is
+// waiting to be made: a version's or a message's Office file recorded, a
+// rendition queued again, a claim given back. Like KindTextQueued, it is
+// told by no event, at seq 0, and wakes only a call that names it among its
+// Kinds: the agent runtime's claim on the queue
+// (agent_runtime.rendition_claim).
+const KindRenditionQueued = "rendition.queued"
+
 // Filter is the news a waiting call is woken by: of its course, or of any
 // course (AnyCourse), and, where they are set, of one conversation, of
 // conversations addressed to one seat, and of some kinds alone. A zero
 // field, or no kinds, asks nothing of it. News of a draft wakes only a
 // filter that says Drafts: a reader of the conversation that shows its
-// draft as it is written; news of a text queued only a filter that names
-// its kind.
+// draft as it is written; news of a text or a rendition queued only a
+// filter that names its kind.
 type Filter struct {
 	CourseID           uuid.UUID
 	AnyCourse          bool
@@ -81,6 +89,8 @@ func (f Filter) Matches(n Note) bool {
 	case n.Kind == KindDraft && !f.Drafts:
 		return false
 	case n.Kind == KindTextQueued && !slices.Contains(f.Kinds, KindTextQueued):
+		return false
+	case n.Kind == KindRenditionQueued && !slices.Contains(f.Kinds, KindRenditionQueued):
 		return false
 	case f.ConversationID != uuid.Nil && n.ConversationID != f.ConversationID:
 		return false

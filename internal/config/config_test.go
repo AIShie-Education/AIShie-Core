@@ -32,6 +32,10 @@ func TestFromEnv(t *testing.T) {
 		if c.ExportMaxMessages != 100000 || c.ExportMaxBytes != 256<<20 || c.ExportTTL != 24*time.Hour {
 			t.Fatalf("exports' defaults: %d %d %s", c.ExportMaxMessages, c.ExportMaxBytes, c.ExportTTL)
 		}
+		// An Office file's PDF is at most 100 MiB.
+		if c.RenditionMaxBytes != 100<<20 {
+			t.Fatalf("renditions' default: %d", c.RenditionMaxBytes)
+		}
 		// Memory stays off until what forgets it on time is in place; its
 		// limits are there whether or not.
 		if c.Memory != (memory.Config{}).WithDefaults() || c.Memory.Enabled || c.Memory.MaxOwner != 200 || c.Memory.MaxAsker != 50 ||
@@ -65,6 +69,7 @@ func TestFromEnv(t *testing.T) {
 		t.Setenv("EXPORT_MAX_MESSAGES", "5000")
 		t.Setenv("EXPORT_MAX_BYTES", "1048576")
 		t.Setenv("EXPORT_TTL", "2h")
+		t.Setenv("RENDITION_MAX_BYTES", "2097152")
 		c, err := FromEnv()
 		if err != nil {
 			t.Fatal(err)
@@ -84,6 +89,9 @@ func TestFromEnv(t *testing.T) {
 		}
 		if c.ExportMaxMessages != 5000 || c.ExportMaxBytes != 1<<20 || c.ExportTTL != 2*time.Hour {
 			t.Fatalf("exports: %d %d %s", c.ExportMaxMessages, c.ExportMaxBytes, c.ExportTTL)
+		}
+		if c.RenditionMaxBytes != 2<<20 {
+			t.Fatalf("renditions: %d", c.RenditionMaxBytes)
 		}
 	})
 	t.Run("a file a message carries is never larger than an upload", func(t *testing.T) {
@@ -123,7 +131,7 @@ func TestFromEnv(t *testing.T) {
 		"MEMORY_WRITES_PER_DAY": "many", "MEMORY_MAX_PER_AGENT": "-5", "JOIN_LINK_REGISTRATION": "no",
 		"JOIN_REGISTRATIONS_PER_MINUTE": "-1", "LONG_POLL_WAITERS": "lots", "LONG_POLL_WAITERS_PER_ACTOR": "-1",
 		"ATTACHMENT_MAX_BYTES": "0", "ATTACHMENT_MAX_PER_MESSAGE": "101", "ATTACHMENT_MAX_CONVERSATION_BYTES": "lots",
-		"EXPORT_MAX_MESSAGES": "0", "EXPORT_MAX_BYTES": "-1", "EXPORT_TTL": "10m"} {
+		"EXPORT_MAX_MESSAGES": "0", "EXPORT_MAX_BYTES": "-1", "EXPORT_TTL": "10m", "RENDITION_MAX_BYTES": "0"} {
 		t.Run("rejects "+key+"="+bad, func(t *testing.T) {
 			t.Setenv(key, bad)
 			if _, err := FromEnv(); err == nil {

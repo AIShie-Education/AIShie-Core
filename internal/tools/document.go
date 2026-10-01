@@ -562,6 +562,12 @@ func insertVersion(ctx context.Context, d Deps, ec *tool.ExecCtx, courseID, docu
 			return uuid.Nil, nil, err
 		}
 	}
+	// An Office file, of whatever kind of document, is queued for its PDF as
+	// it is recorded, by the database; the agent runtime is woken to take
+	// it.
+	if err := queuedFiles(ctx, ec.Q, courseID, fileIDs); err != nil {
+		return uuid.Nil, nil, err
+	}
 	return row.ID, fileIDs, nil
 }
 
@@ -1084,7 +1090,7 @@ type DocumentPurgeIn struct {
 
 type DocumentPurgeOut struct {
 	PurgedVersions int `json:"purged_versions"`
-	FilesRemoved   int `json:"files_removed" jsonschema:"how many files were deleted from storage"`
+	FilesRemoved   int `json:"files_removed" jsonschema:"how many files were deleted from storage, the PDF renditions of its files among them"`
 }
 
 // documentPurge removes what was uploaded by mistake — personal data, say —
@@ -1110,11 +1116,11 @@ func documentPurge(d Deps) tool.Tool {
 	return tool.Define(tool.Spec[DocumentPurgeIn, DocumentPurgeOut]{
 		Name: "document.purge",
 		Description: "Purge a version of a course's material, instructions or rubric, or the whole document, uploaded by " +
-			"mistake: its text and file are removed, the file deleted from storage, and a tombstone says who removed them, " +
-			"when and why. A purged document is archived for good. Work handed in under a purged version of the " +
-			"instructions still names it and reads the tombstone; grades are untouched. Submitted and feedback files are " +
-			"not purged. For a platform administrator, or a department administrator for the courses of the departments " +
-			"they administer; it works in an archived course too.",
+			"mistake: its text and files are removed, the files and their PDF renditions deleted from storage, and a " +
+			"tombstone says who removed them, when and why. A purged document is archived for good. Work handed in under a " +
+			"purged version of the instructions still names it and reads the tombstone; grades are untouched. Submitted and " +
+			"feedback files are not purged. For a platform administrator, or a department administrator for the courses of " +
+			"the departments they administer; it works in an archived course too.",
 		Kind: tool.Write, Gate: administrators, OnArchived: true,
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/documents/{document_id}/purge"},
 		Resolve: func(ctx context.Context, q dbq.Querier, in DocumentPurgeIn) (tool.Target, error) {
@@ -1175,9 +1181,18 @@ func documentPurge(d Deps) tool.Tool {
 				versions = []dbq.ListVersionsToPurgeRow{{ID: v.ID, StorageKeys: keys}}
 			}
 			var files []string
-			for _, v := range versions {
+			purged := make([]uuid.UUID, len(versions))
+			for i, v := range versions {
 				files = append(files, v.StorageKeys...)
+				purged[i] = v.ID
 			}
+			// Their files' PDFs go with them: the rows with the files, by
+			// the database, and the PDFs from the store, here.
+			pdfs, err := ec.Q.RenditionKeysOfVersions(ctx, purged)
+			if err != nil {
+				return DocumentPurgeOut{}, err
+			}
+			files = append(files, pdfs...)
 			if len(files) > 0 && d.Blob == nil {
 				return DocumentPurgeOut{}, apperr.Precondition("this installation has no file storage configured, so the file cannot be removed")
 			}
@@ -1337,8 +1352,9 @@ type DocumentGetOut struct {
 func documentGet(d Deps) tool.Tool {
 	return tool.Define(tool.Spec[DocumentGetIn, DocumentGetOut]{
 		Name: "document.get",
-		Description: "Read a document: its text, and its files, each with a short-lived URL to download it under its name " +
-			"and its text version. Students get the published version; members who can read drafts get the latest. A " +
+		Description: "Read a document: its text, and its files, each with a short-lived URL to download it under its name, " +
+			"its text version, and, for an Office or OpenDocument file, its PDF rendition, with a URL that shows the PDF " +
+			"once it is done. Students get the published version; members who can read drafts get the latest. A " +
 			"specific version can be asked for by id — always allowed if it is the one your own submission was handed in " +
 			"under. The version's download_url, content_type, byte_size, checksum and text are its first file's, and are " +
 			"deprecated: read files.",
@@ -1363,7 +1379,7 @@ func documentGet(d Deps) tool.Tool {
 				Checksum: v.Checksum, AuthorMemberID: v.AuthorMemberID, CreatedAt: v.CreatedAt,
 				Published: doc.PublishedVersionID != nil && *doc.PublishedVersionID == v.ID,
 				Purged:    purgeOf(v.PurgedAt, v.PurgedByActorID, v.PurgeReason)}
-			if view.Files, err = versionFiles(ctx, d, rc.Q, v.ID); err != nil {
+			if view.Files, err = versionFiles(ctx, d, rc.Q, v.ID, rc.Now); err != nil {
 				return DocumentGetOut{}, err
 			}
 			if view.Files == nil {
@@ -1498,7 +1514,8 @@ func documentVersions() tool.Tool {
 	return tool.Define(tool.Spec[DocumentIDIn, DocumentVersionsOut]{
 		Name: "document.versions",
 		Description: "Every version of a document, oldest first, with which one is published, and each version's files, " +
-			"with their text versions, without the texts. For members who can read drafts. Each version's has_file, " +
+			"with their text versions, without the texts, and where their PDF renditions stand. For members who can read " +
+			"drafts. Each version's has_file, " +
 			"content_type, byte_size and text are its first file's, and are deprecated: read files.",
 		Kind: tool.Read, Gate: tool.Gate{Perms: []domain.Perm{domain.PermDocumentReadDraft}},
 		HTTP: tool.Route{Method: "GET", Pattern: "/v1/courses/{course_id}/documents/{document_id}/versions"},

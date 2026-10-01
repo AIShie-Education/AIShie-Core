@@ -100,6 +100,11 @@ type Config struct {
 	// MaxUploadBytes as ever.
 	DocumentMaxFilesPerVersion int
 	DocumentMaxVersionBytes    int64
+	// RenditionMaxBytes bounds the PDF an Office file is converted into
+	// (docs/schema.md §2.4, Renditions; RENDITION_MAX_BYTES, 100 MiB): a
+	// larger one the agent runtime uploads is refused, and it says the
+	// rendition was skipped, too_large.
+	RenditionMaxBytes int64
 	// The exports of conversations administrators make for audit
 	// (docs/schema.md §2.8, Exporting conversations for audit): how many
 	// messages one holds at most (EXPORT_MAX_MESSAGES, 100,000, answers and
@@ -253,6 +258,14 @@ func FromEnv() (Config, error) {
 	}
 	if err := c.readDocumentLimits(); err != nil {
 		return Config{}, err
+	}
+	c.RenditionMaxBytes = 100 << 20
+	if v := os.Getenv("RENDITION_MAX_BYTES"); v != "" {
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil || n <= 0 {
+			return Config{}, fmt.Errorf("RENDITION_MAX_BYTES: %q is not a positive number of bytes", v)
+		}
+		c.RenditionMaxBytes = n
 	}
 	if err := c.readAttachments(); err != nil {
 		return Config{}, err

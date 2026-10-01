@@ -22,7 +22,7 @@ import (
 // that Core gives an identity for one thing, and for nothing else: the
 // runtime's transcriber, which writes documents' text versions
 // (document_text.*), and the site's agent runtime, which hosts the runtime
-// agents (agent_runtime.*). It is an actor of kind service, one for each
+// agents and converts Office files to PDF (agent_runtime.*). It is an actor of kind service, one for each
 // scope, made the first time a credential is issued for it; it is seated in
 // no course, signs in nowhere, and calls its own tools and nothing else. The
 // platform's administrators issue, list and revoke its credentials here, and
@@ -83,9 +83,9 @@ func serviceIssueCredential() tool.Tool {
 		Name: "service.issue_credential",
 		Description: "Issue a credential for a site service: document_text, the runtime's transcriber, which takes the " +
 			"versions waiting to be transcribed and writes their text (document_text.queue, .complete); or agent_runtime, " +
-			"the site's agent runtime, which hosts the runtime agents by their ids and is issued each one's token " +
-			"(agent_runtime.*). The service calls its own tools with it, over REST, and nothing else: no other tool, and " +
-			"not the agents' MCP door. The service is made the first time; it is seated in no course and signs in " +
+			"the site's agent runtime, which hosts the runtime agents by their ids and is issued each one's token, and " +
+			"converts Office files to PDF (agent_runtime.*). The service calls its own tools with it, over REST, and " +
+			"nothing else: no other tool, and not the agents' MCP door. The service is made the first time; it is seated in no course and signs in " +
 			"nowhere. The credential is returned once and only its hash is kept. replace revokes the service's other " +
 			"credentials at once, and puts back in the queue what they had claimed; without it a service holds at most " +
 			strconv.Itoa(MaxServiceCredentials) + " (too_many_credentials). For platform administrators; the operator issues " +
@@ -181,7 +181,8 @@ func IssueServiceCredential(ctx context.Context, q *dbq.Queries, a ServiceCreden
 }
 
 // revokeServiceCredential revokes one of a service's live credentials, and
-// puts back in the queue what it had claimed: its claims end with it, and
+// puts back in the queue what it had claimed — text versions the
+// transcriber's, renditions the agent runtime's: its claims end with it, and
 // another credential may take them at once. It says how many it gave back,
 // and whether it revoked anything. Revoking the agent runtime's credential
 // leaves the tokens it was issued for the agents it hosts as they are: they
@@ -196,11 +197,19 @@ func revokeServiceCredential(ctx context.Context, q *dbq.Queries, emit func(even
 		return 0, apperr.Missing("no such live credential of the service")
 	}
 	var released []uuid.UUID
-	if scope == domain.ServiceDocumentText {
+	switch scope {
+	case domain.ServiceDocumentText:
 		if released, err = q.ReleaseTexts(ctx, dbq.ReleaseTextsParams{CredentialID: &credential, Now: now}); err != nil {
 			return 0, err
 		}
 		if err := notifyQueued(ctx, q, released...); err != nil {
+			return 0, err
+		}
+	case domain.ServiceAgentRuntime:
+		if released, err = q.ReleaseRenditions(ctx, dbq.ReleaseRenditionsParams{CredentialID: &credential, Now: now}); err != nil {
+			return 0, err
+		}
+		if err := notifyRenditionsQueued(ctx, q, released...); err != nil {
 			return 0, err
 		}
 	}
@@ -224,7 +233,7 @@ type ServiceCredentialView struct {
 	IssuedByID  *uuid.UUID `json:"issued_by_actor_id,omitempty"`
 	IssuedBy    *string    `json:"issued_by_name,omitempty"`
 	Live        bool       `json:"live" jsonschema:"neither revoked nor expired: the service can call with it now"`
-	ClaimsHeld  int32      `json:"claims_held" jsonschema:"how many text versions it has claimed and not finished, now; 0 for the agent runtime's"`
+	ClaimsHeld  int32      `json:"claims_held" jsonschema:"how many it has claimed and not finished, now: text versions, for the transcriber's; renditions, for the agent runtime's"`
 }
 
 type ServiceListCredentialsOut struct {
@@ -237,7 +246,8 @@ func serviceListCredentials() tool.Tool {
 	return tool.Define(tool.Spec[ServiceScopeIn, ServiceListCredentialsOut]{
 		Name: "service.list_credentials",
 		Description: "A site service's credentials, newest first, revoked ones included, with their label, prefix, issuer, " +
-			"expiry, last use, whether they are live, and how many text versions each has claimed and not finished. " +
+			"expiry, last use, whether they are live, and how many text versions or renditions each has claimed and not " +
+			"finished. " +
 			"Secrets are never shown. For platform administrators.",
 		Kind: tool.Read, Gate: admins,
 		HTTP: tool.Route{Method: "GET", Pattern: "/v1/services/{scope}/credentials"},
@@ -273,7 +283,7 @@ type ServiceRevokeCredentialIn struct {
 
 type ServiceRevokeCredentialOut struct {
 	OK             bool `json:"ok"`
-	ClaimsReleased int  `json:"claims_released" jsonschema:"how many text versions it had claimed, now back in the queue"`
+	ClaimsReleased int  `json:"claims_released" jsonschema:"how many it had claimed, text versions or renditions, now back in the queue"`
 }
 
 func serviceRevokeCredential() tool.Tool {

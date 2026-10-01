@@ -420,7 +420,8 @@ unlinked is not linked again by its email: unlinking it was somebody's decision.
 **Services.** A site service is a program of the site's that Core gives an identity for one
 thing, and nothing else. There are two: `document_text`, the agent runtime's transcriber, which
 writes documents' text versions (§2.4, Text versions); and `agent_runtime`, the site's agent
-runtime, which hosts the runtime agents (Agents' hosting, above; migration 0025). A service is
+runtime, which hosts the runtime agents (Agents' hosting, above; migration 0025) and converts
+every Office file to PDF (§2.4, Renditions; migration 0026). A service is
 neither a person nor an agent, nor a member of any course: an actor of kind `service`, whose
 `service_scope` says what it is for, one for each scope (`actor_service_scope_key`), made by the
 platform administrator who first issues it a credential, or by the operator's command line, and
@@ -446,8 +447,8 @@ Root and platform administrators, and not a department's, issue a service's cred
 (`service.issue_credential`, whose token is shown once, kept only as its hash, and in no action,
 result, event or log line), as the operator does at setup on the command line
 (`aishie-core service issue`, above), list them (`service.list_credentials`: prefix, label,
-issuer, last use, expiry, whether each is live, and how many text versions each has claimed and
-not finished)
+issuer, last use, expiry, whether each is live, and how many text versions or renditions each has
+claimed and not finished)
 and revoke them (`service.revoke_credential`). Each is an action, and news of no course
 (`service.credential_issued`, `service.credential_revoked`). A service holds five live
 credentials at most (`too_many_credentials`): a runtime's, and a new one's while it takes over;
@@ -481,12 +482,18 @@ host, and is then issued its token:
   back without it.
 - `agent_runtime.revoke_token {agent_id}`, a write: revokes the token it holds for the agent,
   when the hosting ends; revoking none is no error (`revoked: []`).
+- `agent_runtime.rendition_claim`, `.rendition_file`, `.rendition_renew`,
+  `.rendition_upload_url` and `.rendition_complete`, under `/v1/services/agent_runtime/renditions/`:
+  the queue of Office files to convert to PDF, which it claims, reads, renews, uploads the PDF of
+  and completes, as the transcriber does its texts (§2.4, Renditions).
 
 Each write is an action of the service's, news of no course (`agent_runtime.token_issued`,
 `agent_runtime.token_revoked`, filed under the agent). A credential of the runtime's that leaks
 lets whoever holds it, until it is revoked, be issued the token of any runtime agent, and so act
 as that agent, within its seats, as the runtime does: never an mcp agent, a person, or anything
-else of a course's.
+else of a course's; and read the Office files waiting to be converted that it claims, each by a
+URL that lasts fifteen minutes, and give those it holds a claim on a PDF, which Core takes only
+if it is one.
 
 A service credential that leaks lets whoever holds it, until it is revoked, read the files of
 the versions it claims — those waiting to be transcribed, each by a URL that lasts fifteen
@@ -616,6 +623,8 @@ the nearest one, and the choice is recorded here so that it is a decision and no
 | Purging a document or a version (`document.purge`) | `platform_role`, or an appointment at or above the course's department (§2.10) | removing data is not a seat's to do, and must be possible in an archived course |
 | Reading a version's text version (`document.text`, and `text` in `document.get` and `document.versions`) | what reading the version takes, as `document.get` decides it | it is the version's, as text (§2.4, Text versions) |
 | Writing a text version, or sending it to be transcribed again (`document.text_update`, `.text_retranscribe`) | what writing the document takes: `perm_document_write` for material, instructions and a rubric | it is a change to what the version says, as a new version is |
+| Reading a file's PDF rendition (`rendition` in `document.get`, `document.file`, `document.versions`, `conversation.attachment`, `conversation.messages`) | what reading the file takes, by the same checks | it is the file, as a PDF (§2.4, Renditions) |
+| Sending a failed rendition back to be converted (`document.rendition_retry`; `conversation.rendition_retry`) | what writing the document takes, its kind's permission; for a message's file, `perm_document_read`, and being its message's author or deciding actions for the opener | whoever could put the file there again asks for it to be converted again; a message's, as retracting it (§2.4, Renditions) |
 | A site service's credentials (`service.*`) | `platform_role` | outside every course (§2.1, Services) |
 | The course's title and description, from a seat in it (`course.update_details`) | `perm_member_manage` | its instructors run the course and name it; its code, section, term, department and status stay with its administrators |
 
@@ -1030,7 +1039,8 @@ document_version_file(id, version_id, document_id, position, filename, storage_k
            slashes;  content_type 1..200 characters;  byte_size ≥ 0
     trigger: written with its version, in its transaction and dated as it is, never to a purged
              one; kept as written, deleted only as its version is purged;
-             a file of material, instructions or a rubric is queued for its text as it is added
+             a file of material, instructions or a rubric is queued for its text as it is added;
+             an Office or OpenDocument file, of any kind of document, for its PDF rendition
 
 document_version_text(version_id→document_version, file_id→document_version_file,
                       document_id, course_id,
@@ -1056,14 +1066,33 @@ document_version_text(version_id→document_version, file_id→document_version_
              its version, file, document, course and creation never change;
              deleted only when its version is purged;
              one statement writes the text of one file of a version at most
+
+file_rendition(id, course_id→course,
+               file_id null→document_version_file unique ON DELETE CASCADE,
+               attachment_id null→conversation_attachment unique ON DELETE CASCADE,
+               status [queued|claimed|done|failed|skipped], reason null,
+               attempts = 0, backfill = false, queued_at,
+               lease_id null, claimed_until null, claimed_by_credential_id null→credential,
+               claimed_at null, storage_key null unique, byte_size null, checksum null,
+               page_count null, produced_at null, created_at, updated_at)
+    check: exactly one of file_id and attachment_id;
+           reason set ⇔ failed or skipped, one of password_protected, timeout,
+           conversion_failed, too_large, unsupported, attempts_exhausted;
+           storage_key set ⇔ done, and then byte_size (≥ 5), page_count (1..100000) and
+           produced_at; checksum only then;
+           claimed ⇔ lease_id, with claimed_until, and the claim's credential and time
+    trigger: made queued, of a file file_rendition_convertible() takes, in its file's course;
+             its file, course and creation never change; once done, nothing of it changes;
+             deleted only once its file is gone, with it
 ```
 
 **Everything readable is a document**, and a version is text, files in object storage, or
 both: a lecture's slides, its handout and a sample program, say, in one version, with text in
 Markdown beside them or none (Files of a version, below). Each file of material,
 instructions or a rubric has a text version as well (Text versions, below): the file
-transcribed into Markdown, which every reader of the version reads before the file. Versions
-are append-only; an edit is `seq + 1`. The one exception is a purge (below), which empties a
+transcribed into Markdown, which every reader of the version reads before the file; and each
+Office or OpenDocument file, of any kind of document, a PDF rendition the site shows it as
+(Renditions, below). Versions are append-only; an edit is `seq + 1`. The one exception is a purge (below), which empties a
 version and leaves a tombstone in its place.
 
 Two ways to attach a document, chosen by shape:
@@ -1118,7 +1147,8 @@ one by way of a proposal is refused once the upload is two days old, so that the
 decided while its files are there. With `PROPOSAL_TTL=0` proposals wait for ever, and neither
 is done. Reading returns a short-lived download URL the same way, and the file is served as a
 download, never as a page, whichever store keeps it: a student's `essay.html` does not run as
-script for whoever opens it. The storage key is made by the server and is unguessable; nothing
+script for whoever opens it. Only a rendition's PDF, which Core checked is one, is shown where it
+is opened (Renditions, below). The storage key is made by the server and is unguessable; nothing
 the uploader says goes into it. A message of a conversation carries files the same way, with
 an upload URL of its own (`conversation.upload_url`), and they are kept apart (§2.8,
 Attachments). A document's uploads are kept under `documents/<course>/<upload>`; before a
@@ -1288,6 +1318,97 @@ sent to a model for this.
 A request that carries a whole text (`document.text_update`, `document_text.complete`) may be up
 to 5 MiB over REST, where every other call's is at most 1 MiB; the agents' door takes 4 MiB, as
 for any call.
+
+**Renditions.** Every Office or OpenDocument file Core keeps is previewed in the site as a PDF:
+converted once, on the server, by the site's agent runtime (§2.1, Services), never in the browser
+(`file_rendition`, migration 0026). That is each file of a version of every kind of document —
+material, instructions, a rubric, a submission, feedback — and each file a message of a
+conversation carries (§2.8, Attachments).
+
+- **Which files.** One table, `file_rendition_convertible(filename, content_type)`, which the
+  runtime holds too: a file whose name ends in one of `doc`, `dot`, `docx`, `docm`, `dotx`,
+  `xls`, `xlt`, `xlsx`, `xlsm`, `xltx`, `ppt`, `pps`, `pot`, `pptx`, `pptm`, `ppsx`, `potx`,
+  `odt`, `ods`, `odp`, `odg` or `rtf`, and whose declared type, without its parameters, is an
+  Office or OpenDocument type (`application/msword`, `application/vnd.ms-excel`,
+  `application/vnd.ms-powerpoint`, the `application/vnd.openxmlformats-officedocument.*` and
+  `application/vnd.oasis.opendocument.*` types of those, the macro-enabled ones), RTF
+  (`application/rtf`, `text/rtf`), or says nothing in particular of the bytes
+  (`application/octet-stream`; `application/zip` and `application/x-zip-compressed`, as some
+  clients call an Office Open XML file; `application/vnd.ms-office`), both in any case. Both are
+  asked: a `.csv` a browser declares an Excel file is not converted, nor a `.docx` declared
+  `text/html`. A PDF, a picture, a text, an archive has none.
+- **Queued as the file is recorded.** The database records a rendition `queued` in the
+  transaction that records its file, whichever release records it (triggers
+  `document_version_file_rendition_queued`, `conversation_attachment_rendition_queued`): a
+  version's file as it is written, at commit for one the release before writes in the version's
+  own columns; a message's file as its message is written, so that an upload no message came to
+  carry is never queued. The call that records it wakes the runtime (kind `rendition.queued`,
+  as `document_text.queued`). Migration 0026 queued every convertible file there was, of every
+  version and every message, in every course, archived or not, marked `backfill` and dated as its
+  file.
+- **Where it stands.** `status` is `queued`; `claimed`, by the runtime, under a lease; `done`,
+  with its PDF (`storage_key`, `byte_size`, `checksum` as the store gives it, `page_count`,
+  `produced_at`); or `failed` or `skipped`, with `reason`: the runtime's `password_protected`,
+  `timeout`, `conversion_failed`, `too_large` or `unsupported`, or Core's `attempts_exhausted`.
+  Done is for good: the PDF is kept as it was made, under a key of its own, never written over.
+  Nothing tells anyone's feed of it: it is plumbing.
+- **Read as its file is.** Whoever may read a file reads its rendition, by the same checks, and
+  nobody else: `document.get` gives each file of the version `rendition` — `state`, and once it
+  is done `page_count`, `byte_size` and a `download_url` that lasts fifteen minutes
+  (`download_expires_at`) — `document.file` the same for one file, and `document.versions`
+  the `state` alone; `conversation.attachment` gives a message's file's with its URL, and
+  `conversation.messages` each file's without one. The URL serves the PDF to be shown where it is
+  opened (`Content-Disposition: inline`), as `application/pdf` whatever was stored, named as the
+  file with `.pdf` in place of its extension, `nosniff`; the file itself is still a download. A
+  file that is not converted has no `rendition`. A retracted message's file, and its PDF, are
+  withheld (`retracted`).
+- **Sent back.** A rendition that failed or was skipped is queued again, as a file is when it is
+  recorded, its attempts starting again, by whoever may write the document
+  (`document.rendition_retry {file_id}`) or, for a message's file, by the message's author or
+  whoever decides actions for the opener (`conversation.rendition_retry {attachment_id}`); each
+  an action like any other write. One waiting already changes nothing (`changed: false`); a done
+  one is refused (`rendition_done`), and a file with none says `no_rendition`.
+- **Gone with its file.** A rendition goes with its file (`ON DELETE CASCADE`): a purged
+  version's files take theirs with them, whichever release purges, and `document.purge` deletes
+  the PDFs from the store with the files. One whose file the release before purged leaves its
+  PDF behind, which the orphan sweep removes, as it removes a PDF the runtime uploaded and never
+  named: it looks under `renditions/` as under the uploads' prefixes, and keeps what a rendition
+  names. A message's file is never deleted, and so neither is its rendition.
+
+**The runtime's queue.** The agent runtime takes what waits and writes it back, as the
+transcriber does (The queue, above), with the credential it hosts agents with:
+
+- `agent_runtime.rendition_claim` claims up to ten renditions at once, across the site, each for
+  the caller alone until its lease runs out (`lease_s`, 60 to 3600 seconds, 600 by default):
+  those queued as their files were recorded first, the oldest first, then the backfill, the
+  newest first. It hands back each with its `rendition_id`, its `lease_id`, its `source`
+  (`document_file` with `file_id`, or `attachment` with `attachment_id`), the file's
+  `filename`, `content_type`, `byte_size` and a URL for it that lasts fifteen minutes, and the
+  largest PDF taken (`max_bytes`). Two claims at once never take one rendition. A claim that
+  lapses may be claimed again; one claimed five times and not finished is failed,
+  `attempts_exhausted`. A rendition is claimed, and written back, in an archived course and of an
+  archived document too: it is no write of anyone's, and whoever reads the file there reads its
+  PDF. With `wait_s` a claim that finds nothing waits for a file to be queued anywhere.
+  Recorded nowhere: the claim is the record.
+- `agent_runtime.rendition_file` gives another URL for the file, `agent_runtime.rendition_renew`
+  holds the claim longer, and `agent_runtime.rendition_upload_url` gives somewhere to PUT the PDF
+  (`Content-Type: application/pdf`), a new key under `renditions/<course>/` each time, and an
+  upload token for this claim; none is the caller's once the claim no longer holds
+  (`lease_lost`).
+- `agent_runtime.rendition_complete` says what became of it while the claim holds: `done`, naming
+  the upload token and the PDF's `page_count`; or `failed` or `skipped`, with `reason`. Core takes
+  the PDF only from an upload made for this claim (`bad_upload_token`, `not_your_upload`), once
+  something is there (`not_uploaded`), moved where no upload URL reaches it, as an attached file
+  is, no larger than `RENDITION_MAX_BYTES` (100 MiB; `rendition_too_large`) and beginning `%PDF-`
+  (`not_a_pdf`); what it refuses it removes, and the claim holds, for the runtime to upload again
+  or say why not. This server's disk takes a PUT to the URL up to `RENDITION_MAX_BYTES`, beyond
+  `MAX_UPLOAD_BYTES`. Once the claim no longer holds it is refused (`lease_lost`). It is an action
+  of the service's, in the file's course, replayed by its key, which keeps the upload token out of
+  its record (`SecretIn`).
+
+Revoking the runtime's credential gives back what it had claimed, that claim not counted
+(`service.revoke_credential`, `claims_released`). If no runtime ever claims, renditions stay
+`queued`, and the front end offers the file to download, as it does a file with none.
 
 ### 2.5 Assignments and submissions
 
@@ -1636,7 +1757,8 @@ conversation_attachment(id, message_id, conversation_id, course_id, position, fi
                   (conversation_id, course_id) → conversation(id, course_id)
     check: position ≥ 1;  filename 1..255 characters, trimmed, on one line, no / or \;
            content_type 1..200 characters;  byte_size ≥ 0
-    trigger: written with its message, dated as it is (conversation_attachment_with_its_message)
+    trigger: written with its message, dated as it is (conversation_attachment_with_its_message);
+             an Office or OpenDocument file is queued for its PDF rendition as it is written
     append-only
 
 conversation_read(conversation_id, course_id, member_id, last_read_seq, read_at,
@@ -1872,7 +1994,9 @@ for whoever keeps the site to recover, and no tool hands them out; an export for
 describes them, and holds none of their bytes. Nothing deletes a message, and
 so nothing deletes its files; were a conversation ever purged, its files would go with it. A
 message's news (`conversation.message_posted`) says what it carries: each file's `id`,
-`filename`, `content_type` and `byte_size`, and nothing of where it is kept.
+`filename`, `content_type` and `byte_size`, and nothing of where it is kept. An Office or
+OpenDocument file a message carries is converted to PDF, as a document's is, and read as the file
+is (§2.4, Renditions).
 
 **What each participant has read.** Each participant has a place in a conversation: the `seq` of
 the last message they have read, and when they last said so (`conversation_read`). They move it
@@ -2464,6 +2588,9 @@ respondent's `conversation_answer` decides is who is shown its text.
 | A text version is of a file of a version of material, instructions or a rubric, not purged, in its document's course, and stays so; it is deleted only when its version is purged | composite FKs, trigger `document_version_text_guarded` |
 | One statement writes the text of one file of a version at most: the release before 0023, which writes a version's text by its version alone, cannot write one text over several files | trigger `document_version_text_one_file_at_a_time` |
 | A text version's shape: a text exactly when done, at most 2 MiB, saying whose; the service's says its model and when, staff's who and when; failed and skipped say why; a claim holds a lease, made by a credential | CHECKs on `document_version_text` |
+| Every Office or OpenDocument file, a version's of any kind or a message's, has a rendition from the transaction that records it, whichever release records it; nothing else has one | triggers `document_version_file_rendition_queued`, `conversation_attachment_rendition_queued`, `file_rendition_guarded` (`file_rendition_convertible`) |
+| A rendition is of one file, one to a file, in its file's course, made queued; its file, course and creation never change; done, it never changes; it goes with its file and only then | `file_rendition_one_source`, unique `file_id` and `attachment_id`, FKs `ON DELETE CASCADE`, trigger `file_rendition_guarded` |
+| A rendition's shape: a PDF exactly when done, with its size (5 bytes at least), page count and time, one rendition to a stored PDF; failed and skipped say why, in one of six words; a claim holds a lease, made by a credential | CHECKs on `file_rendition`, `unique(storage_key)` |
 
 **Enforced by the application.** Each is a place a bug can hide, and each needs a test.
 
@@ -2761,8 +2888,16 @@ respondent's `conversation_answer` decides is who is shown its text.
   The service writes back only while its claim holds it and staff have not written it; staff's
   text is discarded only with `discard_edit`; a change made from a revision is refused once the
   text has another (`text_changed`), a proposal held to the revision it was made about.
-- Nothing is claimed, or written back, in an archived course or of an archived document; a
-  file claimed five times and not finished is failed (`attempts_exhausted`).
+- No text version is claimed, or written back, in an archived course or of an archived
+  document; a file claimed five times and not finished is failed (`attempts_exhausted`).
+- A file's rendition is read by whoever may read the file, by the same checks
+  (`readableVersion`, the conversation's `mayRead`, a retraction), and by nobody else; its URL is
+  given only once it is done, and shows it inline as `application/pdf` (§2.4, Renditions).
+- The agent runtime writes a rendition back only while its claim holds it; Core takes a PDF only
+  from an upload made for that claim, moved where no upload URL reaches it, no larger than
+  `RENDITION_MAX_BYTES` and beginning `%PDF-`, and removes what it refuses. A rendition is claimed
+  and written back in an archived course too; one claimed five times and not finished is failed
+  (`attempts_exhausted`). A retry queues only a failed or skipped one.
 - `actor.kind` and `course_member.role` are never read by authorization.
 
 ## 5. Worked example: an agent grades an essay
@@ -2800,9 +2935,10 @@ garbage in the grades, full record in the log.
   (§2.4) are what it would index, and their news says when to index them again.
 - **Transcribing students' files.** A submitted file and a feedback file have no text version:
   sending a student's work to a model the site chose is a decision of its own.
-- **A message's files as text, or seen in the page.** Core keeps a message's files and serves
-  them as downloads; it makes no text version of them (§2.4) and no preview. A runtime reads
-  them through its own pipeline (agent-runtime.md), and a front end shows them to download.
+- **A message's files as text.** Core keeps a message's files and serves them as downloads; it
+  makes no text version of them (§2.4). An Office or OpenDocument file has a PDF rendition the
+  front end shows (§2.4, Renditions); a runtime reads the files through its own pipeline
+  (agent-runtime.md).
 - **A message of files alone.** A message has text (1 to 20,000 characters); its files come
   with it.
 - **JIT provisioning** on first SSO login: signing in creates nobody. A provider that links by

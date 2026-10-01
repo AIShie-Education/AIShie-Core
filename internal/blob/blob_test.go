@@ -427,3 +427,109 @@ func TestUploadTokensAndURLsAreNotInterchangeable(t *testing.T) {
 		t.Errorf("a URL token verified as an upload token: %v", err)
 	}
 }
+
+// A rendition's upload token is signed for its purpose alone: it is never
+// taken for a member's upload token or a URL, nor they for it; it names the
+// claim of the rendition it was given to.
+func TestRenditionUploadTokens(t *testing.T) {
+	s, signer := newFS(t)
+	claim := RenditionUpload{Key: "renditions/c/1", Rendition: uuid.New(), Lease: uuid.New(), Expires: time.Now().Add(time.Hour).Unix()}
+	token := signer.SignRendition(claim)
+	if got, err := signer.VerifyRendition(token); err != nil || got != claim {
+		t.Fatalf("verified as %+v %v", got, err)
+	}
+	if _, err := signer.VerifyUpload(token); !errors.Is(err, ErrBadToken) {
+		t.Fatalf("a rendition's token verified as an upload token: %v", err)
+	}
+	for _, method := range []string{"PUT", "GET"} {
+		if _, err := s.Grant(token, method); !errors.Is(err, ErrBadToken) {
+			t.Errorf("a rendition's token granted a %s: %v", method, err)
+		}
+	}
+	upload := signer.SignUpload(UploadClaim{Key: "renditions/c/1", CourseID: uuid.New(), MemberID: uuid.New(), Purpose: "material"})
+	if _, err := signer.VerifyRendition(upload); !errors.Is(err, ErrBadToken) {
+		t.Fatalf("an upload token verified as a rendition's: %v", err)
+	}
+	if _, err := signer.VerifyRendition(signer.SignRendition(RenditionUpload{Key: "renditions/c/1"})); !errors.Is(err, ErrBadToken) {
+		t.Fatalf("a token naming no rendition or claim: %v", err)
+	}
+}
+
+// A view serves what the server checked as the type it says, to be shown
+// where it is opened, under its name; an upload may be as large as its URL
+// says; and a store reads the first bytes of an object alone.
+func TestFSStoreViewsUploadsUpToAndHeads(t *testing.T) {
+	for name, want := range map[string]string{
+		"":           "inline",
+		"slides.pdf": "inline; filename=slides.pdf",
+		"講義 3.pdf":   "inline; filename*=utf-8''%E8%AC%9B%E7%BE%A9%203.pdf",
+	} {
+		if got := InlineDisposition(name); got != want {
+			t.Errorf("InlineDisposition(%q) = %q, want %q", name, got, want)
+		}
+	}
+	s, _ := newFS(t)
+	ctx := context.Background()
+	key := "renditions/c1/u1"
+	put, headers, err := s.PresignPutUpTo(ctx, key, "application/pdf", 1<<30, time.Minute)
+	if err != nil || headers["Content-Type"] != "application/pdf" {
+		t.Fatal(headers, err)
+	}
+	grant, err := s.Grant(strings.TrimPrefix(put, "http://lms.test"+BlobPath), "PUT")
+	if err != nil || grant.Key != key || grant.ContentType != "application/pdf" || grant.MaxBytes != 1<<30 || grant.Inline {
+		t.Fatalf("an upload up to 1 GiB grants %+v %v", grant, err)
+	}
+	plain, _, _ := s.PresignPut(ctx, key, "application/pdf", time.Minute)
+	if grant, err := s.Grant(strings.TrimPrefix(plain, "http://lms.test"+BlobPath), "PUT"); err != nil || grant.MaxBytes != 0 {
+		t.Fatalf("an upload grants %+v %v", grant, err)
+	}
+	if _, err := s.Put(ctx, key, "application/pdf", strings.NewReader("%PDF-1.7 slides"), grant.MaxBytes); err != nil {
+		t.Fatal(err)
+	}
+	view, err := s.PresignView(ctx, key, "講義 3.pdf", "application/pdf", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	grant, err = s.Grant(strings.TrimPrefix(view, "http://lms.test"+BlobPath), "GET")
+	if err != nil || grant.Key != key || !grant.Inline || grant.ContentType != "application/pdf" || grant.Filename != "講義 3.pdf" {
+		t.Fatalf("a view grants %+v %v", grant, err)
+	}
+	if _, err := s.Grant(strings.TrimPrefix(view, "http://lms.test"+BlobPath), "PUT"); !errors.Is(err, ErrBadToken) {
+		t.Fatalf("a view granted a PUT: %v", err)
+	}
+	download, _ := s.PresignDownload(ctx, key, "x.pdf", time.Minute)
+	if grant, err := s.Grant(strings.TrimPrefix(download, "http://lms.test"+BlobPath), "GET"); err != nil || grant.Inline || grant.ContentType != "" {
+		t.Fatalf("a download grants %+v %v", grant, err)
+	}
+	for n, want := range map[int]string{5: "%PDF-", 100: "%PDF-1.7 slides", 0: ""} {
+		if got, err := s.Head(ctx, key, n); err != nil || string(got) != want {
+			t.Fatalf("Head(%d) = %q %v, want %q", n, got, err, want)
+		}
+	}
+	if _, err := s.Head(ctx, "renditions/c1/none", 5); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("the head of nothing: %v", err)
+	}
+}
+
+// An object store is asked, in the URL it signs, to serve a view as its type
+// and inline, under its name; nothing is sent to the store to sign it.
+func TestS3StoreSignsAView(t *testing.T) {
+	s, err := NewS3Store(S3Config{Endpoint: "s3.invalid:9000", Bucket: "aishie", Region: "us-east-1", AccessKey: "k", SecretKey: "s"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := s.PresignView(context.Background(), "attached/renditions/c1/u1", "講義 3.pdf", "application/pdf", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := u.Query().Get("response-content-disposition"); got != InlineDisposition("講義 3.pdf") {
+		t.Fatalf("a view is signed with %q", got)
+	}
+	if got := u.Query().Get("response-content-type"); got != "application/pdf" {
+		t.Fatalf("a view is served as %q", got)
+	}
+}
