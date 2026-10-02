@@ -317,9 +317,8 @@ Run all of these as root on the server.
   administrator's change to a provider.
   `OIDC_PROVIDER_NAME` is the provider's id, such as `school-adfs`, which
   every identity linked at it is recorded under: set it before anyone is
-  linked, and never change it after, or nobody linked can sign in. A server
-  that has had single sign-on without it is on the default, `polyu-adfs`,
-  and keeps it: leave it unset there.
+  linked, and never change it after, or nobody linked can sign in. Unset,
+  it is `example-adfs`, a placeholder to replace before anyone is linked.
 - **Files in a bucket** instead of on the server's disk are `BLOB_STORE=s3`,
   with `S3_ENDPOINT` (`HOST[:PORT]`, no scheme), `S3_BUCKET`,
   `S3_ACCESS_KEY` and `S3_SECRET_KEY` in the env file, and `S3_REGION`, the

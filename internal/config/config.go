@@ -185,13 +185,11 @@ type OIDC struct {
 	DisplayName string
 }
 
-// DefaultOIDCProviderName is OIDC_PROVIDER_NAME when it is unset. It names the
-// identity provider Core was first written against, a real university's, and
-// it stays: an installation that never set OIDC_PROVIDER_NAME has its people's
-// identities linked under it (credential.provider), and under another
-// default none of them could sign in. A new installation names its provider
-// itself, before anyone is linked (README.md, Single sign-on).
-const DefaultOIDCProviderName = "polyu-adfs"
+// DefaultOIDCProviderName is OIDC_PROVIDER_NAME when it is unset: a
+// placeholder, which an installation replaces with its provider's own name
+// before anyone is linked (README.md, Single sign-on), since every identity
+// linked at the provider is recorded under it (credential.provider).
+const DefaultOIDCProviderName = "example-adfs"
 
 func (o OIDC) Enabled() bool { return o.Issuer != "" }
 

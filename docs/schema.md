@@ -339,8 +339,8 @@ One is the server's operator's, set in its environment (`OIDC_ISSUER`, `OIDC_CLI
 `OIDC_CLIENT_SECRET`, `OIDC_PROVIDER_NAME`, `OIDC_SUBJECT_CLAIM`, `OIDC_SCOPES`,
 `OIDC_DISPLAY_NAME`), discovered when the server starts, which does not start if it cannot
 reach it. `OIDC_PROVIDER_NAME` is its id, which its identities' `provider` holds, so it never
-changes once anyone is linked; unset, it is `polyu-adfs`, a default kept for the installations
-that rely on it. The others are the site's, which its administrators — root and the
+changes once anyone is linked; unset, it is `example-adfs`, a placeholder to replace before
+anyone is linked. The others are the site's, which its administrators — root and the
 platform's, never a department's, since a provider signs people in to the whole site — set up
 from the front end, each a row of `sso_provider` (migration 0022). The operator's is listed with
 them, read-only (`source: operator`): the tools refuse to change it (`set_by_operator`) and
