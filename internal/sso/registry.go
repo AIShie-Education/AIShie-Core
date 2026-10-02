@@ -67,6 +67,10 @@ type Operator struct {
 	SubjectClaim string
 	// IdP is the provider, discovered.
 	IdP auth.IdentityProvider
+	// Client is what the provider is reached with, wherever it is: the
+	// operator's setting is not held to public addresses. Nil is one with a
+	// ten-second timeout.
+	Client *http.Client
 }
 
 // Config is what a Registry reads providers with.
@@ -81,9 +85,16 @@ type Config struct {
 	// PublicURL is how browsers reach this server: the redirect URI is it
 	// and CallbackPath.
 	PublicURL string
-	// Client fetches providers' documents and keys and exchanges codes; nil
-	// is one with a ten-second timeout.
+	// Client fetches the site's providers' documents and keys and exchanges
+	// codes; nil is NewClient(PrivateIssuers).
 	Client *http.Client
+	// PrivateIssuers lets the site's providers be on this machine, on a
+	// private or link-local address or on any other that is not Public, and
+	// on http on this machine (SSO_ALLOW_PRIVATE_ISSUERS): for development,
+	// tests, and a site whose provider is on its own network. Off, such an
+	// issuer is refused when it is set up, and nothing is fetched from such
+	// an address.
+	PrivateIssuers bool
 	// Log says what goes wrong with a provider, which a sign-in's answer
 	// does not.
 	Log *slog.Logger
@@ -121,7 +132,7 @@ const DefaultTimeout = 10 * time.Second
 // New is a registry.
 func New(cfg Config) *Registry {
 	if cfg.Client == nil {
-		cfg.Client = &http.Client{Timeout: DefaultTimeout}
+		cfg.Client = NewClient(cfg.PrivateIssuers)
 	}
 	if cfg.Log == nil {
 		cfg.Log = slog.New(slog.DiscardHandler)
@@ -151,12 +162,26 @@ func (r *Registry) Keys() *secrets.Keyring {
 	return r.cfg.Keys
 }
 
-// Client is what providers are reached with.
+// Client is what the site's providers are reached with.
 func (r *Registry) Client() *http.Client {
 	if r == nil {
-		return &http.Client{Timeout: DefaultTimeout}
+		return NewClient(false)
 	}
 	return r.cfg.Client
+}
+
+// PrivateIssuers reports whether the site's providers may be on addresses
+// that are not Public (Config.PrivateIssuers).
+func (r *Registry) PrivateIssuers() bool {
+	return r != nil && r.cfg.PrivateIssuers
+}
+
+// OperatorClient is what the operator's provider is reached with.
+func (r *Registry) OperatorClient() *http.Client {
+	if op := r.Operator(); op != nil && op.Client != nil {
+		return op.Client
+	}
+	return &http.Client{Timeout: DefaultTimeout}
 }
 
 // RedirectURL is the redirect URI every provider is registered with.

@@ -93,9 +93,12 @@ withdrew in them, marked, a department's administrator exports only what is
 beneath her, and the instructor, the student and an agent are refused; Core vouches for the instructor to an agent runtime, and the
 key it publishes checks the assertion; the sign-in page is told whether
 to offer single sign-on, with it off and then, against a stand-in provider,
-on; last, root sets up a provider of the site's against a stand-in provider
-that signs, tests it, switches it on, and a person linked at it signs in
-through it, and nothing says its secret.
+on; last, root finds the server reaches no provider of the site's on this
+machine, where the stand-in is, until it is restarted with
+`SSO_ALLOW_PRIVATE_ISSUERS`; then sets up a provider of the site's against a
+stand-in provider that signs, tests it, switches it on, and a person linked at
+it signs in through it, and nothing says its secret; restarted without the
+setting, the server reaches it no more.
 
 - MCP: agents connect at `/mcp` (stateless streamable HTTP, bearer token) and
   get the same catalogue as REST, tool for tool, through the same pipeline.
@@ -328,6 +331,33 @@ kinds (docs/schema.md §2.1, Single sign-on):
   rand -base64 32`). Without `SECRETS_KEY`, none is added
   (`secrets_key_missing`) and the operator's still works. A change is in
   force at the next sign-in, on every instance, with no restart.
+
+What the server fetches of a provider of the site's, which administrators
+name, it fetches from public addresses only: its discovery document, the key
+set that names, and at a sign-in its token endpoint. Never from this machine,
+a private network (10/8, 172.16/12, 192.168/16, fc00::/7), a link-local
+address (169.254/16, fe80::/10, where clouds keep their metadata), the shared
+100.64/10 (carrier-grade NAT, and a cloud's metadata), multicast, or any other
+address IANA's registry says is not globally reachable, nor such an address
+written in IPv6 (`::ffff:10.0.0.1`, NAT64's `64:ff9b::a00:1`, 6to4's
+`2002:a00:1::`). It checks the address each connection is made to, once the
+name is resolved, so that a name that resolves to a public address when it is
+set up and to a private one later (DNS rebinding) reaches nothing, and a
+redirect is checked as it is followed; it goes through no proxy
+(`HTTPS_PROXY`) for them, which would choose the address itself. An issuer
+plainly at such an address, or at `localhost`, is refused as it is set up
+(`invalid_argument`, field `issuer`, reason `issuer_address_not_allowed`); one
+whose name resolves there is taken, and `sso.test` reports it as a problem
+with the same reason, naming the URL and never the address, as it does a
+token endpoint none of whose addresses is public; and a sign-in through it is
+`sso_provider_unavailable`, the reason in the server's log.
+`SSO_ALLOW_PRIVATE_ISSUERS=true` lifts this, for development, tests and a site
+whose provider is on its own network, or reached through a proxy, explicit or
+transparent: a DNS that answers every name with a `198.18.` address (a
+fake-IP mode) gives no public address at all. http is then taken for an
+issuer on this machine alone, and the server says the setting is on as it
+starts. The operator's provider is the operator's own setting, and is
+reached wherever it is.
 
 Register `<PUBLIC_URL>/v1/auth/sso/callback` with every provider: it is the
 same for all of them, and `sso.list` gives it. A browser signs in by visiting
