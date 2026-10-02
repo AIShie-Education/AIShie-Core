@@ -100,6 +100,16 @@ func TestChangesAreRequestedAndTheRevisionApproved(t *testing.T) {
 		payload["by_action_id"] != out.ActionID.String() || payload["reason"] != nil {
 		t.Fatalf("the event's payload: %s", heard.Payload)
 	}
+	// A decider, who proposed nothing, is told of it under the proposal too.
+	seen := false
+	for _, e := range testkit.Result[tools.EventListOut](t, c.MustCall(c.Sato, "event.list", m{"course_id": c.Course}, "")).Events {
+		if e.Type == "action.changes_requested" && e.ActionID != nil && *e.ActionID == proposal {
+			seen = true
+		}
+	}
+	if !seen {
+		t.Fatal("Sato, who holds action_decide, is not told of it")
+	}
 	for _, e := range testkit.Result[tools.EventListOut](t, c.MustCall(yuki.Actor, "event.list", m{"course_id": c.Course}, "")).Events {
 		if e.Type == "action.changes_requested" {
 			t.Fatal("Yuki, who decides nothing, is told of it")

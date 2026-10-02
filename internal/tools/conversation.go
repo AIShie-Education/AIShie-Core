@@ -907,8 +907,8 @@ func conversationAnswer(d Deps) tool.Tool {
 			"if that message has its answer, answer_pending if an answer of yours to it waits for approval, closed if the " +
 			"conversation is. Your level of conversation_answer decides whether an answer is posted at once, posted and " +
 			"reviewed after, or waits for a person's approval; one that waits is checked again when approved, and refused " +
-			"then if the conversation has moved on. An answer that failed or was rejected may be written again, under a new " +
-			"idempotency key.",
+			"then if the conversation has moved on. An answer that failed, was rejected or was sent back for changes may be " +
+			"written again, under a new idempotency key; one sent back names it in revises (the Revises header over REST).",
 		Kind: tool.Write, Gate: answers,
 		// Its owner judges an agent's answer where they decide actions
 		// here without anyone's confirmation: no person answers, so that

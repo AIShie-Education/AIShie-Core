@@ -438,7 +438,7 @@ func TestAnAgentGradesAnEssayOverMCP(t *testing.T) {
 // proposes again naming the one it revises, in the argument revises, which
 // the action log takes out of the call as it takes the key.
 func TestAnAgentRevisesAGradeSentBackForChangesOverMCP(t *testing.T) {
-	f := serve(t, 1)
+	f := serve(t, 2)
 	c, yuki := f.c, f.c.Students[0]
 	agent := f.connect(t, f.token(t, c.Grader))
 	sato := f.connect(t, f.token(t, c.Sato))
@@ -476,6 +476,15 @@ func TestAnAgentRevisesAGradeSentBackForChangesOverMCP(t *testing.T) {
 	if odd, _ := call(t, agent, "grade_submit", m{"course_id": c.Course, "submission_id": yuki.HW3, "score": 85,
 		"idempotency_key": "odd", "revises": 7}); odd.Status != "error" || odd.Error.Code != "invalid_argument" {
 		t.Fatalf("revises that is no id: %+v", odd)
+	}
+	// An empty revises, as a model may fill an optional field, is leaving it
+	// out, as an empty Revises header is over REST: Ken's grade is a first.
+	ken := c.Students[1]
+	if first, res := call(t, agent, "grade_submit", m{"course_id": c.Course, "submission_id": ken.HW3, "score": 70,
+		"idempotency_key": "ken-hw3", "revises": " "}); first.Status != "proposed" || res.IsError {
+		t.Fatalf("an empty revises: %+v", first)
+	} else if n := c.Count(`SELECT count(*) FROM action WHERE id = $1 AND revises_action_id IS NULL`, *first.ActionID); n != 1 {
+		t.Fatal("an empty revises names something")
 	}
 
 	revised, res := call(t, agent, "grade_submit", m{"course_id": c.Course, "submission_id": yuki.HW3, "score": 85,

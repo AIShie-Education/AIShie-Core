@@ -546,7 +546,8 @@ func newServer(d Deps) *mcp.Server {
 func ToolName(registryName string) string { return strings.ReplaceAll(registryName, ".", "_") }
 
 // inputSchema is the tool's own schema; for a Write, plus the idempotency
-// key. A Read and an Ephemeral write take none.
+// key and revises, the proposal sent back for changes the call proposes
+// again. A Read and an Ephemeral write take neither.
 func inputSchema(t tool.Tool) json.RawMessage {
 	raw, err := json.Marshal(t.InputSchema)
 	if err != nil {
@@ -704,8 +705,11 @@ func splitKey(raw json.RawMessage, write bool) ([]byte, string, *uuid.UUID, erro
 	}
 	var revises *uuid.UUID
 	if r, ok := args[Revises]; ok {
-		// null is leaving it out, as a model may write it.
-		if !bytes.Equal(bytes.TrimSpace(r), []byte("null")) {
+		// null or an empty string is leaving it out, as a model may write
+		// it, and as an empty Revises header is over REST.
+		var blank string
+		if !bytes.Equal(bytes.TrimSpace(r), []byte("null")) &&
+			(json.Unmarshal(r, &blank) != nil || strings.TrimSpace(blank) != "") {
 			var id uuid.UUID
 			if err := json.Unmarshal(r, &id); err != nil {
 				return nil, "", nil, fmt.Errorf("%s must be the action_id of the proposal the call revises", Revises)
