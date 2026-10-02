@@ -127,7 +127,7 @@ func (p *fakeIdP) grant(upn, nonce string, change func(map[string]any)) string {
 type ssoAPI struct {
 	*api
 	idp *fakeIdP
-	// op is the operator's provider, polyu-adfs, at idp; nil in a server
+	// op is the operator's provider, school-adfs, at idp; nil in a server
 	// with none (newSite).
 	op *sso.Operator
 	// keys seal the site's providers' client secrets; nil in a server with
@@ -194,12 +194,12 @@ func newSSOServer(t *testing.T, set ssoSetup) *ssoAPI {
 		a.keys = testKeys(t)
 	}
 	if set.operator {
-		provider, err := auth.NewOIDC(context.Background(), auth.OIDCConfig{Name: "polyu-adfs", Issuer: idp.issuer(), ClientID: clientID,
+		provider, err := auth.NewOIDC(context.Background(), auth.OIDCConfig{Name: "school-adfs", Issuer: idp.issuer(), ClientID: clientID,
 			ClientSecret: clientSecret, SubjectClaim: "upn", RedirectURL: srv.URL + httpapi.SSOCallbackPath})
 		if err != nil {
 			t.Fatalf("discovery: %v", err)
 		}
-		a.op = &sso.Operator{ID: "polyu-adfs", Issuer: idp.issuer(), ClientID: clientID, SecretHint: secrets.Hint(clientSecret),
+		a.op = &sso.Operator{ID: "school-adfs", Issuer: idp.issuer(), ClientID: clientID, SecretHint: secrets.Hint(clientSecret),
 			Scopes: sso.DefaultScopes, SubjectClaim: "upn", IdP: provider}
 	}
 	// The tools and the server share the operator's provider and the keys,
@@ -224,7 +224,7 @@ func newSSOServer(t *testing.T, set ssoSetup) *ssoAPI {
 
 func (a *ssoAPI) link(actor uuid.UUID, upn string) {
 	a.t.Helper()
-	if out := a.c.MustCall(a.c.Root, "actor.link_sso", m{"actor_id": actor, "provider": "polyu-adfs", "subject": upn}, "link-"+upn); out.Error != nil {
+	if out := a.c.MustCall(a.c.Root, "actor.link_sso", m{"actor_id": actor, "provider": "school-adfs", "subject": upn}, "link-"+upn); out.Error != nil {
 		a.t.Fatalf("link %s: %+v", upn, out)
 	}
 }
@@ -277,11 +277,11 @@ func TestSingleSignOn(t *testing.T) {
 	a := newSSO(t)
 	// Linked as an administrator would type it; the provider capitalises it
 	// its own way.
-	a.link(a.c.Sato, "sato@polyu.edu.hk")
+	a.link(a.c.Sato, "sato@campus.example.edu")
 
 	b := browser()
 	q := a.start(b, "/courses?tab=mine")
-	done := a.callback(b, a.idp.grant("Sato@PolyU.edu.hk", q.Get("nonce"), nil), q.Get("state"))
+	done := a.callback(b, a.idp.grant("Sato@Campus.example.edu", q.Get("nonce"), nil), q.Get("state"))
 	if done.Status != http.StatusFound || done.Header.Get("Location") != "/courses?tab=mine" || !hasSession(done) {
 		t.Fatalf("callback: %d %v %s", done.Status, done.Header, done.Raw)
 	}
@@ -294,13 +294,13 @@ func TestSingleSignOn(t *testing.T) {
 		t.Fatalf("me, after signing in: %d %s", me.Status, me.Raw)
 	}
 	// The session is a credential like any other: listed, and revocable.
-	if n := a.c.Count(`SELECT count(*) FROM credential WHERE actor_id = $1 AND kind = 'session' AND label = 'sso: polyu-adfs' AND revoked_at IS NULL`, a.c.Sato); n != 1 {
+	if n := a.c.Count(`SELECT count(*) FROM credential WHERE actor_id = $1 AND kind = 'session' AND label = 'sso: school-adfs' AND revoked_at IS NULL`, a.c.Sato); n != 1 {
 		t.Fatalf("%d sessions recorded", n)
 	}
 
 	// The state is good once. Replaying the provider's answer, even in the
 	// same browser, starts nothing: the cookie went with the first answer.
-	if again := a.callback(b, a.idp.grant("sato@polyu.edu.hk", q.Get("nonce"), nil), q.Get("state")); again.Status != http.StatusBadRequest || hasSession(again) {
+	if again := a.callback(b, a.idp.grant("sato@campus.example.edu", q.Get("nonce"), nil), q.Get("state")); again.Status != http.StatusBadRequest || hasSession(again) {
 		t.Fatalf("a replayed callback: %d %s", again.Status, again.Raw)
 	}
 }
@@ -321,15 +321,15 @@ func TestSingleSignOnCreatesNobody(t *testing.T) {
 			t.Fatalf("%s: %d %s", what, r.Status, r.Raw)
 		}
 	}
-	refused("a stranger", signIn("stranger@polyu.edu.hk"))
+	refused("a stranger", signIn("stranger@campus.example.edu"))
 
-	a.link(a.c.Sato, "sato@polyu.edu.hk")
-	if r := signIn("sato@polyu.edu.hk"); r.Status != http.StatusFound {
+	a.link(a.c.Sato, "sato@campus.example.edu")
+	if r := signIn("sato@campus.example.edu"); r.Status != http.StatusFound {
 		t.Fatalf("Sato: %d %s", r.Status, r.Raw)
 	}
 	// Suspended, the answer is the same as for a stranger.
 	a.c.Exec(`UPDATE actor SET status = 'suspended' WHERE id = $1`, a.c.Sato)
-	refused("a suspended actor", signIn("sato@polyu.edu.hk"))
+	refused("a suspended actor", signIn("sato@campus.example.edu"))
 	a.c.Exec(`UPDATE actor SET status = 'active' WHERE id = $1`, a.c.Sato)
 
 	// Unlinked — Sato revokes the credential — likewise.
@@ -338,18 +338,18 @@ func TestSingleSignOnCreatesNobody(t *testing.T) {
 		t.Fatal(err)
 	}
 	a.c.MustCall(a.c.Sato, "credential.revoke", m{"credential_id": cred}, "unlink")
-	refused("an unlinked identity", signIn("sato@polyu.edu.hk"))
+	refused("an unlinked identity", signIn("sato@campus.example.edu"))
 
 	// An identity that once opened one account never comes to open another.
-	if out := a.c.MustCall(a.c.Root, "actor.link_sso", m{"actor_id": a.c.Grader, "provider": "polyu-adfs", "subject": "SATO@polyu.edu.hk"}, "steal"); out.Error == nil {
+	if out := a.c.MustCall(a.c.Root, "actor.link_sso", m{"actor_id": a.c.Grader, "provider": "school-adfs", "subject": "SATO@campus.example.edu"}, "steal"); out.Error == nil {
 		t.Fatalf("Sato's old identity was linked to someone else: %+v", out)
 	}
 	// Linking it to Sato again brings it back.
-	a.link(a.c.Sato, "Sato@polyu.edu.hk")
-	if r := signIn("sato@polyu.edu.hk"); r.Status != http.StatusFound {
+	a.link(a.c.Sato, "Sato@campus.example.edu")
+	if r := signIn("sato@campus.example.edu"); r.Status != http.StatusFound {
 		t.Fatalf("Sato, linked again: %d %s", r.Status, r.Raw)
 	}
-	if out := a.c.MustCall(a.c.Root, "actor.link_sso", m{"actor_id": a.c.Sato, "provider": "polyu-adfs", "subject": "sato@polyu.edu.hk"}, "twice"); out.Error == nil {
+	if out := a.c.MustCall(a.c.Root, "actor.link_sso", m{"actor_id": a.c.Sato, "provider": "school-adfs", "subject": "sato@campus.example.edu"}, "twice"); out.Error == nil {
 		t.Fatal("linked twice")
 	}
 	if n := a.c.Count(`SELECT count(*) FROM actor`); n != actors {
@@ -361,7 +361,7 @@ func TestSingleSignOnCreatesNobody(t *testing.T) {
 // a real provider would never give and an attacker would.
 func TestSingleSignOnRejectsWhatItCannotVerify(t *testing.T) {
 	a := newSSO(t)
-	a.link(a.c.Sato, "sato@polyu.edu.hk")
+	a.link(a.c.Sato, "sato@campus.example.edu")
 	other, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		t.Fatal(err)
@@ -385,7 +385,7 @@ func TestSingleSignOnRejectsWhatItCannotVerify(t *testing.T) {
 		if tc.forge {
 			a.idp.signer = other
 		}
-		r := a.callback(b, a.idp.grant("sato@polyu.edu.hk", q.Get("nonce"), tc.claims), q.Get("state"))
+		r := a.callback(b, a.idp.grant("sato@campus.example.edu", q.Get("nonce"), tc.claims), q.Get("state"))
 		if r.Status != http.StatusUnauthorized || hasSession(r) {
 			t.Fatalf("%s: %d %s", name, r.Status, r.Raw)
 		}
@@ -401,7 +401,7 @@ func TestSingleSignOnRejectsWhatItCannotVerify(t *testing.T) {
 	// victim works — and uploads — as the attacker.
 	attacker, victim := browser(), browser()
 	q := a.start(attacker, "")
-	code := a.idp.grant("sato@polyu.edu.hk", q.Get("nonce"), nil)
+	code := a.idp.grant("sato@campus.example.edu", q.Get("nonce"), nil)
 	if r := a.callback(victim, code, q.Get("state")); r.Status != http.StatusBadRequest || hasSession(r) {
 		t.Fatalf("a callback in a browser that never started: %d %s", r.Status, r.Raw)
 	}
@@ -429,7 +429,7 @@ func TestSingleSignOnRejectsWhatItCannotVerify(t *testing.T) {
 // and it is no longer than a cookie can carry.
 func TestSingleSignOnDoesNotRedirectElsewhere(t *testing.T) {
 	a := newSSO(t)
-	a.link(a.c.Sato, "sato@polyu.edu.hk")
+	a.link(a.c.Sato, "sato@campus.example.edu")
 	long := "/courses/1?q=" + strings.Repeat("a", 2<<10-len("/courses/1?q="))
 	for want, tries := range map[string][]string{
 		frontEnd + "/": {"", "https://evil.example/", "//evil.example/x", `/\evil.example`, `\\evil.example`, "https://lms.example.edu.evil.example/",
@@ -446,7 +446,7 @@ func TestSingleSignOnDoesNotRedirectElsewhere(t *testing.T) {
 		for _, returnTo := range tries {
 			b := browser()
 			q := a.start(b, returnTo)
-			r := a.callback(b, a.idp.grant("sato@polyu.edu.hk", q.Get("nonce"), nil), q.Get("state"))
+			r := a.callback(b, a.idp.grant("sato@campus.example.edu", q.Get("nonce"), nil), q.Get("state"))
 			if r.Status != http.StatusFound || r.Header.Get("Location") != want {
 				t.Fatalf("return_to %q: %d → %q, want %q", returnTo, r.Status, r.Header.Get("Location"), want)
 			}
@@ -469,11 +469,11 @@ func TestSingleSignOnIsOffByDefault(t *testing.T) {
 // burnt sign-ins.
 func TestALectureHallSignsInAtOnce(t *testing.T) {
 	a := newSSOWith(t, ratelimit.New(10, 10), nil) // as serve builds it
-	a.link(a.c.Sato, "sato@polyu.edu.hk")
+	a.link(a.c.Sato, "sato@campus.example.edu")
 	for i := range 40 {
 		b := browser()
 		q := a.start(b, "")
-		if r := a.callback(b, a.idp.grant("sato@polyu.edu.hk", q.Get("nonce"), nil), q.Get("state")); r.Status != http.StatusFound || !hasSession(r) {
+		if r := a.callback(b, a.idp.grant("sato@campus.example.edu", q.Get("nonce"), nil), q.Get("state")); r.Status != http.StatusFound || !hasSession(r) {
 			t.Fatalf("student %d: %d %s", i+1, r.Status, r.Raw)
 		}
 	}

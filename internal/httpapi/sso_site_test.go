@@ -113,14 +113,14 @@ func TestAProviderSetUpFromTheFrontEndSignsPeopleIn(t *testing.T) {
 		t.Fatalf("methods: %s", r.Raw)
 	}
 
-	if out := a.c.MustCall(a.c.Root, "actor.link_sso", m{"actor_id": a.c.Sato, "provider": "campus", "subject": "sato@campus.edu"}, "link"); out.Error != nil {
+	if out := a.c.MustCall(a.c.Root, "actor.link_sso", m{"actor_id": a.c.Sato, "provider": "campus", "subject": "sato@site.example.edu"}, "link"); out.Error != nil {
 		t.Fatalf("link: %+v", out)
 	}
 	// The one provider offered is where a bare start goes, as a front end
 	// from before there were several starts; and its own path, and the
 	// query, go there too.
 	for _, path := range []string{"/v1/auth/sso/start", "/v1/auth/sso/start/campus", "/v1/auth/sso/start?provider=campus"} {
-		done := a.signInThrough(path+"", a.idp, "Sato@campus.edu", nil)
+		done := a.signInThrough(path+"", a.idp, "Sato@site.example.edu", nil)
 		if done.Status != http.StatusFound || !hasSession(done) {
 			t.Fatalf("sign in at %s: %d %s", path, done.Status, done.Raw)
 		}
@@ -158,7 +158,7 @@ func TestAProviderSetUpFromTheFrontEndSignsPeopleIn(t *testing.T) {
 // it started with, which its state names, and an identity is linked at one
 // provider only.
 func TestTwoProvidersEachSignInTheirOwn(t *testing.T) {
-	a := newSSOServer(t, ssoSetup{operator: true, keys: true, adjust: func(d *httpapi.Deps) { named(d, "PolyU NetID") }})
+	a := newSSOServer(t, ssoSetup{operator: true, keys: true, adjust: func(d *httpapi.Deps) { named(d, "School NetID") }})
 	other := newFakeIdP(t)
 	root := a.tokenFor(a.c.Root)
 	campus := provider("campus", "Campus ID", other)
@@ -167,9 +167,9 @@ func TestTwoProvidersEachSignInTheirOwn(t *testing.T) {
 		t.Fatalf("create: %d %s", r.Status, r.Raw)
 	}
 	want := m{"password": true, "password_accepts": []any{"login_id", "email"},
-		"sso": m{"label": "PolyU NetID", "start": "/v1/auth/sso/start/polyu-adfs"},
+		"sso": m{"label": "School NetID", "start": "/v1/auth/sso/start/school-adfs"},
 		"sso_providers": []any{
-			m{"id": "polyu-adfs", "label": "PolyU NetID", "start": "/v1/auth/sso/start/polyu-adfs"},
+			m{"id": "school-adfs", "label": "School NetID", "start": "/v1/auth/sso/start/school-adfs"},
 			m{"id": "campus", "label": "Campus ID", "start": "/v1/auth/sso/start/campus"},
 		}}
 	if r := a.methods(); !reflect.DeepEqual(r.Body, want) {
@@ -184,8 +184,8 @@ func TestTwoProvidersEachSignInTheirOwn(t *testing.T) {
 	}
 
 	mei := a.c.Actor("human", "Mei")
-	a.link(a.c.Sato, "sato@polyu.edu.hk")
-	if out := a.c.MustCall(a.c.Root, "actor.link_sso", m{"actor_id": mei, "provider": "campus", "subject": "mei@campus.edu"}, "link-mei"); out.Error != nil {
+	a.link(a.c.Sato, "sato@campus.example.edu")
+	if out := a.c.MustCall(a.c.Root, "actor.link_sso", m{"actor_id": mei, "provider": "campus", "subject": "mei@site.example.edu"}, "link-mei"); out.Error != nil {
 		t.Fatalf("link: %+v", out)
 	}
 	for _, tc := range []struct {
@@ -195,8 +195,8 @@ func TestTwoProvidersEachSignInTheirOwn(t *testing.T) {
 		actor uuid.UUID
 		label string
 	}{
-		{"/v1/auth/sso/start/polyu-adfs", a.idp, "sato@polyu.edu.hk", a.c.Sato, "sso: polyu-adfs"},
-		{"/v1/auth/sso/start?provider=campus", other, "mei@campus.edu", mei, "sso: campus"},
+		{"/v1/auth/sso/start/school-adfs", a.idp, "sato@campus.example.edu", a.c.Sato, "sso: school-adfs"},
+		{"/v1/auth/sso/start?provider=campus", other, "mei@site.example.edu", mei, "sso: campus"},
 	} {
 		done := a.signInThrough(tc.path, tc.idp, tc.upn, nil)
 		if done.Status != http.StatusFound || !hasSession(done) {
@@ -207,21 +207,21 @@ func TestTwoProvidersEachSignInTheirOwn(t *testing.T) {
 		}
 	}
 	// The same subject at the other provider is somebody else: nobody.
-	if r := a.signInThrough("/v1/auth/sso/start/campus", other, "sato@polyu.edu.hk", nil); r.Status != http.StatusForbidden || hasSession(r) {
+	if r := a.signInThrough("/v1/auth/sso/start/campus", other, "sato@campus.example.edu", nil); r.Status != http.StatusForbidden || hasSession(r) {
 		t.Fatalf("Sato's UPN through campus: %d %s", r.Status, r.Raw)
 	}
 	// The state names the provider the sign-in went through: a code the
 	// other provider issued is not one this one redeems.
 	b := browser()
 	q := a.startAt(b, "/v1/auth/sso/start/campus", other)
-	if r := a.callback(b, a.idp.grant("sato@polyu.edu.hk", q.Get("nonce"), nil), q.Get("state")); r.Status != http.StatusUnauthorized || hasSession(r) {
+	if r := a.callback(b, a.idp.grant("sato@campus.example.edu", q.Get("nonce"), nil), q.Get("state")); r.Status != http.StatusUnauthorized || hasSession(r) {
 		t.Fatalf("the operator's provider's code at campus: %d %s", r.Status, r.Raw)
 	}
 	// A token signed by the other provider, for this sign-in, is not
 	// verified either: another issuer, another key.
 	b = browser()
 	q = a.startAt(b, "/v1/auth/sso/start/campus", other)
-	forged := other.grant("mei@campus.edu", q.Get("nonce"), func(c map[string]any) { c["iss"] = a.idp.issuer() })
+	forged := other.grant("mei@site.example.edu", q.Get("nonce"), func(c map[string]any) { c["iss"] = a.idp.issuer() })
 	if r := a.callback(b, forged, q.Get("state")); r.Status != http.StatusUnauthorized || hasSession(r) {
 		t.Fatalf("a token naming the other issuer: %d %s", r.Status, r.Raw)
 	}
@@ -235,14 +235,14 @@ func TestAProviderSwitchedOffSignsNobodyIn(t *testing.T) {
 	campus := provider("campus", "Campus ID", a.idp)
 	campus["enabled"] = true
 	a.write(root, "/v1/sso/providers", campus)
-	a.c.MustCall(a.c.Root, "actor.link_sso", m{"actor_id": a.c.Sato, "provider": "campus", "subject": "sato@campus.edu"}, "link")
+	a.c.MustCall(a.c.Root, "actor.link_sso", m{"actor_id": a.c.Sato, "provider": "campus", "subject": "sato@site.example.edu"}, "link")
 
 	b := browser()
 	q := a.startAt(b, "/v1/auth/sso/start/campus", a.idp)
 	if r := a.write(root, "/v1/sso/providers/campus/enabled", m{"enabled": false}); r.Status != http.StatusOK {
 		t.Fatalf("switch off: %d %s", r.Status, r.Raw)
 	}
-	if r := a.callback(b, a.idp.grant("sato@campus.edu", q.Get("nonce"), nil), q.Get("state")); r.Status != http.StatusNotFound || hasSession(r) {
+	if r := a.callback(b, a.idp.grant("sato@site.example.edu", q.Get("nonce"), nil), q.Get("state")); r.Status != http.StatusNotFound || hasSession(r) {
 		t.Fatalf("a sign-in under way when it was switched off: %d %s", r.Status, r.Raw)
 	}
 	if r := a.methods(); r.Body["sso"] != nil {
@@ -252,7 +252,7 @@ func TestAProviderSwitchedOffSignsNobodyIn(t *testing.T) {
 		t.Fatalf("a bare start with nothing offered: %d %s", r.Status, r.Raw)
 	}
 	a.write(root, "/v1/sso/providers/campus/enabled", m{"enabled": true})
-	if r := a.signInThrough("/v1/auth/sso/start", a.idp, "sato@campus.edu", nil); r.Status != http.StatusFound || !hasSession(r) {
+	if r := a.signInThrough("/v1/auth/sso/start", a.idp, "sato@site.example.edu", nil); r.Status != http.StatusFound || !hasSession(r) {
 		t.Fatalf("switched on again: %d %s", r.Status, r.Raw)
 	}
 }
@@ -266,8 +266,8 @@ func TestAChangeToAProviderIsInForceAtOnce(t *testing.T) {
 	campus := provider("campus", "Campus ID", a.idp)
 	campus["enabled"] = true
 	a.write(root, "/v1/sso/providers", campus)
-	a.c.MustCall(a.c.Root, "actor.link_sso", m{"actor_id": a.c.Sato, "provider": "campus", "subject": "sato@campus.edu"}, "link")
-	if r := a.signInThrough("/v1/auth/sso/start", a.idp, "sato@campus.edu", nil); r.Status != http.StatusFound {
+	a.c.MustCall(a.c.Root, "actor.link_sso", m{"actor_id": a.c.Sato, "provider": "campus", "subject": "sato@site.example.edu"}, "link")
+	if r := a.signInThrough("/v1/auth/sso/start", a.idp, "sato@site.example.edu", nil); r.Status != http.StatusFound {
 		t.Fatalf("before: %d %s", r.Status, r.Raw)
 	}
 
@@ -278,13 +278,13 @@ func TestAChangeToAProviderIsInForceAtOnce(t *testing.T) {
 	if r := a.methods(); r.str("sso", "label") != "Campus NetID" {
 		t.Fatalf("the button after the change: %s", r.Raw)
 	}
-	if r := a.signInThrough("/v1/auth/sso/start", a.idp, "sato@campus.edu", nil); r.Status != http.StatusUnauthorized || hasSession(r) {
+	if r := a.signInThrough("/v1/auth/sso/start", a.idp, "sato@site.example.edu", nil); r.Status != http.StatusUnauthorized || hasSession(r) {
 		t.Fatalf("with a secret the provider refuses: %d %s", r.Status, r.Raw)
 	}
 	if r := a.write(root, "/v1/sso/providers/campus", m{"version": 2, "client_secret": clientSecret}); r.Status != http.StatusOK {
 		t.Fatalf("update: %d %s", r.Status, r.Raw)
 	}
-	if r := a.signInThrough("/v1/auth/sso/start", a.idp, "sato@campus.edu", nil); r.Status != http.StatusFound || !hasSession(r) {
+	if r := a.signInThrough("/v1/auth/sso/start", a.idp, "sato@site.example.edu", nil); r.Status != http.StatusFound || !hasSession(r) {
 		t.Fatalf("with the secret back: %d %s", r.Status, r.Raw)
 	}
 	// Moved to another issuer, it signs in through that one from the next
@@ -293,7 +293,7 @@ func TestAChangeToAProviderIsInForceAtOnce(t *testing.T) {
 	if r := a.write(root, "/v1/sso/providers/campus", m{"version": 3, "issuer": other.issuer()}); r.Status != http.StatusOK {
 		t.Fatalf("update: %d %s", r.Status, r.Raw)
 	}
-	if r := a.signInThrough("/v1/auth/sso/start", other, "sato@campus.edu", nil); r.Status != http.StatusFound || !hasSession(r) {
+	if r := a.signInThrough("/v1/auth/sso/start", other, "sato@site.example.edu", nil); r.Status != http.StatusFound || !hasSession(r) {
 		t.Fatalf("at the new issuer: %d %s", r.Status, r.Raw)
 	}
 }
@@ -303,19 +303,19 @@ func TestAChangeToAProviderIsInForceAtOnce(t *testing.T) {
 func TestTheOperatorsProviderWinsOverTheSitesOfItsName(t *testing.T) {
 	a := newSSOServer(t, ssoSetup{operator: true, keys: true})
 	other := newFakeIdP(t)
-	sealed, err := a.keys.Seal(sso.SecretBinding("polyu-adfs"), clientSecret)
+	sealed, err := a.keys.Seal(sso.SecretBinding("school-adfs"), clientSecret)
 	if err != nil {
 		t.Fatal(err)
 	}
 	a.c.Exec(`INSERT INTO sso_provider (id, display_name, issuer, client_id, client_secret_sealed, client_secret_hint, subject_claim, enabled,
-		created_by_actor_id, updated_by_actor_id) VALUES ('polyu-adfs', 'Imposter', $1, $2, $3, '…', 'upn', true, $4, $4)`,
+		created_by_actor_id, updated_by_actor_id) VALUES ('school-adfs', 'Imposter', $1, $2, $3, '…', 'upn', true, $4, $4)`,
 		other.issuer(), clientID, sealed, a.c.Root)
 	r := a.methods()
 	if ps := r.Body["sso_providers"].([]any); len(ps) != 1 || strings.Contains(r.Raw, "Imposter") {
 		t.Fatalf("methods: %s", r.Raw)
 	}
-	a.link(a.c.Sato, "sato@polyu.edu.hk")
-	if r := a.signInThrough("/v1/auth/sso/start/polyu-adfs", a.idp, "sato@polyu.edu.hk", nil); r.Status != http.StatusFound || !hasSession(r) {
+	a.link(a.c.Sato, "sato@campus.example.edu")
+	if r := a.signInThrough("/v1/auth/sso/start/school-adfs", a.idp, "sato@campus.example.edu", nil); r.Status != http.StatusFound || !hasSession(r) {
 		t.Fatalf("through the operator's: %d %s", r.Status, r.Raw)
 	}
 	root := a.tokenFor(a.c.Root)
@@ -348,7 +348,7 @@ func TestLinkingByTheEmailAProviderVouchesFor(t *testing.T) {
 		a.c.Exec(`UPDATE actor SET email = $2 WHERE id = $1`, id, email)
 		return id
 	}
-	mei := person("Mei", "mei@polyu.edu.hk")
+	mei := person("Mei", "mei@campus.example.edu")
 	vouched := func(email string) func(map[string]any) {
 		return func(c map[string]any) { c["email"] = email; c["email_verified"] = true }
 	}
@@ -359,13 +359,13 @@ func TestLinkingByTheEmailAProviderVouchesFor(t *testing.T) {
 		}
 	}
 	// Off, as it is by default: an account linked to nobody is nobody.
-	refused("linking by email off", a.signInThrough("/v1/auth/sso/start", a.idp, "mei-1", vouched("mei@polyu.edu.hk")))
+	refused("linking by email off", a.signInThrough("/v1/auth/sso/start", a.idp, "mei-1", vouched("mei@campus.example.edu")))
 
 	if r := a.write(root, "/v1/sso/providers/campus", m{"version": 1, "link_by_email": true,
-		"allowed_email_domains": []any{"polyu.edu.hk"}}); r.Status != http.StatusOK || r.str("result", "email_claim") != "email" {
+		"allowed_email_domains": []any{"campus.example.edu"}}); r.Status != http.StatusOK || r.str("result", "email_claim") != "email" {
 		t.Fatalf("switch linking by email on: %d %s", r.Status, r.Raw)
 	}
-	done := a.signInThrough("/v1/auth/sso/start", a.idp, "mei-1", vouched("Mei@PolyU.edu.HK"))
+	done := a.signInThrough("/v1/auth/sso/start", a.idp, "mei-1", vouched("Mei@Campus.Example.EDU"))
 	if done.Status != http.StatusFound || !hasSession(done) {
 		t.Fatalf("Mei, vouched for: %d %s", done.Status, done.Raw)
 	}
@@ -381,27 +381,27 @@ func TestLinkingByTheEmailAProviderVouchesFor(t *testing.T) {
 		t.Fatalf("Mei again: %d %s", r.Status, r.Raw)
 	}
 
-	ho := person("Ho", "ho@polyu.edu.hk")
+	ho := person("Ho", "ho@campus.example.edu")
 	refused("an email the provider does not vouch for", a.signInThrough("/v1/auth/sso/start", a.idp, "ho-1",
-		func(c map[string]any) { c["email"] = "ho@polyu.edu.hk"; c["email_verified"] = false }))
+		func(c map[string]any) { c["email"] = "ho@campus.example.edu"; c["email_verified"] = false }))
 	refused("an email with no email_verified", a.signInThrough("/v1/auth/sso/start", a.idp, "ho-1",
-		func(c map[string]any) { c["email"] = "ho@polyu.edu.hk" }))
+		func(c map[string]any) { c["email"] = "ho@campus.example.edu" }))
 	person("Wu", "wu@gmail.com")
 	refused("an email of another domain", a.signInThrough("/v1/auth/sso/start", a.idp, "wu-1", vouched("wu@gmail.com")))
-	refused("an email of a subdomain", a.signInThrough("/v1/auth/sso/start", a.idp, "ho-2", vouched("ho@connect.polyu.edu.hk")))
-	refused("an email nobody has", a.signInThrough("/v1/auth/sso/start", a.idp, "zz-1", vouched("nobody@polyu.edu.hk")))
-	lee := person("Lee", "lee@polyu.edu.hk")
+	refused("an email of a subdomain", a.signInThrough("/v1/auth/sso/start", a.idp, "ho-2", vouched("ho@students.campus.example.edu")))
+	refused("an email nobody has", a.signInThrough("/v1/auth/sso/start", a.idp, "zz-1", vouched("nobody@campus.example.edu")))
+	lee := person("Lee", "lee@campus.example.edu")
 	a.c.Exec(`UPDATE actor SET email_verified = false WHERE id = $1`, lee)
-	refused("an account whose email nobody here vouches for", a.signInThrough("/v1/auth/sso/start", a.idp, "lee-1", vouched("lee@polyu.edu.hk")))
-	boss := person("Boss", "boss@polyu.edu.hk")
+	refused("an account whose email nobody here vouches for", a.signInThrough("/v1/auth/sso/start", a.idp, "lee-1", vouched("lee@campus.example.edu")))
+	boss := person("Boss", "boss@campus.example.edu")
 	a.c.Exec(`UPDATE actor SET platform_role = 'admin' WHERE id = $1`, boss)
-	refused("an account with a platform role", a.signInThrough("/v1/auth/sso/start", a.idp, "boss-1", vouched("boss@polyu.edu.hk")))
-	sus := person("Sus", "sus@polyu.edu.hk")
+	refused("an account with a platform role", a.signInThrough("/v1/auth/sso/start", a.idp, "boss-1", vouched("boss@campus.example.edu")))
+	sus := person("Sus", "sus@campus.example.edu")
 	a.c.Exec(`UPDATE actor SET status = 'suspended' WHERE id = $1`, sus)
-	refused("a suspended account", a.signInThrough("/v1/auth/sso/start", a.idp, "sus-1", vouched("sus@polyu.edu.hk")))
+	refused("a suspended account", a.signInThrough("/v1/auth/sso/start", a.idp, "sus-1", vouched("sus@campus.example.edu")))
 	// Mei's account is linked at campus already: another identity with her
 	// email is not linked to it too.
-	refused("a second identity for one account", a.signInThrough("/v1/auth/sso/start", a.idp, "mei-2", vouched("mei@polyu.edu.hk")))
+	refused("a second identity for one account", a.signInThrough("/v1/auth/sso/start", a.idp, "mei-2", vouched("mei@campus.example.edu")))
 	// An identity unlinked is not linked again by its email: that was
 	// someone's decision.
 	var cred uuid.UUID
@@ -409,7 +409,7 @@ func TestLinkingByTheEmailAProviderVouchesFor(t *testing.T) {
 		t.Fatal(err)
 	}
 	a.c.MustCall(a.c.Root, "actor.revoke_credential", m{"actor_id": mei, "credential_id": cred}, "unlink-mei")
-	refused("an identity unlinked", a.signInThrough("/v1/auth/sso/start", a.idp, "mei-1", vouched("mei@polyu.edu.hk")))
+	refused("an identity unlinked", a.signInThrough("/v1/auth/sso/start", a.idp, "mei-1", vouched("mei@campus.example.edu")))
 
 	if n := a.c.Count(`SELECT count(*) FROM credential WHERE kind = 'sso' AND actor_id IN ($1, $2, $3, $4)`, ho, lee, boss, sus); n != 0 {
 		t.Fatalf("%d identities linked that should not be", n)

@@ -17,7 +17,7 @@ import (
 func TestTheSignInPageIsToldHowToSignIn(t *testing.T) {
 	start := "/v1/auth/sso/start"
 	adfs := func(label any) []any {
-		return []any{m{"id": "polyu-adfs", "label": label, "start": start + "/polyu-adfs"}}
+		return []any{m{"id": "school-adfs", "label": label, "start": start + "/school-adfs"}}
 	}
 	// A password sign-in takes a login ID or an email, in the order the
 	// sign-in field's label names them.
@@ -31,12 +31,12 @@ func TestTheSignInPageIsToldHowToSignIn(t *testing.T) {
 		{"password alone", false, "", m{"password": true, "password_accepts": accepts, "sso": nil, "sso_providers": []any{}}},
 		{"single sign-on, in the front end's own words", true, "", m{"password": true, "password_accepts": accepts,
 			"sso": m{"label": nil, "start": start}, "sso_providers": adfs(nil)}},
-		{"single sign-on, named", true, "PolyU NetID", m{"password": true, "password_accepts": accepts,
-			"sso": m{"label": "PolyU NetID", "start": start}, "sso_providers": adfs("PolyU NetID")}},
-		{"single sign-on, named in any script and with what HTML makes much of", true, `理大 <NetID> & "SSO"`,
-			m{"password": true, "password_accepts": accepts, "sso": m{"label": `理大 <NetID> & "SSO"`, "start": start},
-				"sso_providers": adfs(`理大 <NetID> & "SSO"`)}},
-		{"a name, with single sign-on off", false, "PolyU NetID", m{"password": true, "password_accepts": accepts, "sso": nil,
+		{"single sign-on, named", true, "School NetID", m{"password": true, "password_accepts": accepts,
+			"sso": m{"label": "School NetID", "start": start}, "sso_providers": adfs("School NetID")}},
+		{"single sign-on, named in any script and with what HTML makes much of", true, `示範大學 <NetID> & "SSO"`,
+			m{"password": true, "password_accepts": accepts, "sso": m{"label": `示範大學 <NetID> & "SSO"`, "start": start},
+				"sso_providers": adfs(`示範大學 <NetID> & "SSO"`)}},
+		{"a name, with single sign-on off", false, "School NetID", m{"password": true, "password_accepts": accepts, "sso": nil,
 			"sso_providers": []any{}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -64,7 +64,7 @@ func TestTheSignInPageIsToldHowToSignIn(t *testing.T) {
 			}
 			// Where it says to start is where a sign-in starts.
 			if tc.sso {
-				for _, path := range []string{r.str("sso", "start"), start + "/polyu-adfs"} {
+				for _, path := range []string{r.str("sso", "start"), start + "/school-adfs"} {
 					s := a.do(browser(), "GET", path+"?return_to=/courses", "", nil)
 					if s.Status != http.StatusFound || !strings.Contains(s.Header.Get("Location"), "/oauth2/authorize?") {
 						t.Fatalf("start at %s: %d %v", path, s.Status, s.Header)
@@ -89,9 +89,9 @@ func named(d *httpapi.Deps, label string) {
 // when no origin was sent, so that a cache that kept it for one never gives
 // it to the other.
 func TestAnyoneMayAskHowToSignIn(t *testing.T) {
-	s := newSSOWith(t, nil, func(d *httpapi.Deps) { named(d, "PolyU NetID") })
-	want := m{"password": true, "password_accepts": []any{"login_id", "email"}, "sso": m{"label": "PolyU NetID", "start": "/v1/auth/sso/start"},
-		"sso_providers": []any{m{"id": "polyu-adfs", "label": "PolyU NetID", "start": "/v1/auth/sso/start/polyu-adfs"}}}
+	s := newSSOWith(t, nil, func(d *httpapi.Deps) { named(d, "School NetID") })
+	want := m{"password": true, "password_accepts": []any{"login_id", "email"}, "sso": m{"label": "School NetID", "start": "/v1/auth/sso/start"},
+		"sso_providers": []any{m{"id": "school-adfs", "label": "School NetID", "start": "/v1/auth/sso/start/school-adfs"}}}
 	for _, tc := range []struct {
 		name    string
 		token   string

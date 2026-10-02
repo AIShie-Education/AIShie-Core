@@ -16,8 +16,8 @@ VALUES ('00000000-0000-0000-0016-000000000011', '2027 Spring', '2027-01-10', '20
 INSERT INTO department (id, name) VALUES ('00000000-0000-0000-0016-000000000021', 'Tropical Agriculture');
 -- 31 Lin, the instructor · 35 Wei, a login ID and no email · 37 Fang, both
 INSERT INTO actor (id, kind, display_name, email, login_id, created_by_actor_id) VALUES
-    ('00000000-0000-0000-0016-000000000031', 'human', 'Lin',  'lin@hainanu.edu.cn',  'T19880042', NULL),
-    ('00000000-0000-0000-0016-000000000037', 'human', 'Fang', 'fang@hainanu.edu.cn', '20230002',  NULL);
+    ('00000000-0000-0000-0016-000000000031', 'human', 'Lin',  'lin@campus.example.edu',  'T19880042', NULL),
+    ('00000000-0000-0000-0016-000000000037', 'human', 'Fang', 'fang@campus.example.edu', '20230002',  NULL);
 INSERT INTO actor (id, kind, display_name, login_id, login_id_verified, created_by_actor_id) VALUES
     ('00000000-0000-0000-0016-000000000035', 'human', 'Wei', '20230001', false, '00000000-0000-0000-0016-000000000031');
 -- c1 Wei's own password, revoked by the reset · c2 the temporary one Lin set · c3 the session Wei signed in with

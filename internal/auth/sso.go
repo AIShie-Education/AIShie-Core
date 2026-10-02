@@ -16,7 +16,7 @@ import (
 // Identity is who an identity provider says someone is.
 type Identity struct {
 	// Provider is this installation's name for the provider, as stored in
-	// credential.provider: "polyu-adfs".
+	// credential.provider, such as "school-adfs".
 	Provider string
 	// Subject is the provider's stable name for the account, as stored in
 	// credential.subject: for ADFS, the UPN.

@@ -106,12 +106,12 @@ SELECT pg_temp.fails('email is unique regardless of case', '23505', $q$
     VALUES ('human', 'b', 'yuki@EXAMPLE.edu', '00000000-0000-0000-0000-000000000033') $q$);
 SELECT pg_temp.ok('sso credential with provider and subject', $q$
     INSERT INTO credential (actor_id, kind, provider, subject)
-    VALUES ('00000000-0000-0000-0000-000000000035', 'sso', 'polyu-adfs', 'yuki@connect.polyu.hk') $q$);
+    VALUES ('00000000-0000-0000-0000-000000000035', 'sso', 'school-adfs', 'yuki@students.example.edu') $q$);
 SELECT pg_temp.fails('sso credential needs provider and subject', '23514', $q$
     INSERT INTO credential (actor_id, kind) VALUES ('00000000-0000-0000-0000-000000000035', 'sso') $q$);
 SELECT pg_temp.fails('one sso identity cannot map to two actors', '23505', $q$
     INSERT INTO credential (actor_id, kind, provider, subject)
-    VALUES ('00000000-0000-0000-0000-000000000037', 'sso', 'polyu-adfs', 'yuki@connect.polyu.hk') $q$);
+    VALUES ('00000000-0000-0000-0000-000000000037', 'sso', 'school-adfs', 'yuki@students.example.edu') $q$);
 SELECT pg_temp.fails('password credential needs a hash', '23514', $q$
     INSERT INTO credential (actor_id, kind) VALUES ('00000000-0000-0000-0000-000000000034', 'password') $q$);
 SELECT pg_temp.fails('api token needs a lookup prefix', '23514', $q$
@@ -183,7 +183,7 @@ SELECT pg_temp.fails('no invitation to choose one', '23514', $q$
     VALUES ('00000000-0000-0000-0000-000000000036', 'invite', 'h', 'inv-agent', now() + interval '7 days') $q$);
 SELECT pg_temp.fails('no identity at a provider', '23514', $q$
     INSERT INTO credential (actor_id, kind, provider, subject)
-    VALUES ('00000000-0000-0000-0000-000000000036', 'sso', 'polyu-adfs', 'grader@connect.polyu.hk') $q$);
+    VALUES ('00000000-0000-0000-0000-000000000036', 'sso', 'school-adfs', 'grader@students.example.edu') $q$);
 SELECT pg_temp.fails('and no session, which only signing in makes', '23514', $q$
     INSERT INTO credential (actor_id, kind, secret_hash, token_prefix, expires_at)
     VALUES ('00000000-0000-0000-0000-000000000036', 'session', 'h', 'sess-agent', now() + interval '12 hours') $q$);
@@ -194,16 +194,16 @@ SELECT pg_temp.ok('an agent''s token is revoked as any credential is', $q$
 
 -- Login IDs: a person's student or staff number, a sign-in name beside the email.
 SELECT pg_temp.ok('a person has a login ID, as an administrator gives it', $q$
-    UPDATE actor SET login_id = 'HNU20230001' WHERE id = '00000000-0000-0000-0000-000000000035' $q$);
+    UPDATE actor SET login_id = 'UNI20230001' WHERE id = '00000000-0000-0000-0000-000000000035' $q$);
 SELECT pg_temp.ok('and an email beside it', $q$
-    UPDATE actor SET login_id = 'T19880042', email = 'sato@hainanu.edu.cn' WHERE id = '00000000-0000-0000-0000-000000000034' $q$);
+    UPDATE actor SET login_id = 'T19880042', email = 'sato@campus.example.edu' WHERE id = '00000000-0000-0000-0000-000000000034' $q$);
 SELECT pg_temp.fails('a login ID is unique regardless of case', '23505', $q$
     INSERT INTO actor (kind, display_name, login_id, created_by_actor_id)
-    VALUES ('human', 'x', 'hnu20230001', '00000000-0000-0000-0000-000000000031') $q$);
+    VALUES ('human', 'x', 'uni20230001', '00000000-0000-0000-0000-000000000031') $q$);
 SELECT pg_temp.fails('and is not taken over by another person', '23505', $q$
-    UPDATE actor SET login_id = 'Hnu20230001' WHERE id = '00000000-0000-0000-0000-000000000037' $q$);
+    UPDATE actor SET login_id = 'Uni20230001' WHERE id = '00000000-0000-0000-0000-000000000037' $q$);
 SELECT pg_temp.ok('its longest: 64 letters, digits, dots, hyphens and underscores', $q$
-    UPDATE actor SET login_id = 'hnu.2023-00_' || repeat('7', 52) WHERE id = '00000000-0000-0000-0000-000000000037' $q$);
+    UPDATE actor SET login_id = 'uni.2023-00_' || repeat('7', 52) WHERE id = '00000000-0000-0000-0000-000000000037' $q$);
 SELECT pg_temp.fails('never longer', '23514', $q$
     UPDATE actor SET login_id = repeat('7', 65) WHERE id = '00000000-0000-0000-0000-000000000037' $q$);
 SELECT pg_temp.fails('never empty', '23514', $q$
@@ -217,7 +217,7 @@ SELECT pg_temp.fails('nor a space within', '23514', $q$
 SELECT pg_temp.fails('nor a line after it', '23514', $q$
     UPDATE actor SET login_id = E'20230003\n' WHERE id = '00000000-0000-0000-0000-000000000037' $q$);
 SELECT pg_temp.fails('and in ASCII: no letter of another alphabet', '23514', $q$
-    UPDATE actor SET login_id = 'hnué2023' WHERE id = '00000000-0000-0000-0000-000000000037' $q$);
+    UPDATE actor SET login_id = 'unié2023' WHERE id = '00000000-0000-0000-0000-000000000037' $q$);
 SELECT pg_temp.fails('nor a full-width digit', '23514', $q$
     UPDATE actor SET login_id = '２０２３' WHERE id = '00000000-0000-0000-0000-000000000037' $q$);
 SELECT pg_temp.fails('an agent has no login ID', '23514', $q$
@@ -1827,7 +1827,7 @@ SELECT pg_temp.ok('a service credential is revoked as any is', $q$
 SELECT pg_temp.ok('a provider is set up, its secret sealed', $q$
     INSERT INTO sso_provider (id, display_name, issuer, client_id, client_secret_sealed, client_secret_hint, subject_claim,
                               created_by_actor_id, updated_by_actor_id)
-    VALUES ('adfs', 'PolyU NetID', 'https://adfs.example.edu/adfs', 'aishie', 'v1.0123456789abcdef.' || repeat('A', 60), '…abcd',
+    VALUES ('adfs', 'School NetID', 'https://adfs.example.edu/adfs', 'aishie', 'v1.0123456789abcdef.' || repeat('A', 60), '…abcd',
             'upn', '00000000-0000-0000-0000-000000000032', '00000000-0000-0000-0000-000000000032') $q$);
 SELECT pg_temp.fails('one provider to an id', '23505', $q$
     INSERT INTO sso_provider (id, display_name, issuer, client_id, client_secret_sealed, client_secret_hint,
@@ -1851,13 +1851,13 @@ SELECT pg_temp.fails('a sign-in asks for openid', '23514', $q$
 SELECT pg_temp.fails('an issuer is an http or https URL', '23514', $q$
     UPDATE sso_provider SET issuer = 'adfs.example.edu' WHERE id = 'adfs' $q$);
 SELECT pg_temp.fails('a name on the button is one line', '23514', $q$
-    UPDATE sso_provider SET display_name = E'PolyU\nNetID' WHERE id = 'adfs' $q$);
+    UPDATE sso_provider SET display_name = E'School\nNetID' WHERE id = 'adfs' $q$);
 SELECT pg_temp.fails('linking by email needs the claim and the domains', '23514', $q$
     UPDATE sso_provider SET link_by_email = true, email_claim = 'email' WHERE id = 'adfs' $q$);
 SELECT pg_temp.fails('domains are kept in lower case', '23514', $q$
-    UPDATE sso_provider SET allowed_email_domains = '{PolyU.edu.hk}' WHERE id = 'adfs' $q$);
+    UPDATE sso_provider SET allowed_email_domains = '{Campus.example.edu}' WHERE id = 'adfs' $q$);
 SELECT pg_temp.ok('linking by email within the domains', $q$
-    UPDATE sso_provider SET link_by_email = true, email_claim = 'email', allowed_email_domains = '{polyu.edu.hk}',
+    UPDATE sso_provider SET link_by_email = true, email_claim = 'email', allowed_email_domains = '{campus.example.edu}',
                             version = version + 1
     WHERE id = 'adfs' $q$);
 SELECT pg_temp.fails('a version counts from 1', '23514', $q$

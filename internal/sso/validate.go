@@ -45,7 +45,7 @@ func invalid(field, format string, args ...any) *apperr.Error {
 // never changes.
 func CheckID(id string) error {
 	if !idRE.MatchString(id) {
-		return invalid("id", "1 to 64 lower-case letters, digits and hyphens, beginning and ending with a letter or a digit, such as polyu-adfs")
+		return invalid("id", "1 to 64 lower-case letters, digits and hyphens, beginning and ending with a letter or a digit, such as school-adfs")
 	}
 	return nil
 }
@@ -214,7 +214,7 @@ func CheckClaim(field, v string) (string, error) {
 var domainLabelRE = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 
 // CheckDomains are the domains an email may be linked from: each a domain
-// name (polyu.edu.hk), lower-cased, without an @ before it, at least two
+// name (example.edu), lower-cased, without an @ before it, at least two
 // labels long, each once, at most 50. An email is of a domain when what
 // follows its @ is that domain exactly: a subdomain is a domain of its own.
 func CheckDomains(v []string) ([]string, error) {
@@ -227,7 +227,7 @@ func CheckDomains(v []string) ([]string, error) {
 			ok = ok && domainLabelRE.MatchString(l)
 		}
 		if !ok {
-			return nil, invalid("allowed_email_domains", "%q is not a domain name such as polyu.edu.hk", apperr.Clip(d))
+			return nil, invalid("allowed_email_domains", "%q is not a domain name such as example.edu", apperr.Clip(d))
 		}
 		if !slices.Contains(out, d) {
 			out = append(out, d)

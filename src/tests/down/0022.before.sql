@@ -11,13 +11,13 @@ BEGIN;
 
 INSERT INTO sso_provider (id, display_name, issuer, client_id, client_secret_sealed, client_secret_hint, subject_claim,
                           enabled, position, created_by_actor_id, updated_by_actor_id) VALUES
-    ('hainanu-cas', 'HAINANU CAS', 'https://cas.hainanu.example/oidc', 'aishie', 'v1.0123456789abcdef.' || repeat('A', 60),
+    ('university-sso', 'University SSO', 'https://sso.example.edu/oidc', 'aishie', 'v1.0123456789abcdef.' || repeat('A', 60),
      '…abcd', 'sub', true, 1, '00000000-0000-0000-0018-000000000031', '00000000-0000-0000-0018-000000000031'),
     ('google', 'Google', 'https://accounts.google.com', 'aishie.apps', 'v1.0123456789abcdef.' || repeat('B', 60),
      '…', 'sub', false, 2, '00000000-0000-0000-0018-000000000031', '00000000-0000-0000-0018-000000000032');
--- 1c1 Ho at hainanu-cas · 1c2 Wei at the operator's provider
+-- 1c1 Ho at university-sso · 1c2 Wei at the operator's provider
 INSERT INTO credential (id, actor_id, kind, provider, subject) VALUES
-    ('00000000-0000-0000-0023-0000000001c1', '00000000-0000-0000-0018-000000000032', 'sso', 'hainanu-cas', '20230007'),
-    ('00000000-0000-0000-0023-0000000001c2', '00000000-0000-0000-0018-000000000033', 'sso', 'polyu-adfs', 'wei@polyu.edu.hk');
+    ('00000000-0000-0000-0023-0000000001c1', '00000000-0000-0000-0018-000000000032', 'sso', 'university-sso', '20230007'),
+    ('00000000-0000-0000-0023-0000000001c2', '00000000-0000-0000-0018-000000000033', 'sso', 'school-adfs', 'wei@campus.example.edu');
 
 COMMIT;

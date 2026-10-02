@@ -36,20 +36,20 @@ func TestAnAdministratorGivesAndCorrectsALoginID(t *testing.T) {
 
 	// Given with a person, trimmed, and vouched for.
 	wei := testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register",
-		m{"kind": "human", "display_name": "Wei", "login_id": " HNU2023001 "})).ActorID
-	if v := b.actorView(t, wei); v.LoginID == nil || *v.LoginID != "HNU2023001" || !v.LoginIDVerified || v.Email != nil {
+		m{"kind": "human", "display_name": "Wei", "login_id": " UNI2023001 "})).ActorID
+	if v := b.actorView(t, wei); v.LoginID == nil || *v.LoginID != "UNI2023001" || !v.LoginIDVerified || v.Email != nil {
 		t.Fatalf("Wei as registered: %+v", v)
 	}
 	// Nobody else's, in any case; a person's alone; and of its shape.
-	out := b.MustCall(b.admin, "actor.register", m{"kind": "human", "display_name": "Other", "login_id": "hnu2023001"}, "taken")
+	out := b.MustCall(b.admin, "actor.register", m{"kind": "human", "display_name": "Other", "login_id": "uni2023001"}, "taken")
 	if out.Status != domain.StatusFailed || out.Error.Code != apperr.Conflict || reason(out) != "login_id_taken" {
 		t.Fatalf("a login ID taken, in another case: %+v", out)
 	}
-	for _, bad := range []string{"", "  ", "2023 0001", "wei@hainanu.edu.cn", strings.Repeat("7", 65), "學號2023", "hnu/2023"} {
+	for _, bad := range []string{"", "  ", "2023 0001", "wei@campus.example.edu", strings.Repeat("7", 65), "學號2023", "uni/2023"} {
 		b.try(t, b.admin, "actor.register", m{"kind": "human", "display_name": "Bad", "login_id": bad}, apperr.InvalidArgument)
 	}
 	b.try(t, b.admin, "actor.register", m{"kind": "agent", "hosting": "mcp", "display_name": "bot", "login_id": "bot-1"}, apperr.InvalidArgument)
-	b.do(t, b.admin, "actor.register", m{"kind": "human", "display_name": "Longest", "login_id": "hnu.2023-00_" + strings.Repeat("7", 52)})
+	b.do(t, b.admin, "actor.register", m{"kind": "human", "display_name": "Longest", "login_id": "uni.2023-00_" + strings.Repeat("7", 52)})
 
 	// Given later, to Yuki, and corrected; nobody else's, and never an
 	// agent's. Each change is an event saying which field changed, and not
@@ -68,7 +68,7 @@ func TestAnAdministratorGivesAndCorrectsALoginID(t *testing.T) {
 	if v := b.actorView(t, b.yuki); *v.LoginID != "20230008" {
 		t.Fatalf("corrected: %+v", v)
 	}
-	out = b.MustCall(b.admin, "actor.update", m{"actor_id": b.ken, "login_id": "hnu2023001"}, "wei's")
+	out = b.MustCall(b.admin, "actor.update", m{"actor_id": b.ken, "login_id": "uni2023001"}, "wei's")
 	if out.Status != domain.StatusFailed || out.Error.Code != apperr.Conflict || reason(out) != "login_id_taken" {
 		t.Fatalf("Wei's login ID given to Ken: %+v", out)
 	}
@@ -76,7 +76,7 @@ func TestAnAdministratorGivesAndCorrectsALoginID(t *testing.T) {
 	b.try(t, b.admin, "actor.update", m{"actor_id": b.ken, "login_id": " "}, apperr.InvalidArgument) // it is not taken away
 
 	// An administrator finds them by a piece of it.
-	list := testkit.Result[tools.ActorListOut](t, b.do(t, b.admin, "actor.list", m{"search": "hnu20230"}))
+	list := testkit.Result[tools.ActorListOut](t, b.do(t, b.admin, "actor.list", m{"search": "uni20230"}))
 	if len(list.Actors) != 1 || list.Actors[0].ID != wei {
 		t.Fatalf("searching by a piece of a login ID: %+v", list.Actors)
 	}
@@ -117,16 +117,16 @@ func TestNobodyChangesTheirOwnLoginID(t *testing.T) {
 
 func TestALoginIDIsShownWithTheSeatAndFindsThePerson(t *testing.T) {
 	b := build(t)
-	b.do(t, b.admin, "actor.update", m{"actor_id": b.yuki, "login_id": "HNU20230007"})
+	b.do(t, b.admin, "actor.update", m{"actor_id": b.yuki, "login_id": "UNI20230007"})
 
 	// Whoever reads the members sees it on a person's seat, and on no agent's.
-	if v := b.memberView(t, b.yukiM); v.LoginID == nil || *v.LoginID != "HNU20230007" {
+	if v := b.memberView(t, b.yukiM); v.LoginID == nil || *v.LoginID != "UNI20230007" {
 		t.Fatalf("member.get: %+v", v)
 	}
 	for _, v := range testkit.Result[tools.MemberListOut](t, b.do(t, b.sato, "member.list", m{"course_id": b.course})).Members {
 		switch v.ID {
 		case b.yukiM:
-			if v.LoginID == nil || *v.LoginID != "HNU20230007" {
+			if v.LoginID == nil || *v.LoginID != "UNI20230007" {
 				t.Fatalf("member.list, Yuki: %+v", v)
 			}
 		default:
@@ -138,27 +138,27 @@ func TestALoginIDIsShownWithTheSeatAndFindsThePerson(t *testing.T) {
 
 	// Whoever seats members finds her by all of it, in any case, and by
 	// nothing less.
-	for _, id := range []string{"hnu20230007", " HNU20230007 "} {
+	for _, id := range []string{"uni20230007", " UNI20230007 "} {
 		got := testkit.Result[tools.MemberLookupActorOut](t, b.do(t, b.sato, "member.lookup_actor", m{"course_id": b.course, "login_id": id}))
 		if got.ActorID != b.yuki || got.MemberID == nil || *got.MemberID != b.yukiM {
 			t.Fatalf("member.lookup_actor by %q: %+v", id, got)
 		}
 	}
-	for _, part := range []string{"HNU2023", "20230007"} {
+	for _, part := range []string{"UNI2023", "20230007"} {
 		b.try(t, b.sato, "member.lookup_actor", m{"course_id": b.course, "login_id": part}, apperr.NotFound)
 	}
-	b.try(t, b.sato, "member.lookup_actor", m{"course_id": b.course, "login_id": "HNU20230007", "actor_id": b.yuki}, apperr.InvalidArgument)
+	b.try(t, b.sato, "member.lookup_actor", m{"course_id": b.course, "login_id": "UNI20230007", "actor_id": b.yuki}, apperr.InvalidArgument)
 	b.try(t, b.sato, "member.lookup_actor", m{"course_id": b.course, "login_id": " "}, apperr.InvalidArgument)
-	if out := b.MustCall(b.yuki, "member.lookup_actor", m{"course_id": b.course, "login_id": "HNU20230007"}, ""); out.Status != domain.StatusDenied {
+	if out := b.MustCall(b.yuki, "member.lookup_actor", m{"course_id": b.course, "login_id": "UNI20230007"}, ""); out.Status != domain.StatusDenied {
 		t.Fatalf("a student looking people up: %+v", out)
 	}
 
 	// So do administrators, and nobody is told the number back.
-	got := testkit.Result[tools.ActorLookupOut](t, b.do(t, b.admin, "actor.lookup_by_email", m{"login_id": "hnu20230007"}))
+	got := testkit.Result[tools.ActorLookupOut](t, b.do(t, b.admin, "actor.lookup_by_email", m{"login_id": "uni20230007"}))
 	if got.ActorID != b.yuki {
 		t.Fatalf("actor.lookup_by_email by login ID: %+v", got)
 	}
-	b.try(t, b.admin, "actor.lookup_by_email", m{"login_id": "hnu20230007", "email": "yuki@example.edu"}, apperr.InvalidArgument)
+	b.try(t, b.admin, "actor.lookup_by_email", m{"login_id": "uni20230007", "email": "yuki@example.edu"}, apperr.InvalidArgument)
 	b.try(t, b.admin, "actor.lookup_by_email", m{}, apperr.InvalidArgument)
 }
 
@@ -235,7 +235,7 @@ func TestRegisteringThroughAJoinLinkWithALoginIDAndNoEmail(t *testing.T) {
 	}
 
 	// A link kept to domains asks for an email, and takes nobody without one.
-	domains := b.joinLink(t, b.sato, m{"allowed_email_domains": []string{"hainanu.edu.cn"}})
+	domains := b.joinLink(t, b.sato, m{"allowed_email_domains": []string{"campus.example.edu"}})
 	if p := b.preview(t, domains.Token); !p.EmailRequired {
 		t.Fatalf("a link kept to domains: %+v", p)
 	}
@@ -243,7 +243,7 @@ func TestRegisteringThroughAJoinLinkWithALoginIDAndNoEmail(t *testing.T) {
 	if e, ok := apperr.As(err); !ok || e.Details["reason"] != "email_domain_not_allowed" {
 		t.Fatalf("no email, through a link kept to domains: %v", err)
 	}
-	out, _, err = b.registerAs(t, domains.Token, tools.JoinRegistration{DisplayName: "Fang", LoginID: "20230004", Email: "fang@hainanu.edu.cn"})
+	out, _, err = b.registerAs(t, domains.Token, tools.JoinRegistration{DisplayName: "Fang", LoginID: "20230004", Email: "fang@campus.example.edu"})
 	if err != nil {
 		t.Fatal(err)
 	}

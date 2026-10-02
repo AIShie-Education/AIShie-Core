@@ -342,7 +342,7 @@ func TestAnAgentDoesNotSignIn(t *testing.T) {
 	refusedByTheDatabase("a password", auth.SetPassword(ctx, q, agent, "the agent's password", time.Now()))
 	_, _, err := auth.IssueInvite(ctx, q, agent, &res.RootID, "test", time.Now().Add(time.Hour), time.Now())
 	refusedByTheDatabase("an invitation", err)
-	_, err = pool.Exec(ctx, `INSERT INTO credential (actor_id, kind, provider, subject) VALUES ($1, 'sso', 'polyu-adfs', 'grader@example.edu')`, agent)
+	_, err = pool.Exec(ctx, `INSERT INTO credential (actor_id, kind, provider, subject) VALUES ($1, 'sso', 'school-adfs', 'grader@example.edu')`, agent)
 	refusedByTheDatabase("an identity", err)
 
 	// What the release before could give it.
@@ -357,7 +357,7 @@ func TestAnAgentDoesNotSignIn(t *testing.T) {
 	withoutTheGuard(t, pool, `INSERT INTO credential (actor_id, kind, secret_hash) VALUES ($1, 'password', $2)`, agent, hash)
 	withoutTheGuard(t, pool, `INSERT INTO credential (actor_id, kind, secret_hash, token_prefix, expires_at)
 		VALUES ($1, 'invite', $2, $3, now() + interval '1 day')`, agent, inv.Hash, inv.Prefix)
-	withoutTheGuard(t, pool, `INSERT INTO credential (actor_id, kind, provider, subject) VALUES ($1, 'sso', 'polyu-adfs', 'grader@example.edu')`, agent)
+	withoutTheGuard(t, pool, `INSERT INTO credential (actor_id, kind, provider, subject) VALUES ($1, 'sso', 'school-adfs', 'grader@example.edu')`, agent)
 
 	a := auth.NewAuthenticator(pool, time.Hour)
 	_, err = a.Login(ctx, "grader@example.edu", "the agent's password")
@@ -369,7 +369,7 @@ func TestAnAgentDoesNotSignIn(t *testing.T) {
 	if wrong == nil || noSuch == nil || wrong.Error() != noSuch.Error() {
 		t.Fatalf("a wrong password for an agent: %v; for nobody: %v", wrong, noSuch)
 	}
-	_, err = a.SignInWithIdentity(ctx, auth.Identity{Provider: "polyu-adfs", Subject: "grader@example.edu"})
+	_, err = a.SignInWithIdentity(ctx, auth.Identity{Provider: "school-adfs", Subject: "grader@example.edu"})
 	if !apperr.Is(err, apperr.Forbidden) || reason(err) != auth.ReasonAgentsUseTokens {
 		t.Fatalf("an agent signing in through the identity provider: %v", err)
 	}
@@ -479,7 +479,7 @@ func TestLoginByLoginID(t *testing.T) {
 		email       *string
 		password    string
 	}{
-		{wei, "Wei", "HNU20230001", nil, "weis long password"},
+		{wei, "Wei", "UNI20230001", nil, "weis long password"},
 		{fang, "Fang", "20230002", ptr("fang@example.edu"), "fangs long password"},
 	} {
 		login := p.login
@@ -497,9 +497,9 @@ func TestLoginByLoginID(t *testing.T) {
 		password string
 		want     uuid.UUID
 	}{
-		{"HNU20230001", "weis long password", wei},
-		{"hnu20230001", "weis long password", wei},
-		{" HNU20230001\t", "weis long password", wei},
+		{"UNI20230001", "weis long password", wei},
+		{"uni20230001", "weis long password", wei},
+		{" UNI20230001\t", "weis long password", wei},
 		{"20230002", "fangs long password", fang},
 		{"FANG@example.edu", "fangs long password", fang},
 	} {
@@ -510,10 +510,10 @@ func TestLoginByLoginID(t *testing.T) {
 	}
 	_, noSuch := a.Login(ctx, "nobody@example.edu", "a long enough password")
 	for _, tc := range []struct{ name, password string }{
-		{"HNU20230001", "not the password!"},   // a login ID, the wrong password
-		{"HNU20230009", "weis long password"},  // no such login ID
-		{"HNU2023000", "weis long password"},   // a piece of one
-		{"HNU 20230001", "weis long password"}, // no login ID at all, and so nobody's
+		{"UNI20230001", "not the password!"},   // a login ID, the wrong password
+		{"UNI20230009", "weis long password"},  // no such login ID
+		{"UNI2023000", "weis long password"},   // a piece of one
+		{"UNI 20230001", "weis long password"}, // no login ID at all, and so nobody's
 		{"20230002@", "fangs long password"},   // an email, and so not the login ID
 		{strings.Repeat("7", 65), "a long enough password"},
 		{"", "a long enough password"},

@@ -299,11 +299,11 @@ func TestWithRegistrationOffPeopleSignInAndThenJoin(t *testing.T) {
 	// Mei, registered by an administrator and linked to the provider,
 	// signs in by single sign-on and joins.
 	mei := c.Actor("human", "Mei")
-	c.Exec(`UPDATE actor SET email = 'mei@polyu.edu.hk' WHERE id = $1`, mei)
-	a.link(mei, "mei@polyu.edu.hk")
+	c.Exec(`UPDATE actor SET email = 'mei@campus.example.edu' WHERE id = $1`, mei)
+	a.link(mei, "mei@campus.example.edu")
 	b := browser()
 	q := a.start(b, "/join")
-	if done := a.callback(b, a.idp.grant("mei@polyu.edu.hk", q.Get("nonce"), nil), q.Get("state")); !hasSession(done) {
+	if done := a.callback(b, a.idp.grant("mei@campus.example.edu", q.Get("nonce"), nil), q.Get("state")); !hasSession(done) {
 		t.Fatalf("Mei's sign-in: %d %s", done.Status, done.Raw)
 	}
 	join := a.do(b, "POST", httpapi.JoinPath+token, "", nil, "Idempotency-Key", "mei-joins", "Origin", frontEnd)

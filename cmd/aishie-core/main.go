@@ -116,11 +116,14 @@ Environment:
                     (sso.create), which need SECRETS_KEY; this one is read-only to them,
                     and wins over one of theirs with its name
   OIDC_CLIENT_ID, OIDC_CLIENT_SECRET
-  OIDC_PROVIDER_NAME   default polyu-adfs; what actor.link_sso calls the provider
+  OIDC_PROVIDER_NAME   what actor.link_sso calls the provider, such as school-adfs, and what every
+                       identity linked at it is recorded under: set it before anyone is linked,
+                       and never change it. Unset, it is polyu-adfs, the default kept for the
+                       servers that rely on it
   OIDC_SUBJECT_CLAIM   default upn; the claim an account is known by
   OIDC_SCOPES          default "openid profile email"
   OIDC_DISPLAY_NAME    the provider's name on the front end's sign-in button, such as
-                       "PolyU NetID", at most 64 printable characters; unset, the front end
+                       "School NetID", at most 64 printable characters; unset, the front end
                        uses words of its own. GET /v1/auth/methods tells the front end this,
                        and which providers a person may sign in through.
                        Register <PUBLIC_URL>/v1/auth/sso/callback with every provider.

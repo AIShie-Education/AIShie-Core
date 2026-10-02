@@ -172,17 +172,26 @@ type Config struct {
 	Memory memory.Config
 }
 
-// OIDC describes the identity provider. The defaults are PolyU's ADFS, which
-// is what docs/schema.md was written against: the provider is recorded as
-// "polyu-adfs" and an account is known by its UPN.
+// OIDC describes the identity provider. The defaults are for ADFS: an account
+// is known by its UPN. ProviderName (OIDC_PROVIDER_NAME) is what the provider
+// is recorded as, which an installation names for itself, such as
+// "school-adfs"; unset, it is DefaultOIDCProviderName.
 type OIDC struct {
 	ProviderName, Issuer, ClientID, ClientSecret, SubjectClaim string
 	Scopes                                                     []string
 	// DisplayName is the provider's name as the front end's sign-in button
-	// shows it, such as "PolyU NetID" (OIDC_DISPLAY_NAME). Empty leaves the
+	// shows it, such as "School NetID" (OIDC_DISPLAY_NAME). Empty leaves the
 	// button to the front end's own words.
 	DisplayName string
 }
+
+// DefaultOIDCProviderName is OIDC_PROVIDER_NAME when it is unset. It names the
+// identity provider Core was first written against, a real university's, and
+// it stays: an installation that never set OIDC_PROVIDER_NAME has its people's
+// identities linked under it (credential.provider), and under another
+// default none of them could sign in. A new installation names its provider
+// itself, before anyone is linked (README.md, Single sign-on).
+const DefaultOIDCProviderName = "polyu-adfs"
 
 func (o OIDC) Enabled() bool { return o.Issuer != "" }
 
@@ -337,7 +346,7 @@ func FromEnv() (Config, error) {
 	if err := c.readMemory(); err != nil {
 		return Config{}, err
 	}
-	c.OIDC = OIDC{ProviderName: env("OIDC_PROVIDER_NAME", "polyu-adfs"), Issuer: os.Getenv("OIDC_ISSUER"),
+	c.OIDC = OIDC{ProviderName: env("OIDC_PROVIDER_NAME", DefaultOIDCProviderName), Issuer: os.Getenv("OIDC_ISSUER"),
 		ClientID: os.Getenv("OIDC_CLIENT_ID"), ClientSecret: os.Getenv("OIDC_CLIENT_SECRET"),
 		SubjectClaim: env("OIDC_SUBJECT_CLAIM", "upn"), Scopes: strings.Fields(env("OIDC_SCOPES", "openid profile email"))}
 	name, err := displayName(os.Getenv("OIDC_DISPLAY_NAME"))
