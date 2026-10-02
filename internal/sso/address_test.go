@@ -2,6 +2,7 @@ package sso
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"net"
@@ -16,6 +17,8 @@ import (
 
 	"github.com/AIShie-Education/AIShie-Core/internal/apperr"
 	"github.com/AIShie-Education/AIShie-Core/internal/auth"
+	"github.com/AIShie-Education/AIShie-Core/internal/db/dbq"
+	"github.com/AIShie-Education/AIShie-Core/internal/secrets"
 )
 
 // A provider of the site's is reached at a public address only: not a
@@ -311,3 +314,148 @@ func TestAReportSaysATokenEndpointIsNotAtAPublicAddress(t *testing.T) {
 type roundTrip func(*http.Request) *http.Response
 
 func (f roundTrip) RoundTrip(r *http.Request) (*http.Response, error) { return f(r), nil }
+
+// A provider of the site's, held to public addresses, whose token endpoint
+// or key set is at no public address is refused as it is discovered, by
+// the rule sso.test reports it by: a sign-in through it is refused as it
+// starts, rather than once the person has signed in at the provider and
+// comes back. The refusal names the endpoint and the setting, never the
+// address its name resolved to. A name with a public address among its
+// addresses is taken, as the connection goes on to it, and one that does
+// not resolve is left to the sign-in.
+func TestAProvidersEndpointsAreAtPublicAddresses(t *testing.T) {
+	t.Cleanup(func() { lookup = net.DefaultResolver.LookupNetIP })
+	answers := map[string][]string{}
+	lookup = func(_ context.Context, network, host string) ([]netip.Addr, error) {
+		a, ok := answers[host]
+		if network != "ip" || !ok {
+			return nil, &net.DNSError{Err: "no such host", Name: host, IsNotFound: true}
+		}
+		var out []netip.Addr
+		for _, s := range a {
+			out = append(out, netip.MustParseAddr(s))
+		}
+		return out, nil
+	}
+	const (
+		publicToken = "https://idp.example.edu/adfs/token"
+		publicKeys  = "https://idp.example.edu/adfs/keys"
+	)
+	answers["idp.example.edu"] = []string{"8.8.8.8"}
+	answers["token.example.edu"] = []string{"10.0.0.7", "fd00::7"}
+	answers["keys.example.edu"] = []string{"169.254.169.254"}
+	answers["fake-ip.example.edu"] = []string{"198.18.6.49"}
+	answers["mixed.example.edu"] = []string{"10.0.0.7", "8.8.8.8"}
+	for _, c := range []struct {
+		token, keys string
+		refused     string // the endpoint refused, or none
+	}{
+		{token: publicToken, keys: publicKeys},
+		{token: "https://mixed.example.edu/token", keys: publicKeys},
+		{token: "https://nxdomain.example.edu/token", keys: publicKeys},
+		{token: publicToken, keys: ""}, // none named: go-oidc says so as it checks a signature
+		{token: "https://10.0.0.7/adfs/token", keys: publicKeys, refused: "token_endpoint"},
+		{token: "https://token.example.edu/adfs/token", keys: publicKeys, refused: "token_endpoint"},
+		{token: "https://fake-ip.example.edu/adfs/token", keys: publicKeys, refused: "token_endpoint"},
+		{token: "https://[::ffff:127.0.0.1]/token", keys: publicKeys, refused: "token_endpoint"},
+		{token: publicToken, keys: "https://keys.example.edu/adfs/keys", refused: "jwks_uri"},
+		{token: publicToken, keys: "http://localhost:8080/keys", refused: "jwks_uri"},
+		{token: "https://token.example.edu/adfs/token", keys: "https://keys.example.edu/adfs/keys", refused: "token_endpoint"},
+	} {
+		err := CheckEndpoints(t.Context(), c.token, c.keys)
+		if c.refused == "" {
+			if err != nil {
+				t.Errorf("%s, %s: %v", c.token, c.keys, err)
+			}
+			continue
+		}
+		at := map[string]string{"token_endpoint": c.token, "jwks_uri": c.keys}[c.refused]
+		if !IsAddressNotAllowed(err) || !strings.HasPrefix(err.Error(), "its "+c.refused+", \""+at+"\", is on this machine or a private") ||
+			!strings.Contains(err.Error(), "SSO_ALLOW_PRIVATE_ISSUERS") || slices.ContainsFunc([]string{"10.0.0.7", "fd00::7", "169.254", "198.18"},
+			func(a string) bool { return !strings.Contains(at, a) && strings.Contains(err.Error(), a) }) {
+			t.Errorf("%s, %s: %v, want %s refused", c.token, c.keys, err, c.refused)
+		}
+	}
+
+	// As a sign-in discovers the provider: refused when its token endpoint
+	// or its key set resolves privately, taken when both resolve publicly,
+	// and taken whatever they resolve to with no check, as for the
+	// operator's provider or with private addresses allowed.
+	var issuer, token, keys string
+	docs := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"issuer": issuer, "authorization_endpoint": issuer + "/authorize",
+			"token_endpoint": token, "jwks_uri": keys, "id_token_signing_alg_values_supported": []string{"RS256"}})
+	}))
+	t.Cleanup(docs.Close)
+	issuer = docs.URL + "/idp"
+	discover := func(check func(context.Context, string, string) error) error {
+		_, err := auth.NewOIDC(t.Context(), auth.OIDCConfig{Name: "campus", Issuer: issuer, ClientID: "c", ClientSecret: "s",
+			RedirectURL: "https://lms.example.edu/v1/auth/sso/callback", HTTPClient: docs.Client(), CheckEndpoints: check})
+		return err
+	}
+	token, keys = "https://token.example.edu/adfs/token", publicKeys
+	if err := discover(CheckEndpoints); !IsAddressNotAllowed(err) || !strings.Contains(err.Error(), "its token_endpoint") {
+		t.Fatalf("a token endpoint on a private network: %v", err)
+	}
+	if err := discover(nil); err != nil {
+		t.Fatalf("not checked: %v", err)
+	}
+	token, keys = publicToken, "https://keys.example.edu/adfs/keys"
+	if err := discover(CheckEndpoints); !IsAddressNotAllowed(err) || !strings.Contains(err.Error(), "its jwks_uri") {
+		t.Fatalf("a key set on a private network: %v", err)
+	}
+	if err := discover(nil); err != nil {
+		t.Fatalf("not checked: %v", err)
+	}
+	keys = publicKeys
+	if err := discover(CheckEndpoints); err != nil {
+		t.Fatalf("a public token endpoint and key set: %v", err)
+	}
+
+	// The registry checks them unless private addresses are allowed.
+	row := dbq.ListEnabledSSOProvidersRow{ID: "campus", Issuer: "https://idp.example.edu/adfs", ClientID: "c", SubjectClaim: "sub"}
+	if New(Config{}).oidcConfig(row, "s").CheckEndpoints == nil {
+		t.Fatal("a registry held to public addresses does not check a provider's endpoints")
+	}
+	if New(Config{PrivateIssuers: true}).oidcConfig(row, "s").CheckEndpoints != nil {
+		t.Fatal("a registry allowed private addresses checks a provider's endpoints")
+	}
+}
+
+// A provider of the site's whose issuer is plainly not at a public address,
+// set up before the server was held to public ones or while it allowed
+// private ones, is issuer_address_not_allowed to administrators while it is
+// held to them, and offered when it is not; its name is not resolved.
+func TestAProviderAtAPrivateAddressIsNotOffered(t *testing.T) {
+	k := make([]byte, secrets.KeySize)
+	_, _ = rand.Read(k)
+	keys, err := secrets.NewKeyring(k)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sealed, err := keys.Seal(SecretBinding("campus"), "s")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { lookup = net.DefaultResolver.LookupNetIP })
+	lookup = func(context.Context, string, string) ([]netip.Addr, error) {
+		t.Fatal("a provider's status resolved its issuer")
+		return nil, nil
+	}
+	held, allowed := New(Config{Keys: keys}), New(Config{Keys: keys, PrivateIssuers: true})
+	for _, issuer := range []string{"https://10.0.0.7/adfs", "http://127.0.0.1:5556/dex", "https://localhost/adfs", "https://[fd00:ec2::254]/idp"} {
+		if got := held.SiteStatus("campus", issuer, true, sealed); got != StatusAddressNotAllowed {
+			t.Errorf("%s: %s", issuer, got)
+		}
+		if got := held.SiteStatus("campus", issuer, false, sealed); got != StatusDisabled {
+			t.Errorf("%s, switched off: %s", issuer, got)
+		}
+		if got := allowed.SiteStatus("campus", issuer, true, sealed); got != StatusOffered {
+			t.Errorf("%s, private addresses allowed: %s", issuer, got)
+		}
+	}
+	if got := held.SiteStatus("campus", "https://adfs.example.edu/adfs", true, sealed); got != StatusOffered {
+		t.Errorf("a name: %s", got)
+	}
+}

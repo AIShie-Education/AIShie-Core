@@ -3,9 +3,11 @@ package sso
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"strings"
 	"syscall"
 	"time"
@@ -154,5 +156,51 @@ func guardedClient(allowed func(netip.AddrPort) bool) *http.Client {
 }
 
 // IsAddressNotAllowed reports whether err is a connection refused for its
-// address.
+// address, or an endpoint refused for its (CheckEndpoints).
 func IsAddressNotAllowed(err error) bool { return errors.Is(err, ErrAddressNotAllowed) }
+
+// CheckEndpoints refuses, for a provider of the site's held to public
+// addresses, a discovery document whose token endpoint or key set
+// (jwks_uri) is at no public address, by the rule sso.test reports it by
+// (reachable): neither is fetched until a sign-in comes back from the
+// provider, which would then fail after the person had signed in there.
+// The connection is still checked as it is made; this says so before a
+// sign-in starts. Its error names the endpoint, never the address its name
+// resolved to, and is IsAddressNotAllowed.
+func CheckEndpoints(ctx context.Context, tokenURL, keysURL string) error {
+	for _, e := range []endpointError{{"token_endpoint", tokenURL}, {"jwks_uri", keysURL}} {
+		if err := notPublicEndpoint(ctx, e.name, e.url); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// notPublicEndpoint is an endpointError for the endpoint name at v when v
+// is a web URL whose host is not reachable, and nil otherwise: what is no
+// URL to fetch is left to whatever would fetch it.
+func notPublicEndpoint(ctx context.Context, name, v string) error {
+	u, err := url.Parse(v)
+	if err != nil || !webURL(v) || reachable(ctx, u.Hostname()) {
+		return nil
+	}
+	return endpointError{name: name, url: v}
+}
+
+// endpointError is an endpoint of a provider's at no public address.
+type endpointError struct{ name, url string }
+
+func (e endpointError) Error() string {
+	return fmt.Sprintf("its %s, %q, is %s", e.name, clip(e.url), notPublicWhy)
+}
+
+func (endpointError) Is(target error) bool { return target == ErrAddressNotAllowed }
+
+// plainlyPublic reports whether issuer's host may be public, as far as can
+// be told without resolving it (publicHost): what sso.create and sso.update
+// hold an issuer to, and what the sign-in page and sso.list ask of one set
+// up before they did, or while private addresses were allowed.
+func plainlyPublic(issuer string) bool {
+	u, err := url.Parse(issuer)
+	return err == nil && publicHost(u.Hostname())
+}

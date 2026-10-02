@@ -293,10 +293,14 @@ Run all of these as root on the server.
   through a proxy, or one whose DNS answers through a transparent proxy
   with `198.18.` addresses (a fake-IP mode) sets
   `SSO_ALLOW_PRIVATE_ISSUERS=true` in the env file, and the server says so
-  in its log as it starts. A provider set up on such an address before this
-  check stays listed and switched on, and a sign-in through it fails
-  (`sso_provider_unavailable`, the reason in the log) until the setting is
-  made. The operator's provider (`OIDC_ISSUER`) is reached wherever it is.
+  in its log as it starts. A provider set up before this check with its
+  issuer written as such an address stays switched on, but is not offered
+  on the sign-in page, and `sso.list` gives it the status
+  `issuer_address_not_allowed`, until the setting is made; one whose name,
+  or whose token endpoint's or key set's, resolves there is offered, and a
+  sign-in through it is refused as it starts (`sso_provider_unavailable`,
+  the reason in the log). The operator's provider (`OIDC_ISSUER`) is
+  reached wherever it is.
   `OIDC_DISPLAY_NAME` is what the front end's sign-in button calls the
   provider; without it, the front end uses words of its own. Like every value
   in the file it takes no quotes, even with a space in it:

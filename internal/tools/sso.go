@@ -61,7 +61,7 @@ type SSOProviderView struct {
 	LinkByEmail         bool       `json:"link_by_email" jsonschema:"whether someone the provider vouches for, whose identity is linked to nobody, is linked at sign-in to the account whose email the provider vouches for, within allowed_email_domains; otherwise only accounts already linked sign in"`
 	Enabled             bool       `json:"enabled"`
 	Position            int        `json:"position" jsonschema:"its place on the sign-in page, lowest first; the operator's is always first"`
-	Status              string     `json:"status" jsonschema:"offered: a sign-in may go through it; disabled: switched off; id_taken: the operator's provider has its id, and is offered in its place; secret_unavailable: its client secret does not open with this server's keys, so give it again"`
+	Status              string     `json:"status" jsonschema:"offered: a sign-in may go through it; disabled: switched off; id_taken: the operator's provider has its id, and is offered in its place; secret_unavailable: its client secret does not open with this server's keys, so give it again; issuer_address_not_allowed: its issuer is on this machine or at a private, link-local or other address that is not public, which the server reaches only if its operator sets SSO_ALLOW_PRIVATE_ISSUERS"`
 	LinkedAccounts      int        `json:"linked_accounts" jsonschema:"the accounts that sign in through it: identities linked at it and not unlinked"`
 	Version             *int32     `json:"version" jsonschema:"moves on with every change; give it to sso.update, sso.set_enabled and sso.delete (or in If-Match) to change only what you read. Null for the operator's"`
 	CreatedAt           *time.Time `json:"created_at"`
@@ -80,7 +80,7 @@ func siteView(d Deps, r ssoRow) SSOProviderView {
 	v := SSOProviderView{ID: r.ID, Source: sso.SourceSite, DisplayName: &name, Issuer: r.Issuer, ClientID: r.ClientID,
 		ClientSecretHint: r.ClientSecretHint, Scopes: strs(r.Scopes), SubjectClaim: r.SubjectClaim, EmailClaim: r.EmailClaim,
 		AllowedEmailDomains: strs(r.AllowedEmailDomains), LinkByEmail: r.LinkByEmail, Enabled: r.Enabled, Position: pos,
-		Status: d.SSO.SiteStatus(r.ID, r.Enabled, r.ClientSecretSealed), LinkedAccounts: int(r.LinkedAccounts), Version: &version,
+		Status: d.SSO.SiteStatus(r.ID, r.Issuer, r.Enabled, r.ClientSecretSealed), LinkedAccounts: int(r.LinkedAccounts), Version: &version,
 		CreatedAt: &created, CreatedBy: &SSOActor{ActorID: r.CreatedByActorID, DisplayName: r.CreatedByName},
 		UpdatedAt: &updated, UpdatedBy: &SSOActor{ActorID: r.UpdatedByActorID, DisplayName: r.UpdatedByName},
 		RedirectURI: d.SSO.RedirectURL()}
@@ -511,7 +511,7 @@ func lockSSOProvider(ctx context.Context, q *dbq.Queries, id string, version *in
 
 type SSOSetEnabledIn struct {
 	ProviderID string `json:"provider_id"`
-	Enabled    bool   `json:"enabled" jsonschema:"true offers it on the sign-in page and lets a sign-in through it; false stops both, at once, and unlinks nobody"`
+	Enabled    bool   `json:"enabled" jsonschema:"true offers it on the sign-in page and lets a sign-in through it, unless its issuer is plainly not at a public address (localhost, or such an address written out) and the server's operator has not set SSO_ALLOW_PRIVATE_ISSUERS (status issuer_address_not_allowed); false stops both, at once, and unlinks nobody"`
 	Version    *int32 `json:"version,omitempty" jsonschema:"the version you read; the change is then made only over it (version_mismatch). Over REST the If-Match header may carry it"`
 }
 
@@ -521,8 +521,11 @@ func ssoSetEnabled(d Deps) tool.Tool {
 		Description: "Switch a site's identity provider on or off. Off, it is not offered on the sign-in page, a sign-in through it " +
 			"is refused, even one already under way, and nobody is unlinked: switched on again, everyone linked signs in as " +
 			"before. One whose client secret does not open with this server's keys is not switched on (secret_unavailable): " +
-			"give the secret again (sso.update). Already so, nothing changes. The operator's provider is refused " +
-			"(set_by_operator). Root and platform administrators only.",
+			"give the secret again (sso.update). One whose issuer is plainly not at a public address (localhost, or such an " +
+			"address written out) is switched on but, while the server is held to public addresses, not offered, and a " +
+			"sign-in through it is refused (status issuer_address_not_allowed): the server's operator may set " +
+			"SSO_ALLOW_PRIVATE_ISSUERS, or you may move the issuer with sso.update. Already so, nothing changes. The " +
+			"operator's provider is refused (set_by_operator). Root and platform administrators only.",
 		Kind: tool.Write, Gate: admins,
 		HTTP:    tool.Route{Method: "POST", Pattern: "/v1/sso/providers/{provider_id}/enabled", IfMatch: "version"},
 		Resolve: noTarget[SSOSetEnabledIn]("sso_provider"),

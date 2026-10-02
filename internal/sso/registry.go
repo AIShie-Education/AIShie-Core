@@ -204,8 +204,9 @@ type Offer struct {
 // Offered lists the providers a sign-in may go through now, in the sign-in
 // page's order: the operator's first, then the site's that are switched
 // on, by position. A provider of the site's with the operator's id is not
-// offered: the operator's is. Nor is one whose client secret this server
-// cannot open, which could sign nobody in: that is logged.
+// offered: the operator's is. Nor is one that could sign nobody in, which
+// is logged: one whose client secret this server cannot open, or, held to
+// public addresses, one whose issuer is plainly not at one (reachesIssuer).
 func (r *Registry) Offered(ctx context.Context) ([]Offer, error) {
 	var out []Offer
 	if op := r.Operator(); op != nil {
@@ -224,7 +225,14 @@ func (r *Registry) Offered(ctx context.Context) ([]Offer, error) {
 			continue
 		}
 		if _, err := r.cfg.Keys.Open(SecretBinding(p.ID), p.ClientSecretSealed); err != nil {
-			r.warnOnce(p.ID, p.ClientSecretSealed, err)
+			r.warnOnce(p.ID+" "+p.ClientSecretSealed, "an identity provider is switched on, but its client secret does not "+
+				"open with this server's keys; it is not offered", "provider", p.ID, "err", err)
+			continue
+		}
+		if !r.reachesIssuer(p.Issuer) {
+			r.warnOnce(p.ID+" "+p.Issuer, "an identity provider is switched on, but its issuer is not at a public address, "+
+				"and SSO_ALLOW_PRIVATE_ISSUERS is not set; it is not offered", "provider", p.ID, "issuer", p.Issuer,
+				"reason", ReasonAddressNotAllowed)
 			continue
 		}
 		label := p.DisplayName
@@ -244,17 +252,25 @@ func (r *Registry) enabled(ctx context.Context) ([]dbq.ListEnabledSSOProvidersRo
 	return rows, nil
 }
 
-// warnOnce says, once for each sealed secret, that a provider switched on
-// is not offered because its secret does not open.
-func (r *Registry) warnOnce(id, sealed string, err error) {
+// warnOnce says msg once for key: that a provider switched on is not
+// offered, once for each sealed secret that does not open and each issuer
+// not at a public address.
+func (r *Registry) warnOnce(key, msg string, args ...any) {
 	r.mu.Lock()
-	said := r.warned[id+" "+sealed]
-	r.warned[id+" "+sealed] = true
+	said := r.warned[key]
+	r.warned[key] = true
 	r.mu.Unlock()
 	if !said {
-		r.cfg.Log.Warn("an identity provider is switched on, but its client secret does not open with this server's keys; it is not offered",
-			"provider", id, "err", err)
+		r.cfg.Log.Warn(msg, args...)
 	}
+}
+
+// reachesIssuer reports whether a provider of the site's at issuer may be
+// reached, as far as can be told without resolving its name: anywhere when
+// private addresses are allowed, and otherwise when its host is plainly
+// not on this machine nor at an address that is not Public.
+func (r *Registry) reachesIssuer(issuer string) bool {
+	return r.PrivateIssuers() || plainlyPublic(issuer)
 }
 
 // shadowed reports whether id is the operator's provider's.
@@ -306,20 +322,42 @@ func (r *Registry) Resolve(ctx context.Context, id string) (Resolved, error) {
 			r.cfg.Log.Error("an identity provider's client secret does not open with this server's keys", "provider", p.ID, "err", err)
 			return Resolved{}, ErrUnavailable
 		}
-		cfg := auth.OIDCConfig{Name: p.ID, Issuer: p.Issuer, ClientID: p.ClientID, ClientSecret: secret,
-			RedirectURL: r.RedirectURL(), SubjectClaim: p.SubjectClaim, Scopes: p.Scopes, HTTPClient: r.cfg.Client}
-		if p.EmailClaim != nil {
-			cfg.EmailClaim = *p.EmailClaim
+		if !r.reachesIssuer(p.Issuer) {
+			r.cfg.Log.Warn("an identity provider's issuer is not at a public address, and SSO_ALLOW_PRIVATE_ISSUERS is not set",
+				"provider", p.ID, "issuer", p.Issuer, "reason", ReasonAddressNotAllowed)
+			return Resolved{}, ErrUnavailable
 		}
+		cfg := r.oidcConfig(p, secret)
 		idp, err := r.discover(ctx, cfg)
 		if err != nil {
-			r.cfg.Log.Warn("an identity provider could not be discovered", "provider", p.ID, "issuer", p.Issuer, "err", err)
+			args := []any{"provider", p.ID, "issuer", p.Issuer, "err", err}
+			if IsAddressNotAllowed(err) {
+				args = append(args, "reason", ReasonAddressNotAllowed)
+			}
+			r.cfg.Log.Warn("an identity provider could not be discovered", args...)
 			return Resolved{}, ErrUnavailable
 		}
 		return Resolved{ID: p.ID, Source: SourceSite, LinkByEmail: p.LinkByEmail && cfg.EmailClaim != "",
 			AllowedEmailDomains: p.AllowedEmailDomains, IdP: idp}, nil
 	}
 	return Resolved{}, ErrNotOffered
+}
+
+// oidcConfig is what the site's provider p is discovered with, its client
+// secret opened. Held to public addresses, one whose token endpoint or key
+// set is at none is refused as it is discovered (CheckEndpoints): as a
+// sign-in starts, not once the person has signed in at the provider and
+// comes back.
+func (r *Registry) oidcConfig(p dbq.ListEnabledSSOProvidersRow, secret string) auth.OIDCConfig {
+	cfg := auth.OIDCConfig{Name: p.ID, Issuer: p.Issuer, ClientID: p.ClientID, ClientSecret: secret,
+		RedirectURL: r.RedirectURL(), SubjectClaim: p.SubjectClaim, Scopes: p.Scopes, HTTPClient: r.cfg.Client}
+	if p.EmailClaim != nil {
+		cfg.EmailClaim = *p.EmailClaim
+	}
+	if !r.cfg.PrivateIssuers {
+		cfg.CheckEndpoints = CheckEndpoints
+	}
+	return cfg
 }
 
 // fingerprint says whether two settings are the same, secret included,
@@ -388,11 +426,18 @@ const (
 	// StatusSecretUnavailable: its client secret does not open with this
 	// server's keys (SECRETS_KEY and SECRETS_KEY_PREVIOUS).
 	StatusSecretUnavailable = "secret_unavailable"
+	// StatusAddressNotAllowed: its issuer is plainly on this machine or at
+	// an address that is not Public, and the server is held to public ones
+	// (SSO_ALLOW_PRIVATE_ISSUERS is not set). It was set up before the
+	// server was, or while private addresses were allowed.
+	StatusAddressNotAllowed = ReasonAddressNotAllowed
 )
 
-// SiteStatus is the standing of the site's provider id, switched on or not,
-// its secret sealed as sealed.
-func (r *Registry) SiteStatus(id string, enabled bool, sealed string) string {
+// SiteStatus is the standing of the site's provider id, at issuer, switched
+// on or not, its secret sealed as sealed. An issuer whose name resolves to
+// an address that is not public is not told here, which resolves nothing:
+// sso.test says so, and a sign-in through it is refused as it starts.
+func (r *Registry) SiteStatus(id, issuer string, enabled bool, sealed string) string {
 	switch {
 	case r.shadowed(id):
 		return StatusIDTaken
@@ -401,6 +446,9 @@ func (r *Registry) SiteStatus(id string, enabled bool, sealed string) string {
 	}
 	if _, err := r.Keys().Open(SecretBinding(id), sealed); err != nil {
 		return StatusSecretUnavailable
+	}
+	if !r.reachesIssuer(issuer) {
+		return StatusAddressNotAllowed
 	}
 	return StatusOffered
 }

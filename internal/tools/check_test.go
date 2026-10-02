@@ -722,6 +722,13 @@ func TestACallTheCourseWouldRefuseIsNotProposed(t *testing.T) {
 	// Sato's handout: its Word file converted, its PDF never.
 	handout := b.handout(t, false)
 	b.convert(t, b.claimRenditions(t, m{})[0], pdfOf("the handout"), 1)
+	// Sato's reader, a file in each of its two versions.
+	reader := testkit.Result[tools.DocumentCreateOut](t, b.do(t, b.sato, "document.create",
+		m{"course_id": b.course, "kind": "material", "title": "Reader", "files": []m{
+			{"upload_token": b.upload(t, b.sato, "material", "text/plain", []byte("week 1")), "filename": "week1.txt"}}}))
+	readerV2 := testkit.Result[tools.DocumentVersionOut](t, b.do(t, b.sato, "document.add_version",
+		m{"course_id": b.course, "document_id": reader.DocumentID, "files": []m{
+			{"upload_token": b.upload(t, b.sato, "material", "text/plain", []byte("week 2")), "filename": "week2.txt"}}})).VersionID
 	// Yuki's question carries a text file, which has no rendition.
 	opened := testkit.Result[tools.ConversationOpenOut](t, b.do(t, b.yuki, "conversation.open", m{"course_id": b.course,
 		"respondent_member_id": b.tutorM, "body": "My notes?", "attachments": []m{
@@ -904,6 +911,13 @@ func TestACallTheCourseWouldRefuseIsNotProposed(t *testing.T) {
 			"body": "Week 4."}),
 			apperr.NotFound, "no such file of this version"},
 		{"document.text_retranscribe", in(m{"document_id": handout.DocumentID, "version_id": *handout.VersionID, "file_id": lastYear.FileIDs[0]}),
+			apperr.NotFound, "no such file of this version"},
+		// The reader's second version, and the file of its first: the
+		// document's, but not this version's.
+		{"document.text_update", in(m{"document_id": reader.DocumentID, "version_id": readerV2, "file_id": reader.FileIDs[0],
+			"body": "Week 2."}),
+			apperr.NotFound, "no such file of this version"},
+		{"document.text_retranscribe", in(m{"document_id": reader.DocumentID, "version_id": readerV2, "file_id": reader.FileIDs[0]}),
 			apperr.NotFound, "no such file of this version"},
 		{"document.text_retranscribe", in(m{"document_id": handout.DocumentID, "version_id": *handout.VersionID,
 			"file_id": handout.FileIDs[0], "base_revision": 99}),
