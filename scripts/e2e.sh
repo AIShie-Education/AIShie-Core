@@ -5,7 +5,9 @@
 # entirely through the REST API — register the actors, each person invited,
 # choosing a password and signing in with it, each agent given a token, and
 # nobody a person a token; create and open the course, seat the instructor, set up grading,
-# publish an assignment, hand in work, have an agent grade it, approve, post;
+# publish an assignment, hand in work, have an agent grade it, ask it for
+# changes, which it reads and makes, proposing again naming the grade it
+# revises, approve, post;
 # have the instructor rename the course, halve the assignment's points with
 # the grade rescaled, override and restore the student's total, rename and
 # bring back the slides, and make the student a TA and a student again;
@@ -103,6 +105,8 @@ call() {
   fi
   # IF_MATCH='"3"' call ... — the version a write is made over.
   [ -z "${IF_MATCH:-}" ] || args+=(-H "If-Match: $IF_MATCH")
+  # REVISES=<action id> call ... — the proposal sent back for changes a write revises.
+  [ -z "${REVISES:-}" ] || args+=(-H "Revises: $REVISES")
   local got
   got=$(curl "${args[@]}" "$BASE$path")
   [ "$got" = "$want" ] || fail "$method $path → $got, want $want: $(cat "$WORK/body")"
@@ -322,9 +326,35 @@ call 403 POST "$C/actions/$ACTION/decide" "$GRADER" '{"decision":"approve"}' # n
 call 200 GET "$C/grades" "$YUKI"
 [ "$(json "$WORK/body" 'len(d["result"]["grades"])')" = 0 ] || fail "Yuki sees a grade before anyone approved or posted it"
 
-step "Sato approves, then posts"
+step "Sato asks for changes, saying what; the agent finds it in its feed, reads what to change, and proposes again, naming the grade it revises"
+call 400 POST "$C/actions/$ACTION/decide" "$SATO" '{"decision":"request_changes"}' # saying what, or not at all
+[ "$(reason)" = note_required ] || fail "changes asked for saying nothing, refused, but not saying why: $(cat "$WORK/body")"
+NOTE="Say what the second section is missing."
+call 200 POST "$C/actions/$ACTION/decide" "$SATO" "{\"decision\":\"request_changes\",\"reason\":\"$NOTE\"}"
+[ "$(json "$WORK/body" 'd["result"]["outcome"]')" = changes_requested ] || fail "the proposal was not sent back: $(cat "$WORK/body")"
+call 200 GET "$C/events?since_seq=0" "$GRADER"
+json "$WORK/body" '[e for e in d["result"]["events"] if e["type"] == "action.changes_requested" and e["action_id"] == "'"$ACTION"'"] or sys.exit("no action.changes_requested in the agent feed")' >/dev/null
+call 200 GET "$C/actions/mine" "$GRADER"
+[ "$(json "$WORK/body" '[(a["status"], a["result"]["decision"]["reason"]) for a in d["result"]["actions"] if a["id"] == "'"$ACTION"'"]')" = "[('changes_requested', '$NOTE')]" ] ||
+  fail "the agent does not read what to change: $(cat "$WORK/body")"
+KEY=yuki-hw3 call 409 POST "$C/grades" "$GRADER" "$GRADE" # the first call, retried: sent back, nothing done
+[ "$(json "$WORK/body" 'd["status"]')" = changes_requested ] || fail "the first call, retried, does not say it was sent back"
+call 200 GET "$C/grades" "$YUKI"
+[ "$(json "$WORK/body" 'len(d["result"]["grades"])')" = 0 ] || fail "a grade sent back for changes was written"
+FIRST=$ACTION
+REVISED="{\"submission_id\":\"$SUB\",\"score\":85,\"feedback\":\"Clear thesis; the second section needs evidence for its claim.\"}"
+REVISES=$HW3 KEY=yuki-hw3-bad call 400 POST "$C/grades" "$GRADER" "$REVISED" # no proposal of its own
+[ "$(reason)" = not_revisable ] || fail "revising what is no proposal of its own, refused, but not saying why: $(cat "$WORK/body")"
+REVISES=$FIRST KEY=yuki-hw3-r1 call 202 POST "$C/grades" "$GRADER" "$REVISED"
+ACTION=$(json "$WORK/body" 'd["action_id"]')
+call 200 GET "$C/actions/$FIRST" "$SATO"
+[ "$(json "$WORK/body" 'd["result"]["status"], d["result"]["result"]["decision"]["reason"]')" = "changes_requested $NOTE" ] ||
+  fail "Sato does not read what he asked for: $(cat "$WORK/body")"
+
+step "Sato approves the revision, then posts"
 call 200 GET "$C/actions/proposed" "$SATO"
-[ "$(json "$WORK/body" 'd["result"]["actions"][0]["id"]')" = "$ACTION" ] || fail "the proposal is not in the approval queue"
+[ "$(json "$WORK/body" 'd["result"]["actions"][0]["id"], d["result"]["actions"][0]["revises_action_id"]')" = "$ACTION $FIRST" ] ||
+  fail "the revision, naming what it revises, is not in the approval queue: $(cat "$WORK/body")"
 call 200 POST "$C/actions/$ACTION/decide" "$SATO" '{"decision":"approve"}'
 [ "$(json "$WORK/body" 'd["result"]["outcome"]')" = executed ] || fail "the proposal did not execute"
 call 200 POST "$C/grades/post" "$SATO" "{\"assignment_id\":\"$HW3\"}"
@@ -335,7 +365,9 @@ call 200 GET "$C/gradebook/$YUKI_M" "$YUKI"
 [ "$(json "$WORK/body" 'd["result"]["components"][0]["percent"]')" = 85 ] || fail "Yuki's total is not 85"
 call 200 GET "$C/events?since_seq=0" "$GRADER"
 json "$WORK/body" '"action.approved" in [e["type"] for e in d["result"]["events"]] or sys.exit("no action.approved in the agent feed")' >/dev/null
-KEY=yuki-hw3 call 200 POST "$C/grades" "$GRADER" "$GRADE" # the original call, replayed now, reports executed
+REVISES=$FIRST KEY=yuki-hw3-r1 call 200 POST "$C/grades" "$GRADER" "$REVISED" # the revision, replayed now, reports executed
+KEY=yuki-hw3-r1 call 409 POST "$C/grades" "$GRADER" "$REVISED" # the same key revising nothing is another call
+[ "$(code)" = idempotency_conflict ] || fail "the revision's key, revising nothing, is not a conflict: $(cat "$WORK/body")"
 
 step "Sato renames the course from his seat; its code and the rest stay the administrators'"
 call 200 POST "$C/details" "$SATO" '{"title":"Computing for Everyone","description":"No experience needed."}'
@@ -1011,12 +1043,13 @@ mcp() { # JSON-RPC body → $WORK/body
 json "$WORK/body" '"grade_submit" in [t["name"] for t in d["result"]["tools"]] or sys.exit("grade_submit is not offered over MCP")' >/dev/null
 json "$WORK/body" '{"conversation_upload_url", "conversation_attachment"} <= {t["name"] for t in d["result"]["tools"]} or sys.exit("a message'"'"'s files are not reached over MCP")' >/dev/null
 echo "  tools/list offers $(json "$WORK/body" 'len(d["result"]["tools"])') tools, grade_submit among them"
-# The call REST made earlier, replayed over MCP with the same key: one action, two doors.
-CALL="{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"grade_submit\",\"arguments\":{\"course_id\":\"$COURSE\",\"submission_id\":\"$SUB\",\"score\":85,\"feedback\":\"Clear thesis.\",\"idempotency_key\":\"yuki-hw3\"}}}"
+# The revision REST made earlier, replayed over MCP with the same key and
+# what it revises, as an argument there: one action, two doors.
+CALL="{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"grade_submit\",\"arguments\":{\"course_id\":\"$COURSE\",\"submission_id\":\"$SUB\",\"score\":85,\"feedback\":\"Clear thesis; the second section needs evidence for its claim.\",\"idempotency_key\":\"yuki-hw3-r1\",\"revises\":\"$FIRST\"}}}"
 [ "$(mcp "$GRADER" "$CALL")" = 200 ] || fail "tools/call: $(cat "$WORK/body")"
 [ "$(json "$WORK/body" 'd["result"]["structuredContent"]["action_id"]')" = "$ACTION" ] || fail "MCP and REST did not reach the same action: $(cat "$WORK/body")"
 [ "$(json "$WORK/body" 'd["result"]["structuredContent"]["replayed"]')" = True ] || fail "not a replay"
-echo "  grade_submit over MCP with REST's idempotency key replays REST's action: one tool layer"
+echo "  grade_submit over MCP with REST's idempotency key and revision replays REST's action: one tool layer"
 # Sato's mcp agent, which nobody asks in the site, works over MCP with his
 # token for it: told it is an mcp agent, and reading its seat.
 [ "$(mcp "$HELPER" '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"me_get","arguments":{}}}')" = 200 ] || fail "me_get: $(cat "$WORK/body")"
