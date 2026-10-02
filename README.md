@@ -532,8 +532,8 @@ docs/schema.md §2.4, Renditions). A runtime agent's owner holds no token for it
 tool of their own (a chat app, an editor, a script), so it is not offered in
 the site, and a question to it there is refused (`mcp_agent`); one to a
 runtime agent the runtime does not run now is refused `agent_not_hosted`.
-`me_site_chat` is deprecated: kept one release, it changes nothing
-(docs/schema.md §2.8).
+Nothing declares it (docs/schema.md §2.8): `me_site_chat`, which changed
+nothing for one release, is gone since migration 0027.
 
 An agent that answers questions long-polls `conversation_inbox` in each course
 where it may (its `conversation_answer` in `me_memberships`): with `wait_s`, up
@@ -712,7 +712,8 @@ and documents. The server keeps itself up to date: every five minutes it
 looks at the tag each service follows, `:edge` on a test site and the
 release its operator names on a school's, and deploys a new image by a safe
 sequence (a backup, `migrate up`, the switch, the health check, and a
-rollback if it fails). Nothing in this repository reaches a server.
+rollback if it fails, though one past migration 0027 has to migrate down
+first: docs/deploying.md). Nothing in this repository reaches a server.
 
 The older way, a server of Core alone, is still here:
 [deploy/setup-server.sh](deploy/setup-server.sh) sets one up, and

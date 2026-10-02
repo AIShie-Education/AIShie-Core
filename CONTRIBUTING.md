@@ -46,6 +46,14 @@ running while the new schema goes in, so a migration must leave the previous
 release working: add a column in one release, stop using the old one in the
 next, drop it in the one after.
 
+Migration 0027 is the one exception: the columns it drops, which 0023 and 0025
+kept for the release before them, are still written and read by the release
+before it. It goes out in a release of its own, once every server runs a
+release with 0023 and 0025 and an agent runtime that names a file (`file_id`)
+when it tries a transcription credential, and a rollback past it migrates down
+first, with its own image (docs/deploying.md, Rolling back); its down puts
+back everything the release before reads.
+
 A migration that has reached `main` has run on edge: never delete,
 renumber or rewrite it; undo it with a new one. `migrate up` leaves a schema
 that is ahead of the binary as it is, since that is what a rollback looks
@@ -84,7 +92,9 @@ stable): that is the decision to deploy and to migrate. Going back is
 pinning the release before (its README, Rolling back): `migrate up` leaves
 a schema a newer release migrated as it is, and a migration keeps the
 release before it working. A release further back may need what a later
-migration has dropped.
+migration has dropped. Going back past migration 0027 is the exception
+(Migrations, above): its release's image migrates down first, which the
+stack's own rollback after a failed health check does not do.
 
 To a server of Core's own (the older way,
 [docs/deploying.md](docs/deploying.md)), somebody runs **Deploy** for it

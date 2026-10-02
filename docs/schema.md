@@ -73,29 +73,25 @@ department(id, name, parent_id null→department, created_at)   -- a tree of the
 actor(id, kind [human|agent|system|service], display_name, email null,
       status [active|suspended], platform_role null [root|admin],
       created_by_actor_id null→actor, created_at,
-      owner_actor_id null→actor, suspended_by_actor_id null→actor,
-      site_chat_credential_id null, email_verified = true,
+      owner_actor_id null→actor, suspended_by_actor_id null→actor, email_verified = true,
       login_id null, login_id_verified = true,
       service_scope null [document_text|agent_runtime], hosting null [runtime|mcp])
     unique(lower(email)), unique(lower(login_id)), unique(service_scope)
     check: owner_actor_id ≠ id;  owner_actor_id set ⇒ kind = 'agent' and no platform_role;
-           site_chat_credential_id set ⇒ kind = 'agent';
            not email_verified ⇒ kind = 'human' and email set;
            login_id is 1..64 of [0-9A-Za-z._-];  login_id set ⇒ kind = 'human';
            not login_id_verified ⇒ kind = 'human' and login_id set;
            service_scope set ⇔ kind = 'service';  kind = 'service' ⇒ no email, no platform_role;
            hosting set ⇔ kind = 'agent'
-    composite FK (site_chat_credential_id, id) → credential(id, actor_id)
     trigger: the owner is a person (kind = 'human'), and never changes
-    trigger: an agent's hosting never changes (actor_hosting_fixed); an agent written naming
-             none, as the release before 0025 writes one, is an mcp agent
+    trigger: an agent's hosting never changes (actor_hosting_fixed)
 
 credential(id, actor_id→actor, kind [password|sso|api_token|session|invite|service],
            secret_hash null, provider null, subject null, token_prefix null,
            label null, last_used_at null, expires_at null, revoked_at null, created_at,
            issued_by_actor_id null→actor, must_change = false,
            issued_to_service null [agent_runtime],
-           unique(provider, subject), unique(token_prefix), unique(id, actor_id))
+           unique(provider, subject), unique(token_prefix))
     unique(actor_id) where issued_to_service set and not revoked (credential_one_runtime_token)
     check: must_change ⇒ kind = 'password' and issued_by_actor_id set;
            issued_to_service set ⇒ kind = 'api_token'
@@ -199,19 +195,17 @@ refuse): a runtime agent's API token is the runtime's, and only a runtime agent'
 `agent_runtime.agent` say `hosting`; the news of an agent's registration (`agent.created`,
 `actor.registered`) carries it. Migration 0025 made a runtime agent of every agent whose site
 chat credential was live, taking that credential as the runtime's token and revoking the
-agent's other tokens, and an mcp agent of every other, its tokens as they were. The release
-before it names no hosting; an agent it registers is an mcp agent (trigger
-`actor_hosting_default`), and a token it would issue a runtime agent is refused.
+agent's other tokens, and an mcp agent of every other, its tokens as they were. An agent
+written naming no hosting is refused (`actor_hosting_is_an_agents`); the release before 0025,
+which named none, had its agents made mcp agents until migration 0027.
 
-`site_chat_credential_id` was the credential of an agent's with which a program that ran it
-declared that the agent takes conversations in the site (migration 0011). Nothing declares
-since 0025, and this release reads it nowhere: who is asked in the site follows from hosting
-(§2.8). It stays one release, deprecated, for the release before, which still reads it, and is
-kept in step for that release: `agent_runtime.issue_token` points it at the runtime's new token,
-and `agent_runtime.revoke_token` clears it, so that a rollback asks the same agents. A later
-migration drops it. Only an agent has one, and only a credential of its own: the CHECK reads
-`kind` to refuse, as the refusals of ownership do, and the composite key holds whose it is
-whichever row changes.
+`actor.site_chat_credential_id` was the credential of an agent's with which a program that ran
+it declared that the agent takes conversations in the site (migration 0011). Nothing declares
+since 0025: who is asked in the site follows from hosting (§2.8). The column was kept, pointing
+at each runtime agent's runtime token, for the release before 0025, and migration 0027 drops
+it, with the key on a credential and whose it is, `unique(id, actor_id)`, that it pointed
+through; its down migration puts the key back and points the column again at each runtime
+agent's runtime token that is not revoked.
 
 `email_verified` says whether anyone but the person vouches for their email. Core sends no
 email and checks none; an email an administrator gives (`actor.register`, `actor.invite_new`,
@@ -1023,19 +1017,13 @@ document(id, course_id→course, kind [material|instructions|rubric|submission|f
     trigger: a purged document stays purged, as it was purged
 
 document_version(id, document_id→document, seq, body_md null,
-                 storage_key null, content_type null, byte_size null, checksum null,
                  author_member_id→course_member, created_at,
                  purged_at null, purged_by_actor_id null→actor, purge_reason null,
                  unique(document_id, seq))
-    check: body_md or storage_key present, or purged;  purged: all three purge columns,
-           no body_md, storage_key or checksum, a reason of 1..500 characters
+    check: purged: all three purge columns, no body_md, a reason of 1..500 characters
     trigger: append-only, but for being purged, once;
-             at commit, its files are numbered 1..n and the first is the one storage_key,
-             content_type, byte_size and checksum name; a version written with a file in those
-             columns alone (by the release before 0023) is given it as its one file;
+             at commit, one not purged is text, files or both, its files numbered 1..n;
              its files and their text versions are deleted as it is purged
-    storage_key, content_type, byte_size, checksum: deprecated, the first file's, kept for the
-             release before 0023, which reads them; a later migration drops them
 
 document_version_file(id, version_id, document_id, position, filename, storage_key unique,
                       content_type, byte_size, checksum null, created_at,
@@ -1068,10 +1056,8 @@ document_version_text(version_id→document_version, file_id→document_version_
            pages 1..100000;
            working ⇔ lease_id, with claimed_until, and the claim's credential and time
     trigger: only for a file of a version of material, instructions or a rubric, not purged;
-             one naming no file is its version's first file's;
              its version, file, document, course and creation never change;
-             deleted only when its version is purged;
-             one statement writes the text of one file of a version at most
+             deleted only when its version is purged
 
 file_rendition(id, course_id→course,
                file_id null→document_version_file unique ON DELETE CASCADE,
@@ -1171,25 +1157,25 @@ name is 1 to 255 characters on one line, a name and not a path. A version holds 
 `DOCUMENT_MAX_VERSION_BYTES` in all (200 MiB), each file at most `MAX_UPLOAD_BYTES`;
 `document.upload_url` says the three (`max_files`, `max_version_bytes`, `max_bytes`), for a front
 end to check first. What a version is given is checked before anything is written or proposed
-(`too_many_files`, `duplicate_file`, `bad_filename`, `filename_required`,
-`files_and_upload_token`), and the files together when they are claimed (`version_too_large`).
-A version is text, files, or both; it has at least one of the two. Its files are written with it, in its
+(`too_many_files`, `duplicate_file`, `bad_filename`, `filename_required`), and the files
+together when they are claimed (`version_too_large`). A version is text, files, or both; it has
+at least one of the two, which the database holds at commit. Its files are written with it, in its
 transaction, dated as it is, and kept as they are: nothing is added to a version afterwards, a
 file never changes, and it goes only as its version is purged, when every file of it goes. A proposal
 names its files by their tokens, as a proposal of a feedback file does, is held to all of this
 when it is made and again when it is approved, and is refused once an upload it names is two
 days old.
 
-The one `upload_token` a version took before is one file still, named as it was uploaded, or
-else after the document's title with the extension of its type (`document_file_name`, the same
-in the application), and cannot be given with `files`. It is deprecated. So are a version's own
-file columns (`storage_key`, `content_type`, `byte_size`, `checksum`), filled with its first
-file for the release before, which reads them, and the fields of the reads they filled:
+Migration 0023 recorded every version's file as its one file, named after its document's title
+with the extension of its type, and kept for one release what the release before it read and
+wrote: a version's own file columns (`storage_key`, `content_type`, `byte_size`, `checksum`),
+filled with its first file; the one `upload_token` a version took before, as one file;
 `document.get`'s `version.download_url`, `.content_type`, `.byte_size`, `.checksum` and `.text`,
-and `document.versions`' `has_file`, `content_type`, `byte_size` and `text`, each now its first
-file's. The release before, while the migration goes in and after a rollback, reads a version's
-first file and writes one file as it did, which the database records as its one file at commit.
-Migration 0023 recorded every version's file as its one file, named after its document.
+and `document.versions`' `has_file`, `content_type`, `byte_size` and `text`, each its first
+file's. Migration 0027 drops the columns, and the calls and reads no longer take or give the
+rest: a version's one file is given in `files`, as any, and read in `files`. A feedback file
+named neither in `grade.submit` nor when it was uploaded is still named after its title, with
+its type's extension.
 
 Who may read a file is who may read its version. `document.get` lists the version's `files`,
 each with `id`, `position`, `filename`, `content_type`, `byte_size`, `checksum`, a short-lived
@@ -1219,8 +1205,8 @@ seat's permissions reach (the Admin gate, §2.10): a platform administrator anyw
 department administrator in the courses of the departments they cover; and, unlike every
 other write but opening the course again, it is done in an archived course too. Its text and
 every file of it go, the files deleted from storage and from `document_version_file`, names and
-checksums and all; the version keeps its place, author, date, and its first file's content type
-and size, with who purged it, when and why (`purged_at`, `purged_by_actor_id`,
+checksums and all; the version keeps its place, author and date, with who purged it, when and
+why (`purged_at`, `purged_by_actor_id`,
 `purge_reason`), and reads so to anyone who reads it. A purged document is archived for good — nothing is added to it or
 brought back — and the version list and `document.list` say when it was purged. What pinned a
 purged version still names it: a submission handed in under it reads the tombstone as what it
@@ -1263,8 +1249,8 @@ sent to a model for this.
   `document.get` decides it (`readableVersion`). `document.get` gives each with its file
   (`files[].text`: where it stands, and the text itself when it is one part and the texts given
   with the version so far, in order, come to no more than one part), `document.versions` each
-  file's without the text, and `document.text` reads one, named by `file_id` (the version's
-  first when none is named; given a `file_id` and no `version_id`, the file's version), in parts
+  file's without the text, and `document.text` reads one, named by `file_id`, which it requires
+  (given no `version_id`, the file's version), in parts
   of at most 64 KiB (65536 bytes): whole pages
   where they fit, a page being what starts at a heading of the second level, otherwise whole
   lines, otherwise whole characters, the same text always cut the same way. A reader reads every
@@ -1272,8 +1258,7 @@ sent to a model for this.
 - **Written by staff.** Whoever may write the document — `perm_document_write` — writes a file's
   text (`document.text_update`, the whole text) or sends it back to be transcribed
   (`document.text_retranscribe`), each an action like a new version, naming the file by
-  `file_id`, which a version of one file needs not and a version of several must
-  (`file_id_required`); a proposal pins the file it was made about: recorded, replayed by its
+  `file_id`, which each requires, of a version of one file as of several: recorded, replayed by its
   key, proposed or under review as the writer's level says, refused in an archived course or
   document. An edit is `source: staff` from then on: no transcription writes over it, and one
   under way is refused when it finishes. The edit's text is recorded with the action, as a
@@ -1311,8 +1296,7 @@ sent to a model for this.
 - `document_text.file` gives another URL for a file the caller's claim holds, and
   `document_text.renew` holds a claim longer, from now; neither is the caller's once the claim no
   longer holds (`lease_lost`). These and `document_text.complete` name the claim's version, its
-  `lease_id` and its `file_id`; one naming no file means the file its lease is of, which for a
-  version of one file is that file.
+  `lease_id` and its `file_id`, which each requires.
 - `document_text.complete` writes back what became of it while the claim holds: `done`, with its
   text, its page count and the model's name; or `failed` or `skipped`, with why. It is refused,
   and writes nothing, once staff have written the text (`edited_by_staff`), or once the claim no
@@ -1346,8 +1330,7 @@ conversation carries (§2.8, Attachments).
 - **Queued as the file is recorded.** The database records a rendition `queued` in the
   transaction that records its file, whichever release records it (triggers
   `document_version_file_rendition_queued`, `conversation_attachment_rendition_queued`): a
-  version's file as it is written, at commit for one the release before writes in the version's
-  own columns; a message's file as its message is written, so that an upload no message came to
+  version's file as it is written; a message's file as its message is written, so that an upload no message came to
   carry is never queued. The call that records it wakes the runtime (kind `rendition.queued`,
   as `document_text.queued`). Migration 0026 queued every convertible file there was, of every
   version and every message, in every course, archived or not, marked `backfill` and dated as its
@@ -1878,13 +1861,10 @@ used from its owner's own tools, and of a runtime agent the runtime does not run
 not running.
 
 `me.site_chat`, with which a runtime used to declare it (recording its credential in
-`actor.site_chat_credential_id`), is kept for one release, deprecated: called with the runtime's
-token, `on` true or false, it changes nothing and says `site_chat`, whether the agent is asked
-now; with any other credential, or none, it is refused (`failed_precondition`,
-`not_runtime_hosted`), and a person `not_an_agent`. `agent.update` no longer takes `site_chat`:
-it is refused, either way (`invalid_argument`, `site_chat_follows_hosting`); an owner stops
-people asking a runtime agent by stopping it in the runtime, or by suspending it. The refusals
-read `kind` and `hosting`, to refuse and never to grant, as the refusals of ownership do.
+`actor.site_chat_credential_id`), changed nothing for one release after 0025, and is gone with
+migration 0027, as is the column. `agent.update` takes no `site_chat` (`invalid_argument`, as
+for any field it does not take); an owner stops people asking a runtime agent by stopping it in
+the runtime, or by suspending it.
 
 **An agent that is not asked in the site is asked nothing there.** `conversation.respondents`
 leaves it out, in SQL, whomever else the caller may address; `conversation.open` addressed to it,
@@ -2509,8 +2489,7 @@ Whether people in the site may ask an agent (§2.8) is no part of `authorize()`.
 nothing, and is asked of the respondent, not of the caller: once `authorize()` has let a member
 ask, and the rule of addressing has let them address the agent, a new question to an agent that
 is not asked in the site is refused as a rule of the domain (`failed_precondition`), recorded like
-any other failure. `me.site_chat` is on the caller's own account (the Self gate), and reads
-which credential the call came with, as a site service's gate does.
+any other failure.
 
 An ephemeral write (`conversation.draft`, §2.8) goes through `authorize()` as a write does: step
 1 refuses it in an archived course, and its caller's seat is held until it ends. Any level above
@@ -2541,13 +2520,13 @@ respondent's `conversation_answer` decides is who is shown its text.
 | An invitation has a lookup prefix and an expiry, and an actor has one live invitation at most | CHECKs and a partial unique index on `credential` |
 | No credential is written for the system actor | trigger on `credential` |
 | A person holds no API token, and an agent nothing but API tokens: none written, moved, changed in kind or brought back live otherwise | trigger `credential_fits_actor_kind` on `credential` |
-| `event` is append-only; `document_version` is too, but for being purged once: its text, file and checksum emptied, who, when and why recorded, nothing else changed | triggers |
+| `event` is append-only; `document_version` is too, but for being purged once: its text emptied, who, when and why recorded, nothing else changed; its files go with it | triggers |
 | A version's file is of its version and its document, at a place of its own, and a stored file is one version's file at most; it is written with its version and dated as it is, never to a purged one, and kept as it is: never changed, and deleted only as its version is purged | composite FK, `unique(version_id, position)`, `unique(storage_key)`, triggers `document_version_file_with_its_version`, `document_version_file_kept` |
-| A version's files are numbered 1 to n, at most 100, and the first is the file its own columns name; a version written with a file in them alone is given it as its one file | trigger `document_version_files_whole` on `document_version` and `document_version_file_whole` on `document_version_file`, at commit |
+| A version is text, files or both, and its files are numbered 1 to n, at most 100 | trigger `document_version_files_whole` on `document_version` and `document_version_file_whole` on `document_version_file`, at commit |
 | A purge says who, when and why; a purged document is material, instructions or a rubric, archived, and stays purged as it was purged | CHECKs and trigger `document_purge_kept` on `document`, CHECKs on `document_version` |
 | An override of a total is on a computed grade, not negative, and says who, when and why | CHECKs on `grade` |
 | A submitted submission never changes | trigger |
-| Owner columns match `document.kind`; a version has content; SSO rows carry an identity | CHECKs |
+| Owner columns match `document.kind`; SSO rows carry an identity | CHECKs |
 | An identity provider's client secret is kept sealed, never in the clear, and its hint is four characters of it at most; its id never changes | CHECKs `sso_provider_secret_sealed`, `sso_provider_secret_hint_valid`, trigger `sso_provider_id_fixed` |
 | Emails are unique regardless of case | unique index on `lower(email)` |
 | Login IDs are unique regardless of case; 1..64 of `[0-9A-Za-z._-]`, so never an `@` or a space; only a person has one | unique index `actor_login_id_key` on `lower(login_id)`, CHECKs `actor_login_id_valid`, `actor_login_id_is_a_persons` |
@@ -2558,8 +2537,7 @@ respondent's `conversation_answer` decides is who is shown its text.
 | An agent's seat that is not removed holds `action_decide` at `confirm_required` at most: more is written as that | trigger `course_member_agent_ceiling` |
 | An agent someone owns holds no platform role | CHECK `actor_owned_holds_no_platform_role` |
 | Making an actor active forgets who suspended it | trigger `actor_suspension_cleared` |
-| Only an agent names a site chat credential, and only one of its own (deprecated since 0025) | CHECK `actor_site_chat_is_agent`, composite FK `actor_site_chat_credential_fk` |
-| An agent, and only an agent, is hosted `runtime` or `mcp`, for good; one written naming none is `mcp` | CHECKs `actor_hosting_valid`, `actor_hosting_is_an_agents`, triggers `actor_hosting_fixed`, `actor_hosting_default` |
+| An agent, and only an agent, is hosted `runtime` or `mcp`, for good; one written naming none is refused | CHECKs `actor_hosting_valid`, `actor_hosting_is_an_agents`, trigger `actor_hosting_fixed` |
 | A runtime agent's API tokens are those issued to the site's agent runtime, one not revoked at most; only a runtime agent's are; only an API token is; whom it was issued to never changes | CHECK `credential_issued_to_service_valid`, unique index `credential_one_runtime_token`, trigger `credential_fits_hosting` |
 | The agent runtime is one site service, of its own scope | CHECK `actor_service_scope_valid`, unique index `actor_service_scope_key` |
 | A seat that is not removed has a principal exactly when its actor has an owner; the principal is the owner's seat, in the same course, and nobody's delegate | composite FK and trigger `course_member_principal_valid` on `course_member` |
@@ -2592,7 +2570,6 @@ respondent's `conversation_answer` decides is who is shown its text.
 | A service is seated in no course | trigger `course_member_not_a_service` |
 | Each file of a version of material, instructions or a rubric has a text version from the transaction that adds it, whichever release adds it; a purge deletes it with the files | trigger `document_version_file_text_queued` on `document_version_file`, `document_version_files_purged` on `document_version` |
 | A text version is of a file of a version of material, instructions or a rubric, not purged, in its document's course, and stays so; it is deleted only when its version is purged | composite FKs, trigger `document_version_text_guarded` |
-| One statement writes the text of one file of a version at most: the release before 0023, which writes a version's text by its version alone, cannot write one text over several files | trigger `document_version_text_one_file_at_a_time` |
 | A text version's shape: a text exactly when done, at most 2 MiB, saying whose; the service's says its model and when, staff's who and when; failed and skipped say why; a claim holds a lease, made by a credential | CHECKs on `document_version_text` |
 | Every Office or OpenDocument file, a version's of any kind or a message's, has a rendition from the transaction that records it, whichever release records it; nothing else has one | triggers `document_version_file_rendition_queued`, `conversation_attachment_rendition_queued`, `file_rendition_guarded` (`file_rendition_convertible`) |
 | A rendition is of one file, one to a file, in its file's course, made queued; its file, course and creation never change; done, it never changes; it goes with its file and only then | `file_rendition_one_source`, unique `file_id` and `attachment_id`, FKs `ON DELETE CASCADE`, trigger `file_rendition_guarded` |
@@ -2773,8 +2750,8 @@ respondent's `conversation_answer` decides is who is shown its text.
   own; an administrator's, or one from before it was recorded, is not theirs.
 - People in the site ask an agent (§2.8) only while it is a runtime agent, the site's runtime
   holds a live token for it, and it and its owner, if any, are active: worked out in SQL on every
-  read that needs it, never stored as a flag. Nobody declares it; `me.site_chat` changes nothing
-  and refuses every credential but the runtime's token; `agent.update` refuses `site_chat`.
+  read that needs it, never stored as a flag. Nobody declares it: there is no `me.site_chat`, and
+  `agent.update` takes no `site_chat`.
 - An agent is registered with its hosting, by `agent.create` and `actor.register` alike, and
   `agent.update` refuses another (`hosting_fixed`). A runtime agent is issued no token but by
   `agent_runtime.issue_token` (`hosted_by_runtime`, in `auth.IssueToken`, which every other way of
@@ -2888,8 +2865,8 @@ respondent's `conversation_answer` decides is who is shown its text.
   by the agents' door. A service is managed by the `service.*` tools alone: refused by
   `actor.*`, never seated, never issued an API token (§2.1, Services).
 - A text version is read by whoever may read its version, as `document.get` decides it
-  (`readableVersion`), and by nobody else (§2.4, Text versions). A write of a text names its
-  file, but for a version of one file; a read that names none reads the first file's.
+  (`readableVersion`), and by nobody else (§2.4, Text versions). Every call about a text names
+  its file, a read as a write and the service's as staff's.
 - A text version's changes take turns: staff's hold the document and then the text version, the
   service's the document `FOR SHARE` and then the text version, a claim takes it `SKIP LOCKED`.
   The service writes back only while its claim holds it and staff have not written it; staff's

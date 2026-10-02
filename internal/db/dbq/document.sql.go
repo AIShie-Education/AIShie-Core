@@ -149,7 +149,7 @@ func (q *Queries) GetDocumentWithOwner(ctx context.Context, arg GetDocumentWithO
 }
 
 const getLatestVersion = `-- name: GetLatestVersion :one
-SELECT id, document_id, seq, body_md, storage_key, content_type, byte_size, checksum, author_member_id, created_at, purged_at, purged_by_actor_id, purge_reason FROM document_version WHERE document_id = $1 ORDER BY seq DESC LIMIT 1
+SELECT id, document_id, seq, body_md, author_member_id, created_at, purged_at, purged_by_actor_id, purge_reason FROM document_version WHERE document_id = $1 ORDER BY seq DESC LIMIT 1
 `
 
 func (q *Queries) GetLatestVersion(ctx context.Context, documentID uuid.UUID) (DocumentVersion, error) {
@@ -160,10 +160,6 @@ func (q *Queries) GetLatestVersion(ctx context.Context, documentID uuid.UUID) (D
 		&i.DocumentID,
 		&i.Seq,
 		&i.BodyMd,
-		&i.StorageKey,
-		&i.ContentType,
-		&i.ByteSize,
-		&i.Checksum,
 		&i.AuthorMemberID,
 		&i.CreatedAt,
 		&i.PurgedAt,
@@ -174,7 +170,7 @@ func (q *Queries) GetLatestVersion(ctx context.Context, documentID uuid.UUID) (D
 }
 
 const getVersionOfDocument = `-- name: GetVersionOfDocument :one
-SELECT id, document_id, seq, body_md, storage_key, content_type, byte_size, checksum, author_member_id, created_at, purged_at, purged_by_actor_id, purge_reason FROM document_version WHERE id = $1 AND document_id = $2
+SELECT id, document_id, seq, body_md, author_member_id, created_at, purged_at, purged_by_actor_id, purge_reason FROM document_version WHERE id = $1 AND document_id = $2
 `
 
 type GetVersionOfDocumentParams struct {
@@ -190,10 +186,6 @@ func (q *Queries) GetVersionOfDocument(ctx context.Context, arg GetVersionOfDocu
 		&i.DocumentID,
 		&i.Seq,
 		&i.BodyMd,
-		&i.StorageKey,
-		&i.ContentType,
-		&i.ByteSize,
-		&i.Checksum,
 		&i.AuthorMemberID,
 		&i.CreatedAt,
 		&i.PurgedAt,
@@ -234,8 +226,8 @@ func (q *Queries) InsertDocument(ctx context.Context, arg InsertDocumentParams) 
 }
 
 const insertDocumentVersion = `-- name: InsertDocumentVersion :exec
-INSERT INTO document_version (id, document_id, seq, body_md, storage_key, content_type, byte_size, checksum, author_member_id, created_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+INSERT INTO document_version (id, document_id, seq, body_md, author_member_id, created_at)
+VALUES ($1, $2, $3, $4, $5, $6)
 `
 
 type InsertDocumentVersionParams struct {
@@ -243,24 +235,17 @@ type InsertDocumentVersionParams struct {
 	DocumentID     uuid.UUID
 	Seq            int32
 	BodyMd         *string
-	StorageKey     *string
-	ContentType    *string
-	ByteSize       *int64
-	Checksum       *string
 	AuthorMemberID uuid.UUID
 	CreatedAt      time.Time
 }
 
+// Its files are written with it, in its transaction (InsertDocumentVersionFile).
 func (q *Queries) InsertDocumentVersion(ctx context.Context, arg InsertDocumentVersionParams) error {
 	_, err := q.db.Exec(ctx, insertDocumentVersion,
 		arg.ID,
 		arg.DocumentID,
 		arg.Seq,
 		arg.BodyMd,
-		arg.StorageKey,
-		arg.ContentType,
-		arg.ByteSize,
-		arg.Checksum,
 		arg.AuthorMemberID,
 		arg.CreatedAt,
 	)
@@ -571,16 +556,13 @@ func (q *Queries) ListVersionFiles(ctx context.Context, versionID uuid.UUID) ([]
 }
 
 const listVersions = `-- name: ListVersions :many
-SELECT id, seq, (storage_key IS NOT NULL)::bool AS has_file, content_type, byte_size, author_member_id, created_at, purged_at
+SELECT id, seq, author_member_id, created_at, purged_at
 FROM document_version WHERE document_id = $1 ORDER BY seq
 `
 
 type ListVersionsRow struct {
 	ID             uuid.UUID
 	Seq            int32
-	HasFile        bool
-	ContentType    *string
-	ByteSize       *int64
 	AuthorMemberID uuid.UUID
 	CreatedAt      time.Time
 	PurgedAt       *time.Time
@@ -598,9 +580,6 @@ func (q *Queries) ListVersions(ctx context.Context, documentID uuid.UUID) ([]Lis
 		if err := rows.Scan(
 			&i.ID,
 			&i.Seq,
-			&i.HasFile,
-			&i.ContentType,
-			&i.ByteSize,
 			&i.AuthorMemberID,
 			&i.CreatedAt,
 			&i.PurgedAt,
@@ -713,7 +692,7 @@ func (q *Queries) PurgeDocument(ctx context.Context, arg PurgeDocumentParams) (i
 
 const purgeVersion = `-- name: PurgeVersion :execrows
 UPDATE document_version
-SET body_md = NULL, storage_key = NULL, checksum = NULL,
+SET body_md = NULL,
     purged_at = $1, purged_by_actor_id = $2, purge_reason = $3
 WHERE id = $4 AND purged_at IS NULL
 `
@@ -725,8 +704,9 @@ type PurgeVersionParams struct {
 	ID              uuid.UUID
 }
 
-// Its text, its file and the file's checksum go; the rest stays, with who,
-// when and why. The one change a version takes (document_version_guarded).
+// Its text goes, and its files with it (document_version_files_purged); the
+// rest stays, with who, when and why. The one change a version takes
+// (document_version_guarded).
 func (q *Queries) PurgeVersion(ctx context.Context, arg PurgeVersionParams) (int64, error) {
 	result, err := q.db.Exec(ctx, purgeVersion,
 		arg.PurgedAt,
@@ -772,14 +752,12 @@ func (q *Queries) SetPublishedVersion(ctx context.Context, arg SetPublishedVersi
 }
 
 const storageKeyInUse = `-- name: StorageKeyInUse :one
-SELECT (EXISTS (SELECT 1 FROM document_version WHERE storage_key = $1::text)
-     OR EXISTS (SELECT 1 FROM document_version_file WHERE storage_key = $1::text)
+SELECT (EXISTS (SELECT 1 FROM document_version_file WHERE storage_key = $1::text)
      OR EXISTS (SELECT 1 FROM conversation_attachment WHERE storage_key = $1::text))::bool AS in_use
 `
 
-// Whether a file has been attached: to a version of a document, as any of
-// its files or in its own columns (as the release before 0023 writes it),
-// or to a message of a conversation.
+// Whether a file has been attached: to a version of a document, as one of
+// its files, or to a message of a conversation.
 func (q *Queries) StorageKeyInUse(ctx context.Context, storageKey *string) (bool, error) {
 	row := q.db.QueryRow(ctx, storageKeyInUse, storageKey)
 	var in_use bool

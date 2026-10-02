@@ -136,6 +136,9 @@ heard() {
 # reason — the reason the last refusal gave, from $WORK/body.
 reason() { json "$WORK/body" 'd["error"]["details"]["reason"]'; }
 
+# code — the code of the last refusal, from $WORK/body.
+code() { json "$WORK/body" 'd["error"]["code"]'; }
+
 # signin WANT BODY — POST /v1/auth/login as the sign-in page does; the session
 # the cookie carries is left in $SESSION, the body in $WORK/body.
 signin() {
@@ -289,12 +292,14 @@ PUT_URL=$(json "$WORK/body" 'd["result"]["upload_url"]')
 UPLOAD=$(json "$WORK/body" 'd["result"]["upload_token"]')
 printf '%%PDF-1.7 lecture one' >"$WORK/slides.pdf"
 [ "$(curl -s -o /dev/null -w '%{http_code}' -X PUT -H 'Content-Type: application/pdf' --data-binary "@$WORK/slides.pdf" "$PUT_URL")" = 200 ] || fail "PUT to the upload URL"
-call 200 POST "$C/documents" "$SATO" "{\"kind\":\"material\",\"title\":\"Lecture 1\",\"upload_token\":\"$UPLOAD\"}"
+call 400 POST "$C/documents" "$SATO" "{\"kind\":\"material\",\"title\":\"Lecture 1\",\"upload_token\":\"$UPLOAD\"}" # files, even of one
+[ "$(code)" = invalid_argument ] || fail "upload_token alone refused, but not as no field of the call: $(cat "$WORK/body")"
+call 200 POST "$C/documents" "$SATO" "{\"kind\":\"material\",\"title\":\"Lecture 1\",\"files\":[{\"upload_token\":\"$UPLOAD\",\"filename\":\"slides.pdf\"}]}"
 DOC=$(json "$WORK/body" 'd["result"]["document_id"]')
 call 404 GET "$C/documents/$DOC" "$YUKI" # unpublished: to a student it does not exist yet
 call 200 POST "$C/documents/$DOC/publish" "$SATO"
 call 200 GET "$C/documents/$DOC" "$YUKI"
-curl -sf -o "$WORK/got.pdf" "$(json "$WORK/body" 'd["result"]["version"]["download_url"]')" || fail "download"
+curl -sf -o "$WORK/got.pdf" "$(json "$WORK/body" 'd["result"]["version"]["files"][0]["download_url"]')" || fail "download"
 cmp -s "$WORK/slides.pdf" "$WORK/got.pdf" || fail "the student downloaded different bytes"
 echo "  the student downloaded exactly what the instructor uploaded"
 
@@ -376,23 +381,26 @@ call 403 POST /v1/services/document_text/queue "$SATO" '{}' # the service's alon
 call 200 POST /v1/services/document_text/queue "$SVC" '{"max":5}'
 [ "$(json "$WORK/body" 'len(d["result"]["claimed"])')" = 1 ] || fail "the service claimed $(cat "$WORK/body")"
 VERSION=$(json "$WORK/body" 'd["result"]["claimed"][0]["version_id"]')
+FILE=$(json "$WORK/body" 'd["result"]["claimed"][0]["file_id"]')
 LEASE=$(json "$WORK/body" 'd["result"]["claimed"][0]["lease_id"]')
 curl -sf -o "$WORK/claimed.pdf" "$(json "$WORK/body" 'd["result"]["claimed"][0]["download_url"]')" || fail "the service's download"
 cmp -s "$WORK/slides.pdf" "$WORK/claimed.pdf" || fail "the service downloaded different bytes"
-call 200 GET "/v1/services/document_text/versions/$VERSION/file?lease_id=$LEASE" "$SVC"
+call 400 GET "/v1/services/document_text/versions/$VERSION/file?lease_id=$LEASE" "$SVC" # by its file, always
+call 200 GET "/v1/services/document_text/versions/$VERSION/file?lease_id=$LEASE&file_id=$FILE" "$SVC"
 call 200 POST "/v1/services/document_text/versions/$VERSION/complete" "$SVC" \
-  "{\"lease_id\":\"$LEASE\",\"status\":\"done\",\"body\":\"## Page 1\\n\\nLoops.\",\"pages\":1,\"model\":\"A model\"}"
-call 200 GET "$C/documents/$DOC/text" "$YUKI"
+  "{\"lease_id\":\"$LEASE\",\"file_id\":\"$FILE\",\"status\":\"done\",\"body\":\"## Page 1\\n\\nLoops.\",\"pages\":1,\"model\":\"A model\"}"
+call 400 GET "$C/documents/$DOC/text" "$YUKI" # which file?
+call 200 GET "$C/documents/$DOC/text?file_id=$FILE" "$YUKI"
 [ "$(json "$WORK/body" 'd["result"]["text"]["source"], d["result"]["text"]["body"]')" = "ai ## Page 1
 
 Loops." ] || fail "Yuki reads the text $(cat "$WORK/body")"
-call 200 POST "$C/documents/$DOC/versions/$VERSION/text" "$SATO" '{"body":"## Page 1\n\nLoops, for and while."}'
+call 200 POST "$C/documents/$DOC/versions/$VERSION/text" "$SATO" "{\"file_id\":\"$FILE\",\"body\":\"## Page 1\\n\\nLoops, for and while.\"}"
 call 200 GET "$C/documents/$DOC" "$YUKI"
-[ "$(json "$WORK/body" 'd["result"]["version"]["text"]["source"], d["result"]["version"]["text"]["edited_by_name"]')" = "staff Sato" ] ||
+[ "$(json "$WORK/body" 'd["result"]["version"]["files"][0]["text"]["source"], d["result"]["version"]["files"][0]["text"]["edited_by_name"]')" = "staff Sato" ] ||
   fail "Yuki reads $(cat "$WORK/body")"
-call 422 POST "$C/documents/$DOC/versions/$VERSION/text/retranscribe" "$SATO" '{}' # his edit goes only if he says so
+call 422 POST "$C/documents/$DOC/versions/$VERSION/text/retranscribe" "$SATO" "{\"file_id\":\"$FILE\"}" # his edit goes only if he says so
 [ "$(reason)" = staff_edit ] || fail "refused, but not for his edit: $(cat "$WORK/body")"
-call 403 POST "$C/documents/$DOC/versions/$VERSION/text" "$YUKI" '{"body":"mine"}'
+call 403 POST "$C/documents/$DOC/versions/$VERSION/text" "$YUKI" "{\"file_id\":\"$FILE\",\"body\":\"mine\"}"
 
 step "Sato uploads a lecture of three files and its text; Yuki reads it and downloads each file under its name; the service transcribes each file on its own, for Yuki to read file by file"
 # docfile CONTENT_TYPE FILE [FILENAME] — a URL for a file of Sato's material, named FILENAME if given, and
@@ -454,7 +462,7 @@ for f in $W3_FILES; do
 done
 W3_V1=$(json "$WORK/body" 'd["result"]["version_id"]')
 call 400 POST "$C/documents/$W3/versions/$W3_V1/text" "$SATO" '{"body":"## Slides"}' # which file?
-[ "$(reason)" = file_id_required ] || fail "an edit naming no file of three, refused, but not for want of one: $(cat "$WORK/body")"
+[ "$(code)" = invalid_argument ] || fail "an edit naming no file of three, refused, but not for want of one: $(cat "$WORK/body")"
 
 step "Sato adds a version of two files, which Yuki does not see until it is published; past the limits on a version's files it is refused, saying why"
 printf '%%PDF-1.7 week three, corrected' >"$WORK/week3-slides.pdf"
@@ -487,8 +495,6 @@ for i in 1 2; do
 done
 call 422 POST "$C/documents/$W3/versions" "$SATO" "{\"files\":[$BIG]}"
 [ "$(reason)" = version_too_large ] || fail "10000 bytes refused, but not as too much for a version: $(cat "$WORK/body")"
-call 400 POST "$C/documents/$W3/versions" "$SATO" "{\"upload_token\":\"$T1\",\"files\":[{\"upload_token\":\"$T2\",\"filename\":\"notes.txt\"}]}"
-[ "$(reason)" = files_and_upload_token ] || fail "both refused, but not as both: $(cat "$WORK/body")"
 
 step "The service's credential opens nothing else, and once revoked, nothing at all"
 call 403 GET /v1/me "$SVC"
@@ -555,9 +561,8 @@ call 200 GET /v1/me "$GRADER"
 call 200 GET "/v1/me/agents/$TUTOR_ID/credentials" "$SATO"
 [ "$(json "$WORK/body" '[(c.get("issued_to"), "revoked_at" in c) for c in d["result"]["credentials"]]')" = "[('agent_runtime', False)]" ] ||
   fail "the tutor's credentials, as Sato sees them: $(cat "$WORK/body")"
-# me.site_chat, kept for one release, changes nothing: nothing is declared.
-call 200 POST /v1/me/site-chat "$TUTOR" '{"on":true}'
-[ "$(json "$WORK/body" 'd["result"]["site_chat"]')" = True ] || fail "me.site_chat with the runtime's token: $(cat "$WORK/body")"
+# Nothing is declared, and there is nothing to declare it with since 0027.
+call 404 POST /v1/me/site-chat "$TUTOR" '{"on":true}'
 call 200 GET "/v1/me/agents/$TUTOR_ID" "$SATO"
 [ "$(json "$WORK/body" 'd["result"]["site_chat"]')" = True ] || fail "Sato is not told the tutor is asked in the site"
 call 200 GET "$C/conversations/respondents" "$YUKI"
@@ -812,8 +817,8 @@ call 200 POST /v1/services/agent_runtime/renditions/claim "$RT" '{}'
 echo "  Yuki and the tutor opened the slides' PDF; the grader found nothing"
 
 step "The runtime stops hosting the tutor, revoking its token by its id: Yuki asks it nothing more and still reads what it said; Sato says nothing of it in Core"
-call 400 POST "/v1/me/agents/$TUTOR_ID" "$SATO" '{"site_chat":false}'
-[ "$(reason)" = site_chat_follows_hosting ] || fail "refused, but not as following hosting: $(cat "$WORK/body")"
+call 400 POST "/v1/me/agents/$TUTOR_ID" "$SATO" '{"site_chat":false}' # no field of agent.update since 0027
+[ "$(code)" = invalid_argument ] || fail "site_chat refused, but not as no field of the call: $(cat "$WORK/body")"
 call 200 POST "/v1/services/agent_runtime/agents/$TUTOR_ID/token/revoke" "$RT"
 [ "$(json "$WORK/body" 'len(d["result"]["revoked"])')" = 1 ] || fail "revoking the tutor's token: $(cat "$WORK/body")"
 call 401 GET /v1/me "$TUTOR"
@@ -829,8 +834,6 @@ call 200 POST "/v1/me/agents/$HELPER_ID/tokens" "$SATO" '{"label":"my script"}'
 HELPER=$(json "$WORK/body" 'd["result"]["token"]')
 call 200 POST "$C/delegates" "$SATO" "{\"actor_id\":\"$HELPER_ID\",\"preset\":\"instructor\",\"perms\":{\"member_manage\":\"autonomous\"}}"
 HELPER_M=$(json "$WORK/body" 'd["result"]["member_id"]')
-call 422 POST /v1/me/site-chat "$HELPER" '{"on":true}'
-[ "$(reason)" = not_runtime_hosted ] || fail "an mcp agent's me.site_chat refused, but not as not runtime hosted: $(cat "$WORK/body")"
 call 422 POST "/v1/services/agent_runtime/agents/$HELPER_ID/token" "$RT"
 [ "$(reason)" = not_runtime_hosted ] || fail "the runtime hosting an mcp agent refused, but not as not runtime hosted: $(cat "$WORK/body")"
 call 200 GET "$C/members/$HELPER_M" "$SATO"

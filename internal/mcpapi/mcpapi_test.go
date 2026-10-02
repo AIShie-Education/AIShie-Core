@@ -580,13 +580,13 @@ func TestOnlyAuthenticatedAgentsConnect(t *testing.T) {
 
 // The site's agent runtime connects as a runtime agent with the token it
 // was issued for it, by the agent's id, and the agent is told how it is
-// hosted; nothing is declared, and me_site_chat, kept for one release,
-// changes nothing. An mcp agent connects with its owner's token, is told
-// it is one, and is refused me_site_chat.
+// hosted; nothing is declared, and there is no tool to declare it with
+// (me_site_chat, gone since 0027). An mcp agent connects with its owner's
+// token, and is told it is one.
 func TestTheRuntimeConnectsWithTheTokenItWasIssued(t *testing.T) {
 	f := serve(t, 0)
 	tutor := f.c.OwnedRuntimeAgent(f.c.Sato, "Course tutor")
-	credential, token := f.c.HostToken(tutor)
+	_, token := f.c.HostToken(tutor)
 	s := f.connect(t, token)
 	hosting := func(s *mcp.ClientSession) string {
 		t.Helper()
@@ -600,13 +600,13 @@ func TestTheRuntimeConnectsWithTheTokenItWasIssued(t *testing.T) {
 	if got := hosting(s); got != "runtime" {
 		t.Fatalf("the runtime's agent is told it is hosted %s", got)
 	}
-	env, _ := call(t, s, "me_site_chat", m{"on": true, "idempotency_key": "start-1"})
-	var out tools.SiteChatOut
-	if env.Status != "executed" || json.Unmarshal(env.Result, &out) != nil || !out.SiteChat {
-		t.Fatalf("me_site_chat: %+v", env)
-	}
-	if n := f.c.Count(`SELECT count(*) FROM actor WHERE id = $1 AND site_chat_credential_id = $2`, tutor, credential); n != 1 {
-		t.Fatal("the site chat credential does not name the runtime's token")
+	for tl, err := range s.Tools(context.Background(), nil) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		if tl.Name == "me_site_chat" {
+			t.Fatal("me_site_chat is still offered")
+		}
 	}
 
 	script := f.c.OwnedAgent(f.c.Sato, "Sato's assistant")
@@ -617,10 +617,6 @@ func TestTheRuntimeConnectsWithTheTokenItWasIssued(t *testing.T) {
 	s = f.connect(t, tok.Full)
 	if got := hosting(s); got != "mcp" {
 		t.Fatalf("an mcp agent is told it is hosted %s", got)
-	}
-	if env, _ := call(t, s, "me_site_chat", m{"on": true, "idempotency_key": "start-2"}); env.Status != "failed" ||
-		env.Error == nil || env.Error.Details["reason"] != "not_runtime_hosted" {
-		t.Fatalf("me_site_chat, as an mcp agent: %+v", env)
 	}
 }
 

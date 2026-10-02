@@ -270,8 +270,7 @@ type Querier interface {
 	// behind an update, including while the update waits for the tree lock.
 	GetAssignmentInCourseForUpdate(ctx context.Context, arg GetAssignmentInCourseForUpdateParams) (GetAssignmentInCourseForUpdateRow, error)
 	GetBuiltinPresetByName(ctx context.Context, name string) (PermissionPreset, error)
-	// The file of a text version the caller's claim holds: the one named, or
-	// whichever of the version's the claim is of.
+	// The file of a text version the caller's claim holds, by its id.
 	GetClaimedFile(ctx context.Context, arg GetClaimedFileParams) (GetClaimedFileRow, error)
 	// A rendition the caller's claim holds, with its file.
 	GetClaimedRendition(ctx context.Context, arg GetClaimedRenditionParams) (GetClaimedRenditionRow, error)
@@ -444,6 +443,7 @@ type Querier interface {
 	// department_tree_valid refuses one that would be too deep.
 	InsertDepartment(ctx context.Context, arg InsertDepartmentParams) error
 	InsertDocument(ctx context.Context, arg InsertDocumentParams) error
+	// Its files are written with it, in its transaction (InsertDocumentVersionFile).
 	InsertDocumentVersion(ctx context.Context, arg InsertDocumentVersionParams) error
 	// One file of a version, written with it (document_version_file_with_its_version).
 	InsertDocumentVersionFile(ctx context.Context, arg InsertDocumentVersionFileParams) error
@@ -489,9 +489,6 @@ type Querier interface {
 	// the departments the issuer administers, and beneath them, as ListCourses
 	// finds those.
 	InvitableBy(ctx context.Context, arg InvitableByParams) (InvitableByRow, error)
-	// Whether a credential is the actor's own token, issued to the site's agent
-	// runtime, and live: neither revoked nor expired.
-	IsLiveRuntimeToken(ctx context.Context, arg IsLiveRuntimeTokenParams) (bool, error)
 	// The seq of a conversation's newest message, 0 while it has none; with at,
 	// of the newest written at or before it.
 	LastMessageSeq(ctx context.Context, arg LastMessageSeqParams) (int32, error)
@@ -676,11 +673,11 @@ type Querier interface {
 	// exist, and a course is never deleted, so a key under any other course was
 	// written by another deployment keeping its files in the same place: it is
 	// not ours to remove, however old it is and whatever points at it there.
-	// Attached is attached to a version of a document, as any of its files or
-	// in its own columns, or to a message of a conversation, or a rendition's
-	// PDF. What is left comes back in the order it was given. The orphan sweep
-	// puts a page of listed files at a time to it, and asks again about each
-	// one it removes, under the lock attaching takes.
+	// Attached is attached to a version of a document, as one of its files, or
+	// to a message of a conversation, or a rendition's PDF. What is left comes
+	// back in the order it was given. The orphan sweep puts a page of listed
+	// files at a time to it, and asks again about each one it removes, under the
+	// lock attaching takes.
 	ListOrphanUploads(ctx context.Context, arg ListOrphanUploadsParams) ([]ListOrphanUploadsRow, error)
 	// Seats that count for nothing for good (SeatOrphaned), not yet removed: a
 	// delegate's whose principal is removed or past its expiry, and seats that
@@ -961,10 +958,8 @@ type Querier interface {
 	// A file's text version, held for a change to it. Whoever changes it holds
 	// the document first, as adding and purging a version do.
 	LockText(ctx context.Context, arg LockTextParams) (DocumentVersionText, error)
-	// The text versions a call of the service's may be about, held: the named
-	// file's, or, where it names none, each of the version's, the one its claim
-	// holds first.
-	LockTextsForService(ctx context.Context, arg LockTextsForServiceParams) ([]DocumentVersionText, error)
+	// The text version a call of the service's is about, by its file, held.
+	LockTextForService(ctx context.Context, arg LockTextForServiceParams) (DocumentVersionText, error)
 	LoginIDTaken(ctx context.Context, lower string) (bool, error)
 	LoginIDTakenByAnother(ctx context.Context, arg LoginIDTakenByAnotherParams) (bool, error)
 	// The one person or agent a whole email address belongs to, or the one
@@ -1026,8 +1021,9 @@ type Querier interface {
 	PublishAssignment(ctx context.Context, arg PublishAssignmentParams) (int64, error)
 	// Archived for good, saying who purged it, when and why.
 	PurgeDocument(ctx context.Context, arg PurgeDocumentParams) (int64, error)
-	// Its text, its file and the file's checksum go; the rest stays, with who,
-	// when and why. The one change a version takes (document_version_guarded).
+	// Its text goes, and its files with it (document_version_files_purged); the
+	// rest stays, with who, when and why. The one change a version takes
+	// (document_version_guarded).
 	PurgeVersion(ctx context.Context, arg PurgeVersionParams) (int64, error)
 	// Writes a draft if it is newer than the one kept, and returns its version;
 	// no row when it is passed over. Newer is: none kept, or one gone stale; one of another attempt,
@@ -1139,12 +1135,6 @@ type Querier interface {
 	SetMemberStatus(ctx context.Context, arg SetMemberStatusParams) (int64, error)
 	SetPublishedVersion(ctx context.Context, arg SetPublishedVersionParams) error
 	SetSSOProviderEnabled(ctx context.Context, arg SetSSOProviderEnabledParams) (int32, error)
-	// The release before this one reads who is asked in the site from the
-	// credential an agent declared with (actor.site_chat_credential_id); this
-	// one reads it nowhere, and keeps it naming a runtime agent's live runtime
-	// token, null once there is none, so that a rollback asks the same agents.
-	// The key holds a credential to the agent's own (actor_site_chat_credential_fk).
-	SetSiteChatCredential(ctx context.Context, arg SetSiteChatCredentialParams) error
 	SetSubmissionLateness(ctx context.Context, arg SetSubmissionLatenessParams) (int64, error)
 	// Serialising what races -------------------------------------------------------
 	// The assignment a submission's grade is out of, read again and held still
@@ -1182,9 +1172,8 @@ type Querier interface {
 	// ListRespondentCandidates and GetAgentForRuntime hold the same rule: a
 	// change to one is a change to all four.
 	SiteChatOf(ctx context.Context, arg SiteChatOfParams) ([]SiteChatOfRow, error)
-	// Whether a file has been attached: to a version of a document, as any of
-	// its files or in its own columns (as the release before 0023 writes it),
-	// or to a message of a conversation.
+	// Whether a file has been attached: to a version of a document, as one of
+	// its files, or to a message of a conversation.
 	StorageKeyInUse(ctx context.Context, storageKey *string) (bool, error)
 	StudentCountedAsZero(ctx context.Context, studentMemberID uuid.UUID) (bool, error)
 	// A grade entered, or proposed and not yet decided: either way, one is on its

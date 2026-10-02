@@ -141,13 +141,12 @@ RETURNING t.version_id, t.file_id, t.document_id, t.course_id, t.lease_id, t.cla
 SELECT version_id, document_id, course_id FROM document_version_text WHERE version_id = $1 LIMIT 1;
 
 -- name: GetClaimedFile :one
--- The file of a text version the caller's claim holds: the one named, or
--- whichever of the version's the claim is of.
+-- The file of a text version the caller's claim holds, by its id.
 SELECT t.file_id, t.claimed_until, f.position, f.filename, f.storage_key, f.content_type, f.byte_size, f.checksum
 FROM document_version_text t
 JOIN document_version_file f ON f.id = t.file_id
-WHERE t.version_id = sqlc.arg(version_id) AND t.status = 'working' AND t.lease_id = sqlc.arg(lease_id)
-  AND (sqlc.narg(file_id)::uuid IS NULL OR t.file_id = sqlc.narg(file_id)::uuid);
+WHERE t.version_id = sqlc.arg(version_id) AND t.file_id = sqlc.arg(file_id) AND t.status = 'working'
+  AND t.lease_id = sqlc.arg(lease_id);
 
 -- name: RenewTextLease :one
 -- A claim held longer, from now; its own and nobody else's.
@@ -161,13 +160,10 @@ RETURNING claimed_until;
 -- versions: archiving it waits for the write, or the write sees it.
 SELECT status FROM document WHERE id = $1 FOR SHARE;
 
--- name: LockTextsForService :many
--- The text versions a call of the service's may be about, held: the named
--- file's, or, where it names none, each of the version's, the one its claim
--- holds first.
+-- name: LockTextForService :one
+-- The text version a call of the service's is about, by its file, held.
 SELECT * FROM document_version_text
-WHERE version_id = sqlc.arg(version_id) AND (sqlc.narg(file_id)::uuid IS NULL OR file_id = sqlc.narg(file_id)::uuid)
-ORDER BY lease_id IS NOT DISTINCT FROM sqlc.arg(lease_id)::uuid DESC, file_id
+WHERE version_id = sqlc.arg(version_id) AND file_id = sqlc.arg(file_id)
 FOR UPDATE;
 
 -- name: FinishTextDone :one

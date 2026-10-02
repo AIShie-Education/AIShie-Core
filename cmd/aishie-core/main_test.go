@@ -163,8 +163,8 @@ func TestTokenIssueIsForAgents(t *testing.T) {
 		t.Fatal(err)
 	}
 	agent := uuid.Must(uuid.NewV7())
-	if _, err := pool.Exec(context.Background(), `INSERT INTO actor (id, kind, display_name, email, created_by_actor_id)
-		VALUES ($1, 'agent', 'grader', 'grader@example.edu', $2)`, agent, res.RootID); err != nil {
+	if _, err := pool.Exec(context.Background(), `INSERT INTO actor (id, kind, display_name, email, created_by_actor_id, hosting)
+		VALUES ($1, 'agent', 'grader', 'grader@example.edu', $2, 'mcp')`, agent, res.RootID); err != nil {
 		t.Fatal(err)
 	}
 	issue := func(who string) (string, string, error) {
