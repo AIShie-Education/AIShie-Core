@@ -1,6 +1,7 @@
 package tools_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -12,7 +13,7 @@ import (
 	"github.com/AIShie-Education/AIShie-Core/internal/tools"
 )
 
-// What an answer relied on (docs/schema.md §2.8, Sources of an answer): the
+// What an answer relied on (docs/schema.md §2.8, What an answer relied on): the
 // respondent names the course materials it read, each one it may read as it
 // answers; whoever reads the answer is shown each as they may read it now.
 
@@ -152,13 +153,87 @@ func TestAPurgedVersionsSourceIsRestrictedToEveryone(t *testing.T) {
 	args := answerArgs(b, conv, q2, "Again.")
 	args["sources"] = []m{{"document_id": lecture.DocumentID, "version_id": lecture.VersionID}}
 	b.refusedAs(t, b.tutor, "conversation.answer", args, apperr.InvalidArgument, "source_purged")
+
+	// A document purged whole, every version with it, is restricted to
+	// every reader too.
+	other := b.lecture(t)
+	q3 := b.ask(t, b.yuki, conv, "And the handout?")
+	again := b.sourced(t, conv, q3, []m{{"document_id": other.DocumentID, "version_id": other.VersionID, "file_id": other.FileIDs[1]}})
+	b.do(t, b.admin, "document.purge", m{"course_id": b.course, "document_id": other.DocumentID,
+		"reason": "The handout named a student."})
+	for who, reader := range map[string]uuid.UUID{"Yuki": b.yuki, "Sato": b.sato} {
+		if got := b.sourcesOf(t, reader, conv, again); len(got) != 1 || got[0] != (tools.SourceView{Restricted: true}) {
+			t.Fatalf("%s, the document purged: %+v", who, got)
+		}
+	}
 }
 
-// What an answer names is checked before anything is recorded: what its
-// sources say alone as the call is read, and whether the respondent may
-// read each before the answer is posted or proposed, and again when a
-// proposal is approved. The refusal says which source.
-func TestAnAnswersSourcesAreCheckedBeforeAnythingIsRecorded(t *testing.T) {
+// An answer relying on an assignment's instructions and its rubric, read
+// by a student given rubrics to read, as her tutor is. The rubric is
+// restricted to her once she reads rubrics no more (rubric_read); the
+// instructions are whole to her while the assignment is published to her,
+// and restricted once it is withdrawn from her, with the assignment. Both
+// are whole to the instructor throughout.
+func TestAnAssignmentsSourcesAreReadAsItsDocumentsAre(t *testing.T) {
+	b := build(t)
+	publish := func(kind, title string) tools.DocumentCreateOut {
+		t.Helper()
+		made := testkit.Result[tools.DocumentCreateOut](t, b.do(t, b.sato, "document.create",
+			m{"course_id": b.course, "kind": kind, "title": title, "body_md": title + ": write 1000 words on loops."}))
+		b.do(t, b.sato, "document.publish", m{"course_id": b.course, "document_id": made.DocumentID})
+		return made
+	}
+	brief, rubric := publish("instructions", "HW3 brief"), publish("rubric", "HW3 rubric")
+	b.do(t, b.sato, "assignment.update", m{"course_id": b.course, "assignment_id": b.hw3, "instructions_document_id": brief.DocumentID,
+		"rubric_document_id": rubric.DocumentID})
+	// Yuki and her tutor read rubrics.
+	for _, seat := range []uuid.UUID{b.yukiM, b.tutorM} {
+		b.do(t, b.sato, "member.update_perms", m{"course_id": b.course, "member_id": seat, "perms": m{"rubric_read": "autonomous"}})
+	}
+	conv, q := b.open(t, b.yuki, b.tutorM, "How long is HW3?")
+	answer := b.sourced(t, conv, q, []m{{"document_id": brief.DocumentID, "version_id": brief.VersionID},
+		{"document_id": rubric.DocumentID, "version_id": rubric.VersionID}})
+	whole := func(who string, got tools.SourceView, doc tools.DocumentCreateOut, kind, title string) {
+		t.Helper()
+		if got.Restricted || got.OtherVersion || !sameID(got.VersionID, *doc.VersionID) || got.Kind == nil || *got.Kind != kind ||
+			got.Title == nil || *got.Title != title {
+			t.Fatalf("%s reads %+v", who, got)
+		}
+	}
+	sato := func(when string) {
+		t.Helper()
+		got := b.sourcesOf(t, b.sato, conv, answer)
+		whole("Sato, "+when, got[0], brief, "instructions", "HW3 brief")
+		whole("Sato, "+when, got[1], rubric, "rubric", "HW3 rubric")
+	}
+	got := b.sourcesOf(t, b.yuki, conv, answer)
+	whole("Yuki", got[0], brief, "instructions", "HW3 brief")
+	whole("Yuki", got[1], rubric, "rubric", "HW3 rubric")
+	sato("HW3 published")
+
+	b.do(t, b.sato, "member.update_perms", m{"course_id": b.course, "member_id": b.yukiM, "perms": m{"rubric_read": "denied"}})
+	got = b.sourcesOf(t, b.yuki, conv, answer)
+	whole("Yuki, reading no rubrics", got[0], brief, "instructions", "HW3 brief")
+	if got[1] != (tools.SourceView{Restricted: true}) {
+		t.Fatalf("Yuki, reading no rubrics, the rubric: %+v", got[1])
+	}
+
+	b.do(t, b.sato, "assignment.unpublish", m{"course_id": b.course, "assignment_id": b.hw3})
+	for _, s := range b.sourcesOf(t, b.yuki, conv, answer) {
+		if s != (tools.SourceView{Restricted: true}) {
+			t.Fatalf("Yuki, HW3 withdrawn: %+v", s)
+		}
+	}
+	sato("HW3 withdrawn")
+}
+
+// What an answer names is checked before it is posted or proposed: what
+// its sources say alone as the call is read, and whether the respondent
+// may read each before the answer is posted or proposed, and again when a
+// proposal is approved. The refusal says which source. One refused for
+// what the respondent may read is recorded as failed, as every call
+// Validate refuses is.
+func TestAnAnswersSourcesAreCheckedBeforeItIsPostedOrProposed(t *testing.T) {
 	b := build(t)
 	lecture := b.lecture(t)
 	v1 := *lecture.VersionID
@@ -173,7 +248,11 @@ func TestAnAnswersSourcesAreCheckedBeforeAnythingIsRecorded(t *testing.T) {
 	essay := testkit.Result[tools.DocumentCreateOut](t, b.do(t, b.yuki, "document.create", m{"course_id": b.course,
 		"kind": "submission", "title": "essay.md", "submission_id": yukiDraft, "body_md": "My essay."}))
 	v2 := testkit.Result[tools.DocumentVersionOut](t, b.do(t, b.sato, "document.add_version",
-		m{"course_id": b.course, "document_id": lecture.DocumentID, "body_md": "Loops, rewritten."}))
+		m{"course_id": b.course, "document_id": lecture.DocumentID, "body_md": "Loops, rewritten.",
+			"files": oneFile(b.upload(t, b.sato, "material", "application/pdf", []byte("%PDF the new slides")))}))
+	if len(v2.FileIDs) != 1 {
+		t.Fatalf("the new version: %+v", v2)
+	}
 
 	many := make([]m, 21)
 	for i := range many {
@@ -204,7 +283,9 @@ func TestAnAnswersSourcesAreCheckedBeforeAnythingIsRecorded(t *testing.T) {
 			apperr.InvalidArgument, "source_unreadable", "sources[0]"},
 		{"a document of no course", []m{{"document_id": uuid.New(), "version_id": v1}},
 			apperr.InvalidArgument, "source_unreadable", "sources[0]"},
-		{"a file of another version", []m{{"document_id": lecture.DocumentID, "version_id": v1, "file_id": uuid.New()}},
+		{"a file of another version", []m{{"document_id": lecture.DocumentID, "version_id": v1, "file_id": v2.FileIDs[0]}},
+			apperr.InvalidArgument, "source_unreadable", "sources[0]"},
+		{"a file of no version", []m{{"document_id": lecture.DocumentID, "version_id": v1, "file_id": uuid.New()}},
 			apperr.InvalidArgument, "source_unreadable", "sources[0]"},
 		{"a student's work", []m{good, {"document_id": essay.DocumentID, "version_id": essay.VersionID}},
 			apperr.InvalidArgument, "source_unreadable", "sources[1]"},
@@ -224,6 +305,16 @@ func TestAnAnswersSourcesAreCheckedBeforeAnythingIsRecorded(t *testing.T) {
 			}
 			if n := b.Count(`SELECT count(*) FROM conversation_message WHERE conversation_id = $1`, conv); n != 1 {
 				t.Fatal("the answer was posted")
+			}
+			// What the call says alone refuses it before it is recorded;
+			// what the tutor may read, as it is recorded, failed.
+			if strings.HasPrefix(tc.reason, "source_") {
+				if out.Status != domain.StatusFailed || out.ActionID == nil || b.Count(`SELECT count(*) FROM action
+						WHERE id = $1 AND action_type = 'conversation.answer' AND status = 'failed' AND payload ? 'sources'`, *out.ActionID) != 1 {
+					t.Fatalf("refused for what the tutor may read, not recorded as failed: %+v", out)
+				}
+			} else if out.ActionID != nil {
+				t.Fatalf("refused for what it says alone, and recorded: %+v", out)
 			}
 		})
 	}
@@ -253,21 +344,45 @@ func TestAnAnswersSourcesAreCheckedBeforeAnythingIsRecorded(t *testing.T) {
 	}
 }
 
-// An answer from a runtime that names no sources, as every one did before
-// they were kept, is taken as it always was, and read with none.
-func TestAnAnswerNamingNoSourcesIsAsBefore(t *testing.T) {
+// An answer that does not say what it relied on, as none did before
+// sources were kept, is taken as it always was, and read with no sources
+// (absent); one that says it relied on none (sources, empty) is read so
+// (an empty list), posted at once or approved.
+func TestAnAnswerSayingItReliedOnNoneIsToldFromOneThatDoesNotSay(t *testing.T) {
 	b := build(t)
 	conv, q := b.open(t, b.yuki, b.tutorM, "What is a loop?")
-	for _, sources := range []any{nil, []m{}} {
-		args := answerArgs(b, conv, q, "A block repeated.")
-		if sources != nil {
-			args["sources"] = sources
-		}
-		answer := testkit.Result[tools.MessageIDOut](t, b.do(t, b.tutor, "conversation.answer", args)).MessageID
-		if got := b.sourcesOf(t, b.yuki, conv, answer); got != nil {
-			t.Fatalf("an answer naming none reads %+v", got)
-		}
-		q = b.ask(t, b.yuki, conv, "Again?")
+	silent := testkit.Result[tools.MessageIDOut](t, b.do(t, b.tutor, "conversation.answer",
+		answerArgs(b, conv, q, "A block repeated."))).MessageID
+	q = b.ask(t, b.yuki, conv, "Again?")
+	args := answerArgs(b, conv, q, "A block repeated, again.")
+	args["sources"] = []m{}
+	none := testkit.Result[tools.MessageIDOut](t, b.do(t, b.tutor, "conversation.answer", args)).MessageID
+	if got := b.sourcesOf(t, b.yuki, conv, silent); got != nil {
+		t.Fatalf("an answer that does not say reads %+v", got)
+	}
+	if got := b.sourcesOf(t, b.yuki, conv, none); got == nil || len(got) != 0 {
+		t.Fatalf("an answer that relied on none reads %#v", got)
+	}
+
+	// Proposed, it is kept as said until approved.
+	b.do(t, b.sato, "member.update_perms", m{"course_id": b.course, "member_id": b.tutorM, "perms": m{"conversation_answer": "confirm_required"}})
+	q = b.ask(t, b.yuki, conv, "Once more?")
+	args = answerArgs(b, conv, q, "Once more: a block repeated.")
+	args["sources"] = []m{}
+	proposed := b.MustCall(b.tutor, "conversation.answer", args, "proposed-none")
+	if proposed.Status != domain.StatusProposed {
+		t.Fatalf("the answer, proposed: %+v", proposed)
+	}
+	approved := b.do(t, b.sato, "action.decide", m{"course_id": b.course, "action_id": proposed.ActionID, "decision": "approve"})
+	if d := testkit.Result[pipeline.DecideOut](t, approved); d.Outcome != domain.StatusExecuted {
+		t.Fatalf("approving it: %+v", d)
+	}
+	msgs := b.messages(t, b.yuki, conv)
+	if last := msgs[len(msgs)-1]; last.Body == nil || *last.Body != "Once more: a block repeated." || last.Sources == nil || len(last.Sources) != 0 {
+		t.Fatalf("the approved answer that relied on none: %+v", last)
+	}
+	if n := b.Count(`SELECT count(*) FROM conversation_message WHERE conversation_id = $1 AND sources_stated`, conv); n != 2 {
+		t.Fatalf("%d answers say what they relied on, want 2", n)
 	}
 }
 
@@ -308,8 +423,8 @@ func TestAnExportHoldsWhatEachAnswerReliedOn(t *testing.T) {
 		t.Fatalf("the answer's source, exported: %v", s)
 	}
 	for _, msg := range list(x.byID[a.c1.String()]["messages"]) {
-		if got, ok := obj(msg)["sources"].([]any); !ok || len(got) != 0 {
-			t.Fatalf("a message naming none exports sources %v", obj(msg)["sources"])
+		if got, there := obj(msg)["sources"]; !there || got != nil {
+			t.Fatalf("a message that says nothing of its sources exports sources %v", got)
 		}
 	}
 	proposals := list(x.byID[waits.String()]["proposals"])

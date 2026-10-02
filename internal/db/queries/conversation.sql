@@ -21,12 +21,14 @@ WHERE id = sqlc.arg(id) AND status = 'open';
 
 -- name: InsertConversationMessage :one
 -- The second half, under the lock TouchConversation took: the next seq in
--- this conversation.
+-- this conversation. sources_stated: an answer that says what it relied
+-- on, even nothing.
 INSERT INTO conversation_message (id, conversation_id, course_id, seq, author_member_id, in_reply_to_message_id, body,
-                                  created_by_action_id, created_at)
+                                  created_by_action_id, created_at, sources_stated)
 VALUES (sqlc.arg(id), sqlc.arg(conversation_id), sqlc.arg(course_id),
         (SELECT coalesce(max(x.seq), 0) + 1 FROM conversation_message x WHERE x.conversation_id = sqlc.arg(conversation_id)),
-        sqlc.arg(author_member_id), sqlc.narg(in_reply_to_message_id), sqlc.arg(body), sqlc.arg(created_by_action_id), sqlc.arg(created_at))
+        sqlc.arg(author_member_id), sqlc.narg(in_reply_to_message_id), sqlc.arg(body), sqlc.arg(created_by_action_id), sqlc.arg(created_at),
+        sqlc.arg(sources_stated))
 RETURNING seq;
 
 -- name: CloseConversation :execrows
@@ -96,7 +98,7 @@ ON CONFLICT (message_id) DO NOTHING;
 
 -- name: ListConversationMessagesAfter :many
 -- Oldest first, after a seq.
-SELECT m.id, m.seq, m.author_member_id, m.in_reply_to_message_id, m.body, m.created_at,
+SELECT m.id, m.seq, m.author_member_id, m.in_reply_to_message_id, m.body, m.created_at, m.sources_stated,
        r.created_at AS retracted_at, r.retracted_by_member_id, r.reason AS retraction_reason
 FROM conversation_message m
 LEFT JOIN conversation_message_retraction r ON r.message_id = m.id
@@ -107,7 +109,7 @@ LIMIT sqlc.arg(max_rows);
 -- name: ListConversationMessagesBefore :many
 -- Newest first, before a seq: the tail of a conversation, turned round by
 -- the caller.
-SELECT m.id, m.seq, m.author_member_id, m.in_reply_to_message_id, m.body, m.created_at,
+SELECT m.id, m.seq, m.author_member_id, m.in_reply_to_message_id, m.body, m.created_at, m.sources_stated,
        r.created_at AS retracted_at, r.retracted_by_member_id, r.reason AS retraction_reason
 FROM conversation_message m
 LEFT JOIN conversation_message_retraction r ON r.message_id = m.id
@@ -331,7 +333,7 @@ WHERE c.id = ANY(sqlc.arg(ids)::uuid[])
                  AND NOT EXISTS (SELECT 1 FROM conversation_message_retraction x WHERE x.message_id = m.id));
 
 -- name: InsertMessageSource :exec
--- One of an answer's sources (docs/schema.md §2.8, Sources of an answer),
+-- One of an answer's sources (docs/schema.md §2.8, What an answer relied on),
 -- written with it, in its transaction, and dated as it is. The file, when
 -- one is named, is named with the source's version, which holds it to
 -- that version's files.
@@ -342,14 +344,14 @@ VALUES (sqlc.arg(message_id), sqlc.arg(course_id), sqlc.arg(position), sqlc.arg(
         sqlc.narg(page), sqlc.narg(slide), sqlc.narg(part), sqlc.arg(created_at));
 
 -- name: ListMessageSources :many
--- The sources of the given messages, each message's in order, with their
--- documents and versions as they stand now: what each is called, whether
--- it is archived or purged, which version is published, and the file's
--- name while it has one. Whom each may be shown to is the caller's to
--- decide, reader by reader, in Go (tools.sourceReader).
+-- The sources of the given messages, each message's in order, with what
+-- an export and every reader are told of them alike: the document's kind
+-- and title as they are now, the version's seq, whether either was purged,
+-- and the file's name while it has one. Whom each may be shown to, and
+-- how much, is the caller's to decide, reader by reader, in Go
+-- (tools.sourceReader), with document.get's rules.
 SELECT s.message_id, s.position, s.document_id, s.version_id, s.file_id, s.page, s.slide, s.part,
-       d.kind AS document_kind, d.title AS document_title, d.status AS document_status,
-       d.published_version_id, d.purged_at AS document_purged_at,
+       d.kind AS document_kind, d.title AS document_title, d.purged_at AS document_purged_at,
        v.seq AS version_seq, v.purged_at AS version_purged_at, f.filename
 FROM conversation_message_source s
 JOIN document d ON d.id = s.document_id

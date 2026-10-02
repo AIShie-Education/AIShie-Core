@@ -461,7 +461,8 @@ var (
 // question than the one it answers. So is the room the conversation has for
 // the files asked there, so that two messages at once are held to its limit
 // together. An answer's sources, checked already (checkSourcesReadable),
-// are written with it.
+// are written with it, and so is whether it said what it relied on at all
+// (sources not nil), even nothing.
 func post(ctx context.Context, d Deps, ec *tool.ExecCtx, c dbq.Conversation, inReplyTo *uuid.UUID, body string, files []attached,
 	sources []SourceIn, check func() error) (uuid.UUID, error) {
 	author := ec.Member.ID
@@ -483,7 +484,7 @@ func post(ctx context.Context, d Deps, ec *tool.ExecCtx, c dbq.Conversation, inR
 	id := ids.New()
 	if _, err := ec.Q.InsertConversationMessage(ctx, dbq.InsertConversationMessageParams{
 		ID: id, ConversationID: c.ID, CourseID: c.CourseID, AuthorMemberID: author, InReplyToMessageID: inReplyTo,
-		Body: body, CreatedByActionID: ec.ActionID, CreatedAt: ec.Now,
+		Body: body, CreatedByActionID: ec.ActionID, CreatedAt: ec.Now, SourcesStated: sources != nil,
 	}); err != nil {
 		return uuid.Nil, err
 	}
@@ -836,8 +837,11 @@ type ConversationAnswerIn struct {
 	InReplyToMessageID uuid.UUID      `json:"in_reply_to_message_id" jsonschema:"the opener's latest message, which you answer: latest_opener_message_id in conversation.inbox and conversation.get"`
 	Body               string         `json:"body" jsonschema:"at most 20000 characters"`
 	Attachments        []AttachmentIn `json:"attachments,omitempty" jsonschema:"files the answer carries, in the order they are shown, each uploaded first with conversation.upload_url"`
-	// Sources are what the answer relied on (sources.go).
-	Sources []SourceIn `json:"sources,omitempty" jsonschema:"the course materials the answer relied on, in order, at most 20: each a version you read (document.get, document.text, a search hit), and the file, page or slide and part of its text if you know them; each must be one you may read now. Leave it out, or empty, when the answer relied on none"`
+	// Sources are what the answer relied on (sources.go). Empty is an
+	// answer that says it relied on none; absent (nil), one that does not
+	// say, which is kept apart (sources_stated), and so is kept nil when a
+	// proposal stores it.
+	Sources []SourceIn `json:"sources,omitzero" jsonschema:"the course materials the answer relied on, in order, at most 20: each a version you read (document.get, a search hit), and the file, page or slide and part of its text if you know them; each must be one you may read now. Give an empty list when the answer relied on none; leave it out only if you do not say"`
 }
 
 // checkAnswer is conversation.answer's rule, on arguments checkMessageArgs
@@ -912,10 +916,11 @@ func conversationAnswer(d Deps) tool.Tool {
 			"moved_on if the opener has written again since (read the new message and answer that), or has withdrawn " +
 			"(retracted) their latest message, when nothing waits for an answer and no message is named; already_answered " +
 			"if that message has its answer, answer_pending if an answer of yours to it waits for approval, closed if the " +
-			"conversation is. Say which course materials the answer relied on (sources): each a version of a document you " +
-			"read for it, with the file, page or slide and part when you know them; readers are shown each as they may " +
-			"read it now. A source you may not read, or a version purged, is refused before anything is recorded, naming " +
-			"it (sources[i]). Your level of conversation_answer decides whether an answer is posted at once, posted and " +
+			"conversation is. Say which course materials the answer relied on (sources), an empty list if none: each a " +
+			"version of a document you read for it, with the file, page or slide and part when you know them; readers are " +
+			"shown each as they may read it now. A source you may not read, or a version purged, is refused before the " +
+			"answer is posted or proposed, naming it (sources[i]); the call is recorded as failed, as every refusal then " +
+			"is, so post the answer again, without it, under a new idempotency key. Your level of conversation_answer decides whether an answer is posted at once, posted and " +
 			"reviewed after, or waits for a person's approval; one that waits is checked again when approved, and refused " +
 			"then if the conversation has moved on. An answer that failed or was rejected may be written again, under a new " +
 			"idempotency key.",
@@ -1733,8 +1738,9 @@ type MessageView struct {
 	// Attachments are withheld with the body once the message is retracted.
 	Attachments []AttachmentView `json:"attachments,omitempty" jsonschema:"the files the message carries, in order; conversation.attachment gives a URL for each. Absent when it carries none, and once it is retracted"`
 	// Sources are an answer's, as this reader may read them now
-	// (sourceReader), withheld with the body once it is retracted.
-	Sources []SourceView `json:"sources,omitempty" jsonschema:"for an answer, the course materials it relied on, in order, each as you may read it now: its document's title as it is now, the version, file and page; other_version when you may open that document but not the version; restricted, and nothing else, when you may not open it at all, or it was purged. Absent when it named none, as answers did before sources were kept, and once it is retracted"`
+	// (sourceReader), withheld with the body once it is retracted. Empty
+	// (not nil) for an answer that said it relied on none.
+	Sources []SourceView `json:"sources,omitzero" jsonschema:"for an answer that said what it relied on, the course materials it relied on, in order, each as you may read it now: its document's title as it is now, the version, file and page; other_version when you may open that document but not the version; restricted, and nothing else, when you may not open it at all, or it was purged. An empty list when the answer said it relied on none. Absent when it did not say (a question; an answer written before sources were kept, or by an agent that does not say), and once it is retracted"`
 }
 
 type ConversationMessagesOut struct {
@@ -1805,6 +1811,7 @@ func conversationMessages() tool.Tool {
 			}
 			out := ConversationMessagesOut{Messages: make([]MessageView, 0, len(rows)), More: len(rows) == int(limit)}
 			var shown []uuid.UUID
+			stated := map[uuid.UUID]bool{}
 			for _, r := range rows {
 				v := MessageView{ID: r.ID, Seq: r.Seq, AuthorMemberID: r.AuthorMemberID, InReplyToMessageID: r.InReplyToMessageID,
 					CreatedAt: r.CreatedAt}
@@ -1814,6 +1821,7 @@ func conversationMessages() tool.Tool {
 					body := r.Body
 					v.Body = &body
 					shown = append(shown, r.ID)
+					stated[r.ID] = r.SourcesStated
 				}
 				out.Messages = append(out.Messages, v)
 			}
@@ -1831,6 +1839,9 @@ func conversationMessages() tool.Tool {
 			for i, v := range out.Messages {
 				out.Messages[i].Attachments = files[v.ID]
 				out.Messages[i].Sources = sources[v.ID]
+				if stated[v.ID] && out.Messages[i].Sources == nil {
+					out.Messages[i].Sources = []SourceView{}
+				}
 			}
 			if out.Conversation, err = conversationView(ctx, rc, in.ConversationID); err != nil {
 				return out, err

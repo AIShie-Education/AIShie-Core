@@ -300,7 +300,7 @@ func (q *Queries) ListExportConversations(ctx context.Context, arg ListExportCon
 const listExportMessages = `-- name: ListExportMessages :many
 SELECT m.id, m.conversation_id, m.seq, m.author_member_id, am.actor_id AS author_actor_id,
        aa.display_name AS author_name, aa.kind AS author_kind, am.role AS author_role,
-       m.in_reply_to_message_id, m.body, m.created_at, m.created_by_action_id,
+       m.in_reply_to_message_id, m.body, m.created_at, m.created_by_action_id, m.sources_stated,
        x.created_at AS retracted_at, x.retracted_by_member_id, xm.actor_id AS retracted_by_actor_id,
        xa.display_name AS retracted_by_name, xa.kind AS retracted_by_kind, xm.role AS retracted_by_role,
        x.reason AS retraction_reason,
@@ -343,6 +343,7 @@ type ListExportMessagesRow struct {
 	Body                string
 	CreatedAt           time.Time
 	CreatedByActionID   uuid.UUID
+	SourcesStated       bool
 	RetractedAt         *time.Time
 	RetractedByMemberID *uuid.UUID
 	RetractedByActorID  *uuid.UUID
@@ -388,6 +389,7 @@ func (q *Queries) ListExportMessages(ctx context.Context, arg ListExportMessages
 			&i.Body,
 			&i.CreatedAt,
 			&i.CreatedByActionID,
+			&i.SourcesStated,
 			&i.RetractedAt,
 			&i.RetractedByMemberID,
 			&i.RetractedByActorID,
@@ -419,7 +421,7 @@ SELECT a.id, a.target_id AS conversation_id, a.action_type, a.status, a.created_
                  FROM jsonb_array_elements(CASE WHEN jsonb_typeof(a.payload->'attachments') = 'array'
                                                 THEN a.payload->'attachments' ELSE '[]'::jsonb END) WITH ORDINALITY f),
                 '{}')::text[] AS attachment_filenames,
-       (CASE WHEN jsonb_typeof(a.payload->'sources') = 'array' THEN a.payload->'sources' ELSE '[]'::jsonb END)::jsonb AS sources,
+       (CASE WHEN jsonb_typeof(a.payload->'sources') = 'array' THEN a.payload->'sources' ELSE 'null'::jsonb END)::jsonb AS sources,
        coalesce(a.result->'decision'->>'reason', a.result->'error'->'details'->>'reason', '')::text AS reason
 FROM action a
 LEFT JOIN course_member pm ON pm.id = a.member_id
@@ -471,7 +473,7 @@ type ListExportProposalsRow struct {
 // seat gone). What each said is its payload's; of the files it named, their
 // names alone, never the upload tokens it names them by. Why it was
 // rejected or cancelled is its result's. An answer's sources are as it
-// named them, ids alone.
+// named them, ids alone; null when it did not say.
 func (q *Queries) ListExportProposals(ctx context.Context, arg ListExportProposalsParams) ([]ListExportProposalsRow, error) {
 	rows, err := q.db.Query(ctx, listExportProposals,
 		arg.ConversationIds,

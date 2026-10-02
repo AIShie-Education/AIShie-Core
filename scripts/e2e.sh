@@ -591,8 +591,9 @@ call 403 POST "$C/conversations/$CONV/draft" "$YUKI" '{"attempt":"a1","version":
 [ "$(reason)" = conversations_are_with_agents ] || fail "Yuki writing the tutor's draft, refused, but not as a person: $(cat "$WORK/body")"
 wait_on "$C/conversations/$CONV/messages?after_seq=1&wait_s=20&seen_state=awaiting_answer&seen_draft_version=1" "$YUKI"
 # The answer says what it relied on: page 1 of Lecture 1's slides. Week 3's
-# draft, which the tutor may not read, is refused, naming it, and nothing is
-# recorded.
+# draft, which the tutor may not read, is refused, naming it, before the
+# answer is posted; the call is recorded as failed, and the answer is posted
+# again under a new key.
 LECTURE_SOURCE="{\"document_id\":\"$DOC\",\"version_id\":\"$VERSION\",\"file_id\":\"$FILE\",\"page\":1}"
 KEY="answer:$CONV:$QUESTION:0" call 400 POST "$C/conversations/$CONV/answer" "$TUTOR" "{\"in_reply_to_message_id\":\"$QUESTION\",\"body\":\"An essay with a thesis.\",\"sources\":[$LECTURE_SOURCE,{\"document_id\":\"$W3\",\"version_id\":\"$W3_V2\"}]}"
 [ "$(reason) $(json "$WORK/body" 'd["error"]["details"]["field"]')" = "source_unreadable sources[1]" ] ||

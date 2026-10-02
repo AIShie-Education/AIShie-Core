@@ -16,18 +16,22 @@ import (
 	"github.com/AIShie-Education/AIShie-Core/internal/tool"
 )
 
-// What an answer relied on (docs/schema.md §2.8, Sources of an answer). An
-// agent answering may say which of the course's materials it read for the
-// answer (conversation.answer's sources): each a version of a document — a
-// material, instructions or a rubric — and, if it says so, one of the
+// What an answer relied on (docs/schema.md §2.8, What an answer relied on).
+// An agent answering may say which of the course's materials it read for
+// the answer (conversation.answer's sources): each a version of a document
+// — a material, instructions or a rubric — and, if it says so, one of the
 // version's files, a page or a slide of it and a part of its text. They are
 // kept with the answer (conversation_message_source), in order, a row each.
+// An answer that says it relied on none (sources, empty) is kept apart from
+// one that does not say (sources_stated), and read back as an empty list.
 //
 // What it names it must be able to read as it answers: each version is one
 // document.get would show the answering seat, named by id, at that moment,
 // and not purged; each file one of that version's. A source that is not is
-// refused, saying which (sources[i]), before anything is recorded or
-// proposed, and again when a proposal is approved, as the proposer's.
+// refused, saying which (sources[i]), before the answer is posted or
+// proposed (Validate), and again when a proposal is approved, as the
+// proposer's. The call is recorded as failed then, as every call Validate
+// refuses is, so the answer is posted again under a new idempotency key.
 //
 // Who reads the answer reads its sources as they may read the documents now,
 // whoever they are: what document.get would show them of each version, named
@@ -54,9 +58,9 @@ type SourceIn struct {
 	DocumentID uuid.UUID  `json:"document_id" jsonschema:"the document read: a material, instructions or a rubric of the course"`
 	VersionID  uuid.UUID  `json:"version_id" jsonschema:"the version read: version.id in document.get, or version_id in document.text"`
 	FileID     *uuid.UUID `json:"file_id,omitempty" jsonschema:"one of the version's files, when the answer relied on that file: its id in version.files of document.get, or file_id in document.text"`
-	Page       *int32     `json:"page,omitempty" jsonschema:"a page of the file, as its text heads it (## 第 N 頁 / ## Page N), from 1; with file_id, not with slide"`
-	Slide      *int32     `json:"slide,omitempty" jsonschema:"a slide of the file, as its text heads it (## Slide N), from 1; with file_id, not with page"`
-	Part       *int32     `json:"part,omitempty" jsonschema:"the part of the file's text read, as document.text numbers its parts, from 1; with file_id"`
+	Page       *int32     `json:"page,omitempty" jsonschema:"a page of the file, as its text version heads it (## 第 N 頁), from 1; with file_id, not with slide"`
+	Slide      *int32     `json:"slide,omitempty" jsonschema:"a slide of the file, as its text version heads it (## Slide N), from 1; with file_id, not with page"`
+	Part       *int32     `json:"part,omitempty" jsonschema:"the part of the file's text version read, as document.text numbers its parts, from 1; with file_id. Only Core's own numbering: never a part of a reading of your own"`
 }
 
 // SourceView is a source of an answer as one reader is shown it.

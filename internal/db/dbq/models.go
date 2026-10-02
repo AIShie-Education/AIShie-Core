@@ -166,6 +166,7 @@ type ConversationMessage struct {
 	Body               string
 	CreatedByActionID  uuid.UUID
 	CreatedAt          time.Time
+	SourcesStated      bool
 }
 
 type ConversationMessageRetraction struct {

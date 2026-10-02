@@ -801,10 +801,10 @@ func exportSourcesOf(ctx context.Context, q dbq.Querier, messages []uuid.UUID) (
 }
 
 // exportProposedSources are the sources a proposed answer named, as it
-// named them: ids alone.
+// named them: ids alone; none (nil) when it did not say.
 func exportProposedSources(payload []byte) ([]exportSource, error) {
 	var named []SourceIn
-	if err := json.Unmarshal(payload, &named); err != nil {
+	if err := json.Unmarshal(payload, &named); err != nil || named == nil {
 		return nil, err
 	}
 	out := make([]exportSource, len(named))
@@ -881,7 +881,9 @@ type exportAttachment struct {
 // exportSource is a source of an answer, as an export holds it. A posted
 // answer's says what its document is called now, and whether its version
 // was purged; a proposed answer's is as it was named, its title, kind,
-// seq and file name null.
+// seq and file name null. A message's or a proposal's sources are an
+// empty list for an answer that said it relied on none, and null where
+// nothing was said: a question, or an answer that did not say.
 type exportSource struct {
 	DocumentID uuid.UUID  `json:"document_id"`
 	VersionID  uuid.UUID  `json:"version_id"`
@@ -978,7 +980,7 @@ func (w *exportWriter) message(c dbq.ListExportConversationsRow, m exportedMessa
 		ActionID: m.CreatedByActionID, Attachments: make([]exportAttachment, 0, len(m.files)), Sources: m.sources,
 		Author: exportParty{MemberID: m.AuthorMemberID, ActorID: m.AuthorActorID, Name: m.AuthorName, Kind: m.AuthorKind,
 			Role: m.AuthorRole}}
-	if v.Sources == nil {
+	if v.Sources == nil && m.SourcesStated {
 		v.Sources = []exportSource{}
 	}
 	ids, names := make([]string, len(m.files)), make([]string, len(m.files))

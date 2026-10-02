@@ -435,7 +435,8 @@ type Querier interface {
 	// the message is (conversation_attachment_with_its_message).
 	InsertConversationAttachment(ctx context.Context, arg InsertConversationAttachmentParams) error
 	// The second half, under the lock TouchConversation took: the next seq in
-	// this conversation.
+	// this conversation. sources_stated: an answer that says what it relied
+	// on, even nothing.
 	InsertConversationMessage(ctx context.Context, arg InsertConversationMessageParams) (int32, error)
 	InsertCourse(ctx context.Context, arg InsertCourseParams) error
 	InsertCredential(ctx context.Context, arg InsertCredentialParams) error
@@ -454,7 +455,7 @@ type Querier interface {
 	// A new entry, unless the same text is already live in its bucket: then no
 	// row comes back, and GetMemoryByHash finds the one that is there.
 	InsertMemory(ctx context.Context, arg InsertMemoryParams) (uuid.UUID, error)
-	// One of an answer's sources (docs/schema.md §2.8, Sources of an answer),
+	// One of an answer's sources (docs/schema.md §2.8, What an answer relied on),
 	// written with it, in its transaction, and dated as it is. The file, when
 	// one is named, is named with the source's version, which holds it to
 	// that version's files.
@@ -612,7 +613,7 @@ type Querier interface {
 	// seat gone). What each said is its payload's; of the files it named, their
 	// names alone, never the upload tokens it names them by. Why it was
 	// rejected or cancelled is its result's. An answer's sources are as it
-	// named them, ids alone.
+	// named them, ids alone; null when it did not say.
 	ListExportProposals(ctx context.Context, arg ListExportProposalsParams) ([]ListExportProposalsRow, error)
 	ListGradeDocuments(ctx context.Context, gradeID *uuid.UUID) ([]ListGradeDocumentsRow, error)
 	// Assignments that count toward the grade. An unpublished one cannot have a
@@ -677,11 +678,12 @@ type Querier interface {
 	// The files of the given messages, each message's in order. What a message
 	// view shows of them: never where they are kept.
 	ListMessageAttachments(ctx context.Context, messageIds []uuid.UUID) ([]ListMessageAttachmentsRow, error)
-	// The sources of the given messages, each message's in order, with their
-	// documents and versions as they stand now: what each is called, whether
-	// it is archived or purged, which version is published, and the file's
-	// name while it has one. Whom each may be shown to is the caller's to
-	// decide, reader by reader, in Go (tools.sourceReader).
+	// The sources of the given messages, each message's in order, with what
+	// an export and every reader are told of them alike: the document's kind
+	// and title as they are now, the version's seq, whether either was purged,
+	// and the file's name while it has one. Whom each may be shown to, and
+	// how much, is the caller's to decide, reader by reader, in Go
+	// (tools.sourceReader), with document.get's rules.
 	ListMessageSources(ctx context.Context, messageIds []uuid.UUID) ([]ListMessageSourcesRow, error)
 	// The conversations the given seats opened, newest activity first — its
 	// last message, or its opening while it has none — after a

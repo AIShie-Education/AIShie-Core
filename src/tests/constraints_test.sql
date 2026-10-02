@@ -2175,10 +2175,23 @@ SELECT pg_temp.ok('a version''s files'' renditions go with them when it is purge
         END IF;
     END $chk$ $q$);
 
--- Sources of an answer (migration 0029) ----------------------------------------
+-- What an answer relied on (migration 0029) -----------------------------------
 -- 29e1 Week 6 (material) · 29f1 its version of two files, 29d1, 29d2 · 29f2 its version of text alone
--- 29e2 a document of CS101 B · c12 the grader's answer to Yuki's c11 · c11 her question
+-- 29e2 a document of CS101 B · 29c1 Yuki's conversation with the grader, open
+-- 29a1 her question · 29a2 the grader's answer, saying what it relied on
+-- c12 the grader's answer to c11, which says nothing of its sources
 SELECT pg_temp.ok('an answer names the versions, files and pages it relied on, in order', $q$
+    INSERT INTO conversation (id, course_id, opener_member_id, respondent_member_id)
+    VALUES ('00000000-0000-0000-0000-0000000029c1', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000000052',
+            '00000000-0000-0000-0000-000000000053');
+    INSERT INTO conversation_message (id, conversation_id, course_id, seq, author_member_id, body, created_by_action_id)
+    VALUES ('00000000-0000-0000-0000-0000000029a1', '00000000-0000-0000-0000-0000000029c1', '00000000-0000-0000-0000-000000000041', 1,
+            '00000000-0000-0000-0000-000000000052', 'Where is the rubric?', '00000000-0000-0000-0000-0000000000b1');
+    INSERT INTO conversation_message (id, conversation_id, course_id, seq, author_member_id, in_reply_to_message_id, body,
+                                      created_by_action_id, sources_stated)
+    VALUES ('00000000-0000-0000-0000-0000000029a2', '00000000-0000-0000-0000-0000000029c1', '00000000-0000-0000-0000-000000000041', 2,
+            '00000000-0000-0000-0000-000000000053', '00000000-0000-0000-0000-0000000029a1', 'In Week 6.',
+            '00000000-0000-0000-0000-0000000000b1', true);
     INSERT INTO document (id, course_id, kind, title) VALUES
         ('00000000-0000-0000-0000-0000000029e1', '00000000-0000-0000-0000-000000000041', 'material', 'Week 6'),
         ('00000000-0000-0000-0000-0000000029e2', '00000000-0000-0000-0000-000000000042', 'material', 'Week 6, section B');
@@ -2193,79 +2206,87 @@ SELECT pg_temp.ok('an answer names the versions, files and pages it relied on, i
          'notes.md', 'k/29d2', 'text/markdown', 10);
     INSERT INTO conversation_message_source (message_id, course_id, position, document_id, version_id, file_id, file_version_id,
                                              slide, part) VALUES
-        ('00000000-0000-0000-0000-000000000c12', '00000000-0000-0000-0000-000000000041', 1, '00000000-0000-0000-0000-0000000029e1',
+        ('00000000-0000-0000-0000-0000000029a2', '00000000-0000-0000-0000-000000000041', 1, '00000000-0000-0000-0000-0000000029e1',
          '00000000-0000-0000-0000-0000000029f1', '00000000-0000-0000-0000-0000000029d1', '00000000-0000-0000-0000-0000000029f1', 4, 1);
     INSERT INTO conversation_message_source (message_id, course_id, position, document_id, version_id) VALUES
-        ('00000000-0000-0000-0000-000000000c12', '00000000-0000-0000-0000-000000000041', 2, '00000000-0000-0000-0000-0000000029e1',
+        ('00000000-0000-0000-0000-0000000029a2', '00000000-0000-0000-0000-000000000041', 2, '00000000-0000-0000-0000-0000000029e1',
          '00000000-0000-0000-0000-0000000029f2') $q$);
+SELECT pg_temp.fails('only an answer says what it relied on', '23514', $q$
+    INSERT INTO conversation_message (conversation_id, course_id, seq, author_member_id, body, created_by_action_id, sources_stated)
+    VALUES ('00000000-0000-0000-0000-0000000029c1', '00000000-0000-0000-0000-000000000041', 3,
+            '00000000-0000-0000-0000-000000000052', 'And the rubric?', '00000000-0000-0000-0000-0000000000b1', true) $q$);
 SELECT pg_temp.fails('one source at each place', '23505', $q$
     INSERT INTO conversation_message_source (message_id, course_id, position, document_id, version_id)
-    VALUES ('00000000-0000-0000-0000-000000000c12', '00000000-0000-0000-0000-000000000041', 2, '00000000-0000-0000-0000-0000000029e1',
+    VALUES ('00000000-0000-0000-0000-0000000029a2', '00000000-0000-0000-0000-000000000041', 2, '00000000-0000-0000-0000-0000000029e1',
             '00000000-0000-0000-0000-0000000029f1') $q$);
 SELECT pg_temp.fails('at most 20 to an answer', '23514', $q$
     INSERT INTO conversation_message_source (message_id, course_id, position, document_id, version_id)
-    VALUES ('00000000-0000-0000-0000-000000000c12', '00000000-0000-0000-0000-000000000041', 21, '00000000-0000-0000-0000-0000000029e1',
+    VALUES ('00000000-0000-0000-0000-0000000029a2', '00000000-0000-0000-0000-000000000041', 21, '00000000-0000-0000-0000-0000000029e1',
             '00000000-0000-0000-0000-0000000029f1') $q$);
 SELECT pg_temp.fails('a source is in its answer''s course', '23503', $q$
     INSERT INTO conversation_message_source (message_id, course_id, position, document_id, version_id)
-    VALUES ('00000000-0000-0000-0000-000000000c12', '00000000-0000-0000-0000-000000000042', 3, '00000000-0000-0000-0000-0000000029e2',
+    VALUES ('00000000-0000-0000-0000-0000000029a2', '00000000-0000-0000-0000-000000000042', 3, '00000000-0000-0000-0000-0000000029e2',
             '00000000-0000-0000-0000-0000000029f3') $q$);
 SELECT pg_temp.fails('and so is its document', '23503', $q$
     INSERT INTO conversation_message_source (message_id, course_id, position, document_id, version_id)
-    VALUES ('00000000-0000-0000-0000-000000000c12', '00000000-0000-0000-0000-000000000041', 3, '00000000-0000-0000-0000-0000000029e2',
+    VALUES ('00000000-0000-0000-0000-0000000029a2', '00000000-0000-0000-0000-000000000041', 3, '00000000-0000-0000-0000-0000000029e2',
             '00000000-0000-0000-0000-0000000029f3') $q$);
 SELECT pg_temp.fails('a version is its document''s', '23503', $q$
     INSERT INTO conversation_message_source (message_id, course_id, position, document_id, version_id)
-    VALUES ('00000000-0000-0000-0000-000000000c12', '00000000-0000-0000-0000-000000000041', 3, '00000000-0000-0000-0000-0000000000e1',
+    VALUES ('00000000-0000-0000-0000-0000000029a2', '00000000-0000-0000-0000-000000000041', 3, '00000000-0000-0000-0000-0000000000e1',
             '00000000-0000-0000-0000-0000000029f1') $q$);
 SELECT pg_temp.fails('a file is its version''s', '23503', $q$
     INSERT INTO conversation_message_source (message_id, course_id, position, document_id, version_id, file_id, file_version_id)
-    VALUES ('00000000-0000-0000-0000-000000000c12', '00000000-0000-0000-0000-000000000041', 3, '00000000-0000-0000-0000-0000000029e1',
+    VALUES ('00000000-0000-0000-0000-0000000029a2', '00000000-0000-0000-0000-000000000041', 3, '00000000-0000-0000-0000-0000000029e1',
             '00000000-0000-0000-0000-0000000029f2', '00000000-0000-0000-0000-0000000029d1', '00000000-0000-0000-0000-0000000029f2') $q$);
 SELECT pg_temp.fails('and named with the source''s version', '23514', $q$
     INSERT INTO conversation_message_source (message_id, course_id, position, document_id, version_id, file_id, file_version_id)
-    VALUES ('00000000-0000-0000-0000-000000000c12', '00000000-0000-0000-0000-000000000041', 3, '00000000-0000-0000-0000-0000000029e1',
+    VALUES ('00000000-0000-0000-0000-0000000029a2', '00000000-0000-0000-0000-000000000041', 3, '00000000-0000-0000-0000-0000000029e1',
             '00000000-0000-0000-0000-0000000029f2', '00000000-0000-0000-0000-0000000029d1', '00000000-0000-0000-0000-0000000029f1') $q$);
 SELECT pg_temp.fails('a file named, its version named too', '23514', $q$
     INSERT INTO conversation_message_source (message_id, course_id, position, document_id, version_id, file_id)
-    VALUES ('00000000-0000-0000-0000-000000000c12', '00000000-0000-0000-0000-000000000041', 3, '00000000-0000-0000-0000-0000000029e1',
+    VALUES ('00000000-0000-0000-0000-0000000029a2', '00000000-0000-0000-0000-000000000041', 3, '00000000-0000-0000-0000-0000000029e1',
             '00000000-0000-0000-0000-0000000029f1', '00000000-0000-0000-0000-0000000029d1') $q$);
 SELECT pg_temp.fails('a page or a slide, not both', '23514', $q$
     INSERT INTO conversation_message_source (message_id, course_id, position, document_id, version_id, file_id, file_version_id,
                                              page, slide)
-    VALUES ('00000000-0000-0000-0000-000000000c12', '00000000-0000-0000-0000-000000000041', 3, '00000000-0000-0000-0000-0000000029e1',
+    VALUES ('00000000-0000-0000-0000-0000000029a2', '00000000-0000-0000-0000-000000000041', 3, '00000000-0000-0000-0000-0000000029e1',
             '00000000-0000-0000-0000-0000000029f1', '00000000-0000-0000-0000-0000000029d1', '00000000-0000-0000-0000-0000000029f1', 1, 1) $q$);
 SELECT pg_temp.fails('a page counts from 1', '23514', $q$
     INSERT INTO conversation_message_source (message_id, course_id, position, document_id, version_id, file_id, file_version_id, page)
-    VALUES ('00000000-0000-0000-0000-000000000c12', '00000000-0000-0000-0000-000000000041', 3, '00000000-0000-0000-0000-0000000029e1',
+    VALUES ('00000000-0000-0000-0000-0000000029a2', '00000000-0000-0000-0000-000000000041', 3, '00000000-0000-0000-0000-0000000029e1',
             '00000000-0000-0000-0000-0000000029f1', '00000000-0000-0000-0000-0000000029d1', '00000000-0000-0000-0000-0000000029f1', 0) $q$);
 SELECT pg_temp.fails('and so does a part', '23514', $q$
     INSERT INTO conversation_message_source (message_id, course_id, position, document_id, version_id, file_id, file_version_id, part)
-    VALUES ('00000000-0000-0000-0000-000000000c12', '00000000-0000-0000-0000-000000000041', 3, '00000000-0000-0000-0000-0000000029e1',
+    VALUES ('00000000-0000-0000-0000-0000000029a2', '00000000-0000-0000-0000-000000000041', 3, '00000000-0000-0000-0000-0000000029e1',
             '00000000-0000-0000-0000-0000000029f1', '00000000-0000-0000-0000-0000000029d1', '00000000-0000-0000-0000-0000000029f1', 0) $q$);
+SELECT pg_temp.fails('an answer that said nothing of its sources names none', '23514', $q$
+    INSERT INTO conversation_message_source (message_id, course_id, position, document_id, version_id)
+    VALUES ('00000000-0000-0000-0000-000000000c12', '00000000-0000-0000-0000-000000000041', 1, '00000000-0000-0000-0000-0000000029e1',
+            '00000000-0000-0000-0000-0000000029f1') $q$);
 SELECT pg_temp.fails('a question names no sources', '23514', $q$
     INSERT INTO conversation_message_source (message_id, course_id, position, document_id, version_id)
     VALUES ('00000000-0000-0000-0000-000000000c11', '00000000-0000-0000-0000-000000000041', 1, '00000000-0000-0000-0000-0000000029e1',
             '00000000-0000-0000-0000-0000000029f1') $q$);
 SELECT pg_temp.fails('a source is written with its answer, never added to it afterwards', '23514', $q$
     INSERT INTO conversation_message_source (message_id, course_id, position, document_id, version_id, created_at)
-    VALUES ('00000000-0000-0000-0000-000000000c12', '00000000-0000-0000-0000-000000000041', 3, '00000000-0000-0000-0000-0000000029e1',
+    VALUES ('00000000-0000-0000-0000-0000000029a2', '00000000-0000-0000-0000-000000000041', 3, '00000000-0000-0000-0000-0000000029e1',
             '00000000-0000-0000-0000-0000000029f1', now() + interval '1 minute') $q$);
 SELECT pg_temp.fails('a student''s work is no source', '23514', $q$
     INSERT INTO conversation_message_source (message_id, course_id, position, document_id, version_id)
-    VALUES ('00000000-0000-0000-0000-000000000c12', '00000000-0000-0000-0000-000000000041', 3, '00000000-0000-0000-0000-0000000020e3',
+    VALUES ('00000000-0000-0000-0000-0000000029a2', '00000000-0000-0000-0000-000000000041', 3, '00000000-0000-0000-0000-0000000020e3',
             '00000000-0000-0000-0000-0000000020f4') $q$);
 SELECT pg_temp.fails('nor is a purged version', '23514', $q$
     INSERT INTO conversation_message_source (message_id, course_id, position, document_id, version_id)
-    VALUES ('00000000-0000-0000-0000-000000000c12', '00000000-0000-0000-0000-000000000041', 3, '00000000-0000-0000-0000-0000000020e1',
+    VALUES ('00000000-0000-0000-0000-0000000029a2', '00000000-0000-0000-0000-000000000041', 3, '00000000-0000-0000-0000-0000000020e1',
             '00000000-0000-0000-0000-0000000020f1') $q$);
 SELECT pg_temp.fails('a source is kept as it was written', '23001', $q$
-    UPDATE conversation_message_source SET slide = 5 WHERE message_id = '00000000-0000-0000-0000-000000000c12' AND position = 1 $q$);
+    UPDATE conversation_message_source SET slide = 5 WHERE message_id = '00000000-0000-0000-0000-0000000029a2' AND position = 1 $q$);
 SELECT pg_temp.fails('and names its file while there is one', '23001', $q$
     UPDATE conversation_message_source SET file_id = NULL, file_version_id = NULL
-    WHERE message_id = '00000000-0000-0000-0000-000000000c12' AND position = 1 $q$);
+    WHERE message_id = '00000000-0000-0000-0000-0000000029a2' AND position = 1 $q$);
 SELECT pg_temp.fails('a source is never deleted', '23001', $q$
-    DELETE FROM conversation_message_source WHERE message_id = '00000000-0000-0000-0000-000000000c12' $q$);
+    DELETE FROM conversation_message_source WHERE message_id = '00000000-0000-0000-0000-0000000029a2' $q$);
 SELECT pg_temp.fails('nor all at once', '23001', $q$
     TRUNCATE conversation_message_source $q$);
 SELECT pg_temp.ok('a version is purged: its sources stay, naming no file', $q$
@@ -2276,7 +2297,7 @@ SELECT pg_temp.ok('a version is purged: its sources stay, naming no file', $q$
     BEGIN
         IF (SELECT string_agg(position || ':' || coalesce(file_id::text, '-') || ':' || coalesce(file_version_id::text, '-')
                               || ':' || coalesce(slide::text, '-') || ':' || coalesce(part::text, '-'), ' ' ORDER BY position)
-            FROM conversation_message_source WHERE message_id = '00000000-0000-0000-0000-000000000c12') IS DISTINCT FROM '1:-:-:4:1 2:-:-:-:-' THEN
+            FROM conversation_message_source WHERE message_id = '00000000-0000-0000-0000-0000000029a2') IS DISTINCT FROM '1:-:-:4:1 2:-:-:-:-' THEN
             RAISE EXCEPTION 'the sources of a purged version are not as they were, but for their file';
         END IF;
     END $chk$ $q$);

@@ -1,7 +1,8 @@
 -- AIshie Core — after 0029_message_sources.down.sql, in `make db-test-sql`
 --
--- The sources are gone, and what held them; the answer that named them
--- stays as it was written, and so do the versions and files it relied on.
+-- The sources are gone, and what held them, and so is whether an answer
+-- said what it relied on; the answer that named them stays as it was
+-- written, and so do the versions and files it relied on.
 -- The release before this one writes no source and reads none.
 
 \set ON_ERROR_STOP 1
@@ -11,6 +12,10 @@ BEGIN
     IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public'
                AND table_name = 'conversation_message_source') THEN
         RAISE EXCEPTION 'FAIL  0029 down: the sources are still there';
+    END IF;
+    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public'
+               AND table_name = 'conversation_message' AND column_name = 'sources_stated') THEN
+        RAISE EXCEPTION 'FAIL  0029 down: messages still say whether they named their sources';
     END IF;
     IF EXISTS (SELECT 1 FROM pg_proc WHERE proname IN ('conversation_message_source_check', 'conversation_message_source_guarded')) THEN
         RAISE EXCEPTION 'FAIL  0029 down: a function it added is still there';
