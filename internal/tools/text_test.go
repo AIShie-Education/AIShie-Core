@@ -454,8 +454,9 @@ func TestATextIsAtMostTwoMebibytes(t *testing.T) {
 	svc := b.transcriber(t)
 	b.do(t, b.sato, "document.text_retranscribe", m{"course_id": b.course, "document_id": doc, "version_id": v1, "file_id": b.fileOf(t, v1), "discard_edit": true})
 	c := b.claim(t, svc, m{})[0]
-	if out, err := b.CallWith(svc, "document_text.complete", m{"version_id": c.VersionID, "file_id": c.FileID, "lease_id": c.LeaseID,
-		"status": "done", "body": fits + "a", "pages": 1, "model": "A model"}, "over"); !apperr.Is(err, apperr.InvalidArgument) {
+	out, err = b.CallWith(svc, "document_text.complete", m{"version_id": c.VersionID, "file_id": c.FileID, "lease_id": c.LeaseID,
+		"status": "done", "body": fits + "a", "pages": 1, "model": "A model"}, "over")
+	if e, ok := apperr.As(err); !ok || e.Code != apperr.InvalidArgument || e.Details["reason"] != "text_too_long" {
 		t.Fatalf("the service writing a text over the limit: %+v %v", out, err)
 	}
 	if n := b.Count(`SELECT count(*) FROM action WHERE idempotency_key IN ('empty', 'over')`); n != 0 {
