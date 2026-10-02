@@ -148,7 +148,8 @@ LIMIT sqlc.arg(max_rows);
 -- decision, rejected, or cancelled (withdrawn, expired, or their proposer's
 -- seat gone). What each said is its payload's; of the files it named, their
 -- names alone, never the upload tokens it names them by. Why it was
--- rejected or cancelled is its result's.
+-- rejected or cancelled is its result's. An answer's sources are as it
+-- named them, ids alone.
 SELECT a.id, a.target_id AS conversation_id, a.action_type, a.status, a.created_at,
        a.member_id AS proposer_member_id, pm.actor_id AS proposer_actor_id, pa.display_name AS proposer_name,
        pa.kind AS proposer_kind, pm.role AS proposer_role,
@@ -160,6 +161,7 @@ SELECT a.id, a.target_id AS conversation_id, a.action_type, a.status, a.created_
                  FROM jsonb_array_elements(CASE WHEN jsonb_typeof(a.payload->'attachments') = 'array'
                                                 THEN a.payload->'attachments' ELSE '[]'::jsonb END) WITH ORDINALITY f),
                 '{}')::text[] AS attachment_filenames,
+       (CASE WHEN jsonb_typeof(a.payload->'sources') = 'array' THEN a.payload->'sources' ELSE '[]'::jsonb END)::jsonb AS sources,
        coalesce(a.result->'decision'->>'reason', a.result->'error'->'details'->>'reason', '')::text AS reason
 FROM action a
 LEFT JOIN course_member pm ON pm.id = a.member_id

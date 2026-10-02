@@ -372,6 +372,47 @@ func (q *Queries) InsertConversationMessage(ctx context.Context, arg InsertConve
 	return seq, err
 }
 
+const insertMessageSource = `-- name: InsertMessageSource :exec
+INSERT INTO conversation_message_source (message_id, course_id, position, document_id, version_id, file_id, file_version_id,
+                                         page, slide, part, created_at)
+VALUES ($1, $2, $3, $4, $5,
+        $6, CASE WHEN $6::uuid IS NULL THEN NULL ELSE $5::uuid END,
+        $7, $8, $9, $10)
+`
+
+type InsertMessageSourceParams struct {
+	MessageID  uuid.UUID
+	CourseID   uuid.UUID
+	Position   int32
+	DocumentID uuid.UUID
+	VersionID  uuid.UUID
+	FileID     *uuid.UUID
+	Page       *int32
+	Slide      *int32
+	Part       *int32
+	CreatedAt  time.Time
+}
+
+// One of an answer's sources (docs/schema.md §2.8, Sources of an answer),
+// written with it, in its transaction, and dated as it is. The file, when
+// one is named, is named with the source's version, which holds it to
+// that version's files.
+func (q *Queries) InsertMessageSource(ctx context.Context, arg InsertMessageSourceParams) error {
+	_, err := q.db.Exec(ctx, insertMessageSource,
+		arg.MessageID,
+		arg.CourseID,
+		arg.Position,
+		arg.DocumentID,
+		arg.VersionID,
+		arg.FileID,
+		arg.Page,
+		arg.Slide,
+		arg.Part,
+		arg.CreatedAt,
+	)
+	return err
+}
+
 const insertRetraction = `-- name: InsertRetraction :execrows
 INSERT INTO conversation_message_retraction (message_id, course_id, retracted_by_member_id, created_by_action_id, reason, created_at)
 VALUES ($1, $2, $3, $4, $6, $5)
@@ -743,6 +784,80 @@ func (q *Queries) ListInboxConversationIDs(ctx context.Context, arg ListInboxCon
 	for rows.Next() {
 		var i ListInboxConversationIDsRow
 		if err := rows.Scan(&i.ID, &i.LastMessageAt); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listMessageSources = `-- name: ListMessageSources :many
+SELECT s.message_id, s.position, s.document_id, s.version_id, s.file_id, s.page, s.slide, s.part,
+       d.kind AS document_kind, d.title AS document_title, d.status AS document_status,
+       d.published_version_id, d.purged_at AS document_purged_at,
+       v.seq AS version_seq, v.purged_at AS version_purged_at, f.filename
+FROM conversation_message_source s
+JOIN document d ON d.id = s.document_id
+JOIN document_version v ON v.id = s.version_id
+LEFT JOIN document_version_file f ON f.id = s.file_id
+WHERE s.message_id = ANY($1::uuid[])
+ORDER BY s.message_id, s.position
+`
+
+type ListMessageSourcesRow struct {
+	MessageID          uuid.UUID
+	Position           int32
+	DocumentID         uuid.UUID
+	VersionID          uuid.UUID
+	FileID             *uuid.UUID
+	Page               *int32
+	Slide              *int32
+	Part               *int32
+	DocumentKind       string
+	DocumentTitle      string
+	DocumentStatus     string
+	PublishedVersionID *uuid.UUID
+	DocumentPurgedAt   *time.Time
+	VersionSeq         int32
+	VersionPurgedAt    *time.Time
+	Filename           *string
+}
+
+// The sources of the given messages, each message's in order, with their
+// documents and versions as they stand now: what each is called, whether
+// it is archived or purged, which version is published, and the file's
+// name while it has one. Whom each may be shown to is the caller's to
+// decide, reader by reader, in Go (tools.sourceReader).
+func (q *Queries) ListMessageSources(ctx context.Context, messageIds []uuid.UUID) ([]ListMessageSourcesRow, error) {
+	rows, err := q.db.Query(ctx, listMessageSources, messageIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListMessageSourcesRow
+	for rows.Next() {
+		var i ListMessageSourcesRow
+		if err := rows.Scan(
+			&i.MessageID,
+			&i.Position,
+			&i.DocumentID,
+			&i.VersionID,
+			&i.FileID,
+			&i.Page,
+			&i.Slide,
+			&i.Part,
+			&i.DocumentKind,
+			&i.DocumentTitle,
+			&i.DocumentStatus,
+			&i.PublishedVersionID,
+			&i.DocumentPurgedAt,
+			&i.VersionSeq,
+			&i.VersionPurgedAt,
+			&i.Filename,
+		); err != nil {
 			return nil, err
 		}
 		items = append(items, i)

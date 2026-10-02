@@ -1508,14 +1508,44 @@ func documentGet(d Deps) tool.Tool {
 // with no error, for a document the caller may read that has no version for
 // them. A document or a version the caller may not read is not found.
 func readableVersion(ctx context.Context, rc *tool.ReadCtx, courseID, documentID uuid.UUID, versionID *uuid.UUID) (dbq.GetDocumentWithOwnerRow, *dbq.DocumentVersion, error) {
-	doc, err := loadDocument(ctx, rc.Q, courseID, documentID)
+	return readerOf(rc).version(ctx, courseID, documentID, versionID)
+}
+
+// docReader is a seat reading documents: who reads, and its scope as list
+// queries take it. A read tool's caller is one (readerOf); so is a seat the
+// tools ask about without its call, such as an answer's respondent, whose
+// sources it must be able to read, or a reader of those sources.
+type docReader struct {
+	q     dbq.Querier
+	m     *domain.Member
+	scope authz.ScopeFilter
+}
+
+func readerOf(rc *tool.ReadCtx) docReader {
+	return docReader{q: rc.Q, m: rc.Member, scope: rc.Scope}
+}
+
+// readerAs is the seat m reading, outside a call of its own.
+func readerAs(q dbq.Querier, m *domain.Member) docReader {
+	return docReader{q: q, m: m, scope: authz.FilterFor(m)}
+}
+
+// version is readableVersion, for this reader.
+func (r docReader) version(ctx context.Context, courseID, documentID uuid.UUID, versionID *uuid.UUID) (dbq.GetDocumentWithOwnerRow, *dbq.DocumentVersion, error) {
+	doc, err := loadDocument(ctx, r.q, courseID, documentID)
 	if err != nil {
 		return doc, nil, err
 	}
-	if feedbackWithheld(doc, rc.Member) {
+	return r.versionOf(ctx, doc, versionID)
+}
+
+// versionOf is version, of a document already loaded.
+func (r docReader) versionOf(ctx context.Context, doc dbq.GetDocumentWithOwnerRow, versionID *uuid.UUID) (dbq.GetDocumentWithOwnerRow, *dbq.DocumentVersion, error) {
+	var err error
+	if feedbackWithheld(doc, r.m) {
 		return doc, nil, apperr.Missing("no such document in this course")
 	}
-	drafts := rc.Member.Perm(domain.PermDocumentReadDraft).Allowed()
+	drafts := r.m.Perm(domain.PermDocumentReadDraft).Allowed()
 	if courseLevel(doc.Kind) && doc.PublishedVersionID == nil && !drafts {
 		return doc, nil, apperr.Missing("no such document in this course")
 	}
@@ -1531,7 +1561,7 @@ func readableVersion(ctx context.Context, rc *tool.ReadCtx, courseID, documentID
 	// the record of what they were told.
 	withdrawn := courseLevel(doc.Kind) && doc.Status == "archived" && !drafts
 	if courseLevel(doc.Kind) && doc.Kind != kindMaterial && !withdrawn {
-		withdrawn, err = assignmentWithheld(ctx, rc, doc.ID)
+		withdrawn, err = r.assignmentWithheld(ctx, doc.ID)
 		if err != nil {
 			return doc, nil, err
 		}
@@ -1543,13 +1573,13 @@ func readableVersion(ctx context.Context, rc *tool.ReadCtx, courseID, documentID
 	var v dbq.DocumentVersion
 	switch {
 	case versionID != nil:
-		v, err = rc.Q.GetVersionOfDocument(ctx, dbq.GetVersionOfDocumentParams{ID: *versionID, DocumentID: doc.ID})
+		v, err = r.q.GetVersionOfDocument(ctx, dbq.GetVersionOfDocumentParams{ID: *versionID, DocumentID: doc.ID})
 		if err == nil && (withdrawn || (!drafts && (doc.PublishedVersionID == nil || *doc.PublishedVersionID != v.ID))) {
 			// Not the published one and no right to drafts. One more
 			// way in: it is what the caller's own work was pinned to.
-			pinned, perr := rc.Q.VersionPinnedInScope(ctx, dbq.VersionPinnedInScopeParams{VersionID: &v.ID,
-				StudentAll: rc.Scope.StudentAll, AssignmentAll: rc.Scope.AssignmentAll, MemberID: rc.Scope.MemberID,
-				PrincipalID: rc.Scope.PrincipalID, PrincipalStudentAll: rc.Scope.PrincipalStudentAll, PrincipalAssignmentAll: rc.Scope.PrincipalAssignmentAll})
+			pinned, perr := r.q.VersionPinnedInScope(ctx, dbq.VersionPinnedInScopeParams{VersionID: &v.ID,
+				StudentAll: r.scope.StudentAll, AssignmentAll: r.scope.AssignmentAll, MemberID: r.scope.MemberID,
+				PrincipalID: r.scope.PrincipalID, PrincipalStudentAll: r.scope.PrincipalStudentAll, PrincipalAssignmentAll: r.scope.PrincipalAssignmentAll})
 			if perr != nil {
 				return doc, nil, perr
 			}
@@ -1558,9 +1588,9 @@ func readableVersion(ctx context.Context, rc *tool.ReadCtx, courseID, documentID
 			}
 		}
 	case drafts && courseLevel(doc.Kind):
-		v, err = rc.Q.GetLatestVersion(ctx, doc.ID)
+		v, err = r.q.GetLatestVersion(ctx, doc.ID)
 	case doc.PublishedVersionID != nil:
-		v, err = rc.Q.GetVersionOfDocument(ctx, dbq.GetVersionOfDocumentParams{ID: *doc.PublishedVersionID, DocumentID: doc.ID})
+		v, err = r.q.GetVersionOfDocument(ctx, dbq.GetVersionOfDocumentParams{ID: *doc.PublishedVersionID, DocumentID: doc.ID})
 	default:
 		err = pgx.ErrNoRows
 	}
@@ -1604,12 +1634,16 @@ func feedbackWithheld(doc dbq.GetDocumentWithOwnerRow, m *domain.Member) bool {
 // their scope refers to it — the document is visible exactly when the
 // assignment is.
 func assignmentWithheld(ctx context.Context, rc *tool.ReadCtx, docID uuid.UUID) (bool, error) {
-	if canSeeUnpublished(rc.Member) {
+	return readerOf(rc).assignmentWithheld(ctx, docID)
+}
+
+func (r docReader) assignmentWithheld(ctx context.Context, docID uuid.UUID) (bool, error) {
+	if canSeeUnpublished(r.m) {
 		return false, nil
 	}
-	inUse, err := rc.Q.DocumentInUseByPublishedAssignment(ctx, dbq.DocumentInUseByPublishedAssignmentParams{
-		DocumentID: &docID, AssignmentAll: rc.Scope.AssignmentAll, MemberID: rc.Scope.MemberID,
-		PrincipalID: rc.Scope.PrincipalID, PrincipalAssignmentAll: rc.Scope.PrincipalAssignmentAll})
+	inUse, err := r.q.DocumentInUseByPublishedAssignment(ctx, dbq.DocumentInUseByPublishedAssignmentParams{
+		DocumentID: &docID, AssignmentAll: r.scope.AssignmentAll, MemberID: r.scope.MemberID,
+		PrincipalID: r.scope.PrincipalID, PrincipalAssignmentAll: r.scope.PrincipalAssignmentAll})
 	return !inUse, err
 }
 

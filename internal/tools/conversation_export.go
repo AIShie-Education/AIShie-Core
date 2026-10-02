@@ -726,16 +726,19 @@ type exportMessages struct {
 	ids       []uuid.UUID
 	rows      []dbq.ListExportMessagesRow
 	files     map[uuid.UUID][]AttachmentView
+	sources   map[uuid.UUID][]exportSource
 	at        int
 	afterConv uuid.UUID
 	afterSeq  int32
 	done      bool
 }
 
-// message is a message with the files it carries.
+// message is a message with the files it carries, and an answer with
+// what it relied on.
 type exportedMessage struct {
 	dbq.ListExportMessagesRow
-	files []AttachmentView
+	files   []AttachmentView
+	sources []exportSource
 }
 
 // next is the next message of conv, if it has another.
@@ -756,6 +759,11 @@ func (e *exportMessages) next(ctx context.Context, conv uuid.UUID) (exportedMess
 		if e.files, err = attachmentsOf(ctx, e.w.q, shown); err != nil {
 			return exportedMessage{}, false, err
 		}
+		// An answer's sources, whoever may read them now: for the
+		// record too, with their documents' titles as they are now.
+		if e.sources, err = exportSourcesOf(ctx, e.w.q, shown); err != nil {
+			return exportedMessage{}, false, err
+		}
 		e.rows, e.at, e.done = rows, 0, len(rows) < exportMessagePage
 		if len(rows) > 0 {
 			last := rows[len(rows)-1]
@@ -767,7 +775,44 @@ func (e *exportMessages) next(ctx context.Context, conv uuid.UUID) (exportedMess
 	}
 	r := e.rows[e.at]
 	e.at++
-	return exportedMessage{ListExportMessagesRow: r, files: e.files[r.ID]}, true, nil
+	return exportedMessage{ListExportMessagesRow: r, files: e.files[r.ID], sources: e.sources[r.ID]}, true, nil
+}
+
+// exportSourcesOf are the sources of the given messages, by message, as an
+// export holds them: every one, named by its ids, with its document's
+// title and kind as they are now and whether its version was purged; a
+// purged version's file is gone, and named no more.
+func exportSourcesOf(ctx context.Context, q dbq.Querier, messages []uuid.UUID) (map[uuid.UUID][]exportSource, error) {
+	out := map[uuid.UUID][]exportSource{}
+	if len(messages) == 0 {
+		return out, nil
+	}
+	rows, err := q.ListMessageSources(ctx, messages)
+	if err != nil {
+		return nil, err
+	}
+	for _, r := range rows {
+		title, kind, seq := r.DocumentTitle, r.DocumentKind, r.VersionSeq
+		out[r.MessageID] = append(out[r.MessageID], exportSource{DocumentID: r.DocumentID, VersionID: r.VersionID,
+			FileID: r.FileID, Page: r.Page, Slide: r.Slide, Part: r.Part, Title: &title, Kind: &kind, VersionSeq: &seq,
+			Filename: r.Filename, Purged: r.VersionPurgedAt != nil || r.DocumentPurgedAt != nil})
+	}
+	return out, nil
+}
+
+// exportProposedSources are the sources a proposed answer named, as it
+// named them: ids alone.
+func exportProposedSources(payload []byte) ([]exportSource, error) {
+	var named []SourceIn
+	if err := json.Unmarshal(payload, &named); err != nil {
+		return nil, err
+	}
+	out := make([]exportSource, len(named))
+	for i, s := range named {
+		out[i] = exportSource{DocumentID: s.DocumentID, VersionID: s.VersionID, FileID: s.FileID, Page: s.Page, Slide: s.Slide,
+			Part: s.Part}
+	}
+	return out, nil
 }
 
 // The JSON Lines file's records. Every field is always there, null where
@@ -833,6 +878,24 @@ type exportAttachment struct {
 	CreatedAt   time.Time `json:"created_at"`
 }
 
+// exportSource is a source of an answer, as an export holds it. A posted
+// answer's says what its document is called now, and whether its version
+// was purged; a proposed answer's is as it was named, its title, kind,
+// seq and file name null.
+type exportSource struct {
+	DocumentID uuid.UUID  `json:"document_id"`
+	VersionID  uuid.UUID  `json:"version_id"`
+	FileID     *uuid.UUID `json:"file_id"`
+	Page       *int32     `json:"page"`
+	Slide      *int32     `json:"slide"`
+	Part       *int32     `json:"part"`
+	Title      *string    `json:"title"`
+	Kind       *string    `json:"kind"`
+	VersionSeq *int32     `json:"version_seq"`
+	Filename   *string    `json:"filename"`
+	Purged     bool       `json:"purged"`
+}
+
 type exportMessage struct {
 	ID                 uuid.UUID          `json:"id"`
 	Seq                int32              `json:"seq"`
@@ -843,20 +906,22 @@ type exportMessage struct {
 	ActionID           uuid.UUID          `json:"action_id"`
 	Retracted          *exportRetraction  `json:"retracted"`
 	Attachments        []exportAttachment `json:"attachments"`
+	Sources            []exportSource     `json:"sources"`
 }
 
 type exportProposal struct {
-	ActionID            uuid.UUID    `json:"action_id"`
-	Type                string       `json:"type"`
-	Status              string       `json:"status"`
-	ProposedBy          *exportParty `json:"proposed_by"`
-	CreatedAt           time.Time    `json:"created_at"`
-	InReplyToMessageID  *uuid.UUID   `json:"in_reply_to_message_id"`
-	Body                string       `json:"body"`
-	AttachmentFilenames []string     `json:"attachment_filenames"`
-	DecidedAt           *time.Time   `json:"decided_at"`
-	DecidedBy           *exportParty `json:"decided_by"`
-	Reason              *string      `json:"reason"`
+	ActionID            uuid.UUID      `json:"action_id"`
+	Type                string         `json:"type"`
+	Status              string         `json:"status"`
+	ProposedBy          *exportParty   `json:"proposed_by"`
+	CreatedAt           time.Time      `json:"created_at"`
+	InReplyToMessageID  *uuid.UUID     `json:"in_reply_to_message_id"`
+	Body                string         `json:"body"`
+	AttachmentFilenames []string       `json:"attachment_filenames"`
+	Sources             []exportSource `json:"sources"`
+	DecidedAt           *time.Time     `json:"decided_at"`
+	DecidedBy           *exportParty   `json:"decided_by"`
+	Reason              *string        `json:"reason"`
 }
 
 func exportConversation(c dbq.ListExportConversationsRow) exportConversationHead {
@@ -910,9 +975,12 @@ func (w *exportWriter) message(c dbq.ListExportConversationsRow, m exportedMessa
 		return err
 	}
 	v := exportMessage{ID: m.ID, Seq: m.Seq, CreatedAt: m.CreatedAt.UTC(), InReplyToMessageID: m.InReplyToMessageID, Body: m.Body,
-		ActionID: m.CreatedByActionID, Attachments: make([]exportAttachment, 0, len(m.files)),
+		ActionID: m.CreatedByActionID, Attachments: make([]exportAttachment, 0, len(m.files)), Sources: m.sources,
 		Author: exportParty{MemberID: m.AuthorMemberID, ActorID: m.AuthorActorID, Name: m.AuthorName, Kind: m.AuthorKind,
 			Role: m.AuthorRole}}
+	if v.Sources == nil {
+		v.Sources = []exportSource{}
+	}
 	ids, names := make([]string, len(m.files)), make([]string, len(m.files))
 	for j, a := range m.files {
 		v.Attachments = append(v.Attachments, exportAttachment{ID: a.ID, Filename: a.Filename, ContentType: a.ContentType,
@@ -950,6 +1018,11 @@ func (w *exportWriter) proposal(c dbq.ListExportConversationsRow, p dbq.ListExpo
 	if v.AttachmentFilenames == nil {
 		v.AttachmentFilenames = []string{}
 	}
+	sources, err := exportProposedSources(p.Sources)
+	if err != nil {
+		return err
+	}
+	v.Sources = sources
 	if id, err := uuid.Parse(p.InReplyToMessageID); err == nil {
 		v.InReplyToMessageID = &id
 	}

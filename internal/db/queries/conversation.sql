@@ -329,3 +329,31 @@ WHERE c.id = ANY(sqlc.arg(ids)::uuid[])
                WHERE m.conversation_id = c.id AND m.author_member_id <> p.reader
                  AND m.seq > coalesce(r.last_read_seq, 0)
                  AND NOT EXISTS (SELECT 1 FROM conversation_message_retraction x WHERE x.message_id = m.id));
+
+-- name: InsertMessageSource :exec
+-- One of an answer's sources (docs/schema.md §2.8, Sources of an answer),
+-- written with it, in its transaction, and dated as it is. The file, when
+-- one is named, is named with the source's version, which holds it to
+-- that version's files.
+INSERT INTO conversation_message_source (message_id, course_id, position, document_id, version_id, file_id, file_version_id,
+                                         page, slide, part, created_at)
+VALUES (sqlc.arg(message_id), sqlc.arg(course_id), sqlc.arg(position), sqlc.arg(document_id), sqlc.arg(version_id),
+        sqlc.narg(file_id), CASE WHEN sqlc.narg(file_id)::uuid IS NULL THEN NULL ELSE sqlc.arg(version_id)::uuid END,
+        sqlc.narg(page), sqlc.narg(slide), sqlc.narg(part), sqlc.arg(created_at));
+
+-- name: ListMessageSources :many
+-- The sources of the given messages, each message's in order, with their
+-- documents and versions as they stand now: what each is called, whether
+-- it is archived or purged, which version is published, and the file's
+-- name while it has one. Whom each may be shown to is the caller's to
+-- decide, reader by reader, in Go (tools.sourceReader).
+SELECT s.message_id, s.position, s.document_id, s.version_id, s.file_id, s.page, s.slide, s.part,
+       d.kind AS document_kind, d.title AS document_title, d.status AS document_status,
+       d.published_version_id, d.purged_at AS document_purged_at,
+       v.seq AS version_seq, v.purged_at AS version_purged_at, f.filename
+FROM conversation_message_source s
+JOIN document d ON d.id = s.document_id
+JOIN document_version v ON v.id = s.version_id
+LEFT JOIN document_version_file f ON f.id = s.file_id
+WHERE s.message_id = ANY(sqlc.arg(message_ids)::uuid[])
+ORDER BY s.message_id, s.position;
