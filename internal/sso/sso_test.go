@@ -11,10 +11,11 @@ import (
 
 	"github.com/AIShie-Education/AIShie-Core/internal/apperr"
 	"github.com/AIShie-Education/AIShie-Core/internal/auth"
+	"github.com/AIShie-Education/AIShie-Core/internal/config"
 )
 
 func TestSettingsAreHeldToTheirRules(t *testing.T) {
-	for _, id := range []string{"a", "school-adfs", "university-sso", "g2", strings.Repeat("a", 64)} {
+	for _, id := range []string{"a", "school-adfs", "university-sso", "g2", strings.Repeat("a", 64), config.DefaultOIDCProviderName} {
 		if err := CheckID(id); err != nil {
 			t.Errorf("id %q: %v", id, err)
 		}

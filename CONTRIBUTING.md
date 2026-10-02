@@ -59,9 +59,9 @@ and `build` green. CI also runs `test (s3 against minio)` and `vuln`.
   **no real school**. A provider is `school-adfs` or `university-sso`, its
   label `School NetID`, an email `name@example.edu` and a domain
   `example.edu` (or a name under it, such as `campus.example.edu`).
-  `polyu-adfs` stays only as `OIDC_PROVIDER_NAME`'s default
-  (`config.DefaultOIDCProviderName`), where that default is defined, tested
-  or documented.
+  `OIDC_PROVIDER_NAME`'s default (`config.DefaultOIDCProviderName`) is the
+  placeholder `example-adfs`. A migration on `main` is never rewritten
+  (Migrations), so an older example in one stays.
 
 ## Migrations
 

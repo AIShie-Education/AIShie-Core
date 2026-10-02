@@ -325,9 +325,9 @@ kinds (docs/schema.md §2.1, Single sign-on):
   `upn` claim (`OIDC_SUBJECT_CLAIM`). Its id is `OIDC_PROVIDER_NAME`, such
   as `school-adfs`, under which every identity linked at it is recorded: set
   it before anyone is linked, and never change it after, or nobody linked
-  can sign in. Unset, it is `polyu-adfs`, a default that stays for the
-  installations that rely on it. The provider is discovered when the server
-  starts, and administrators see it read-only.
+  can sign in. Unset, it is `example-adfs`, a placeholder to replace before
+  anyone is linked. The provider is discovered when the server starts, and
+  administrators see it read-only.
 - the site's: root and the platform's administrators set them up from the
   front end, with the `sso.*` tools, kept in the database with their client
   secrets sealed under `SECRETS_KEY` (32 random bytes in base64: `openssl

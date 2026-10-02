@@ -118,8 +118,8 @@ Environment:
   OIDC_CLIENT_ID, OIDC_CLIENT_SECRET
   OIDC_PROVIDER_NAME   what actor.link_sso calls the provider, such as school-adfs, and what every
                        identity linked at it is recorded under: set it before anyone is linked,
-                       and never change it. Unset, it is polyu-adfs, the default kept for the
-                       servers that rely on it
+                       and never change it. Unset, it is example-adfs, a placeholder to replace
+                       before anyone is linked
   OIDC_SUBJECT_CLAIM   default upn; the claim an account is known by
   OIDC_SCOPES          default "openid profile email"
   OIDC_DISPLAY_NAME    the provider's name on the front end's sign-in button, such as

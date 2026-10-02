@@ -151,14 +151,14 @@ func TestFromEnv(t *testing.T) {
 }
 
 // OIDC_PROVIDER_NAME is what every identity linked at the operator's
-// provider is recorded under, so its default never changes: an installation
-// that left it unset would find that nobody linked could sign in.
+// provider is recorded under. Unset, it is a placeholder that is a valid
+// provider id; an installation names its own before anyone is linked.
 func TestOIDCProviderName(t *testing.T) {
 	t.Setenv("OIDC_ISSUER", "https://adfs.example.edu/adfs")
 	t.Setenv("OIDC_CLIENT_ID", "aishie")
 	t.Setenv("SIGNING_KEY", "an installation's signing key, 32+ characters long")
 	for _, tc := range []struct{ name, value, want string }{
-		{"unset, the default it has always had", "", "polyu-adfs"},
+		{"unset, the placeholder", "", "example-adfs"},
 		{"an installation's own", "school-adfs", "school-adfs"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
