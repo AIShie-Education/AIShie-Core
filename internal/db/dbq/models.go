@@ -167,6 +167,7 @@ type ConversationMessage struct {
 	Body               string
 	CreatedByActionID  uuid.UUID
 	CreatedAt          time.Time
+	SourcesStated      bool
 }
 
 type ConversationMessageRetraction struct {
@@ -176,6 +177,20 @@ type ConversationMessageRetraction struct {
 	CreatedByActionID   uuid.UUID
 	Reason              *string
 	CreatedAt           time.Time
+}
+
+type ConversationMessageSource struct {
+	MessageID     uuid.UUID
+	CourseID      uuid.UUID
+	Position      int32
+	DocumentID    uuid.UUID
+	VersionID     uuid.UUID
+	FileID        *uuid.UUID
+	FileVersionID *uuid.UUID
+	Page          *int32
+	Slide         *int32
+	Part          *int32
+	CreatedAt     time.Time
 }
 
 type ConversationRead struct {

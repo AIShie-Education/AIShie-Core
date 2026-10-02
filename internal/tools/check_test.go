@@ -299,6 +299,10 @@ func TestArgumentsAreCheckedBeforeAnythingIsProposed(t *testing.T) {
 		{tool: "conversation.answer",
 			invalid: in(m{"conversation_id": conv, "in_reply_to_message_id": question, "body": strings.Repeat("a", 20001)}),
 			message: "the message is 20001 characters long; the most is 20000"},
+		{tool: "conversation.answer",
+			invalid: in(m{"conversation_id": conv, "in_reply_to_message_id": question, "body": "See the notes.", "sources": []m{
+				{"document_id": notes, "version_id": notes, "page": 3}}}),
+			message: "sources[0]: a page, a slide or a part is of a file: give file_id as well"},
 		// A grade's feedback files, and a post's drafts: a call gives the
 		// drafts or the assignment, and a proposal to post the assignment
 		// stores both (CheckCall).

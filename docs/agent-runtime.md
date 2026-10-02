@@ -332,10 +332,10 @@ The events that matter carry ids, never text:
 
 | Tool | Input | Notes |
 |---|---|---|
-| `conversation_messages` | `course_id`, `conversation_id`, `after_seq` or `before_seq`, `limit` (default 50, at most 200), `wait_s` (0 to 25, default 0, not with `before_seq`), `seen_state`, `seen_draft_version` | `conversation` (the view below), `messages[]`, `more`, `draft` (§2.8; null for none). A message has `id`, `seq`, `author_member_id`, `in_reply_to_message_id`, `body`, `created_at`, and `attachments`, the files it carries (§2.9), absent when none; a retracted one has no `body` and no `attachments` but `retracted: {at, by_member_id, reason}`. `after_seq` reads on; `before_seq`, or neither, gives the newest; both oldest first. With `wait_s`, a call that finds no message after `after_seq`, and the conversation standing as it did (`state`, `pending_reply_action_id`, `last_retracted_at`, `closed_reason`), waits for one of them to change; `seen_state`, the `state` last read, answers at once if the state has changed since; `seen_draft_version`, the draft's `version` last read (0 for none), answers as soon as the draft is another, a front end's long poll; without it a draft wakes nothing. |
+| `conversation_messages` | `course_id`, `conversation_id`, `after_seq` or `before_seq`, `limit` (default 50, at most 200), `wait_s` (0 to 25, default 0, not with `before_seq`), `seen_state`, `seen_draft_version` | `conversation` (the view below), `messages[]`, `more`, `draft` (§2.8; null for none). A message has `id`, `seq`, `author_member_id`, `in_reply_to_message_id`, `body`, `created_at`, `attachments`, the files it carries (§2.9), absent when none, and an answer's `sources` as the agent may read them now (§2.10): an empty list when the answer said it relied on none, absent when it did not say; a retracted one has no `body`, `attachments` or `sources` but `retracted: {at, by_member_id, reason}`. `after_seq` reads on; `before_seq`, or neither, gives the newest; both oldest first. With `wait_s`, a call that finds no message after `after_seq`, and the conversation standing as it did (`state`, `pending_reply_action_id`, `last_retracted_at`, `closed_reason`), waits for one of them to change; `seen_state`, the `state` last read, answers at once if the state has changed since; `seen_draft_version`, the draft's `version` last read (0 for none), answers as soon as the draft is another, a front end's long poll; without it a draft wakes nothing. |
 | `conversation_get` | `course_id`, `conversation_id` | The view: `status`, `state` (`awaiting_answer`, `reply_pending_approval`, `answered`, `closed`), `pending_reply_action_id`, `opener`, `respondent` (with `answer_level`), `latest_opener_message_id`, `last_retracted_at`, `visible_to`, and `draft` (§2.8). |
 | `conversation_attachment` | `course_id`, `attachment_id` | One file a message carries (§2.9): `id`, `filename`, `content_type`, `byte_size`, `checksum`, `created_at`, `conversation_id`, `message_id`, `message_seq`, `author_member_id`, and `download_url`, a download for about 15 minutes (`expires_at`), fetched with no `Authorization` header. `not_found` for a file the agent may not read now, `reason: retracted` for one whose message was retracted. |
-| `conversation_answer` | `course_id`, `conversation_id`, `in_reply_to_message_id`, `body`, `attachments`, `idempotency_key` | `body` is 1 to 20,000 characters of Markdown. `in_reply_to_message_id` must be the opener's newest message. `attachments`, optional, are files the answer carries, each `{upload_token, filename}` from `conversation_upload_url` (§2.9); the runtime sends none yet. Returns `message_id`. Posted or proposed, it deletes the conversation's draft. |
+| `conversation_answer` | `course_id`, `conversation_id`, `in_reply_to_message_id`, `body`, `attachments`, `sources`, `idempotency_key` | `body` is 1 to 20,000 characters of Markdown. `in_reply_to_message_id` must be the opener's newest message. `attachments`, optional, are files the answer carries, each `{upload_token, filename}` from `conversation_upload_url` (§2.9); the runtime sends none yet. `sources`, optional, at most 20, are the course materials the answer relied on, each `{document_id, version_id, file_id?, page? or slide?, part?}`, an empty list for none, every one a version the agent may read now and not purged (`source_unreadable`, `source_purged`, naming `sources[i]`, before the answer is posted or proposed; the call is recorded as failed, so the answer is posted again under a new key); the runtime sends none yet (§2.10). Returns `message_id`. Posted or proposed, it deletes the conversation's draft. |
 | `conversation_draft` | `course_id`, `conversation_id`, `attempt` (1 to 64 characters), `version` (1 or more), `text` (at most 20,000 characters), `steps` (at most 20 `{kind, target, state}`), `done`; no `idempotency_key` | `{stored, version}`. The answer being written, for whoever reads the conversation to watch (§2.8). An ephemeral write: recorded nowhere, never proposed, and not counted against the rate limit when carried out; at most 10 a second per conversation. The respondent's alone, while the conversation is `awaiting_answer`: `not_the_respondent`, `conversation_not_awaiting`, `not_addressable` otherwise. |
 | `conversation_close` | `course_id`, `conversation_id`, `reason` (≤ 500 characters) | Either participant closes. The runtime closes only as §2.4 says. A reason that reads as the system's (`seat_removed`, `conversations_are_with_agents`) is refused. |
 | `conversation_retract` | `course_id`, `message_id`, `reason` | The author retracts, or staff overseeing the opener; the runtime only when the owner asks. Retracting the opener's latest message withdraws the question: the conversation is `answered`, an answer to it is refused `moved_on`, and its draft is gone. |
@@ -568,6 +568,45 @@ text of them.
   each to `ATTACHMENT_MAX_BYTES` (50 MiB), and a conversation to
   `ATTACHMENT_MAX_CONVERSATION_BYTES` (500 MiB); `conversation_upload_url` says
   them (`max_files`, `max_bytes`, `max_conversation_bytes`).
+
+### 2.10 What an answer relied on
+
+`conversation_answer` takes `sources`: the course materials the answer relied
+on, which Core keeps with it and shows each reader as they may read them now
+(docs/schema.md §2.8, What an answer relied on), so that a student or a
+teacher can tell whether an answer rests on the course's materials. The
+runtime is to send what the answer actually relied on, in the order it read
+it, from what it read for this answer:
+
+- each `document_get` of a course's material, instructions or rubric whose
+  result the answer relied on: its `document_id` and `version.id`, and
+  `file_id` when the call read one file of the version (the runtime's own
+  `file_id` argument, or a version of one file);
+- `part` only where it is Core's own numbering: the `part` of a
+  `document_text` call of the file's text version (`file.text_source` says
+  that is the text the model was given) that the runtime made itself and
+  whose text the answer relied on. The runtime's own `file_part`, a part of
+  its own cutting of a file (a range of its text, or of a PDF's pages), is
+  not Core's numbering even where the text is Core's text version, and is
+  never sent as `part`; when it cannot tell, the runtime leaves `part` out;
+- `page` or `slide` where the answer relied on one: from the `file_pages`
+  the call read (a single page or slide), or from a
+  `course_materials_search` hit's `where` (`page 3`, `slide 2`), with the
+  hit's document, version and file;
+
+and not a document it only listed, nor anything it read for another
+question. An answer that relied on none of the course's materials sends an
+empty list (`sources: []`), which Core keeps as saying so; leaving `sources`
+out says nothing, as every answer before them did, and Core keeps that
+apart, so that the front end says an answer cites no course material only
+where it said so. At most 20; one named twice is refused. Each must be one
+the agent may read when Core takes the answer, and not purged: if one is not
+(archived meanwhile, say), Core refuses the whole answer before it is posted
+or proposed, naming it (`source_unreadable` or `source_purged`, with `field`
+`sources[i]`). The call is recorded as failed, as every call refused then is,
+so its idempotency key is spent: the runtime drops that source and posts
+again under a new key. An answer waiting for approval is checked again when
+it is approved. The runtime sends none yet.
 
 ## 3. Providers
 

@@ -336,10 +336,11 @@ func (q *Queries) InsertConversation(ctx context.Context, arg InsertConversation
 
 const insertConversationMessage = `-- name: InsertConversationMessage :one
 INSERT INTO conversation_message (id, conversation_id, course_id, seq, author_member_id, in_reply_to_message_id, body,
-                                  created_by_action_id, created_at)
+                                  created_by_action_id, created_at, sources_stated)
 VALUES ($1, $2, $3,
         (SELECT coalesce(max(x.seq), 0) + 1 FROM conversation_message x WHERE x.conversation_id = $2),
-        $4, $5, $6, $7, $8)
+        $4, $5, $6, $7, $8,
+        $9)
 RETURNING seq
 `
 
@@ -352,10 +353,12 @@ type InsertConversationMessageParams struct {
 	Body               string
 	CreatedByActionID  uuid.UUID
 	CreatedAt          time.Time
+	SourcesStated      bool
 }
 
 // The second half, under the lock TouchConversation took: the next seq in
-// this conversation.
+// this conversation. sources_stated: an answer that says what it relied
+// on, even nothing.
 func (q *Queries) InsertConversationMessage(ctx context.Context, arg InsertConversationMessageParams) (int32, error) {
 	row := q.db.QueryRow(ctx, insertConversationMessage,
 		arg.ID,
@@ -366,10 +369,52 @@ func (q *Queries) InsertConversationMessage(ctx context.Context, arg InsertConve
 		arg.Body,
 		arg.CreatedByActionID,
 		arg.CreatedAt,
+		arg.SourcesStated,
 	)
 	var seq int32
 	err := row.Scan(&seq)
 	return seq, err
+}
+
+const insertMessageSource = `-- name: InsertMessageSource :exec
+INSERT INTO conversation_message_source (message_id, course_id, position, document_id, version_id, file_id, file_version_id,
+                                         page, slide, part, created_at)
+VALUES ($1, $2, $3, $4, $5,
+        $6, CASE WHEN $6::uuid IS NULL THEN NULL ELSE $5::uuid END,
+        $7, $8, $9, $10)
+`
+
+type InsertMessageSourceParams struct {
+	MessageID  uuid.UUID
+	CourseID   uuid.UUID
+	Position   int32
+	DocumentID uuid.UUID
+	VersionID  uuid.UUID
+	FileID     *uuid.UUID
+	Page       *int32
+	Slide      *int32
+	Part       *int32
+	CreatedAt  time.Time
+}
+
+// One of an answer's sources (docs/schema.md §2.8, What an answer relied on),
+// written with it, in its transaction, and dated as it is. The file, when
+// one is named, is named with the source's version, which holds it to
+// that version's files.
+func (q *Queries) InsertMessageSource(ctx context.Context, arg InsertMessageSourceParams) error {
+	_, err := q.db.Exec(ctx, insertMessageSource,
+		arg.MessageID,
+		arg.CourseID,
+		arg.Position,
+		arg.DocumentID,
+		arg.VersionID,
+		arg.FileID,
+		arg.Page,
+		arg.Slide,
+		arg.Part,
+		arg.CreatedAt,
+	)
+	return err
 }
 
 const insertRetraction = `-- name: InsertRetraction :execrows
@@ -562,7 +607,7 @@ func (q *Queries) ListConversationIDs(ctx context.Context, arg ListConversationI
 }
 
 const listConversationMessagesAfter = `-- name: ListConversationMessagesAfter :many
-SELECT m.id, m.seq, m.author_member_id, m.in_reply_to_message_id, m.body, m.created_at,
+SELECT m.id, m.seq, m.author_member_id, m.in_reply_to_message_id, m.body, m.created_at, m.sources_stated,
        r.created_at AS retracted_at, r.retracted_by_member_id, r.reason AS retraction_reason
 FROM conversation_message m
 LEFT JOIN conversation_message_retraction r ON r.message_id = m.id
@@ -584,6 +629,7 @@ type ListConversationMessagesAfterRow struct {
 	InReplyToMessageID  *uuid.UUID
 	Body                string
 	CreatedAt           time.Time
+	SourcesStated       bool
 	RetractedAt         *time.Time
 	RetractedByMemberID *uuid.UUID
 	RetractionReason    *string
@@ -606,6 +652,7 @@ func (q *Queries) ListConversationMessagesAfter(ctx context.Context, arg ListCon
 			&i.InReplyToMessageID,
 			&i.Body,
 			&i.CreatedAt,
+			&i.SourcesStated,
 			&i.RetractedAt,
 			&i.RetractedByMemberID,
 			&i.RetractionReason,
@@ -621,7 +668,7 @@ func (q *Queries) ListConversationMessagesAfter(ctx context.Context, arg ListCon
 }
 
 const listConversationMessagesBefore = `-- name: ListConversationMessagesBefore :many
-SELECT m.id, m.seq, m.author_member_id, m.in_reply_to_message_id, m.body, m.created_at,
+SELECT m.id, m.seq, m.author_member_id, m.in_reply_to_message_id, m.body, m.created_at, m.sources_stated,
        r.created_at AS retracted_at, r.retracted_by_member_id, r.reason AS retraction_reason
 FROM conversation_message m
 LEFT JOIN conversation_message_retraction r ON r.message_id = m.id
@@ -643,6 +690,7 @@ type ListConversationMessagesBeforeRow struct {
 	InReplyToMessageID  *uuid.UUID
 	Body                string
 	CreatedAt           time.Time
+	SourcesStated       bool
 	RetractedAt         *time.Time
 	RetractedByMemberID *uuid.UUID
 	RetractionReason    *string
@@ -666,6 +714,7 @@ func (q *Queries) ListConversationMessagesBefore(ctx context.Context, arg ListCo
 			&i.InReplyToMessageID,
 			&i.Body,
 			&i.CreatedAt,
+			&i.SourcesStated,
 			&i.RetractedAt,
 			&i.RetractedByMemberID,
 			&i.RetractionReason,
@@ -743,6 +792,76 @@ func (q *Queries) ListInboxConversationIDs(ctx context.Context, arg ListInboxCon
 	for rows.Next() {
 		var i ListInboxConversationIDsRow
 		if err := rows.Scan(&i.ID, &i.LastMessageAt); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listMessageSources = `-- name: ListMessageSources :many
+SELECT s.message_id, s.position, s.document_id, s.version_id, s.file_id, s.page, s.slide, s.part,
+       d.kind AS document_kind, d.title AS document_title, d.purged_at AS document_purged_at,
+       v.seq AS version_seq, v.purged_at AS version_purged_at, f.filename
+FROM conversation_message_source s
+JOIN document d ON d.id = s.document_id
+JOIN document_version v ON v.id = s.version_id
+LEFT JOIN document_version_file f ON f.id = s.file_id
+WHERE s.message_id = ANY($1::uuid[])
+ORDER BY s.message_id, s.position
+`
+
+type ListMessageSourcesRow struct {
+	MessageID        uuid.UUID
+	Position         int32
+	DocumentID       uuid.UUID
+	VersionID        uuid.UUID
+	FileID           *uuid.UUID
+	Page             *int32
+	Slide            *int32
+	Part             *int32
+	DocumentKind     string
+	DocumentTitle    string
+	DocumentPurgedAt *time.Time
+	VersionSeq       int32
+	VersionPurgedAt  *time.Time
+	Filename         *string
+}
+
+// The sources of the given messages, each message's in order, with what
+// an export and every reader are told of them alike: the document's kind
+// and title as they are now, the version's seq, whether either was purged,
+// and the file's name while it has one. Whom each may be shown to, and
+// how much, is the caller's to decide, reader by reader, in Go
+// (tools.sourceReader), with document.get's rules.
+func (q *Queries) ListMessageSources(ctx context.Context, messageIds []uuid.UUID) ([]ListMessageSourcesRow, error) {
+	rows, err := q.db.Query(ctx, listMessageSources, messageIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListMessageSourcesRow
+	for rows.Next() {
+		var i ListMessageSourcesRow
+		if err := rows.Scan(
+			&i.MessageID,
+			&i.Position,
+			&i.DocumentID,
+			&i.VersionID,
+			&i.FileID,
+			&i.Page,
+			&i.Slide,
+			&i.Part,
+			&i.DocumentKind,
+			&i.DocumentTitle,
+			&i.DocumentPurgedAt,
+			&i.VersionSeq,
+			&i.VersionPurgedAt,
+			&i.Filename,
+		); err != nil {
 			return nil, err
 		}
 		items = append(items, i)

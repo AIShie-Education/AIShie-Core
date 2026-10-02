@@ -672,6 +672,25 @@ Run all of these as root on the server.
   which it answers again with; that holds for an agent proposing to ask
   for changes too, whose decision a teacher approves in the front end of
   today.
+- **Migration 0029, what an answer relied on:** an agent's answer may name
+  the course materials it relied on (`conversation.answer`'s `sources`),
+  which are kept with it (`conversation_message_source`) and shown to each
+  reader as they may read those documents now (docs/schema.md §2.8, What
+  an answer relied on). It changes no row and needs nothing of the
+  operator; until the agent runtime sends sources, answers name none, as
+  before. It comes after 0028, which must be on a server before it: a
+  database migrated to 0029 never takes a 0028 deployed after it. The
+  previous release, while it goes in and after a rollback, writes and reads
+  no source, its messages say nothing of their sources (the new
+  `conversation_message.sources_stated` takes its default), and its purges
+  clear the file each source of a purged version named, by the database, as
+  this release's do. It does read proposals, though: an answer proposed
+  with `sources` under this release and still waiting when the release
+  before decides it, during a rolling deploy or after a rollback, is
+  cancelled as `tool_no_longer_here`, since that release's
+  `conversation.answer` takes no `sources`; the agent answers again. Going
+  down drops the sources and `sources_stated`; each answer's action keeps
+  them as the call named them.
 - **Migration 0013, `member_invite`:** the permission that makes a course's
   join links. Every seat a person holds got it at its level of
   `member_manage`, and every seat an agent holds got it `denied`, whatever it

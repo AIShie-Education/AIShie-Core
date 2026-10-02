@@ -41,7 +41,8 @@ course
  ├ action
  ├ grade
  ├ conversation ── conversation_message ── conversation_message_retraction
- │                                      └─ conversation_attachment (the files it carries)
+ │                                      ├─ conversation_attachment (the files it carries)
+ │                                      └─ conversation_message_source (what an answer relied on)
  ├ memory_entry (an agent's memory of the course's askers, and the course's shared memory)
  └ event
 ```
@@ -1776,11 +1777,13 @@ conversation(id, course_id→course, opener_member_id, respondent_member_id, tit
 
 conversation_message(id, conversation_id, course_id, seq, author_member_id,
                      in_reply_to_message_id null, body, created_by_action_id→action, created_at,
+                     sources_stated (default false),
                      unique(conversation_id, seq), unique(id, conversation_id), unique(id, course_id))
     composite FK (conversation_id, course_id) → conversation(id, course_id)
     composite FK (course_id, author_member_id) → course_member(course_id, id)
     composite FK (in_reply_to_message_id, conversation_id) → conversation_message(id, conversation_id)
-    check: body 1..20000 characters
+    check: body 1..20000 characters;  sources_stated only on an answer
+           (conversation_message_sources_of_an_answer, NOT VALID: every row before 0029 is false)
     trigger: only the two participants write, only while the conversation is open; a reply
              is the respondent's, to a message of the opener's
     append-only
@@ -1801,6 +1804,21 @@ conversation_attachment(id, message_id, conversation_id, course_id, position, fi
     trigger: written with its message, dated as it is (conversation_attachment_with_its_message);
              an Office or OpenDocument file is queued for its PDF rendition as it is written
     append-only
+
+conversation_message_source(message_id, course_id, position, document_id, version_id,
+                            file_id null, file_version_id null, page null, slide null, part null,
+                            created_at, primary key (message_id, position))
+    composite FKs (message_id, course_id) → conversation_message(id, course_id),
+                  (document_id, course_id) → document(id, course_id),
+                  (version_id, document_id) → document_version(id, document_id),
+                  (file_id, file_version_id) → document_version_file(id, version_id)
+                  ON DELETE SET NULL
+    check: position 1..20;  file_id and file_version_id both or neither, file_version_id the
+           source's version;  page or slide, not both;  page, slide and part 1..100000
+    trigger: written with its message, dated as it is, and only an answer's that says what it
+             relied on (sources_stated); of a course's material, instructions or rubric, a
+             version not purged (conversation_message_source_with_its_answer)
+    append-only, but for the purge of its version, which clears its file
 
 conversation_read(conversation_id, course_id, member_id, last_read_seq, read_at,
                   primary key (conversation_id, member_id))
@@ -2037,6 +2055,63 @@ message's news (`conversation.message_posted`) says what it carries: each file's
 OpenDocument file a message carries is converted to PDF, as a document's is, and read as the file
 is (§2.4, Renditions).
 
+**What an answer relied on (sources).** While an answer is written, its draft says what the
+agent reads (below: `reading_document`, a document's title); once it is posted, the answer keeps
+which of the course's materials it relied on, so that its readers can see whether it rests on
+them. `conversation.answer` takes `sources`, at most 20 (`too_many_sources`), in order, each a
+version the answer read — `document_id` and `version_id`, as `document.get` and `document.text`
+give them — and, when the answer relied on one file of it, `file_id`, with a `page` or a `slide`
+of it as the file's text version heads them (`## 第 N 頁`, `## Slide N`) and the `part` of its
+text version, as `document.text` numbers its parts, each from 1. What a call's sources say alone is checked as it
+is read (`Check`): a page, a slide or a part only with a file, a page or a slide and not both,
+none named twice (`bad_source`, `duplicate_source`), and is refused before anything is
+recorded. Then, before the answer is posted or proposed (`Validate`), and again as it is posted,
+and when a proposal is approved, as the proposer's: each must be a version of a course's material, instructions or rubric that
+`document.get` would show the answering seat, named by id, at that moment (`source_unreadable`,
+which a version that does not exist, one of another document, a student's work and a version the
+seat may not open all answer alike, so that nobody learns which), not purged (`source_purged`),
+and its file one of that version's (`source_unreadable`). Each refusal is `invalid_argument` and
+names the source: `field` `sources[i]`, `index` i, counting from 0. A call `Validate` refuses
+is recorded as failed, as every one is, its payload naming the sources it gave; the answer is
+posted again, without that source, under a new idempotency key.
+
+The sources are optional, and an answer says what it relied on even when that is nothing. One
+that leaves them out, as every answer did before them, is taken as it always was and read with
+no `sources`: it did not say. One that gives an empty list says it relied on none; that is kept
+(`conversation_message.sources_stated`, set as it is written, only on an answer) and read as an
+empty list, so that a reader can tell an answer that relied on no course material from one that
+did not say.
+
+They are kept with the answer, a row each (`conversation_message_source`, migration 0029), in
+its transaction and dated as it is, and as its action's payload, for those who decide actions.
+A row each, rather than a list in the message, so that the database holds every source to a
+version and a file it has, in the answer's course, of a course's material, not purged, and so that
+a purge, which deletes a version's files, takes the file from each source that named one. A page
+of messages reads its sources in one statement (`ListMessageSources`), with what is the same for
+every reader: the document's `kind` and `title` as they are now, the version's `seq`, whether
+either is purged, the file's name. How much of each a reader is shown is then `document.get`'s
+rule, asked once of each document and version the page names. Who
+reads the answer — its opener, its respondent, staff who oversee the opener — reads its sources
+in `conversation.messages`, each as that reader may read its document now, whoever named it:
+
+- a version the reader may open (`document.get` would show it, named by id): the document's
+  `document_id`, `kind` and `title` as it is now, the `version_id`, its `seq`, whether it is
+  `published` now, and the `file_id`, `filename`, `page`, `slide` and `part` the answer named;
+- a version the reader may not open, of a document they may — an earlier version since
+  replaced, to a student who reads the published one: `other_version`, with the document's
+  `document_id`, `kind` and `title`, and nothing of the version, its file or page;
+- anything else — a document not published to them, archived, withheld with its assignment, of
+  a kind they do not read: `restricted`, and nothing else, so that they learn the answer relied
+  on something and not what.
+
+A version purged, or a purged document's, is `restricted` to every reader, staff included: what it
+said is gone, and so is whatever would say what it was. Its source is kept, as the version is
+kept as a tombstone (§2.4), naming no file: the purge deletes the version's files, and with them
+each source's `file_id`, by the database, whichever release purges. A retracted answer's sources
+are withheld with its text and files. `conversation.get` and `me.conversations` show no messages,
+and so no sources. An export for audit (below) holds every source as it was named, with its
+document's title as it is now.
+
 **What each participant has read.** Each participant has a place in a conversation: the `seq` of
 the last message they have read, and when they last said so (`conversation_read`). They move it
 with `conversation.mark_read`: every message there is now, or up to one of its messages
@@ -2192,10 +2267,17 @@ A line of the JSON Lines file is a conversation: `id`; `course` (`id`, `code`, `
 `kind`, `role`), the respondent with `principal_member_id`, `answers_course` and `owner`
 (`actor_id`, `name`, or null); `messages`, each `id`, `seq`, `author` (a party), `created_at`,
 `in_reply_to_message_id`, `body`, `action_id`, `retracted` (`at`, `by`, `reason`, `action_id`,
-or null) and `attachments` (`id`, `filename`, `content_type`, `byte_size`, `checksum`,
-`created_at`); and `proposals`, each `action_id`, `type`, `status`, `proposed_by`, `created_at`,
-`in_reply_to_message_id`, `body`, `attachment_filenames`, `decided_at`, `decided_by` and
-`reason`. A row of the CSV file has the columns `conversation_id`, `course_id`, `course_code`,
+or null), `attachments` (`id`, `filename`, `content_type`, `byte_size`, `checksum`,
+`created_at`) and `sources`, an answer's (`document_id`, `version_id`, `file_id`, `page`, `slide`,
+`part`, and the document's `title` and `kind` as they are now, the version's `version_seq`, the
+file's `filename` and whether the version is `purged`, whose file is then null), an empty list
+for an answer that said it relied on none and null where nothing was said (a question, an answer
+that did not say); and `proposals`, each `action_id`, `type`, `status`, `proposed_by`,
+`created_at`, `in_reply_to_message_id`, `body`, `attachment_filenames`, `sources` as the proposal
+named them (their ids, page, slide and part; `title`, `kind`, `version_seq` and `filename` null;
+empty or null as a message's),
+`decided_at`, `decided_by` and `reason`. The CSV file, a reading of what was said, does not
+carry sources. A row of the CSV file has the columns `conversation_id`, `course_id`, `course_code`,
 `course_section`, `course_title`, `conversation_title`, `status` (`posted`, `retracted`,
 `proposed`, `rejected`, `changes_requested` or `cancelled`), `message_id`, `seq`, `action_id`, `created_at`,
 `author_member_id`, `author_actor_id`, `author_name`, `author_kind`, `author_role`,
@@ -2611,6 +2693,8 @@ respondent's `conversation_answer` decides is who is shown its text.
 | `conversation_message` and `conversation_message_retraction` are append-only | triggers |
 | A message's file is in its message's conversation and course, one at each place, and a stored file is attached to one message at most; it is written with its message and dated as it is, and kept as it is: never changed or deleted | composite FKs, `unique(message_id, position)`, `unique(storage_key)`, trigger `conversation_attachment_with_its_message`, append-only triggers on `conversation_attachment` |
 | A file's name is 1..255 characters, trimmed, on one line, and no path; its type is 1..200 characters; its size is not below nothing | CHECKs on `conversation_attachment` |
+| An answer's source is in its answer's course, one at each place, at most 20; it names a version of its document and a file of that version; it is an answer's that says what it relied on, written with it and dated as it is, of a course's material, instructions or rubric, a version not purged; it is kept as it is, but that the purge of its version clears its file | composite FKs (the file's `ON DELETE SET NULL`), CHECKs and triggers `conversation_message_source_with_its_answer`, `conversation_message_source_append_only` on `conversation_message_source` |
+| Only an answer says what it relied on (`sources_stated`) | CHECK `conversation_message_sources_of_an_answer` |
 | An answer's draft is one per conversation, in its course; its attempt, version, text and steps are held to their shape, and an attempt's end keeps nothing | primary key, composite FK and CHECKs on `conversation_draft` |
 | Memory is held by agents, owner memory is about the agent's owner, and each seat an entry names is its actor's, in the entry's course | trigger `memory_entry_guarded`, composite FKs on `memory_entry` |
 | Each scope of memory has its shape: owner memory in no seat, asker memory in both, shared memory in the agent's seat and about nobody; only shared memory is proposed or rejected | `memory_shape_valid` |
@@ -2654,7 +2738,8 @@ respondent's `conversation_answer` decides is who is shown its text.
 - A tool's check of what a call's arguments say alone (`tool.Spec.Check`) runs as they are
   decoded, after the schema and before anything else: a name left blank, a number below zero, a
   value that is not one of those allowed, two fields given that exclude each other, a message
-  empty or too long, a file named twice or not named as a file may be. A call it refuses is never
+  empty or too long, a file named twice or not named as a file may be, an answer's sources too
+  many, named twice, or a page of no file. A call it refuses is never
   an attempt: nothing is recorded, whoever makes it and at whatever level. It is asked of a stored
   proposal too, when it is approved and for its owner (§2.6): a proposal stored before its tool's
   `Check` refused what it says fails when it is approved, with that refusal. What only a call may
@@ -2674,7 +2759,8 @@ respondent's `conversation_answer` decides is who is shown its text.
   file's rendition done already or a file with none; a submission handed in or still a draft, a
   student who has a submission already; whom one may address, a conversation closed or not the
   caller's to mark read, a question the opener has asked again since or withdrawn, a message
-  retracted, files a message or a version may hold; a join link revoked; totals that do not
+  retracted, files a message or a version may hold, the sources an answer names that its
+  respondent may not read, or that were purged; a join link revoked; totals that do not
   count ungraded work as zero; and of `action.decide`, `action.review` and `action.withdraw`
   whether the action waits for it and is the caller's to decide, review or take back, at any
   remove. `Execute` asks its rules again under its locks. As a proposal is made, its tool's
@@ -2750,6 +2836,11 @@ respondent's `conversation_answer` decides is who is shown its text.
   course, under the document's lock; the file is deleted from storage after the rows are
   emptied, and a purged version is never published.
 - The component tree is acyclic beyond the self-loop the CHECK blocks.
+- An answer's sources are shown to each reader as that reader may read their documents now, as
+  `document.get` decides it for a version named by id (`tools.sourceReader`), and never as
+  whoever named them could: a version the reader may not open says only its document
+  (`other_version`), one of a document they may not read nothing (`restricted`), and a purged
+  version nothing to anyone (§2.8, What an answer relied on).
 - Cancelling pending proposals when a member is removed or expires.
 - Nobody hands out more than they hold (§2.2): any change that widens a seat is measured as
   the whole of what it will then hold, a student's seat reaching the student included.

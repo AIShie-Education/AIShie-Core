@@ -23,7 +23,9 @@
 # runtime, for which he holds no token, and the runtime, checking he owns it,
 # be issued its token by its id; have it answer the student's question, its
 # inbox and her conversation each waiting to hear what comes next, the
-# answer's draft reaching her while it is written; and answer her question
+# answer's draft reaching her while it is written, the answer saying which
+# lecture it relied on, of which she is told no more while the lecture is
+# archived, and refused a draft it may not read; and answer her question
 # again, her essay attached as a PDF, which it lists and downloads, and the
 # grader cannot, and she withdraws, and which past the limits on files is
 # refused, saying why; and have the runtime, with that credential, convert
@@ -507,6 +509,7 @@ docfile text/plain "$WORK/notes.txt" notes.txt
 T2=$UPLOAD
 call 200 POST "$C/documents/$W3/versions" "$SATO" "{\"files\":[{\"upload_token\":\"$T1\",\"filename\":\"week3-slides.pdf\"},{\"upload_token\":\"$T2\"}]}"
 [ "$(json "$WORK/body" 'd["result"]["seq"], len(d["result"]["file_ids"])')" = "2 2" ] || fail "the second version: $(cat "$WORK/body")"
+W3_V2=$(json "$WORK/body" 'd["result"]["version_id"]')
 W3_V2_FILE=$(json "$WORK/body" 'd["result"]["file_ids"][1]')
 call 404 GET "$C/documents/$W3/files/$W3_V2_FILE" "$YUKI" # a draft's
 call 200 GET "$C/documents/$W3/files/$W3_V2_FILE" "$SATO"
@@ -619,13 +622,35 @@ heard 200
 call 403 POST "$C/conversations/$CONV/draft" "$YUKI" '{"attempt":"a1","version":2,"text":"Mine"}'
 [ "$(reason)" = conversations_are_with_agents ] || fail "Yuki writing the tutor's draft, refused, but not as a person: $(cat "$WORK/body")"
 wait_on "$C/conversations/$CONV/messages?after_seq=1&wait_s=20&seen_state=awaiting_answer&seen_draft_version=1" "$YUKI"
-KEY="answer:$CONV:$QUESTION:1" call 200 POST "$C/conversations/$CONV/answer" "$TUTOR" "{\"in_reply_to_message_id\":\"$QUESTION\",\"body\":\"An essay with a thesis.\"}"
+# The answer says what it relied on: page 1 of Lecture 1's slides. Week 3's
+# draft, which the tutor may not read, is refused, naming it, before the
+# answer is posted; the call is recorded as failed, and the answer is posted
+# again under a new key.
+LECTURE_SOURCE="{\"document_id\":\"$DOC\",\"version_id\":\"$VERSION\",\"file_id\":\"$FILE\",\"page\":1}"
+KEY="answer:$CONV:$QUESTION:0" call 400 POST "$C/conversations/$CONV/answer" "$TUTOR" "{\"in_reply_to_message_id\":\"$QUESTION\",\"body\":\"An essay with a thesis.\",\"sources\":[$LECTURE_SOURCE,{\"document_id\":\"$W3\",\"version_id\":\"$W3_V2\"}]}"
+[ "$(reason) $(json "$WORK/body" 'd["error"]["details"]["field"]')" = "source_unreadable sources[1]" ] ||
+  fail "a source the tutor may not read refused, but not naming it: $(cat "$WORK/body")"
+KEY="answer:$CONV:$QUESTION:1" call 200 POST "$C/conversations/$CONV/answer" "$TUTOR" "{\"in_reply_to_message_id\":\"$QUESTION\",\"body\":\"An essay with a thesis.\",\"sources\":[$LECTURE_SOURCE]}"
 heard 200
+[ "$(json "$WORK/body" '*(lambda s: (len(s), s[0]["title"], s[0]["version_id"] == "'"$VERSION"'", s[0]["filename"], s[0]["page"], s[0]["published"]))(d["result"]["messages"][-1]["sources"])')" = \
+  "1 Lecture 1: Loops True slides.pdf 1 True" ] || fail "Yuki does not see what the answer relied on: $(cat "$WORK/body")"
 [ "$(json "$WORK/body" 'd["result"]["messages"][-1]["body"], d["result"]["conversation"]["state"], d["result"]["draft"]')" = "An essay with a thesis. answered None" ] ||
   fail "Yuki does not see the answer in its draft's place: $(cat "$WORK/body")"
 call 409 POST "$C/conversations/$CONV/draft" "$TUTOR" '{"attempt":"a1","version":2}'
 [ "$(reason)" = conversation_not_awaiting ] || fail "a draft after the answer, refused, but not as waiting for none: $(cat "$WORK/body")"
 call 404 GET "$C/conversations/$CONV" "$GRADER" # nobody else's to read
+
+step "Where the tutor's answer came from, as each reader may read it now: archived, Lecture 1 is a source Yuki may not open, and she is told no more; Sato reads it still; brought back, Yuki reads it again"
+call 200 POST "$C/documents/$DOC/archive" "$SATO"
+call 200 GET "$C/conversations/$CONV/messages" "$YUKI"
+[ "$(json "$WORK/body" 'd["result"]["messages"][-1]["sources"]')" = "[{'restricted': True}]" ] ||
+  fail "Yuki reads an archived source as $(cat "$WORK/body")"
+call 200 GET "$C/conversations/$CONV/messages" "$SATO"
+[ "$(json "$WORK/body" '*(lambda s: (s["title"], s["file_id"] == "'"$FILE"'", s.get("restricted")))(d["result"]["messages"][-1]["sources"][0])')" = "Lecture 1: Loops True None" ] ||
+  fail "Sato reads an archived source as $(cat "$WORK/body")"
+call 200 POST "$C/documents/$DOC/unarchive" "$SATO"
+call 200 GET "$C/conversations/$CONV/messages" "$YUKI"
+[ "$(json "$WORK/body" 'd["result"]["messages"][-1]["sources"][0]["title"]')" = "Lecture 1: Loops" ] || fail "Yuki, the lecture back: $(cat "$WORK/body")"
 
 step "Conversations are with agents: Sato is offered to nobody, asked nothing and answers nothing, and his seat says why"
 call 200 GET "$C/conversations/respondents" "$YUKI"
