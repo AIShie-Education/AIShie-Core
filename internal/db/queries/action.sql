@@ -15,10 +15,12 @@ SELECT pg_advisory_xact_lock(hashtextextended('action-key:' || sqlc.arg(actor_id
 -- transaction holding the key, so two simultaneous calls cannot both act.
 -- authority and authority_dept_id are the capacity a call outside any course
 -- was allowed in; null for a seat's call, one's own account's, and a denial.
+-- revises_action_id is the proposal of the caller's that ended in
+-- changes_requested which the call revises, if it names one.
 INSERT INTO action (id, actor_id, course_id, member_id, action_type, target_type, target_id,
                     payload, payload_hash, idempotency_key, authz_result, status, result, created_at,
-                    authority, authority_dept_id)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+                    authority, authority_dept_id, revises_action_id)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
 ON CONFLICT (actor_id, idempotency_key) DO NOTHING;
 
 -- name: MarkActionExecuted :exec

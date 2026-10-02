@@ -89,7 +89,7 @@ func (q *Queries) FinishProposal(ctx context.Context, arg FinishProposalParams) 
 }
 
 const getActionByKey = `-- name: GetActionByKey :one
-SELECT id, actor_id, course_id, member_id, action_type, target_type, target_id, payload, idempotency_key, authz_result, status, decided_by_member_id, decided_at, review_state, reviewed_by_member_id, reviewed_at, executed_at, created_at, payload_hash, result, authority, authority_dept_id FROM action WHERE actor_id = $1 AND idempotency_key = $2
+SELECT id, actor_id, course_id, member_id, action_type, target_type, target_id, payload, idempotency_key, authz_result, status, decided_by_member_id, decided_at, review_state, reviewed_by_member_id, reviewed_at, executed_at, created_at, payload_hash, result, authority, authority_dept_id, revises_action_id FROM action WHERE actor_id = $1 AND idempotency_key = $2
 `
 
 type GetActionByKeyParams struct {
@@ -123,12 +123,13 @@ func (q *Queries) GetActionByKey(ctx context.Context, arg GetActionByKeyParams) 
 		&i.Result,
 		&i.Authority,
 		&i.AuthorityDeptID,
+		&i.RevisesActionID,
 	)
 	return i, err
 }
 
 const getActionInCourse = `-- name: GetActionInCourse :one
-SELECT id, actor_id, course_id, member_id, action_type, target_type, target_id, payload, idempotency_key, authz_result, status, decided_by_member_id, decided_at, review_state, reviewed_by_member_id, reviewed_at, executed_at, created_at, payload_hash, result, authority, authority_dept_id FROM action WHERE id = $1 AND course_id = $2
+SELECT id, actor_id, course_id, member_id, action_type, target_type, target_id, payload, idempotency_key, authz_result, status, decided_by_member_id, decided_at, review_state, reviewed_by_member_id, reviewed_at, executed_at, created_at, payload_hash, result, authority, authority_dept_id, revises_action_id FROM action WHERE id = $1 AND course_id = $2
 `
 
 type GetActionInCourseParams struct {
@@ -162,12 +163,13 @@ func (q *Queries) GetActionInCourse(ctx context.Context, arg GetActionInCoursePa
 		&i.Result,
 		&i.Authority,
 		&i.AuthorityDeptID,
+		&i.RevisesActionID,
 	)
 	return i, err
 }
 
 const getActionInCourseForUpdate = `-- name: GetActionInCourseForUpdate :one
-SELECT id, actor_id, course_id, member_id, action_type, target_type, target_id, payload, idempotency_key, authz_result, status, decided_by_member_id, decided_at, review_state, reviewed_by_member_id, reviewed_at, executed_at, created_at, payload_hash, result, authority, authority_dept_id FROM action WHERE id = $1 AND course_id = $2 FOR UPDATE
+SELECT id, actor_id, course_id, member_id, action_type, target_type, target_id, payload, idempotency_key, authz_result, status, decided_by_member_id, decided_at, review_state, reviewed_by_member_id, reviewed_at, executed_at, created_at, payload_hash, result, authority, authority_dept_id, revises_action_id FROM action WHERE id = $1 AND course_id = $2 FOR UPDATE
 `
 
 type GetActionInCourseForUpdateParams struct {
@@ -201,6 +203,7 @@ func (q *Queries) GetActionInCourseForUpdate(ctx context.Context, arg GetActionI
 		&i.Result,
 		&i.Authority,
 		&i.AuthorityDeptID,
+		&i.RevisesActionID,
 	)
 	return i, err
 }
@@ -208,8 +211,8 @@ func (q *Queries) GetActionInCourseForUpdate(ctx context.Context, arg GetActionI
 const insertAction = `-- name: InsertAction :execrows
 INSERT INTO action (id, actor_id, course_id, member_id, action_type, target_type, target_id,
                     payload, payload_hash, idempotency_key, authz_result, status, result, created_at,
-                    authority, authority_dept_id)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+                    authority, authority_dept_id, revises_action_id)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
 ON CONFLICT (actor_id, idempotency_key) DO NOTHING
 `
 
@@ -230,6 +233,7 @@ type InsertActionParams struct {
 	CreatedAt       time.Time
 	Authority       *string
 	AuthorityDeptID *uuid.UUID
+	RevisesActionID *uuid.UUID
 }
 
 // Zero rows means another call with the same key got there first; the caller
@@ -237,6 +241,8 @@ type InsertActionParams struct {
 // transaction holding the key, so two simultaneous calls cannot both act.
 // authority and authority_dept_id are the capacity a call outside any course
 // was allowed in; null for a seat's call, one's own account's, and a denial.
+// revises_action_id is the proposal of the caller's that ended in
+// changes_requested which the call revises, if it names one.
 func (q *Queries) InsertAction(ctx context.Context, arg InsertActionParams) (int64, error) {
 	result, err := q.db.Exec(ctx, insertAction,
 		arg.ID,
@@ -255,6 +261,7 @@ func (q *Queries) InsertAction(ctx context.Context, arg InsertActionParams) (int
 		arg.CreatedAt,
 		arg.Authority,
 		arg.AuthorityDeptID,
+		arg.RevisesActionID,
 	)
 	if err != nil {
 		return 0, err
@@ -263,7 +270,7 @@ func (q *Queries) InsertAction(ctx context.Context, arg InsertActionParams) (int
 }
 
 const listActionsByMember = `-- name: ListActionsByMember :many
-SELECT id, actor_id, course_id, member_id, action_type, target_type, target_id, payload, idempotency_key, authz_result, status, decided_by_member_id, decided_at, review_state, reviewed_by_member_id, reviewed_at, executed_at, created_at, payload_hash, result, authority, authority_dept_id FROM action
+SELECT id, actor_id, course_id, member_id, action_type, target_type, target_id, payload, idempotency_key, authz_result, status, decided_by_member_id, decided_at, review_state, reviewed_by_member_id, reviewed_at, executed_at, created_at, payload_hash, result, authority, authority_dept_id, revises_action_id FROM action
 WHERE course_id = $1 AND member_id = $2 AND id > $3
   AND NOT (action_type = ANY($4::text[]))
 ORDER BY id
@@ -318,6 +325,7 @@ func (q *Queries) ListActionsByMember(ctx context.Context, arg ListActionsByMemb
 			&i.Result,
 			&i.Authority,
 			&i.AuthorityDeptID,
+			&i.RevisesActionID,
 		); err != nil {
 			return nil, err
 		}
@@ -330,7 +338,7 @@ func (q *Queries) ListActionsByMember(ctx context.Context, arg ListActionsByMemb
 }
 
 const listPendingReviewActions = `-- name: ListPendingReviewActions :many
-SELECT id, actor_id, course_id, member_id, action_type, target_type, target_id, payload, idempotency_key, authz_result, status, decided_by_member_id, decided_at, review_state, reviewed_by_member_id, reviewed_at, executed_at, created_at, payload_hash, result, authority, authority_dept_id FROM action
+SELECT id, actor_id, course_id, member_id, action_type, target_type, target_id, payload, idempotency_key, authz_result, status, decided_by_member_id, decided_at, review_state, reviewed_by_member_id, reviewed_at, executed_at, created_at, payload_hash, result, authority, authority_dept_id, revises_action_id FROM action
 WHERE course_id = $1 AND review_state IN ('pending', 'escalated') AND id > $2
 ORDER BY id
 LIMIT $3
@@ -374,6 +382,7 @@ func (q *Queries) ListPendingReviewActions(ctx context.Context, arg ListPendingR
 			&i.Result,
 			&i.Authority,
 			&i.AuthorityDeptID,
+			&i.RevisesActionID,
 		); err != nil {
 			return nil, err
 		}
@@ -386,7 +395,7 @@ func (q *Queries) ListPendingReviewActions(ctx context.Context, arg ListPendingR
 }
 
 const listPendingReviewActionsOfAgentsOf = `-- name: ListPendingReviewActionsOfAgentsOf :many
-SELECT id, actor_id, course_id, member_id, action_type, target_type, target_id, payload, idempotency_key, authz_result, status, decided_by_member_id, decided_at, review_state, reviewed_by_member_id, reviewed_at, executed_at, created_at, payload_hash, result, authority, authority_dept_id FROM action x
+SELECT id, actor_id, course_id, member_id, action_type, target_type, target_id, payload, idempotency_key, authz_result, status, decided_by_member_id, decided_at, review_state, reviewed_by_member_id, reviewed_at, executed_at, created_at, payload_hash, result, authority, authority_dept_id, revises_action_id FROM action x
 WHERE x.course_id = $1 AND x.review_state IN ('pending', 'escalated') AND x.id > $2
   AND x.actor_id IN (SELECT a.id FROM actor a WHERE a.owner_actor_id = $3)
 ORDER BY x.id
@@ -438,6 +447,7 @@ func (q *Queries) ListPendingReviewActionsOfAgentsOf(ctx context.Context, arg Li
 			&i.Result,
 			&i.Authority,
 			&i.AuthorityDeptID,
+			&i.RevisesActionID,
 		); err != nil {
 			return nil, err
 		}
@@ -450,7 +460,7 @@ func (q *Queries) ListPendingReviewActionsOfAgentsOf(ctx context.Context, arg Li
 }
 
 const listProposedActions = `-- name: ListProposedActions :many
-SELECT id, actor_id, course_id, member_id, action_type, target_type, target_id, payload, idempotency_key, authz_result, status, decided_by_member_id, decided_at, review_state, reviewed_by_member_id, reviewed_at, executed_at, created_at, payload_hash, result, authority, authority_dept_id FROM action
+SELECT id, actor_id, course_id, member_id, action_type, target_type, target_id, payload, idempotency_key, authz_result, status, decided_by_member_id, decided_at, review_state, reviewed_by_member_id, reviewed_at, executed_at, created_at, payload_hash, result, authority, authority_dept_id, revises_action_id FROM action
 WHERE course_id = $1 AND status = 'proposed' AND id > $2
 ORDER BY id
 LIMIT $3
@@ -494,6 +504,7 @@ func (q *Queries) ListProposedActions(ctx context.Context, arg ListProposedActio
 			&i.Result,
 			&i.Authority,
 			&i.AuthorityDeptID,
+			&i.RevisesActionID,
 		); err != nil {
 			return nil, err
 		}
@@ -506,7 +517,7 @@ func (q *Queries) ListProposedActions(ctx context.Context, arg ListProposedActio
 }
 
 const listProposedActionsOfAgentsOf = `-- name: ListProposedActionsOfAgentsOf :many
-SELECT id, actor_id, course_id, member_id, action_type, target_type, target_id, payload, idempotency_key, authz_result, status, decided_by_member_id, decided_at, review_state, reviewed_by_member_id, reviewed_at, executed_at, created_at, payload_hash, result, authority, authority_dept_id FROM action x
+SELECT id, actor_id, course_id, member_id, action_type, target_type, target_id, payload, idempotency_key, authz_result, status, decided_by_member_id, decided_at, review_state, reviewed_by_member_id, reviewed_at, executed_at, created_at, payload_hash, result, authority, authority_dept_id, revises_action_id FROM action x
 WHERE x.course_id = $1 AND x.status = 'proposed' AND x.id > $2
   AND x.actor_id IN (SELECT a.id FROM actor a WHERE a.owner_actor_id = $3)
 ORDER BY x.id
@@ -559,6 +570,7 @@ func (q *Queries) ListProposedActionsOfAgentsOf(ctx context.Context, arg ListPro
 			&i.Result,
 			&i.Authority,
 			&i.AuthorityDeptID,
+			&i.RevisesActionID,
 		); err != nil {
 			return nil, err
 		}
