@@ -56,14 +56,14 @@ END $$;
 INSERT INTO term (id, name, starts_on, ends_on)
 VALUES ('00000000-0000-0000-0000-000000000011', '2026 Autumn', '2026-09-01', '2026-12-20');
 INSERT INTO department (id, name) VALUES ('00000000-0000-0000-0000-000000000021', 'Computing');
-INSERT INTO actor (id, kind, display_name, platform_role, created_by_actor_id) VALUES
-    ('00000000-0000-0000-0000-000000000031', 'human',  'root',   'root',  NULL),
-    ('00000000-0000-0000-0000-000000000032', 'human',  'admin',  'admin', '00000000-0000-0000-0000-000000000031'),
-    ('00000000-0000-0000-0000-000000000033', 'system', 'system', NULL,    '00000000-0000-0000-0000-000000000031'),
-    ('00000000-0000-0000-0000-000000000034', 'human',  'Sato',   NULL,    '00000000-0000-0000-0000-000000000033'),
-    ('00000000-0000-0000-0000-000000000035', 'human',  'Yuki',   NULL,    '00000000-0000-0000-0000-000000000033'),
-    ('00000000-0000-0000-0000-000000000036', 'agent',  'grader', NULL,    '00000000-0000-0000-0000-000000000034'),
-    ('00000000-0000-0000-0000-000000000037', 'human',  'Ken',    NULL,    '00000000-0000-0000-0000-000000000033');
+INSERT INTO actor (id, kind, display_name, platform_role, created_by_actor_id, hosting) VALUES
+    ('00000000-0000-0000-0000-000000000031', 'human',  'root',   'root',  NULL,                                   NULL),
+    ('00000000-0000-0000-0000-000000000032', 'human',  'admin',  'admin', '00000000-0000-0000-0000-000000000031', NULL),
+    ('00000000-0000-0000-0000-000000000033', 'system', 'system', NULL,    '00000000-0000-0000-0000-000000000031', NULL),
+    ('00000000-0000-0000-0000-000000000034', 'human',  'Sato',   NULL,    '00000000-0000-0000-0000-000000000033', NULL),
+    ('00000000-0000-0000-0000-000000000035', 'human',  'Yuki',   NULL,    '00000000-0000-0000-0000-000000000033', NULL),
+    ('00000000-0000-0000-0000-000000000036', 'agent',  'grader', NULL,    '00000000-0000-0000-0000-000000000034', 'mcp'),
+    ('00000000-0000-0000-0000-000000000037', 'human',  'Ken',    NULL,    '00000000-0000-0000-0000-000000000033', NULL);
 -- 91 built-in preset (name chosen not to collide with src/seed/presets.sql)
 INSERT INTO permission_preset (id, name, role, student_scope, assignment_scope, perm_document_read, perm_grade_submit)
 VALUES ('00000000-0000-0000-0000-000000000091', 'test-grader', 'assistant', 'all', 'listed', 'autonomous', 'confirm_required');
@@ -223,16 +223,16 @@ SELECT pg_temp.fails('nor a full-width digit', '23514', $q$
 SELECT pg_temp.fails('an agent has no login ID', '23514', $q$
     UPDATE actor SET login_id = 'grader-v2' WHERE id = '00000000-0000-0000-0000-000000000036' $q$);
 SELECT pg_temp.fails('nor is one registered with one', '23514', $q$
-    INSERT INTO actor (kind, display_name, login_id, created_by_actor_id)
-    VALUES ('agent', 'bot', 'bot-1', '00000000-0000-0000-0000-000000000031') $q$);
+    INSERT INTO actor (kind, display_name, login_id, created_by_actor_id, hosting)
+    VALUES ('agent', 'bot', 'bot-1', '00000000-0000-0000-0000-000000000031', 'mcp') $q$);
 SELECT pg_temp.fails('nor has the system actor one', '23514', $q$
     UPDATE actor SET login_id = 'system' WHERE id = '00000000-0000-0000-0000-000000000033' $q$);
 SELECT pg_temp.ok('a person who typed their own has it recorded unchecked', $q$
     INSERT INTO actor (kind, display_name, login_id, login_id_verified, created_by_actor_id)
     VALUES ('human', 'Wei', '20230009', false, '00000000-0000-0000-0000-000000000034') $q$);
 SELECT pg_temp.fails('only a person''s login ID goes unchecked', '23514', $q$
-    INSERT INTO actor (kind, display_name, login_id_verified, created_by_actor_id)
-    VALUES ('agent', 'bot', false, '00000000-0000-0000-0000-000000000031') $q$);
+    INSERT INTO actor (kind, display_name, login_id_verified, created_by_actor_id, hosting)
+    VALUES ('agent', 'bot', false, '00000000-0000-0000-0000-000000000031', 'mcp') $q$);
 SELECT pg_temp.fails('and only a login ID there is', '23514', $q$
     INSERT INTO actor (kind, display_name, email, login_id_verified, created_by_actor_id)
     VALUES ('human', 'x', 'x@example.edu', false, '00000000-0000-0000-0000-000000000031') $q$);
@@ -358,20 +358,20 @@ SELECT pg_temp.fails('preset_id must name an existing preset', '23503', $q$
 -- Agents a person owns, and their delegate seats ------------------------------
 -- 38 Yuki's agent · 5a its seat in A, as Yuki's (52) delegate
 SELECT pg_temp.ok('a person owns an agent', $q$
-    INSERT INTO actor (id, kind, display_name, owner_actor_id, created_by_actor_id)
-    VALUES ('00000000-0000-0000-0000-000000000038', 'agent', 'Yuki''s agent', '00000000-0000-0000-0000-000000000035', '00000000-0000-0000-0000-000000000035') $q$);
+    INSERT INTO actor (id, kind, display_name, owner_actor_id, created_by_actor_id, hosting)
+    VALUES ('00000000-0000-0000-0000-000000000038', 'agent', 'Yuki''s agent', '00000000-0000-0000-0000-000000000035', '00000000-0000-0000-0000-000000000035', 'mcp') $q$);
 SELECT pg_temp.fails('an agent owns no agent', '23514', $q$
-    INSERT INTO actor (kind, display_name, owner_actor_id, created_by_actor_id)
-    VALUES ('agent', 'x', '00000000-0000-0000-0000-000000000036', '00000000-0000-0000-0000-000000000031') $q$);
+    INSERT INTO actor (kind, display_name, owner_actor_id, created_by_actor_id, hosting)
+    VALUES ('agent', 'x', '00000000-0000-0000-0000-000000000036', '00000000-0000-0000-0000-000000000031', 'mcp') $q$);
 SELECT pg_temp.fails('the system actor owns nothing', '23514', $q$
-    INSERT INTO actor (kind, display_name, owner_actor_id, created_by_actor_id)
-    VALUES ('agent', 'x', '00000000-0000-0000-0000-000000000033', '00000000-0000-0000-0000-000000000031') $q$);
+    INSERT INTO actor (kind, display_name, owner_actor_id, created_by_actor_id, hosting)
+    VALUES ('agent', 'x', '00000000-0000-0000-0000-000000000033', '00000000-0000-0000-0000-000000000031', 'mcp') $q$);
 SELECT pg_temp.fails('only an agent has an owner', '23514', $q$
     INSERT INTO actor (kind, display_name, owner_actor_id, created_by_actor_id)
     VALUES ('human', 'x', '00000000-0000-0000-0000-000000000035', '00000000-0000-0000-0000-000000000031') $q$);
 SELECT pg_temp.fails('an owner is an actor that exists', '23514', $q$
-    INSERT INTO actor (kind, display_name, owner_actor_id, created_by_actor_id)
-    VALUES ('agent', 'x', '00000000-0000-0000-0000-0000000000ff', '00000000-0000-0000-0000-000000000031') $q$);
+    INSERT INTO actor (kind, display_name, owner_actor_id, created_by_actor_id, hosting)
+    VALUES ('agent', 'x', '00000000-0000-0000-0000-0000000000ff', '00000000-0000-0000-0000-000000000031', 'mcp') $q$);
 SELECT pg_temp.fails('an agent''s owner never changes: not to another person', '23001', $q$
     UPDATE actor SET owner_actor_id = '00000000-0000-0000-0000-000000000037' WHERE id = '00000000-0000-0000-0000-000000000038' $q$);
 SELECT pg_temp.fails('nor to an agent', '23001', $q$
@@ -387,11 +387,11 @@ SELECT pg_temp.ok('the rest of an owned agent''s row changes, its owner named as
 SELECT pg_temp.fails('an agent someone owns holds no platform role', '23514', $q$
     UPDATE actor SET platform_role = 'admin' WHERE id = '00000000-0000-0000-0000-000000000038' $q$);
 SELECT pg_temp.fails('nor is an agent that holds one given an owner', '23514', $q$
-    INSERT INTO actor (kind, display_name, platform_role, owner_actor_id, created_by_actor_id)
-    VALUES ('agent', 'x', 'admin', '00000000-0000-0000-0000-000000000035', '00000000-0000-0000-0000-000000000031') $q$);
+    INSERT INTO actor (kind, display_name, platform_role, owner_actor_id, created_by_actor_id, hosting)
+    VALUES ('agent', 'x', 'admin', '00000000-0000-0000-0000-000000000035', '00000000-0000-0000-0000-000000000031', 'mcp') $q$);
 SELECT pg_temp.fails('nothing owns itself', '23514', $q$
-    INSERT INTO actor (id, kind, display_name, owner_actor_id, created_by_actor_id)
-    VALUES ('00000000-0000-0000-0000-0000000000fe', 'agent', 'x', '00000000-0000-0000-0000-0000000000fe', '00000000-0000-0000-0000-000000000031') $q$);
+    INSERT INTO actor (id, kind, display_name, owner_actor_id, created_by_actor_id, hosting)
+    VALUES ('00000000-0000-0000-0000-0000000000fe', 'agent', 'x', '00000000-0000-0000-0000-0000000000fe', '00000000-0000-0000-0000-000000000031', 'mcp') $q$);
 SELECT pg_temp.fails('who suspended an actor is an actor', '23503', $q$
     UPDATE actor SET suspended_by_actor_id = '00000000-0000-0000-0000-0000000000ff' WHERE id = '00000000-0000-0000-0000-000000000038' $q$);
 SELECT pg_temp.ok('making an actor active again forgets who suspended it', $q$
@@ -419,8 +419,8 @@ SELECT pg_temp.ok('an agent''s seat is written deciding only by proposal', $q$
         END IF;
     END $chk$ $q$);
 SELECT pg_temp.ok('and so is a new one', $q$
-    INSERT INTO actor (id, kind, display_name, created_by_actor_id)
-    VALUES ('00000000-0000-0000-0000-0000000003d0', 'agent', 'triage', '00000000-0000-0000-0000-000000000031');
+    INSERT INTO actor (id, kind, display_name, created_by_actor_id, hosting)
+    VALUES ('00000000-0000-0000-0000-0000000003d0', 'agent', 'triage', '00000000-0000-0000-0000-000000000031', 'mcp');
     INSERT INTO course_member (id, course_id, actor_id, role, added_by_actor_id, student_scope, assignment_scope, perm_action_decide)
     VALUES ('00000000-0000-0000-0000-0000000005d0', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-0000000003d0',
             'assistant', '00000000-0000-0000-0000-000000000034', 'all', 'all', 'autonomous');
@@ -476,8 +476,8 @@ SELECT pg_temp.ok('a delegate''s seat is removed with its principal''s', $q$
     -- paused; Mei's seat is then removed, and both are history afterwards.
     INSERT INTO actor (id, kind, display_name, created_by_actor_id)
     VALUES ('00000000-0000-0000-0000-00000000003a', 'human', 'Mei', '00000000-0000-0000-0000-000000000031');
-    INSERT INTO actor (id, kind, display_name, owner_actor_id, created_by_actor_id)
-    VALUES ('00000000-0000-0000-0000-000000000039', 'agent', 'Mei''s agent', '00000000-0000-0000-0000-00000000003a', '00000000-0000-0000-0000-00000000003a');
+    INSERT INTO actor (id, kind, display_name, owner_actor_id, created_by_actor_id, hosting)
+    VALUES ('00000000-0000-0000-0000-000000000039', 'agent', 'Mei''s agent', '00000000-0000-0000-0000-00000000003a', '00000000-0000-0000-0000-00000000003a', 'mcp');
     INSERT INTO course_member (id, course_id, actor_id, role, added_by_actor_id, student_scope, assignment_scope)
     VALUES ('00000000-0000-0000-0000-00000000005d', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-00000000003a', 'student', '00000000-0000-0000-0000-000000000034', 'listed', 'all');
     INSERT INTO course_member (id, course_id, actor_id, role, status, added_by_actor_id, student_scope, assignment_scope, principal_member_id)
@@ -521,32 +521,15 @@ SELECT pg_temp.ok('the new permissions default to denied on both tables', $q$
 SELECT pg_temp.fails('only a delegate''s seat answers the course', '23514', $q$
     UPDATE course_member SET answers_course = true WHERE id = '00000000-0000-0000-0000-000000000051' $q$);
 
--- Site chat: which credential of an agent's declared it ------------------------
--- 1c1 the grader's (36) token · 1c2 Sato's (34) session
-INSERT INTO credential (id, actor_id, kind, secret_hash, token_prefix, expires_at) VALUES
-    ('00000000-0000-0000-0000-0000000001c1', '00000000-0000-0000-0000-000000000036', 'api_token', 'h', 'sc-agent', NULL),
-    ('00000000-0000-0000-0000-0000000001c2', '00000000-0000-0000-0000-000000000034', 'session', 'h', 'sc-person', now() + interval '12 hours');
-SELECT pg_temp.ok('an agent declares site chat with a credential of its own', $q$
-    UPDATE actor SET site_chat_credential_id = '00000000-0000-0000-0000-0000000001c1' WHERE id = '00000000-0000-0000-0000-000000000036' $q$);
-SELECT pg_temp.fails('not with someone else''s', '23503', $q$
-    UPDATE actor SET site_chat_credential_id = '00000000-0000-0000-0000-0000000001c2' WHERE id = '00000000-0000-0000-0000-000000000036' $q$);
-SELECT pg_temp.fails('nor with one that does not exist', '23503', $q$
-    UPDATE actor SET site_chat_credential_id = '00000000-0000-0000-0000-0000000000ff' WHERE id = '00000000-0000-0000-0000-000000000036' $q$);
-SELECT pg_temp.fails('a person declares no site chat, even with a credential of their own', '23514', $q$
-    UPDATE actor SET site_chat_credential_id = '00000000-0000-0000-0000-0000000001c2' WHERE id = '00000000-0000-0000-0000-000000000034' $q$);
-SELECT pg_temp.fails('a credential that declared it is not moved to another actor', '23503', $q$
-    UPDATE credential SET actor_id = '00000000-0000-0000-0000-000000000038' WHERE id = '00000000-0000-0000-0000-0000000001c1' $q$);
-SELECT pg_temp.ok('revoking it leaves the row as it is: whether it is live is read, not kept', $q$
-    UPDATE credential SET revoked_at = now() WHERE id = '00000000-0000-0000-0000-0000000001c1';
+-- Site chat: declared by nobody since 0025, and recorded nowhere since 0027 ---
+SELECT pg_temp.ok('no actor names a site chat credential', $q$
     DO $chk$
     BEGIN
-        IF NOT EXISTS (SELECT 1 FROM actor WHERE id = '00000000-0000-0000-0000-000000000036'
-                       AND site_chat_credential_id = '00000000-0000-0000-0000-0000000001c1') THEN
-            RAISE EXCEPTION 'revoking the credential changed the actor';
+        IF EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_schema = 'public' AND table_name = 'actor' AND column_name = 'site_chat_credential_id') THEN
+            RAISE EXCEPTION 'actor.site_chat_credential_id is still there';
         END IF;
     END $chk$ $q$);
-SELECT pg_temp.ok('and switching it off clears it', $q$
-    UPDATE actor SET site_chat_credential_id = NULL WHERE id = '00000000-0000-0000-0000-000000000036' $q$);
 
 -- Join links: a way into a course, as a student ------------------------------
 -- 1a1 Sato's (51) link to A · 3c Aoi, who registered through it · 5f her seat
@@ -619,8 +602,8 @@ SELECT pg_temp.fails('a seat names a link of its own course', '23503', $q$
     VALUES ('00000000-0000-0000-0000-000000000042', '00000000-0000-0000-0000-00000000003c', 'student',
             '00000000-0000-0000-0000-000000000034', 'listed', 'all', '00000000-0000-0000-0000-0000000001a1') $q$);
 SELECT pg_temp.fails('only a person''s email goes unchecked', '23514', $q$
-    INSERT INTO actor (kind, display_name, email, email_verified, created_by_actor_id)
-    VALUES ('agent', 'x', 'x@example.edu', false, '00000000-0000-0000-0000-000000000034') $q$);
+    INSERT INTO actor (kind, display_name, email, email_verified, created_by_actor_id, hosting)
+    VALUES ('agent', 'x', 'x@example.edu', false, '00000000-0000-0000-0000-000000000034', 'mcp') $q$);
 SELECT pg_temp.fails('and only an email there is', '23514', $q$
     INSERT INTO actor (kind, display_name, email_verified, created_by_actor_id)
     VALUES ('human', 'x', false, '00000000-0000-0000-0000-000000000034') $q$);
@@ -722,27 +705,20 @@ SELECT pg_temp.ok('text-only version', $q$
     INSERT INTO document_version (id, document_id, seq, body_md, author_member_id)
     VALUES ('00000000-0000-0000-0000-0000000000f1', '00000000-0000-0000-0000-0000000000e1', 1, 'Lecture text',
             '00000000-0000-0000-0000-000000000051') $q$);
-SELECT pg_temp.ok('file-only version, its file in its own columns, recorded at commit as its one file', $q$
-    INSERT INTO document_version (id, document_id, seq, storage_key, content_type, byte_size, author_member_id)
-    VALUES ('00000000-0000-0000-0000-0000000000f2', '00000000-0000-0000-0000-0000000000e2', 1, 'k/lecture2.pdf',
-            'application/pdf', 1024, '00000000-0000-0000-0000-000000000051');
+SELECT pg_temp.ok('file-only version: its one file, written with it', $q$
+    INSERT INTO document_version (id, document_id, seq, author_member_id)
+    VALUES ('00000000-0000-0000-0000-0000000000f2', '00000000-0000-0000-0000-0000000000e2', 1, '00000000-0000-0000-0000-000000000051');
+    INSERT INTO document_version_file (version_id, document_id, position, filename, storage_key, content_type, byte_size)
+    VALUES ('00000000-0000-0000-0000-0000000000f2', '00000000-0000-0000-0000-0000000000e2', 1, 'lecture2.pdf', 'k/lecture2.pdf',
+            'application/pdf', 1024);
     SET CONSTRAINTS ALL IMMEDIATE;
-    SET CONSTRAINTS ALL DEFERRED;
-    DO $chk$
-    BEGIN
-        IF NOT EXISTS (SELECT 1 FROM document_version_file f JOIN document d ON d.id = f.document_id
-                       WHERE f.version_id = '00000000-0000-0000-0000-0000000000f2' AND f.position = 1
-                         AND f.storage_key = 'k/lecture2.pdf' AND f.content_type = 'application/pdf' AND f.byte_size = 1024
-                         AND f.filename = document_file_name(d.title, 'application/pdf')) THEN
-            RAISE EXCEPTION 'the version''s file was not recorded as its one file';
-        END IF;
-    END $chk$ $q$);
+    SET CONSTRAINTS ALL DEFERRED $q$);
 SELECT pg_temp.fails('version needs text or a file', '23514', $q$
     INSERT INTO document_version (document_id, seq, author_member_id)
     VALUES ('00000000-0000-0000-0000-0000000000e1', 2, '00000000-0000-0000-0000-000000000051') $q$);
-SELECT pg_temp.fails('file needs content type and size', '23514', $q$
-    INSERT INTO document_version (document_id, seq, storage_key, author_member_id)
-    VALUES ('00000000-0000-0000-0000-0000000000e1', 2, 'k/x', '00000000-0000-0000-0000-000000000051') $q$);
+SELECT pg_temp.fails('a version keeps no file of its own, since 0027: its files are document_version_file''s', '42703', $q$
+    INSERT INTO document_version (document_id, seq, storage_key, content_type, byte_size, author_member_id)
+    VALUES ('00000000-0000-0000-0000-0000000000e1', 2, 'k/x', 'application/pdf', 1, '00000000-0000-0000-0000-000000000051') $q$);
 SELECT pg_temp.ok('published pointer moves to own version', $q$
     UPDATE document SET published_version_id = '00000000-0000-0000-0000-0000000000f1'
     WHERE id = '00000000-0000-0000-0000-0000000000e1' $q$);
@@ -754,22 +730,22 @@ SELECT pg_temp.fails('versions are append-only', '23001', $q$
 SELECT pg_temp.fails('a version is never deleted', '23001', $q$
     DELETE FROM document_version WHERE id = '00000000-0000-0000-0000-0000000000f2' $q$);
 SELECT pg_temp.fails('a purge says who made it and why', '23514', $q$
-    UPDATE document_version SET storage_key = NULL, purged_at = now() WHERE id = '00000000-0000-0000-0000-0000000000f2' $q$);
-SELECT pg_temp.fails('a purge takes the file and not only the date', '23001', $q$
+    UPDATE document_version SET purged_at = now() WHERE id = '00000000-0000-0000-0000-0000000000f2' $q$);
+SELECT pg_temp.fails('a purge takes the text and not only the date', '23001', $q$
     UPDATE document_version SET purged_at = now(), purged_by_actor_id = '00000000-0000-0000-0000-000000000032',
-                                purge_reason = 'personal data' WHERE id = '00000000-0000-0000-0000-0000000000f2' $q$);
+                                purge_reason = 'personal data' WHERE id = '00000000-0000-0000-0000-0000000000f1' $q$);
 SELECT pg_temp.fails('nor does it move the version', '23001', $q$
-    UPDATE document_version SET storage_key = NULL, seq = 9, purged_at = now(),
+    UPDATE document_version SET seq = 9, purged_at = now(),
                                 purged_by_actor_id = '00000000-0000-0000-0000-000000000032', purge_reason = 'personal data'
     WHERE id = '00000000-0000-0000-0000-0000000000f2' $q$);
-SELECT pg_temp.ok('a version is purged: its file goes, what it was and who purged it stay', $q$
-    UPDATE document_version SET storage_key = NULL, purged_at = now(),
+SELECT pg_temp.ok('a version is purged: its file goes, where it was and who purged it stay', $q$
+    UPDATE document_version SET purged_at = now(),
                                 purged_by_actor_id = '00000000-0000-0000-0000-000000000032', purge_reason = 'personal data'
     WHERE id = '00000000-0000-0000-0000-0000000000f2';
     DO $chk$
     BEGIN
         IF NOT EXISTS (SELECT 1 FROM document_version WHERE id = '00000000-0000-0000-0000-0000000000f2'
-                       AND seq = 1 AND content_type = 'application/pdf' AND byte_size = 1024 AND storage_key IS NULL) THEN
+                       AND seq = 1 AND purged_by_actor_id = '00000000-0000-0000-0000-000000000032') THEN
             RAISE EXCEPTION 'the tombstone does not say what was there';
         END IF;
         IF EXISTS (SELECT 1 FROM document_version_file WHERE version_id = '00000000-0000-0000-0000-0000000000f2') THEN
@@ -1418,8 +1394,8 @@ SELECT pg_temp.ok('a person is seated answering nothing, whatever the row says',
 -- the application's to write; defaults for the rest of this transaction keep
 -- each check below about the one rule it tests. Rolled back with everything
 -- else.
-INSERT INTO actor (id, kind, display_name, owner_actor_id, created_by_actor_id)
-VALUES ('00000000-0000-0000-0000-00000000003b', 'agent', 'Sato''s tutor', '00000000-0000-0000-0000-000000000034', '00000000-0000-0000-0000-000000000034');
+INSERT INTO actor (id, kind, display_name, owner_actor_id, created_by_actor_id, hosting)
+VALUES ('00000000-0000-0000-0000-00000000003b', 'agent', 'Sato''s tutor', '00000000-0000-0000-0000-000000000034', '00000000-0000-0000-0000-000000000034', 'mcp');
 INSERT INTO course_member (id, course_id, actor_id, role, added_by_actor_id, student_scope, assignment_scope, principal_member_id, answers_course)
 VALUES ('00000000-0000-0000-0000-00000000005e', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-00000000003b', 'assistant',
         '00000000-0000-0000-0000-000000000034', 'listed', 'listed', '00000000-0000-0000-0000-000000000051', true);
@@ -1673,7 +1649,7 @@ SELECT pg_temp.fails('a service says what it is for', '23514', $q$
 SELECT pg_temp.fails('for one of the things there are services for', '23514', $q$
     INSERT INTO actor (kind, display_name, service_scope) VALUES ('service', 'Grader', 'grading') $q$);
 SELECT pg_temp.fails('only a service has a scope', '23514', $q$
-    INSERT INTO actor (kind, display_name, service_scope) VALUES ('agent', 'Transcriber', 'document_text') $q$);
+    INSERT INTO actor (kind, display_name, service_scope, hosting) VALUES ('agent', 'Transcriber', 'document_text', 'mcp') $q$);
 SELECT pg_temp.fails('a service has no email', '23514', $q$
     UPDATE actor SET email = 'transcriber@example.edu' WHERE id = '00000000-0000-0000-0000-0000000020a1' $q$);
 SELECT pg_temp.fails('nor a platform role', '23514', $q$
@@ -1712,18 +1688,21 @@ SELECT pg_temp.fails('nor moved into a seat', '23514', $q$
 
 -- Text versions --------------------------------------------------------------
 -- 20e1 slides (material) · 20e2 an exam's instructions · 20e3 a submitted file
--- 20f1 the slides' file · 20f2 their text · 20f3 the exam's file · 20f4 the submitted file
+-- 20f1 the slides' file · 20f2 their text · 20f3 the exam's file · 20f4 the submitted file · 20d1, 20d3, 20d4 the files
 INSERT INTO document (id, course_id, kind, title, submission_id) VALUES
     ('00000000-0000-0000-0000-0000000020e1', '00000000-0000-0000-0000-000000000041', 'material', 'Slides', NULL),
     ('00000000-0000-0000-0000-0000000020e2', '00000000-0000-0000-0000-000000000041', 'instructions', 'Exam', NULL),
     ('00000000-0000-0000-0000-0000000020e3', '00000000-0000-0000-0000-000000000041', 'submission', 'essay.pdf',
      '00000000-0000-0000-0000-0000000000a1');
 SELECT pg_temp.ok('a version with a file is queued for its text as its file is recorded', $q$
-    INSERT INTO document_version (id, document_id, seq, storage_key, content_type, byte_size, author_member_id)
-    VALUES ('00000000-0000-0000-0000-0000000020f1', '00000000-0000-0000-0000-0000000020e1', 1, 'k/slides.pdf',
-            'application/pdf', 2048, '00000000-0000-0000-0000-000000000051'),
-           ('00000000-0000-0000-0000-0000000020f3', '00000000-0000-0000-0000-0000000020e2', 1, 'k/exam.pdf',
-            'application/pdf', 512, '00000000-0000-0000-0000-000000000051');
+    INSERT INTO document_version (id, document_id, seq, author_member_id) VALUES
+        ('00000000-0000-0000-0000-0000000020f1', '00000000-0000-0000-0000-0000000020e1', 1, '00000000-0000-0000-0000-000000000051'),
+        ('00000000-0000-0000-0000-0000000020f3', '00000000-0000-0000-0000-0000000020e2', 1, '00000000-0000-0000-0000-000000000051');
+    INSERT INTO document_version_file (id, version_id, document_id, position, filename, storage_key, content_type, byte_size) VALUES
+        ('00000000-0000-0000-0000-0000000020d1', '00000000-0000-0000-0000-0000000020f1', '00000000-0000-0000-0000-0000000020e1', 1,
+         'slides.pdf', 'k/slides.pdf', 'application/pdf', 2048),
+        ('00000000-0000-0000-0000-0000000020d3', '00000000-0000-0000-0000-0000000020f3', '00000000-0000-0000-0000-0000000020e2', 1,
+         'exam.pdf', 'k/exam.pdf', 'application/pdf', 512);
     SET CONSTRAINTS ALL IMMEDIATE;
     SET CONSTRAINTS ALL DEFERRED;
     DO $chk$
@@ -1739,9 +1718,11 @@ SELECT pg_temp.ok('a version of text alone, and a submitted file, are not', $q$
     INSERT INTO document_version (id, document_id, seq, body_md, author_member_id)
     VALUES ('00000000-0000-0000-0000-0000000020f2', '00000000-0000-0000-0000-0000000020e1', 2, '# Slides',
             '00000000-0000-0000-0000-000000000051');
-    INSERT INTO document_version (id, document_id, seq, storage_key, content_type, byte_size, author_member_id)
-    VALUES ('00000000-0000-0000-0000-0000000020f4', '00000000-0000-0000-0000-0000000020e3', 1, 'k/essay.pdf',
-            'application/pdf', 100, '00000000-0000-0000-0000-000000000052');
+    INSERT INTO document_version (id, document_id, seq, author_member_id)
+    VALUES ('00000000-0000-0000-0000-0000000020f4', '00000000-0000-0000-0000-0000000020e3', 1, '00000000-0000-0000-0000-000000000052');
+    INSERT INTO document_version_file (id, version_id, document_id, position, filename, storage_key, content_type, byte_size)
+    VALUES ('00000000-0000-0000-0000-0000000020d4', '00000000-0000-0000-0000-0000000020f4', '00000000-0000-0000-0000-0000000020e3', 1,
+            'essay.pdf', 'k/essay.pdf', 'application/pdf', 100);
     SET CONSTRAINTS ALL IMMEDIATE;
     SET CONSTRAINTS ALL DEFERRED;
     DO $chk$
@@ -1752,9 +1733,14 @@ SELECT pg_temp.ok('a version of text alone, and a submitted file, are not', $q$
         END IF;
     END $chk$ $q$);
 SELECT pg_temp.fails('nor may they be', '23514', $q$
-    INSERT INTO document_version_text (version_id, document_id, course_id)
-    VALUES ('00000000-0000-0000-0000-0000000020f4', '00000000-0000-0000-0000-0000000020e3', '00000000-0000-0000-0000-000000000041') $q$);
-SELECT pg_temp.fails('one text version for each file, the first when none is named', '23505', $q$
+    INSERT INTO document_version_text (version_id, file_id, document_id, course_id)
+    VALUES ('00000000-0000-0000-0000-0000000020f4', '00000000-0000-0000-0000-0000000020d4', '00000000-0000-0000-0000-0000000020e3',
+            '00000000-0000-0000-0000-000000000041') $q$);
+SELECT pg_temp.fails('one text version for each file', '23505', $q$
+    INSERT INTO document_version_text (version_id, file_id, document_id, course_id)
+    VALUES ('00000000-0000-0000-0000-0000000020f1', '00000000-0000-0000-0000-0000000020d1', '00000000-0000-0000-0000-0000000020e1',
+            '00000000-0000-0000-0000-000000000041') $q$);
+SELECT pg_temp.fails('a text version names its file, since 0027: nothing takes the first for it', '23514', $q$
     INSERT INTO document_version_text (version_id, document_id, course_id)
     VALUES ('00000000-0000-0000-0000-0000000020f1', '00000000-0000-0000-0000-0000000020e1', '00000000-0000-0000-0000-000000000041') $q$);
 SELECT pg_temp.fails('in its document''s course', '23001', $q$
@@ -1820,7 +1806,7 @@ SELECT pg_temp.ok('skipped, saying why', $q$
 SELECT pg_temp.fails('a text version is not deleted', '23001', $q$
     DELETE FROM document_version_text WHERE version_id = '00000000-0000-0000-0000-0000000020f3' $q$);
 SELECT pg_temp.ok('but goes with its file when its version is purged', $q$
-    UPDATE document_version SET storage_key = NULL, purged_at = now(),
+    UPDATE document_version SET purged_at = now(),
                                 purged_by_actor_id = '00000000-0000-0000-0000-000000000032', purge_reason = 'personal data'
     WHERE id = '00000000-0000-0000-0000-0000000020f1';
     DO $chk$
@@ -1830,8 +1816,9 @@ SELECT pg_temp.ok('but goes with its file when its version is purged', $q$
         END IF;
     END $chk$ $q$);
 SELECT pg_temp.fails('and a purged version is queued no more', '23514', $q$
-    INSERT INTO document_version_text (version_id, document_id, course_id)
-    VALUES ('00000000-0000-0000-0000-0000000020f1', '00000000-0000-0000-0000-0000000020e1', '00000000-0000-0000-0000-000000000041') $q$);
+    INSERT INTO document_version_text (version_id, file_id, document_id, course_id)
+    VALUES ('00000000-0000-0000-0000-0000000020f1', '00000000-0000-0000-0000-0000000020d1', '00000000-0000-0000-0000-0000000020e1',
+            '00000000-0000-0000-0000-000000000041') $q$);
 SELECT pg_temp.ok('a service credential is revoked as any is', $q$
     UPDATE credential SET revoked_at = now() WHERE id = '00000000-0000-0000-0000-0000000020c1' $q$);
 
@@ -1886,11 +1873,10 @@ SELECT pg_temp.ok('and a provider is removed', $q$
 -- 22e1 a lecture (material) · 22f1 its version of three files, 22d1..22d3 · 22f2 one refused
 INSERT INTO document (id, course_id, kind, title) VALUES
     ('00000000-0000-0000-0000-0000000022e1', '00000000-0000-0000-0000-000000000041', 'material', 'Week 3');
-SELECT pg_temp.ok('a version holds several files, the first in its own columns, each queued for its text', $q$
-    INSERT INTO document_version (id, document_id, seq, body_md, storage_key, content_type, byte_size, checksum, author_member_id,
-                                  created_at)
-    VALUES ('00000000-0000-0000-0000-0000000022f1', '00000000-0000-0000-0000-0000000022e1', 1, 'Read these.', 'k/22d1',
-            'application/pdf', 10, 'sha256:1', '00000000-0000-0000-0000-000000000051', '2026-09-30 09:00:00+00');
+SELECT pg_temp.ok('a version holds several files, each queued for its text', $q$
+    INSERT INTO document_version (id, document_id, seq, body_md, author_member_id, created_at)
+    VALUES ('00000000-0000-0000-0000-0000000022f1', '00000000-0000-0000-0000-0000000022e1', 1, 'Read these.',
+            '00000000-0000-0000-0000-000000000051', '2026-09-30 09:00:00+00');
     INSERT INTO document_version_file (id, version_id, document_id, position, filename, storage_key, content_type, byte_size,
                                        checksum, created_at) VALUES
         ('00000000-0000-0000-0000-0000000022d1', '00000000-0000-0000-0000-0000000022f1', '00000000-0000-0000-0000-0000000022e1', 1,
@@ -1909,28 +1895,18 @@ SELECT pg_temp.ok('a version holds several files, the first in its own columns, 
         END IF;
     END $chk$ $q$);
 SELECT pg_temp.fails('a version''s files are numbered from 1, none missing', '23514', $q$
-    INSERT INTO document_version (id, document_id, seq, storage_key, content_type, byte_size, author_member_id, created_at)
-    VALUES ('00000000-0000-0000-0000-0000000022f2', '00000000-0000-0000-0000-0000000022e1', 2, 'k/22d4', 'application/pdf', 10,
-            '00000000-0000-0000-0000-000000000051', '2026-09-30 10:00:00+00');
+    INSERT INTO document_version (id, document_id, seq, author_member_id, created_at)
+    VALUES ('00000000-0000-0000-0000-0000000022f2', '00000000-0000-0000-0000-0000000022e1', 2, '00000000-0000-0000-0000-000000000051',
+            '2026-09-30 10:00:00+00');
     INSERT INTO document_version_file (version_id, document_id, position, filename, storage_key, content_type, byte_size, created_at)
     VALUES ('00000000-0000-0000-0000-0000000022f2', '00000000-0000-0000-0000-0000000022e1', 1, 'a.pdf', 'k/22d4', 'application/pdf',
             10, '2026-09-30 10:00:00+00'),
            ('00000000-0000-0000-0000-0000000022f2', '00000000-0000-0000-0000-0000000022e1', 3, 'c.pdf', 'k/22d6', 'application/pdf',
             10, '2026-09-30 10:00:00+00') $q$);
-SELECT pg_temp.fails('the first is the file the version''s own columns name', '23514', $q$
-    INSERT INTO document_version (id, document_id, seq, storage_key, content_type, byte_size, author_member_id, created_at)
-    VALUES ('00000000-0000-0000-0000-0000000022f2', '00000000-0000-0000-0000-0000000022e1', 2, 'k/22d4', 'application/pdf', 10,
-            '00000000-0000-0000-0000-000000000051', '2026-09-30 10:00:00+00');
-    INSERT INTO document_version_file (version_id, document_id, position, filename, storage_key, content_type, byte_size, created_at)
-    VALUES ('00000000-0000-0000-0000-0000000022f2', '00000000-0000-0000-0000-0000000022e1', 1, 'a.pdf', 'k/22d5', 'application/pdf',
-            10, '2026-09-30 10:00:00+00') $q$);
-SELECT pg_temp.fails('a version with files names its first in its own columns', '23514', $q$
-    INSERT INTO document_version (id, document_id, seq, body_md, author_member_id, created_at)
-    VALUES ('00000000-0000-0000-0000-0000000022f2', '00000000-0000-0000-0000-0000000022e1', 2, 'text', '00000000-0000-0000-0000-000000000051',
-            '2026-09-30 10:00:00+00');
-    INSERT INTO document_version_file (version_id, document_id, position, filename, storage_key, content_type, byte_size, created_at)
-    VALUES ('00000000-0000-0000-0000-0000000022f2', '00000000-0000-0000-0000-0000000022e1', 1, 'a.pdf', 'k/22d5', 'application/pdf',
-            10, '2026-09-30 10:00:00+00') $q$);
+SELECT pg_temp.fails('a version of files alone has at least one', '23514', $q$
+    INSERT INTO document_version (id, document_id, seq, author_member_id, created_at)
+    VALUES ('00000000-0000-0000-0000-0000000022f2', '00000000-0000-0000-0000-0000000022e1', 2, '00000000-0000-0000-0000-000000000051',
+            '2026-09-30 10:00:00+00') $q$);
 SELECT pg_temp.fails('nothing is added to a version afterwards', '23514', $q$
     INSERT INTO document_version_file (version_id, document_id, position, filename, storage_key, content_type, byte_size)
     VALUES ('00000000-0000-0000-0000-0000000022f1', '00000000-0000-0000-0000-0000000022e1', 4, 'more.pdf', 'k/22d5',
@@ -1940,25 +1916,25 @@ SELECT pg_temp.fails('nor to another document''s version', '23503', $q$
     VALUES ('00000000-0000-0000-0000-0000000022f1', '00000000-0000-0000-0000-0000000020e1', 4, 'more.pdf', 'k/22d5',
             'application/pdf', 10, '2026-09-30 09:00:00+00') $q$);
 SELECT pg_temp.fails('a file''s name is a name, not a path', '23514', $q$
-    INSERT INTO document_version (id, document_id, seq, storage_key, content_type, byte_size, author_member_id, created_at)
-    VALUES ('00000000-0000-0000-0000-0000000022f2', '00000000-0000-0000-0000-0000000022e1', 2, 'k/22d4', 'application/pdf', 10,
-            '00000000-0000-0000-0000-000000000051', '2026-09-30 10:00:00+00');
+    INSERT INTO document_version (id, document_id, seq, author_member_id, created_at)
+    VALUES ('00000000-0000-0000-0000-0000000022f2', '00000000-0000-0000-0000-0000000022e1', 2, '00000000-0000-0000-0000-000000000051',
+            '2026-09-30 10:00:00+00');
     INSERT INTO document_version_file (version_id, document_id, position, filename, storage_key, content_type, byte_size, created_at)
     VALUES ('00000000-0000-0000-0000-0000000022f2', '00000000-0000-0000-0000-0000000022e1', 1, '../a.pdf', 'k/22d4',
             'application/pdf', 10, '2026-09-30 10:00:00+00') $q$);
 SELECT pg_temp.fails('one file to a key', '23505', $q$
-    INSERT INTO document_version (id, document_id, seq, storage_key, content_type, byte_size, author_member_id, created_at)
-    VALUES ('00000000-0000-0000-0000-0000000022f2', '00000000-0000-0000-0000-0000000022e1', 2, 'k/22d4', 'application/pdf', 10,
-            '00000000-0000-0000-0000-000000000051', '2026-09-30 10:00:00+00');
+    INSERT INTO document_version (id, document_id, seq, author_member_id, created_at)
+    VALUES ('00000000-0000-0000-0000-0000000022f2', '00000000-0000-0000-0000-0000000022e1', 2, '00000000-0000-0000-0000-000000000051',
+            '2026-09-30 10:00:00+00');
     INSERT INTO document_version_file (version_id, document_id, position, filename, storage_key, content_type, byte_size, created_at)
     VALUES ('00000000-0000-0000-0000-0000000022f2', '00000000-0000-0000-0000-0000000022e1', 1, 'a.pdf', 'k/22d4', 'application/pdf',
             10, '2026-09-30 10:00:00+00'),
            ('00000000-0000-0000-0000-0000000022f2', '00000000-0000-0000-0000-0000000022e1', 2, 'b.pdf', 'k/22d2', 'application/pdf',
             10, '2026-09-30 10:00:00+00') $q$);
 SELECT pg_temp.fails('at most 100 files to a version', '23514', $q$
-    INSERT INTO document_version (id, document_id, seq, storage_key, content_type, byte_size, author_member_id, created_at)
-    VALUES ('00000000-0000-0000-0000-0000000022f2', '00000000-0000-0000-0000-0000000022e1', 2, 'k/22d4', 'application/pdf', 10,
-            '00000000-0000-0000-0000-000000000051', '2026-09-30 10:00:00+00');
+    INSERT INTO document_version (id, document_id, seq, author_member_id, created_at)
+    VALUES ('00000000-0000-0000-0000-0000000022f2', '00000000-0000-0000-0000-0000000022e1', 2, '00000000-0000-0000-0000-000000000051',
+            '2026-09-30 10:00:00+00');
     INSERT INTO document_version_file (version_id, document_id, position, filename, storage_key, content_type, byte_size, created_at)
     SELECT '00000000-0000-0000-0000-0000000022f2', '00000000-0000-0000-0000-0000000022e1', n, 'f' || n, 'k/22x' || n,
            'application/pdf', 10, '2026-09-30 10:00:00+00'
@@ -1967,11 +1943,7 @@ SELECT pg_temp.fails('a file is kept as it was written', '23001', $q$
     UPDATE document_version_file SET filename = 'renamed.pdf' WHERE id = '00000000-0000-0000-0000-0000000022d1' $q$);
 SELECT pg_temp.fails('and not deleted', '23001', $q$
     DELETE FROM document_version_file WHERE id = '00000000-0000-0000-0000-0000000022d3' $q$);
-SELECT pg_temp.fails('one file''s text is written at a time', '23514', $q$
-    UPDATE document_version_text SET status = 'done', body = '## Page 1', source = 'staff', revision = revision + 1,
-                                     edited_by_member_id = '00000000-0000-0000-0000-000000000051', edited_at = now()
-    WHERE version_id = '00000000-0000-0000-0000-0000000022f1' $q$);
-SELECT pg_temp.ok('by its file', $q$
+SELECT pg_temp.ok('a file''s text is written by its file', $q$
     UPDATE document_version_text SET status = 'done', body = '## Page 1', source = 'staff', revision = revision + 1,
                                      edited_by_member_id = '00000000-0000-0000-0000-000000000051', edited_at = now()
     WHERE version_id = '00000000-0000-0000-0000-0000000022f1' AND file_id = '00000000-0000-0000-0000-0000000022d2' $q$);
@@ -1981,7 +1953,7 @@ SELECT pg_temp.ok('several are claimed at once', $q$
                                      attempts = 1
     WHERE version_id = '00000000-0000-0000-0000-0000000022f1' AND status = 'pending' $q$);
 SELECT pg_temp.ok('a version''s files go with it, and their texts, when it is purged', $q$
-    UPDATE document_version SET body_md = NULL, storage_key = NULL, checksum = NULL, purged_at = now(),
+    UPDATE document_version SET body_md = NULL, purged_at = now(),
                                 purged_by_actor_id = '00000000-0000-0000-0000-000000000032', purge_reason = 'personal data'
     WHERE id = '00000000-0000-0000-0000-0000000022f1';
     DO $chk$
@@ -1995,20 +1967,16 @@ SELECT pg_temp.fails('and a purged version takes no file', '23514', $q$
     INSERT INTO document_version_file (version_id, document_id, position, filename, storage_key, content_type, byte_size, created_at)
     VALUES ('00000000-0000-0000-0000-0000000022f1', '00000000-0000-0000-0000-0000000022e1', 1, 'back.pdf', 'k/22d9',
             'application/pdf', 10, '2026-09-30 09:00:00+00') $q$);
-SELECT pg_temp.ok('a document''s title makes a file''s name', $q$
+SELECT pg_temp.ok('nothing writes a version''s file in its own columns any more, to be named after its document', $q$
     DO $chk$
     BEGIN
-        IF document_file_name(E'Week 2/3\tnotes', 'application/pdf') <> 'Week 2 3 notes.pdf'
-           OR document_file_name('essay.PDF', 'application/pdf; charset=binary') <> 'essay.PDF'
-           OR document_file_name('   ', 'image/png') <> 'file.png'
-           OR document_file_name('data', 'application/x-unknown') <> 'data'
-           OR char_length(document_file_name(repeat('x', 300), 'application/pdf')) <> 255 THEN
-            RAISE EXCEPTION 'a title made the wrong name';
+        IF EXISTS (SELECT 1 FROM pg_proc WHERE proname IN ('document_file_name', 'document_version_text_one_file_at_a_time')) THEN
+            RAISE EXCEPTION 'a function kept for the release before 0027 is still there';
         END IF;
     END $chk$ $q$);
 
 -- Hosting: one mode for each agent, for good -----------------------------------
--- 25a1 Sato's tutor, a runtime agent · 25a2 his script, an mcp agent · 25a3 one the release before registers
+-- 25a1 Sato's tutor, a runtime agent · 25a2 his script, an mcp agent
 -- · 25a4 the agent runtime service · 25c1.. their tokens
 SELECT pg_temp.ok('an agent is a runtime agent or an mcp agent', $q$
     INSERT INTO actor (id, kind, display_name, owner_actor_id, created_by_actor_id, hosting) VALUES
@@ -2018,15 +1986,9 @@ SELECT pg_temp.ok('an agent is a runtime agent or an mcp agent', $q$
          '00000000-0000-0000-0000-000000000034', 'mcp') $q$);
 SELECT pg_temp.fails('and nothing else', '23514', $q$
     INSERT INTO actor (kind, display_name, hosting) VALUES ('agent', 'Elsewhere', 'self_hosted') $q$);
-SELECT pg_temp.ok('an agent registered naming none, as the release before registers one, is an mcp agent', $q$
-    INSERT INTO actor (id, kind, display_name, created_by_actor_id)
-    VALUES ('00000000-0000-0000-0000-0000000025a3', 'agent', 'Old style', '00000000-0000-0000-0000-000000000034');
-    DO $chk$
-    BEGIN
-        IF NOT EXISTS (SELECT 1 FROM actor WHERE id = '00000000-0000-0000-0000-0000000025a3' AND hosting = 'mcp') THEN
-            RAISE EXCEPTION 'it is not an mcp agent';
-        END IF;
-    END $chk$ $q$);
+SELECT pg_temp.fails('nor none: an agent registered naming none is refused, since 0027', '23514', $q$
+    INSERT INTO actor (kind, display_name, created_by_actor_id)
+    VALUES ('agent', 'Old style', '00000000-0000-0000-0000-000000000034') $q$);
 SELECT pg_temp.fails('a person has no hosting', '23514', $q$
     INSERT INTO actor (kind, display_name, hosting) VALUES ('human', 'Hosted person', 'mcp') $q$);
 SELECT pg_temp.fails('an agent''s hosting is never taken away', '23001', $q$
@@ -2085,9 +2047,9 @@ SELECT pg_temp.ok('revoking a runtime''s token passes', $q$
 SELECT pg_temp.ok('an Office file of a version is queued for its PDF as it is recorded; a PDF, and a .csv called an Excel file, are not', $q$
     INSERT INTO document (id, course_id, kind, title) VALUES
         ('00000000-0000-0000-0000-0000000026e1', '00000000-0000-0000-0000-000000000041', 'material', 'Handout');
-    INSERT INTO document_version (id, document_id, seq, storage_key, content_type, byte_size, author_member_id, created_at)
-    VALUES ('00000000-0000-0000-0000-0000000026f1', '00000000-0000-0000-0000-0000000026e1', 1, 'k/26d1', 'application/msword', 10,
-            '00000000-0000-0000-0000-000000000051', '2026-09-30 09:00:00+00');
+    INSERT INTO document_version (id, document_id, seq, author_member_id, created_at)
+    VALUES ('00000000-0000-0000-0000-0000000026f1', '00000000-0000-0000-0000-0000000026e1', 1, '00000000-0000-0000-0000-000000000051',
+            '2026-09-30 09:00:00+00');
     INSERT INTO document_version_file (id, version_id, document_id, position, filename, storage_key, content_type, byte_size,
                                        created_at) VALUES
         ('00000000-0000-0000-0000-0000000026d1', '00000000-0000-0000-0000-0000000026f1', '00000000-0000-0000-0000-0000000026e1', 1,
@@ -2201,7 +2163,7 @@ SELECT pg_temp.fails('a rendition goes only with its file', '23001', $q$
 SELECT pg_temp.fails('nor all at once', '23001', $q$
     TRUNCATE file_rendition $q$);
 SELECT pg_temp.ok('a version''s files'' renditions go with them when it is purged', $q$
-    UPDATE document_version SET storage_key = NULL, checksum = NULL, purged_at = now(),
+    UPDATE document_version SET purged_at = now(),
                                 purged_by_actor_id = '00000000-0000-0000-0000-000000000032', purge_reason = 'personal data'
     WHERE id = '00000000-0000-0000-0000-0000000026f1';
     DO $chk$

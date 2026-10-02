@@ -137,7 +137,7 @@ func TestAPurgeLeavesATombstone(t *testing.T) {
 	b := build(t)
 	token := b.upload(t, b.sato, "instructions", "application/pdf", []byte("%PDF the brief, with the class list"))
 	brief := testkit.Result[tools.DocumentCreateOut](t, b.do(t, b.sato, "document.create",
-		m{"course_id": b.course, "kind": "instructions", "title": "HW5 brief", "upload_token": token}))
+		m{"course_id": b.course, "kind": "instructions", "title": "HW5 brief", "files": oneFile(token)}))
 	b.do(t, b.sato, "document.publish", m{"course_id": b.course, "document_id": brief.DocumentID})
 	hw5 := testkit.Result[tools.IDOut](t, b.do(t, b.sato, "assignment.create", m{"course_id": b.course, "title": "HW5",
 		"points_possible": 10, "instructions_document_id": brief.DocumentID})).ID
@@ -149,7 +149,7 @@ func TestAPurgeLeavesATombstone(t *testing.T) {
 	fixed := testkit.Result[tools.DocumentVersionOut](t, b.do(t, b.sato, "document.add_version",
 		m{"course_id": b.course, "document_id": brief.DocumentID, "body_md": "The brief.", "publish": true}))
 	var key string
-	if err := b.Pool.QueryRow(t.Context(), `SELECT storage_key FROM document_version WHERE id = $1`, v1).Scan(&key); err != nil {
+	if err := b.Pool.QueryRow(t.Context(), `SELECT storage_key FROM document_version_file WHERE version_id = $1 AND position = 1`, v1).Scan(&key); err != nil {
 		t.Fatal(err)
 	}
 	purge := func(args m) m {
@@ -170,8 +170,9 @@ func TestAPurgeLeavesATombstone(t *testing.T) {
 	if _, err := b.Blob.Stat(t.Context(), key); !errors.Is(err, blob.ErrNotFound) {
 		t.Fatalf("the file is still in storage: %v", err)
 	}
-	if n := b.Count(`SELECT count(*) FROM document_version WHERE id = $1 AND storage_key IS NULL AND body_md IS NULL AND checksum IS NULL
-		AND content_type = 'application/pdf' AND purged_by_actor_id = $2 AND purge_reason = 'The class list was attached by mistake.'`, v1, b.admin); n != 1 {
+	if n := b.Count(`SELECT count(*) FROM document_version v WHERE id = $1 AND body_md IS NULL AND purged_by_actor_id = $2
+		AND purge_reason = 'The class list was attached by mistake.'
+		AND NOT EXISTS (SELECT 1 FROM document_version_file f WHERE f.version_id = v.id)`, v1, b.admin); n != 1 {
 		t.Fatal("no tombstone where the version was")
 	}
 	if n := b.Count(`SELECT count(*) FROM action WHERE id = $1 AND action_type = 'document.purge' AND authority = 'platform' AND course_id = $2`,
@@ -189,11 +190,11 @@ func TestAPurgeLeavesATombstone(t *testing.T) {
 	}
 	got := b.get(t, b.yuki, m{"document_id": brief.DocumentID, "version_id": v1})
 	if got.Version == nil || got.Version.Purged == nil || got.Version.Purged.ByActorID != b.admin ||
-		got.Version.DownloadURL != nil || got.Version.BodyMD != nil {
+		len(got.Version.Files) != 0 || got.Version.BodyMD != nil {
 		t.Fatalf("Yuki reads the purged version as %+v", got.Version)
 	}
 	versions := testkit.Result[tools.DocumentVersionsOut](t, b.do(t, b.sato, "document.versions", m{"course_id": b.course, "document_id": brief.DocumentID}))
-	if versions.Versions[0].PurgedAt == nil || versions.Versions[0].HasFile || versions.Versions[1].PurgedAt != nil {
+	if versions.Versions[0].PurgedAt == nil || len(versions.Versions[0].Files) != 0 || versions.Versions[1].PurgedAt != nil {
 		t.Fatalf("the version list: %+v", versions.Versions)
 	}
 	// Once is enough; there is nothing in it to publish.
@@ -225,7 +226,7 @@ func TestAPurgedDocumentStaysArchived(t *testing.T) {
 	notes := testkit.Result[tools.DocumentCreateOut](t, b.do(t, b.sato, "document.create",
 		m{"course_id": b.course, "kind": "material", "title": "Grades of 2025 (Yuki, Ken, ...)", "body_md": "Yuki 71, Ken 64."})).DocumentID
 	b.do(t, b.sato, "document.add_version", m{"course_id": b.course, "document_id": notes,
-		"upload_token": b.upload(t, b.sato, "material", "text/csv", []byte("Yuki,71\nKen,64\n")), "publish": true})
+		"files": oneFile(b.upload(t, b.sato, "material", "text/csv", []byte("Yuki,71\nKen,64\n"))), "publish": true})
 
 	// A department administrator: of Computer Science, whose course this is,
 	// and of another department, whose it is not.

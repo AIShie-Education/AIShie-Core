@@ -70,7 +70,7 @@ func (q *Queries) CountRootActors(ctx context.Context) (int64, error) {
 
 const getActor = `-- name: GetActor :one
 SELECT id, kind, display_name, email, status, platform_role, created_by_actor_id, created_at,
-       owner_actor_id, suspended_by_actor_id, site_chat_credential_id, email_verified, login_id, login_id_verified,
+       owner_actor_id, suspended_by_actor_id, email_verified, login_id, login_id_verified,
        service_scope, hosting
 FROM actor
 WHERE id = $1
@@ -92,7 +92,6 @@ func (q *Queries) GetActor(ctx context.Context, id uuid.UUID) (Actor, error) {
 		&i.CreatedAt,
 		&i.OwnerActorID,
 		&i.SuspendedByActorID,
-		&i.SiteChatCredentialID,
 		&i.EmailVerified,
 		&i.LoginID,
 		&i.LoginIDVerified,
@@ -142,7 +141,7 @@ func (q *Queries) GetActorByLoginID(ctx context.Context, lower string) (GetActor
 
 const getActorForShare = `-- name: GetActorForShare :one
 SELECT id, kind, display_name, email, status, platform_role, created_by_actor_id, created_at,
-       owner_actor_id, suspended_by_actor_id, site_chat_credential_id, email_verified, login_id, login_id_verified,
+       owner_actor_id, suspended_by_actor_id, email_verified, login_id, login_id_verified,
        service_scope, hosting
 FROM actor
 WHERE id = $1
@@ -168,7 +167,6 @@ func (q *Queries) GetActorForShare(ctx context.Context, id uuid.UUID) (Actor, er
 		&i.CreatedAt,
 		&i.OwnerActorID,
 		&i.SuspendedByActorID,
-		&i.SiteChatCredentialID,
 		&i.EmailVerified,
 		&i.LoginID,
 		&i.LoginIDVerified,
@@ -746,25 +744,6 @@ func (q *Queries) ReactivateAgentByOwner(ctx context.Context, arg ReactivateAgen
 		return 0, err
 	}
 	return result.RowsAffected(), nil
-}
-
-const setSiteChatCredential = `-- name: SetSiteChatCredential :exec
-UPDATE actor SET site_chat_credential_id = $1 WHERE id = $2
-`
-
-type SetSiteChatCredentialParams struct {
-	CredentialID *uuid.UUID
-	ID           uuid.UUID
-}
-
-// The release before this one reads who is asked in the site from the
-// credential an agent declared with (actor.site_chat_credential_id); this
-// one reads it nowhere, and keeps it naming a runtime agent's live runtime
-// token, null once there is none, so that a rollback asks the same agents.
-// The key holds a credential to the agent's own (actor_site_chat_credential_fk).
-func (q *Queries) SetSiteChatCredential(ctx context.Context, arg SetSiteChatCredentialParams) error {
-	_, err := q.db.Exec(ctx, setSiteChatCredential, arg.CredentialID, arg.ID)
-	return err
 }
 
 const siteChatOf = `-- name: SiteChatOf :many

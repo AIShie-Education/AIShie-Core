@@ -47,12 +47,17 @@ func (w *World) Exec(sql string, args ...any) {
 }
 
 // Actor registers an actor of the given kind: human, agent or system. An
-// agent is an mcp agent, as the database makes an agent registered naming
-// no hosting; RuntimeAgent registers the other kind.
+// agent is an mcp agent; RuntimeAgent registers the other kind.
 func (w *World) Actor(kind, name string) uuid.UUID {
 	w.T.Helper()
 	id := ids.New()
-	w.Exec(`INSERT INTO actor (id, kind, display_name, created_by_actor_id) VALUES ($1, $2, $3, $4)`, id, kind, name, w.Root)
+	var hosting *string
+	if kind == "agent" {
+		mcp := "mcp"
+		hosting = &mcp
+	}
+	w.Exec(`INSERT INTO actor (id, kind, display_name, created_by_actor_id, hosting) VALUES ($1, $2, $3, $4, $5)`,
+		id, kind, name, w.Root, hosting)
 	return id
 }
 

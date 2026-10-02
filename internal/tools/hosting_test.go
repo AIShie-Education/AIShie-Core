@@ -135,10 +135,12 @@ func TestAnAgentIsHostedOneWayForGood(t *testing.T) {
 		got.DisplayName != "Essay tutor" {
 		t.Fatalf("after all that: %+v", got)
 	}
-	// Nor does an owner say whether it is asked in the site: that follows.
+	// Nor does an owner say whether it is asked in the site: that follows,
+	// and agent.update takes no site_chat.
 	for _, on := range []bool{false, true} {
-		refusedAs(t, fmt.Sprintf("site_chat %v", on), b.MustCall(b.yuki, "agent.update", m{"actor_id": tutor, "site_chat": on},
-			fmt.Sprint("site-chat-", on)), apperr.InvalidArgument, "site_chat_follows_hosting")
+		if out, err := b.Call(b.yuki, "agent.update", m{"actor_id": tutor, "site_chat": on}, fmt.Sprint("site-chat-", on)); !apperr.Is(err, apperr.InvalidArgument) {
+			t.Fatalf("site_chat %v: %+v %v", on, out, err)
+		}
 	}
 
 	// An administrator registers an agent saying how it is hosted, and a
@@ -249,10 +251,6 @@ func TestTheSiteRuntimeIsIssuedOneTokenForEachRuntimeAgent(t *testing.T) {
 	if n := b.Count(`SELECT count(*) FROM credential WHERE id = $1 AND label = 'runtime, replica 2'`, second.CredentialID); n != 1 {
 		t.Fatal("the label was not kept")
 	}
-	// Kept for the release before, which reads who is asked there.
-	if n := b.Count(`SELECT count(*) FROM actor WHERE id = $1 AND site_chat_credential_id = $2`, tutor, second.CredentialID); n != 1 {
-		t.Fatal("the site chat credential does not name the runtime's token")
-	}
 
 	// Each is an action of the service's, and the token is in none of what
 	// is kept; a replay comes back without it.
@@ -307,9 +305,6 @@ func TestTheSiteRuntimeIsIssuedOneTokenForEachRuntimeAgent(t *testing.T) {
 	revoked := testkit.Result[tools.RuntimeRevokeTokenOut](t, b.asRuntime(t, "agent_runtime.revoke_token", m{"agent_id": tutor}))
 	if len(revoked.Revoked) != 1 || revoked.Revoked[0] != third.CredentialID || b.liveRuntimeTokens(tutor) != 0 {
 		t.Fatalf("revoked %+v; %d live", revoked, b.liveRuntimeTokens(tutor))
-	}
-	if n := b.Count(`SELECT count(*) FROM actor WHERE id = $1 AND site_chat_credential_id IS NULL`, tutor); n != 1 {
-		t.Fatal("the site chat credential still names a revoked token")
 	}
 	for _, agent := range []uuid.UUID{tutor, script} {
 		if again := testkit.Result[tools.RuntimeRevokeTokenOut](t, b.asRuntime(t, "agent_runtime.revoke_token", m{"agent_id": agent})); len(again.Revoked) != 0 {
@@ -572,50 +567,32 @@ func TestAnMCPAgentIsNeverAskedInTheSite(t *testing.T) {
 	if out := b.with(t, script, tok.CredentialID, "document.list", m{"course_id": b.course}); out.Status != domain.StatusExecuted {
 		t.Fatalf("reading the course, as the mcp agent: %+v", out)
 	}
-	refusedAs(t, "it saying it answers in the site", b.with(t, script, tok.CredentialID, "me.site_chat", m{"on": true}),
-		apperr.FailedPrecondition, "not_runtime_hosted")
 	// And the runtime does not host it.
 	refusedAs(t, "the runtime hosting it", b.asRuntime(t, "agent_runtime.issue_token", m{"agent_id": script}),
 		apperr.FailedPrecondition, "not_runtime_hosted")
 }
 
-// me.site_chat is kept for one release: the runtime's token may call it,
-// which changes nothing and says whether the agent is asked now; anything
-// else is refused.
-func TestMeSiteChatIsKeptForOneReleaseAndChangesNothing(t *testing.T) {
+// Nothing declares site chat, and nothing is left to: me.site_chat, which
+// changed nothing for one release, is gone (0027), for the runtime's token
+// as for anyone, and the agent is asked in the site while the runtime hosts
+// it, as before.
+func TestNothingDeclaresSiteChat(t *testing.T) {
 	b := build(t)
 	tutor := b.runtimeAgent(t, b.sato, "Course tutor")
 	b.delegate(t, b.sato, tutor, m{"preset": "course_tutor"})
 	runtime := b.Host(tutor)
-	events := b.Count(`SELECT count(*) FROM event`)
-
-	for _, on := range []bool{true, false, true} {
-		out := b.with(t, tutor, runtime, "me.site_chat", m{"on": on})
-		if out.Status != domain.StatusExecuted || !testkit.Result[tools.SiteChatOut](t, out).SiteChat {
-			t.Fatalf("on %v, with the runtime's token: %+v", on, out)
-		}
-		if !b.siteChat(t, b.sato, tutor) {
-			t.Fatalf("on %v changed whether it is asked", on)
+	for _, on := range []bool{true, false} {
+		if out, err := b.CallWith(pipeline.Caller{ActorID: tutor, CredentialID: runtime}, "me.site_chat", m{"on": on},
+			fmt.Sprint("site-chat-", on)); !apperr.Is(err, apperr.NotFound) {
+			t.Fatalf("me.site_chat %v, with the runtime's token: %+v %v", on, out, err)
 		}
 	}
-	if n := b.Count(`SELECT count(*) FROM actor WHERE id = $1 AND site_chat_credential_id = $2`, tutor, runtime); n != 1 {
-		t.Fatal("the site chat credential moved")
+	if !b.siteChat(t, b.sato, tutor) {
+		t.Fatal("the runtime's agent is not asked in the site")
 	}
-	if n := b.Count(`SELECT count(*) FROM event`); n != events {
-		t.Fatalf("%d events for changing nothing", n-events)
+	if n := b.Count(`SELECT count(*) FROM information_schema.columns WHERE table_name = 'actor' AND column_name = 'site_chat_credential_id'`); n != 0 {
+		t.Fatal("the column the release before 0027 read is still there")
 	}
-	b.do(t, b.sato, "agent.suspend", m{"actor_id": tutor})
-	if out := b.with(t, tutor, runtime, "me.site_chat", m{"on": true}); out.Status != domain.StatusDenied {
-		t.Fatalf("a suspended agent's call: %+v", out)
-	}
-	b.do(t, b.sato, "agent.reactivate", m{"actor_id": tutor})
-
-	refusedAs(t, "with no credential", b.MustCall(tutor, "me.site_chat", m{"on": true}, "none"), apperr.FailedPrecondition, "not_runtime_hosted")
-	old := runtime
-	b.Host(tutor)
-	refusedAs(t, "with the runtime's token before", b.with(t, tutor, old, "me.site_chat", m{"on": true}), apperr.FailedPrecondition,
-		"not_runtime_hosted")
-	refusedAs(t, "a person", b.with(t, b.yuki, b.session(t, b.yuki), "me.site_chat", m{"on": true}), apperr.FailedPrecondition, "not_an_agent")
 }
 
 // The catalogue says the two modes where an owner, an agent or the runtime
@@ -644,7 +621,7 @@ func TestTheCatalogueSaysHowAgentsAreHosted(t *testing.T) {
 	if !strings.Contains(strings.Join(schema.Required, " "), "hosting") || strings.Join(h.Enum, " ") != "runtime mcp" || h.Default != nil {
 		t.Fatalf("agent.create's hosting: required %v, %+v", schema.Required, h)
 	}
-	for _, name := range []string{"agent.create", "agent.issue_token", "conversation.respondents", "me.site_chat", "agent_runtime.issue_token"} {
+	for _, name := range []string{"agent.create", "agent.issue_token", "conversation.respondents", "agent_runtime.issue_token"} {
 		tl, ok := b.P.Registry().Get(name)
 		if !ok || !strings.Contains(tl.Description, "runtime") {
 			t.Fatalf("%s says nothing of how agents are hosted: %q", name, tl.Description)

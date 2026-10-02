@@ -48,10 +48,12 @@ func TestSeveralFilesOverHTTP(t *testing.T) {
 		}
 		named = append(named, entry)
 	}
-	both := a.do(nil, "POST", course+"/documents", sato, m{"kind": "material", "title": "Week 3", "files": named[:1],
-		"upload_token": named[1]["upload_token"]}, "Idempotency-Key", "both")
-	if both.Status != 400 || both.str("action_id") != "" || both.str("error", "details", "reason") != "files_and_upload_token" {
-		t.Fatalf("files and upload_token: %d %s", both.Status, both.Raw)
+	// One file is given in files too: upload_token alone is no field of the
+	// call since 0027.
+	alone := a.do(nil, "POST", course+"/documents", sato, m{"kind": "material", "title": "Week 3",
+		"upload_token": named[1]["upload_token"]}, "Idempotency-Key", "alone")
+	if alone.Status != 400 || alone.str("action_id") != "" || alone.str("error", "code") != "invalid_argument" {
+		t.Fatalf("upload_token alone: %d %s", alone.Status, alone.Raw)
 	}
 	made := a.do(nil, "POST", course+"/documents", sato, m{"kind": "material", "title": "Week 3", "body_md": "Slides first.",
 		"files": named}, "Idempotency-Key", "week3")
@@ -94,9 +96,11 @@ func TestSeveralFilesOverHTTP(t *testing.T) {
 	if cd := res.Header.Get("Content-Disposition"); !strings.Contains(cd, "filename*=utf-8''handout%20%E8%AC%9B%E7%BE%A9.doc") {
 		t.Fatalf("the handout's Content-Disposition: %s", cd)
 	}
-	// What the release before read is the first file's.
-	if version["content_type"] != "application/pdf" || version["download_url"] != got[0].(map[string]any)["download_url"] {
-		t.Fatalf("the version's own file fields: %v", version)
+	// The version says nothing of its first file in fields of its own.
+	for _, field := range []string{"download_url", "content_type", "byte_size", "checksum", "text"} {
+		if _, ok := version[field]; ok {
+			t.Fatalf("the version has %s: %v", field, version)
+		}
 	}
 
 	// The service claims each file on its own, and writes each back by its file.
@@ -129,10 +133,10 @@ func TestSeveralFilesOverHTTP(t *testing.T) {
 		}
 	}
 
-	// The instructor edits one by its file, and is asked which when he names none.
+	// The instructor edits one by its file, and names it.
 	v := version["id"].(string)
 	if got := a.do(nil, "POST", course+"/documents/"+doc+"/versions/"+v+"/text", sato, m{"body": "## Slides"},
-		"Idempotency-Key", "which"); got.Status != 400 || got.str("error", "details", "reason") != "file_id_required" {
+		"Idempotency-Key", "which"); got.Status != 400 || got.str("error", "code") != "invalid_argument" {
 		t.Fatalf("an edit naming no file: %d %s", got.Status, got.Raw)
 	}
 	if got := a.do(nil, "POST", course+"/documents/"+doc+"/versions/"+v+"/text", sato, m{"body": "## Slides", "file_id": fileIDs[0]},

@@ -242,7 +242,7 @@ func TestAMessagesFilesAreHeldToWhatAMessageMayCarry(t *testing.T) {
 	essay := b.upload(t, b.yuki, "submission", "application/pdf", []byte("essay"))
 	b.refusedAs(t, b.yuki, "conversation.ask", ask(m{"upload_token": essay, "filename": "essay.pdf"}), apperr.Forbidden, "not_your_upload")
 	b.refusedAs(t, b.yuki, "document.create", m{"course_id": b.course, "kind": "submission", "title": "essay.pdf", "submission_id": draft,
-		"upload_token": file(1, "x")["upload_token"]}, apperr.Forbidden, "not_your_upload")
+		"files": []m{file(1, "x")}}, apperr.Forbidden, "not_your_upload")
 	b.refusedAs(t, b.yuki, "conversation.ask", ask(m{"upload_token": "not-a-token", "filename": "x"}), apperr.InvalidArgument, "bad_upload_token")
 	never := testkit.Result[tools.AttachmentUploadURLOut](t, b.do(t, b.yuki, "conversation.upload_url", m{"course_id": b.course, "content_type": "text/plain"}))
 	b.refusedAs(t, b.yuki, "conversation.ask", ask(m{"upload_token": never.UploadToken, "filename": "x"}), apperr.FailedPrecondition, "not_uploaded")

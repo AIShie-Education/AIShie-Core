@@ -39,14 +39,10 @@ type FeedbackFile struct {
 }
 
 // content is the one version of the feedback document it is recorded as: its
-// one file, named as it is named, or else (upload_token) as it was uploaded
-// or after its title.
+// one file, named as it is named, or else as it was uploaded or after its
+// title.
 func (f FeedbackFile) content() Content {
-	token := f.UploadToken
-	if f.Filename != "" {
-		return Content{Files: []FileIn{{UploadToken: token, Filename: f.Filename}}}
-	}
-	return Content{UploadToken: &token}
+	return Content{Files: []FileIn{{UploadToken: f.UploadToken, Filename: f.Filename}}, untitled: true}
 }
 
 // checkFeedbackArgs is what a grade's feedback files say alone (Check):

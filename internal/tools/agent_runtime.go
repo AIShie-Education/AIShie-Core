@@ -253,11 +253,6 @@ func runtimeIssueToken() tool.Tool {
 			if err != nil {
 				return RuntimeIssueTokenOut{}, err
 			}
-			// For the release before, which reads who is asked in the site
-			// there; this one reads it nowhere.
-			if err := ec.Q.SetSiteChatCredential(ctx, dbq.SetSiteChatCredentialParams{ID: in.AgentID, CredentialID: &id}); err != nil {
-				return RuntimeIssueTokenOut{}, err
-			}
 			ec.Emit(events.Event{Type: EventRuntimeTokenIssued, SubjectType: "actor", SubjectID: &in.AgentID,
 				Payload: map[string]any{"credential_id": id, "replaced": len(replaced)}})
 			return RuntimeIssueTokenOut{AgentID: in.AgentID, CredentialID: id, Token: tok.Full, TokenPrefix: tok.Prefix, Replaced: replaced}, nil
@@ -294,9 +289,6 @@ func runtimeRevokeToken() tool.Tool {
 			if out.Revoked == nil {
 				out.Revoked = []uuid.UUID{}
 				return out, nil
-			}
-			if err := ec.Q.SetSiteChatCredential(ctx, dbq.SetSiteChatCredentialParams{ID: in.AgentID}); err != nil {
-				return RuntimeRevokeTokenOut{}, err
 			}
 			ec.Emit(events.Event{Type: EventRuntimeTokenRevoked, SubjectType: "actor", SubjectID: &in.AgentID,
 				Payload: map[string]any{"credentials": revoked}})

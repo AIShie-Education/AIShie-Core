@@ -52,10 +52,14 @@
 # page is told how a person signs in: by password alone, and then, restarted
 # with single sign-on against a stand-in provider, by that too, under its name.
 # Last, root finds no provider of the site's can be added without
-# SECRETS_KEY; restarted with one, tests a stand-in provider that signs
-# people in, sets it up, switches it on over the version read and is told
-# its secret nowhere; the instructor, linked at it, signs in through it; and
-# root cannot remove it while he is linked, and then, forced, does.
+# SECRETS_KEY; restarted with one, finds the server reaches none on this
+# machine, where the stand-in is, while the operator's is tested as before;
+# restarted with SSO_ALLOW_PRIVATE_ISSUERS too, tests a stand-in provider
+# that signs people in, sets it up, switches it on over the version read and
+# is told its secret nowhere; the instructor, linked at it, signs in through
+# it; restarted without the setting, the server reaches it no more, saying
+# why in its log; and root cannot remove it while he is linked, and then,
+# forced, does.
 #
 #   make e2e            (builds first)
 #   scripts/e2e.sh      (expects bin/aishie-core)
@@ -133,6 +137,9 @@ heard() {
 # reason — the reason the last refusal gave, from $WORK/body.
 reason() { json "$WORK/body" 'd["error"]["details"]["reason"]'; }
 
+# code — the code of the last refusal, from $WORK/body.
+code() { json "$WORK/body" 'd["error"]["code"]'; }
+
 # signin WANT BODY — POST /v1/auth/login as the sign-in page does; the session
 # the cookie carries is left in $SESSION, the body in $WORK/body.
 signin() {
@@ -168,6 +175,8 @@ else
 fi
 export HTTP_ADDR="127.0.0.1:$PORT"
 export BLOB_FS_ROOT="$WORK/blobs" PUBLIC_URL="$BASE"
+# Set below, where the site's provider on this machine is to be reached.
+unset SSO_ALLOW_PRIVATE_ISSUERS
 # Small limits on the files a message carries, so that going past them
 # costs nothing: 4 KiB a file, three to a message, 8 KiB in a conversation.
 export ATTACHMENT_MAX_BYTES=4096 ATTACHMENT_MAX_PER_MESSAGE=3 ATTACHMENT_MAX_CONVERSATION_BYTES=8192
@@ -284,12 +293,14 @@ PUT_URL=$(json "$WORK/body" 'd["result"]["upload_url"]')
 UPLOAD=$(json "$WORK/body" 'd["result"]["upload_token"]')
 printf '%%PDF-1.7 lecture one' >"$WORK/slides.pdf"
 [ "$(curl -s -o /dev/null -w '%{http_code}' -X PUT -H 'Content-Type: application/pdf' --data-binary "@$WORK/slides.pdf" "$PUT_URL")" = 200 ] || fail "PUT to the upload URL"
-call 200 POST "$C/documents" "$SATO" "{\"kind\":\"material\",\"title\":\"Lecture 1\",\"upload_token\":\"$UPLOAD\"}"
+call 400 POST "$C/documents" "$SATO" "{\"kind\":\"material\",\"title\":\"Lecture 1\",\"upload_token\":\"$UPLOAD\"}" # files, even of one
+[ "$(code)" = invalid_argument ] || fail "upload_token alone refused, but not as no field of the call: $(cat "$WORK/body")"
+call 200 POST "$C/documents" "$SATO" "{\"kind\":\"material\",\"title\":\"Lecture 1\",\"files\":[{\"upload_token\":\"$UPLOAD\",\"filename\":\"slides.pdf\"}]}"
 DOC=$(json "$WORK/body" 'd["result"]["document_id"]')
 call 404 GET "$C/documents/$DOC" "$YUKI" # unpublished: to a student it does not exist yet
 call 200 POST "$C/documents/$DOC/publish" "$SATO"
 call 200 GET "$C/documents/$DOC" "$YUKI"
-curl -sf -o "$WORK/got.pdf" "$(json "$WORK/body" 'd["result"]["version"]["download_url"]')" || fail "download"
+curl -sf -o "$WORK/got.pdf" "$(json "$WORK/body" 'd["result"]["version"]["files"][0]["download_url"]')" || fail "download"
 cmp -s "$WORK/slides.pdf" "$WORK/got.pdf" || fail "the student downloaded different bytes"
 echo "  the student downloaded exactly what the instructor uploaded"
 
@@ -371,23 +382,26 @@ call 403 POST /v1/services/document_text/queue "$SATO" '{}' # the service's alon
 call 200 POST /v1/services/document_text/queue "$SVC" '{"max":5}'
 [ "$(json "$WORK/body" 'len(d["result"]["claimed"])')" = 1 ] || fail "the service claimed $(cat "$WORK/body")"
 VERSION=$(json "$WORK/body" 'd["result"]["claimed"][0]["version_id"]')
+FILE=$(json "$WORK/body" 'd["result"]["claimed"][0]["file_id"]')
 LEASE=$(json "$WORK/body" 'd["result"]["claimed"][0]["lease_id"]')
 curl -sf -o "$WORK/claimed.pdf" "$(json "$WORK/body" 'd["result"]["claimed"][0]["download_url"]')" || fail "the service's download"
 cmp -s "$WORK/slides.pdf" "$WORK/claimed.pdf" || fail "the service downloaded different bytes"
-call 200 GET "/v1/services/document_text/versions/$VERSION/file?lease_id=$LEASE" "$SVC"
+call 400 GET "/v1/services/document_text/versions/$VERSION/file?lease_id=$LEASE" "$SVC" # by its file, always
+call 200 GET "/v1/services/document_text/versions/$VERSION/file?lease_id=$LEASE&file_id=$FILE" "$SVC"
 call 200 POST "/v1/services/document_text/versions/$VERSION/complete" "$SVC" \
-  "{\"lease_id\":\"$LEASE\",\"status\":\"done\",\"body\":\"## Page 1\\n\\nLoops.\",\"pages\":1,\"model\":\"A model\"}"
-call 200 GET "$C/documents/$DOC/text" "$YUKI"
+  "{\"lease_id\":\"$LEASE\",\"file_id\":\"$FILE\",\"status\":\"done\",\"body\":\"## Page 1\\n\\nLoops.\",\"pages\":1,\"model\":\"A model\"}"
+call 400 GET "$C/documents/$DOC/text" "$YUKI" # which file?
+call 200 GET "$C/documents/$DOC/text?file_id=$FILE" "$YUKI"
 [ "$(json "$WORK/body" 'd["result"]["text"]["source"], d["result"]["text"]["body"]')" = "ai ## Page 1
 
 Loops." ] || fail "Yuki reads the text $(cat "$WORK/body")"
-call 200 POST "$C/documents/$DOC/versions/$VERSION/text" "$SATO" '{"body":"## Page 1\n\nLoops, for and while."}'
+call 200 POST "$C/documents/$DOC/versions/$VERSION/text" "$SATO" "{\"file_id\":\"$FILE\",\"body\":\"## Page 1\\n\\nLoops, for and while.\"}"
 call 200 GET "$C/documents/$DOC" "$YUKI"
-[ "$(json "$WORK/body" 'd["result"]["version"]["text"]["source"], d["result"]["version"]["text"]["edited_by_name"]')" = "staff Sato" ] ||
+[ "$(json "$WORK/body" 'd["result"]["version"]["files"][0]["text"]["source"], d["result"]["version"]["files"][0]["text"]["edited_by_name"]')" = "staff Sato" ] ||
   fail "Yuki reads $(cat "$WORK/body")"
-call 422 POST "$C/documents/$DOC/versions/$VERSION/text/retranscribe" "$SATO" '{}' # his edit goes only if he says so
+call 422 POST "$C/documents/$DOC/versions/$VERSION/text/retranscribe" "$SATO" "{\"file_id\":\"$FILE\"}" # his edit goes only if he says so
 [ "$(reason)" = staff_edit ] || fail "refused, but not for his edit: $(cat "$WORK/body")"
-call 403 POST "$C/documents/$DOC/versions/$VERSION/text" "$YUKI" '{"body":"mine"}'
+call 403 POST "$C/documents/$DOC/versions/$VERSION/text" "$YUKI" "{\"file_id\":\"$FILE\",\"body\":\"mine\"}"
 
 step "Sato uploads a lecture of three files and its text; Yuki reads it and downloads each file under its name; the service transcribes each file on its own, for Yuki to read file by file"
 # docfile CONTENT_TYPE FILE [FILENAME] — a URL for a file of Sato's material, named FILENAME if given, and
@@ -449,7 +463,7 @@ for f in $W3_FILES; do
 done
 W3_V1=$(json "$WORK/body" 'd["result"]["version_id"]')
 call 400 POST "$C/documents/$W3/versions/$W3_V1/text" "$SATO" '{"body":"## Slides"}' # which file?
-[ "$(reason)" = file_id_required ] || fail "an edit naming no file of three, refused, but not for want of one: $(cat "$WORK/body")"
+[ "$(code)" = invalid_argument ] || fail "an edit naming no file of three, refused, but not for want of one: $(cat "$WORK/body")"
 
 step "Sato adds a version of two files, which Yuki does not see until it is published; past the limits on a version's files it is refused, saying why"
 printf '%%PDF-1.7 week three, corrected' >"$WORK/week3-slides.pdf"
@@ -482,8 +496,6 @@ for i in 1 2; do
 done
 call 422 POST "$C/documents/$W3/versions" "$SATO" "{\"files\":[$BIG]}"
 [ "$(reason)" = version_too_large ] || fail "10000 bytes refused, but not as too much for a version: $(cat "$WORK/body")"
-call 400 POST "$C/documents/$W3/versions" "$SATO" "{\"upload_token\":\"$T1\",\"files\":[{\"upload_token\":\"$T2\",\"filename\":\"notes.txt\"}]}"
-[ "$(reason)" = files_and_upload_token ] || fail "both refused, but not as both: $(cat "$WORK/body")"
 
 step "The service's credential opens nothing else, and once revoked, nothing at all"
 call 403 GET /v1/me "$SVC"
@@ -550,9 +562,8 @@ call 200 GET /v1/me "$GRADER"
 call 200 GET "/v1/me/agents/$TUTOR_ID/credentials" "$SATO"
 [ "$(json "$WORK/body" '[(c.get("issued_to"), "revoked_at" in c) for c in d["result"]["credentials"]]')" = "[('agent_runtime', False)]" ] ||
   fail "the tutor's credentials, as Sato sees them: $(cat "$WORK/body")"
-# me.site_chat, kept for one release, changes nothing: nothing is declared.
-call 200 POST /v1/me/site-chat "$TUTOR" '{"on":true}'
-[ "$(json "$WORK/body" 'd["result"]["site_chat"]')" = True ] || fail "me.site_chat with the runtime's token: $(cat "$WORK/body")"
+# Nothing is declared, and there is nothing to declare it with since 0027.
+call 404 POST /v1/me/site-chat "$TUTOR" '{"on":true}'
 call 200 GET "/v1/me/agents/$TUTOR_ID" "$SATO"
 [ "$(json "$WORK/body" 'd["result"]["site_chat"]')" = True ] || fail "Sato is not told the tutor is asked in the site"
 call 200 GET "$C/conversations/respondents" "$YUKI"
@@ -807,8 +818,8 @@ call 200 POST /v1/services/agent_runtime/renditions/claim "$RT" '{}'
 echo "  Yuki and the tutor opened the slides' PDF; the grader found nothing"
 
 step "The runtime stops hosting the tutor, revoking its token by its id: Yuki asks it nothing more and still reads what it said; Sato says nothing of it in Core"
-call 400 POST "/v1/me/agents/$TUTOR_ID" "$SATO" '{"site_chat":false}'
-[ "$(reason)" = site_chat_follows_hosting ] || fail "refused, but not as following hosting: $(cat "$WORK/body")"
+call 400 POST "/v1/me/agents/$TUTOR_ID" "$SATO" '{"site_chat":false}' # no field of agent.update since 0027
+[ "$(code)" = invalid_argument ] || fail "site_chat refused, but not as no field of the call: $(cat "$WORK/body")"
 call 200 POST "/v1/services/agent_runtime/agents/$TUTOR_ID/token/revoke" "$RT"
 [ "$(json "$WORK/body" 'len(d["result"]["revoked"])')" = 1 ] || fail "revoking the tutor's token: $(cat "$WORK/body")"
 call 401 GET /v1/me "$TUTOR"
@@ -824,8 +835,6 @@ call 200 POST "/v1/me/agents/$HELPER_ID/tokens" "$SATO" '{"label":"my script"}'
 HELPER=$(json "$WORK/body" 'd["result"]["token"]')
 call 200 POST "$C/delegates" "$SATO" "{\"actor_id\":\"$HELPER_ID\",\"preset\":\"instructor\",\"perms\":{\"member_manage\":\"autonomous\"}}"
 HELPER_M=$(json "$WORK/body" 'd["result"]["member_id"]')
-call 422 POST /v1/me/site-chat "$HELPER" '{"on":true}'
-[ "$(reason)" = not_runtime_hosted ] || fail "an mcp agent's me.site_chat refused, but not as not runtime hosted: $(cat "$WORK/body")"
 call 422 POST "/v1/services/agent_runtime/agents/$HELPER_ID/token" "$RT"
 [ "$(reason)" = not_runtime_hosted ] || fail "the runtime hosting an mcp agent refused, but not as not runtime hosted: $(cat "$WORK/body")"
 call 200 GET "$C/members/$HELPER_M" "$SATO"
@@ -1173,7 +1182,13 @@ IDP_CLIENT_ID=aishie-site IDP_CLIENT_SECRET=$SITE_SECRET IDP_REDIRECT_URI="$BASE
   IDP_SUBJECT=mori@campus.example IDP_EMAIL=mori@example.edu \
   python3 "$(dirname "$0")/e2e-idp.py" "$IDP_PORT" >"$WORK/idp.log" 2>&1 &
 IDP_PID=$!
-for _ in $(seq 1 100); do curl -sf "$ISSUER/.well-known/openid-configuration" >/dev/null 2>&1 && break; sleep 0.1; done
+# It makes its RSA key in Python as it starts: a second or two, and on a busy
+# machine half a minute.
+for _ in $(seq 1 600); do
+  curl -sf "$ISSUER/.well-known/openid-configuration" >/dev/null 2>&1 && break
+  kill -0 "$IDP_PID" 2>/dev/null || break
+  sleep 0.1
+done
 curl -sf "$ISSUER/.well-known/openid-configuration" >/dev/null || fail "the stand-in provider did not come up: $(cat "$WORK/idp.log")"
 export OIDC_ISSUER="$ISSUER" OIDC_CLIENT_ID=aishie-e2e OIDC_DISPLAY_NAME="PolyU NetID"
 # A name the button cannot show as it is, and the server does not start.
@@ -1195,16 +1210,47 @@ call 200 GET /v1/sso/providers "$ROOT"
   "False secrets_key_missing [('polyu-adfs', 'operator', True, 'offered')]" ] || fail "the providers: $(cat "$WORK/body")"
 [ "$(json "$WORK/body" 'd["result"]["redirect_uri"]')" = "$BASE/v1/auth/sso/callback" ] || fail "the redirect URI: $(cat "$WORK/body")"
 SITE="{\"id\":\"campus\",\"display_name\":\"Campus ID\",\"issuer\":\"$SITE_ISSUER\",\"client_id\":\"aishie-site\",\"client_secret\":\"$SITE_SECRET\"}"
-call 422 POST /v1/sso/providers "$ROOT" "$SITE"
+# The operator's provider, by the id the server gives it: OIDC_PROVIDER_NAME,
+# or its default.
+OPERATOR=$(json "$WORK/body" '[p["id"] for p in d["result"]["providers"] if p["source"] == "operator"][0]')
+# At an issuer elsewhere than this machine: one here, where the stand-in is,
+# would be refused for that first (below).
+call 422 POST /v1/sso/providers "$ROOT" "${SITE/"$SITE_ISSUER"/https://idp.example.edu/site}"
 [ "$(reason)" = secrets_key_missing ] || fail "refused, but not for want of a key: $(cat "$WORK/body")"
 
-step "Restarted with SECRETS_KEY, root tests the site's provider, sets it up and switches it on over the version read; its secret is said nowhere"
+# urlencoded VALUE — VALUE escaped for a query string.
+urlencoded() { python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$1"; }
+
+step "Restarted with SECRETS_KEY, root finds the server reaches no provider of the site's on this machine; the operator's, there too, is tested as before"
 SECRETS_KEY=$(python3 -c 'import base64, os; print(base64.b64encode(os.urandom(32)).decode())')
 export SECRETS_KEY
 kill "$SERVER_PID"
 wait "$SERVER_PID" 2>/dev/null || true
 start
-call 200 GET "/v1/sso/test?issuer=$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$SITE_ISSUER")" "$ROOT"
+for at in "$SITE_ISSUER" "http://localhost:$IDP_PORT/site" "https://169.254.169.254/latest"; do
+  call 200 GET "/v1/sso/test?issuer=$(urlencoded "$at")" "$ROOT"
+  [ "$(json "$WORK/body" 'd["result"]["ok"], "issuer_address_not_allowed" in d["result"]["problems"][0], d["result"]["discovery_url"]')" = "False True " ] ||
+    fail "the test of an issuer on this machine: $(cat "$WORK/body")"
+done
+call 400 POST /v1/sso/providers "$ROOT" "$SITE"
+[ "$(json "$WORK/body" 'd["error"]["details"]["reason"], d["error"]["details"]["field"]')" = "issuer_address_not_allowed issuer" ] ||
+  fail "a provider on this machine set up: $(cat "$WORK/body")"
+# The stand-in serves the operator's discovery document and no key set: what
+# matters here is that the document is read.
+call 200 GET "/v1/sso/test?provider_id=$OPERATOR" "$ROOT"
+[ "$(json "$WORK/body" 'd["result"]["token_endpoint"], any("issuer_address_not_allowed" in p for p in d["result"]["problems"])')" = \
+  "$ISSUER/oauth2/token False" ] || fail "the test of the operator's provider: $(cat "$WORK/body")"
+ALLOWED='administrators may have this server reach identity providers on this machine'
+grep -q "$ALLOWED" "$WORK/server.log" && fail "the server says private issuers are allowed, unasked"
+echo "  refused for its address as it is tested and set up, saying nothing of it; the operator's provider is not held to it"
+
+step "Restarted with SSO_ALLOW_PRIVATE_ISSUERS too, root tests the site's provider, sets it up and switches it on over the version read; its secret is said nowhere"
+export SSO_ALLOW_PRIVATE_ISSUERS=1
+kill "$SERVER_PID"
+wait "$SERVER_PID" 2>/dev/null || true
+start
+grep -q "$ALLOWED" "$WORK/server.log" || fail "the server does not say private issuers are allowed"
+call 200 GET "/v1/sso/test?issuer=$(urlencoded "$SITE_ISSUER")" "$ROOT"
 [ "$(json "$WORK/body" 'd["result"]["ok"], len(d["result"]["signing_keys"]), d["result"]["token_endpoint"]')" = "True 1 $SITE_ISSUER/token" ] ||
   fail "the test of the site's provider: $(cat "$WORK/body")"
 call 200 GET "/v1/sso/test?issuer=http://127.0.0.1:$IDP_PORT/nothing" "$ROOT"
@@ -1269,6 +1315,19 @@ call 200 GET /v1/me "$MORI"
 [ "$(curl -s -o "$WORK/body" -D "$WORK/h.again" -w '%{http_code}' -H "Cookie: ais_sso=$STATE" "$BACK")" = 401 ] ||
   fail "a replayed callback: $(cat "$WORK/body")"
 [ -z "$(cookie "$WORK/h.again" ais_session)" ] || fail "a replayed callback set a session"
+
+step "Restarted without SSO_ALLOW_PRIVATE_ISSUERS, the server reaches the site's provider on this machine no more, as it dials it, and says why in its log; the operator's still starts"
+unset SSO_ALLOW_PRIVATE_ISSUERS
+kill "$SERVER_PID"
+wait "$SERVER_PID" 2>/dev/null || true
+LOGGED=$(wc -l <"$WORK/server.log")
+start
+call 422 GET "/v1/auth/sso/start/campus?return_to=/courses" ""
+[ "$(reason)" = sso_provider_unavailable ] || fail "a sign-in through the provider on this machine: $(cat "$WORK/body")"
+tail -n +$((LOGGED + 1)) "$WORK/server.log" | grep -q 'issuer_address_not_allowed' || fail "the log does not say why: $(tail -5 "$WORK/server.log")"
+[[ "$(curl -s -o /dev/null -w '%{http_code} %{redirect_url}' "$BASE/v1/auth/sso/start/$OPERATOR?return_to=/courses")" == "302 $ISSUER/oauth2/authorize?"* ]] ||
+  fail "the operator's provider does not start a sign-in"
+N=$((N + 1))
 
 step "Root cannot remove the provider while Mori is linked at it; forced, it goes, and his identity is unlinked"
 call 409 POST /v1/sso/providers/campus/delete "$ROOT" '{}'

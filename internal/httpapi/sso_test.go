@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"log/slog"
 	"math/big"
 	"net/http"
 	"net/http/cookiejar"
@@ -132,8 +133,9 @@ type ssoAPI struct {
 	// keys seal the site's providers' client secrets; nil in a server with
 	// no SECRETS_KEY.
 	keys *secrets.Keyring
-	// registry is the server's.
+	// registry is the server's, and log what it says.
 	registry *sso.Registry
+	log      syncBuffer
 }
 
 func newSSO(t *testing.T) *ssoAPI {
@@ -151,8 +153,13 @@ func newSSOWith(t *testing.T, signIns *ratelimit.Limiter, adjust func(*httpapi.D
 // a secrets key or none.
 type ssoSetup struct {
 	operator, keys bool
-	signIns        *ratelimit.Limiter
-	adjust         func(*httpapi.Deps)
+	// publicOnly holds the server's sign-ins through the site's providers
+	// to public addresses, as a server is held without
+	// SSO_ALLOW_PRIVATE_ISSUERS; its tools still set up a provider on this
+	// machine, where every fake one is, as such a server's were before.
+	publicOnly bool
+	signIns    *ratelimit.Limiter
+	adjust     func(*httpapi.Deps)
 }
 
 func testKeys(t *testing.T) *secrets.Keyring {
@@ -198,9 +205,10 @@ func newSSOServer(t *testing.T, set ssoSetup) *ssoAPI {
 	// The tools and the server share the operator's provider and the keys,
 	// as serve's one registry has them.
 	c := testkit.NewCS101WithDeps(t, 0, func(d *tools.Deps) {
-		d.SSO = sso.New(sso.Config{Operator: a.op, Keys: a.keys, PublicURL: srv.URL})
+		d.SSO = sso.New(sso.Config{Operator: a.op, Keys: a.keys, PublicURL: srv.URL, PrivateIssuers: true})
 	})
-	a.registry = sso.New(sso.Config{Pool: c.Pool, Operator: a.op, Keys: a.keys, PublicURL: srv.URL})
+	a.registry = sso.New(sso.Config{Pool: c.Pool, Operator: a.op, Keys: a.keys, PublicURL: srv.URL, PrivateIssuers: !set.publicOnly,
+		Log: slog.New(slog.NewTextHandler(&a.log, nil))})
 	deps := httpapi.Deps{
 		Pool: c.Pool, LatestSchema: latest, Pipeline: c.P, Auth: auth.NewAuthenticator(c.Pool, time.Hour),
 		TrustedOrigins: []string{frontEnd}, InsecureCookies: true, SSO: a.registry, Signer: signer,

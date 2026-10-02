@@ -2,7 +2,7 @@
 -- The whole row, for showing an actor. Authorization uses GetActorForAuthz,
 -- which leaves kind out on purpose.
 SELECT id, kind, display_name, email, status, platform_role, created_by_actor_id, created_at,
-       owner_actor_id, suspended_by_actor_id, site_chat_credential_id, email_verified, login_id, login_id_verified,
+       owner_actor_id, suspended_by_actor_id, email_verified, login_id, login_id_verified,
        service_scope, hosting
 FROM actor
 WHERE id = $1;
@@ -14,7 +14,7 @@ WHERE id = $1;
 -- lock: it never changes (docs/schema.md §2.1). The foreign keys to the row
 -- take only KEY SHARE, which this does not conflict with.
 SELECT id, kind, display_name, email, status, platform_role, created_by_actor_id, created_at,
-       owner_actor_id, suspended_by_actor_id, site_chat_credential_id, email_verified, login_id, login_id_verified,
+       owner_actor_id, suspended_by_actor_id, email_verified, login_id, login_id_verified,
        service_scope, hosting
 FROM actor
 WHERE id = $1
@@ -191,14 +191,6 @@ SELECT a.id, (a.kind = 'agent')::bool AS agent, coalesce(a.hosting, '')::text AS
                        AND (rt.expires_at IS NULL OR rt.expires_at > sqlc.arg(now))))::bool AS site_chat
 FROM actor a
 WHERE a.id = ANY(sqlc.arg(actor_ids)::uuid[]);
-
--- name: SetSiteChatCredential :exec
--- The release before this one reads who is asked in the site from the
--- credential an agent declared with (actor.site_chat_credential_id); this
--- one reads it nowhere, and keeps it naming a runtime agent's live runtime
--- token, null once there is none, so that a rollback asks the same agents.
--- The key holds a credential to the agent's own (actor_site_chat_credential_fk).
-UPDATE actor SET site_chat_credential_id = sqlc.narg(credential_id) WHERE id = sqlc.arg(id);
 
 -- name: LockAgentForHosting :exec
 -- An agent's runtime token is issued and revoked one call at a time, and
