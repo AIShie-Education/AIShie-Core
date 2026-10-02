@@ -351,8 +351,8 @@ redirect is checked as it is followed; it goes through no proxy
 (`HTTPS_PROXY`) for them, which would choose the address itself. An issuer
 plainly at such an address, or at `localhost`, is refused as it is set up
 (`invalid_argument`, field `issuer`, reason `issuer_address_not_allowed`), and
-one set up there earlier, or while the setting below was on, is not offered
-on the sign-in page: `sso.list` gives it the status
+one set up there earlier, or while the setting below was on, and switched on
+is not offered on the sign-in page: `sso.list` gives it the status
 `issuer_address_not_allowed`. One whose name resolves there is taken, and
 `sso.test` reports it as a problem with the same reason, naming the URL and
 never the address, as it does a key set it may not fetch and a token

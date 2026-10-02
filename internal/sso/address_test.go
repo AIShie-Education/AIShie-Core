@@ -378,14 +378,14 @@ func TestAProvidersEndpointsAreAtPublicAddresses(t *testing.T) {
 	}
 
 	// As a sign-in discovers the provider: refused when its token endpoint
-	// resolves privately, taken when it resolves publicly, and taken
-	// whatever it resolves to with no check, as for the operator's
-	// provider or with private addresses allowed.
-	var issuer, token string
+	// or its key set resolves privately, taken when both resolve publicly,
+	// and taken whatever they resolve to with no check, as for the
+	// operator's provider or with private addresses allowed.
+	var issuer, token, keys string
 	docs := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"issuer": issuer, "authorization_endpoint": issuer + "/authorize",
-			"token_endpoint": token, "jwks_uri": publicKeys, "id_token_signing_alg_values_supported": []string{"RS256"}})
+			"token_endpoint": token, "jwks_uri": keys, "id_token_signing_alg_values_supported": []string{"RS256"}})
 	}))
 	t.Cleanup(docs.Close)
 	issuer = docs.URL + "/idp"
@@ -394,16 +394,23 @@ func TestAProvidersEndpointsAreAtPublicAddresses(t *testing.T) {
 			RedirectURL: "https://lms.example.edu/v1/auth/sso/callback", HTTPClient: docs.Client(), CheckEndpoints: check})
 		return err
 	}
-	token = "https://token.example.edu/adfs/token"
+	token, keys = "https://token.example.edu/adfs/token", publicKeys
 	if err := discover(CheckEndpoints); !IsAddressNotAllowed(err) || !strings.Contains(err.Error(), "its token_endpoint") {
 		t.Fatalf("a token endpoint on a private network: %v", err)
 	}
 	if err := discover(nil); err != nil {
 		t.Fatalf("not checked: %v", err)
 	}
-	token = publicToken
+	token, keys = publicToken, "https://keys.example.edu/adfs/keys"
+	if err := discover(CheckEndpoints); !IsAddressNotAllowed(err) || !strings.Contains(err.Error(), "its jwks_uri") {
+		t.Fatalf("a key set on a private network: %v", err)
+	}
+	if err := discover(nil); err != nil {
+		t.Fatalf("not checked: %v", err)
+	}
+	keys = publicKeys
 	if err := discover(CheckEndpoints); err != nil {
-		t.Fatalf("a public token endpoint: %v", err)
+		t.Fatalf("a public token endpoint and key set: %v", err)
 	}
 
 	// The registry checks them unless private addresses are allowed.

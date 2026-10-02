@@ -511,7 +511,7 @@ func lockSSOProvider(ctx context.Context, q *dbq.Queries, id string, version *in
 
 type SSOSetEnabledIn struct {
 	ProviderID string `json:"provider_id"`
-	Enabled    bool   `json:"enabled" jsonschema:"true offers it on the sign-in page and lets a sign-in through it; false stops both, at once, and unlinks nobody"`
+	Enabled    bool   `json:"enabled" jsonschema:"true offers it on the sign-in page and lets a sign-in through it, unless its issuer is plainly not at a public address (localhost, or such an address written out) and the server's operator has not set SSO_ALLOW_PRIVATE_ISSUERS (status issuer_address_not_allowed); false stops both, at once, and unlinks nobody"`
 	Version    *int32 `json:"version,omitempty" jsonschema:"the version you read; the change is then made only over it (version_mismatch). Over REST the If-Match header may carry it"`
 }
 
@@ -521,8 +521,11 @@ func ssoSetEnabled(d Deps) tool.Tool {
 		Description: "Switch a site's identity provider on or off. Off, it is not offered on the sign-in page, a sign-in through it " +
 			"is refused, even one already under way, and nobody is unlinked: switched on again, everyone linked signs in as " +
 			"before. One whose client secret does not open with this server's keys is not switched on (secret_unavailable): " +
-			"give the secret again (sso.update). Already so, nothing changes. The operator's provider is refused " +
-			"(set_by_operator). Root and platform administrators only.",
+			"give the secret again (sso.update). One whose issuer is plainly not at a public address (localhost, or such an " +
+			"address written out) is switched on but, while the server is held to public addresses, not offered, and a " +
+			"sign-in through it is refused (status issuer_address_not_allowed): the server's operator may set " +
+			"SSO_ALLOW_PRIVATE_ISSUERS, or you may move the issuer with sso.update. Already so, nothing changes. The " +
+			"operator's provider is refused (set_by_operator). Root and platform administrators only.",
 		Kind: tool.Write, Gate: admins,
 		HTTP:    tool.Route{Method: "POST", Pattern: "/v1/sso/providers/{provider_id}/enabled", IfMatch: "version"},
 		Resolve: noTarget[SSOSetEnabledIn]("sso_provider"),

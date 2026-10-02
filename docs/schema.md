@@ -398,8 +398,8 @@ a sign-in its token endpoint) it fetches from public addresses only, checked on 
 each connection is made to once the name is resolved, unless the operator sets
 `SSO_ALLOW_PRIVATE_ISSUERS` (README, Single sign-on): an issuer plainly elsewhere is refused as
 it is set up (`issuer_address_not_allowed`), and a name that resolves elsewhere is reached never.
-One set up plainly elsewhere before, or while the setting was on, is not offered, and its status
-is `issuer_address_not_allowed`, which resolves nothing. A discovery document whose token endpoint
+One set up plainly elsewhere before, or while the setting was on, and switched on is not offered,
+and its status is `issuer_address_not_allowed`, which resolves nothing (switched off, it is `disabled`). A discovery document whose token endpoint
 or key set (`jwks_uri`), both fetched only as a sign-in comes back, is at no public address is
 refused as the provider is discovered, so that a sign-in through it is `sso_provider_unavailable`
 as it starts, not once the person has signed in at the provider; `sso.test` reports it beforehand.
