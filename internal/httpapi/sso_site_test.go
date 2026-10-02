@@ -421,9 +421,10 @@ func TestLinkingByTheEmailAProviderVouchesFor(t *testing.T) {
 
 // A server held to public addresses (no SSO_ALLOW_PRIVATE_ISSUERS) reaches
 // no provider of the site's on this machine, where the fake one is: set up
-// there while the server allowed it, the provider is offered still, and a
-// sign-in through it is told it cannot be reached, its discovery refused as
-// it was dialled, and the log says why. The operator's provider, on this
+// there while the server allowed it, the provider is not offered on the
+// sign-in page, which a sign-in through it could not get past, and a
+// sign-in through it all the same is told it cannot be reached, with
+// nothing fetched, and the log says why. The operator's provider, on this
 // machine too, signs people in as before: it is the operator's own setting.
 func TestASitesProviderOnAPrivateAddressIsNotReached(t *testing.T) {
 	a := newSSOServer(t, ssoSetup{operator: true, keys: true, publicOnly: true})
@@ -434,12 +435,22 @@ func TestASitesProviderOnAPrivateAddressIsNotReached(t *testing.T) {
 		t.Fatalf("create: %d %s", r.Status, r.Raw)
 	}
 	a.c.MustCall(a.c.Root, "actor.link_sso", m{"actor_id": a.c.Sato, "provider": "campus", "subject": "sato@site.example.edu"}, "link")
+	for range 2 {
+		offered := a.methods().Body["sso_providers"].([]any)
+		if len(offered) != 1 || offered[0].(m)["id"] != a.op.ID {
+			t.Fatalf("the sign-in page offers %v", offered)
+		}
+	}
+	if n := strings.Count(a.log.String(), "its issuer is not at a public address"); n != 1 {
+		t.Fatalf("the log says %d times that the provider is not offered: %s", n, a.log.String())
+	}
 	if r := a.do(browser(), "GET", "/v1/auth/sso/start/campus", "", nil); r.Status != http.StatusUnprocessableEntity ||
 		r.str("error", "details", "reason") != "sso_provider_unavailable" || strings.Contains(r.Raw, "127.0.0.1") {
 		t.Fatalf("a sign-in through a provider on this machine: %d %s", r.Status, r.Raw)
 	}
-	if !strings.Contains(a.log.String(), sso.ReasonAddressNotAllowed) {
-		t.Fatalf("the log does not say why: %s", a.log.String())
+	if l := a.log.String(); !strings.Contains(l, "an identity provider's issuer is not at a public address") ||
+		!strings.Contains(l, sso.ReasonAddressNotAllowed) || strings.Contains(l, "could not be discovered") {
+		t.Fatalf("the log does not say why, or says it was dialled: %s", l)
 	}
 
 	a.link(a.c.Sato, "sato@campus.example.edu")

@@ -116,13 +116,13 @@ func TestTheOperatorsProviderAlone(t *testing.T) {
 	if _, err := r.Resolve(t.Context(), "google"); !errors.Is(err, ErrNotOffered) {
 		t.Fatalf("resolve another: %v", err)
 	}
-	if got := r.SiteStatus("school-adfs", true, "v1.x"); got != StatusIDTaken {
+	if got := r.SiteStatus("school-adfs", "https://adfs.example.edu/adfs", true, "v1.x"); got != StatusIDTaken {
 		t.Fatalf("a site's provider with its id: %s", got)
 	}
-	if got := r.SiteStatus("google", true, "v1.x"); got != StatusSecretUnavailable {
+	if got := r.SiteStatus("google", "https://accounts.google.com", true, "v1.x"); got != StatusSecretUnavailable {
 		t.Fatalf("a site's provider with no key to open it: %s", got)
 	}
-	if got := r.SiteStatus("google", false, "v1.x"); got != StatusDisabled {
+	if got := r.SiteStatus("google", "https://accounts.google.com", false, "v1.x"); got != StatusDisabled {
 		t.Fatalf("a site's provider switched off: %s", got)
 	}
 }

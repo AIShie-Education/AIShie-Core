@@ -554,8 +554,9 @@ func TestAProvidersIssuerIsTested(t *testing.T) {
 // Without SSO_ALLOW_PRIVATE_ISSUERS, sso.test fetches nothing of a provider
 // of the site's on this machine, where the fake one is: an issuer plainly
 // there is a problem before anything is fetched, and so is the issuer of
-// one set up there while the server allowed it. A name that resolves there
-// is refused as it is dialled (package sso's tests). The
+// one set up there while the server allowed it, which, switched on, is
+// issuer_address_not_allowed rather than offered. A name that resolves
+// there is refused as it is dialled (package sso's tests). The
 // operator's provider, on this machine as well, is tested as before: it is
 // the operator's own setting.
 func TestAnIssuerOnAPrivateAddressIsNotFetched(t *testing.T) {
@@ -606,6 +607,16 @@ func TestAnIssuerOnAPrivateAddressIsNotFetched(t *testing.T) {
 	}
 	s.fails(s.admin, "sso.update", m{"provider_id": "campus", "version": 1, "issuer": issuer}, apperr.InvalidArgument,
 		sso.ReasonAddressNotAllowed)
+	// Switched on, it is not offered, and sso.list and sso.get say why.
+	if v := s.view("sso.set_enabled", m{"provider_id": "campus", "enabled": true}); v.Status != sso.StatusAddressNotAllowed {
+		t.Fatalf("switched on: %+v", v)
+	}
+	if v := s.view("sso.get", m{"provider_id": "campus"}); v.Status != sso.StatusAddressNotAllowed {
+		t.Fatalf("sso.get: %+v", v)
+	}
+	if l := s.list(); len(l.Providers) != 2 || l.Providers[1].ID != "campus" || l.Providers[1].Status != sso.StatusAddressNotAllowed {
+		t.Fatalf("sso.list: %+v", l)
+	}
 
 	if r := test(m{"provider_id": s.op.ID}); !r.OK || len(r.SigningKeys) != 1 || fetched.Load() != 2 {
 		t.Fatalf("the operator's provider: %+v", r)

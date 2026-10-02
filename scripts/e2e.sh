@@ -57,8 +57,9 @@
 # restarted with SSO_ALLOW_PRIVATE_ISSUERS too, tests a stand-in provider
 # that signs people in, sets it up, switches it on over the version read and
 # is told its secret nowhere; the instructor, linked at it, signs in through
-# it; restarted without the setting, the server reaches it no more, saying
-# why in its log; and root cannot remove it while he is linked, and then,
+# it; restarted without the setting, the server reaches it no more and
+# offers it no more, saying why in sso.list and its log; and root cannot
+# remove it while he is linked, and then,
 # forced, does.
 #
 #   make e2e            (builds first)
@@ -1316,7 +1317,7 @@ call 200 GET /v1/me "$MORI"
   fail "a replayed callback: $(cat "$WORK/body")"
 [ -z "$(cookie "$WORK/h.again" ais_session)" ] || fail "a replayed callback set a session"
 
-step "Restarted without SSO_ALLOW_PRIVATE_ISSUERS, the server reaches the site's provider on this machine no more, as it dials it, and says why in its log; the operator's still starts"
+step "Restarted without SSO_ALLOW_PRIVATE_ISSUERS, the server reaches the site's provider on this machine no more, nor offers it, and says why in sso.list and its log; the operator's still starts"
 unset SSO_ALLOW_PRIVATE_ISSUERS
 kill "$SERVER_PID"
 wait "$SERVER_PID" 2>/dev/null || true
@@ -1325,6 +1326,12 @@ start
 call 422 GET "/v1/auth/sso/start/campus?return_to=/courses" ""
 [ "$(reason)" = sso_provider_unavailable ] || fail "a sign-in through the provider on this machine: $(cat "$WORK/body")"
 tail -n +$((LOGGED + 1)) "$WORK/server.log" | grep -q 'issuer_address_not_allowed' || fail "the log does not say why: $(tail -5 "$WORK/server.log")"
+call 200 GET /v1/auth/methods ""
+[ "$(json "$WORK/body" '[p["id"] for p in d["sso_providers"]]')" = "['school-adfs']" ] ||
+  fail "the sign-in page offers the provider on this machine: $(cat "$WORK/body")"
+call 200 GET /v1/sso/providers/campus "$ROOT"
+[ "$(json "$WORK/body" 'd["result"]["status"], d["result"]["enabled"]')" = "issuer_address_not_allowed True" ] ||
+  fail "the provider on this machine, as administrators read it: $(cat "$WORK/body")"
 [[ "$(curl -s -o /dev/null -w '%{http_code} %{redirect_url}' "$BASE/v1/auth/sso/start/$OPERATOR?return_to=/courses")" == "302 $ISSUER/oauth2/authorize?"* ]] ||
   fail "the operator's provider does not start a sign-in"
 N=$((N + 1))

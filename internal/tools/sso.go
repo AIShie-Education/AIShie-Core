@@ -61,7 +61,7 @@ type SSOProviderView struct {
 	LinkByEmail         bool       `json:"link_by_email" jsonschema:"whether someone the provider vouches for, whose identity is linked to nobody, is linked at sign-in to the account whose email the provider vouches for, within allowed_email_domains; otherwise only accounts already linked sign in"`
 	Enabled             bool       `json:"enabled"`
 	Position            int        `json:"position" jsonschema:"its place on the sign-in page, lowest first; the operator's is always first"`
-	Status              string     `json:"status" jsonschema:"offered: a sign-in may go through it; disabled: switched off; id_taken: the operator's provider has its id, and is offered in its place; secret_unavailable: its client secret does not open with this server's keys, so give it again"`
+	Status              string     `json:"status" jsonschema:"offered: a sign-in may go through it; disabled: switched off; id_taken: the operator's provider has its id, and is offered in its place; secret_unavailable: its client secret does not open with this server's keys, so give it again; issuer_address_not_allowed: its issuer is on this machine or at a private, link-local or other address that is not public, which the server reaches only if its operator sets SSO_ALLOW_PRIVATE_ISSUERS"`
 	LinkedAccounts      int        `json:"linked_accounts" jsonschema:"the accounts that sign in through it: identities linked at it and not unlinked"`
 	Version             *int32     `json:"version" jsonschema:"moves on with every change; give it to sso.update, sso.set_enabled and sso.delete (or in If-Match) to change only what you read. Null for the operator's"`
 	CreatedAt           *time.Time `json:"created_at"`
@@ -80,7 +80,7 @@ func siteView(d Deps, r ssoRow) SSOProviderView {
 	v := SSOProviderView{ID: r.ID, Source: sso.SourceSite, DisplayName: &name, Issuer: r.Issuer, ClientID: r.ClientID,
 		ClientSecretHint: r.ClientSecretHint, Scopes: strs(r.Scopes), SubjectClaim: r.SubjectClaim, EmailClaim: r.EmailClaim,
 		AllowedEmailDomains: strs(r.AllowedEmailDomains), LinkByEmail: r.LinkByEmail, Enabled: r.Enabled, Position: pos,
-		Status: d.SSO.SiteStatus(r.ID, r.Enabled, r.ClientSecretSealed), LinkedAccounts: int(r.LinkedAccounts), Version: &version,
+		Status: d.SSO.SiteStatus(r.ID, r.Issuer, r.Enabled, r.ClientSecretSealed), LinkedAccounts: int(r.LinkedAccounts), Version: &version,
 		CreatedAt: &created, CreatedBy: &SSOActor{ActorID: r.CreatedByActorID, DisplayName: r.CreatedByName},
 		UpdatedAt: &updated, UpdatedBy: &SSOActor{ActorID: r.UpdatedByActorID, DisplayName: r.UpdatedByName},
 		RedirectURI: d.SSO.RedirectURL()}

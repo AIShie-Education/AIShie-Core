@@ -146,8 +146,10 @@ func Inspect(ctx context.Context, client *http.Client, private bool, issuer stri
 	}
 	if strings.HasPrefix(doc.TokenEndpoint, "http://") && !loopbackURL(doc.TokenEndpoint) {
 		rep.Problems = append(rep.Problems, "its token_endpoint is http: the client secret would cross the network in the clear")
-	} else if u, err := url.Parse(doc.TokenEndpoint); !private && err == nil && webURL(doc.TokenEndpoint) && !reachable(ctx, u.Hostname()) {
-		rep.Problems = append(rep.Problems, fmt.Sprintf("its token_endpoint, %q, is %s", clip(doc.TokenEndpoint), notPublicWhy))
+	} else if !private {
+		if err := notPublicEndpoint(ctx, "token_endpoint", doc.TokenEndpoint); err != nil {
+			rep.Problems = append(rep.Problems, err.Error())
+		}
 	}
 	for _, s := range want.Scopes {
 		if len(doc.Scopes) > 0 && !slices.Contains(doc.Scopes, s) {

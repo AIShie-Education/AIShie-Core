@@ -35,6 +35,10 @@ type OIDCConfig struct {
 	// HTTPClient is what discovery, the keys and the code's exchange are
 	// fetched with; nil is http.DefaultClient.
 	HTTPClient *http.Client
+	// CheckEndpoints, when set, is asked of the token endpoint and the key
+	// set's URL (jwks_uri) the discovery document names, neither of which
+	// is fetched until a sign-in comes back; an error fails the discovery.
+	CheckEndpoints func(ctx context.Context, tokenURL, keysURL string) error
 }
 
 type oidcProvider struct {
@@ -60,6 +64,17 @@ func NewOIDC(ctx context.Context, cfg OIDCConfig) (IdentityProvider, error) {
 	provider, err := oidc.NewProvider(ctx, cfg.Issuer)
 	if err != nil {
 		return nil, fmt.Errorf("oidc discovery at %s: %w", cfg.Issuer, err)
+	}
+	if cfg.CheckEndpoints != nil {
+		var keys struct {
+			URL string `json:"jwks_uri"`
+		}
+		if err := provider.Claims(&keys); err != nil {
+			return nil, fmt.Errorf("oidc discovery at %s: %w", cfg.Issuer, err)
+		}
+		if err := cfg.CheckEndpoints(ctx, provider.Endpoint().TokenURL, keys.URL); err != nil {
+			return nil, fmt.Errorf("oidc discovery at %s: %w", cfg.Issuer, err)
+		}
 	}
 	return &oidcProvider{
 		cfg:      cfg,
