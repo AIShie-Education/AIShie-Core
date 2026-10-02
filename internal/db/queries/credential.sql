@@ -120,11 +120,3 @@ UPDATE credential SET revoked_at = sqlc.arg(now)
 WHERE actor_id = sqlc.arg(actor_id) AND issued_to_service = 'agent_runtime' AND revoked_at IS NULL
 RETURNING id;
 
--- name: IsLiveRuntimeToken :one
--- Whether a credential is the actor's own token, issued to the site's agent
--- runtime, and live: neither revoked nor expired.
-SELECT EXISTS (
-    SELECT 1 FROM credential c
-    WHERE c.id = sqlc.arg(credential_id) AND c.actor_id = sqlc.arg(actor_id) AND c.issued_to_service = 'agent_runtime'
-      AND c.revoked_at IS NULL AND (c.expires_at IS NULL OR c.expires_at > sqlc.arg(now))
-)::bool;

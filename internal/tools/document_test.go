@@ -57,6 +57,21 @@ func (b *built) download(t *testing.T, url string) []byte {
 	return got
 }
 
+// oneFile is the files of a version that holds one upload, named for it.
+func oneFile(token string) []m {
+	return []m{{"upload_token": token, "filename": "upload"}}
+}
+
+// firstURL is where a version's first file downloads from, as document.get
+// gives it.
+func firstURL(t *testing.T, v *tools.VersionView) string {
+	t.Helper()
+	if v == nil || len(v.Files) == 0 || v.Files[0].DownloadURL == nil {
+		t.Fatalf("no file to download: %+v", v)
+	}
+	return *v.Files[0].DownloadURL
+}
+
 func (b *built) get(t *testing.T, actor uuid.UUID, args m) tools.DocumentGetOut {
 	t.Helper()
 	args["course_id"] = b.course
@@ -224,28 +239,30 @@ func TestFilesRoundTrip(t *testing.T) {
 	pdf := []byte("%PDF-1.7 slides")
 	token := b.upload(t, b.sato, "material", "application/pdf", pdf)
 	made := testkit.Result[tools.DocumentCreateOut](t, b.do(t, b.sato, "document.create",
-		m{"course_id": b.course, "kind": "material", "title": "Slides", "upload_token": token, "body_md": "See the slides."}))
+		m{"course_id": b.course, "kind": "material", "title": "Slides", "files": oneFile(token), "body_md": "See the slides."}))
 	b.do(t, b.sato, "document.publish", m{"course_id": b.course, "document_id": made.DocumentID})
 
 	got := b.get(t, b.yuki, m{"document_id": made.DocumentID}).Version
-	if got.DownloadURL == nil || *got.ContentType != "application/pdf" || *got.ByteSize != int64(len(pdf)) || !strings.HasPrefix(*got.Checksum, "sha256:") {
+	if len(got.Files) != 1 || got.Files[0].ContentType != "application/pdf" || got.Files[0].ByteSize != int64(len(pdf)) ||
+		got.Files[0].Checksum == nil || !strings.HasPrefix(*got.Files[0].Checksum, "sha256:") {
 		t.Fatalf("version: %+v", got)
 	}
-	if !bytes.Equal(b.download(t, *got.DownloadURL), pdf) {
+	if !bytes.Equal(b.download(t, firstURL(t, got)), pdf) {
 		t.Fatal("what came back is not what went up")
 	}
-	if n := b.Count(`SELECT count(*) FROM document_version WHERE document_id = $1 AND author_member_id = $2 AND storage_key LIKE 'documents/' || $3 || '/%'`,
+	if n := b.Count(`SELECT count(*) FROM document_version v JOIN document_version_file f ON f.version_id = v.id
+		WHERE v.document_id = $1 AND v.author_member_id = $2 AND f.storage_key LIKE 'documents/' || $3 || '/%'`,
 		made.DocumentID, b.satoM, b.course.String()); n != 1 {
 		t.Fatal("the version row does not name its author and a key inside the course")
 	}
 
 	// An upload belongs to whoever asked for it, for what they asked.
-	b.try(t, b.sato, "document.create", m{"course_id": b.course, "kind": "material", "title": "Again", "upload_token": token}, apperr.Conflict) // attached once
+	b.try(t, b.sato, "document.create", m{"course_id": b.course, "kind": "material", "title": "Again", "files": oneFile(token)}, apperr.Conflict) // attached once
 	mine := b.upload(t, b.sato, "material", "text/plain", []byte("x"))
 	for name, args := range map[string]m{
-		"as a rubric instead":  {"kind": "rubric", "title": "x", "upload_token": mine},
-		"a forged token":       {"kind": "material", "title": "x", "upload_token": testkit.Forged(t, mine)},
-		"a token that is none": {"kind": "material", "title": "x", "upload_token": "nonsense"},
+		"as a rubric instead":  {"kind": "rubric", "title": "x", "files": oneFile(mine)},
+		"a forged token":       {"kind": "material", "title": "x", "files": oneFile(testkit.Forged(t, mine))},
+		"a token that is none": {"kind": "material", "title": "x", "files": oneFile("nonsense")},
 	} {
 		args["course_id"] = b.course
 		if out, err := b.Call(b.sato, "document.create", args, uuid.NewString()); err == nil && out.Status == domain.StatusExecuted {
@@ -254,14 +271,14 @@ func TestFilesRoundTrip(t *testing.T) {
 	}
 	other := testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register", m{"kind": "human", "display_name": "Co-instructor"})).ActorID
 	b.do(t, b.sato, "member.add", m{"course_id": b.course, "actor_id": other, "preset": "instructor"})
-	b.try(t, other, "document.create", m{"course_id": b.course, "kind": "material", "title": "x", "upload_token": mine}, apperr.Forbidden) // someone else's upload
+	b.try(t, other, "document.create", m{"course_id": b.course, "kind": "material", "title": "x", "files": oneFile(mine)}, apperr.Forbidden) // someone else's upload
 
 	// Asked for, never uploaded.
 	empty := testkit.Result[tools.UploadURLOut](t, b.do(t, b.sato, "document.upload_url", m{"course_id": b.course, "kind": "material", "content_type": "text/plain"}))
-	b.try(t, b.sato, "document.create", m{"course_id": b.course, "kind": "material", "title": "x", "upload_token": empty.UploadToken}, apperr.FailedPrecondition)
+	b.try(t, b.sato, "document.create", m{"course_id": b.course, "kind": "material", "title": "x", "files": oneFile(empty.UploadToken)}, apperr.FailedPrecondition)
 	// Too big: refused, and not kept.
 	big := b.upload(t, b.sato, "material", "application/zip", bytes.Repeat([]byte("z"), testkit.MaxUploadBytes+1))
-	b.try(t, b.sato, "document.create", m{"course_id": b.course, "kind": "material", "title": "x", "upload_token": big}, apperr.FailedPrecondition)
+	b.try(t, b.sato, "document.create", m{"course_id": b.course, "kind": "material", "title": "x", "files": oneFile(big)}, apperr.FailedPrecondition)
 	claim, _ := b.Uploads.VerifyUpload(big)
 	if _, err := b.Blob.Stat(context.Background(), claim.Key); err == nil {
 		t.Fatal("an oversized upload was kept after being refused")
@@ -277,13 +294,13 @@ func TestSubmissionFiles(t *testing.T) {
 	essay := []byte("PK zip of an essay")
 	token := b.upload(t, b.yuki, "submission", "application/zip", essay)
 	file := testkit.Result[tools.DocumentCreateOut](t, b.do(t, b.yuki, "document.create",
-		m{"course_id": b.course, "kind": "submission", "title": "essay.zip", "submission_id": draft, "upload_token": token})).DocumentID
+		m{"course_id": b.course, "kind": "submission", "title": "essay.zip", "submission_id": draft, "files": oneFile(token)})).DocumentID
 
 	// A file is enough to hand in: no text needed.
 	b.do(t, b.yuki, "submission.submit", m{"course_id": b.course, "submission_id": draft})
 	// Once handed in, the files are frozen with it.
 	late := b.upload(t, b.yuki, "submission", "text/plain", []byte("one more thing"))
-	b.try(t, b.yuki, "document.create", m{"course_id": b.course, "kind": "submission", "title": "ps.txt", "submission_id": draft, "upload_token": late}, apperr.Conflict)
+	b.try(t, b.yuki, "document.create", m{"course_id": b.course, "kind": "submission", "title": "ps.txt", "submission_id": draft, "files": oneFile(late)}, apperr.Conflict)
 	b.try(t, b.yuki, "document.archive", m{"course_id": b.course, "document_id": file}, apperr.Conflict)
 	b.try(t, b.yuki, "document.add_version", m{"course_id": b.course, "document_id": file, "body_md": "v2"}, apperr.FailedPrecondition)
 
@@ -293,7 +310,7 @@ func TestSubmissionFiles(t *testing.T) {
 		t.Fatalf("submission files: %+v", sub.Files)
 	}
 	got := b.get(t, b.grader, m{"document_id": file})
-	if !bytes.Equal(b.download(t, *got.Version.DownloadURL), essay) {
+	if !bytes.Equal(b.download(t, firstURL(t, got.Version)), essay) {
 		t.Fatal("the grader did not get the student's bytes")
 	}
 	// Another student does not, and neither does a student attach to another's draft.
@@ -302,7 +319,7 @@ func TestSubmissionFiles(t *testing.T) {
 	}
 	kens := testkit.Result[tools.SubmissionCreateOut](t, b.do(t, b.ken, "submission.create", m{"course_id": b.course, "assignment_id": b.hw3})).SubmissionID
 	planted := b.upload(t, b.yuki, "submission", "text/plain", []byte("not yours"))
-	if out := b.MustCall(b.yuki, "document.create", m{"course_id": b.course, "kind": "submission", "title": "x", "submission_id": kens, "upload_token": planted}, "plant"); out.Status != domain.StatusDenied {
+	if out := b.MustCall(b.yuki, "document.create", m{"course_id": b.course, "kind": "submission", "title": "x", "submission_id": kens, "files": oneFile(planted)}, "plant"); out.Status != domain.StatusDenied {
 		t.Fatalf("Yuki attaching a file to Ken's draft: %+v", out)
 	}
 }
@@ -352,7 +369,7 @@ func TestFeedbackFilesTravelWithAProposal(t *testing.T) {
 	if len(g.FeedbackFiles) != 1 {
 		t.Fatalf("grade.get lists %d feedback files", len(g.FeedbackFiles))
 	}
-	if got := b.get(t, b.yuki, m{"document_id": g.FeedbackFiles[0].DocumentID}); !bytes.Equal(b.download(t, *got.Version.DownloadURL), marked) {
+	if got := b.get(t, b.yuki, m{"document_id": g.FeedbackFiles[0].DocumentID}); !bytes.Equal(b.download(t, firstURL(t, got.Version)), marked) {
 		t.Fatal("Yuki did not get her marked-up essay")
 	}
 	if out := b.MustCall(b.ken, "document.get", m{"course_id": b.course, "document_id": file}, ""); out.Status != domain.StatusDenied {
@@ -397,10 +414,10 @@ func TestAProposalIsNotMadeAboutAnUploadItMayOutlive(t *testing.T) {
 		args       func(token string) m
 	}{
 		{"document.create", "material", editor, func(token string) m {
-			return m{"kind": "material", "title": "Lecture 2", "upload_token": token}
+			return m{"kind": "material", "title": "Lecture 2", "files": oneFile(token)}
 		}},
 		{"document.add_version", "material", editor, func(token string) m {
-			return m{"document_id": lecture, "upload_token": token}
+			return m{"document_id": lecture, "files": oneFile(token)}
 		}},
 		{"grade.submit", "feedback", b.grader, func(token string) m {
 			return m{"submission_id": b.submit(t, b.yuki, "essay"), "score": 70, "feedback_files": []m{{"title": "notes.txt", "upload_token": token}}}
@@ -462,7 +479,7 @@ func TestWhereProposalsDoNotExpireAnUploadOfAnyAgeMayBeProposed(t *testing.T) {
 	b.P.SetClock(func() time.Time { return time.Now().Add(tools.OrphanGrace + time.Hour) })
 	defer b.P.SetClock(time.Now)
 
-	out := b.MustCall(editor, "document.create", m{"course_id": b.course, "kind": "material", "title": "Lecture 2", "upload_token": token}, "propose")
+	out := b.MustCall(editor, "document.create", m{"course_id": b.course, "kind": "material", "title": "Lecture 2", "files": oneFile(token)}, "propose")
 	if out.Status != domain.StatusProposed {
 		t.Fatalf("with no proposal TTL, a proposal naming an upload more than %v old: %+v", tools.OrphanGrace, out)
 	}
@@ -538,19 +555,19 @@ func TestAnAttachedFileCannotBeSwapped(t *testing.T) {
 	u := testkit.Result[tools.UploadURLOut](t, b.do(t, b.yuki, "document.upload_url", m{"course_id": b.course, "kind": "submission", "content_type": "application/pdf"}))
 	b.put(t, u, []byte("placeholder"))
 	file := testkit.Result[tools.DocumentCreateOut](t, b.do(t, b.yuki, "document.create",
-		m{"course_id": b.course, "kind": "submission", "title": "essay.pdf", "submission_id": draft, "upload_token": u.UploadToken})).DocumentID
+		m{"course_id": b.course, "kind": "submission", "title": "essay.pdf", "submission_id": draft, "files": oneFile(u.UploadToken)})).DocumentID
 	b.do(t, b.yuki, "submission.submit", m{"course_id": b.course, "submission_id": draft})
 	swap(u, "the essay, finished after the deadline")
 
 	got := b.get(t, b.grader, m{"document_id": file})
-	if string(b.download(t, *got.Version.DownloadURL)) != "placeholder" {
+	if string(b.download(t, firstURL(t, got.Version))) != "placeholder" {
 		t.Fatal("the grader was served bytes that were PUT after the file was handed in")
 	}
-	if n := b.Count(`SELECT count(*) FROM document_version WHERE document_id = $1 AND storage_key LIKE 'attached/%' AND byte_size = 11`, file); n != 1 {
+	if n := b.Count(`SELECT count(*) FROM document_version_file WHERE document_id = $1 AND storage_key LIKE 'attached/%' AND byte_size = 11`, file); n != 1 {
 		t.Fatal("the version does not record the final object")
 	}
 	// The swapped-in object is not something the token can attach either.
-	b.try(t, b.yuki, "document.create", m{"course_id": b.course, "kind": "submission", "title": "again", "submission_id": draft, "upload_token": u.UploadToken}, apperr.Conflict)
+	b.try(t, b.yuki, "document.create", m{"course_id": b.course, "kind": "submission", "title": "again", "submission_id": draft, "files": oneFile(u.UploadToken)}, apperr.Conflict)
 
 	// The same for a file that travelled inside a proposal: what Sato
 	// approved is what Ken downloads.
@@ -573,7 +590,7 @@ func TestAnAttachedFileCannotBeSwapped(t *testing.T) {
 	if len(g.FeedbackFiles) != 1 {
 		t.Fatalf("%d feedback files", len(g.FeedbackFiles))
 	}
-	if got := b.get(t, b.ken, m{"document_id": g.FeedbackFiles[0].DocumentID}); string(b.download(t, *got.Version.DownloadURL)) != "well argued" {
+	if got := b.get(t, b.ken, m{"document_id": g.FeedbackFiles[0].DocumentID}); string(b.download(t, firstURL(t, got.Version))) != "well argued" {
 		t.Fatal("Ken was served feedback that was PUT after the proposal was approved")
 	}
 }
@@ -687,14 +704,14 @@ func TestWithdrawnFeedbackIsWithdrawn(t *testing.T) {
 	gradeID := testkit.Result[tools.GradeSubmitOut](t, b.do(t, b.sato, "grade.submit", m{"course_id": b.course, "submission_id": work, "score": 90})).GradeID
 	token := b.upload(t, b.sato, "feedback", "application/pdf", []byte("%PDF Ken's marked-up essay"))
 	wrong := testkit.Result[tools.DocumentCreateOut](t, b.do(t, b.sato, "document.create", m{"course_id": b.course, "kind": "feedback",
-		"title": "essay-marked.pdf", "grade_id": gradeID, "body_md": "notes for Ken", "upload_token": token}))
+		"title": "essay-marked.pdf", "grade_id": gradeID, "body_md": "notes for Ken", "files": oneFile(token)}))
 	versions := m{"course_id": b.course, "document_id": wrong.DocumentID}
 	if _, err := b.Call(b.tutor, "document.versions", versions, ""); !apperr.Is(err, apperr.NotFound) {
 		t.Fatalf("the tutor listing the versions of feedback on a draft grade: %v", err)
 	}
 	b.do(t, b.sato, "grade.post", m{"course_id": b.course, "grade_ids": []uuid.UUID{gradeID}})
 	for _, reader := range []uuid.UUID{b.yuki, b.tutor} {
-		if got := b.get(t, reader, m{"document_id": wrong.DocumentID}); got.Version == nil || got.Version.DownloadURL == nil {
+		if got := b.get(t, reader, m{"document_id": wrong.DocumentID}); got.Version == nil || len(got.Version.Files) == 0 {
 			t.Fatalf("posted feedback: %+v", got)
 		}
 	}
@@ -941,17 +958,17 @@ func TestARetriedAttachFindsTheMovedObject(t *testing.T) {
 	}
 
 	file := testkit.Result[tools.DocumentCreateOut](t, b.do(t, b.yuki, "document.create",
-		m{"course_id": b.course, "kind": "submission", "title": "essay.txt", "submission_id": draft, "upload_token": u.UploadToken})).DocumentID
+		m{"course_id": b.course, "kind": "submission", "title": "essay.txt", "submission_id": draft, "files": oneFile(u.UploadToken)})).DocumentID
 	got := b.get(t, b.yuki, m{"document_id": file})
-	if string(b.download(t, *got.Version.DownloadURL)) != "my essay" {
+	if string(b.download(t, firstURL(t, got.Version))) != "my essay" {
 		t.Fatal("the retried attach did not attach the moved object")
 	}
-	if n := b.Count(`SELECT count(*) FROM document_version WHERE document_id = $1 AND storage_key = $2 AND byte_size = 8`, file, store.FinalKey(key)); n != 1 {
+	if n := b.Count(`SELECT count(*) FROM document_version_file WHERE document_id = $1 AND storage_key = $2 AND byte_size = 8`, file, store.FinalKey(key)); n != 1 {
 		t.Fatal("the version does not record the final object")
 	}
 	// A token whose object was never uploaded is still refused.
 	never := testkit.Result[tools.UploadURLOut](t, b.do(t, b.yuki, "document.upload_url", m{"course_id": b.course, "kind": "submission", "content_type": "text/plain"}))
-	b.try(t, b.yuki, "document.create", m{"course_id": b.course, "kind": "submission", "title": "x", "submission_id": draft, "upload_token": never.UploadToken}, apperr.FailedPrecondition)
+	b.try(t, b.yuki, "document.create", m{"course_id": b.course, "kind": "submission", "title": "x", "submission_id": draft, "files": oneFile(never.UploadToken)}, apperr.FailedPrecondition)
 }
 
 // An installation's files can be moved from this server's disk to a bucket,
@@ -984,19 +1001,19 @@ func TestAnUploadAttachedOnDiskIsNotAttachedAgainOnceTheFilesAreInABucket(t *tes
 	slides := b.upload(t, b.sato, "material", "application/pdf", []byte("%PDF-1.7 the slides"))
 	files[slides] = []byte("%PDF-1.7 the slides")
 	lecture := testkit.Result[tools.DocumentCreateOut](t, b.do(t, b.sato, "document.create",
-		m{"course_id": b.course, "kind": "material", "title": "Lecture 1", "upload_token": slides})).DocumentID
+		m{"course_id": b.course, "kind": "material", "title": "Lecture 1", "files": oneFile(slides)})).DocumentID
 	b.do(t, b.sato, "document.publish", m{"course_id": b.course, "document_id": lecture})
 	draft := testkit.Result[tools.SubmissionCreateOut](t, b.do(t, b.yuki, "submission.create", m{"course_id": b.course, "assignment_id": b.hw3})).SubmissionID
 	essay := b.upload(t, b.yuki, "submission", "application/pdf", []byte("%PDF-1.7 the essay"))
 	files[essay] = []byte("%PDF-1.7 the essay")
-	b.do(t, b.yuki, "document.create", m{"course_id": b.course, "kind": "submission", "title": "essay.pdf", "submission_id": draft, "upload_token": essay})
+	b.do(t, b.yuki, "document.create", m{"course_id": b.course, "kind": "submission", "title": "essay.pdf", "submission_id": draft, "files": oneFile(essay)})
 	b.do(t, b.yuki, "submission.submit", m{"course_id": b.course, "submission_id": draft})
 	notes := b.upload(t, b.sato, "feedback", "text/plain", []byte("well argued"))
 	files[notes] = []byte("well argued")
 	b.do(t, b.sato, "grade.submit", m{"course_id": b.course, "submission_id": draft, "score": 80,
 		"feedback_files": []m{{"title": "notes.txt", "upload_token": notes}}})
 	for token := range files {
-		if n := b.Count(`SELECT count(*) FROM document_version WHERE storage_key = $1`, keyOf(token)); n != 1 {
+		if n := b.Count(`SELECT count(*) FROM document_version_file WHERE storage_key = $1`, keyOf(token)); n != 1 {
 			t.Fatalf("the disk recorded %d versions under the key %s was uploaded to, want 1", n, keyOf(token))
 		}
 	}
@@ -1006,12 +1023,12 @@ func TestAnUploadAttachedOnDiskIsNotAttachedAgainOnceTheFilesAreInABucket(t *tes
 	// Replayed in the bucket, each token is refused as attached, however it
 	// comes: a new version, a new document, a new attempt's file, the files
 	// of another grade.
-	b.refusedAs(t, b.sato, "document.add_version", m{"course_id": b.course, "document_id": lecture, "upload_token": slides},
+	b.refusedAs(t, b.sato, "document.add_version", m{"course_id": b.course, "document_id": lecture, "files": oneFile(slides)},
 		apperr.Conflict, "already_attached")
-	b.refusedAs(t, b.sato, "document.create", m{"course_id": b.course, "kind": "material", "title": "Lecture 1 again", "upload_token": slides},
+	b.refusedAs(t, b.sato, "document.create", m{"course_id": b.course, "kind": "material", "title": "Lecture 1 again", "files": oneFile(slides)},
 		apperr.Conflict, "already_attached")
 	again := testkit.Result[tools.SubmissionCreateOut](t, b.do(t, b.yuki, "submission.create", m{"course_id": b.course, "assignment_id": b.hw3})).SubmissionID
-	b.refusedAs(t, b.yuki, "document.create", m{"course_id": b.course, "kind": "submission", "title": "essay.pdf", "submission_id": again, "upload_token": essay},
+	b.refusedAs(t, b.yuki, "document.create", m{"course_id": b.course, "kind": "submission", "title": "essay.pdf", "submission_id": again, "files": oneFile(essay)},
 		apperr.Conflict, "already_attached")
 	kens := b.submit(t, b.ken, "Ken's essay")
 	b.refusedAs(t, b.sato, "grade.submit", m{"course_id": b.course, "submission_id": kens, "score": 70,
@@ -1034,18 +1051,18 @@ func TestAnUploadAttachedOnDiskIsNotAttachedAgainOnceTheFilesAreInABucket(t *tes
 			t.Fatalf("an attached file was copied to %s: %v", store.FinalKey(key), err)
 		}
 	}
-	if got := b.get(t, b.yuki, m{"document_id": lecture}); string(b.download(t, *got.Version.DownloadURL)) != "%PDF-1.7 the slides" {
+	if got := b.get(t, b.yuki, m{"document_id": lecture}); string(b.download(t, firstURL(t, got.Version))) != "%PDF-1.7 the slides" {
 		t.Fatal("Yuki cannot read the slides the move kept")
 	}
 
 	// An upload the disk never attached is attached as the bucket attaches
 	// one, once.
 	fresh := b.upload(t, b.sato, "material", "application/pdf", []byte("%PDF-1.7 new slides"))
-	b.do(t, b.sato, "document.add_version", m{"course_id": b.course, "document_id": lecture, "upload_token": fresh, "publish": true})
-	if n := b.Count(`SELECT count(*) FROM document_version WHERE document_id = $1 AND storage_key = $2`, lecture, store.FinalKey(keyOf(fresh))); n != 1 {
+	b.do(t, b.sato, "document.add_version", m{"course_id": b.course, "document_id": lecture, "files": oneFile(fresh), "publish": true})
+	if n := b.Count(`SELECT count(*) FROM document_version_file WHERE document_id = $1 AND storage_key = $2`, lecture, store.FinalKey(keyOf(fresh))); n != 1 {
 		t.Fatal("an upload attached in the bucket is not recorded under its final key")
 	}
-	b.refusedAs(t, b.sato, "document.add_version", m{"course_id": b.course, "document_id": lecture, "upload_token": fresh},
+	b.refusedAs(t, b.sato, "document.add_version", m{"course_id": b.course, "document_id": lecture, "files": oneFile(fresh)},
 		apperr.Conflict, "already_attached")
 
 	// Attaching one upload several times at once, each call takes the locks
@@ -1057,7 +1074,7 @@ func TestAnUploadAttachedOnDiskIsNotAttachedAgainOnceTheFilesAreInABucket(t *tes
 	for i := range outs {
 		wg.Go(func() {
 			outs[i], errs[i] = b.Call(b.sato, "document.create", m{"course_id": b.course, "kind": "material", "title": "Raced",
-				"upload_token": raced}, "raced-"+uuid.NewString())
+				"files": oneFile(raced)}, "raced-"+uuid.NewString())
 		})
 	}
 	wg.Wait()
@@ -1072,7 +1089,7 @@ func TestAnUploadAttachedOnDiskIsNotAttachedAgainOnceTheFilesAreInABucket(t *tes
 			t.Fatalf("an attach racing others: %+v", out)
 		}
 	}
-	if attached != 1 || b.Count(`SELECT count(*) FROM document_version WHERE storage_key = $1`, store.FinalKey(keyOf(raced))) != 1 {
+	if attached != 1 || b.Count(`SELECT count(*) FROM document_version_file WHERE storage_key = $1`, store.FinalKey(keyOf(raced))) != 1 {
 		t.Fatalf("%d attaches of one upload went through at once, want 1", attached)
 	}
 }

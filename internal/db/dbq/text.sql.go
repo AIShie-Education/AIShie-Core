@@ -238,14 +238,14 @@ const getClaimedFile = `-- name: GetClaimedFile :one
 SELECT t.file_id, t.claimed_until, f.position, f.filename, f.storage_key, f.content_type, f.byte_size, f.checksum
 FROM document_version_text t
 JOIN document_version_file f ON f.id = t.file_id
-WHERE t.version_id = $1 AND t.status = 'working' AND t.lease_id = $2
-  AND ($3::uuid IS NULL OR t.file_id = $3::uuid)
+WHERE t.version_id = $1 AND t.file_id = $2 AND t.status = 'working'
+  AND t.lease_id = $3
 `
 
 type GetClaimedFileParams struct {
 	VersionID uuid.UUID
+	FileID    uuid.UUID
 	LeaseID   *uuid.UUID
-	FileID    *uuid.UUID
 }
 
 type GetClaimedFileRow struct {
@@ -259,10 +259,9 @@ type GetClaimedFileRow struct {
 	Checksum     *string
 }
 
-// The file of a text version the caller's claim holds: the one named, or
-// whichever of the version's the claim is of.
+// The file of a text version the caller's claim holds, by its id.
 func (q *Queries) GetClaimedFile(ctx context.Context, arg GetClaimedFileParams) (GetClaimedFileRow, error) {
-	row := q.db.QueryRow(ctx, getClaimedFile, arg.VersionID, arg.LeaseID, arg.FileID)
+	row := q.db.QueryRow(ctx, getClaimedFile, arg.VersionID, arg.FileID, arg.LeaseID)
 	var i GetClaimedFileRow
 	err := row.Scan(
 		&i.FileID,
@@ -743,64 +742,47 @@ func (q *Queries) LockText(ctx context.Context, arg LockTextParams) (DocumentVer
 	return i, err
 }
 
-const lockTextsForService = `-- name: LockTextsForService :many
+const lockTextForService = `-- name: LockTextForService :one
 SELECT version_id, document_id, course_id, status, body, source, pages, model, reason, revision, attempts, backfill, queued_at, lease_id, claimed_until, claimed_by_credential_id, claimed_at, produced_at, edited_by_member_id, edited_at, created_at, updated_at, file_id FROM document_version_text
-WHERE version_id = $1 AND ($2::uuid IS NULL OR file_id = $2::uuid)
-ORDER BY lease_id IS NOT DISTINCT FROM $3::uuid DESC, file_id
+WHERE version_id = $1 AND file_id = $2
 FOR UPDATE
 `
 
-type LockTextsForServiceParams struct {
+type LockTextForServiceParams struct {
 	VersionID uuid.UUID
-	FileID    *uuid.UUID
-	LeaseID   uuid.UUID
+	FileID    uuid.UUID
 }
 
-// The text versions a call of the service's may be about, held: the named
-// file's, or, where it names none, each of the version's, the one its claim
-// holds first.
-func (q *Queries) LockTextsForService(ctx context.Context, arg LockTextsForServiceParams) ([]DocumentVersionText, error) {
-	rows, err := q.db.Query(ctx, lockTextsForService, arg.VersionID, arg.FileID, arg.LeaseID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var items []DocumentVersionText
-	for rows.Next() {
-		var i DocumentVersionText
-		if err := rows.Scan(
-			&i.VersionID,
-			&i.DocumentID,
-			&i.CourseID,
-			&i.Status,
-			&i.Body,
-			&i.Source,
-			&i.Pages,
-			&i.Model,
-			&i.Reason,
-			&i.Revision,
-			&i.Attempts,
-			&i.Backfill,
-			&i.QueuedAt,
-			&i.LeaseID,
-			&i.ClaimedUntil,
-			&i.ClaimedByCredentialID,
-			&i.ClaimedAt,
-			&i.ProducedAt,
-			&i.EditedByMemberID,
-			&i.EditedAt,
-			&i.CreatedAt,
-			&i.UpdatedAt,
-			&i.FileID,
-		); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
+// The text version a call of the service's is about, by its file, held.
+func (q *Queries) LockTextForService(ctx context.Context, arg LockTextForServiceParams) (DocumentVersionText, error) {
+	row := q.db.QueryRow(ctx, lockTextForService, arg.VersionID, arg.FileID)
+	var i DocumentVersionText
+	err := row.Scan(
+		&i.VersionID,
+		&i.DocumentID,
+		&i.CourseID,
+		&i.Status,
+		&i.Body,
+		&i.Source,
+		&i.Pages,
+		&i.Model,
+		&i.Reason,
+		&i.Revision,
+		&i.Attempts,
+		&i.Backfill,
+		&i.QueuedAt,
+		&i.LeaseID,
+		&i.ClaimedUntil,
+		&i.ClaimedByCredentialID,
+		&i.ClaimedAt,
+		&i.ProducedAt,
+		&i.EditedByMemberID,
+		&i.EditedAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.FileID,
+	)
+	return i, err
 }
 
 const queueNewText = `-- name: QueueNewText :exec

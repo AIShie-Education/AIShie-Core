@@ -312,17 +312,17 @@ func TestArgumentsAreCheckedBeforeAnythingIsProposed(t *testing.T) {
 				{"upload_token": "t", "filename": "a.pdf"}, {"upload_token": "t", "filename": "b.pdf"}}}),
 			message: "the same upload is named twice"},
 		{tool: "document.add_version",
-			invalid: in(m{"document_id": notes, "upload_token": "t", "files": []m{{"upload_token": "u", "filename": "a.pdf"}}}),
-			message: "give files, or upload_token for one file, not both"},
+			invalid: in(m{"document_id": notes}),
+			message: "a version needs content: body_md or files"},
 		{tool: "document.text_update",
-			invalid: in(m{"document_id": notes, "version_id": uuid.New(), "body": " \n "}),
+			invalid: in(m{"document_id": notes, "version_id": uuid.New(), "file_id": uuid.New(), "body": " \n "}),
 			message: "the text is empty"},
 		// The site's services: what they write back.
 		{tool: "agent_runtime.rendition_complete",
 			invalid: m{"rendition_id": uuid.New(), "lease_id": uuid.New(), "status": "done", "page_count": 3},
 			message: "done needs upload_token"},
 		{tool: "document_text.complete",
-			invalid: m{"version_id": uuid.New(), "lease_id": uuid.New(), "status": "failed"},
+			invalid: m{"version_id": uuid.New(), "file_id": uuid.New(), "lease_id": uuid.New(), "status": "failed"},
 			message: "reason is 1 to 500 characters"},
 	}
 
@@ -702,7 +702,7 @@ func TestACallTheCourseWouldRefuseIsNotProposed(t *testing.T) {
 	// attempt and written nothing in it yet.
 	yukiDraft := testkit.Result[tools.SubmissionCreateOut](t, b.do(t, b.yuki, "submission.create", m{"course_id": b.course, "assignment_id": b.hw3})).SubmissionID
 	essay := testkit.Result[tools.DocumentCreateOut](t, b.do(t, b.yuki, "document.create", m{"course_id": b.course, "kind": "submission",
-		"title": "essay.txt", "submission_id": yukiDraft, "upload_token": b.upload(t, b.yuki, "submission", "text/plain", []byte("my essay"))})).DocumentID
+		"title": "essay.txt", "submission_id": yukiDraft, "files": oneFile(b.upload(t, b.yuki, "submission", "text/plain", []byte("my essay")))})).DocumentID
 	b.do(t, b.yuki, "submission.submit", m{"course_id": b.course, "submission_id": yukiDraft})
 	kenDraft := testkit.Result[tools.SubmissionCreateOut](t, b.do(t, b.ken, "submission.create", m{"course_id": b.course, "assignment_id": b.hw3})).SubmissionID
 	// Yuki took back a question of hers; Sato revoked a join link.
@@ -886,11 +886,11 @@ func TestACallTheCourseWouldRefuseIsNotProposed(t *testing.T) {
 			apperr.FailedPrecondition, "a submission file has exactly one version; replace it by archiving it and adding another"},
 		{"document.create", in(m{"kind": "submission", "title": "more.txt", "submission_id": yukiDraft, "body_md": "More."}),
 			apperr.Conflict, "the submission is submitted; files are added to a draft, and a new attempt is a new draft"},
-		{"document.create", in(m{"kind": "material", "title": "Slides", "upload_token": "not a token"}),
+		{"document.create", in(m{"kind": "material", "title": "Slides", "files": oneFile("not a token")}),
 			apperr.InvalidArgument, "upload_token is not valid"},
-		{"document.text_update", in(m{"document_id": old, "version_id": lastYear.VersionID, "body": "Old, corrected."}),
+		{"document.text_update", in(m{"document_id": old, "version_id": lastYear.VersionID, "file_id": uuid.New(), "body": "Old, corrected."}),
 			apperr.Conflict, "the document is archived"},
-		{"document.text_update", in(m{"document_id": notes, "version_id": notesVersion, "body": "Chapter 1."}),
+		{"document.text_update", in(m{"document_id": notes, "version_id": notesVersion, "file_id": uuid.New(), "body": "Chapter 1."}),
 			apperr.NotFound, "this version has no text version: only a file of a version of material, instructions or a rubric has one"},
 		{"document.text_retranscribe", in(m{"document_id": handout.DocumentID, "version_id": *handout.VersionID,
 			"file_id": handout.FileIDs[0], "base_revision": 99}),

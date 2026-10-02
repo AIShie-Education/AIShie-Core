@@ -28,8 +28,8 @@ import (
 // document.versions say where each stands, document.text reads one, in
 // parts. Whoever may write the document edits one (document.text_update)
 // and sends it back to be transcribed again (document.text_retranscribe),
-// each an action like any other write of a document's. A call that names no
-// file means the version's one file; a read, its first.
+// each an action like any other write of a document's. Each call names its
+// file.
 
 func textTools(d Deps) []tool.Tool {
 	return []tool.Tool{documentText(), documentTextUpdate(), documentTextRetranscribe(),
@@ -100,36 +100,24 @@ func textsOf(ctx context.Context, q dbq.Querier, document uuid.UUID) (map[uuid.U
 	return out, err
 }
 
-// errFileIDRequired refuses a write of a text that does not say which of a
-// version's files it is of.
-func errFileIDRequired(files int) *apperr.Error {
-	return apperr.Invalid("the version has %d files, each with a text version of its own: say which (file_id)", files).
-		With("reason", "file_id_required").With("files", files)
-}
-
 var errNoSuchFile = apperr.Missing("no such file of this version")
 
-// textFileOf is the file of a version a call about a text is about: the one
-// named; else the version's one file, or, for a read (first), its first. A
-// version with no file has no text (no_text).
-func textFileOf(ctx context.Context, q dbq.Querier, version uuid.UUID, file *uuid.UUID, first bool) (dbq.DocumentVersionFile, error) {
+// textFileOf is the file of a version a call about a text is about, by its
+// id. A version with no file has no text (no_text).
+func textFileOf(ctx context.Context, q dbq.Querier, version, file uuid.UUID) (dbq.DocumentVersionFile, error) {
 	files, err := q.ListVersionFiles(ctx, version)
-	switch {
-	case err != nil:
+	if err != nil {
 		return dbq.DocumentVersionFile{}, err
-	case len(files) == 0:
-		return dbq.DocumentVersionFile{}, errNoText()
-	case file != nil:
-		for _, f := range files {
-			if f.ID == *file {
-				return f, nil
-			}
-		}
-		return dbq.DocumentVersionFile{}, errNoSuchFile
-	case len(files) > 1 && !first:
-		return dbq.DocumentVersionFile{}, errFileIDRequired(len(files))
 	}
-	return files[0], nil
+	if len(files) == 0 {
+		return dbq.DocumentVersionFile{}, errNoText()
+	}
+	for _, f := range files {
+		if f.ID == file {
+			return f, nil
+		}
+	}
+	return dbq.DocumentVersionFile{}, errNoSuchFile
 }
 
 // callerFault says whether err is one the call is answered with, rather
@@ -244,8 +232,8 @@ func errNoText() *apperr.Error {
 type DocumentTextIn struct {
 	tool.InCourse
 	DocumentID uuid.UUID  `json:"document_id"`
-	VersionID  *uuid.UUID `json:"version_id,omitempty" jsonschema:"a specific version; otherwise the file's, when file_id is given, or the one document.get gives: the published one, or the latest for members who can read drafts"`
-	FileID     *uuid.UUID `json:"file_id,omitempty" jsonschema:"which of the version's files; its first if omitted"`
+	VersionID  *uuid.UUID `json:"version_id,omitempty" jsonschema:"the file's version; the file says which if omitted"`
+	FileID     uuid.UUID  `json:"file_id" jsonschema:"which file's text: the id document.get gives it in version.files"`
 	Part       int        `json:"part,omitempty" jsonschema:"which part of the text, from 1; 1 if omitted"`
 }
 
@@ -267,8 +255,7 @@ func documentText() tool.Tool {
 		Name: "document.text",
 		Description: "Read the text version of a file of a document's version: the file (slides, a PDF, a Word file) " +
 			"transcribed into Markdown, pictures and diagrams described in brackets, each page or slide under a heading of " +
-			"its own; or written by staff. Each file of a version has its own; file_id says which, the version's first if " +
-			"omitted. Read it before the file: it is the same for every model. For whoever may read the version, as " +
+			"its own; or written by staff. Each file of a version has its own; file_id says which. Read it before the file: it is the same for every model. For whoever may read the version, as " +
 			"document.get: students read the published one. A long text is read in parts of at most 65536 bytes, whole " +
 			"pages where they fit, from part 1 to parts; read them all at one revision. Until the text is done, it says " +
 			"where it stands (pending, working, failed or skipped, with reason) and has no body.",
@@ -282,9 +269,9 @@ func documentText() tool.Tool {
 				return DocumentTextOut{}, apperr.Invalid("part counts from 1")
 			}
 			version := in.VersionID
-			if in.FileID != nil && version == nil {
+			if version == nil {
 				// The file's version, as document.file reads it.
-				f, err := rc.Q.GetDocumentFile(ctx, dbq.GetDocumentFileParams{ID: *in.FileID, DocumentID: in.DocumentID})
+				f, err := rc.Q.GetDocumentFile(ctx, dbq.GetDocumentFileParams{ID: in.FileID, DocumentID: in.DocumentID})
 				if errors.Is(err, pgx.ErrNoRows) {
 					return DocumentTextOut{}, errNoFile
 				}
@@ -300,7 +287,7 @@ func documentText() tool.Tool {
 			if v == nil {
 				return DocumentTextOut{}, apperr.Missing("the document has no version for you to read")
 			}
-			f, err := textFileOf(ctx, rc.Q, v.ID, in.FileID, true)
+			f, err := textFileOf(ctx, rc.Q, v.ID, in.FileID)
 			if err != nil {
 				return DocumentTextOut{}, err
 			}
@@ -335,20 +322,20 @@ func documentText() tool.Tool {
 
 type DocumentTextUpdateIn struct {
 	tool.InCourse
-	DocumentID   uuid.UUID  `json:"document_id"`
-	VersionID    uuid.UUID  `json:"version_id"`
-	FileID       *uuid.UUID `json:"file_id,omitempty" jsonschema:"which of the version's files; required when it has more than one (file_id_required)"`
-	Body         string     `json:"body" jsonschema:"the whole text, Markdown, at most 2 MiB; it takes the place of what there was"`
-	BaseRevision *int32     `json:"base_revision,omitempty" jsonschema:"the revision of the text the edit was made from, as the views give it: if the text has changed since, the edit is refused (text_changed) rather than put over the change"`
+	DocumentID   uuid.UUID `json:"document_id"`
+	VersionID    uuid.UUID `json:"version_id"`
+	FileID       uuid.UUID `json:"file_id" jsonschema:"which of the version's files"`
+	Body         string    `json:"body" jsonschema:"the whole text, Markdown, at most 2 MiB; it takes the place of what there was"`
+	BaseRevision *int32    `json:"base_revision,omitempty" jsonschema:"the revision of the text the edit was made from, as the views give it: if the text has changed since, the edit is refused (text_changed) rather than put over the change"`
 }
 
 type DocumentTextRetranscribeIn struct {
 	tool.InCourse
-	DocumentID   uuid.UUID  `json:"document_id"`
-	VersionID    uuid.UUID  `json:"version_id"`
-	FileID       *uuid.UUID `json:"file_id,omitempty" jsonschema:"which of the version's files; required when it has more than one (file_id_required)"`
-	DiscardEdit  bool       `json:"discard_edit,omitempty" jsonschema:"true to discard staff's text: required when the text is staff's (staff_edit)"`
-	BaseRevision *int32     `json:"base_revision,omitempty" jsonschema:"the revision of the text the request was made from: if the text has changed since, it is refused (text_changed)"`
+	DocumentID   uuid.UUID `json:"document_id"`
+	VersionID    uuid.UUID `json:"version_id"`
+	FileID       uuid.UUID `json:"file_id" jsonschema:"which of the version's files"`
+	DiscardEdit  bool      `json:"discard_edit,omitempty" jsonschema:"true to discard staff's text: required when the text is staff's (staff_edit)"`
+	BaseRevision *int32    `json:"base_revision,omitempty" jsonschema:"the revision of the text the request was made from: if the text has changed since, it is refused (text_changed)"`
 }
 
 type DocumentTextChangeOut struct {
@@ -371,29 +358,28 @@ func textTarget(ctx context.Context, q dbq.Querier, courseID, documentID, versio
 	return t, nil
 }
 
-// pinText fixes, for a proposal, the file and the revision of the text it
-// was made about, unless it names them: a text changed while it waits is not
-// what whoever asked for the change saw, and approving it refuses
-// (text_changed).
-func pinText(ctx context.Context, q dbq.Querier, version uuid.UUID, file *uuid.UUID, given *int32) (*uuid.UUID, *int32, error) {
-	f, err := textFileOf(ctx, q, version, file, false)
+// pinText fixes, for a proposal, the revision of the text it was made
+// about, unless it names one: a text changed while it waits is not what
+// whoever asked for the change saw, and approving it refuses (text_changed).
+func pinText(ctx context.Context, q dbq.Querier, version, file uuid.UUID, given *int32) (*int32, error) {
+	if given != nil {
+		return given, nil
+	}
+	f, err := textFileOf(ctx, q, version, file)
 	if callerFault(err) {
-		return file, given, nil // the call itself says what is wrong
+		return nil, nil // the call itself says what is wrong
 	}
 	if err != nil {
-		return file, given, err
-	}
-	if given != nil {
-		return &f.ID, given, nil
+		return nil, err
 	}
 	r, err := q.GetTextView(ctx, dbq.GetTextViewParams{VersionID: version, FileID: f.ID})
 	if errors.Is(err, pgx.ErrNoRows) {
-		return &f.ID, nil, nil
+		return nil, nil
 	}
 	if err != nil {
-		return file, nil, err
+		return nil, err
 	}
-	return &f.ID, &r.Revision, nil
+	return &r.Revision, nil
 }
 
 // staffText is a text version held for staff's change to it, and its
@@ -408,10 +394,10 @@ type staffText struct {
 
 // lockText holds the text version of a file of a version for staff's change
 // to it: of a version of material, instructions or a rubric, not archived,
-// with the file, named or the version's one (textFileOf). A file of a
+// with the file named (textFileOf). A file of a
 // version from before text versions, never queued, is given one here,
 // pending: staff may write it, or ask for it to be transcribed.
-func lockText(ctx context.Context, ec *tool.ExecCtx, courseID, documentID, versionID uuid.UUID, fileID *uuid.UUID) (staffText, error) {
+func lockText(ctx context.Context, ec *tool.ExecCtx, courseID, documentID, versionID, fileID uuid.UUID) (staffText, error) {
 	var st staffText
 	if err := ec.Q.LockDocument(ctx, documentID); err != nil {
 		return st, err
@@ -436,7 +422,7 @@ func lockText(ctx context.Context, ec *tool.ExecCtx, courseID, documentID, versi
 	if v.PurgedAt != nil {
 		return st, errNoText()
 	}
-	f, err := textFileOf(ctx, ec.Q, v.ID, fileID, false)
+	f, err := textFileOf(ctx, ec.Q, v.ID, fileID)
 	if err != nil {
 		return st, err
 	}
@@ -474,7 +460,7 @@ func changedSince(revision int32, base *int32) error {
 // proposed, and when a proposal is approved (Validate), so that nobody is
 // asked to approve one that approving would refuse; lockText and
 // changedSince ask it again, held, as the change is made.
-func textToChange(ctx context.Context, q dbq.Querier, courseID, documentID, versionID uuid.UUID, fileID *uuid.UUID,
+func textToChange(ctx context.Context, q dbq.Querier, courseID, documentID, versionID, fileID uuid.UUID,
 	base *int32) (text *dbq.GetTextViewRow, err error) {
 	doc, err := loadDocument(ctx, q, courseID, documentID)
 	if err != nil {
@@ -496,7 +482,7 @@ func textToChange(ctx context.Context, q dbq.Querier, courseID, documentID, vers
 	if v.PurgedAt != nil {
 		return nil, errNoText()
 	}
-	f, err := textFileOf(ctx, q, v.ID, fileID, false)
+	f, err := textFileOf(ctx, q, v.ID, fileID)
 	if err != nil {
 		return nil, err
 	}
@@ -528,7 +514,7 @@ func documentTextUpdate() tool.Tool {
 	return tool.Define(tool.Spec[DocumentTextUpdateIn, DocumentTextChangeOut]{
 		Name: "document.text_update",
 		Description: "Write the text version of a file of a document's version, in place of what there was: correct a " +
-			"transcription, or write one by hand. file_id says which file; a version of one file needs none. The text is " +
+			"transcription, or write one by hand. file_id says which file. The text is " +
 			"staff's from then on: no transcription writes over it, and one under way is refused when it finishes. For " +
 			"whoever may write the document, as a new version is written; the text, at most 2 MiB of Markdown, is recorded " +
 			"with the action, for whoever decides or reviews it. base_revision refuses the edit if the text has changed " +
@@ -547,7 +533,7 @@ func documentTextUpdate() tool.Tool {
 		},
 		Pin: func(ctx context.Context, q dbq.Querier, _ *domain.Member, _ time.Time, in DocumentTextUpdateIn) (DocumentTextUpdateIn, error) {
 			var err error
-			in.FileID, in.BaseRevision, err = pinText(ctx, q, in.VersionID, in.FileID, in.BaseRevision)
+			in.BaseRevision, err = pinText(ctx, q, in.VersionID, in.FileID, in.BaseRevision)
 			return in, err
 		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in DocumentTextUpdateIn) (DocumentTextChangeOut, error) {
@@ -580,7 +566,7 @@ func documentTextRetranscribe() tool.Tool {
 		Description: "Send the text version of a file of a document's version to be transcribed again, or for the first " +
 			"time for a version added before there were text versions: it is pending again, ahead of anything queued when " +
 			"text versions came in, and what it said is gone until the new transcription is done; one under way is refused " +
-			"when it finishes. file_id says which file; a version of one file needs none. A text staff wrote or corrected " +
+			"when it finishes. file_id says which file. A text staff wrote or corrected " +
 			"is discarded only with discard_edit true (staff_edit). For whoever may write the document. base_revision " +
 			"refuses it if the text has changed since (text_changed). A text already waiting its turn changes nothing " +
 			"(changed: false).",
@@ -600,7 +586,7 @@ func documentTextRetranscribe() tool.Tool {
 		},
 		Pin: func(ctx context.Context, q dbq.Querier, _ *domain.Member, _ time.Time, in DocumentTextRetranscribeIn) (DocumentTextRetranscribeIn, error) {
 			var err error
-			in.FileID, in.BaseRevision, err = pinText(ctx, q, in.VersionID, in.FileID, in.BaseRevision)
+			in.BaseRevision, err = pinText(ctx, q, in.VersionID, in.FileID, in.BaseRevision)
 			return in, err
 		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in DocumentTextRetranscribeIn) (DocumentTextChangeOut, error) {

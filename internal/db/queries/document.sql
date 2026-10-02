@@ -3,8 +3,9 @@ INSERT INTO document (id, course_id, kind, title, submission_id, grade_id, sort_
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8);
 
 -- name: InsertDocumentVersion :exec
-INSERT INTO document_version (id, document_id, seq, body_md, storage_key, content_type, byte_size, checksum, author_member_id, created_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10);
+-- Its files are written with it, in its transaction (InsertDocumentVersionFile).
+INSERT INTO document_version (id, document_id, seq, body_md, author_member_id, created_at)
+VALUES ($1, $2, $3, $4, $5, $6);
 
 -- name: InsertDocumentVersionFile :exec
 -- One file of a version, written with it (document_version_file_with_its_version).
@@ -56,7 +57,7 @@ SELECT * FROM document_version WHERE id = $1 AND document_id = $2;
 SELECT * FROM document_version WHERE document_id = $1 ORDER BY seq DESC LIMIT 1;
 
 -- name: ListVersions :many
-SELECT id, seq, (storage_key IS NOT NULL)::bool AS has_file, content_type, byte_size, author_member_id, created_at, purged_at
+SELECT id, seq, author_member_id, created_at, purged_at
 FROM document_version WHERE document_id = $1 ORDER BY seq;
 
 -- name: SetPublishedVersion :exec
@@ -80,10 +81,11 @@ GROUP BY v.id, v.seq
 ORDER BY v.seq;
 
 -- name: PurgeVersion :execrows
--- Its text, its file and the file's checksum go; the rest stays, with who,
--- when and why. The one change a version takes (document_version_guarded).
+-- Its text goes, and its files with it (document_version_files_purged); the
+-- rest stays, with who, when and why. The one change a version takes
+-- (document_version_guarded).
 UPDATE document_version
-SET body_md = NULL, storage_key = NULL, checksum = NULL,
+SET body_md = NULL,
     purged_at = sqlc.arg(purged_at), purged_by_actor_id = sqlc.arg(purged_by_actor_id), purge_reason = sqlc.arg(purge_reason)
 WHERE id = sqlc.arg(id) AND purged_at IS NULL;
 
@@ -166,11 +168,9 @@ SELECT EXISTS (
 );
 
 -- name: StorageKeyInUse :one
--- Whether a file has been attached: to a version of a document, as any of
--- its files or in its own columns (as the release before 0023 writes it),
--- or to a message of a conversation.
-SELECT (EXISTS (SELECT 1 FROM document_version WHERE storage_key = sqlc.narg(storage_key)::text)
-     OR EXISTS (SELECT 1 FROM document_version_file WHERE storage_key = sqlc.narg(storage_key)::text)
+-- Whether a file has been attached: to a version of a document, as one of
+-- its files, or to a message of a conversation.
+SELECT (EXISTS (SELECT 1 FROM document_version_file WHERE storage_key = sqlc.narg(storage_key)::text)
      OR EXISTS (SELECT 1 FROM conversation_attachment WHERE storage_key = sqlc.narg(storage_key)::text))::bool AS in_use;
 
 -- name: LockStorageKey :exec
