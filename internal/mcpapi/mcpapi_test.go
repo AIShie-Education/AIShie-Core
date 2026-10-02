@@ -433,6 +433,66 @@ func TestAnAgentGradesAnEssayOverMCP(t *testing.T) {
 	}
 }
 
+// An agent over MCP learns that its grade was sent back for changes as it
+// learns of a rejection, reads what to change in its own actions, and
+// proposes again naming the one it revises, in the argument revises, which
+// the action log takes out of the call as it takes the key.
+func TestAnAgentRevisesAGradeSentBackForChangesOverMCP(t *testing.T) {
+	f := serve(t, 1)
+	c, yuki := f.c, f.c.Students[0]
+	agent := f.connect(t, f.token(t, c.Grader))
+	sato := f.connect(t, f.token(t, c.Sato))
+
+	grade := m{"course_id": c.Course, "submission_id": yuki.HW3, "score": 85, "idempotency_key": "yuki-hw3"}
+	proposed, _ := call(t, agent, "grade_submit", grade)
+	if proposed.Status != "proposed" || !strings.Contains(proposed.Note, "action.changes_requested") || !strings.Contains(proposed.Note, "revises") {
+		t.Fatalf("grade_submit: %+v", proposed)
+	}
+	asked, res := call(t, sato, "action_decide", m{"course_id": c.Course, "action_id": proposed.ActionID, "decision": "request_changes",
+		"reason": "Add feedback the student can act on.", "idempotency_key": "changes"})
+	if asked.Status != "executed" || res.IsError || !strings.Contains(string(asked.Result), `"outcome":"changes_requested"`) {
+		t.Fatalf("asking for changes: %+v", asked)
+	}
+
+	feed, _ := call(t, agent, "event_list", m{"course_id": c.Course})
+	if !strings.Contains(string(feed.Result), `"type":"action.changes_requested"`) {
+		t.Fatalf("the agent's feed: %s", feed.Result)
+	}
+	mine, _ := call(t, agent, "action_list_mine", m{"course_id": c.Course})
+	if !strings.Contains(string(mine.Result), `"status":"changes_requested"`) || !strings.Contains(string(mine.Result), "Add feedback the student can act on.") {
+		t.Fatalf("the agent's own actions: %s", mine.Result)
+	}
+	// Retried, the first call says what became of it, and is no success.
+	if again, res := call(t, agent, "grade_submit", grade); again.Status != "changes_requested" || !again.Replayed || !res.IsError {
+		t.Fatalf("the first call, retried: %+v", again)
+	}
+
+	// Revising what is not a proposal of its own sent back: refused, recorded nowhere.
+	bad, res := call(t, agent, "grade_submit", m{"course_id": c.Course, "submission_id": yuki.HW3, "score": 85,
+		"idempotency_key": "bad", "revises": asked.ActionID})
+	if bad.Status != "error" || !res.IsError || bad.Error.Details["reason"] != "not_revisable" {
+		t.Fatalf("revising Sato's decision: %+v", bad)
+	}
+	if odd, _ := call(t, agent, "grade_submit", m{"course_id": c.Course, "submission_id": yuki.HW3, "score": 85,
+		"idempotency_key": "odd", "revises": 7}); odd.Status != "error" || odd.Error.Code != "invalid_argument" {
+		t.Fatalf("revises that is no id: %+v", odd)
+	}
+
+	revised, res := call(t, agent, "grade_submit", m{"course_id": c.Course, "submission_id": yuki.HW3, "score": 85,
+		"feedback": "Your thesis is clear; section two needs evidence.", "idempotency_key": "yuki-hw3-2", "revises": proposed.ActionID})
+	if revised.Status != "proposed" || res.IsError {
+		t.Fatalf("the revision: %+v", revised)
+	}
+	if n := c.Count(`SELECT count(*) FROM action WHERE id = $1 AND revises_action_id = $2 AND NOT payload ? 'revises'`,
+		*revised.ActionID, *proposed.ActionID); n != 1 {
+		t.Fatal("the revision's row does not name what it revises, or keeps the transport in its payload")
+	}
+	if decided, _ := call(t, sato, "action_decide", m{"course_id": c.Course, "action_id": revised.ActionID, "decision": "approve",
+		"idempotency_key": "ok"}); !strings.Contains(string(decided.Result), `"outcome":"executed"`) {
+		t.Fatalf("approving the revision: %+v", decided)
+	}
+}
+
 // A tree is built and staffed over MCP as over REST: the same tools behind
 // the same gate. An agent administers nothing, and is told so.
 func TestATreeIsBuiltAndStaffedOverMCP(t *testing.T) {
@@ -708,6 +768,15 @@ func TestToolsListIsTheRegistry(t *testing.T) {
 		write, read := reg.Kind == tool.Write, reg.Kind == tool.Read
 		if hasKey != write || required != write {
 			t.Errorf("%s: write=%v but idempotency_key present=%v required=%v", tl.Name, write, hasKey, required)
+		}
+		// A write may name the proposal it revises; nothing requires it,
+		// and nothing else takes it.
+		_, hasRevises := in.Properties[mcpapi.Revises]
+		if hasRevises != write || slices.Contains(in.Required, mcpapi.Revises) {
+			t.Errorf("%s: write=%v but revises present=%v, or required", tl.Name, write, hasRevises)
+		}
+		if _, own := reg.InputSchema.Properties[mcpapi.Revises]; own {
+			t.Errorf("%s takes an argument of its own named %s", tl.Name, mcpapi.Revises)
 		}
 		if tl.Annotations == nil || tl.Annotations.ReadOnlyHint != read || tl.Annotations.IdempotentHint != (reg.Kind != tool.Ephemeral) {
 			t.Errorf("%s: readOnlyHint or idempotentHint is wrong", tl.Name)

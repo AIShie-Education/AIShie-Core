@@ -220,7 +220,7 @@ type ConversationExportOut struct {
 	Messages      int `json:"messages" jsonschema:"the messages it holds, the retracted among them"`
 	Retracted     int `json:"retracted" jsonschema:"of them, how many are retracted: held with their text, and marked"`
 	Attachments   int `json:"attachments" jsonschema:"the files the messages carry, described; their bytes are not in it"`
-	Proposals     int `json:"proposals" jsonschema:"the answers and questions proposed in its conversations and never posted: waiting for a decision, rejected or cancelled"`
+	Proposals     int `json:"proposals" jsonschema:"the answers and questions proposed in its conversations and never posted: waiting for a decision, rejected, sent back for changes or cancelled"`
 	// TextBytes is what its limit (max_bytes) measures.
 	TextBytes int64        `json:"text_bytes" jsonschema:"the bytes of what its messages and proposals say, which max_bytes bounds"`
 	Files     []ExportFile `json:"files"`

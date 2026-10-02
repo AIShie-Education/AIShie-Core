@@ -38,7 +38,7 @@ func (p *Pipeline) InvokeUnlisted(ctx context.Context, caller Caller, name strin
 	if err != nil {
 		return Outcome{}, err
 	}
-	return p.invoke(ctx, caller, t, in, rawArgs, idempotencyKey)
+	return p.invoke(ctx, caller, t, in, rawArgs, idempotencyKey, nil)
 }
 
 // NewActor is the caller of a call made with InvokeAsNew, made in the call's
@@ -96,7 +96,7 @@ func (p *Pipeline) InvokeAsNew(ctx context.Context, name string, rawArgs []byte,
 		if err != nil {
 			return err
 		}
-		if out, err = p.write(ctx, tx, Caller{ActorID: actor}, t, in, canonical, hash, idempotencyKey, final); err != nil {
+		if out, err = p.write(ctx, tx, Caller{ActorID: actor}, t, in, canonical, hash, idempotencyKey, nil, final); err != nil {
 			return err
 		}
 		if out.Status != domain.StatusExecuted {

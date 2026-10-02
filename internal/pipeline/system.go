@@ -65,7 +65,7 @@ func (p *Pipeline) InvokeSystem(ctx context.Context, systemActor uuid.UUID, name
 
 		existing, err := q.GetActionByKey(ctx, dbq.GetActionByKeyParams{ActorID: systemActor, IdempotencyKey: key})
 		if err == nil {
-			out, err = replay(existing, hash)
+			out, err = replay(existing, hash, nil)
 			return err
 		}
 		if !errors.Is(err, pgx.ErrNoRows) {
@@ -96,7 +96,7 @@ func (p *Pipeline) InvokeSystem(ctx context.Context, systemActor uuid.UUID, name
 			if err != nil {
 				return err
 			}
-			out, err = replay(existing, hash)
+			out, err = replay(existing, hash, nil)
 			return err
 		}
 		out = Outcome{ActionID: &actionID, ReviewState: domain.ReviewNone}

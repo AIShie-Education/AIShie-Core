@@ -31,8 +31,9 @@ var visibility = map[string][]domain.Perm{
 	// The action log belongs to those who decide. A proposer still sees what
 	// became of its own proposals, by the own-action rule.
 	events.ActionProposed: {domain.PermActionDecide}, events.ActionApproved: {domain.PermActionDecide},
-	events.ActionRejected: {domain.PermActionDecide}, events.ActionCancelled: {domain.PermActionDecide},
-	events.ActionReviewed: {domain.PermActionDecide}, events.ActionEscalated: {domain.PermActionDecide},
+	events.ActionRejected: {domain.PermActionDecide}, events.ActionChangesRequested: {domain.PermActionDecide},
+	events.ActionCancelled: {domain.PermActionDecide}, events.ActionReviewed: {domain.PermActionDecide},
+	events.ActionEscalated: {domain.PermActionDecide},
 
 	// A draft grade is for graders; a posted one for whoever may read grades.
 	events.GradeCreated:      {domain.PermGradeSubmit, domain.PermGradePost},
@@ -203,7 +204,7 @@ func eventList() tool.Tool {
 		Description: "The course's event feed from a cursor: everything that has happened since since_seq that the caller is " +
 			"allowed to know about. Events carry ids, never content — fetch what they point to with the read tools. " +
 			"The events of your own actions are always included, which is how you learn that a proposal was approved, " +
-			"rejected or cancelled. Core never calls out: call this again from next_seq. With wait_s, a call that finds " +
+			"rejected, sent back for changes (action.changes_requested) or cancelled. Core never calls out: call this again from next_seq. With wait_s, a call that finds " +
 			"nothing waits up to that many seconds for an event you may see, and answers as soon as there is one.",
 		Kind: tool.Read,
 		// Any seat in the course can read the feed; what it shows is decided

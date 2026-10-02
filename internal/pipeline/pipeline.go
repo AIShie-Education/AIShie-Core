@@ -134,7 +134,7 @@ type Caller struct {
 // reused for different content — come back as an error instead.
 type Outcome struct {
 	// Status is executed, proposed, denied or failed; a replay of an old
-	// proposal may also report rejected or cancelled.
+	// proposal may also report rejected, changes_requested or cancelled.
 	Status domain.ActionStatus `json:"status"`
 	// ActionID is nil for a Read: reads are not actions.
 	ActionID    *uuid.UUID         `json:"action_id,omitempty"`
@@ -156,18 +156,42 @@ func (p *Pipeline) Invoke(ctx context.Context, caller Caller, name string, rawAr
 	if err != nil {
 		return Outcome{}, err
 	}
-	return p.invoke(ctx, caller, t, in, rawArgs, idempotencyKey)
+	return p.invoke(ctx, caller, t, in, rawArgs, idempotencyKey, nil)
 }
 
-// invoke takes a decoded call down the road of its tool's kind.
-func (p *Pipeline) invoke(ctx context.Context, caller Caller, t tool.Tool, in any, rawArgs []byte, idempotencyKey string) (Outcome, error) {
+// InvokeRevising is Invoke for a call that revises a proposal: one of the
+// caller's own, in the same course, that its decider sent back for changes
+// (StatusChangesRequested). The call is made as any other, and its row says
+// which proposal it revises (revises_action_id), so that whoever decides it
+// can read what was asked and the chain can be followed back. Only a call
+// that is recorded revises anything: a read or an ephemeral write naming a
+// proposal is refused, as is one naming a proposal that is not the caller's
+// to revise, with nothing recorded.
+func (p *Pipeline) InvokeRevising(ctx context.Context, caller Caller, name string, rawArgs []byte, idempotencyKey string, revises uuid.UUID) (Outcome, error) {
+	t, ok := p.reg.Get(name)
+	if !ok || t.Internal || t.Unlisted {
+		return Outcome{}, apperr.Missing("there is no tool named %q", name)
+	}
+	in, err := t.Decode(rawArgs)
+	if err != nil {
+		return Outcome{}, err
+	}
+	return p.invoke(ctx, caller, t, in, rawArgs, idempotencyKey, &revises)
+}
+
+// invoke takes a decoded call down the road of its tool's kind. revises is
+// the proposal a write revises, if it names one.
+func (p *Pipeline) invoke(ctx context.Context, caller Caller, t tool.Tool, in any, rawArgs []byte, idempotencyKey string, revises *uuid.UUID) (Outcome, error) {
+	if revises != nil && t.Kind != tool.Write {
+		return Outcome{}, apperr.Invalid("%s is recorded nowhere, so it revises no proposal", t.Name).With("reason", "not_revisable")
+	}
 	switch t.Kind {
 	case tool.Read:
 		return p.invokeRead(ctx, caller, t, in)
 	case tool.Ephemeral:
 		return p.invokeEphemeral(ctx, caller, t, in)
 	}
-	return p.invokeWrite(ctx, caller, t, in, rawArgs, idempotencyKey)
+	return p.invokeWrite(ctx, caller, t, in, rawArgs, idempotencyKey, revises)
 }
 
 // isCallerFault reports whether err is the caller's doing, and as what. An
