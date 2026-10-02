@@ -2839,9 +2839,9 @@ respondent's `conversation_answer` decides is who is shown its text.
   again.
 - Four eyes counts parties (§2.6): an actor, the agents it owns or its owner, and the owner's
   other agents are one, in `action.decide`, `action.review`, at any remove and for escalations.
-  One exception, at no remove: an owner approves, rejects or reviews their own agent's action
-  where their own seat, as `authorize()` finds it for the same call when they decide, holds it at
-  `autonomous` and reaches its target, and, deciding a proposal, the tool's `Check` and
+  One exception, at no remove: an owner approves, rejects, asks for changes to or reviews their
+  own agent's action where their own seat, as `authorize()` finds it for the same call when they
+  decide, holds it at `autonomous` and reaches its target, and, deciding a proposal, the tool's `Check` and
   `Validate`, run as approving it now would run them, and its `Since`, of what changed since it
   was proposed, do not refuse it; `yours_to_decide` is worked out the same way, and the decision
   and its event say `by_owner`. That takes no `perm_action_decide` and is `autonomous` whatever

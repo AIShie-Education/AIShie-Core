@@ -660,7 +660,8 @@ header, its action id: one of the caller's own in the course, which ended in
 `changes_requested` (`action.decide` with `request_changes` and a note of what
 to change); anything else it names is refused with nothing recorded
 (`not_revisable`), and the same key with another `Revises`, or none, is a
-conflict. The response says what
+conflict. An empty `Revises` names nothing, as an empty or null `revises`
+over MCP does. The response says what
 became of the call. A call that was attempted is recorded, and the answer
 names the action in a top-level `action_id`: `200` executed, `202` proposed
 (it now waits for a human; watch the action id; one its tool's rules refuse as

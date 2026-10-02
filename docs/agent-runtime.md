@@ -1301,8 +1301,9 @@ Still open, none blocking M1: 2, 3, and one inbox across courses (4).
    (§2.0); `me_get` names the owner too (`owner_actor_id`).
 2. **Which permission gates each tool.** The catalogue has no gates, so §4
    keeps them by hand. Proposed: a `gate` field in `GET /v1/tools`.
-3. **A rejection's reason.** `action.rejected` carries none and `action_get`
-   needs `action_decide`, so the runtime pages `action_list_mine`. Proposed:
+3. **A rejection's reason, or what to change.** `action.rejected` and
+   `action.changes_requested` carry none, and `action_get` needs
+   `action_decide`, so the runtime pages `action_list_mine`. Proposed:
    `action_get` open to an action's own actor.
 4. **Finding work.** Settled in part: `conversation_inbox`, `event_list` and
    `conversation_messages` long-poll with `wait_s` (§7.2). One inbox across

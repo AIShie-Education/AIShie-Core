@@ -662,10 +662,16 @@ Run all of these as root on the server.
   reason, and forgets what each call revised; a decision proposed to ask for
   changes and still waiting is refused by the release before if it is
   approved. The site's agent runtime and front end that know of it come
-  with their own releases: until then the front end offers no button for
-  it, and a runtime that does not know it does not follow an answer sent
-  back as it follows one rejected, so a hosted agent's answers are better
-  rejected with a reason meanwhile.
+  with their own releases, **the runtime's first**: until then the front end
+  offers no button for it, and a runtime that does not know it leaves an
+  answer sent back for changes waiting for good. Its hosted agent never
+  answers that question again, `max_attempts` never closes the
+  conversation, and the seat shows the answer as waiting for approval; only
+  a new message from the asker gets an answer. Until the runtime that knows
+  it is deployed, reject a hosted agent's answer with a reason instead,
+  which it answers again with; that holds for an agent proposing to ask
+  for changes too, whose decision a teacher approves in the front end of
+  today.
 - **Migration 0013, `member_invite`:** the permission that makes a course's
   join links. Every seat a person holds got it at its level of
   `member_manage`, and every seat an agent holds got it `denied`, whatever it
