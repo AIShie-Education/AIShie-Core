@@ -381,7 +381,7 @@ another instance or after a restart.
 
 The tools, each gated to root and the platform's administrators (`platform_role_required`
 otherwise): `sso.list` and `sso.get` read the providers, the operator's first, with their status
-(`offered`, `disabled`, `id_taken`, `secret_unavailable`), how many accounts are linked at each
+(`offered`, `disabled`, `id_taken`, `secret_unavailable`, `issuer_address_not_allowed`), how many accounts are linked at each
 now, their version, and the redirect URI to register with each, which is the same for every
 provider: `<PUBLIC_URL>/v1/auth/sso/callback`. `sso.create` sets one up, switched off unless
 told otherwise; `sso.update` changes what it is given over the version its caller read
@@ -398,6 +398,11 @@ a sign-in its token endpoint) it fetches from public addresses only, checked on 
 each connection is made to once the name is resolved, unless the operator sets
 `SSO_ALLOW_PRIVATE_ISSUERS` (README, Single sign-on): an issuer plainly elsewhere is refused as
 it is set up (`issuer_address_not_allowed`), and a name that resolves elsewhere is reached never.
+One set up plainly elsewhere before, or while the setting was on, is not offered, and its status
+is `issuer_address_not_allowed`, which resolves nothing. A discovery document whose token endpoint
+or key set (`jwks_uri`), both fetched only as a sign-in comes back, is at no public address is
+refused as the provider is discovered, so that a sign-in through it is `sso_provider_unavailable`
+as it starts, not once the person has signed in at the provider; `sso.test` reports it beforehand.
 The operator's provider is the operator's setting, and is reached wherever it is.
 Changing a provider's issuer keeps the identities linked at it: whoever the new issuer vouches
 for under the same subject signs in as them.
@@ -2599,7 +2604,9 @@ respondent's `conversation_answer` decides is who is shown its text.
   switched off signs nobody in; the operator's provider wins over a site's of its name; linking
   by email asks every one of its questions again in the link's transaction (§2.1, Single
   sign-on); unless `SSO_ALLOW_PRIVATE_ISSUERS`, the server connects to no address of a site's
-  provider's that is not public, checked on the address dialled (package `sso`, `Public`).
+  provider's that is not public, checked on the address dialled (package `sso`, `Public`), offers
+  none whose issuer is plainly at such an address, and refuses as it discovers one a token
+  endpoint or key set at no public address (`sso.CheckEndpoints`).
 - The *transitions* between `action.status` values. The database checks that a row at rest is
   consistent with its `authz_result`; the order things happen in is application logic.
 - Idempotent replay: same key and same `payload_hash` returns the stored result, same key and
