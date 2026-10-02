@@ -80,6 +80,7 @@ type Action struct {
 	Result             []byte
 	Authority          *string
 	AuthorityDeptID    *uuid.UUID
+	RevisesActionID    *uuid.UUID
 }
 
 type Actor struct {

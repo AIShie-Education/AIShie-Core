@@ -390,6 +390,34 @@ func TestAnExportHoldsEveryMessageRetractedOnesMarkedAndNoBytesOrTokens(t *testi
 	}
 }
 
+// An answer sent back for changes is never posted, and an export holds it
+// as it holds one rejected: what it said, who asked for changes, and what
+// to change, as its reason.
+func TestAnExportHoldsAnAnswerSentBackForChanges(t *testing.T) {
+	a := newAudit(t)
+	const what = "Name the chapter, and leave the file out."
+	a.do(t, a.sato, "action.decide", m{"course_id": a.course, "action_id": a.waiting, "decision": "request_changes", "reason": what})
+	out, _ := a.export(t, a.Root, m{"course_id": a.course})
+	if out.Proposals != 2 {
+		t.Fatalf("the export: %+v", out)
+	}
+	x := a.files(t, out)
+	props := list(x.byID[a.c2.String()]["proposals"])
+	if len(props) != 2 {
+		t.Fatalf("c2's proposals: %v", props)
+	}
+	if sent := obj(props[1]); sent["action_id"] != a.waiting.String() || sent["status"] != "changes_requested" ||
+		sent["body"] != waitingAnswer || sent["reason"] != what || obj(sent["decided_by"])["actor_id"] != a.sato.String() {
+		t.Fatalf("the answer sent back for changes: %v", sent)
+	}
+	for _, row := range x.rows[1:] {
+		if x.column(row, "action_id") == a.waiting.String() && (x.column(row, "status") != "changes_requested" ||
+			x.column(row, "reason") != what || x.column(row, "decided_by_name") != "Sato") {
+			t.Fatalf("its row: %v", row)
+		}
+	}
+}
+
 func slicesEqual(a, b []uuid.UUID) bool {
 	if len(a) != len(b) {
 		return false

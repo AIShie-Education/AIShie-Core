@@ -10,7 +10,8 @@
 //	executed → 200    proposed → 202    denied → 403
 //	failed   → its error's own status: 400, 403, 404, 409 or 422
 //	replayed → as the action stands now, with Idempotency-Replayed: true;
-//	           a proposal since rejected is 409, one cancelled 422
+//	           a proposal since rejected, or sent back for changes, is 409,
+//	           one cancelled 422
 //
 // An answer with no top-level action_id records nothing, whatever its
 // status: among them every 401 and 429, a 400 or 404 from before the tool
@@ -34,6 +35,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/AIShie-Education/AIShie-Core/internal/apperr"
@@ -52,6 +54,11 @@ const (
 	HeaderIdempotencyKey = "Idempotency-Key"
 	HeaderReplayed       = "Idempotency-Replayed"
 	SessionCookie        = "ais_session"
+
+	// HeaderRevises names the proposal a call revises: one of the caller's,
+	// sent back for changes (pipeline.InvokeRevising). MCP takes the same
+	// as the argument revises.
+	HeaderRevises = "Revises"
 
 	maxBodyBytes = 1 << 20
 )
@@ -290,9 +297,11 @@ func (s *server) callTool(t tool.Tool) func(http.ResponseWriter, *http.Request) 
 		// One key. Given twice, which of the two a retry carries would decide
 		// whether it is the same call, so neither is taken, as a key named
 		// twice in a body is not.
-		if len(r.Header.Values(HeaderIdempotencyKey)) > 1 {
-			s.writeError(w, r, apperr.Invalid("%s is given more than once", HeaderIdempotencyKey))
-			return
+		for _, h := range []string{HeaderIdempotencyKey, HeaderRevises} {
+			if len(r.Header.Values(h)) > 1 {
+				s.writeError(w, r, apperr.Invalid("%s is given more than once", h))
+				return
+			}
 		}
 		args, err := buildArgs(t, r)
 		if err != nil {
@@ -300,8 +309,18 @@ func (s *server) callTool(t tool.Tool) func(http.ResponseWriter, *http.Request) 
 			return
 		}
 		p := r.Context().Value(callerKey{}).(auth.Principal)
-		out, err := s.Pipeline.Invoke(r.Context(), pipeline.Caller{ActorID: p.ActorID, CredentialID: p.CredentialID}, t.Name, args,
-			r.Header.Get(HeaderIdempotencyKey))
+		caller, key := pipeline.Caller{ActorID: p.ActorID, CredentialID: p.CredentialID}, r.Header.Get(HeaderIdempotencyKey)
+		var out pipeline.Outcome
+		if v := r.Header.Get(HeaderRevises); v != "" {
+			revises, perr := uuid.Parse(strings.TrimSpace(v))
+			if perr != nil {
+				s.writeError(w, r, apperr.Invalid("%s must be the id of the proposal the call revises", HeaderRevises))
+				return
+			}
+			out, err = s.Pipeline.InvokeRevising(r.Context(), caller, t.Name, args, key, revises)
+		} else {
+			out, err = s.Pipeline.Invoke(r.Context(), caller, t.Name, args, key)
+		}
 		if err == nil && t.BoundsOwnRate && out.Status == domain.StatusExecuted {
 			// An ephemeral write carried out that bounds its own rate is
 			// not what the limit counts (tool.Spec.BoundsOwnRate). One
@@ -648,7 +667,7 @@ func (s *server) cors(next http.Handler) http.Handler {
 			h.Add("Vary", "Origin")
 			if r.Method == http.MethodOptions && r.Header.Get("Access-Control-Request-Method") != "" {
 				h.Set("Access-Control-Allow-Methods", "GET, POST, PUT, OPTIONS")
-				h.Set("Access-Control-Allow-Headers", "Authorization, Content-Type, "+HeaderIdempotencyKey+", "+HeaderIfMatch)
+				h.Set("Access-Control-Allow-Headers", "Authorization, Content-Type, "+HeaderIdempotencyKey+", "+HeaderIfMatch+", "+HeaderRevises)
 				h.Set("Access-Control-Max-Age", "600")
 				w.WriteHeader(http.StatusNoContent)
 				return
@@ -725,7 +744,7 @@ func outcomeStatus(out pipeline.Outcome) int {
 		return http.StatusAccepted
 	case domain.StatusDenied:
 		return http.StatusForbidden
-	default: // failed; or, replaying an old proposal, rejected or cancelled
+	default: // failed; or, replaying an old proposal, rejected, changes_requested or cancelled
 		if out.Error != nil {
 			return codeStatus(out.Error.Code)
 		}

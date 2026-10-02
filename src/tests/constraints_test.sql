@@ -877,6 +877,58 @@ SELECT pg_temp.ok('proposal cancelled with a reason', $q$
     VALUES ('00000000-0000-0000-0000-000000000036', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000000053',
             'grade.submit', 'submission', 'k-cancel', 'confirm_required', 'cancelled', '{"error": {"code": "proposal_expired"}}') $q$);
 
+-- b2 the grader's grade, sent back for changes by Sato
+SELECT pg_temp.ok('changes requested of a proposal, by whom, when and what to change', $q$
+    INSERT INTO action (id, actor_id, course_id, member_id, action_type, target_type, idempotency_key, authz_result, status,
+                        decided_by_member_id, decided_at, result)
+    VALUES ('00000000-0000-0000-0000-0000000000b2', '00000000-0000-0000-0000-000000000036', '00000000-0000-0000-0000-000000000041',
+            '00000000-0000-0000-0000-000000000053', 'grade.submit', 'submission', 'k-changes', 'confirm_required', 'changes_requested',
+            '00000000-0000-0000-0000-000000000051', now(),
+            '{"decision": {"decision": "request_changes", "reason": "Give each criterion its points."}}') $q$);
+SELECT pg_temp.fails('only a confirm_required action has changes requested', '23514', $q$
+    INSERT INTO action (actor_id, action_type, target_type, idempotency_key, authz_result, status, result)
+    VALUES ('00000000-0000-0000-0000-000000000034', 'grade.submit', 'submission', 'k-cr1', 'autonomous', 'changes_requested',
+            '{"decision": {"reason": "x"}}') $q$);
+SELECT pg_temp.fails('changes are requested by someone', '23514', $q$
+    INSERT INTO action (actor_id, course_id, member_id, action_type, target_type, idempotency_key, authz_result, status, result)
+    VALUES ('00000000-0000-0000-0000-000000000036', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000000053',
+            'grade.submit', 'submission', 'k-cr2', 'confirm_required', 'changes_requested', '{"decision": {"reason": "x"}}') $q$);
+SELECT pg_temp.fails('changes are requested saying what to change', '23514', $q$
+    INSERT INTO action (actor_id, course_id, member_id, action_type, target_type, idempotency_key, authz_result, status,
+                        decided_by_member_id, decided_at, result)
+    VALUES ('00000000-0000-0000-0000-000000000036', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000000053',
+            'grade.submit', 'submission', 'k-cr3', 'confirm_required', 'changes_requested',
+            '00000000-0000-0000-0000-000000000051', now(), '{"decision": {"reason": ""}}') $q$);
+SELECT pg_temp.fails('what to change is at most 2000 characters', '23514', $q$
+    INSERT INTO action (actor_id, course_id, member_id, action_type, target_type, idempotency_key, authz_result, status,
+                        decided_by_member_id, decided_at, result)
+    VALUES ('00000000-0000-0000-0000-000000000036', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000000053',
+            'grade.submit', 'submission', 'k-cr4', 'confirm_required', 'changes_requested',
+            '00000000-0000-0000-0000-000000000051', now(), jsonb_build_object('decision', jsonb_build_object('reason', repeat('改', 2001)))) $q$);
+-- b3 the grader's revision of b2
+SELECT pg_temp.ok('a proposal revises its proposer''s own sent back for changes in its course', $q$
+    INSERT INTO action (id, actor_id, course_id, member_id, action_type, target_type, idempotency_key, authz_result, status,
+                        revises_action_id)
+    VALUES ('00000000-0000-0000-0000-0000000000b3', '00000000-0000-0000-0000-000000000036', '00000000-0000-0000-0000-000000000041',
+            '00000000-0000-0000-0000-000000000053', 'grade.submit', 'submission', 'k-rev1', 'confirm_required', 'proposed',
+            '00000000-0000-0000-0000-0000000000b2') $q$);
+SELECT pg_temp.fails('nobody revises someone else''s proposal', '23514', $q$
+    INSERT INTO action (actor_id, course_id, member_id, action_type, target_type, idempotency_key, authz_result, status,
+                        executed_at, revises_action_id)
+    VALUES ('00000000-0000-0000-0000-000000000034', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000000051',
+            'grade.submit', 'submission', 'k-rev2', 'autonomous', 'executed', now(), '00000000-0000-0000-0000-0000000000b2') $q$);
+SELECT pg_temp.fails('a revision is in the course of what it revises', '23514', $q$
+    INSERT INTO action (actor_id, course_id, action_type, target_type, idempotency_key, authz_result, status, revises_action_id)
+    VALUES ('00000000-0000-0000-0000-000000000036', '00000000-0000-0000-0000-000000000042', 'grade.submit', 'submission', 'k-rev3',
+            'denied', 'denied', '00000000-0000-0000-0000-0000000000b2') $q$);
+SELECT pg_temp.fails('only a proposal sent back for changes is revised', '23514', $q$
+    INSERT INTO action (actor_id, course_id, member_id, action_type, target_type, idempotency_key, authz_result, status,
+                        revises_action_id)
+    VALUES ('00000000-0000-0000-0000-000000000036', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000000053',
+            'grade.submit', 'submission', 'k-rev4', 'confirm_required', 'proposed', '00000000-0000-0000-0000-0000000000b3') $q$);
+SELECT pg_temp.fails('what an action revises never changes', '23001', $q$
+    UPDATE action SET revises_action_id = NULL WHERE id = '00000000-0000-0000-0000-0000000000b3' $q$);
+
 SELECT pg_temp.fails('member cannot approve own proposal', '23514', $q$
     INSERT INTO action (actor_id, course_id, member_id, action_type, target_type, target_id, idempotency_key,
                         authz_result, status, decided_by_member_id, decided_at)

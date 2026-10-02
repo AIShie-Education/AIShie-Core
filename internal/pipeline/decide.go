@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -31,16 +33,25 @@ const (
 	ToolActionReview = "action.review"
 )
 
+// The decisions about a proposal. Whoever may reject one may request
+// changes to it instead, under the same rules: it ends as a rejection does,
+// nothing of it carried out, in changes_requested, with a note of what to
+// change, for the proposer to propose again naming it (revises).
 const (
-	DecisionApprove = "approve"
-	DecisionReject  = "reject"
+	DecisionApprove        = "approve"
+	DecisionReject         = "reject"
+	DecisionRequestChanges = "request_changes"
 )
+
+// MaxChangesNoteChars bounds the note a request for changes carries, its
+// reason, in characters.
+const MaxChangesNoteChars = 2000
 
 type DecideIn struct {
 	tool.InCourse
 	ActionID uuid.UUID `json:"action_id" jsonschema:"the proposal being decided"`
-	Decision string    `json:"decision" jsonschema:"approve or reject"`
-	Reason   *string   `json:"reason,omitempty" jsonschema:"why; shown to the proposer"`
+	Decision string    `json:"decision" jsonschema:"approve, reject, or request_changes: send it back to its proposer to change and propose again"`
+	Reason   *string   `json:"reason,omitempty" jsonschema:"why; shown to the proposer. Required to request changes: what to change, 1 to 2000 characters"`
 }
 
 // DecideOut reports what became of the proposal, which is not the same as
@@ -48,8 +59,8 @@ type DecideIn struct {
 // lost the permission succeeds as a decision and cancels the proposal.
 type DecideOut struct {
 	ActionID uuid.UUID `json:"action_id"`
-	// Outcome is the proposal's new status: executed, failed, rejected or
-	// cancelled.
+	// Outcome is the proposal's new status: executed, failed, rejected,
+	// changes_requested or cancelled.
 	Outcome domain.ActionStatus `json:"outcome"`
 	Result  json.RawMessage     `json:"result,omitempty"`
 	Error   *apperr.Error       `json:"error,omitempty"`
@@ -69,13 +80,30 @@ const (
 	CancelWithdrawn = "withdrawn"
 )
 
-// CheckDecision is action.decide's Check: a decision is to approve or to
-// reject.
+// CheckDecision is action.decide's Check: a decision is to approve, to
+// reject, or to request changes, which says what to change (changesNote).
 func CheckDecision(in DecideIn) error {
-	if in.Decision != DecisionApprove && in.Decision != DecisionReject {
-		return apperr.Invalid("decision must be %q or %q", DecisionApprove, DecisionReject)
+	switch in.Decision {
+	case DecisionApprove, DecisionReject:
+		return nil
+	case DecisionRequestChanges:
+		_, err := changesNote(in.Reason)
+		return err
 	}
-	return nil
+	return apperr.Invalid("decision must be %q, %q or %q", DecisionApprove, DecisionReject, DecisionRequestChanges)
+}
+
+// changesNote is what a request for changes asks of its proposer: its
+// reason, trimmed, 1 to MaxChangesNoteChars characters.
+func changesNote(reason *string) (string, error) {
+	if reason == nil || strings.TrimSpace(*reason) == "" {
+		return "", apperr.Invalid("a request for changes says what to change, in reason").With("reason", "note_required")
+	}
+	note := strings.TrimSpace(*reason)
+	if n := utf8.RuneCountInString(note); n > MaxChangesNoteChars {
+		return "", apperr.Invalid("the note is %d characters long; the most is %d", n, MaxChangesNoteChars).With("reason", "note_too_long")
+	}
+	return note, nil
 }
 
 // errNoAction is what an action id that is not one of the course's answers.
@@ -201,9 +229,9 @@ func LockProposal(ctx context.Context, q dbq.Querier, course, id uuid.UUID) (dbq
 	return prop, err
 }
 
-// Decide approves or rejects a proposal. It runs as the Execute of
-// action.decide, inside that action's savepoint, on a decision CheckDecision
-// has taken.
+// Decide approves or rejects a proposal, or requests changes to it. It runs
+// as the Execute of action.decide, inside that action's savepoint, on a
+// decision CheckDecision has taken.
 func (p *Pipeline) Decide(ctx context.Context, ec *tool.ExecCtx, in DecideIn) (DecideOut, error) {
 	prop, err := LockProposal(ctx, ec.Q, in.CourseID, in.ActionID)
 	if err != nil {
@@ -244,6 +272,24 @@ func (p *Pipeline) Decide(ctx context.Context, ec *tool.ExecCtx, in DecideIn) (D
 		}
 		ec.Emit(proposalEvent(events.ActionRejected, prop, ec.ActionID, said(nil)))
 		out.Outcome = domain.StatusRejected
+		return out, nil
+	}
+	if in.Decision == DecisionRequestChanges {
+		// As a rejection, with the note it carries, which CheckDecision has
+		// taken, as its reason: a proposer reads both the same way. The
+		// event carries no note, as no event carries what was written.
+		note, err := changesNote(in.Reason)
+		if err != nil {
+			return DecideOut{}, err
+		}
+		res, _ := json.Marshal(map[string]any{"decision": said(map[string]any{
+			"decision": DecisionRequestChanges, "reason": note, "by_action_id": ec.ActionID,
+		})})
+		if err := finish(ctx, ec.Q, prop.ID, domain.StatusChangesRequested, &ec.Member.ID, ec, false, res); err != nil {
+			return DecideOut{}, err
+		}
+		ec.Emit(proposalEvent(events.ActionChangesRequested, prop, ec.ActionID, said(nil)))
+		out.Outcome = domain.StatusChangesRequested
 		return out, nil
 	}
 
@@ -387,7 +433,8 @@ func sameParty(ctx context.Context, q dbq.Querier, a, b uuid.UUID) (bool, error)
 // one case in which a party judges its own, and only at no remove: nobody
 // else of the party — the agent itself, its sibling — and nobody judging an
 // action of the party through a decision about it (judgesOwn) is let by it.
-// It is the same rule for approving and rejecting, and for reviewing.
+// It is the same rule for approving, rejecting and requesting changes, and
+// for reviewing.
 //
 // A proposal they could not have made themselves without its being refused
 // is not theirs to decide either: one whose arguments the tool's Check

@@ -112,6 +112,28 @@ func TestAnInboxThatWaitsHearsAQuestionAtOnce(t *testing.T) {
 	waitingNow(t, hub, 0)
 }
 
+// An inbox that waits hears an answer of its own sent back for changes, as
+// it hears one rejected: the question waits for an answer again.
+func TestAnInboxThatWaitsHearsChangesAskedFor(t *testing.T) {
+	b, hub := waking(t, wake.DefaultConfig)
+	b.do(t, b.sato, "member.update_perms", m{"course_id": b.course, "member_id": b.tutorM, "perms": m{"conversation_answer": "confirm_required"}})
+	conversation, question := b.open(t, b.yuki, b.tutorM, "Where do I start?")
+	proposed := b.MustCall(b.tutor, "conversation.answer", answerArgs(b, conversation, question, "Anywhere."), "answer:1")
+	if proposed.Status != domain.StatusProposed {
+		t.Fatalf("the answer: %+v", proposed)
+	}
+	inbox := b.reading(context.Background(), b.tutor, "conversation.inbox", m{"course_id": b.course, "wait_s": 10})
+	waitingNow(t, hub, 1)
+	notYet(t, inbox, 200*time.Millisecond)
+	b.do(t, b.sato, "action.decide", m{"course_id": b.course, "action_id": proposed.ActionID, "decision": "request_changes",
+		"reason": "Point her to chapter one."})
+	got := resultOf[tools.ConversationInboxOut](t, answered(t, inbox, 5*time.Second)).Conversations
+	if len(got) != 1 || got[0].ID != conversation {
+		t.Fatalf("inbox: %+v", got)
+	}
+	waitingNow(t, hub, 0)
+}
+
 // A reader of a conversation that waits hears the answer, and then, with no
 // message written, its closing; a change it has not seen answers at once.
 func TestMessagesThatWaitHearAMessageAndAClose(t *testing.T) {

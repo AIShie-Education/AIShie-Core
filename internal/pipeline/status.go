@@ -8,6 +8,7 @@ import "github.com/AIShie-Education/AIShie-Core/internal/domain"
 //	denied             denied            —                             none
 //	confirm_required   proposed          executed | failed  (approved) none
 //	                                     rejected
+//	                                     changes_requested
 //	                                     cancelled  (proposer no longer
 //	                                       allowed, target gone, too old,
 //	                                       member removed)
@@ -45,7 +46,8 @@ func canFollow(level domain.Level, from, to domain.ActionStatus) bool {
 			return false
 		}
 		switch to {
-		case domain.StatusExecuted, domain.StatusFailed, domain.StatusRejected, domain.StatusCancelled:
+		case domain.StatusExecuted, domain.StatusFailed, domain.StatusRejected, domain.StatusChangesRequested,
+			domain.StatusCancelled:
 			return true
 		}
 	case domain.StatusApproved:
@@ -54,7 +56,7 @@ func canFollow(level domain.Level, from, to domain.ActionStatus) bool {
 		}
 		return to == domain.StatusExecuted || to == domain.StatusFailed
 	}
-	return false // denied, executed, failed, rejected and cancelled are final
+	return false // denied, executed, failed, rejected, changes_requested and cancelled are final
 }
 
 // canReview reports whether a review may move from one state to another.

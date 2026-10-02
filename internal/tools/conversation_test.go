@@ -1048,6 +1048,46 @@ func TestAQuestionIsAnsweredOnce(t *testing.T) {
 	b.do(t, b.yuki, "conversation.close", m{"course_id": b.course, "conversation_id": conv, "reason": "Thanks"})
 }
 
+// An answer sent back for changes leaves its question waiting, as a
+// rejected one does: the conversation is back in its respondent's inbox,
+// which, waiting, hears it; the answer is written again under the next
+// attempt, naming the one it revises, and approved, the one answer posted.
+func TestAnAnswerSentBackForChangesIsWrittenAgain(t *testing.T) {
+	b := build(t)
+	b.do(t, b.sato, "member.update_perms", m{"course_id": b.course, "member_id": b.tutorM, "perms": m{"conversation_answer": "confirm_required"}})
+	conv, q := b.open(t, b.yuki, b.tutorM, "Is HW4 due on Friday?")
+	key := func(attempt int) string { return fmt.Sprintf("answer:%s:%s:%d", conv, q, attempt) }
+	first := b.MustCall(b.tutor, "conversation.answer", answerArgs(b, conv, q, "Yes"), key(1))
+	if first.Status != domain.StatusProposed {
+		t.Fatalf("the first answer: %+v", first)
+	}
+	if in := b.inbox(t, b.tutor); len(in) != 0 {
+		t.Fatalf("the inbox while the answer waits: %+v", in)
+	}
+	d := testkit.Result[pipeline.DecideOut](t, b.do(t, b.sato, "action.decide", m{"course_id": b.course, "action_id": first.ActionID,
+		"decision": "request_changes", "reason": "Say that it moved to Monday, and why."}))
+	if d.Outcome != domain.StatusChangesRequested {
+		t.Fatalf("asking for changes: %+v", d)
+	}
+	if in := b.inbox(t, b.tutor); len(in) != 1 || in[0].ID != conv {
+		t.Fatalf("the inbox once changes were asked for: %+v", in)
+	}
+	if n := b.Count(`SELECT count(*) FROM conversation_message WHERE in_reply_to_message_id = $1`, q); n != 0 {
+		t.Fatal("an answer sent back for changes was posted")
+	}
+	second, err := b.CallRevising(b.tutor, "conversation.answer", answerArgs(b, conv, q, "No: Monday, after the holiday."), key(2), *first.ActionID)
+	if err != nil || second.Status != domain.StatusProposed {
+		t.Fatalf("the answer written again: %+v, %v", second, err)
+	}
+	approved := testkit.Result[pipeline.DecideOut](t, b.do(t, b.sato, "action.decide", m{"course_id": b.course, "action_id": second.ActionID, "decision": "approve"}))
+	if approved.Outcome != domain.StatusExecuted {
+		t.Fatalf("approving it: %+v", approved)
+	}
+	if n := b.Count(`SELECT count(*) FROM conversation_message WHERE in_reply_to_message_id = $1 AND body = 'No: Monday, after the holiday.'`, q); n != 1 {
+		t.Fatal("the revised answer is not the one answer posted")
+	}
+}
+
 // The answers of a course tutor its instructor owns are that instructor's
 // party's: the queues list them, and say whose they are to decide. No person
 // answers a conversation, so the instructor is measured for them by what
