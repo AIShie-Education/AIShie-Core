@@ -135,7 +135,9 @@ if ! healthy "$ver" "$commit"; then
   docker logs --tail 30 "$NAME" >&2 2>&1 || true
   # The schema is one the version before works with (CONTRIBUTING.md,
   # Migrations), so it can take over again: if it is another image, not the
-  # same one by another name, and with the env file as it is now.
+  # same one by another name, and with the env file as it is now. Migration
+  # 0027 is the exception, which the version before does not work with
+  # (docs/deploying.md, The new version did not report healthy).
   if [ -n "$prev" ] && [ "$prev_id" != "$(docker image inspect -f '{{.Id}}' "$IMG" 2>/dev/null || true)" ]; then
     docker rm -f "$NAME" >/dev/null
     start "$prev"

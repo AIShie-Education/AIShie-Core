@@ -68,8 +68,7 @@ func (b *built) lecture(t *testing.T) tools.DocumentCreateOut {
 }
 
 // A material of three files and text is created, read and downloaded file
-// by file, by a student, in the order and under the names it was given; the
-// fields the release before read say its first file.
+// by file, by a student, in the order and under the names it was given.
 func TestAVersionHoldsSeveralFiles(t *testing.T) {
 	b := build(t)
 	made := b.lecture(t)
@@ -90,12 +89,6 @@ func TestAVersionHoldsSeveralFiles(t *testing.T) {
 		if f.Text == nil || f.Text.Status != "pending" || f.Text.Body != nil {
 			t.Fatalf("file %d's text version: %+v", i+1, f.Text)
 		}
-	}
-	// What the release before read is the first file's.
-	first := got.Files[0]
-	if got.DownloadURL == nil || *got.DownloadURL != *first.DownloadURL || *got.ContentType != first.ContentType ||
-		*got.ByteSize != first.ByteSize || *got.Checksum != *first.Checksum || got.Text == nil || got.Text.Status != "pending" {
-		t.Fatalf("the version's own file fields: %+v", got)
 	}
 	if n := b.Count(`SELECT count(*) FROM document_version_text WHERE version_id = $1 AND status = 'pending'`, *made.VersionID); n != 3 {
 		t.Fatalf("%d files queued for their text, want 3", n)
@@ -146,9 +139,9 @@ func TestAVersionHoldsSeveralFiles(t *testing.T) {
 	}
 	versions := testkit.Result[tools.DocumentVersionsOut](t, b.do(t, b.sato, "document.versions",
 		m{"course_id": b.course, "document_id": made.DocumentID})).Versions
-	if len(versions) != 2 || len(versions[0].Files) != 3 || len(versions[1].Files) != 2 || !versions[0].HasFile ||
+	if len(versions) != 2 || len(versions[0].Files) != 3 || len(versions[1].Files) != 2 ||
 		versions[1].Files[0].ID != v2.FileIDs[0] || versions[1].Files[1].Text == nil || versions[1].Files[1].Text.Status != "pending" ||
-		versions[0].Files[0].DownloadURL != nil || *versions[1].ContentType != "application/pdf" || versions[1].Text == nil {
+		versions[0].Files[0].DownloadURL != nil {
 		t.Fatalf("the versions: %+v", versions)
 	}
 	// Published, it is Yuki's to read.
@@ -188,8 +181,9 @@ func TestAVersionsFilesAreHeldToItsLimits(t *testing.T) {
 		{"upload_token": sixty(), "filename": "a.pdf"}, {"upload_token": sixty(), "filename": "b.pdf"},
 	}}), apperr.FailedPrecondition, "version_too_large")
 	one := small()
-	b.refusedAs(t, b.sato, "document.create", create(m{"upload_token": one, "files": []m{{"upload_token": small(), "filename": "a.pdf"}}}),
-		apperr.InvalidArgument, "files_and_upload_token")
+	// A version's files are files; upload_token alone, which named one, is no
+	// field of the call any more.
+	b.refusedAs(t, b.sato, "document.create", create(m{"upload_token": one}), apperr.InvalidArgument, "")
 	b.refusedAs(t, b.sato, "document.create", create(m{"files": []m{{"upload_token": one, "filename": "a.pdf"}, {"upload_token": one, "filename": "b.pdf"}}}),
 		apperr.InvalidArgument, "duplicate_file")
 	b.refusedAs(t, b.sato, "document.create", create(m{"files": []m{{"upload_token": one}}}), apperr.InvalidArgument, "filename_required")
@@ -273,8 +267,7 @@ func TestAProposedVersionKeepsItsFilesUntilItIsDecided(t *testing.T) {
 
 // Each file of a version has a text version of its own: the service claims
 // them one file at a time, in order, and writes each back; readers read each
-// by its file; staff write one by its file, and are asked which when a
-// version has several.
+// by its file; staff write one by its file. Every call names the file.
 func TestEachFileHasATextVersionOfItsOwn(t *testing.T) {
 	b := build(t)
 	svc := b.transcriber(t)
@@ -294,15 +287,16 @@ func TestEachFileHasATextVersionOfItsOwn(t *testing.T) {
 			t.Fatalf("claim %d's file: %q", i+1, body)
 		}
 	}
-	// The file of a claim, again, by its file or by its lease alone.
+	// The file of a claim, again, by its file; never by its lease alone.
 	again := testkit.Result[tools.TextFileOut](t, b.as(t, svc, "document_text.file", m{"version_id": version, "lease_id": claimed[1].LeaseID,
 		"file_id": claimed[1].FileID}))
 	if again.FileID != claimed[1].FileID || again.Filename != "handout.docx" {
 		t.Fatalf("document_text.file: %+v", again)
 	}
-	if byLease := testkit.Result[tools.TextFileOut](t, b.as(t, svc, "document_text.file", m{"version_id": version,
-		"lease_id": claimed[2].LeaseID})); byLease.FileID != claimed[2].FileID {
-		t.Fatalf("document_text.file by its lease: %+v", byLease)
+	for _, name := range []string{"document_text.file", "document_text.renew"} {
+		if _, err := b.CallWith(svc, name, m{"version_id": version, "lease_id": claimed[2].LeaseID}, ""); !apperr.Is(err, apperr.InvalidArgument) {
+			t.Fatalf("%s naming no file: %v", name, err)
+		}
 	}
 	// Another file's lease is not this file's.
 	if _, err := b.CallWith(svc, "document_text.file", m{"version_id": version, "lease_id": claimed[0].LeaseID,
@@ -311,14 +305,16 @@ func TestEachFileHasATextVersionOfItsOwn(t *testing.T) {
 	}
 	b.as(t, svc, "document_text.renew", m{"version_id": version, "file_id": claimed[0].FileID, "lease_id": claimed[0].LeaseID})
 
-	// Each written back: the first by its file, the second by its lease
-	// alone, the third failed.
+	// Each written back by its file, the third failed; a completion naming
+	// no file is refused, and writes nothing.
+	if _, err := b.CallWith(svc, "document_text.complete", m{"version_id": version, "lease_id": claimed[0].LeaseID, "status": "done",
+		"body": "## Slide 1", "pages": 1, "model": "A model"}, "complete-no-file"); !apperr.Is(err, apperr.InvalidArgument) {
+		t.Fatalf("a completion naming no file: %v", err)
+	}
 	bodies := []string{"## Slide 1\n\nLoops.", "## Page 1\n\nThe handout."}
 	for i, body := range bodies {
-		args := m{"version_id": version, "lease_id": claimed[i].LeaseID, "status": "done", "body": body, "pages": 1, "model": "A model"}
-		if i == 0 {
-			args["file_id"] = claimed[i].FileID
-		}
+		args := m{"version_id": version, "file_id": claimed[i].FileID, "lease_id": claimed[i].LeaseID, "status": "done", "body": body,
+			"pages": 1, "model": "A model"}
 		out := testkit.Result[tools.TextCompleteOut](t, b.as(t, svc, "document_text.complete", args))
 		if out.FileID != claimed[i].FileID || out.Status != "done" {
 			t.Fatalf("complete %d: %+v", i+1, out)
@@ -327,7 +323,7 @@ func TestEachFileHasATextVersionOfItsOwn(t *testing.T) {
 	b.as(t, svc, "document_text.complete", m{"version_id": version, "file_id": claimed[2].FileID, "lease_id": claimed[2].LeaseID,
 		"status": "skipped", "reason": "unsupported_format"})
 
-	// Readers read each by its file; the first when none is named.
+	// Readers read each by its file, and name it.
 	for i, body := range bodies {
 		got, err := b.readText(t, b.yuki, m{"document_id": made.DocumentID, "file_id": made.FileIDs[i]})
 		if err != nil || got.FileID != made.FileIDs[i] || got.Position != int32(i+1) || got.Filename != week3Files[i].filename ||
@@ -335,16 +331,15 @@ func TestEachFileHasATextVersionOfItsOwn(t *testing.T) {
 			t.Fatalf("the text of file %d: %+v, %v", i+1, got, err)
 		}
 	}
-	if got, err := b.readText(t, b.yuki, m{"document_id": made.DocumentID}); err != nil || got.FileID != made.FileIDs[0] {
-		t.Fatalf("the text with no file named: %+v, %v", got, err)
+	if _, err := b.Call(b.yuki, "document.text", m{"course_id": b.course, "document_id": made.DocumentID}, ""); !apperr.Is(err, apperr.InvalidArgument) {
+		t.Fatalf("the text with no file named: %v", err)
 	}
 	if got, err := b.readText(t, b.yuki, m{"document_id": made.DocumentID, "file_id": made.FileIDs[2]}); err != nil ||
 		got.Text.Status != "skipped" || got.Parts != 0 {
 		t.Fatalf("the skipped file's text: %+v, %v", got, err)
 	}
 	view := b.get(t, b.yuki, m{"document_id": made.DocumentID}).Version
-	if *view.Files[0].Text.Body != bodies[0] || *view.Files[1].Text.Body != bodies[1] || view.Files[2].Text.Status != "skipped" ||
-		*view.Text.Body != bodies[0] {
+	if *view.Files[0].Text.Body != bodies[0] || *view.Files[1].Text.Body != bodies[1] || view.Files[2].Text.Status != "skipped" {
 		t.Fatalf("document.get's texts: %+v", view)
 	}
 	// Each file's news names it.
@@ -355,11 +350,11 @@ func TestEachFileHasATextVersionOfItsOwn(t *testing.T) {
 		}
 	}
 
-	// Staff write one file's text by its file; a version of several asks which.
+	// Staff write one file's text by its file, and name it.
 	b.refusedAs(t, b.sato, "document.text_update", m{"course_id": b.course, "document_id": made.DocumentID, "version_id": version,
-		"body": "## Slide 1\n\nLoops, for and while."}, apperr.InvalidArgument, "file_id_required")
+		"body": "## Slide 1\n\nLoops, for and while."}, apperr.InvalidArgument, "")
 	b.refusedAs(t, b.sato, "document.text_retranscribe", m{"course_id": b.course, "document_id": made.DocumentID, "version_id": version},
-		apperr.InvalidArgument, "file_id_required")
+		apperr.InvalidArgument, "")
 	edited := testkit.Result[tools.DocumentTextChangeOut](t, b.do(t, b.sato, "document.text_update", m{"course_id": b.course,
 		"document_id": made.DocumentID, "version_id": version, "file_id": made.FileIDs[0], "body": "## Slide 1\n\nLoops, for and while."}))
 	if !edited.Changed || edited.FileID != made.FileIDs[0] {
@@ -391,16 +386,16 @@ func TestEachFileHasATextVersionOfItsOwn(t *testing.T) {
 	b.refusedAs(t, b.sato, "document.text_update", m{"course_id": b.course, "document_id": made.DocumentID, "version_id": version,
 		"file_id": uuid.New(), "body": "x"}, apperr.NotFound, "")
 
-	// Sent back, the file is claimed again, alone, and its completion
-	// without a file named finds it by its lease.
+	// Sent back, the file is claimed again, alone.
 	again2 := b.claim(t, svc, m{"max": 5})
 	if len(again2) != 1 || again2[0].FileID != made.FileIDs[2] {
 		t.Fatalf("claimed again: %+v", again2)
 	}
-	b.as(t, svc, "document_text.complete", m{"version_id": version, "lease_id": again2[0].LeaseID, "status": "done",
-		"body": "## loops.py\n\n```python\nfor i in range(3):\n```", "pages": 1, "model": "A model"})
-	// A lease that no longer holds, with no file named, is lost.
-	if _, err := b.CallWith(svc, "document_text.renew", m{"version_id": version, "lease_id": again2[0].LeaseID}, ""); !apperr.Is(err, apperr.Conflict) {
+	b.as(t, svc, "document_text.complete", m{"version_id": version, "file_id": again2[0].FileID, "lease_id": again2[0].LeaseID,
+		"status": "done", "body": "## loops.py\n\n```python\nfor i in range(3):\n```", "pages": 1, "model": "A model"})
+	// A lease that no longer holds is lost.
+	if _, err := b.CallWith(svc, "document_text.renew", m{"version_id": version, "file_id": again2[0].FileID,
+		"lease_id": again2[0].LeaseID}, ""); !apperr.Is(err, apperr.Conflict) {
 		t.Fatalf("renewing a finished claim: %v", err)
 	}
 	// A proposal of an edit names the file it is about.
@@ -417,53 +412,60 @@ func TestEachFileHasATextVersionOfItsOwn(t *testing.T) {
 	}
 }
 
-// The calls of before a version held several files work as they did: one
-// upload_token is one file, named as it was uploaded or after its document;
-// a version of one file needs no file named, by staff or by the service.
-func TestTheCallsOfOneFileWorkAsBefore(t *testing.T) {
+// The calls of before a version held several files are gone with 0027: a
+// version's one file is given in files, as any, and refused as upload_token
+// alone, and every call about a text names its file, of a version of one
+// file as of any, by staff, by readers and by the service.
+func TestAVersionOfOneFileIsWrittenAndReadAsAny(t *testing.T) {
 	b := build(t)
 	svc := b.transcriber(t)
 	pdf := []byte("%PDF week 1")
+	b.refusedAs(t, b.sato, "document.create", m{"course_id": b.course, "kind": "material", "title": "Week 1: Variables",
+		"upload_token": b.upload(t, b.sato, "material", "application/pdf", pdf)}, apperr.InvalidArgument, "")
 	made := testkit.Result[tools.DocumentCreateOut](t, b.do(t, b.sato, "document.create", m{"course_id": b.course, "kind": "material",
-		"title": "Week 1: Variables", "upload_token": b.upload(t, b.sato, "material", "application/pdf", pdf)}))
+		"title": "Week 1: Variables", "files": []m{{"upload_token": b.uploadNamed(t, b.sato, "material", "application/pdf", "variables.pdf", pdf)}}}))
 	if len(made.FileIDs) != 1 {
 		t.Fatalf("made: %+v", made)
 	}
-	got := b.get(t, b.sato, m{"document_id": made.DocumentID}).Version
-	if len(got.Files) != 1 || got.Files[0].Filename != "Week 1: Variables.pdf" || got.DownloadURL == nil || *got.ContentType != "application/pdf" {
-		t.Fatalf("the one file: %+v", got)
+	if n := b.Count(`SELECT count(*) FROM document_version_file WHERE id = $1 AND version_id = $2 AND position = 1
+	                 AND filename = 'variables.pdf'`, made.FileIDs[0], *made.VersionID); n != 1 {
+		t.Fatal("the one file is not the version's, named as it was uploaded")
 	}
-	if body, name := b.fetch(t, *got.DownloadURL); !bytes.Equal(body, pdf) || name != "Week 1: Variables.pdf" {
-		t.Fatalf("the version's download_url gives %q: %q", name, body)
-	}
-	// Named when it was uploaded, it keeps that name.
-	named := testkit.Result[tools.DocumentVersionOut](t, b.do(t, b.sato, "document.add_version", m{"course_id": b.course,
-		"document_id": made.DocumentID, "upload_token": b.uploadNamed(t, b.sato, "material", "application/pdf", "variables.pdf", pdf)}))
-	if f := b.get(t, b.sato, m{"document_id": made.DocumentID}).Version.Files; len(f) != 1 || f[0].ID != named.FileIDs[0] || f[0].Filename != "variables.pdf" {
-		t.Fatalf("named at upload: %+v", f)
-	}
+	b.refusedAs(t, b.sato, "document.add_version", m{"course_id": b.course, "document_id": made.DocumentID,
+		"upload_token": b.upload(t, b.sato, "material", "application/pdf", pdf)}, apperr.InvalidArgument, "")
 
 	c := b.claim(t, svc, m{"max": 1})[0]
 	if c.VersionID != *made.VersionID || c.FileID != made.FileIDs[0] {
 		t.Fatalf("the claim: %+v", c)
 	}
-	b.as(t, svc, "document_text.file", m{"version_id": c.VersionID, "lease_id": c.LeaseID})
-	b.as(t, svc, "document_text.renew", m{"version_id": c.VersionID, "lease_id": c.LeaseID})
+	lease := m{"version_id": c.VersionID, "lease_id": c.LeaseID}
+	for _, name := range []string{"document_text.file", "document_text.renew"} {
+		if _, err := b.CallWith(svc, name, lease, ""); !apperr.Is(err, apperr.InvalidArgument) {
+			t.Fatalf("%s naming no file: %v", name, err)
+		}
+	}
 	if out := b.complete(t, svc, c, "## Page 1"); out.Status != domain.StatusExecuted {
-		t.Fatalf("complete with no file named: %+v", out)
+		t.Fatalf("complete: %+v", out)
 	}
-	args := m{"course_id": b.course, "document_id": made.DocumentID, "version_id": made.VersionID}
-	if got, err := b.readText(t, b.sato, m{"document_id": made.DocumentID, "version_id": *made.VersionID}); err != nil || *got.Text.Body != "## Page 1" {
-		t.Fatalf("read with no file named: %+v, %v", got, err)
+	if _, err := b.Call(b.sato, "document.text", m{"course_id": b.course, "document_id": made.DocumentID, "version_id": *made.VersionID},
+		""); !apperr.Is(err, apperr.InvalidArgument) {
+		t.Fatalf("a read naming no file: %v", err)
 	}
-	args["body"] = "## Page 1\n\nCorrected."
+	if got, err := b.readText(t, b.sato, m{"document_id": made.DocumentID, "file_id": made.FileIDs[0]}); err != nil ||
+		*got.Text.Body != "## Page 1" || got.VersionID != *made.VersionID {
+		t.Fatalf("a read by its file: %+v, %v", got, err)
+	}
+	args := m{"course_id": b.course, "document_id": made.DocumentID, "version_id": made.VersionID, "body": "## Page 1\n\nCorrected."}
+	b.refusedAs(t, b.sato, "document.text_update", args, apperr.InvalidArgument, "")
+	args["file_id"] = made.FileIDs[0]
 	if out := testkit.Result[tools.DocumentTextChangeOut](t, b.do(t, b.sato, "document.text_update", args)); !out.Changed || out.FileID != made.FileIDs[0] {
-		t.Fatalf("an edit with no file named: %+v", out)
+		t.Fatalf("an edit by its file: %+v", out)
 	}
-	delete(args, "body")
-	args["discard_edit"] = true
+	args = m{"course_id": b.course, "document_id": made.DocumentID, "version_id": made.VersionID, "discard_edit": true}
+	b.refusedAs(t, b.sato, "document.text_retranscribe", args, apperr.InvalidArgument, "")
+	args["file_id"] = made.FileIDs[0]
 	if out := testkit.Result[tools.DocumentTextChangeOut](t, b.do(t, b.sato, "document.text_retranscribe", args)); !out.Changed {
-		t.Fatalf("sent back with no file named: %+v", out)
+		t.Fatalf("sent back by its file: %+v", out)
 	}
 }
 
@@ -503,7 +505,7 @@ func TestAPurgedVersionLosesAllItsFiles(t *testing.T) {
 		t.Fatal("the purged version's files or texts are still recorded")
 	}
 	got := b.get(t, b.sato, m{"document_id": made.DocumentID, "version_id": *made.VersionID}).Version
-	if got.Purged == nil || len(got.Files) != 0 || got.DownloadURL != nil || got.BodyMD != nil || got.Text != nil {
+	if got.Purged == nil || len(got.Files) != 0 || got.BodyMD != nil {
 		t.Fatalf("the tombstone: %+v", got)
 	}
 	b.refusedAs(t, b.sato, "document.file", m{"course_id": b.course, "document_id": made.DocumentID, "file_id": made.FileIDs[0]},
@@ -553,26 +555,22 @@ func TestASubmittedDocumentAndFeedbackHoldFilesAsAVersionDoes(t *testing.T) {
 	}
 }
 
-// The application names a file after its document's title as the database
-// does, for the file of a release that knows one file to a version.
-func TestAFileIsNamedAfterItsDocumentAsTheDatabaseNamesIt(t *testing.T) {
-	w := testkit.NewWorld(t)
-	for _, c := range []struct{ title, contentType string }{
-		{"Week 1", "application/pdf"},
-		{"Week 2/3\thandout", "application/vnd.openxmlformats-officedocument.wordprocessingml.document; charset=binary"},
-		{"essay.PDF", "application/pdf"},
-		{"  ", "image/png"},
-		{"notes", "application/x-unknown"},
-		{"a\\b" + string(rune(0x202e)) + "gpj.exe", "image/jpeg"},
-		{strings.Repeat("長", 300), "text/plain"},
-		{"\x7f" + string(rune(0x85)) + " trailing /", "text/markdown"},
+// A feedback file given no name is named after its title, as migration
+// 0023 named the file of each version there was: the title made a name,
+// with its type's extension.
+func TestAFileIsNamedAfterItsDocumentAsBefore(t *testing.T) {
+	for _, c := range []struct{ title, contentType, want string }{
+		{"Week 1", "application/pdf", "Week 1.pdf"},
+		{"Week 2/3\thandout", "application/vnd.openxmlformats-officedocument.wordprocessingml.document; charset=binary", "Week 2 3 handout.docx"},
+		{"essay.PDF", "application/pdf", "essay.PDF"},
+		{"  ", "image/png", "file.png"},
+		{"notes", "application/x-unknown", "notes"},
+		{"a\\b" + string(rune(0x202e)) + "gpj.exe", "image/jpeg", "a b gpj.exe.jpg"},
+		{strings.Repeat("長", 300), "text/plain", strings.Repeat("長", 251) + ".txt"},
+		{"\x7f" + string(rune(0x85)) + " trailing /", "text/markdown", "trailing.md"},
 	} {
-		var want string
-		if err := w.Pool.QueryRow(context.Background(), `SELECT document_file_name($1, $2)`, c.title, c.contentType).Scan(&want); err != nil {
-			t.Fatal(err)
-		}
-		if got := tools.LegacyFilename(c.title, c.contentType); got != want {
-			t.Fatalf("%q, %q: the application says %q, the database %q", c.title, c.contentType, got, want)
+		if got := tools.LegacyFilename(c.title, c.contentType); got != c.want {
+			t.Fatalf("%q, %q: %q, want %q", c.title, c.contentType, got, c.want)
 		}
 	}
 }

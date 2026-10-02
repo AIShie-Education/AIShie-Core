@@ -22,18 +22,12 @@ import (
 // text beside them or none. Each is uploaded first (document.upload_url) and
 // named, in order, by its upload token and its name in the call that writes
 // the version (files), and recorded with the version, in its transaction,
-// as part of it. The one upload_token the version took before is one file,
-// named after its upload or the document, and is kept for a release.
+// as part of it.
 //
 // Who may read a file is who may read its version: document.get lists a
 // version's files, each with a URL to download it under its name, and
 // document.file gives one by its id. Each file of material, instructions or
 // a rubric has a text version of its own.
-//
-// The version's own columns (storage_key, content_type, byte_size, checksum)
-// still name its first file, and the reads give the first file's in the
-// fields they gave before, for the runtimes and front ends of the release
-// before, which read them. Both are deprecated.
 
 const (
 	// DefaultFilesPerVersion and DefaultVersionBytes are the limits a
@@ -92,8 +86,6 @@ func fileView(f dbq.DocumentVersionFile) FileView {
 		Checksum: f.Checksum}
 }
 
-var errFilesAndUploadToken = apperr.Invalid("give files, or upload_token for one file, not both").With("reason", "files_and_upload_token")
-
 // errVersionTooLarge refuses files that come to more than a version holds.
 func errVersionTooLarge(d Deps, size int64) *apperr.Error {
 	return apperr.Precondition("the files come to %d bytes; a version holds at most %d", size, d.Documents.VersionBytes).
@@ -101,13 +93,9 @@ func errVersionTooLarge(d Deps, size int64) *apperr.Error {
 }
 
 // check holds what a version is given to what one may hold, as far as can be
-// told without asking the store: files or upload_token, not both; no more
-// files than a version holds; no upload named twice; and each name given a
-// name. It records nothing.
+// told without asking the store: no more files than a version holds; no
+// upload named twice; and each name given a name. It records nothing.
 func (c Content) check(d Deps) error {
-	if c.UploadToken != nil && len(c.Files) > 0 {
-		return errFilesAndUploadToken
-	}
 	if len(c.Files) > d.Documents.FilesPerVersion {
 		return apperr.Invalid("a version holds at most %d files; this names %d", d.Documents.FilesPerVersion, len(c.Files)).
 			With("reason", "too_many_files").With("max_files", d.Documents.FilesPerVersion)
@@ -134,23 +122,13 @@ type namedUpload struct {
 }
 
 // named says what each file of the content is to be called, in order: the
-// name given with it; else the name given when it was uploaded; and for the
-// one file of upload_token, which names none, else its document's title,
-// made a name (legacyFilename). A file of files with neither is refused.
+// name given with it; else the name given when it was uploaded; else, for
+// content that names such a file after its document (a feedback file), the
+// document's title, made a name (legacyFilename). Any other file with no
+// name is refused.
 func (c Content) named(d Deps, title string) ([]namedUpload, error) {
 	if err := c.check(d); err != nil {
 		return nil, err
-	}
-	if c.UploadToken != nil {
-		claim, err := d.Uploads.VerifyUpload(*c.UploadToken)
-		if err != nil {
-			return nil, errBadUploadToken
-		}
-		name := legacyFilename(title, claim.ContentType)
-		if n, err := checkFilename(claim.Filename); claim.Filename != "" && err == nil {
-			name = n
-		}
-		return []namedUpload{{token: *c.UploadToken, filename: name}}, nil
 	}
 	out := make([]namedUpload, len(c.Files))
 	for i, f := range c.Files {
@@ -160,7 +138,11 @@ func (c Content) named(d Deps, title string) ([]namedUpload, error) {
 			if err != nil {
 				return nil, errBadUploadToken
 			}
-			if name = claim.Filename; name == "" {
+			name = claim.Filename
+			if _, err := checkFilename(name); c.untitled && (name == "" || err != nil) {
+				name = legacyFilename(title, claim.ContentType)
+			}
+			if name == "" {
 				return nil, apperr.Invalid("file %d has no name: give its filename, here or to document.upload_url", i+1).
 					With("reason", "filename_required")
 			}
@@ -237,9 +219,7 @@ func insertFiles(ctx context.Context, ec *tool.ExecCtx, documentID, versionID uu
 }
 
 // fileExtensions is the extension a file of a type is given when it is named
-// after its document's title, which says none. The database names a file
-// the same way (document_file_name, migration 0023), and the two lists are
-// the same.
+// after its document's title, which says none.
 var fileExtensions = map[string]string{
 	"application/pdf":    ".pdf",
 	"application/msword": ".doc",
@@ -271,8 +251,9 @@ var fileExtensions = map[string]string{
 // document's title, made a name — each run of control characters, of
 // characters that turn the text round and of slashes a space, trimmed —
 // with the extension of its type where the title does not end in it, at
-// most 255 characters; "file" for a title that leaves nothing. As the
-// database's document_file_name.
+// most 255 characters; "file" for a title that leaves nothing. Migration
+// 0023 named the files it recorded so, and its document_file_name, which
+// 0027 drops, the files the release before it wrote.
 func legacyFilename(title, contentType string) string {
 	var b strings.Builder
 	gap := false

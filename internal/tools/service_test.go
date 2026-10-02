@@ -36,10 +36,10 @@ func TestAServiceCallsItsToolsAndNothingElse(t *testing.T) {
 		"course.list":                {},
 		"actor.list":                 {},
 		"document.get":               {"course_id": b.course, "document_id": doc},
-		"document.text":              {"course_id": b.course, "document_id": doc},
+		"document.text":              {"course_id": b.course, "document_id": doc, "file_id": uuid.New()},
 		"document.list":              {"course_id": b.course},
 		"document.upload_url":        {"course_id": b.course, "kind": "material", "content_type": "application/pdf"},
-		"document.text_update":       {"course_id": b.course, "document_id": doc, "version_id": uuid.New(), "body": "x"},
+		"document.text_update":       {"course_id": b.course, "document_id": doc, "version_id": uuid.New(), "file_id": uuid.New(), "body": "x"},
 		"event.list":                 {"course_id": b.course},
 		"member.list":                {"course_id": b.course},
 		"conversation.inbox":         {"course_id": b.course},
@@ -66,8 +66,8 @@ func TestAServiceCallsItsToolsAndNothingElse(t *testing.T) {
 		if out.Status != domain.StatusDenied || out.Error.Details["reason"] != "service_only" {
 			t.Fatalf("%s claiming from the queue: %+v", who, out)
 		}
-		out = b.MustCall(who, "document_text.complete", m{"version_id": uuid.New(), "lease_id": uuid.New(), "status": "failed",
-			"reason": "no"}, "complete-"+who.String())
+		out = b.MustCall(who, "document_text.complete", m{"version_id": uuid.New(), "file_id": uuid.New(), "lease_id": uuid.New(),
+			"status": "failed", "reason": "no"}, "complete-"+who.String())
 		if out.Status != domain.StatusDenied || out.Error.Details["reason"] != "service_only" {
 			t.Fatalf("%s writing back a text: %+v", who, out)
 		}
@@ -195,8 +195,8 @@ func TestRevokingAServicesCredentialStopsItAtOnce(t *testing.T) {
 		t.Fatalf("revoked: %+v, the text %s", revoked, textStatus(t, b, v))
 	}
 	// Its claim is gone, and so is the credential.
-	if out := b.MustCallWith(svc, "document_text.complete", m{"version_id": v, "lease_id": c.LeaseID, "status": "done", "body": "x",
-		"pages": 1, "model": "M"}); out.Status != domain.StatusDenied || out.Error.Details["reason"] != "service_only" {
+	if out := b.MustCallWith(svc, "document_text.complete", m{"version_id": v, "file_id": c.FileID, "lease_id": c.LeaseID,
+		"status": "done", "body": "x", "pages": 1, "model": "M"}); out.Status != domain.StatusDenied || out.Error.Details["reason"] != "service_only" {
 		t.Fatalf("the revoked credential writing back: %+v", out)
 	}
 	// What it held went back, and woke the other credential's claim, which

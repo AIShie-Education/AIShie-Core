@@ -418,3 +418,32 @@ func TestLinkingByTheEmailAProviderVouchesFor(t *testing.T) {
 		t.Fatalf("%d links by email", n)
 	}
 }
+
+// A server held to public addresses (no SSO_ALLOW_PRIVATE_ISSUERS) reaches
+// no provider of the site's on this machine, where the fake one is: set up
+// there while the server allowed it, the provider is offered still, and a
+// sign-in through it is told it cannot be reached, its discovery refused as
+// it was dialled, and the log says why. The operator's provider, on this
+// machine too, signs people in as before: it is the operator's own setting.
+func TestASitesProviderOnAPrivateAddressIsNotReached(t *testing.T) {
+	a := newSSOServer(t, ssoSetup{operator: true, keys: true, publicOnly: true})
+	root := a.tokenFor(a.c.Root)
+	campus := provider("campus", "Campus ID", a.idp)
+	campus["enabled"] = true
+	if r := a.write(root, "/v1/sso/providers", campus); r.Status != http.StatusOK {
+		t.Fatalf("create: %d %s", r.Status, r.Raw)
+	}
+	a.c.MustCall(a.c.Root, "actor.link_sso", m{"actor_id": a.c.Sato, "provider": "campus", "subject": "sato@site.example.edu"}, "link")
+	if r := a.do(browser(), "GET", "/v1/auth/sso/start/campus", "", nil); r.Status != http.StatusUnprocessableEntity ||
+		r.str("error", "details", "reason") != "sso_provider_unavailable" || strings.Contains(r.Raw, "127.0.0.1") {
+		t.Fatalf("a sign-in through a provider on this machine: %d %s", r.Status, r.Raw)
+	}
+	if !strings.Contains(a.log.String(), sso.ReasonAddressNotAllowed) {
+		t.Fatalf("the log does not say why: %s", a.log.String())
+	}
+
+	a.link(a.c.Sato, "sato@campus.example.edu")
+	if r := a.signInThrough("/v1/auth/sso/start/"+a.op.ID, a.idp, "sato@campus.example.edu", nil); r.Status != http.StatusFound || !hasSession(r) {
+		t.Fatalf("the operator's provider: %d %s", r.Status, r.Raw)
+	}
+}

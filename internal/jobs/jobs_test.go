@@ -610,7 +610,7 @@ func TestOrphanFilesAreRemoved(t *testing.T) {
 	draft := testkit.Result[tools.SubmissionCreateOut](t, f.MustCall(yuki.Actor, "submission.create", m{"course_id": f.Course, "assignment_id": f.HW4}, "d")).SubmissionID
 	essayToken, essay := upload(yuki.Actor, "submission", "essay")
 	if out := f.MustCall(yuki.Actor, "document.create", m{"course_id": f.Course, "kind": "submission", "title": "essay.txt",
-		"submission_id": draft, "upload_token": essayToken}, "attach"); out.Status != domain.StatusExecuted {
+		"submission_id": draft, "files": []m{{"upload_token": essayToken, "filename": "essay.txt"}}}, "attach"); out.Status != domain.StatusExecuted {
 		t.Fatalf("%+v", out)
 	}
 	// Travelling inside proposals: one that will be approved late, one that
@@ -657,7 +657,7 @@ func TestOrphanFilesAreRemoved(t *testing.T) {
 	if !exists(essay) || !exists(approved) {
 		t.Fatal("a file that a document version points at was removed")
 	}
-	if n := f.Count(`SELECT count(*) FROM document_version WHERE storage_key = ANY($1)`, []string{essay, approved}); n != 2 {
+	if n := f.Count(`SELECT count(*) FROM document_version_file WHERE storage_key = ANY($1)`, []string{essay, approved}); n != 2 {
 		t.Fatalf("%d of the two attached files are recorded", n)
 	}
 
@@ -711,7 +711,7 @@ func TestAnUploadOutlastsTheProposalThatNamesIt(t *testing.T) {
 			if decided.Outcome != domain.StatusExecuted {
 				t.Fatalf("approving on the proposal's last day: %+v", decided)
 			}
-			if n := f.Count(`SELECT count(*) FROM document_version WHERE storage_key = $1`, store.FinalKey(key)); n != 1 {
+			if n := f.Count(`SELECT count(*) FROM document_version_file WHERE storage_key = $1`, store.FinalKey(key)); n != 1 {
 				t.Fatal("the file was not attached")
 			}
 		})
@@ -874,15 +874,21 @@ func TestTheSweepKeepsEveryFileOfAVersion(t *testing.T) {
 				"files": []m{{"upload_token": first, "filename": "slides.txt"}, {"upload_token": second, "filename": "notes.txt"}}}, "create"); out.Status != domain.StatusExecuted {
 				t.Fatalf("%+v", out)
 			}
-			// A file attached as the release before attached it, under courses/.
+			// A file attached before a version held several files, under
+			// courses/, which migration 0023 recorded as its version's one file.
 			legacy := store.FinalKey("courses/" + f.Course.String() + "/" + uuid.Must(uuid.NewV7()).String())
 			if _, err := f.Blob.Put(ctx, legacy, "text/plain", strings.NewReader("an old upload"), 1<<20); err != nil {
 				t.Fatal(err)
 			}
 			doc := uuid.New()
 			f.Exec(`INSERT INTO document (id, course_id, kind, title) VALUES ($1, $2, 'material', 'Week 0')`, doc, f.Course)
-			f.Exec(`INSERT INTO document_version (document_id, seq, storage_key, content_type, byte_size, author_member_id)
-			        SELECT $1, 1, $2, 'text/plain', 13, id FROM course_member WHERE course_id = $3 AND actor_id = $4`, doc, legacy, f.Course, f.Sato)
+			f.Exec(`WITH v AS (INSERT INTO document_version (document_id, seq, author_member_id)
+			                   SELECT $1, 1, id FROM course_member WHERE course_id = $3 AND actor_id = $4
+			                   RETURNING id, document_id, created_at)
+			        INSERT INTO document_version_file (version_id, document_id, position, filename, storage_key, content_type,
+			                                           byte_size, created_at)
+			        SELECT v.id, v.document_id, 1, 'Week 0.txt', $2, 'text/plain', 13, v.created_at FROM v`,
+				doc, legacy, f.Course, f.Sato)
 
 			f.now = f.now.Add(pipeline.DefaultProposalTTL + tools.OrphanGrace + time.Hour)
 			if rep := f.sweep(t); rep.OrphanFilesRemoved != 1 {
@@ -903,8 +909,9 @@ func TestTheSweepKeepsEveryFileOfAVersion(t *testing.T) {
 // A rendition's PDF is a file of the server's like any other: one a rendition
 // names is kept; one the agent runtime uploaded and never named is removed
 // once it is as old as an upload nothing attached; and so is one whose file
-// the release before purged, which takes the rendition's row with the file
-// and leaves its PDF in the store, knowing nothing of it.
+// was purged by the database alone, as the release before 0026 purged it,
+// which takes the rendition's row with the file and leaves its PDF in the
+// store, knowing nothing of it.
 func TestTheSweepKeepsWhatRenditionsName(t *testing.T) {
 	for name, wrap := range stores {
 		t.Run(name, func(t *testing.T) {
@@ -977,10 +984,11 @@ func TestTheSweepKeepsWhatRenditionsName(t *testing.T) {
 					purgedPDF = k
 				}
 			}
-			// The release before purges Week 2: its file and rendition go
-			// from the database, the PDF stays in the store.
-			f.Exec(`UPDATE document_version SET storage_key = NULL, checksum = NULL, purged_at = now(), purged_by_actor_id = $2,
-			        purge_reason = 'by mistake' WHERE id = $1`, purged, f.Root)
+			// Week 2 is purged in the database alone, as the release before
+			// 0026 purged it: its file and rendition go from the database,
+			// the PDF stays in the store.
+			f.Exec(`UPDATE document_version SET purged_at = now(), purged_by_actor_id = $2, purge_reason = 'by mistake'
+			        WHERE id = $1`, purged, f.Root)
 			if n := f.Count(`SELECT count(*) FROM file_rendition`); n != 1 {
 				t.Fatalf("%d renditions after the purge", n)
 			}
@@ -990,7 +998,7 @@ func TestTheSweepKeepsWhatRenditionsName(t *testing.T) {
 			}
 			f.now = f.now.Add(pipeline.DefaultProposalTTL + tools.OrphanGrace + time.Hour)
 			// Week 2's PDF, the PDF never named, and Week 2's file, which the
-			// release before would have deleted itself.
+			// release before 0026 would have deleted itself.
 			if rep := f.sweep(t); rep.OrphanFilesRemoved != 3 {
 				t.Fatalf("%+v, want the purged file's PDF, the PDF never named and the purged file removed", rep)
 			}
@@ -1039,7 +1047,7 @@ func TestTheSweepGetsPastAttachedFiles(t *testing.T) {
 			for i := range 5 {
 				token, key := f.upload(t)
 				if out := f.MustCall(f.Sato, "document.create", m{"course_id": f.Course, "kind": "material",
-					"title": fmt.Sprintf("week %d", i+1), "upload_token": token}, fmt.Sprint("attach", i)); out.Status != domain.StatusExecuted {
+					"title": fmt.Sprintf("week %d", i+1), "files": []m{{"upload_token": token, "filename": "week.txt"}}}, fmt.Sprint("attach", i)); out.Status != domain.StatusExecuted {
 					t.Fatalf("%+v", out)
 				}
 				kept = append(kept, store.FinalKey(key))
@@ -1153,9 +1161,14 @@ func TestAFileAttachedWhileTheSweepWaitsForItIsKept(t *testing.T) {
 	if err := attach.LockStorageKey(ctx, key); err != nil {
 		t.Fatal(err)
 	}
-	contentType, size, checksum := "text/plain", int64(6), "sha256:x"
-	if err := attach.InsertDocumentVersion(ctx, dbq.InsertDocumentVersionParams{ID: uuid.Must(uuid.NewV7()), DocumentID: doc, Seq: 2,
-		StorageKey: &key, ContentType: &contentType, ByteSize: &size, Checksum: &checksum, AuthorMemberID: f.SatoM, CreatedAt: f.now}); err != nil {
+	version, checksum := uuid.Must(uuid.NewV7()), "sha256:x"
+	if err := attach.InsertDocumentVersion(ctx, dbq.InsertDocumentVersionParams{ID: version, DocumentID: doc, Seq: 2,
+		AuthorMemberID: f.SatoM, CreatedAt: f.now}); err != nil {
+		t.Fatal(err)
+	}
+	if err := attach.InsertDocumentVersionFile(ctx, dbq.InsertDocumentVersionFileParams{ID: uuid.Must(uuid.NewV7()), VersionID: version,
+		DocumentID: doc, Position: 1, Filename: "week1.txt", StorageKey: key, ContentType: "text/plain", ByteSize: 6,
+		Checksum: &checksum, CreatedAt: f.now}); err != nil {
 		t.Fatal(err)
 	}
 

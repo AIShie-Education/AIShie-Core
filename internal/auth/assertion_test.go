@@ -139,8 +139,13 @@ func newPeople(t *testing.T) people {
 	add := func(kind, name string, email, role *string) uuid.UUID {
 		t.Helper()
 		id := ids.New()
+		var hosting *string
+		if kind == "agent" {
+			mcp := "mcp"
+			hosting = &mcp
+		}
 		if err := q.InsertActor(t.Context(), dbq.InsertActorParams{ID: id, Kind: kind, DisplayName: name, Email: email,
-			PlatformRole: role, CreatedAt: time.Now()}); err != nil {
+			PlatformRole: role, CreatedAt: time.Now(), Hosting: hosting}); err != nil {
 			t.Fatal(err)
 		}
 		return id

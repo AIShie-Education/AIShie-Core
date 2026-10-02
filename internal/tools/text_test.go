@@ -59,14 +59,34 @@ func (b *built) slides(t *testing.T, title string) (doc, version uuid.UUID) {
 	t.Helper()
 	token := b.upload(t, b.sato, "material", "application/pdf", []byte("%PDF "+title))
 	made := testkit.Result[tools.DocumentCreateOut](t, b.do(t, b.sato, "document.create",
-		m{"course_id": b.course, "kind": "material", "title": title, "upload_token": token}))
+		m{"course_id": b.course, "kind": "material", "title": title, "files": oneFile(token)}))
 	return made.DocumentID, *made.VersionID
 }
 
-// readText reads a document's text as actor.
+// readText reads a document's text as actor: of the file args names, or
+// else of the first file of the version document.get gives actor, asked
+// for as args ask for it.
 func (b *built) readText(t *testing.T, actor uuid.UUID, args m) (tools.DocumentTextOut, error) {
 	t.Helper()
 	args["course_id"] = b.course
+	if _, named := args["file_id"]; !named {
+		get := m{"course_id": b.course, "document_id": args["document_id"]}
+		if v, ok := args["version_id"]; ok {
+			get["version_id"] = v
+		}
+		out, err := b.Call(actor, "document.get", get, "")
+		if err != nil {
+			return tools.DocumentTextOut{}, err
+		}
+		if out.Status != domain.StatusExecuted {
+			return tools.DocumentTextOut{}, apperr.Forbid("denied: %+v", out.Error)
+		}
+		// A version of no file names none, and has no text (no_text).
+		args["file_id"] = uuid.Nil
+		if v := testkit.Result[tools.DocumentGetOut](t, out).Version; v != nil && len(v.Files) > 0 {
+			args["file_id"] = v.Files[0].ID
+		}
+	}
 	out, err := b.Call(actor, "document.text", args, "")
 	if err != nil {
 		return tools.DocumentTextOut{}, err
@@ -79,12 +99,32 @@ func (b *built) readText(t *testing.T, actor uuid.UUID, args m) (tools.DocumentT
 
 func (b *built) complete(t *testing.T, svc pipeline.Caller, c tools.ClaimedText, body string) pipeline.Outcome {
 	t.Helper()
-	out, err := b.CallWith(svc, "document_text.complete", m{"version_id": c.VersionID, "lease_id": c.LeaseID, "status": "done",
-		"body": body, "pages": 1, "model": "A model"}, "complete-"+c.LeaseID.String())
+	out, err := b.CallWith(svc, "document_text.complete", m{"version_id": c.VersionID, "file_id": c.FileID, "lease_id": c.LeaseID,
+		"status": "done", "body": body, "pages": 1, "model": "A model"}, "complete-"+c.LeaseID.String())
 	if err != nil {
 		t.Fatalf("document_text.complete: %v", err)
 	}
 	return out
+}
+
+// fileOf is the first file of a version.
+func (b *built) fileOf(t *testing.T, version any) uuid.UUID {
+	t.Helper()
+	var id uuid.UUID
+	if err := b.Pool.QueryRow(context.Background(), `SELECT id FROM document_version_file WHERE version_id = $1 AND position = 1`,
+		version).Scan(&id); err != nil {
+		t.Fatalf("the first file of %v: %v", version, err)
+	}
+	return id
+}
+
+// firstText is the text version of a version's first file, as a read gives
+// it; nil for a version of no file.
+func firstText(files []tools.FileView) *tools.TextView {
+	if len(files) == 0 {
+		return nil
+	}
+	return files[0].Text
 }
 
 func textStatus(t *testing.T, b *built, version uuid.UUID) string {
@@ -101,17 +141,18 @@ func textStatus(t *testing.T, b *built, version uuid.UUID) string {
 func TestAFileIsQueuedForItsText(t *testing.T) {
 	b := build(t)
 	doc, v1 := b.slides(t, "Week 1")
-	if got := b.get(t, b.sato, m{"document_id": doc}); got.Version == nil || got.Version.Text == nil || got.Version.Text.Status != "pending" {
+	if got := b.get(t, b.sato, m{"document_id": doc}); got.Version == nil || firstText(got.Version.Files) == nil ||
+		firstText(got.Version.Files).Status != "pending" {
 		t.Fatalf("the new version's text: %+v", got.Version)
 	}
 	v2 := testkit.Result[tools.DocumentVersionOut](t, b.do(t, b.sato, "document.add_version",
 		m{"course_id": b.course, "document_id": doc, "body_md": "# Week 1, as text"})).VersionID
 	token := b.upload(t, b.sato, "material", "application/pdf", []byte("%PDF again"))
 	v3 := testkit.Result[tools.DocumentVersionOut](t, b.do(t, b.sato, "document.add_version",
-		m{"course_id": b.course, "document_id": doc, "upload_token": token})).VersionID
+		m{"course_id": b.course, "document_id": doc, "files": oneFile(token)})).VersionID
 	versions := testkit.Result[tools.DocumentVersionsOut](t, b.do(t, b.sato, "document.versions", m{"course_id": b.course, "document_id": doc})).Versions
-	if len(versions) != 3 || versions[0].Text == nil || versions[1].Text != nil || versions[2].Text == nil ||
-		versions[0].ID != v1 || versions[1].ID != v2 || versions[2].ID != v3 || versions[2].Text.Status != "pending" {
+	if len(versions) != 3 || firstText(versions[0].Files) == nil || firstText(versions[1].Files) != nil || firstText(versions[2].Files) == nil ||
+		versions[0].ID != v1 || versions[1].ID != v2 || versions[2].ID != v3 || firstText(versions[2].Files).Status != "pending" {
 		t.Fatalf("the versions' texts: %+v", versions)
 	}
 	if _, err := b.readText(t, b.sato, m{"document_id": doc, "version_id": v2}); !apperr.Is(err, apperr.NotFound) {
@@ -122,7 +163,7 @@ func TestAFileIsQueuedForItsText(t *testing.T) {
 		m{"course_id": b.course, "assignment_id": b.hw3, "body": "see the file"})).SubmissionID
 	essay := b.upload(t, b.yuki, "submission", "application/pdf", []byte("%PDF essay"))
 	file := testkit.Result[tools.DocumentCreateOut](t, b.do(t, b.yuki, "document.create",
-		m{"course_id": b.course, "kind": "submission", "title": "essay.pdf", "submission_id": draft, "upload_token": essay}))
+		m{"course_id": b.course, "kind": "submission", "title": "essay.pdf", "submission_id": draft, "files": oneFile(essay)}))
 	if n := b.Count(`SELECT count(*) FROM document_version_text WHERE document_id = $1`, file.DocumentID); n != 0 {
 		t.Fatalf("a student's file was queued to be transcribed (%d)", n)
 	}
@@ -172,14 +213,15 @@ func TestATextIsReadAsItsVersionIs(t *testing.T) {
 	if err != nil || got.VersionID != v1 || got.Text.Body == nil || !got.Published || got.Text.Model == nil || *got.Text.Model != "A model" {
 		t.Fatalf("a student reading the published text: %+v %v", got, err)
 	}
-	if v := b.get(t, b.yuki, m{"document_id": doc}).Version; v.Text == nil || v.Text.Body == nil || v.Text.Status != "done" || v.Text.Pages == nil || *v.Text.Pages != 1 {
-		t.Fatalf("document.get's text for the student: %+v", v.Text)
+	if v := firstText(b.get(t, b.yuki, m{"document_id": doc}).Version.Files); v == nil || v.Body == nil || v.Status != "done" ||
+		v.Pages == nil || *v.Pages != 1 {
+		t.Fatalf("document.get's text for the student: %+v", v)
 	}
 
 	// A new version, transcribed and not published: hers stays the first.
 	token := b.upload(t, b.sato, "material", "application/pdf", []byte("%PDF v2"))
 	v2 := testkit.Result[tools.DocumentVersionOut](t, b.do(t, b.sato, "document.add_version",
-		m{"course_id": b.course, "document_id": doc, "upload_token": token})).VersionID
+		m{"course_id": b.course, "document_id": doc, "files": oneFile(token)})).VersionID
 	b.complete(t, svc, b.claim(t, svc, m{})[0], "## Page 1\n\nLoops, again.")
 	if _, err := b.readText(t, b.yuki, m{"document_id": doc, "version_id": v2}); !apperr.Is(err, apperr.NotFound) {
 		t.Fatalf("a student naming the draft: %v", err)
@@ -202,10 +244,10 @@ func TestATextIsReadAsItsVersionIs(t *testing.T) {
 	other := b.Course("CS102")
 	stranger := b.Actor("human", "Stranger")
 	b.Member(other, stranger, "instructor")
-	if out := b.MustCall(stranger, "document.text", m{"course_id": b.course, "document_id": doc}, ""); out.Status != domain.StatusDenied {
+	if out := b.MustCall(stranger, "document.text", m{"course_id": b.course, "document_id": doc, "file_id": b.fileOf(t, v1)}, ""); out.Status != domain.StatusDenied {
 		t.Fatalf("a stranger reading the course's text: %+v", out)
 	}
-	if _, err := b.Call(stranger, "document.text", m{"course_id": other, "document_id": doc}, ""); !apperr.Is(err, apperr.NotFound) {
+	if _, err := b.Call(stranger, "document.text", m{"course_id": other, "document_id": doc, "file_id": b.fileOf(t, v1)}, ""); !apperr.Is(err, apperr.NotFound) {
 		t.Fatalf("a stranger reading it through their own course: %v", err)
 	}
 
@@ -214,7 +256,7 @@ func TestATextIsReadAsItsVersionIs(t *testing.T) {
 		m{"course_id": b.course, "title": "HW9", "points_possible": 10})).ID
 	examFile := b.upload(t, b.sato, "instructions", "application/pdf", []byte("%PDF exam"))
 	exam := testkit.Result[tools.DocumentCreateOut](t, b.do(t, b.sato, "document.create",
-		m{"course_id": b.course, "kind": "instructions", "title": "HW9", "upload_token": examFile}))
+		m{"course_id": b.course, "kind": "instructions", "title": "HW9", "files": oneFile(examFile)}))
 	b.do(t, b.sato, "document.publish", m{"course_id": b.course, "document_id": exam.DocumentID})
 	b.do(t, b.sato, "assignment.update", m{"course_id": b.course, "assignment_id": hw, "instructions_document_id": exam.DocumentID})
 	b.complete(t, svc, b.claim(t, svc, m{})[0], "## Page 1\n\nThe exam.")
@@ -239,7 +281,7 @@ func TestALongTextIsReadInParts(t *testing.T) {
 	body := strings.Join(pages, "\n")
 	b.complete(t, svc, b.claim(t, svc, m{})[0], body)
 
-	if v := b.get(t, b.sato, m{"document_id": doc}).Version.Text; v.Body != nil || int(v.Bytes) != len(body) {
+	if v := firstText(b.get(t, b.sato, m{"document_id": doc}).Version.Files); v.Body != nil || int(v.Bytes) != len(body) {
 		t.Fatalf("document.get of a long text: bytes %d, body given %v", v.Bytes, v.Body != nil)
 	}
 	first, err := b.readText(t, b.sato, m{"document_id": doc})
@@ -275,7 +317,7 @@ func TestALongTextIsReadInParts(t *testing.T) {
 		"one line":  strings.Repeat("字", 50000),
 		"odd bytes": "a" + strings.Repeat("字", 40000) + "\n" + strings.Repeat("é", 50000),
 	} {
-		b.do(t, b.sato, "document.text_update", m{"course_id": b.course, "document_id": doc, "version_id": first.VersionID, "body": text})
+		b.do(t, b.sato, "document.text_update", m{"course_id": b.course, "document_id": doc, "version_id": first.VersionID, "file_id": b.fileOf(t, first.VersionID), "body": text})
 		var whole strings.Builder
 		for part, parts := 1, 1; part <= parts; part++ {
 			got, err := b.readText(t, b.sato, m{"document_id": doc, "part": part})
@@ -307,9 +349,11 @@ func TestStaffEditATextAsTheyEditTheDocument(t *testing.T) {
 	doc, v1 := b.slides(t, "Week 1")
 	b.do(t, b.sato, "document.publish", m{"course_id": b.course, "document_id": doc})
 	b.complete(t, svc, b.claim(t, svc, m{})[0], "## Page 1\n\nLops.")
-	revision := testkit.Result[tools.DocumentTextOut](t, b.do(t, b.sato, "document.text", m{"course_id": b.course, "document_id": doc})).Text.Revision
+	revision := testkit.Result[tools.DocumentTextOut](t, b.do(t, b.sato, "document.text", m{"course_id": b.course, "document_id": doc,
+		"file_id": b.fileOf(t, v1)})).Text.Revision
 
-	args := m{"course_id": b.course, "document_id": doc, "version_id": v1, "body": "## Page 1\n\nLoops.", "base_revision": revision}
+	args := m{"course_id": b.course, "document_id": doc, "version_id": v1, "file_id": b.fileOf(t, v1), "body": "## Page 1\n\nLoops.",
+		"base_revision": revision}
 	first := b.MustCall(b.sato, "document.text_update", args, "fix-typo")
 	edited := testkit.Result[tools.DocumentTextChangeOut](t, first)
 	if first.Status != domain.StatusExecuted || !edited.Changed || edited.Revision != revision+1 {
@@ -319,7 +363,7 @@ func TestStaffEditATextAsTheyEditTheDocument(t *testing.T) {
 	if !again.Replayed || *again.ActionID != *first.ActionID {
 		t.Fatalf("the edit retried: %+v", again)
 	}
-	if _, err := b.Call(b.sato, "document.text_update", m{"course_id": b.course, "document_id": doc, "version_id": v1,
+	if _, err := b.Call(b.sato, "document.text_update", m{"course_id": b.course, "document_id": doc, "version_id": v1, "file_id": b.fileOf(t, v1),
 		"body": "something else"}, "fix-typo"); !apperr.Is(err, apperr.IdempotencyConflict) {
 		t.Fatalf("the key reused for another text: %v", err)
 	}
@@ -329,14 +373,14 @@ func TestStaffEditATextAsTheyEditTheDocument(t *testing.T) {
 		t.Fatalf("the student reads %+v", got.Text)
 	}
 	// An edit from a revision that is not there any more is refused.
-	stale := b.MustCall(b.sato, "document.text_update", m{"course_id": b.course, "document_id": doc, "version_id": v1,
+	stale := b.MustCall(b.sato, "document.text_update", m{"course_id": b.course, "document_id": doc, "version_id": v1, "file_id": b.fileOf(t, v1),
 		"body": "## Page 1\n\nWhile.", "base_revision": revision}, "stale")
 	if stale.Status != domain.StatusFailed || stale.Error.Details["reason"] != "text_changed" {
 		t.Fatalf("an edit of a stale revision: %+v", stale)
 	}
 	// The same text again changes nothing.
 	same := testkit.Result[tools.DocumentTextChangeOut](t, b.do(t, b.sato, "document.text_update",
-		m{"course_id": b.course, "document_id": doc, "version_id": v1, "body": "## Page 1\n\nLoops."}))
+		m{"course_id": b.course, "document_id": doc, "version_id": v1, "file_id": b.fileOf(t, v1), "body": "## Page 1\n\nLoops."}))
 	if same.Changed {
 		t.Fatalf("the same text again: %+v", same)
 	}
@@ -353,7 +397,7 @@ func TestStaffEditATextAsTheyEditTheDocument(t *testing.T) {
 
 	// Neither a student nor a grader writes it.
 	for _, who := range []uuid.UUID{b.yuki, b.grader} {
-		if out := b.MustCall(who, "document.text_update", m{"course_id": b.course, "document_id": doc, "version_id": v1,
+		if out := b.MustCall(who, "document.text_update", m{"course_id": b.course, "document_id": doc, "version_id": v1, "file_id": b.fileOf(t, v1),
 			"body": "mine"}, "not-theirs-"+who.String()); out.Status != domain.StatusDenied {
 			t.Fatalf("%s writing the text: %+v", who, out)
 		}
@@ -364,7 +408,7 @@ func TestStaffEditATextAsTheyEditTheDocument(t *testing.T) {
 	ta := b.Actor("human", "Ta")
 	taM := testkit.Result[tools.MemberIDOut](t, b.do(t, b.sato, "member.add", m{"course_id": b.course, "actor_id": ta,
 		"preset": "ta", "perms": m{"document_write": "confirm_required"}})).MemberID
-	proposed := b.MustCall(ta, "document.text_update", m{"course_id": b.course, "document_id": doc, "version_id": v1,
+	proposed := b.MustCall(ta, "document.text_update", m{"course_id": b.course, "document_id": doc, "version_id": v1, "file_id": b.fileOf(t, v1),
 		"body": "## Page 1\n\nLoops, by the TA."}, "ta-edit")
 	if proposed.Status != domain.StatusProposed {
 		t.Fatalf("the TA's edit: %+v", proposed)
@@ -377,9 +421,9 @@ func TestStaffEditATextAsTheyEditTheDocument(t *testing.T) {
 
 	// A proposal made from a revision is refused on approval once the text
 	// has moved on.
-	late := b.MustCall(ta, "document.text_update", m{"course_id": b.course, "document_id": doc, "version_id": v1,
+	late := b.MustCall(ta, "document.text_update", m{"course_id": b.course, "document_id": doc, "version_id": v1, "file_id": b.fileOf(t, v1),
 		"body": "## Page 1\n\nLate."}, "ta-late")
-	b.do(t, b.sato, "document.text_update", m{"course_id": b.course, "document_id": doc, "version_id": v1, "body": "## Page 1\n\nSato's."})
+	b.do(t, b.sato, "document.text_update", m{"course_id": b.course, "document_id": doc, "version_id": v1, "file_id": b.fileOf(t, v1), "body": "## Page 1\n\nSato's."})
 	decided := testkit.Result[pipeline.DecideOut](t, b.do(t, b.sato, "action.decide",
 		m{"course_id": b.course, "action_id": late.ActionID, "decision": "approve"}))
 	if decided.Outcome != domain.StatusFailed || decided.Error == nil || decided.Error.Details["reason"] != "text_changed" {
@@ -392,19 +436,19 @@ func TestATextIsAtMostTwoMebibytes(t *testing.T) {
 	b := build(t)
 	doc, v1 := b.slides(t, "Big")
 	fits := strings.Repeat("a", tools.MaxTextBytes)
-	b.do(t, b.sato, "document.text_update", m{"course_id": b.course, "document_id": doc, "version_id": v1, "body": fits})
-	out := b.MustCall(b.sato, "document.text_update", m{"course_id": b.course, "document_id": doc, "version_id": v1,
+	b.do(t, b.sato, "document.text_update", m{"course_id": b.course, "document_id": doc, "version_id": v1, "file_id": b.fileOf(t, v1), "body": fits})
+	out := b.MustCall(b.sato, "document.text_update", m{"course_id": b.course, "document_id": doc, "version_id": v1, "file_id": b.fileOf(t, v1),
 		"body": fits + "a"}, "too-long")
 	if out.Status != domain.StatusFailed || out.Error.Code != apperr.InvalidArgument || out.Error.Details["reason"] != "text_too_long" {
 		t.Fatalf("a text over the limit: %+v", out)
 	}
-	if out := b.MustCall(b.sato, "document.text_update", m{"course_id": b.course, "document_id": doc, "version_id": v1,
+	if out := b.MustCall(b.sato, "document.text_update", m{"course_id": b.course, "document_id": doc, "version_id": v1, "file_id": b.fileOf(t, v1),
 		"body": "  \n "}, "empty"); out.Status != domain.StatusFailed {
 		t.Fatalf("an empty text: %+v", out)
 	}
 	// The service is held to it as staff are.
 	svc := b.transcriber(t)
-	b.do(t, b.sato, "document.text_retranscribe", m{"course_id": b.course, "document_id": doc, "version_id": v1, "discard_edit": true})
+	b.do(t, b.sato, "document.text_retranscribe", m{"course_id": b.course, "document_id": doc, "version_id": v1, "file_id": b.fileOf(t, v1), "discard_edit": true})
 	c := b.claim(t, svc, m{})[0]
 	if out := b.complete(t, svc, c, fits+"a"); out.Status != domain.StatusFailed || out.Error.Code != apperr.InvalidArgument {
 		t.Fatalf("the service writing a text over the limit: %+v", out)
@@ -418,9 +462,9 @@ func TestRetranscribingKeepsStaffTextUnlessToldTo(t *testing.T) {
 	b := build(t)
 	svc := b.transcriber(t)
 	doc, v1 := b.slides(t, "Week 1")
-	b.do(t, b.sato, "document.text_update", m{"course_id": b.course, "document_id": doc, "version_id": v1, "body": "Mine."})
+	b.do(t, b.sato, "document.text_update", m{"course_id": b.course, "document_id": doc, "version_id": v1, "file_id": b.fileOf(t, v1), "body": "Mine."})
 
-	args := m{"course_id": b.course, "document_id": doc, "version_id": v1}
+	args := m{"course_id": b.course, "document_id": doc, "version_id": v1, "file_id": b.fileOf(t, v1)}
 	out := b.MustCall(b.sato, "document.text_retranscribe", args, "again")
 	if out.Status != domain.StatusFailed || out.Error.Code != apperr.FailedPrecondition || out.Error.Details["reason"] != "staff_edit" {
 		t.Fatalf("retranscribing staff's text without discard_edit: %+v", out)
@@ -446,21 +490,23 @@ func TestRetranscribingKeepsStaffTextUnlessToldTo(t *testing.T) {
 	// A version from before there were text versions, which nobody queued.
 	b.Exec(`ALTER TABLE document_version_file DISABLE TRIGGER document_version_file_text_queued`)
 	old := uuid.New()
-	b.Exec(`INSERT INTO document_version (id, document_id, seq, storage_key, content_type, byte_size, author_member_id)
-	        VALUES ($1, $2, 9, 'courses/old', 'application/pdf', 5, $3)`, old, doc, b.satoM)
+	b.Exec(`WITH v AS (INSERT INTO document_version (id, document_id, seq, author_member_id) VALUES ($1, $2, 9, $3)
+	                   RETURNING id, document_id, created_at)
+	        INSERT INTO document_version_file (version_id, document_id, position, filename, storage_key, content_type, byte_size, created_at)
+	        SELECT v.id, v.document_id, 1, 'Week 1.pdf', 'courses/old', 'application/pdf', 5, v.created_at FROM v`, old, doc, b.satoM)
 	b.Exec(`ALTER TABLE document_version_file ENABLE TRIGGER document_version_file_text_queued`)
 	if n := b.Count(`SELECT count(*) FROM document_version_text WHERE version_id = $1`, old); n != 0 {
 		t.Fatal("the old version was queued")
 	}
 	queued := testkit.Result[tools.DocumentTextChangeOut](t, b.do(t, b.sato, "document.text_retranscribe",
-		m{"course_id": b.course, "document_id": doc, "version_id": old}))
+		m{"course_id": b.course, "document_id": doc, "version_id": old, "file_id": b.fileOf(t, old)}))
 	if !queued.Changed || textStatus(t, b, old) != "pending" {
 		t.Fatalf("asking for the old version's text: %+v", queued)
 	}
 	// Text alone has none to ask for.
 	v2 := testkit.Result[tools.DocumentVersionOut](t, b.do(t, b.sato, "document.add_version",
 		m{"course_id": b.course, "document_id": doc, "body_md": "text"})).VersionID
-	b.try(t, b.sato, "document.text_retranscribe", m{"course_id": b.course, "document_id": doc, "version_id": v2}, apperr.NotFound)
+	b.try(t, b.sato, "document.text_retranscribe", m{"course_id": b.course, "document_id": doc, "version_id": v2, "file_id": uuid.New()}, apperr.NotFound)
 }
 
 // The service claims what waits: each version to one claim, uploads before
@@ -549,7 +595,7 @@ func TestALapsedClaimIsClaimedAgain(t *testing.T) {
 		t.Fatalf("the file claimed: %q", got)
 	}
 	renewed := testkit.Result[tools.TextRenewOut](t, b.as(t, svc, "document_text.renew",
-		m{"version_id": v, "lease_id": first.LeaseID, "lease_s": 120}))
+		m{"version_id": v, "file_id": first.FileID, "lease_id": first.LeaseID, "lease_s": 120}))
 	if !renewed.LeaseExpiresAt.After(first.LeaseExpiresAt) {
 		t.Fatalf("renewed until %v, was %v", renewed.LeaseExpiresAt, first.LeaseExpiresAt)
 	}
@@ -564,7 +610,7 @@ func TestALapsedClaimIsClaimedAgain(t *testing.T) {
 	if out := b.complete(t, svc, first, "## Page 1"); out.Status != domain.StatusFailed || out.Error.Details["reason"] != "lease_lost" {
 		t.Fatalf("the lapsed claim writing back: %+v", out)
 	}
-	if _, err := b.CallWith(svc, "document_text.file", m{"version_id": v, "lease_id": first.LeaseID}, ""); !apperr.Is(err, apperr.Conflict) {
+	if _, err := b.CallWith(svc, "document_text.file", m{"version_id": v, "file_id": first.FileID, "lease_id": first.LeaseID}, ""); !apperr.Is(err, apperr.Conflict) {
 		t.Fatalf("the lapsed claim reading the file: %v", err)
 	}
 	if out := b.complete(t, svc, second[0], "## Page 1"); out.Status != domain.StatusExecuted {
@@ -572,7 +618,7 @@ func TestALapsedClaimIsClaimedAgain(t *testing.T) {
 	}
 
 	// Claimed and never finished five times over, it is failed.
-	b.do(t, b.sato, "document.text_retranscribe", m{"course_id": b.course, "document_id": b.docOf(t, v), "version_id": v})
+	b.do(t, b.sato, "document.text_retranscribe", m{"course_id": b.course, "document_id": b.docOf(t, v), "version_id": v, "file_id": b.fileOf(t, v)})
 	for i := range tools.MaxTextAttempts {
 		at := later.Add(time.Duration(i+1) * time.Hour)
 		b.P.SetClock(func() time.Time { return at })
@@ -608,11 +654,11 @@ func TestTheServiceWritesOnlyWhatItHolds(t *testing.T) {
 	svc := b.transcriber(t)
 	doc, v1 := b.slides(t, "Week 1")
 	c := b.claim(t, svc, m{})[0]
-	b.do(t, b.sato, "document.text_update", m{"course_id": b.course, "document_id": doc, "version_id": v1, "body": "Staff's."})
+	b.do(t, b.sato, "document.text_update", m{"course_id": b.course, "document_id": doc, "version_id": v1, "file_id": b.fileOf(t, v1), "body": "Staff's."})
 	if out := b.complete(t, svc, c, "## Page 1"); out.Status != domain.StatusFailed || out.Error.Details["reason"] != "edited_by_staff" {
 		t.Fatalf("the service writing over staff's text: %+v", out)
 	}
-	if out, err := b.CallWith(svc, "document_text.renew", m{"version_id": v1, "lease_id": c.LeaseID}, ""); !apperr.Is(err, apperr.Conflict) {
+	if out, err := b.CallWith(svc, "document_text.renew", m{"version_id": v1, "file_id": c.FileID, "lease_id": c.LeaseID}, ""); !apperr.Is(err, apperr.Conflict) {
 		t.Fatalf("renewing a claim of staff's text: %+v %v", out, err)
 	}
 	if got, _ := b.readText(t, b.sato, m{"document_id": doc}); *got.Text.Body != "Staff's." {
@@ -626,7 +672,7 @@ func TestTheServiceWritesOnlyWhatItHolds(t *testing.T) {
 	if out := b.complete(t, svc, forged, "## Page 1"); out.Status != domain.StatusFailed || out.Error.Details["reason"] != "lease_lost" {
 		t.Fatalf("writing back without the claim: %+v", out)
 	}
-	if out := b.MustCall(b.sato, "document.text_retranscribe", m{"course_id": b.course, "document_id": b.docOf(t, v2), "version_id": v2}, "back"); out.Status != domain.StatusExecuted {
+	if out := b.MustCall(b.sato, "document.text_retranscribe", m{"course_id": b.course, "document_id": b.docOf(t, v2), "version_id": v2, "file_id": b.fileOf(t, v2)}, "back"); out.Status != domain.StatusExecuted {
 		t.Fatalf("sent back while claimed: %+v", out)
 	}
 	if out := b.complete(t, svc, c2, "## Page 1"); out.Status != domain.StatusFailed || out.Error.Details["reason"] != "lease_lost" {
@@ -650,12 +696,12 @@ func TestTheServiceWritesOnlyWhatItHolds(t *testing.T) {
 	// Failed and skipped say why.
 	_, v4 := b.slides(t, "Week 4")
 	c4 := b.claim(t, svc, m{})[0]
-	out, err := b.CallWith(svc, "document_text.complete", m{"version_id": v4, "lease_id": c4.LeaseID, "status": "skipped"}, "skip-1")
+	out, err := b.CallWith(svc, "document_text.complete", m{"version_id": v4, "file_id": c4.FileID, "lease_id": c4.LeaseID, "status": "skipped"}, "skip-1")
 	if err != nil || out.Status != domain.StatusFailed || out.Error.Code != apperr.InvalidArgument {
 		t.Fatalf("skipped without a reason: %+v %v", out, err)
 	}
-	b.as(t, svc, "document_text.complete", m{"version_id": v4, "lease_id": c4.LeaseID, "status": "skipped", "reason": "too_many_pages"})
-	if got := b.get(t, b.sato, m{"document_id": b.docOf(t, v4)}).Version.Text; got.Status != "skipped" || *got.Reason != "too_many_pages" {
+	b.as(t, svc, "document_text.complete", m{"version_id": v4, "file_id": c4.FileID, "lease_id": c4.LeaseID, "status": "skipped", "reason": "too_many_pages"})
+	if got := firstText(b.get(t, b.sato, m{"document_id": b.docOf(t, v4)}).Version.Files); got.Status != "skipped" || *got.Reason != "too_many_pages" {
 		t.Fatalf("skipped: %+v", got)
 	}
 }
@@ -729,7 +775,7 @@ func TestAPurgeTakesTheText(t *testing.T) {
 	if n := b.Count(`SELECT count(*) FROM document_version_text WHERE version_id = $1`, v); n != 0 {
 		t.Fatal("the text of a purged version is still there")
 	}
-	if got := b.get(t, b.sato, m{"document_id": doc, "version_id": v}).Version; got.Text != nil {
-		t.Fatalf("a purged version's text: %+v", got.Text)
+	if got := b.get(t, b.sato, m{"document_id": doc, "version_id": v}).Version; len(got.Files) != 0 {
+		t.Fatalf("a purged version's files: %+v", got.Files)
 	}
 }

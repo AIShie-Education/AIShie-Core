@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/google/uuid"
@@ -27,13 +28,34 @@ type ssoSite struct {
 	t          *testing.T
 	admin, dan uuid.UUID
 	keys       *secrets.Keyring
+	// op is the operator's provider, nil in a site with none.
+	op *sso.Operator
 }
 
 const googleSecret = "GOCSPX-a-google-client-secret-1234"
 
 func newSSOSite(t *testing.T, operator, keys bool) *ssoSite {
 	t.Helper()
+	return newSSOSiteWith(t, ssoOptions{operator: operator, keys: keys})
+}
+
+// ssoOptions are what newSSOSiteWith makes a site with.
+type ssoOptions struct {
+	operator, keys bool
+	// private lets the site's providers be on private addresses, as
+	// SSO_ALLOW_PRIVATE_ISSUERS does: a fake provider is on this machine.
+	private bool
+	// operatorIssuer, when set, is the operator's provider's issuer in
+	// place of the one it has otherwise.
+	operatorIssuer string
+}
+
+func newSSOSiteWith(t *testing.T, o ssoOptions) *ssoSite {
+	t.Helper()
 	s := &ssoSite{t: t}
+	// Unpacked so the lines below stay as they were when operator and
+	// keys were parameters, and a change to them merges cleanly.
+	operator, keys := o.operator, o.keys
 	if keys {
 		k := make([]byte, secrets.KeySize)
 		_, _ = rand.Read(k)
@@ -43,9 +65,13 @@ func newSSOSite(t *testing.T, operator, keys bool) *ssoSite {
 	if operator {
 		op = &sso.Operator{ID: "school-adfs", DisplayName: "School NetID", Issuer: "https://adfs.example.edu/adfs", ClientID: "aishie",
 			SecretHint: secrets.Hint("the-operator's-client-secret"), Scopes: sso.DefaultScopes, SubjectClaim: "upn"}
+		if o.operatorIssuer != "" {
+			op.Issuer = o.operatorIssuer
+		}
 	}
+	s.op = op
 	s.Platform = testkit.NewPlatformWithDeps(t, func(d *tools.Deps) {
-		d.SSO = sso.New(sso.Config{Operator: op, Keys: s.keys, PublicURL: "https://lms.example.edu"})
+		d.SSO = sso.New(sso.Config{Operator: op, Keys: s.keys, PublicURL: "https://lms.example.edu", PrivateIssuers: o.private})
 	})
 	s.admin = s.Actor("human", "Admin")
 	s.Exec(`UPDATE actor SET platform_role = 'admin' WHERE id = $1`, s.admin)
@@ -351,9 +377,32 @@ func TestAProvidersSettingsAreHeldToTheirRules(t *testing.T) {
 			}
 		})
 	}
-	// http is for this machine only; a domain is kept in lower case, once;
-	// scopes are kept in order, once; linking by email reads email unless
-	// told otherwise.
+	// Without SSO_ALLOW_PRIVATE_ISSUERS, an issuer plainly not at a public
+	// address is refused as it is set up, for that; a name is checked when
+	// it is fetched (TestAnIssuerOnAPrivateAddressIsNotFetched).
+	for name, issuer := range map[string]string{
+		"an issuer on this machine over http":   "http://127.0.0.1:5556/dex",
+		"an issuer at localhost":                "https://localhost/adfs",
+		"an issuer at a subdomain of localhost": "https://idp.localhost/adfs",
+		"an issuer on a private network":        "https://10.20.30.40/adfs",
+		"an issuer at the cloud's metadata":     "https://169.254.169.254/latest",
+		"an issuer on loopback in IPv6":         "https://[::ffff:127.0.0.1]/adfs",
+		"an issuer on a unique local IPv6":      "https://[fd00:ec2::254]/adfs",
+	} {
+		t.Run(name, func(t *testing.T) {
+			e := s.fails(s.admin, "sso.create", with("issuer", issuer), apperr.InvalidArgument, sso.ReasonAddressNotAllowed)
+			if e.Details["field"] != "issuer" || strings.Contains(e.Message, googleSecret) {
+				t.Fatalf("%+v", e)
+			}
+		})
+	}
+	// A public address is taken, as a name is.
+	s.do(s.admin, "sso.create", with("issuer", "https://8.8.8.8/adfs"))
+
+	// With SSO_ALLOW_PRIVATE_ISSUERS, http is for this machine only; a
+	// domain is kept in lower case, once; scopes are kept in order, once;
+	// linking by email reads email unless told otherwise.
+	s = newSSOSiteWith(t, ssoOptions{keys: true, private: true})
 	local := s.view("sso.create", m{"id": "dev", "display_name": "Dev", "issuer": "http://127.0.0.1:5556/dex", "client_id": "aishie",
 		"client_secret": "x", "scopes": []any{"openid", "email", "openid"}, "link_by_email": true,
 		"allowed_email_domains": []any{"@Campus.Example.edu", "campus.example.edu", "students.example.edu"}})
@@ -400,7 +449,7 @@ func TestOnlyPlatformAdministratorsSetUpProviders(t *testing.T) {
 // sso.test reads an issuer's discovery document and keys, says what it
 // found, and catches what would stop a sign-in; it signs nobody in.
 func TestAProvidersIssuerIsTested(t *testing.T) {
-	s := newSSOSite(t, false, true)
+	s := newSSOSiteWith(t, ssoOptions{keys: true, private: true})
 	var issuer string
 	doc := func(change func(map[string]any)) map[string]any {
 		d := map[string]any{"issuer": issuer, "authorization_endpoint": issuer + "/authorize", "token_endpoint": issuer + "/token",
@@ -499,5 +548,66 @@ func TestAProvidersIssuerIsTested(t *testing.T) {
 	// Nothing was recorded: it is a read.
 	if n := s.Count(`SELECT count(*) FROM action WHERE action_type = 'sso.test'`); n != 0 {
 		t.Fatalf("%d tests recorded", n)
+	}
+}
+
+// Without SSO_ALLOW_PRIVATE_ISSUERS, sso.test fetches nothing of a provider
+// of the site's on this machine, where the fake one is: an issuer plainly
+// there is a problem before anything is fetched, and so is the issuer of
+// one set up there while the server allowed it. A name that resolves there
+// is refused as it is dialled (package sso's tests). The
+// operator's provider, on this machine as well, is tested as before: it is
+// the operator's own setting.
+func TestAnIssuerOnAPrivateAddressIsNotFetched(t *testing.T) {
+	var fetched atomic.Int64
+	var issuer string
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /idp/.well-known/openid-configuration", func(w http.ResponseWriter, _ *http.Request) {
+		fetched.Add(1)
+		_ = json.NewEncoder(w).Encode(map[string]any{"issuer": issuer, "authorization_endpoint": issuer + "/authorize",
+			"token_endpoint": issuer + "/token", "jwks_uri": issuer + "/keys", "id_token_signing_alg_values_supported": []string{"RS256"},
+			"scopes_supported": []string{"openid", "profile", "email"}, "claims_supported": []string{"sub", "upn", "email"}})
+	})
+	mux.HandleFunc("GET /idp/keys", func(w http.ResponseWriter, _ *http.Request) {
+		fetched.Add(1)
+		_, _ = w.Write([]byte(`{"keys":[{"kty":"RSA","kid":"k1","alg":"RS256","use":"sig"}]}`))
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	issuer = srv.URL + "/idp"
+	s := newSSOSiteWith(t, ssoOptions{operator: true, keys: true, operatorIssuer: issuer})
+	test := func(args m) sso.Report {
+		t.Helper()
+		return testkit.Result[sso.Report](t, s.do(s.admin, "sso.test", args))
+	}
+	refused := func(r sso.Report) bool {
+		return !r.OK && len(r.Problems) == 1 && strings.Contains(r.Problems[0], sso.ReasonAddressNotAllowed) &&
+			strings.Contains(r.Problems[0], "SSO_ALLOW_PRIVATE_ISSUERS")
+	}
+
+	for _, at := range []string{issuer, "http://localhost:1/idp", "https://169.254.169.254/latest", "https://[::1]/idp"} {
+		if r := test(m{"issuer": at}); !refused(r) || r.DiscoveryURL != "" {
+			t.Fatalf("%s: %+v", at, r)
+		}
+	}
+	if n := fetched.Load(); n != 0 {
+		t.Fatalf("fetched %d times", n)
+	}
+
+	s.do(s.admin, "sso.create", m{"id": "campus", "display_name": "Campus", "issuer": "https://idp.campus.example/adfs", "client_id": "c",
+		"client_secret": "s"})
+	s.Exec(`UPDATE sso_provider SET issuer = $1 WHERE id = 'campus'`, issuer)
+	r := test(m{"provider_id": "campus"})
+	if !refused(r) || !strings.HasPrefix(r.Problems[0], "issuer: ") || r.DiscoveryURL != "" {
+		t.Fatalf("a provider set up on this machine: %+v", r)
+	}
+	if n := fetched.Load(); n != 0 {
+		t.Fatalf("fetched %d times", n)
+	}
+	s.fails(s.admin, "sso.update", m{"provider_id": "campus", "version": 1, "issuer": issuer}, apperr.InvalidArgument,
+		sso.ReasonAddressNotAllowed)
+
+	if r := test(m{"provider_id": s.op.ID}); !r.OK || len(r.SigningKeys) != 1 || fetched.Load() != 2 {
+		t.Fatalf("the operator's provider: %+v", r)
 	}
 }

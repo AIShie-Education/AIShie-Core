@@ -237,7 +237,7 @@ func readSSOProvider(ctx context.Context, d Deps, q dbq.Querier, id string) (SSO
 type SSOCreateIn struct {
 	ID                  string   `json:"id" jsonschema:"the provider's id: 1 to 64 lower-case letters, digits and hyphens, such as university-sso; what actor.link_sso names, and what it is known by for good"`
 	DisplayName         string   `json:"display_name" jsonschema:"the name on the sign-in button, such as School NetID: 1 to 64 printable characters"`
-	Issuer              string   `json:"issuer" jsonschema:"the provider's issuer, exactly as its discovery document writes it: an https URL (http only for this machine), such as https://adfs.example.edu/adfs"`
+	Issuer              string   `json:"issuer" jsonschema:"the provider's issuer, exactly as its discovery document writes it: an https URL, such as https://adfs.example.edu/adfs, at a public address: localhost, or an address on this machine or a private or link-local one, is refused (issuer_address_not_allowed) unless the server's operator sets SSO_ALLOW_PRIVATE_ISSUERS, and http is taken only then, for this machine; a name that resolves to such an address is taken, and sso.test reports it"`
 	ClientID            string   `json:"client_id" jsonschema:"the client id the provider gave this site"`
 	ClientSecret        string   `json:"client_secret" jsonschema:"the client secret the provider gave this site: sealed before it is kept, never recorded and never shown again but as its hint"`
 	Scopes              []string `json:"scopes,omitempty" jsonschema:"what a sign-in asks for, openid among them; default openid profile email"`
@@ -296,7 +296,7 @@ func ssoCreate(d Deps) tool.Tool {
 			if s.displayName, err = sso.CheckDisplayName(in.DisplayName); err != nil {
 				return SSOProviderView{}, err
 			}
-			if s.issuer, err = sso.CheckIssuer(in.Issuer); err != nil {
+			if s.issuer, err = sso.CheckIssuer(in.Issuer, d.SSO.PrivateIssuers()); err != nil {
 				return SSOProviderView{}, err
 			}
 			if s.clientID, err = sso.CheckClientID(in.ClientID); err != nil {
@@ -421,7 +421,7 @@ func ssoUpdate(d Deps) tool.Tool {
 				}
 			}
 			if in.Issuer != nil {
-				if s.issuer, err = sso.CheckIssuer(*in.Issuer); err != nil {
+				if s.issuer, err = sso.CheckIssuer(*in.Issuer, d.SSO.PrivateIssuers()); err != nil {
 					return SSOProviderView{}, err
 				}
 			}
@@ -636,19 +636,26 @@ func ssoTest(d Deps) tool.Tool {
 			"(<issuer>/.well-known/openid-configuration) and its key set, check them as a sign-in would use them, and say what " +
 			"was found — its endpoints, its signing keys, the scopes and claims it supports — with problems (what stops a " +
 			"sign-in: ok is false) and warnings (what may). Give provider_id for a provider set up, or issuer for one to be. " +
-			"It sends no secret, follows no redirect and changes nothing. Root and platform administrators only.",
+			"It sends no secret, follows no redirect and changes nothing. A provider of the site's is fetched only from a public address, " +
+			"checked on the address each connection is made to, and its token endpoint, which is not fetched, is resolved: one on this " +
+			"machine, or on a private or link-local address, is a problem (issuer_address_not_allowed) unless the server's operator sets " +
+			"SSO_ALLOW_PRIVATE_ISSUERS. Root and platform administrators only.",
 		Kind: tool.Read, Gate: admins,
 		HTTP:    tool.Route{Method: "GET", Pattern: "/v1/sso/test"},
 		Resolve: noTarget[SSOTestIn]("sso_provider"),
 		Query: func(ctx context.Context, rc *tool.ReadCtx, in SSOTestIn) (sso.Report, error) {
 			var issuer string
 			var want sso.Want
+			// The site's providers are held to public addresses, unless the
+			// operator says otherwise; the operator's provider is not.
+			client, private := d.SSO.Client(), d.SSO.PrivateIssuers()
 			switch {
 			case (in.ProviderID == nil) == (in.Issuer == nil):
 				return sso.Report{}, apperr.Invalid("give provider_id or issuer, one of them")
 			case in.ProviderID != nil && isOperators(d, *in.ProviderID):
 				op := d.SSO.Operator()
 				issuer, want = op.Issuer, sso.Want{Scopes: op.Scopes, SubjectClaim: op.SubjectClaim}
+				client, private = d.SSO.OperatorClient(), true
 			case in.ProviderID != nil:
 				r, err := rc.Q.GetSSOProvider(ctx, *in.ProviderID)
 				if errors.Is(err, pgx.ErrNoRows) {
@@ -679,7 +686,7 @@ func ssoTest(d Deps) tool.Tool {
 					}
 				}
 			}
-			return sso.Inspect(ctx, d.SSO.Client(), issuer, want), nil
+			return sso.Inspect(ctx, client, private, issuer, want), nil
 		},
 	})
 }

@@ -125,6 +125,14 @@ type Config struct {
 	// secrets). Without it, no provider is added from the front end.
 	SecretsKey          []byte
 	SecretsKeysPrevious [][]byte
+	// SSOAllowPrivateIssuers lets the site's providers be on this machine,
+	// or on a private, link-local or other address that is not public
+	// (SSO_ALLOW_PRIVATE_ISSUERS, false unless true): for development,
+	// tests, and a site whose identity provider is on its own network.
+	// False, administrators can have the server fetch nothing from such an
+	// address, checked on the address each connection is made to (package
+	// sso, NewClient). The operator's provider is reached wherever it is.
+	SSOAllowPrivateIssuers bool
 	// JoinLinkRegistration lets someone with no account register through a
 	// course's join link (JOIN_LINK_REGISTRATION, on unless off): the one
 	// way a person registers on their own, a stopgap until single sign-on
@@ -302,7 +310,8 @@ func FromEnv() (Config, error) {
 	default:
 		return Config{}, fmt.Errorf("BLOB_STORE: %q is not fs, s3 or none", c.BlobStore)
 	}
-	for key, dst := range map[string]*bool{"INSECURE_COOKIES": &c.InsecureCookies, "JOBS": &c.Jobs} {
+	for key, dst := range map[string]*bool{"INSECURE_COOKIES": &c.InsecureCookies, "JOBS": &c.Jobs,
+		"SSO_ALLOW_PRIVATE_ISSUERS": &c.SSOAllowPrivateIssuers} {
 		if v := os.Getenv(key); v != "" {
 			b, err := strconv.ParseBool(v)
 			if err != nil {

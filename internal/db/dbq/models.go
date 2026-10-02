@@ -83,22 +83,21 @@ type Action struct {
 }
 
 type Actor struct {
-	ID                   uuid.UUID
-	Kind                 string
-	DisplayName          string
-	Email                *string
-	Status               string
-	PlatformRole         *string
-	CreatedByActorID     *uuid.UUID
-	CreatedAt            time.Time
-	OwnerActorID         *uuid.UUID
-	SuspendedByActorID   *uuid.UUID
-	SiteChatCredentialID *uuid.UUID
-	EmailVerified        bool
-	LoginID              *string
-	LoginIDVerified      bool
-	ServiceScope         *string
-	Hosting              *string
+	ID                 uuid.UUID
+	Kind               string
+	DisplayName        string
+	Email              *string
+	Status             string
+	PlatformRole       *string
+	CreatedByActorID   *uuid.UUID
+	CreatedAt          time.Time
+	OwnerActorID       *uuid.UUID
+	SuspendedByActorID *uuid.UUID
+	EmailVerified      bool
+	LoginID            *string
+	LoginIDVerified    bool
+	ServiceScope       *string
+	Hosting            *string
 }
 
 type Assignment struct {
@@ -307,10 +306,6 @@ type DocumentVersion struct {
 	DocumentID      uuid.UUID
 	Seq             int32
 	BodyMd          *string
-	StorageKey      *string
-	ContentType     *string
-	ByteSize        *int64
-	Checksum        *string
 	AuthorMemberID  uuid.UUID
 	CreatedAt       time.Time
 	PurgedAt        *time.Time

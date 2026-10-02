@@ -97,8 +97,9 @@ func newAgent(t *testing.T, pool *pgxpool.Pool, root uuid.UUID) (uuid.UUID, auth
 	ctx := context.Background()
 	q := dbq.New(pool)
 	agent := ids.New()
+	mcp := "mcp"
 	if err := q.InsertActor(ctx, dbq.InsertActorParams{ID: agent, Kind: "agent", DisplayName: "grader", CreatedByActorID: &root,
-		CreatedAt: time.Now()}); err != nil {
+		CreatedAt: time.Now(), Hosting: &mcp}); err != nil {
 		t.Fatal(err)
 	}
 	tok, _, err := auth.IssueToken(ctx, q, agent, &root, "runtime", nil, time.Now())

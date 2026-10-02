@@ -272,29 +272,6 @@ func (q *Queries) InsertTemporaryPassword(ctx context.Context, arg InsertTempora
 	return err
 }
 
-const isLiveRuntimeToken = `-- name: IsLiveRuntimeToken :one
-SELECT EXISTS (
-    SELECT 1 FROM credential c
-    WHERE c.id = $1 AND c.actor_id = $2 AND c.issued_to_service = 'agent_runtime'
-      AND c.revoked_at IS NULL AND (c.expires_at IS NULL OR c.expires_at > $3)
-)::bool
-`
-
-type IsLiveRuntimeTokenParams struct {
-	CredentialID uuid.UUID
-	ActorID      uuid.UUID
-	Now          *time.Time
-}
-
-// Whether a credential is the actor's own token, issued to the site's agent
-// runtime, and live: neither revoked nor expired.
-func (q *Queries) IsLiveRuntimeToken(ctx context.Context, arg IsLiveRuntimeTokenParams) (bool, error) {
-	row := q.db.QueryRow(ctx, isLiveRuntimeToken, arg.CredentialID, arg.ActorID, arg.Now)
-	var column_1 bool
-	err := row.Scan(&column_1)
-	return column_1, err
-}
-
 const listCredentialsForActor = `-- name: ListCredentialsForActor :many
 SELECT c.id, c.kind, c.provider, c.subject, c.token_prefix, c.label, c.last_used_at, c.expires_at, c.revoked_at,
        c.created_at, c.issued_by_actor_id, i.display_name AS issued_by_name, c.must_change, c.issued_to_service

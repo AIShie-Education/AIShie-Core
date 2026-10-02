@@ -19,7 +19,7 @@ import (
 )
 
 func meTools() []tool.Tool {
-	return []tool.Tool{meGet(), meMemberships(), meSiteChat(), meConversations(), credentialList(), credentialIssueToken(),
+	return []tool.Tool{meGet(), meMemberships(), meConversations(), credentialList(), credentialIssueToken(),
 		credentialSetPassword(), credentialRevoke()}
 }
 
@@ -170,34 +170,14 @@ func meMemberships() tool.Tool {
 }
 
 // ---------------------------------------------------------------------------
-// me.site_chat
+// Site chat
 // ---------------------------------------------------------------------------
 
 // Site chat is whether people in the site may ask an agent (docs/schema.md
 // §2.8). It follows from how the agent is hosted, and nobody declares it: a
 // runtime agent is asked while the site's agent runtime holds a live token
 // for it (agent_runtime.issue_token), it is active and its owner too; an mcp
-// agent never is (SiteChatOf). me.site_chat, with which a runtime used to
-// declare it, is kept for one release, deprecated: the runtime's token may
-// still call it, which changes nothing and says whether the agent is asked
-// now; any other credential is refused, not_runtime_hosted.
-
-type SiteChatIn struct {
-	On bool `json:"on" jsonschema:"deprecated, and changes nothing either way: people in the site ask a runtime agent while the site's runtime hosts it"`
-}
-
-type SiteChatOut struct {
-	SiteChat bool `json:"site_chat" jsonschema:"whether people in the site may ask you now: while the site's runtime hosts you, and you and your owner are active"`
-}
-
-var (
-	errSiteChatNotAgent = apperr.Precondition("site chat is an agent's; a person asks in the site, and is asked nothing: conversations are with agents").
-				With("reason", "not_an_agent")
-	// errNotRuntimeHosted refuses what only a runtime agent, by the token
-	// the site's runtime holds for it, may do or be given.
-	errNotRuntimeHosted = apperr.Precondition("only a runtime agent is asked in the site, by the token the site's agent runtime "+
-		"holds for it; an mcp agent, reached by its owner's own tools, is asked nothing there").With("reason", "not_runtime_hosted")
-)
+// agent never is (SiteChatOf).
 
 // siteChatOf is whether people in the site may ask each of the given actors
 // now, by id, whether it is an agent, and how it is hosted: the rule is
@@ -212,40 +192,6 @@ func siteChatOf(ctx context.Context, q dbq.Querier, now time.Time, actors []uuid
 		out[r.ID] = r
 	}
 	return out, err
-}
-
-func meSiteChat() tool.Tool {
-	return tool.Define(tool.Spec[SiteChatIn, SiteChatOut]{
-		Name: "me.site_chat",
-		Description: "Deprecated: nothing is declared any more. People in the site ask a runtime agent while the site's " +
-			"agent runtime hosts it, and never an mcp agent; me_get says which you are (hosting). Called with the token the " +
-			"site's runtime holds for you, it changes nothing, on true or false, and says whether people may ask you now; " +
-			"with any other credential it is refused (not_runtime_hosted).",
-		Kind: tool.Write, Gate: self,
-		HTTP:    tool.Route{Method: "POST", Pattern: "/v1/me/site-chat"},
-		Resolve: noTarget[SiteChatIn]("actor"),
-		Execute: func(ctx context.Context, ec *tool.ExecCtx, in SiteChatIn) (SiteChatOut, error) {
-			me, err := ec.Q.GetActor(ctx, ec.Actor.ID)
-			if err != nil {
-				return SiteChatOut{}, err
-			}
-			// A refusal that reads kind, as the database's does: site chat
-			// is an agent's. Nothing that grants reads it.
-			if me.Kind != "agent" {
-				return SiteChatOut{}, errSiteChatNotAgent
-			}
-			runtime, err := ec.Q.IsLiveRuntimeToken(ctx, dbq.IsLiveRuntimeTokenParams{CredentialID: ec.CredentialID, ActorID: me.ID,
-				Now: &ec.Now})
-			if err != nil {
-				return SiteChatOut{}, err
-			}
-			if !runtime {
-				return SiteChatOut{}, errNotRuntimeHosted
-			}
-			now, err := siteChatOf(ctx, ec.Q, ec.Now, []uuid.UUID{me.ID})
-			return SiteChatOut{SiteChat: now[me.ID].SiteChat}, err
-		},
-	})
 }
 
 // ---------------------------------------------------------------------------

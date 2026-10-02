@@ -74,10 +74,13 @@ func CheckDisplayName(v string) (string, error) {
 
 // CheckIssuer is the provider's issuer, trimmed, written exactly as the
 // provider writes it in its discovery document: an https URL with a host,
-// and no user, query or fragment. http is taken only for this machine
-// (localhost, 127.0.0.0/8, ::1), for development and tests: anywhere else
-// the client secret would cross the network in the clear.
-func CheckIssuer(v string) (string, error) {
+// and no user, query or fragment. Unless private (SSO_ALLOW_PRIVATE_ISSUERS),
+// its host is no address that is not Public, nor localhost: the server would
+// refuse to fetch from it (issuer_address_not_allowed). http is taken only
+// for this machine (localhost, 127.0.0.0/8, ::1), and so only when private,
+// for development and tests: anywhere else the client secret would cross
+// the network in the clear.
+func CheckIssuer(v string, private bool) (string, error) {
 	v = strings.TrimSpace(v)
 	u, err := url.Parse(v)
 	switch {
@@ -88,15 +91,33 @@ func CheckIssuer(v string) (string, error) {
 	case err != nil || u.Opaque != "" || u.Hostname() == "" || strings.ContainsAny(v, " \t\r\n"):
 		return "", invalid("issuer", "is not an absolute URL with a host, such as https://adfs.example.edu/adfs")
 	case u.Scheme == "http" && !Loopback(u.Hostname()):
-		return "", invalid("issuer", "is http: an identity provider is reached over https, but on this machine")
+		return "", errIssuerHTTP(private)
 	case u.Scheme != "https" && u.Scheme != "http":
 		return "", invalid("issuer", "is not an https URL")
 	case u.User != nil:
 		return "", invalid("issuer", "carries a user name or password")
 	case u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || strings.Contains(v, "#"):
 		return "", invalid("issuer", "has a query or a fragment, which an issuer never has")
+	case !private && !publicHost(u.Hostname()):
+		return "", errIssuerNotPublic("issuer")
 	}
 	return v, nil
+}
+
+// errIssuerHTTP refuses an http issuer elsewhere than on this machine,
+// which is taken only when private: without it, it says nothing of this
+// machine, which is refused for its address.
+func errIssuerHTTP(private bool) *apperr.Error {
+	if private {
+		return invalid("issuer", "is http: an identity provider is reached over https, but on this machine")
+	}
+	return invalid("issuer", "is http: an identity provider is reached over https")
+}
+
+// errIssuerNotPublic refuses field for naming this machine, or an address
+// that is not Public, as an issuer, without SSO_ALLOW_PRIVATE_ISSUERS.
+func errIssuerNotPublic(field string) *apperr.Error {
+	return invalid(field, "is %s", notPublicWhy).With("reason", ReasonAddressNotAllowed)
 }
 
 // Loopback reports whether host is this machine.

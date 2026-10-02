@@ -33,14 +33,14 @@ func TestSettingsAreHeldToTheirRules(t *testing.T) {
 		"http://[::1]:8080/realms/school":   "http://[::1]:8080/realms/school",
 		"https://示範大學.example/adfs":         "https://示範大學.example/adfs",
 	} {
-		if got, err := CheckIssuer(in); err != nil || got != want {
+		if got, err := CheckIssuer(in, true); err != nil || got != want {
 			t.Errorf("issuer %q: %q %v", in, got, err)
 		}
 	}
 	for _, in := range []string{"", "adfs.example.edu", "ftp://adfs.example.edu", "http://adfs.example.edu", "http://10.0.0.1/adfs",
 		"https://user:pw@adfs.example.edu", "https://adfs.example.edu/?a=b", "https://adfs.example.edu/#x", "https:///adfs",
 		"https://adfs.example.edu/a b", "https://" + strings.Repeat("a", 500) + ".edu"} {
-		if _, err := CheckIssuer(in); err == nil {
+		if _, err := CheckIssuer(in, true); err == nil {
 			t.Errorf("issuer %q taken", in)
 		} else if e, ok := apperr.As(err); !ok || e.Details["field"] != "issuer" {
 			t.Errorf("issuer %q: %v", in, err)
