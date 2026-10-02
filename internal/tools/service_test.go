@@ -191,8 +191,10 @@ func TestRevokingAServicesCredentialStopsItAtOnce(t *testing.T) {
 
 	revoked := testkit.Result[tools.ServiceRevokeCredentialOut](t, b.do(t, b.admin, "service.revoke_credential",
 		m{"scope": "document_text", "credential_id": svc.CredentialID}))
-	if revoked.ClaimsReleased != 1 || textStatus(t, b, v) != "pending" {
-		t.Fatalf("revoked: %+v, the text %s", revoked, textStatus(t, b, v))
+	// What it held is back in the queue, where the release wakes the other
+	// credential's waiting claim: by now it may have taken it already.
+	if s := textStatus(t, b, v); revoked.ClaimsReleased != 1 || (s != "pending" && s != "working") {
+		t.Fatalf("revoked: %+v, the text %s", revoked, s)
 	}
 	// Its claim is gone, and so is the credential.
 	if out := b.MustCallWith(svc, "document_text.complete", m{"version_id": v, "file_id": c.FileID, "lease_id": c.LeaseID,
@@ -204,6 +206,9 @@ func TestRevokingAServicesCredentialStopsItAtOnce(t *testing.T) {
 	r := answered(t, waiting, 5*time.Second)
 	if got := resultOf[tools.TextQueueOut](t, r).Claimed; len(got) != 1 || got[0].VersionID != v || got[0].Attempt != 1 {
 		t.Fatalf("the other credential's waiting claim: %+v", got)
+	}
+	if s := textStatus(t, b, v); s != "working" {
+		t.Fatalf("the text the other credential took: %s", s)
 	}
 
 	// A claim waiting when its own credential is revoked stops there.
