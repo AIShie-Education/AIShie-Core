@@ -115,9 +115,12 @@ func actionTarget(ctx context.Context, q dbq.Querier, courseID, actionID uuid.UU
 func actionDecide(d Deps) tool.Tool {
 	return tool.Define(tool.Spec[pipeline.DecideIn, pipeline.DecideOut]{
 		Name: pipeline.ToolActionDecide,
-		Description: "Approve or reject a proposal: an action that was blocked before execution because its proposer " +
-			"needs confirmation. Approving runs it now, as the proposer, after checking that the proposer is still " +
-			"allowed to do it; if not, or if the proposal is too old, it is cancelled instead. Nobody decides their own proposal, " +
+		Description: "Approve or reject a proposal, or send it back for changes: an action that was blocked before execution " +
+			"because its proposer needs confirmation. Approving runs it now, as the proposer, after checking that the proposer is still " +
+			"allowed to do it; if not, or if the proposal is too old, it is cancelled instead. Requesting changes (request_changes) " +
+			"says what to change in reason, 1 to 2000 characters: the proposal ends in changes_requested, nothing of it carried " +
+			"out, and its proposer reads the note and may propose again, naming it in revises; whoever may reject a proposal may " +
+			"request changes to it, under the same rules. Nobody decides their own proposal, " +
 			"nor their owner's, nor another agent's of their owner, nor a decision someone else proposed about any of those, " +
 			"nor approves closing an escalation they raised or approved. An agent's owner decides its proposal only where " +
 			"they could do the same themselves without anyone's confirmation: their own level for it autonomous, its " +
@@ -187,8 +190,9 @@ type ActionView struct {
 	ReviewedByMemberID *uuid.UUID      `json:"reviewed_by_member_id,omitempty"`
 	ReviewedAt         *time.Time      `json:"reviewed_at,omitempty"`
 	ExecutedAt         *time.Time      `json:"executed_at,omitempty"`
-	Result             json.RawMessage `json:"result,omitempty"`
+	Result             json.RawMessage `json:"result,omitempty" jsonschema:"what the call returned; for a rejected proposal, or one sent back for changes, the decision: decision.reason is why, or what to change"`
 	CreatedAt          time.Time       `json:"created_at"`
+	RevisesActionID    *uuid.UUID      `json:"revises_action_id,omitempty" jsonschema:"the proposal this one revises: its proposer's own, sent back for changes, whose result says what was asked"`
 	// YoursToDecide is set in the approval and review queues.
 	YoursToDecide *bool `json:"yours_to_decide,omitempty" jsonschema:"in the approval and review queues: false when the action is yours, your owner's or another agent's of your owner, and when it is your own agent's and you could not do the same yourself without anyone's confirmation (your own level for it below autonomous, or its target beyond your reach, or, for a proposal, the tool's own checks of what it asks refuse it as approving it now would run them): someone else decides and reviews those; true otherwise, though a decision about a decision may still be refused at one remove"`
 }
@@ -200,7 +204,7 @@ func viewAction(a dbq.Action) ActionView {
 		AuthzResult: string(a.AuthzResult), Status: a.Status,
 		DecidedByMemberID: a.DecidedByMemberID, DecidedAt: a.DecidedAt,
 		ReviewState: a.ReviewState, ReviewedByMemberID: a.ReviewedByMemberID, ReviewedAt: a.ReviewedAt,
-		ExecutedAt: a.ExecutedAt, Result: a.Result, CreatedAt: a.CreatedAt,
+		ExecutedAt: a.ExecutedAt, Result: a.Result, CreatedAt: a.CreatedAt, RevisesActionID: a.RevisesActionID,
 	}
 }
 
@@ -268,7 +272,8 @@ func actionListProposed(d Deps) tool.Tool {
 		Description: "The approval queue: proposals in this course waiting for a decision, oldest first. yours_to_decide is " +
 			"false on those of your own party, which someone else decides — yours, your owner's, your owner's other " +
 			"agents', and your own agents' unless you could do the same yourself without anyone's confirmation. If you " +
-			"hold no action_decide here but own an agent seated here, it lists your own agents' proposals alone.",
+			"hold no action_decide here but own an agent seated here, it lists your own agents' proposals alone. A " +
+			"proposal that revises one sent back for changes names it in revises_action_id; action.get on that one says what was asked.",
 		Kind:    tool.Read,
 		Gate:    ownAgentsQueue(),
 		HTTP:    tool.Route{Method: "GET", Pattern: "/v1/courses/{course_id}/actions/proposed"},
@@ -334,7 +339,8 @@ func actionListMine() tool.Tool {
 	return tool.Define(tool.Spec[ActionListMineIn, ActionListOut]{
 		Name: "action.list_mine",
 		Description: "The caller's own actions in this course — proposals and their outcomes included — oldest first. " +
-			"exclude_types leaves out whole kinds of action: a chat's messages, say.",
+			"A proposal rejected or sent back for changes says why, or what to change, in result.decision.reason; one " +
+			"that revises another names it in revises_action_id. exclude_types leaves out whole kinds of action: a chat's messages, say.",
 		Kind: tool.Read,
 		Gate: tool.Gate{Perms: []domain.Perm{domain.PermDocumentRead}},
 		HTTP: tool.Route{Method: "GET", Pattern: "/v1/courses/{course_id}/actions/mine"},

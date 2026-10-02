@@ -42,7 +42,7 @@ WITH RECURSIVE within (id, n) AS (
            OR EXISTS (SELECT 1 FROM action a
                       WHERE a.target_type = 'conversation' AND a.target_id = c.id
                         AND a.action_type IN ('conversation.answer', 'conversation.ask')
-                        AND a.status IN ('proposed', 'rejected', 'cancelled')
+                        AND a.status IN ('proposed', 'rejected', 'changes_requested', 'cancelled')
                         AND a.created_at >= coalesce(sqlc.narg(from_at)::timestamptz, '-infinity')
                         AND a.created_at < coalesce(sqlc.narg(before_at)::timestamptz, 'infinity')
                         AND a.created_at <= sqlc.arg(as_of)))
@@ -58,7 +58,7 @@ FROM (SELECT count(*)::bigint AS messages, coalesce(sum(octet_length(m.body)), 0
      (SELECT count(*)::bigint AS proposals, coalesce(sum(octet_length(a.payload->>'body')), 0)::bigint AS proposal_bytes
       FROM action a
       WHERE a.target_type = 'conversation' AND a.target_id IN (SELECT id FROM chosen)
-        AND a.action_type IN ('conversation.answer', 'conversation.ask') AND a.status IN ('proposed', 'rejected', 'cancelled')
+        AND a.action_type IN ('conversation.answer', 'conversation.ask') AND a.status IN ('proposed', 'rejected', 'changes_requested', 'cancelled')
         AND a.created_at >= coalesce(sqlc.narg(from_at)::timestamptz, '-infinity')
         AND a.created_at < coalesce(sqlc.narg(before_at)::timestamptz, 'infinity')
         AND a.created_at <= sqlc.arg(as_of)) p;
@@ -108,7 +108,7 @@ WHERE c.id > sqlc.arg(after)
        OR EXISTS (SELECT 1 FROM action a
                   WHERE a.target_type = 'conversation' AND a.target_id = c.id
                     AND a.action_type IN ('conversation.answer', 'conversation.ask')
-                    AND a.status IN ('proposed', 'rejected', 'cancelled')
+                    AND a.status IN ('proposed', 'rejected', 'changes_requested', 'cancelled')
                     AND a.created_at >= coalesce(sqlc.narg(from_at)::timestamptz, '-infinity')
                     AND a.created_at < coalesce(sqlc.narg(before_at)::timestamptz, 'infinity')
                     AND a.created_at <= sqlc.arg(as_of)))
@@ -145,11 +145,12 @@ LIMIT sqlc.arg(max_rows);
 -- name: ListExportProposals :many
 -- The answers and questions proposed in the given conversations, in the
 -- span of time, as of the export, that were never posted: waiting for a
--- decision, rejected, or cancelled (withdrawn, expired, or their proposer's
--- seat gone). What each said is its payload's; of the files it named, their
--- names alone, never the upload tokens it names them by. Why it was
--- rejected or cancelled is its result's. An answer's sources are as it
--- named them, ids alone; null when it did not say.
+-- decision, rejected, sent back for changes, or cancelled (withdrawn,
+-- expired, or their proposer's seat gone). What each said is its payload's;
+-- of the files it named, their names alone, never the upload tokens it
+-- names them by. Why it was rejected, what to change, or why it was
+-- cancelled is its result's. An answer's sources are as it named them, ids
+-- alone; null when it did not say.
 SELECT a.id, a.target_id AS conversation_id, a.action_type, a.status, a.created_at,
        a.member_id AS proposer_member_id, pm.actor_id AS proposer_actor_id, pa.display_name AS proposer_name,
        pa.kind AS proposer_kind, pm.role AS proposer_role,
@@ -169,7 +170,7 @@ LEFT JOIN actor pa ON pa.id = pm.actor_id
 LEFT JOIN course_member dm ON dm.id = a.decided_by_member_id
 LEFT JOIN actor da ON da.id = dm.actor_id
 WHERE a.target_type = 'conversation' AND a.target_id = ANY(sqlc.arg(conversation_ids)::uuid[])
-  AND a.action_type IN ('conversation.answer', 'conversation.ask') AND a.status IN ('proposed', 'rejected', 'cancelled')
+  AND a.action_type IN ('conversation.answer', 'conversation.ask') AND a.status IN ('proposed', 'rejected', 'changes_requested', 'cancelled')
   AND a.created_at >= coalesce(sqlc.narg(from_at)::timestamptz, '-infinity')
   AND a.created_at < coalesce(sqlc.narg(before_at)::timestamptz, 'infinity')
   AND a.created_at <= sqlc.arg(as_of)

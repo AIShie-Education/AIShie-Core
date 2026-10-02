@@ -1447,16 +1447,19 @@ change to its draft that waits for approval has been decided.
 action(id, actor_id→actor, course_id null→course, member_id null→course_member,
        action_type, target_type, target_id null, payload jsonb, payload_hash,
        idempotency_key, authz_result autonomy_level,
-       status [denied|proposed|approved|rejected|cancelled|executed|failed],
+       status [denied|proposed|approved|rejected|changes_requested|cancelled|executed|failed],
        decided_by_member_id null→course_member, decided_at null,
        review_state [none|pending|reviewed|escalated],
        reviewed_by_member_id null→course_member, reviewed_at null,
        executed_at null, result jsonb null, created_at,
        authority null [platform|department], authority_dept_id null→department,
+       revises_action_id null→action,
        unique(actor_id, idempotency_key),
        check(decided_by_member_id ≠ member_id), check(reviewed_by_member_id ≠ member_id),
        check(status agrees with authz_result), check(executed_at set ⇔ status = 'executed'),
-       check(authority_dept_id set ⇒ authority = 'department'))
+       check(authority_dept_id set ⇒ authority = 'department'),
+       check(changes_requested ⇒ a decider, a date and a note of 1..2000 characters),
+       check(revises_action_id ≠ id))
 
 event(seq, type, course_id null→course, action_id null→action,
       subject_type, subject_id null,
@@ -1474,6 +1477,32 @@ says `by_owner`. Nobody else may: not another agent of the owner's, nor an agent
 `pending_review` needs no review table — the queue is `WHERE review_state IN ('pending', 'escalated')`,
 an escalated action still waiting for its second reviewer: someone other than whoever escalated it
 or approved its escalation.
+
+**Asking for changes.** Whoever may reject a proposal may instead send it back for changes
+(`action.decide` with `request_changes`), saying what to change in the decision's `reason`: a
+note of 1 to 2000 characters, required, kept trimmed. Since it says no as a rejection does, it
+is held to every rule a rejection is held to: nobody's of their own party, an owner's own
+agent's only where they could have done it themselves (`owner_not_autonomous`,
+`owner_would_be_refused`, below), nobody's at one remove, and refused at once, before it is
+proposed, where it would be refused as it is made. The proposal ends in `changes_requested`, as
+final as `rejected`: nothing of it is carried out, `decided_by_member_id` and `decided_at` say
+who asked and when, and `result` is `{"decision": {"decision": "request_changes", "reason": …,
+"by_action_id": …}}`, which `action_changes_requested_decided` holds to a decider, a date and a
+note. Its proposer learns of it as of a rejection: `action.changes_requested`, filed under the
+proposal (below), carries no note, as no event carries what was written, and the proposal in
+`action.list_mine` has it in `result.decision.reason`; a conversation whose answer was sent back
+is back in its respondent's inbox (§2.8). What follows is a new proposal, which names the one
+it revises (`revises_action_id`; the `Revises` header over REST, the argument `revises` over
+MCP), for whoever decides it to read what was asked, in the queue and with `action.get` of the
+one it names. A call names only a proposal of its own actor's, in its own course, that ended in
+`changes_requested`; anything else, a read or a draft naming one included, is refused before
+anything is recorded (`not_revisable`), and the database holds the same (trigger
+`action_revises_own_changes_requested`), and that what a row revises never changes. A revision
+may be sent back and revised in turn, so the chain runs back to the first proposal. What a call
+revises is part of the call: retried under the same key, it names the same proposal, or none if
+the first named none, or it is an `idempotency_conflict`. Nothing ties a revision's tool or
+target to what it revises, and several calls may name one proposal — a revision that failed,
+then one that did not.
 
 `authority` says in what capacity a call outside any course was allowed, when it was not the
 caller's own account's: by a platform role, or by a department administrator's appointment,
@@ -1503,8 +1532,8 @@ id or as one that was waiting for the assignment, and that is posted by hand mea
 already, as proposed, and the approval posts the rest, failing if there are none; one replaced
 meanwhile fails the approval.
 `result` holds what the call returned (secrets removed likewise), or `{"error": …}` for a
-failed, denied or cancelled action and `{"decision": …}` for a rejected one; which of those it
-is follows from `status`, never from the shape of `result`.
+failed, denied or cancelled action and `{"decision": …}` for one rejected or sent back for
+changes; which of those it is follows from `status`, never from the shape of `result`.
 
 **Only state changes are actions.** A read passes `authorize()`, scope included, and writes
 no `action` row: the log stays a record of attempts to change something. One change is no
@@ -1550,9 +1579,10 @@ cursor is how anyone — a student's page, an agent starting cold — learns wha
 event type is visible to holders of certain permissions (a posted grade to `perm_grade_read`,
 a draft to those who grade, the roster to `perm_member_read`, the action log to
 `perm_action_decide`); a type with no rule is visible to nobody. On top of that, the events of
-a member's *own* actions are always visible to it: `action.approved`, `action.rejected` and
-`action.cancelled` are filed under the proposal's id, which is how a pull-based agent learns
-what became of what it proposed. `action.approved` carries an `outcome` — `executed`, or
+a member's *own* actions are always visible to it: `action.approved`, `action.rejected`,
+`action.changes_requested` and `action.cancelled` are filed under the proposal's id, which is
+how a pull-based agent learns what became of what it proposed. `action.proposed` names the
+proposal a revision revises (`revises_action_id`). `action.approved` carries an `outcome` — `executed`, or
 `failed` when the approved call was refused by the domain — so that the two are never taken
 for one another. News of a conversation is the exception both ways: its two participants see
 it, and nobody else (§2.8). Then scope, per row, as below.
@@ -1616,10 +1646,10 @@ agent someone owns acts only as their delegate. An agent does not approve or rev
 owner or a sibling did, nor does any of the party close an escalation another of them raised.
 
 **An owner decides what their own agent did where they could have done it themselves.** They
-approve or reject its proposal, and review what it did under review, only if their own seat, when
-they decide, holds every permission that gates the action at `autonomous` and reaches its target:
-the authorization they would face making the very same call themselves then (`authorize()`, §3,
-from their own seat). Their agent does nothing they could not do anyway, and they could have done
+approve or reject its proposal, or ask for changes to it, and review what it did under review,
+only if their own seat, when they decide, holds every permission that gates the action at
+`autonomous` and reaches its target: the authorization they would face making the very same
+call themselves then (`authorize()`, §3, from their own seat). Their agent does nothing they could not do anyway, and they could have done
 this without anyone. So it needs no `perm_action_decide` of theirs, and whatever they hold of it,
 their decision is carried out at once, `autonomous`, as their own doing of it would be: a student,
 who decides nothing else, confirms her own agent's drafts of her work (§2.2, Delegates), since she
@@ -1648,15 +1678,16 @@ such a proposal is not theirs meanwhile, rather than failing. An answer
 conversation (§2.8): for it the owner is measured by what judging an answer is,
 `perm_action_decide` (`tool.Spec.OwnerJudgedBy`), so an instructor who decides actions without
 anyone's confirmation decides their own course tutor's answers, and one whose decisions wait
-for a confirmation does not. Rejecting is held to
+for a confirmation does not. Rejecting, and asking for changes, are held to
 the same rule as approving, so that one mark says which proposals are the caller's; an owner who
 wants their agent's proposal gone takes it back (`action.withdraw`, above) whatever their level.
 It is the owner's own decision about their own agent's action and nothing more: the agent never
 decides its owner's, a sibling never another's, and at one remove (below) the party stays one.
 Approving authorizes the proposer again, as any approval does, so an owner carries out nothing
 their agent may no longer do. The decision says the owner made it: `by_owner` in its result and
-in the event it writes (`action.approved`, `action.rejected`, `action.reviewed`,
-`action.escalated`), and in a rejection's `result.decision`. The database cannot see it: the
+in the event it writes (`action.approved`, `action.rejected`, `action.changes_requested`,
+`action.reviewed`, `action.escalated`), and in the `result.decision` of a rejection or a request
+for changes. The database cannot see it: the
 CHECKs compare seats, and an owner's seat is not their agent's.
 
 The approval and review queues list the party's actions all the same — they are the course's
@@ -1924,8 +1955,9 @@ question it never saw. It is refused as `moved_on` too once the opener's latest 
 retracted, and then names no message to answer: the question is withdrawn, and nothing waits
 for an answer (below). It is refused as well once that message is answered
 (`already_answered`), and a second proposal to one message is refused while the first waits
-for a decision (`answer_pending`): so an answer that failed, or was rejected, is written again
-under a new idempotency key without any risk of two answers to one question. An answer waiting
+for a decision (`answer_pending`): so an answer that failed, was rejected or was sent back for
+changes is written again under a new idempotency key without any risk of two answers to one
+question, one sent back naming the answer it revises (§2.6, Asking for changes). An answer waiting
 for approval to a message since overtaken, or since withdrawn, holds nothing up: the
 conversation is back in the inbox, or waits for nothing, and approving the answer can only
 fail. Writing a message first updates who spoke last, `WHERE status = 'open'`, which
@@ -2212,7 +2244,8 @@ the message it answers and the action that wrote it, a retracted one with its te
 database keeps it, marked `retracted` with when, by whom and why; each file a message carries,
 described by its id, name, type, size and checksum, never its bytes nor where it is kept; and
 the answers and questions proposed in it and never posted, which are actions and no messages
-(§2.6): waiting for a decision, rejected or cancelled, with what each said, the names of the
+(§2.6): waiting for a decision, rejected, sent back for changes or cancelled, with what each
+said, the names of the
 files it would carry and never the upload tokens it names them by, who decided it and why. It
 holds no token, password or secret. Its ids are the database's, so that every line of it can
 be followed back to its rows and actions.
@@ -2246,7 +2279,7 @@ empty or null as a message's),
 `decided_at`, `decided_by` and `reason`. The CSV file, a reading of what was said, does not
 carry sources. A row of the CSV file has the columns `conversation_id`, `course_id`, `course_code`,
 `course_section`, `course_title`, `conversation_title`, `status` (`posted`, `retracted`,
-`proposed`, `rejected` or `cancelled`), `message_id`, `seq`, `action_id`, `created_at`,
+`proposed`, `rejected`, `changes_requested` or `cancelled`), `message_id`, `seq`, `action_id`, `created_at`,
 `author_member_id`, `author_actor_id`, `author_name`, `author_kind`, `author_role`,
 `in_reply_to_message_id`, `body`, `retracted_at`, `retracted_by_name`, `reason`, `decided_at`,
 `decided_by_name`, `attachment_ids` and `attachment_filenames`, in that order, a proposal's row
@@ -2617,7 +2650,9 @@ respondent's `conversation_answer` decides is who is shown its text.
 | A retried call cannot act twice | `unique(actor_id, idempotency_key)` |
 | Every action carries the hash of what was asked | `payload_hash NOT NULL`, 64 hex characters |
 | Nobody decides or reviews their own action from the same seat | CHECKs on `action` |
-| `denied` status ⇔ `denied` authorization; only a `confirm_required` action is proposed, rejected, cancelled or has a decider; only an executed `pending_review` action is under review | `action_status_matches_authz` |
+| `denied` status ⇔ `denied` authorization; only a `confirm_required` action is proposed, rejected, sent back for changes, cancelled or has a decider; only an executed `pending_review` action is under review | `action_status_matches_authz` |
+| A proposal sent back for changes says who asked, when, and what to change, in 1 to 2000 characters | `action_changes_requested_decided` |
+| A call revises only a proposal of its own actor's, in its own course, sent back for changes, and never itself; what a row revises never changes | triggers `action_revises_own_changes_requested`, `action_revises_fixed`; `action_revises_fk`, `action_not_own_revision` |
 | `executed_at` is set exactly when status is `executed` | `action_executed_at_consistent` |
 | A session credential has a lookup prefix and an expiry | CHECKs on `credential` |
 | An invitation has a lookup prefix and an expiry, and an actor has one live invitation at most | CHECKs and a partial unique index on `credential` |
@@ -2694,7 +2729,10 @@ respondent's `conversation_answer` decides is who is shown its text.
 - The *transitions* between `action.status` values. The database checks that a row at rest is
   consistent with its `authz_result`; the order things happen in is application logic.
 - Idempotent replay: same key and same `payload_hash` returns the stored result, same key and
-  a different hash is refused.
+  a different hash is refused, and so is the same key naming another proposal it revises, or
+  one where the first named none, or none where it did.
+- A request for changes says what to change: `action.decide`'s check refuses one with no note,
+  or one of blanks, or past 2000 characters, before anything is recorded, and stores it trimmed.
 - Re-authorizing the proposer when a proposal is approved, and cancelling proposals past
   their TTL.
 - A tool's check of what a call's arguments say alone (`tool.Spec.Check`) runs as they are
@@ -2892,9 +2930,9 @@ respondent's `conversation_answer` decides is who is shown its text.
   again.
 - Four eyes counts parties (§2.6): an actor, the agents it owns or its owner, and the owner's
   other agents are one, in `action.decide`, `action.review`, at any remove and for escalations.
-  One exception, at no remove: an owner approves, rejects or reviews their own agent's action
-  where their own seat, as `authorize()` finds it for the same call when they decide, holds it at
-  `autonomous` and reaches its target, and, deciding a proposal, the tool's `Check` and
+  One exception, at no remove: an owner approves, rejects, asks for changes to or reviews their
+  own agent's action where their own seat, as `authorize()` finds it for the same call when they
+  decide, holds it at `autonomous` and reaches its target, and, deciding a proposal, the tool's `Check` and
   `Validate`, run as approving it now would run them, and its `Since`, of what changed since it
   was proposed, do not refuse it; `yours_to_decide` is worked out the same way, and the decision
   and its event say `by_owner`. That takes no `perm_action_decide` and is `autonomous` whatever
@@ -3062,7 +3100,10 @@ respondent's `conversation_answer` decides is who is shown its text.
    student a `computed` snapshot of the assignments bucket and the course total.
 
 If Sato rejects, the action becomes `rejected` and the grade tables are never touched — no
-garbage in the grades, full record in the log.
+garbage in the grades, full record in the log. If he asks for changes instead, saying what
+(`request_changes`), it becomes `changes_requested`, touching nothing either; the agent reads
+the note in its own actions, and proposes again naming the proposal it revises, for Sato to
+decide as at step 3.
 
 ## 6. Deliberately out of scope for v1
 

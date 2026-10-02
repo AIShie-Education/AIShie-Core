@@ -229,6 +229,17 @@ func (c *Platform) CallWith(caller pipeline.Caller, name string, args any, key s
 	return c.P.Invoke(context.Background(), caller, name, raw, key)
 }
 
+// CallRevising is Call for a call that revises proposal revises, one of the
+// actor's sent back for changes (pipeline.InvokeRevising).
+func (c *Platform) CallRevising(actor uuid.UUID, name string, args any, key string, revises uuid.UUID) (pipeline.Outcome, error) {
+	c.T.Helper()
+	raw, err := json.Marshal(args)
+	if err != nil {
+		c.T.Fatalf("marshal args: %v", err)
+	}
+	return c.P.InvokeRevising(context.Background(), pipeline.Caller{ActorID: actor}, name, raw, key, revises)
+}
+
 // RuntimeService is the site's agent runtime, a site service, and a live
 // credential of its own, made the first time it is asked for, as root
 // makes them (service.issue_credential): the service's actor, its

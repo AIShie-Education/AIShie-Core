@@ -91,7 +91,9 @@ read on 2026-09-26; **[UNVERIFIED]** marks what it did not confirm.
   never acts as an agent: each agent's token does that.
 - **REST.** `GET /v1/tools` (no token needed) lists each tool's `name`,
   `description`, `kind`, `method`, `path`, `input_schema` and
-  `output_schema`. Writes are `POST`s with an `Idempotency-Key` header. The
+  `output_schema`. Writes are `POST`s with an `Idempotency-Key` header, and
+  a `Revises` header when they propose again what was sent back for changes
+  (§2.2). The
   status is 200 executed, 202 proposed, 403 denied, else by error code; the
   body holds the envelope's fields. Prefer MCP, which brings Core's
   instructions with it; both share one per-actor limit.
@@ -221,8 +223,8 @@ text.
 ```
 
 - `status` is `executed`, `proposed`, `denied` or `failed` for a call that was
-  attempted and recorded; `rejected` or `cancelled` only on the replay of an
-  old proposal; and `error` for a call never attempted: bad arguments, no such
+  attempted and recorded; `rejected`, `changes_requested` or `cancelled` only
+  on the replay of an old proposal; and `error` for a call never attempted: bad arguments, no such
   tool or target, a reused key, a fault of Core's.
 - MCP `isError` is true for everything but `executed` and `proposed`. It is an
   outcome to act on, not a transport failure.
@@ -249,6 +251,14 @@ text.
   `idempotency_conflict`, with `details.action_id`, and nothing is recorded.
 - The runtime removes `idempotency_key` from the schema the model sees and
   sets it itself. Models never choose keys.
+- A write that proposes again what a person sent back for changes names
+  that proposal in `revises` (the `Revises` header over REST): the agent's own
+  proposal in the same course whose status is `changes_requested`. Anything
+  else is refused, `invalid_argument` or `failed_precondition` with
+  `details.reason` `not_revisable`, and nothing is recorded. What a call
+  revises is part of it: the same key with another `revises`, or none, is an
+  `idempotency_conflict`. The runtime sets it, as it sets the key, and removes
+  it from the schema the model sees.
 
 | Write | Key |
 |---|---|
@@ -264,7 +274,7 @@ text.
 a timeout send the stored bytes again: a new body under the old key is an
 `idempotency_conflict` with the runtime's own call. A regenerated body is a new
 attempt, under the next number, after an attempt that posted nothing (failed,
-rejected, cancelled). That is safe: Core refuses a second answer to a message
+rejected, sent back for changes, cancelled). That is safe: Core refuses a second answer to a message
 (`already_answered`), and a second proposal while one waits (`answer_pending`).
 
 ### 2.3 The tools the runtime calls
@@ -301,13 +311,17 @@ with `conversation_mark_read`; `conversation_list` and `conversation_get` say
 what the inbox holds. What it reads is unchanged.
 
 The events that matter carry ids, never text:
-- `action.approved`, `action.rejected` and `action.cancelled`, filed under the
-  proposal's `action_id`. `action.approved` has `payload.outcome`, `executed`
-  or `failed`; `action.cancelled` has `payload.reason` (proposals expire after
-  14 days by default; `withdrawn` when the agent or its owner took it back).
+- `action.approved`, `action.rejected`, `action.changes_requested` and
+  `action.cancelled`, filed under the proposal's `action_id`.
+  `action.approved` has `payload.outcome`, `executed` or `failed`;
+  `action.cancelled` has `payload.reason` (proposals expire after 14 days by
+  default; `withdrawn` when the agent or its owner took it back).
   `payload.by_owner` is true when it was the agent's own owner who approved,
-  rejected or withdrew it. A rejection's reason is in the proposal's
-  `result.decision.reason`, which `action_list_mine` returns.
+  rejected, sent back or withdrew it. A rejection's reason, and what a person
+  sent back for changes asks to change (a note of 1 to 2000 characters), is in
+  the proposal's `result.decision.reason`, which `action_list_mine` returns; a
+  proposal sent back has `result.decision.decision` `request_changes` and
+  status `changes_requested`, and is over, as a rejected one is.
 - `conversation.opened`, `conversation.message_posted` (`conversation_id`,
   `message_id`, `author_member_id`, `opener_member_id`,
   `respondent_member_id`, and `attachments`, `[{id, filename, content_type,
@@ -325,7 +339,7 @@ The events that matter carry ids, never text:
 | `conversation_draft` | `course_id`, `conversation_id`, `attempt` (1 to 64 characters), `version` (1 or more), `text` (at most 20,000 characters), `steps` (at most 20 `{kind, target, state}`), `done`; no `idempotency_key` | `{stored, version}`. The answer being written, for whoever reads the conversation to watch (§2.8). An ephemeral write: recorded nowhere, never proposed, and not counted against the rate limit when carried out; at most 10 a second per conversation. The respondent's alone, while the conversation is `awaiting_answer`: `not_the_respondent`, `conversation_not_awaiting`, `not_addressable` otherwise. |
 | `conversation_close` | `course_id`, `conversation_id`, `reason` (≤ 500 characters) | Either participant closes. The runtime closes only as §2.4 says. A reason that reads as the system's (`seat_removed`, `conversations_are_with_agents`) is refused. |
 | `conversation_retract` | `course_id`, `message_id`, `reason` | The author retracts, or staff overseeing the opener; the runtime only when the owner asks. Retracting the opener's latest message withdraws the question: the conversation is `answered`, an answer to it is refused `moved_on`, and its draft is gone. |
-| `action_list_mine` | `course_id`, `exclude_types`, `after`, `limit` | The agent's own actions, oldest first, with `status` and `result`: a proposal's fate and a rejection's reason. Keep its `after` cursor. (`action_get` needs `action_decide`.) |
+| `action_list_mine` | `course_id`, `exclude_types`, `after`, `limit` | The agent's own actions, oldest first, with `status` and `result`: a proposal's fate, a rejection's reason and what to change in one sent back, and `revises_action_id` on a revision. Keep its `after` cursor. (`action_get` needs `action_decide`.) |
 
 **Read tools for the model**, where the seat allows (§4): `course_get`,
 `document_list`, `document_get` (text in `version.body_md`; the version's
@@ -352,12 +366,14 @@ in parts, by `file_id`), `document_file` (one file again, with a fresh URL),
 | `error`, `idempotency_conflict` | Another body was sent under this key, by another worker. | Never regenerate under it. If the conversation is still in the inbox, answer under the next attempt number. |
 | `error`, `not_found` | No such conversation, or none the agent may read now. | Drop it. |
 | any, `replayed: true` | Already done. | Treat it as the stored status. |
-| replayed `rejected` or `cancelled` | A person rejected the earlier answer, or it expired. | See below. |
+| replayed `rejected`, `changes_requested` or `cancelled` | A person rejected the earlier answer, sent it back for changes, or it expired. | See below. |
 
-**A rejected or cancelled answer** puts the conversation back in the inbox for
-the same message, where the same key would only replay the rejection.
-Regenerate under the next attempt number, with the rejection's reason in the
-prompt. After `max_attempts` (default 3), close the conversation with a short,
+**A rejected, sent back or cancelled answer** puts the conversation back in
+the inbox for the same message, where the same key would only replay the
+decision. Regenerate under the next attempt number, with the rejection's
+reason, or what to change, in the prompt. An answer sent back for changes is
+a rejection with a reason that asks for another: the new attempt names it in
+`revises`, so that whoever decides it sees what it revises. After `max_attempts` (default 3), close the conversation with a short,
 polite reason rather than leave it at the head of the inbox. An answer waiting
 for approval to a message since overtaken holds nothing up: the inbox shows the
 newer message, and approving the old answer can only fail. The answers of an
@@ -1324,8 +1340,9 @@ Still open, none blocking M1: 2, 3, and one inbox across courses (4).
    (§2.0); `me_get` names the owner too (`owner_actor_id`).
 2. **Which permission gates each tool.** The catalogue has no gates, so §4
    keeps them by hand. Proposed: a `gate` field in `GET /v1/tools`.
-3. **A rejection's reason.** `action.rejected` carries none and `action_get`
-   needs `action_decide`, so the runtime pages `action_list_mine`. Proposed:
+3. **A rejection's reason, or what to change.** `action.rejected` and
+   `action.changes_requested` carry none, and `action_get` needs
+   `action_decide`, so the runtime pages `action_list_mine`. Proposed:
    `action_get` open to an action's own actor.
 4. **Finding work.** Settled in part: `conversation_inbox`, `event_list` and
    `conversation_messages` long-poll with `wait_s` (§7.2). One inbox across

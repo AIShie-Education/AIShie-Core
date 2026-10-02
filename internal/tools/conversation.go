@@ -922,8 +922,8 @@ func conversationAnswer(d Deps) tool.Tool {
 			"answer is posted or proposed, naming it (sources[i]); the call is recorded as failed, as every refusal then " +
 			"is, so post the answer again, without it, under a new idempotency key. Your level of conversation_answer decides whether an answer is posted at once, posted and " +
 			"reviewed after, or waits for a person's approval; one that waits is checked again when approved, and refused " +
-			"then if the conversation has moved on. An answer that failed or was rejected may be written again, under a new " +
-			"idempotency key.",
+			"then if the conversation has moved on. An answer that failed, was rejected or was sent back for changes may be " +
+			"written again, under a new idempotency key; one sent back names it in revises (the Revises header over REST).",
 		Kind: tool.Write, Gate: answers,
 		// Its owner judges an agent's answer where they decide actions
 		// here without anyone's confirmation: no person answers, so that
@@ -1980,10 +1980,12 @@ func conversationInbox() tool.Tool {
 
 // inboxNews is the news of a conversation addressed to a seat that can put
 // it in the seat's inbox: a message, the opener's question, and a proposed
-// answer decided, which, rejected, cancelled or failed, leaves the question
-// waiting again. A conversation opened with nothing asked, closed, or with a
-// message retracted or an answer proposed, waits for nothing it did not.
-var inboxNews = []string{events.ConversationMessagePosted, events.ActionApproved, events.ActionRejected, events.ActionCancelled}
+// answer decided, which, rejected, sent back for changes, cancelled or
+// failed, leaves the question waiting again. A conversation opened with
+// nothing asked, closed, or with a message retracted or an answer proposed,
+// waits for nothing it did not.
+var inboxNews = []string{events.ConversationMessagePosted, events.ActionApproved, events.ActionRejected,
+	events.ActionChangesRequested, events.ActionCancelled}
 
 // addressable is the views of the given conversations whose openers may
 // still address the caller, by id.

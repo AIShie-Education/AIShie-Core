@@ -16,7 +16,8 @@ In place so far:
 
 - `authorize()`, the tool registry, and the action pipeline every call goes
   through — idempotent replay, proposals with re-authorization on approval,
-  after-the-fact review, events;
+  sent back for changes with a note of what to change and proposed again
+  naming the one revised, after-the-fact review, events;
 - authentication (API tokens for agents and nobody else; for people, a
   session from a password or single sign-on) and the REST API, whose routes
   are generated from the tool registry;
@@ -492,7 +493,9 @@ registry's with the dot turned to an underscore (`grade_submit`). Every tool
 that changes something takes an `idempotency_key` argument. A result whose
 status is `proposed` is not an error: the action waits for a person, and the
 agent learns the decision from `event_list`, which it may long-poll (`wait_s`,
-below). The server's MCP
+below). A proposal a person sent back for changes (`action.changes_requested`)
+says what to change in `result.decision.reason` (`action_list_mine`); the agent
+proposes again under a new key, naming it in the argument `revises`. The server's MCP
 instructions tell a connecting model all of this. One HTTP request carries
 one call: JSON-RPC batches are refused, since the rate limit counts requests.
 
@@ -560,8 +563,9 @@ waiting conversation with `conversation_messages`, and answers with
 (`in_reply_to_message_id`, the conversation's `latest_opener_message_id`). An
 answer to anything but the latest question is refused as a conflict, so a
 reply that took a while is never posted under a newer question, and so is a
-second answer to one question, so an answer that failed or was rejected is
-written again safely. People find the agents they may ask with
+second answer to one question, so an answer that failed, was rejected or was
+sent back for changes is written again safely, naming in `revises` the one
+sent back. People find the agents they may ask with
 `conversation.respondents` and start with `conversation.open`; a person is
 nobody's respondent and answers nothing (`conversations_are_with_agents`),
 and a person's seat holds `conversation_answer` at `denied`. A person's chat
@@ -655,7 +659,14 @@ state is a `POST` and needs an `Idempotency-Key` header, all but
 as `ephemeral`, takes none and records nothing: send the same key
 with the same body again and you get the first answer back
 (`Idempotency-Replayed: true`) with nothing done twice; send it with a
-different body and you get `409 idempotency_conflict`. The response says what
+different body and you get `409 idempotency_conflict`. A write that proposes
+again what a person sent back for changes names that proposal in a `Revises`
+header, its action id: one of the caller's own in the course, which ended in
+`changes_requested` (`action.decide` with `request_changes` and a note of what
+to change); anything else it names is refused with nothing recorded
+(`not_revisable`), and the same key with another `Revises`, or none, is a
+conflict. An empty `Revises` names nothing, as an empty or null `revises`
+over MCP does. The response says what
 became of the call. A call that was attempted is recorded, and the answer
 names the action in a top-level `action_id`: `200` executed, `202` proposed
 (it now waits for a human; watch the action id; one its tool's rules refuse as
@@ -663,7 +674,7 @@ the course stands fails at once instead), `403` denied, and a failure
 with its error's own status, `400`, `403`, `404`, `409` or `422`, or `429`, with
 `Retry-After`, for an agent writing to its memory faster than it may. A proposal
 replayed says what has become of it: `202` while it waits, `200` executed,
-`409` rejected, `422` cancelled, or its failure's status. An answer with no
+`409` rejected or sent back for changes, `422` cancelled, or its failure's status. An answer with no
 top-level `action_id` recorded nothing, whatever its status: among them every
 `401` and every other `429`, a `400` or `404` for a call that was never attempted (its
 arguments refused by the schema, or by its tool's check of what they say alone, such as a

@@ -38,7 +38,7 @@ WITH RECURSIVE within (id, n) AS (
            OR EXISTS (SELECT 1 FROM action a
                       WHERE a.target_type = 'conversation' AND a.target_id = c.id
                         AND a.action_type IN ('conversation.answer', 'conversation.ask')
-                        AND a.status IN ('proposed', 'rejected', 'cancelled')
+                        AND a.status IN ('proposed', 'rejected', 'changes_requested', 'cancelled')
                         AND a.created_at >= coalesce($1::timestamptz, '-infinity')
                         AND a.created_at < coalesce($2::timestamptz, 'infinity')
                         AND a.created_at <= $3))
@@ -54,7 +54,7 @@ FROM (SELECT count(*)::bigint AS messages, coalesce(sum(octet_length(m.body)), 0
      (SELECT count(*)::bigint AS proposals, coalesce(sum(octet_length(a.payload->>'body')), 0)::bigint AS proposal_bytes
       FROM action a
       WHERE a.target_type = 'conversation' AND a.target_id IN (SELECT id FROM chosen)
-        AND a.action_type IN ('conversation.answer', 'conversation.ask') AND a.status IN ('proposed', 'rejected', 'cancelled')
+        AND a.action_type IN ('conversation.answer', 'conversation.ask') AND a.status IN ('proposed', 'rejected', 'changes_requested', 'cancelled')
         AND a.created_at >= coalesce($1::timestamptz, '-infinity')
         AND a.created_at < coalesce($2::timestamptz, 'infinity')
         AND a.created_at <= $3) p
@@ -187,7 +187,7 @@ WHERE c.id > $1
        OR EXISTS (SELECT 1 FROM action a
                   WHERE a.target_type = 'conversation' AND a.target_id = c.id
                     AND a.action_type IN ('conversation.answer', 'conversation.ask')
-                    AND a.status IN ('proposed', 'rejected', 'cancelled')
+                    AND a.status IN ('proposed', 'rejected', 'changes_requested', 'cancelled')
                     AND a.created_at >= coalesce($6::timestamptz, '-infinity')
                     AND a.created_at < coalesce($7::timestamptz, 'infinity')
                     AND a.created_at <= $2))
@@ -429,7 +429,7 @@ LEFT JOIN actor pa ON pa.id = pm.actor_id
 LEFT JOIN course_member dm ON dm.id = a.decided_by_member_id
 LEFT JOIN actor da ON da.id = dm.actor_id
 WHERE a.target_type = 'conversation' AND a.target_id = ANY($1::uuid[])
-  AND a.action_type IN ('conversation.answer', 'conversation.ask') AND a.status IN ('proposed', 'rejected', 'cancelled')
+  AND a.action_type IN ('conversation.answer', 'conversation.ask') AND a.status IN ('proposed', 'rejected', 'changes_requested', 'cancelled')
   AND a.created_at >= coalesce($2::timestamptz, '-infinity')
   AND a.created_at < coalesce($3::timestamptz, 'infinity')
   AND a.created_at <= $4
@@ -469,11 +469,12 @@ type ListExportProposalsRow struct {
 
 // The answers and questions proposed in the given conversations, in the
 // span of time, as of the export, that were never posted: waiting for a
-// decision, rejected, or cancelled (withdrawn, expired, or their proposer's
-// seat gone). What each said is its payload's; of the files it named, their
-// names alone, never the upload tokens it names them by. Why it was
-// rejected or cancelled is its result's. An answer's sources are as it
-// named them, ids alone; null when it did not say.
+// decision, rejected, sent back for changes, or cancelled (withdrawn,
+// expired, or their proposer's seat gone). What each said is its payload's;
+// of the files it named, their names alone, never the upload tokens it
+// names them by. Why it was rejected, what to change, or why it was
+// cancelled is its result's. An answer's sources are as it named them, ids
+// alone; null when it did not say.
 func (q *Queries) ListExportProposals(ctx context.Context, arg ListExportProposalsParams) ([]ListExportProposalsRow, error) {
 	rows, err := q.db.Query(ctx, listExportProposals,
 		arg.ConversationIds,

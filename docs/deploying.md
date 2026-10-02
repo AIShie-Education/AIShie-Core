@@ -648,6 +648,30 @@ Run all of these as root on the server.
   site chat credential; what it cannot put back is the type and size of a
   purged version's file, which the release before shows and nothing keeps
   once 0027 has dropped them.
+- **Migration 0028, asking for changes:** whoever may reject a proposal may
+  send it back for changes instead, saying what to change
+  (`action.decide`, `request_changes`); the proposal ends in
+  `changes_requested`, and its proposer's next names the one it revises
+  (`revises_action_id`; the `Revises` header, or `revises` over MCP)
+  (docs/schema.md §2.6, Asking for changes). It needs nothing of the
+  operator, and changes no row. The previous release, while the migration
+  goes in and after a rollback, never asks for changes and names nothing a
+  call revises; it shows a proposal sent back as over, with its status, and
+  has no rule for its news, which it shows the proposer alone. Going down
+  makes every proposal sent back for changes a rejection, its note its
+  reason, and forgets what each call revised; a decision proposed to ask for
+  changes and still waiting is refused by the release before if it is
+  approved. The site's agent runtime and front end that know of it come
+  with their own releases, **the runtime's first**: until then the front end
+  offers no button for it, and a runtime that does not know it leaves an
+  answer sent back for changes waiting for good. Its hosted agent never
+  answers that question again, `max_attempts` never closes the
+  conversation, and the seat shows the answer as waiting for approval; only
+  a new message from the asker gets an answer. Until the runtime that knows
+  it is deployed, reject a hosted agent's answer with a reason instead,
+  which it answers again with; that holds for an agent proposing to ask
+  for changes too, whose decision a teacher approves in the front end of
+  today.
 - **Migration 0029, what an answer relied on:** an agent's answer may name
   the course materials it relied on (`conversation.answer`'s `sources`),
   which are kept with it (`conversation_message_source`) and shown to each

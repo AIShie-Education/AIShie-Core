@@ -23,12 +23,14 @@ import (
 
 // Event types. The catalogue grows with the tool catalogue.
 const (
-	ActionProposed  = "action.proposed"
-	ActionApproved  = "action.approved"
-	ActionRejected  = "action.rejected"
-	ActionCancelled = "action.cancelled"
-	ActionReviewed  = "action.reviewed"
-	ActionEscalated = "action.escalated"
+	ActionProposed = "action.proposed"
+	ActionApproved = "action.approved"
+	ActionRejected = "action.rejected"
+	// A proposal sent back with a note of what to change.
+	ActionChangesRequested = "action.changes_requested"
+	ActionCancelled        = "action.cancelled"
+	ActionReviewed         = "action.reviewed"
+	ActionEscalated        = "action.escalated"
 
 	GradeCreated      = "grade.created"
 	GradePosted       = "grade.posted"

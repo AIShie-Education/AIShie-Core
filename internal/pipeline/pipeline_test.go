@@ -978,6 +978,8 @@ func TestAnOwnerDecidesWhatTheyCouldHaveDoneThemselves(t *testing.T) {
 	}
 	refused("Sato approving, his own grades needing a confirmation", decide(c.Sato, sib, "approve", "sato-1"), "owner_not_autonomous")
 	refused("Sato rejecting, his own grades needing a confirmation", decide(c.Sato, sib, "reject", "sato-1r"), "owner_not_autonomous")
+	refused("Sato asking for changes, his own grades needing a confirmation", decide(c.Sato, sib, "request_changes", "sato-1c"), "owner_not_autonomous")
+	refusedAtOnce("Sato's other agent asking for changes", decide(sibling, sib, "request_changes", "sib-1c"))
 	set(c.SatoM, domain.PermGradeSubmit, domain.PendingReview)
 	refused("Sato approving, his own grades under review", decide(c.Sato, sib, "approve", "sato-1pr"), "owner_not_autonomous")
 	decided("Mori approving it", decide(mori, sib, "approve", "mori-1"), domain.StatusExecuted, false)
@@ -990,6 +992,14 @@ func TestAnOwnerDecidesWhatTheyCouldHaveDoneThemselves(t *testing.T) {
 		t.Fatal("the rejection does not say the owner made it")
 	}
 	byOwner("the rejection", "action.rejected", rejected)
+	// Asking for changes, likewise.
+	sentBack := propose(bot, 2, "p2c")
+	decided("Sato asking his agent for changes", decide(c.Sato, sentBack, "request_changes", "sato-2c"), domain.StatusChangesRequested, true)
+	if n := c.Count(`SELECT count(*) FROM action WHERE id = $1 AND status = 'changes_requested' AND result->'decision'->>'by_owner' = 'true'
+		AND result->'decision'->>'reason' = 'because'`, *sentBack); n != 1 {
+		t.Fatal("the request for changes does not say the owner made it, and what to change")
+	}
+	byOwner("the request for changes", "action.changes_requested", sentBack)
 
 	// A student his own seat no longer reaches, by the time he decides: not
 	// his. Nor is it his agent's any more, which approval finds.

@@ -75,7 +75,16 @@ func TestArgumentsAreCheckedBeforeAnythingIsProposed(t *testing.T) {
 		{tool: "action.decide",
 			valid:   in(m{"action_id": graded.ActionID, "decision": "reject"}),
 			invalid: in(m{"action_id": graded.ActionID, "decision": "maybe"}),
-			message: `decision must be "approve" or "reject"`},
+			message: `decision must be "approve", "reject" or "request_changes"`},
+		// Changes are requested saying what to change, or not at all.
+		{tool: "action.decide",
+			valid:   in(m{"action_id": graded.ActionID, "decision": "request_changes", "reason": "Say why the thesis is weak."}),
+			invalid: in(m{"action_id": graded.ActionID, "decision": "request_changes", "reason": "  "}),
+			message: "a request for changes says what to change, in reason"},
+		{tool: "action.decide",
+			valid:   in(m{"action_id": graded.ActionID, "decision": "request_changes", "reason": strings.Repeat("改", 2000)}),
+			invalid: in(m{"action_id": graded.ActionID, "decision": "request_changes", "reason": strings.Repeat("改", 2001)}),
+			message: "the note is 2001 characters long; the most is 2000"},
 		// Sato's grade is not under review: Tanaka's review of it, which
 		// says nothing wrong, is refused as approving it would refuse it
 		// (Validate), recorded, where the invalid one is not.
@@ -417,8 +426,9 @@ func TestAProposalThatWouldBeRefusedIsNotItsOwnersToDecide(t *testing.T) {
 	if q := b.queue(t, tanaka, "action.list_proposed"); !q[*proposed.ActionID] {
 		t.Fatalf("Tanaka's queue: %v", q)
 	}
-	for _, decision := range []string{"approve", "reject"} {
-		out := b.MustCall(b.sato, "action.decide", m{"course_id": b.course, "action_id": proposed.ActionID, "decision": decision}, "sato-"+decision)
+	for _, decision := range []string{"approve", "reject", "request_changes"} {
+		out := b.MustCall(b.sato, "action.decide", m{"course_id": b.course, "action_id": proposed.ActionID, "decision": decision,
+			"reason": "Out of 50 now."}, "sato-"+decision)
 		refusal, _ := out.Error.Details["refusal"].(*apperr.Error)
 		if out.Status != domain.StatusFailed || out.Error.Code != apperr.Forbidden || out.Error.Details["reason"] != "owner_would_be_refused" ||
 			refusal == nil || refusal.Code != apperr.FailedPrecondition {
@@ -430,9 +440,10 @@ func TestAProposalThatWouldBeRefusedIsNotItsOwnersToDecide(t *testing.T) {
 	if q := b.queue(t, ito, "action.list_proposed"); q[*itoProposed.ActionID] {
 		t.Fatalf("Ito's queue, a grade out of points the work is no longer worth: %v", q)
 	}
-	for _, decision := range []string{"approve", "reject"} {
+	for _, decision := range []string{"approve", "reject", "request_changes"} {
 		deniedOutright(t, "Ito deciding ("+decision+") his agent's grade that would be refused",
-			b.MustCall(ito, "action.decide", m{"course_id": b.course, "action_id": itoProposed.ActionID, "decision": decision}, "ito-"+decision))
+			b.MustCall(ito, "action.decide", m{"course_id": b.course, "action_id": itoProposed.ActionID, "decision": decision,
+				"reason": "Out of 50 now."}, "ito-"+decision))
 	}
 	if n := b.Count(`SELECT count(*) FROM action WHERE id = $1 AND status = 'proposed'`, *proposed.ActionID); n != 1 {
 		t.Fatal("the proposal is no longer waiting")

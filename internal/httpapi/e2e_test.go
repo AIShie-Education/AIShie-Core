@@ -358,6 +358,13 @@ func TestStatusCodes(t *testing.T) {
 	toReject := m{"submission_id": yuki.HW3, "score": 60}
 	rejected := c.MustCall(c.Grader, "grade.submit", m{"course_id": c.Course, "submission_id": yuki.HW3, "score": 60}, "to-reject")
 	c.MustCall(c.Sato, "action.decide", m{"course_id": c.Course, "action_id": rejected.ActionID, "decision": "reject"}, "reject")
+	// One of the TA's sent back for changes, which she may revise, naming it
+	// in the Revises header, where the agent's rejected one is not hers.
+	toChange := m{"submission_id": yuki.HW3, "score": 55}
+	sentBack := c.MustCall(ta, "grade.submit", m{"course_id": c.Course, "submission_id": yuki.HW3, "score": 55}, "to-change")
+	c.MustCall(c.Sato, "action.decide", m{"course_id": c.Course, "action_id": sentBack.ActionID, "decision": "request_changes",
+		"reason": "Out of 100, not 60."}, "changes")
+	revises := func(k, id string) []string { return append(key(k), "Revises", id) }
 	toCancel := m{"submission_id": yuki.HW3, "score": 70}
 	c.MustCall(c.Grader, "grade.submit", m{"course_id": c.Course, "submission_id": yuki.HW3, "score": 70}, "to-cancel")
 	c.MustCall(c.Sato, "member.remove", m{"course_id": c.Course, "member_id": c.GraderM}, "rm-grader")
@@ -398,6 +405,13 @@ func TestStatusCodes(t *testing.T) {
 		{"something the tool forbids", "POST", course + "/actions/" + own.ActionID.String() + "/decide", a.tokenFor(ta), m{"decision": "approve"}, key("l"), 403, "forbidden", true},
 		{"a rejected proposal, replayed", "POST", course + "/grades", grader, toReject, key("to-reject"), 409, "", true},
 		{"a cancelled proposal, replayed", "POST", course + "/grades", grader, toCancel, key("to-cancel"), 422, "failed_precondition", true},
+		{"a proposal sent back for changes, replayed", "POST", course + "/grades", a.tokenFor(ta), toChange, key("to-change"), 409, "", true},
+		{"revising what is no id", "POST", course + "/grades", a.tokenFor(ta), m{"submission_id": yuki.HW3, "score": 56}, revises("o", "soon"), 400, "invalid_argument", false},
+		{"revising someone else's proposal", "POST", course + "/grades", a.tokenFor(ta), m{"submission_id": yuki.HW3, "score": 56}, revises("p", rejected.ActionID.String()), 400, "invalid_argument", false},
+		{"revising a proposal still waiting", "POST", course + "/grades", a.tokenFor(ta), m{"submission_id": yuki.HW3, "score": 56}, revises("q", own.ActionID.String()), 422, "failed_precondition", false},
+		{"revising by a read", "GET", course + "/actions/mine", a.tokenFor(ta), nil, []string{"Revises", sentBack.ActionID.String()}, 400, "invalid_argument", false},
+		{"a revision", "POST", course + "/grades", a.tokenFor(ta), m{"submission_id": yuki.HW3, "score": 56}, revises("r", sentBack.ActionID.String()), 202, "", true},
+		{"the revision's key, revising nothing", "POST", course + "/grades", a.tokenFor(ta), m{"submission_id": yuki.HW3, "score": 56}, key("r"), 409, "idempotency_conflict", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -522,7 +536,8 @@ func TestBrowserSession(t *testing.T) {
 		t.Fatalf("the issued token does not work: %d %s", me.Status, me.Raw)
 	}
 	pre := a.do(browser, "OPTIONS", "/v1/me", "", nil, "Origin", frontEnd, "Access-Control-Request-Method", "GET")
-	if pre.Status != http.StatusNoContent || !strings.Contains(pre.Header.Get("Access-Control-Allow-Headers"), "Idempotency-Key") {
+	if allowed := pre.Header.Get("Access-Control-Allow-Headers"); pre.Status != http.StatusNoContent ||
+		!strings.Contains(allowed, "Idempotency-Key") || !strings.Contains(allowed, "Revises") {
 		t.Fatalf("preflight: %d %v", pre.Status, pre.Header)
 	}
 

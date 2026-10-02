@@ -411,6 +411,8 @@ type Querier interface {
 	// transaction holding the key, so two simultaneous calls cannot both act.
 	// authority and authority_dept_id are the capacity a call outside any course
 	// was allowed in; null for a seat's call, one's own account's, and a denial.
+	// revises_action_id is the proposal of the caller's that ended in
+	// changes_requested which the call revises, if it names one.
 	InsertAction(ctx context.Context, arg InsertActionParams) (int64, error)
 	// A login ID an administrator gives is one they vouch for (login_id_verified,
 	// by its default). An agent's hosting is given, and only an agent's
@@ -609,11 +611,12 @@ type Querier interface {
 	ListExportMessages(ctx context.Context, arg ListExportMessagesParams) ([]ListExportMessagesRow, error)
 	// The answers and questions proposed in the given conversations, in the
 	// span of time, as of the export, that were never posted: waiting for a
-	// decision, rejected, or cancelled (withdrawn, expired, or their proposer's
-	// seat gone). What each said is its payload's; of the files it named, their
-	// names alone, never the upload tokens it names them by. Why it was
-	// rejected or cancelled is its result's. An answer's sources are as it
-	// named them, ids alone; null when it did not say.
+	// decision, rejected, sent back for changes, or cancelled (withdrawn,
+	// expired, or their proposer's seat gone). What each said is its payload's;
+	// of the files it named, their names alone, never the upload tokens it
+	// names them by. Why it was rejected, what to change, or why it was
+	// cancelled is its result's. An answer's sources are as it named them, ids
+	// alone; null when it did not say.
 	ListExportProposals(ctx context.Context, arg ListExportProposalsParams) ([]ListExportProposalsRow, error)
 	ListGradeDocuments(ctx context.Context, gradeID *uuid.UUID) ([]ListGradeDocumentsRow, error)
 	// Assignments that count toward the grade. An unpublished one cannot have a
