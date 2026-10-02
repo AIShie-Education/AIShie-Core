@@ -1746,11 +1746,13 @@ conversation(id, course_id→course, opener_member_id, respondent_member_id, tit
 
 conversation_message(id, conversation_id, course_id, seq, author_member_id,
                      in_reply_to_message_id null, body, created_by_action_id→action, created_at,
+                     sources_stated (default false),
                      unique(conversation_id, seq), unique(id, conversation_id), unique(id, course_id))
     composite FK (conversation_id, course_id) → conversation(id, course_id)
     composite FK (course_id, author_member_id) → course_member(course_id, id)
     composite FK (in_reply_to_message_id, conversation_id) → conversation_message(id, conversation_id)
-    check: body 1..20000 characters
+    check: body 1..20000 characters;  sources_stated only on an answer
+           (conversation_message_sources_of_an_answer, NOT VALID: every row before 0029 is false)
     trigger: only the two participants write, only while the conversation is open; a reply
              is the respondent's, to a message of the opener's
     append-only
@@ -1782,9 +1784,9 @@ conversation_message_source(message_id, course_id, position, document_id, versio
                   ON DELETE SET NULL
     check: position 1..20;  file_id and file_version_id both or neither, file_version_id the
            source's version;  page or slide, not both;  page, slide and part 1..100000
-    trigger: written with its message, dated as it is, and only an answer's; of a course's
-             material, instructions or rubric, a version not purged
-             (conversation_message_source_with_its_answer)
+    trigger: written with its message, dated as it is, and only an answer's that says what it
+             relied on (sources_stated); of a course's material, instructions or rubric, a
+             version not purged (conversation_message_source_with_its_answer)
     append-only, but for the purge of its version, which clears its file
 
 conversation_read(conversation_id, course_id, member_id, last_read_seq, read_at,
@@ -2027,25 +2029,36 @@ which of the course's materials it relied on, so that its readers can see whethe
 them. `conversation.answer` takes `sources`, at most 20 (`too_many_sources`), in order, each a
 version the answer read — `document_id` and `version_id`, as `document.get` and `document.text`
 give them — and, when the answer relied on one file of it, `file_id`, with a `page` or a `slide`
-of it as the file's text heads them (`## 第 N 頁`, `## Slide N`) and the `part` of its text, as
-`document.text` numbers its parts, each from 1. What a call's sources say alone is checked as it
+of it as the file's text version heads them (`## 第 N 頁`, `## Slide N`) and the `part` of its
+text version, as `document.text` numbers its parts, each from 1. What a call's sources say alone is checked as it
 is read (`Check`): a page, a slide or a part only with a file, a page or a slide and not both,
-none named twice (`bad_source`, `duplicate_source`). Then, before anything is recorded or
-proposed (`Validate`), and again as it is posted, and when a proposal is approved, as the
-proposer's: each must be a version of a course's material, instructions or rubric that
+none named twice (`bad_source`, `duplicate_source`), and is refused before anything is
+recorded. Then, before the answer is posted or proposed (`Validate`), and again as it is posted,
+and when a proposal is approved, as the proposer's: each must be a version of a course's material, instructions or rubric that
 `document.get` would show the answering seat, named by id, at that moment (`source_unreadable`,
 which a version that does not exist, one of another document, a student's work and a version the
 seat may not open all answer alike, so that nobody learns which), not purged (`source_purged`),
 and its file one of that version's (`source_unreadable`). Each refusal is `invalid_argument` and
-names the source: `field` `sources[i]`, `index` i, counting from 0. The sources are optional:
-an answer that names none, as every answer did before them, is taken as it always was, and is
-read with none.
+names the source: `field` `sources[i]`, `index` i, counting from 0. A call `Validate` refuses
+is recorded as failed, as every one is, its payload naming the sources it gave; the answer is
+posted again, without that source, under a new idempotency key.
+
+The sources are optional, and an answer says what it relied on even when that is nothing. One
+that leaves them out, as every answer did before them, is taken as it always was and read with
+no `sources`: it did not say. One that gives an empty list says it relied on none; that is kept
+(`conversation_message.sources_stated`, set as it is written, only on an answer) and read as an
+empty list, so that a reader can tell an answer that relied on no course material from one that
+did not say.
 
 They are kept with the answer, a row each (`conversation_message_source`, migration 0029), in
 its transaction and dated as it is, and as its action's payload, for those who decide actions.
 A row each, rather than a list in the message, so that the database holds every source to a
-version and a file it has, in the answer's course, of a course's material, and so that a page of
-messages is read with its sources and their documents as they stand now in one statement. Who
+version and a file it has, in the answer's course, of a course's material, not purged, and so that
+a purge, which deletes a version's files, takes the file from each source that named one. A page
+of messages reads its sources in one statement (`ListMessageSources`), with what is the same for
+every reader: the document's `kind` and `title` as they are now, the version's `seq`, whether
+either is purged, the file's name. How much of each a reader is shown is then `document.get`'s
+rule, asked once of each document and version the page names. Who
 reads the answer — its opener, its respondent, staff who oversee the opener — reads its sources
 in `conversation.messages`, each as that reader may read its document now, whoever named it:
 
@@ -2224,10 +2237,12 @@ A line of the JSON Lines file is a conversation: `id`; `course` (`id`, `code`, `
 or null), `attachments` (`id`, `filename`, `content_type`, `byte_size`, `checksum`,
 `created_at`) and `sources`, an answer's (`document_id`, `version_id`, `file_id`, `page`, `slide`,
 `part`, and the document's `title` and `kind` as they are now, the version's `version_seq`, the
-file's `filename` and whether the version is `purged`, whose file is then null), empty for
-none; and `proposals`, each `action_id`, `type`, `status`, `proposed_by`, `created_at`,
-`in_reply_to_message_id`, `body`, `attachment_filenames`, `sources` as the proposal named them
-(their ids, page, slide and part; `title`, `kind`, `version_seq` and `filename` null),
+file's `filename` and whether the version is `purged`, whose file is then null), an empty list
+for an answer that said it relied on none and null where nothing was said (a question, an answer
+that did not say); and `proposals`, each `action_id`, `type`, `status`, `proposed_by`,
+`created_at`, `in_reply_to_message_id`, `body`, `attachment_filenames`, `sources` as the proposal
+named them (their ids, page, slide and part; `title`, `kind`, `version_seq` and `filename` null;
+empty or null as a message's),
 `decided_at`, `decided_by` and `reason`. The CSV file, a reading of what was said, does not
 carry sources. A row of the CSV file has the columns `conversation_id`, `course_id`, `course_code`,
 `course_section`, `course_title`, `conversation_title`, `status` (`posted`, `retracted`,
@@ -2643,7 +2658,8 @@ respondent's `conversation_answer` decides is who is shown its text.
 | `conversation_message` and `conversation_message_retraction` are append-only | triggers |
 | A message's file is in its message's conversation and course, one at each place, and a stored file is attached to one message at most; it is written with its message and dated as it is, and kept as it is: never changed or deleted | composite FKs, `unique(message_id, position)`, `unique(storage_key)`, trigger `conversation_attachment_with_its_message`, append-only triggers on `conversation_attachment` |
 | A file's name is 1..255 characters, trimmed, on one line, and no path; its type is 1..200 characters; its size is not below nothing | CHECKs on `conversation_attachment` |
-| An answer's source is in its answer's course, one at each place, at most 20; it names a version of its document and a file of that version; it is an answer's, written with it and dated as it is, of a course's material, instructions or rubric, a version not purged; it is kept as it is, but that the purge of its version clears its file | composite FKs (the file's `ON DELETE SET NULL`), CHECKs and triggers `conversation_message_source_with_its_answer`, `conversation_message_source_append_only` on `conversation_message_source` |
+| An answer's source is in its answer's course, one at each place, at most 20; it names a version of its document and a file of that version; it is an answer's that says what it relied on, written with it and dated as it is, of a course's material, instructions or rubric, a version not purged; it is kept as it is, but that the purge of its version clears its file | composite FKs (the file's `ON DELETE SET NULL`), CHECKs and triggers `conversation_message_source_with_its_answer`, `conversation_message_source_append_only` on `conversation_message_source` |
+| Only an answer says what it relied on (`sources_stated`) | CHECK `conversation_message_sources_of_an_answer` |
 | An answer's draft is one per conversation, in its course; its attempt, version, text and steps are held to their shape, and an attempt's end keeps nothing | primary key, composite FK and CHECKs on `conversation_draft` |
 | Memory is held by agents, owner memory is about the agent's owner, and each seat an entry names is its actor's, in the entry's course | trigger `memory_entry_guarded`, composite FKs on `memory_entry` |
 | Each scope of memory has its shape: owner memory in no seat, asker memory in both, shared memory in the agent's seat and about nobody; only shared memory is proposed or rejected | `memory_shape_valid` |

@@ -41,10 +41,13 @@ In place so far:
   what they have not read yet; while an agent writes an answer, whoever reads
   the conversation watches it come — what the agent is doing, and the text
   where the answer would be shown — through a draft that is no action and
-  that the answer, posted, replaces; and root and the administrators of the
-  site, and of a department for its courses, export conversations for
-  audit, retracted messages included, as files kept a day, each export
-  itself on record;
+  that the answer, posted, replaces; an agent's answer may say which of the
+  course's materials it relied on, or that it relied on none, each shown to
+  a reader as they may read it now — whole, as a document whose version
+  they may not open, or only as something they may not open; and root and
+  the administrators of the site, and of a department for its courses,
+  export conversations for audit, retracted messages included, as files
+  kept a day, each export itself on record;
 - agents' memory, kept in Core whatever runs the agent (off unless
   `MEMORY=on`): about its owner, about each person who asks it in a course,
   reached only through that person's conversation, and a course's shared
@@ -75,7 +78,9 @@ makes the student a TA and a student again; then, once the site's agent
 runtime, given its credential on the command line, is issued the token of
 the instructor's tutor agent by its id, the student asks the tutor a
 question, watches its answer's draft come, waiting on the conversation, and
-it answers, and she is refused the instructor as a respondent,
+it answers, naming the page of the lecture it relied on once it is refused a
+draft it may not read, and she is told no more of that source while the
+lecture is archived; she is refused the instructor as a respondent,
 as he is refused answering; her chat panel lists the conversation, unread
 until she marks it read; the runtime converts the instructor's Word handout
 and the slides she sends the tutor to PDF, which she opens and nobody else
