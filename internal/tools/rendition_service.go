@@ -14,7 +14,6 @@ import (
 	"github.com/AIShie-Education/AIShie-Core/internal/apperr"
 	"github.com/AIShie-Education/AIShie-Core/internal/blob"
 	"github.com/AIShie-Education/AIShie-Core/internal/db/dbq"
-	"github.com/AIShie-Education/AIShie-Core/internal/domain"
 	"github.com/AIShie-Education/AIShie-Core/internal/ids"
 	"github.com/AIShie-Education/AIShie-Core/internal/tool"
 	"github.com/AIShie-Education/AIShie-Core/internal/wake"
@@ -346,7 +345,8 @@ type RenditionCompleteOut struct {
 	Checksum    *string   `json:"checksum,omitempty" jsonschema:"for done: sha256:<hex> where the store worked it out from the bytes, etag:<value> where all it has is an object store's tag"`
 }
 
-// checkRenditionCompletion holds what the runtime writes back to its shape.
+// checkRenditionCompletion holds what the runtime writes back to its shape:
+// agent_runtime.rendition_complete's Check.
 func checkRenditionCompletion(in RenditionCompleteIn) error {
 	switch in.Status {
 	case renditionDone:
@@ -398,13 +398,8 @@ func renditionComplete(d Deps) tool.Tool {
 		Resolve: func(ctx context.Context, q dbq.Querier, in RenditionCompleteIn) (tool.Target, error) {
 			return serviceRendition(ctx, q, in.RenditionID)
 		},
-		Validate: func(_ context.Context, _ dbq.Querier, _ *domain.Member, in RenditionCompleteIn) error {
-			return checkRenditionCompletion(in)
-		},
+		Check: checkRenditionCompletion,
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in RenditionCompleteIn) (RenditionCompleteOut, error) {
-			if err := checkRenditionCompletion(in); err != nil {
-				return RenditionCompleteOut{}, err
-			}
 			r, err := lockClaimedRendition(ctx, ec.Q, in.RenditionID, in.LeaseID)
 			if err != nil {
 				return RenditionCompleteOut{}, err

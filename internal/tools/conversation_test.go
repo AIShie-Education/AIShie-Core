@@ -1085,12 +1085,14 @@ func TestAnInstructorsOwnTutorIsDecidedByThemOnlyWhereTheyDecideFreely(t *testin
 	}
 
 	// Sato's own decisions wait for a confirmation: his tutor's answers are
-	// not his, and a decision of his about one is itself a proposal.
+	// not his, and a decision of his about one, which confirming it would
+	// refuse, is refused at once, nobody asked to confirm it.
 	b.Exec(`UPDATE course_member SET perm_action_decide = 'confirm_required' WHERE id = $1`, b.satoM)
 	if v := queue()[*answer.ActionID]; v == nil || *v {
 		t.Fatalf("Sato's own tutor's answer, as his queue lists it while his own decisions wait: %v", v)
 	}
-	if d := b.MustCall(b.sato, "action.decide", m{"course_id": b.course, "action_id": answer.ActionID, "decision": "approve"}, "decide"); d.Status != domain.StatusProposed {
+	if d := b.MustCall(b.sato, "action.decide", m{"course_id": b.course, "action_id": answer.ActionID, "decision": "approve"}, "decide"); d.Status != domain.StatusFailed ||
+		d.Error == nil || d.Error.Details["reason"] != "owner_not_autonomous" {
 		t.Fatalf("Sato deciding his own tutor's answer while his own decisions wait: %+v", d)
 	}
 	if n := b.Count(`SELECT count(*) FROM conversation_message WHERE conversation_id = $1`, conv); n != 1 {

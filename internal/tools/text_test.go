@@ -437,21 +437,30 @@ func TestATextIsAtMostTwoMebibytes(t *testing.T) {
 	doc, v1 := b.slides(t, "Big")
 	fits := strings.Repeat("a", tools.MaxTextBytes)
 	b.do(t, b.sato, "document.text_update", m{"course_id": b.course, "document_id": doc, "version_id": v1, "file_id": b.fileOf(t, v1), "body": fits})
-	out := b.MustCall(b.sato, "document.text_update", m{"course_id": b.course, "document_id": doc, "version_id": v1, "file_id": b.fileOf(t, v1),
+	// Refused as it is read: nothing is recorded, nor would be proposed.
+	out, err := b.Call(b.sato, "document.text_update", m{"course_id": b.course, "document_id": doc, "version_id": v1, "file_id": b.fileOf(t, v1),
 		"body": fits + "a"}, "too-long")
-	if out.Status != domain.StatusFailed || out.Error.Code != apperr.InvalidArgument || out.Error.Details["reason"] != "text_too_long" {
-		t.Fatalf("a text over the limit: %+v", out)
+	if e, ok := apperr.As(err); !ok || e.Code != apperr.InvalidArgument || e.Details["reason"] != "text_too_long" {
+		t.Fatalf("a text over the limit: %+v %v", out, err)
 	}
-	if out := b.MustCall(b.sato, "document.text_update", m{"course_id": b.course, "document_id": doc, "version_id": v1, "file_id": b.fileOf(t, v1),
-		"body": "  \n "}, "empty"); out.Status != domain.StatusFailed {
-		t.Fatalf("an empty text: %+v", out)
+	if n := b.Count(`SELECT count(*) FROM action WHERE idempotency_key = 'too-long'`); n != 0 {
+		t.Fatal("a text over the limit is recorded")
+	}
+	if out, err := b.Call(b.sato, "document.text_update", m{"course_id": b.course, "document_id": doc, "version_id": v1, "file_id": b.fileOf(t, v1),
+		"body": "  \n "}, "empty"); !apperr.Is(err, apperr.InvalidArgument) {
+		t.Fatalf("an empty text: %+v %v", out, err)
 	}
 	// The service is held to it as staff are.
 	svc := b.transcriber(t)
 	b.do(t, b.sato, "document.text_retranscribe", m{"course_id": b.course, "document_id": doc, "version_id": v1, "file_id": b.fileOf(t, v1), "discard_edit": true})
 	c := b.claim(t, svc, m{})[0]
-	if out := b.complete(t, svc, c, fits+"a"); out.Status != domain.StatusFailed || out.Error.Code != apperr.InvalidArgument {
-		t.Fatalf("the service writing a text over the limit: %+v", out)
+	out, err = b.CallWith(svc, "document_text.complete", m{"version_id": c.VersionID, "file_id": c.FileID, "lease_id": c.LeaseID,
+		"status": "done", "body": fits + "a", "pages": 1, "model": "A model"}, "over")
+	if e, ok := apperr.As(err); !ok || e.Code != apperr.InvalidArgument || e.Details["reason"] != "text_too_long" {
+		t.Fatalf("the service writing a text over the limit: %+v %v", out, err)
+	}
+	if n := b.Count(`SELECT count(*) FROM action WHERE idempotency_key IN ('empty', 'over')`); n != 0 {
+		t.Fatalf("%d texts refused for what they say are recorded", n)
 	}
 }
 
@@ -696,9 +705,13 @@ func TestTheServiceWritesOnlyWhatItHolds(t *testing.T) {
 	// Failed and skipped say why.
 	_, v4 := b.slides(t, "Week 4")
 	c4 := b.claim(t, svc, m{})[0]
+	// Its arguments are refused as they are read, and nothing is recorded.
 	out, err := b.CallWith(svc, "document_text.complete", m{"version_id": v4, "file_id": c4.FileID, "lease_id": c4.LeaseID, "status": "skipped"}, "skip-1")
-	if err != nil || out.Status != domain.StatusFailed || out.Error.Code != apperr.InvalidArgument {
+	if e, ok := apperr.As(err); !ok || e.Code != apperr.InvalidArgument {
 		t.Fatalf("skipped without a reason: %+v %v", out, err)
+	}
+	if n := b.Count(`SELECT count(*) FROM action WHERE idempotency_key = 'skip-1'`); n != 0 {
+		t.Fatal("skipped without a reason is recorded")
 	}
 	b.as(t, svc, "document_text.complete", m{"version_id": v4, "file_id": c4.FileID, "lease_id": c4.LeaseID, "status": "skipped", "reason": "too_many_pages"})
 	if got := firstText(b.get(t, b.sato, m{"document_id": b.docOf(t, v4)}).Version.Files); got.Status != "skipped" || *got.Reason != "too_many_pages" {

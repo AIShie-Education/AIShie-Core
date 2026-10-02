@@ -647,6 +647,17 @@ type Querier interface {
 	// wait for: the call waits instead for the principal, and then finds it
 	// removed.
 	ListLiveDelegatesOf(ctx context.Context, principalMemberID *uuid.UUID) ([]uuid.UUID, error)
+	// LockLiveEnteredGradesOfAssignment's grades, by their scores, without the
+	// lock: what a change of the assignment's points is held to before it is
+	// carried out, proposed or approved.
+	ListLiveEnteredGradeScoresOfAssignment(ctx context.Context, assignmentID uuid.UUID) ([]ListLiveEnteredGradeScoresOfAssignmentRow, error)
+	// LockLiveEnteredGradesOfComponent's grades, by their scores, without the
+	// lock, as ListLiveEnteredGradeScoresOfAssignment.
+	ListLiveEnteredGradeScoresOfComponent(ctx context.Context, componentID *uuid.UUID) ([]ListLiveEnteredGradeScoresOfComponentRow, error)
+	// LockLiveSeatsByRole without the lock: the seats a member.update_perms_bulk
+	// made now would change, each of which it is held to before it is carried
+	// out, proposed or approved.
+	ListLiveSeatsByRole(ctx context.Context, arg ListLiveSeatsByRoleParams) ([]uuid.UUID, error)
 	ListLiveServiceCredentials(ctx context.Context, arg ListLiveServiceCredentialsParams) ([]uuid.UUID, error)
 	// Where the student has a total written down.
 	ListLiveTotalComponents(ctx context.Context, studentMemberID uuid.UUID) ([]*uuid.UUID, error)
@@ -779,6 +790,10 @@ type Querier interface {
 	ListStudentsWithoutSubmission(ctx context.Context, arg ListStudentsWithoutSubmissionParams) ([]uuid.UUID, error)
 	ListSubmissionDocuments(ctx context.Context, submissionID *uuid.UUID) ([]ListSubmissionDocumentsRow, error)
 	ListSubmissions(ctx context.Context, arg ListSubmissionsParams) ([]ListSubmissionsRow, error)
+	// LockSubmissionsOf, not locked: what a tool's Validate reads of a
+	// student's attempts before a proposal is queued, which the tool reads again
+	// under the lock when it is carried out.
+	ListSubmissionsOf(ctx context.Context, arg ListSubmissionsOfParams) ([]ListSubmissionsOfRow, error)
 	ListTerms(ctx context.Context) ([]Term, error)
 	// The text versions of the files of a document's versions, without their
 	// text.
@@ -982,6 +997,7 @@ type Querier interface {
 	MaxVersionSeq(ctx context.Context, documentID uuid.UUID) (int32, error)
 	// Whether an agent's owner lets it keep memory: no row is yes.
 	MemoryEnabled(ctx context.Context, holderActorID uuid.UUID) (bool, error)
+	MessageRetracted(ctx context.Context, messageID uuid.UUID) (bool, error)
 	MessageSeqIn(ctx context.Context, arg MessageSeqInParams) (int32, error)
 	// A grade's feedback files go with it when it is written again without
 	// being graded again: a total worked out anew, a score rescaled.
@@ -1116,10 +1132,10 @@ type Querier interface {
 	// one comes back. An agent's owner never changes now (migration 0014); the
 	// last kind is a seat an agent kept in an archived course when it changed
 	// hands before that, where only this could find it once the course is
-	// opened again. With no clock (now null), a principal's expiry is not judged:
-	// whoever asks leaves it to seat(), which has one. ListOrphanedSeats is the
-	// same rule for every seat, and the authorization queries' owner_matches
-	// its other half: a change to one is a change to all three.
+	// opened again. A principal's expiry is judged at now, which every caller
+	// gives. ListOrphanedSeats is the same rule for every seat, and the
+	// authorization queries' owner_matches its other half: a change to one is a
+	// change to all three.
 	SeatOrphaned(ctx context.Context, arg SeatOrphanedParams) (bool, error)
 	SetActionReview(ctx context.Context, arg SetActionReviewParams) (int64, error)
 	SetComponentParent(ctx context.Context, arg SetComponentParentParams) error

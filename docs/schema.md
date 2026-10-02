@@ -1623,7 +1623,21 @@ reviewing and reading them (`action.get`, any of them), and the queues listing t
 anything else is denied as it is to anyone who does not hold it, an action id that does not exist
 included. Where their own level is `confirm_required` or `pending_review`, the course
 has someone check them too, and so their agent: someone outside the party decides it, as for the
-rest of the party; so it is where the target is beyond their reach, or gone. An answer
+rest of the party; so it is where the target is beyond their reach, or gone, and where approving
+the proposal now would be refused for what it asks: by the tool's check of its arguments
+(`Check`), by the tool's own rules (`Validate`), run as approving it runs them, as the
+proposer's and at the moment the owner asks, or by what has changed since it was proposed
+(`Since`) — a grade proposed out of the points the work was worth then, an expiry that has
+passed while it waited, an answer to a question its opener has asked again since, a newer draft
+of the grade entered meanwhile, a draft to post replaced meanwhile, say. They could not have
+made it themselves either. An owner who holds `perm_action_decide` is refused it saying why
+(`owner_would_be_refused`, the refusal approving it would meet in `details.refusal`); one who
+decides nothing else is refused as anyone without it is (`permission_denied`), and the queues
+tell both so (`yours_to_decide` false). Either takes it back, or someone else rejects it. Where
+whether approving it would be refused cannot be told, a file store that does not answer while a
+grade's feedback files are looked at, say, the owner's decision fails with nothing recorded, as
+approving it would, and the same call made again once it can be told is decided; the queues say
+such a proposal is not theirs meanwhile, rather than failing. An answer
 (`conversation.answer`) is the one action no person could have made, since a person answers no
 conversation (§2.8): for it the owner is measured by what judging an answer is,
 `perm_action_decide` (`tool.Spec.OwnerJudgedBy`), so an instructor who decides actions without
@@ -2592,6 +2606,50 @@ respondent's `conversation_answer` decides is who is shown its text.
   a different hash is refused.
 - Re-authorizing the proposer when a proposal is approved, and cancelling proposals past
   their TTL.
+- A tool's check of what a call's arguments say alone (`tool.Spec.Check`) runs as they are
+  decoded, after the schema and before anything else: a name left blank, a number below zero, a
+  value that is not one of those allowed, two fields given that exclude each other, a message
+  empty or too long, a file named twice or not named as a file may be. A call it refuses is never
+  an attempt: nothing is recorded, whoever makes it and at whatever level. It is asked of a stored
+  proposal too, when it is approved and for its owner (§2.6): a proposal stored before its tool's
+  `Check` refused what it says fails when it is approved, with that refusal. What only a call may
+  not say, and a stored proposal may, is `tool.Spec.CheckCall`'s, asked of calls alone:
+  `grade.post`'s `grade_ids` beside `assignment_id`, which a proposal to post an assignment stores.
+- What needs the course, the caller's seat or the moment to tell is the tool's `Validate`, given
+  the moment it is asked at. It runs before a call is carried out and before a proposal is
+  queued, recording the call failed, with its error's own status, if it refuses; again, as the
+  proposer's, when a proposal is approved; and for an agent's owner, as the proposer's, when
+  they are told whether its proposal is theirs to decide (§2.6). Every course tool that may be
+  proposed holds its rules there, so that nobody is asked to approve what approving would
+  refuse: a member's grants within the granter's own, an expiry already past, a seat removed or
+  past its own, an actor or an agent seated already, the seats a roster role takes in; an
+  assignment's documents and bucket, the grading scheme's shape, what a change of points does to
+  the grades entered, a total there to change; a document or a version published already, or not
+  yet, archived, or not, purged, a text changed since the revision a change was made from, a
+  file's rendition done already or a file with none; a submission handed in or still a draft, a
+  student who has a submission already; whom one may address, a conversation closed or not the
+  caller's to mark read, a question the opener has asked again since or withdrawn, a message
+  retracted, files a message or a version may hold; a join link revoked; totals that do not
+  count ungraded work as zero; and of `action.decide`, `action.review` and `action.withdraw`
+  whether the action waits for it and is the caller's to decide, review or take back, at any
+  remove. `Execute` asks its rules again under its locks. As a proposal is made, its tool's
+  `tool.Spec.Pin` asks what is true of a proposal and of no call: an upload too old to outlast
+  it, an answer of the proposer's to the same question waiting already, a call that is never made
+  by proposal (`member.reset_password`, `course.join_link_create`). It also holds the proposal to
+  the rules `Execute` holds a call to and an approval passes over on purpose: a grade given
+  `no_rubric` while a rubric is published (`grade.submit`, `grade.regrade`), the draft handed in
+  and the instructions in force (`submission.submit`), a draft named to post that is posted or
+  replaced already (`grade.post`).
+- What `Validate` asks, it asks of the course as it stands then. What changes while a proposal
+  waits — an expiry that passes, a question asked again, a rendition done, a proposal decided by
+  someone else — is found when it is approved, and by its owner's question meanwhile; between
+  `Validate` and `Execute` in one call, what another call changes is found by `Execute`. What
+  has changed since a proposal was made, and that no call is refused for, is its tool's
+  `tool.Spec.Since`, given when it was proposed and asked after `Validate` as the proposal is
+  approved and for its owner: a newer draft entered for the work since a grade was proposed
+  (`grade.submit`); a draft a proposal to post names replaced since, or every one of them posted
+  since (`grade.post`, whose `Validate` holds those still waiting to what a call is held to and
+  passes over the rest). `Execute` asks them again under its locks.
 - Nobody decides or reviews their own action from another seat (§2.6): the CHECKs compare seats,
   and the application compares actors, so an actor removed and seated again is still refused.
 - Nobody decides or reviews their own action at one remove (§2.6): a decision or review that is
@@ -2738,11 +2796,13 @@ respondent's `conversation_answer` decides is who is shown its text.
   other agents are one, in `action.decide`, `action.review`, at any remove and for escalations.
   One exception, at no remove: an owner approves, rejects or reviews their own agent's action
   where their own seat, as `authorize()` finds it for the same call when they decide, holds it at
-  `autonomous` and reaches its target; `yours_to_decide` is worked out the same way, and the
-  decision and its event say `by_owner`. That takes no `perm_action_decide` and is `autonomous`
-  whatever the owner holds of it (`tool.Gate.OwnAgents`); without it, an owner reaches their own
-  agents' actions alone, in `action.decide`, `.review`, `.get` and the queues, and is denied the
-  rest as anyone without it is.
+  `autonomous` and reaches its target, and, deciding a proposal, the tool's `Check` and
+  `Validate`, run as approving it now would run them, and its `Since`, of what changed since it
+  was proposed, do not refuse it; `yours_to_decide` is worked out the same way, and the decision
+  and its event say `by_owner`. That takes no `perm_action_decide` and is `autonomous` whatever
+  the owner holds of it (`tool.Gate.OwnAgents`); without it, an owner reaches their own agents'
+  actions alone, in `action.decide`, `.review`, `.get` and the queues, and is denied the rest as
+  anyone without it is.
 - Only an agent's owner acts on it through `agent.*`, and to anyone else it does not exist.
   What an owner does for themselves is capped: `agent.create`, and `agent.reactivate` of one they
   suspended, are refused once they have `AGENT_MAX_PER_OWNER` agents that are not suspended,

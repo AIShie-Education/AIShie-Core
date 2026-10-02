@@ -485,6 +485,48 @@ func (q *Queries) ListLiveDelegatesOf(ctx context.Context, principalMemberID *uu
 	return items, nil
 }
 
+const listLiveSeatsByRole = `-- name: ListLiveSeatsByRole :many
+SELECT id FROM course_member
+WHERE course_id = $1 AND role = $2 AND status <> 'removed'
+  AND (expires_at IS NULL OR expires_at > $3) AND id <> $4
+ORDER BY id
+`
+
+type ListLiveSeatsByRoleParams struct {
+	CourseID       uuid.UUID
+	Role           string
+	Now            *time.Time
+	ExceptMemberID uuid.UUID
+}
+
+// LockLiveSeatsByRole without the lock: the seats a member.update_perms_bulk
+// made now would change, each of which it is held to before it is carried
+// out, proposed or approved.
+func (q *Queries) ListLiveSeatsByRole(ctx context.Context, arg ListLiveSeatsByRoleParams) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, listLiveSeatsByRole,
+		arg.CourseID,
+		arg.Role,
+		arg.Now,
+		arg.ExceptMemberID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listMembers = `-- name: ListMembers :many
 SELECT m.id, m.course_id, m.actor_id, m.role, m.status, m.preset_id, m.added_by_actor_id, m.expires_at, m.student_scope, m.assignment_scope, m.perm_document_read, m.perm_document_read_draft, m.perm_document_write, m.perm_rubric_read, m.perm_assignment_write, m.perm_submission_read, m.perm_submission_write, m.perm_grade_read, m.perm_grade_submit, m.perm_grade_post, m.perm_member_read, m.perm_member_manage, m.perm_action_decide, m.created_at, m.principal_member_id, m.answers_course, m.perm_agent_delegate, m.perm_conversation_ask, m.perm_conversation_answer, m.join_link_id, m.perm_member_invite, a.display_name, a.kind AS actor_kind, a.owner_actor_id, o.display_name AS owner_name, a.login_id
 FROM course_member m
@@ -790,7 +832,7 @@ func (q *Queries) PrincipalsSeatsHaveRole(ctx context.Context, arg PrincipalsSea
 
 const seatOrphaned = `-- name: SeatOrphaned :one
 SELECT (CASE WHEN m.principal_member_id IS NULL THEN a.owner_actor_id IS NOT NULL
-             ELSE p.status = 'removed' OR coalesce(p.expires_at <= $1, false)
+             ELSE p.status = 'removed' OR coalesce(p.expires_at <= $1::timestamptz, false)
                   OR a.owner_actor_id IS DISTINCT FROM p.actor_id END)::bool AS orphaned
 FROM course_member m
 JOIN actor a ON a.id = m.actor_id
@@ -799,7 +841,7 @@ WHERE m.id = $2
 `
 
 type SeatOrphanedParams struct {
-	Now      *time.Time
+	Now      time.Time
 	MemberID uuid.UUID
 }
 
@@ -810,10 +852,10 @@ type SeatOrphanedParams struct {
 // one comes back. An agent's owner never changes now (migration 0014); the
 // last kind is a seat an agent kept in an archived course when it changed
 // hands before that, where only this could find it once the course is
-// opened again. With no clock (now null), a principal's expiry is not judged:
-// whoever asks leaves it to seat(), which has one. ListOrphanedSeats is the
-// same rule for every seat, and the authorization queries' owner_matches
-// its other half: a change to one is a change to all three.
+// opened again. A principal's expiry is judged at now, which every caller
+// gives. ListOrphanedSeats is the same rule for every seat, and the
+// authorization queries' owner_matches its other half: a change to one is a
+// change to all three.
 func (q *Queries) SeatOrphaned(ctx context.Context, arg SeatOrphanedParams) (bool, error) {
 	row := q.db.QueryRow(ctx, seatOrphaned, arg.Now, arg.MemberID)
 	var orphaned bool

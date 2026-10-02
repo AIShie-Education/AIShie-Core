@@ -187,21 +187,19 @@ func claimFiles(ctx context.Context, d Deps, q dbq.Querier, m *domain.Member, co
 	return out, nil
 }
 
-// checkProposedVersion is what a version that is to wait for a decision is
-// held to, as to its files, when it is proposed (Pin): that they may be
-// held, as far as they can be told now, and are young enough to outlast
-// the proposal (checkUploadAge). All of it is asked again when it is
-// approved, and the files are named then.
-func checkProposedVersion(ctx context.Context, d Deps, q dbq.Querier, m *domain.Member, now time.Time, courseID uuid.UUID,
-	kind, title string, c Content) error {
+// checkVersionFiles is what a version is held to, as to its files, before
+// it is written or proposed, and when a proposal of it is approved
+// (Validate): that they may be held, as far as they can be told without
+// claiming them. A version being written asks it again as it claims them; a
+// proposal is held as well to files young enough to outlast it
+// (checkUploadAge, in Pin).
+func checkVersionFiles(ctx context.Context, d Deps, q dbq.Querier, m *domain.Member, courseID uuid.UUID, kind, title string, c Content) error {
 	files, err := c.named(d, title)
 	if err != nil {
 		return err
 	}
-	if _, err := claimFiles(ctx, d, q, m, courseID, kind, files, false); err != nil {
-		return err
-	}
-	return checkUploadAge(ctx, d, now, c.uploads()...)
+	_, err = claimFiles(ctx, d, q, m, courseID, kind, files, false)
+	return err
 }
 
 // insertFiles records a version's files, claimed already, in order, with it.

@@ -149,9 +149,10 @@ func TestAnAgentIsHostedOneWayForGood(t *testing.T) {
 		"an agent registered without its hosting": {"kind": "agent", "display_name": "Bot"},
 		"a person registered with a hosting":      {"kind": "human", "display_name": "Mori", "hosting": "mcp"},
 	} {
-		if out := b.MustCall(b.admin, "actor.register", args, what); out.Status != domain.StatusFailed || out.Error.Code != apperr.InvalidArgument ||
-			out.Error.Details["field"] != "hosting" {
-			t.Fatalf("%s: %+v", what, out)
+		// Refused as the arguments are read: nothing is recorded.
+		out, err := b.Call(b.admin, "actor.register", args, what)
+		if e, ok := apperr.As(err); !ok || e.Code != apperr.InvalidArgument || e.Details["field"] != "hosting" {
+			t.Fatalf("%s: %+v %v", what, out, err)
 		}
 	}
 	bot := testkit.Result[tools.ActorOut](t, b.do(t, b.admin, "actor.register",

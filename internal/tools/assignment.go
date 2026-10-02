@@ -142,16 +142,25 @@ type AssignmentBody struct {
 	DueAt                  *time.Time       `json:"due_at,omitempty"`
 }
 
-// checkAssignment holds the same-course rules no foreign key covers: the two
-// documents are documents of this course and of the right kind, and the
-// component is a bucket of this course.
-func checkAssignment(ctx context.Context, q dbq.Querier, courseID uuid.UUID, a dbq.GetAssignmentInCourseRow) error {
-	if strings.TrimSpace(a.Title) == "" {
+// check holds what is given to the rules of an assignment that need nothing
+// else to tell: a title that says something, and points that are not below
+// zero. What is not given stays as it is, and was held to them before.
+func (b AssignmentBody) check() error {
+	if b.Title != nil && strings.TrimSpace(*b.Title) == "" {
 		return apperr.Invalid("title is required")
 	}
-	if a.PointsPossible.IsNegative() {
+	if b.PointsPossible != nil && b.PointsPossible.IsNegative() {
 		return apperr.Invalid("points_possible cannot be negative")
 	}
+	return nil
+}
+
+// checkAssignment holds the same-course rules no foreign key covers: the two
+// documents are documents of this course and of the right kind, and the
+// component is a bucket of this course. lock takes the component tree's
+// lock first, as Execute does; Validate asks it of the tree as it stands,
+// before the call is carried out or proposed.
+func checkAssignment(ctx context.Context, q dbq.Querier, courseID uuid.UUID, a dbq.GetAssignmentInCourseRow, lock bool) error {
 	for _, d := range []struct {
 		id   *uuid.UUID
 		kind string
@@ -188,8 +197,10 @@ func checkAssignment(ctx context.Context, q dbq.Querier, courseID uuid.UUID, a d
 		// this check and theirs each see the tree as it was before the other
 		// committed, and a component ends up with both assignments and
 		// children — whose assignments then count toward nothing.
-		if err := q.LockCourseComponents(ctx, courseID); err != nil {
-			return err
+		if lock {
+			if err := q.LockCourseComponents(ctx, courseID); err != nil {
+				return err
+			}
 		}
 		c, err := q.GetComponentInCourse(ctx, dbq.GetComponentInCourseParams{ID: *a.ComponentID, CourseID: courseID})
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -243,16 +254,24 @@ func assignmentCreate() tool.Tool {
 			"assignment.publish. title and points_possible are required.",
 		Kind: tool.Write, Gate: writeAssignments,
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/assignments"},
+		Check: func(in AssignmentCreateIn) error {
+			if in.Title == nil || in.PointsPossible == nil {
+				return apperr.Invalid("title and points_possible are required")
+			}
+			return in.check()
+		},
 		Resolve: func(_ context.Context, _ dbq.Querier, in AssignmentCreateIn) (tool.Target, error) {
 			return tool.Target{CourseID: in.CourseID, Type: "assignment"}, nil
 		},
+		Validate: func(ctx context.Context, q dbq.Querier, _ *domain.Member, _ time.Time, in AssignmentCreateIn) error {
+			a := dbq.GetAssignmentInCourseRow{CourseID: in.CourseID}
+			in.applyTo(&a)
+			return checkAssignment(ctx, q, in.CourseID, a, false)
+		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in AssignmentCreateIn) (IDOut, error) {
-			if in.Title == nil || in.PointsPossible == nil {
-				return IDOut{}, apperr.Invalid("title and points_possible are required")
-			}
 			a := dbq.GetAssignmentInCourseRow{ID: ids.New(), CourseID: in.CourseID}
 			in.applyTo(&a)
-			if err := checkAssignment(ctx, ec.Q, in.CourseID, a); err != nil {
+			if err := checkAssignment(ctx, ec.Q, in.CourseID, a, true); err != nil {
 				return IDOut{}, err
 			}
 			if err := ec.Q.InsertAssignment(ctx, dbq.InsertAssignmentParams{
@@ -321,7 +340,8 @@ func assignmentUpdate() tool.Tool {
 			"Either rewrites, at once, the posted totals it changes, with history, and so must reach every student who has " +
 			"one, over the whole course. A grade proposed out of the old points is refused when it is approved.",
 		Kind: tool.Write, Gate: writeAssignments,
-		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/assignments/{assignment_id}"},
+		HTTP:  tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/assignments/{assignment_id}"},
+		Check: func(in AssignmentUpdateIn) error { return in.check() },
 		Resolve: func(ctx context.Context, q dbq.Querier, in AssignmentUpdateIn) (tool.Target, error) {
 			t, err := assignmentTarget(ctx, q, in.CourseID, in.AssignmentID)
 			if err != nil {
@@ -354,6 +374,32 @@ func assignmentUpdate() tool.Tool {
 			}
 			return t, nil
 		},
+		Validate: func(ctx context.Context, q dbq.Querier, _ *domain.Member, _ time.Time, in AssignmentUpdateIn) error {
+			before, err := q.GetAssignmentInCourse(ctx, dbq.GetAssignmentInCourseParams{ID: in.AssignmentID, CourseID: in.CourseID})
+			if err != nil {
+				return err
+			}
+			a := in.updated(before)
+			if points, _ := movesInScheme(before, a); points {
+				graded, err := q.ListLiveEnteredGradeScoresOfAssignment(ctx, a.ID)
+				if err != nil {
+					return err
+				}
+				switch {
+				case len(graded) > 0 && in.ExistingGrades == nil:
+					return errExistingGradesRequired
+				case len(graded) > 0:
+					scores := make([]gradeScore, len(graded))
+					for i, g := range graded {
+						scores[i] = gradeScore{id: g.ID, score: g.Score}
+					}
+					if err := rebaseRefusal(scores, before.PointsPossible, a.PointsPossible, *in.ExistingGrades); err != nil {
+						return err
+					}
+				}
+			}
+			return checkAssignment(ctx, q, in.CourseID, a, false)
+		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in AssignmentUpdateIn) (SchemeChangeOut, error) {
 			// Read under the row's lock. Every column is written back, and a
 			// copy read before another change committed would quietly undo
@@ -380,15 +426,14 @@ func assignmentUpdate() tool.Tool {
 			// it, or a 95 entered out of 100 would be posted out of 50 with
 			// nobody having said so.
 			if points && len(graded) > 0 && in.ExistingGrades == nil {
-				return SchemeChangeOut{}, apperr.Precondition("grades have been entered for this assignment; say what becomes of them when its points change: existing_grades rescale or keep_scores").
-					With("reason", "existing_grades_required")
+				return SchemeChangeOut{}, errExistingGradesRequired
 			}
 			if len(graded) > 0 {
 				if err := checkSchemeScope(ctx, ec, in.CourseID, gradedStudents(graded)); err != nil {
 					return SchemeChangeOut{}, err
 				}
 			}
-			if err := checkAssignment(ctx, ec.Q, in.CourseID, a); err != nil {
+			if err := checkAssignment(ctx, ec.Q, in.CourseID, a, true); err != nil {
 				return SchemeChangeOut{}, err
 			}
 			if err := ec.Q.UpdateAssignment(ctx, dbq.UpdateAssignmentParams{
@@ -428,6 +473,11 @@ func assignmentUpdate() tool.Tool {
 	})
 }
 
+// errExistingGradesRequired refuses a change of an assignment's points
+// that does not say what becomes of the grades entered for it.
+var errExistingGradesRequired = apperr.Precondition("grades have been entered for this assignment; say what becomes of them when its points change: existing_grades rescale or keep_scores").
+	With("reason", "existing_grades_required")
+
 func assignmentPublish() tool.Tool {
 	return tool.Define(tool.Spec[AssignmentIDIn, OK]{
 		Name: "assignment.publish",
@@ -437,6 +487,13 @@ func assignmentPublish() tool.Tool {
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/assignments/{assignment_id}/publish"},
 		Resolve: func(ctx context.Context, q dbq.Querier, in AssignmentIDIn) (tool.Target, error) {
 			return assignmentTarget(ctx, q, in.CourseID, in.AssignmentID)
+		},
+		Validate: func(ctx context.Context, q dbq.Querier, _ *domain.Member, _ time.Time, in AssignmentIDIn) error {
+			a, err := q.GetAssignmentInCourse(ctx, dbq.GetAssignmentInCourseParams{ID: in.AssignmentID, CourseID: in.CourseID})
+			if err != nil {
+				return err
+			}
+			return publishable(ctx, q, a)
 		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in AssignmentIDIn) (OK, error) {
 			// Under the row's lock too, so that the instructions checked are
@@ -448,21 +505,15 @@ func assignmentPublish() tool.Tool {
 			if err != nil {
 				return OK{}, err
 			}
-			if a.InstructionsDocumentID != nil {
-				v, err := ec.Q.GetDocumentPublishedVersion(ctx, *a.InstructionsDocumentID)
-				if err != nil {
-					return OK{}, err
-				}
-				if v == nil {
-					return OK{}, apperr.Precondition("the instructions have no published version yet; students would see an assignment with nothing to read")
-				}
+			if err := publishable(ctx, ec.Q, a); err != nil {
+				return OK{}, err
 			}
 			n, err := ec.Q.PublishAssignment(ctx, dbq.PublishAssignmentParams{ID: a.ID, PublishedAt: &ec.Now})
 			if err != nil {
 				return OK{}, err
 			}
 			if n == 0 {
-				return OK{}, apperr.Conflicts("the assignment is already published")
+				return OK{}, errPublished
 			}
 			ec.Emit(events.Event{Type: EventAssignmentPublished, CourseID: &in.CourseID, SubjectType: "assignment", SubjectID: &a.ID, AssignmentID: &a.ID})
 			return OK{OK: true}, nil
@@ -482,32 +533,75 @@ func assignmentUnpublish() tool.Tool {
 		Resolve: func(ctx context.Context, q dbq.Querier, in AssignmentIDIn) (tool.Target, error) {
 			return assignmentTarget(ctx, q, in.CourseID, in.AssignmentID)
 		},
+		Validate: func(ctx context.Context, q dbq.Querier, _ *domain.Member, _ time.Time, in AssignmentIDIn) error {
+			a, err := q.GetAssignmentInCourse(ctx, dbq.GetAssignmentInCourseParams{ID: in.AssignmentID, CourseID: in.CourseID})
+			if err != nil {
+				return err
+			}
+			return unpublishable(ctx, q, a.ID, a.PublishedAt)
+		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in AssignmentIDIn) (OK, error) {
 			a, err := ec.Q.LockAssignmentForUnpublish(ctx, dbq.LockAssignmentForUnpublishParams{ID: in.AssignmentID, CourseID: in.CourseID})
 			if err != nil {
 				return OK{}, err
 			}
-			if a.PublishedAt == nil {
-				return OK{}, apperr.Conflicts("the assignment is not published")
-			}
-			// Once someone has started, their work hangs on the assignment
-			// being there; so does a grade for a 'missing' placeholder.
-			if started, err := ec.Q.AssignmentHasSubmissions(ctx, a.ID); err != nil {
+			if err := unpublishable(ctx, ec.Q, a.ID, a.PublishedAt); err != nil {
 				return OK{}, err
-			} else if started {
-				return OK{}, apperr.Precondition("it already has submissions — a draft, a hand-in, or the 'missing' rows recorded by hand or when its due date passed — so it can no longer be unpublished")
 			}
 			n, err := ec.Q.UnpublishAssignment(ctx, a.ID)
 			if err != nil {
 				return OK{}, err
 			}
 			if n == 0 {
-				return OK{}, apperr.Conflicts("the assignment is not published")
+				return OK{}, errNotPublished
 			}
 			ec.Emit(events.Event{Type: EventAssignmentUnpublished, CourseID: &in.CourseID, SubjectType: "assignment", SubjectID: &a.ID, AssignmentID: &a.ID})
 			return OK{OK: true}, nil
 		},
 	})
+}
+
+var (
+	errPublished    = apperr.Conflicts("the assignment is already published")
+	errNotPublished = apperr.Conflicts("the assignment is not published")
+)
+
+// publishable refuses publishing a as it stands: its instructions, if it
+// has any, must have a version students can read, and it must not be
+// published already. assignment.publish asks it before a proposal is queued
+// (Validate), and again under the assignment's lock as it publishes.
+func publishable(ctx context.Context, q dbq.Querier, a dbq.GetAssignmentInCourseRow) error {
+	if a.InstructionsDocumentID != nil {
+		v, err := q.GetDocumentPublishedVersion(ctx, *a.InstructionsDocumentID)
+		if err != nil {
+			return err
+		}
+		if v == nil {
+			return apperr.Precondition("the instructions have no published version yet; students would see an assignment with nothing to read")
+		}
+	}
+	if a.PublishedAt != nil {
+		return errPublished
+	}
+	return nil
+}
+
+// unpublishable refuses taking back the assignment id, published at
+// publishedAt, once anyone has started on it. assignment.unpublish asks it
+// before a proposal is queued (Validate), and again under the assignment's
+// lock as it takes it back.
+func unpublishable(ctx context.Context, q dbq.Querier, id uuid.UUID, publishedAt *time.Time) error {
+	if publishedAt == nil {
+		return errNotPublished
+	}
+	// Once someone has started, their work hangs on the assignment
+	// being there; so does a grade for a 'missing' placeholder.
+	if started, err := q.AssignmentHasSubmissions(ctx, id); err != nil {
+		return err
+	} else if started {
+		return apperr.Precondition("it already has submissions — a draft, a hand-in, or the 'missing' rows recorded by hand or when its due date passed — so it can no longer be unpublished")
+	}
+	return nil
 }
 
 // lockAssignment reads an assignment and holds it until the transaction

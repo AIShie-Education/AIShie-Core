@@ -52,7 +52,7 @@ func TestSeveralFilesOverHTTP(t *testing.T) {
 	// call since 0027.
 	alone := a.do(nil, "POST", course+"/documents", sato, m{"kind": "material", "title": "Week 3",
 		"upload_token": named[1]["upload_token"]}, "Idempotency-Key", "alone")
-	if alone.Status != 400 || alone.str("error", "code") != "invalid_argument" {
+	if alone.Status != 400 || alone.str("action_id") != "" || alone.str("error", "code") != "invalid_argument" {
 		t.Fatalf("upload_token alone: %d %s", alone.Status, alone.Raw)
 	}
 	made := a.do(nil, "POST", course+"/documents", sato, m{"kind": "material", "title": "Week 3", "body_md": "Slides first.",

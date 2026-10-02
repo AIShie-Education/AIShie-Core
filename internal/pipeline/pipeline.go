@@ -222,13 +222,14 @@ func savepoint(ctx context.Context, tx pgx.Tx, fn func(sp pgx.Tx) (any, error)) 
 // validate runs a tool's Validate inside a savepoint. Validate may take locks
 // — a grade's takes the work's — and so may lose a deadlock; the savepoint
 // keeps that from aborting the transaction its failure is then recorded in.
-// What it locked it keeps when it succeeds, for Execute after it.
-func validate(ctx context.Context, tx pgx.Tx, t tool.Tool, m *domain.Member, in any) error {
+// What it locked it keeps when it succeeds, for Execute after it. now is
+// the moment it is asked at: the call's, or the approval's.
+func validate(ctx context.Context, tx pgx.Tx, t tool.Tool, m *domain.Member, now time.Time, in any) error {
 	sp, err := tx.Begin(ctx)
 	if err != nil {
 		return err
 	}
-	if err := t.Validate(ctx, dbq.New(sp), m, in); err != nil {
+	if err := t.Validate(ctx, dbq.New(sp), m, now, in); err != nil {
 		if rbErr := sp.Rollback(ctx); rbErr != nil {
 			return errors.Join(err, rbErr)
 		}

@@ -11,6 +11,7 @@ import (
 
 	"github.com/AIShie-Education/AIShie-Core/internal/apperr"
 	"github.com/AIShie-Education/AIShie-Core/internal/db/dbq"
+	"github.com/AIShie-Education/AIShie-Core/internal/domain"
 	"github.com/AIShie-Education/AIShie-Core/internal/tool"
 	"github.com/AIShie-Education/AIShie-Core/internal/wake"
 )
@@ -232,6 +233,29 @@ type RenditionRetryOut struct {
 	State       string    `json:"state" jsonschema:"where it stands now: queued, or claimed when it was being converted already"`
 }
 
+// errRenditionDone refuses a retry of a rendition that is done: its PDF is
+// there.
+func errRenditionDone() *apperr.Error {
+	return apperr.Precondition("the PDF is there already; it is made once").With("reason", "rendition_done")
+}
+
+// retryable says why a retry of a file's rendition would be refused as it
+// stands, read without its lock, or nil when it would not: rs is the file's,
+// none for a file that has none. A retry asks it before it is proposed,
+// carried out or approved (Validate), and requeue again under the
+// rendition's lock. A rendition waiting or being converted when a retry is
+// proposed may be done by the time it is approved, which approving then
+// refuses.
+func retryable(rs []dbq.FileRendition) error {
+	switch {
+	case len(rs) == 0:
+		return errNoRendition()
+	case rs[0].Status == renditionDone:
+		return errRenditionDone()
+	}
+	return nil
+}
+
 // requeue sends a failed or skipped rendition back to the queue, as an
 // upload is queued; one waiting or being converted is left as it is, and a
 // done one is refused: its PDF is there.
@@ -241,7 +265,7 @@ func requeue(ctx context.Context, ec *tool.ExecCtx, r dbq.FileRendition) (Rendit
 	case renditionQueued, renditionClaimed:
 		return out, nil
 	case renditionDone:
-		return out, apperr.Precondition("the PDF is there already; it is made once").With("reason", "rendition_done")
+		return out, errRenditionDone()
 	}
 	if err := ec.Q.RequeueRendition(ctx, dbq.RequeueRenditionParams{ID: r.ID, Now: ec.Now}); err != nil {
 		return out, err
@@ -274,10 +298,18 @@ func documentRenditionRetry() tool.Tool {
 			t.Type, t.ID = "document_version_file", &in.FileID
 			return t, nil
 		},
+		Validate: func(ctx context.Context, q dbq.Querier, _ *domain.Member, _ time.Time, in DocumentRenditionRetryIn) error {
+			if err := documentFileExists(ctx, q, in); err != nil {
+				return err
+			}
+			rs, err := q.ListRenditionsOfFiles(ctx, []uuid.UUID{in.FileID})
+			if err != nil {
+				return err
+			}
+			return retryable(rs)
+		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in DocumentRenditionRetryIn) (RenditionRetryOut, error) {
-			if _, err := ec.Q.GetDocumentFile(ctx, dbq.GetDocumentFileParams{ID: in.FileID, DocumentID: in.DocumentID}); errors.Is(err, pgx.ErrNoRows) {
-				return RenditionRetryOut{}, errNoFile
-			} else if err != nil {
+			if err := documentFileExists(ctx, ec.Q, in); err != nil {
 				return RenditionRetryOut{}, err
 			}
 			r, err := ec.Q.LockRenditionOfFile(ctx, &in.FileID)
@@ -290,6 +322,15 @@ func documentRenditionRetry() tool.Tool {
 			return requeue(ctx, ec, r)
 		},
 	})
+}
+
+// documentFileExists refuses a file that is not one of the document's.
+func documentFileExists(ctx context.Context, q dbq.Querier, in DocumentRenditionRetryIn) error {
+	_, err := q.GetDocumentFile(ctx, dbq.GetDocumentFileParams{ID: in.FileID, DocumentID: in.DocumentID})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return errNoFile
+	}
+	return err
 }
 
 type ConversationRenditionRetryIn struct {
@@ -314,32 +355,22 @@ func conversationRenditionRetry() tool.Tool {
 			}
 			return tool.Target{CourseID: in.CourseID, Type: "conversation_attachment", ID: &in.AttachmentID}, nil
 		},
+		// Whether the caller may read the file, and send it back, and
+		// whether it has a rendition that is not done: asked before a retry
+		// is proposed, and again as it is made.
+		Validate: func(ctx context.Context, q dbq.Querier, m *domain.Member, now time.Time, in ConversationRenditionRetryIn) error {
+			if err := attachmentToRetry(ctx, q, m, now, in); err != nil {
+				return err
+			}
+			rs, err := q.ListRenditionsOfAttachments(ctx, []uuid.UUID{in.AttachmentID})
+			if err != nil {
+				return err
+			}
+			return retryable(rs)
+		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in ConversationRenditionRetryIn) (RenditionRetryOut, error) {
-			a, err := findAttachment(ctx, ec.Q, in.CourseID, in.AttachmentID)
-			if err != nil {
+			if err := attachmentToRetry(ctx, ec.Q, ec.Member, ec.Now, in); err != nil {
 				return RenditionRetryOut{}, err
-			}
-			c, err := findConversation(ctx, ec.Q, in.CourseID, a.ConversationID)
-			if err != nil {
-				return RenditionRetryOut{}, err
-			}
-			if ok, err := newAddressing(ec.Q, ec.Now).mayRead(ctx, ec.Member, c); err != nil {
-				return RenditionRetryOut{}, err
-			} else if !ok {
-				return RenditionRetryOut{}, errNoAttachment
-			}
-			if a.Retracted {
-				return RenditionRetryOut{}, errAttachmentRetracted
-			}
-			if a.AuthorMemberID != ec.Member.ID {
-				staff, err := oversees(ctx, ec.Q, ec.Member, c.OpenerMemberID)
-				if err != nil {
-					return RenditionRetryOut{}, err
-				}
-				if !staff {
-					return RenditionRetryOut{}, apperr.Forbid("only the message's author, or someone who decides actions for the "+
-						"conversation's opener, sends its file back to be converted").With("reason", "not_your_message")
-				}
 			}
 			r, err := ec.Q.LockRenditionOfAttachment(ctx, &in.AttachmentID)
 			if errors.Is(err, pgx.ErrNoRows) {
@@ -351,4 +382,38 @@ func conversationRenditionRetry() tool.Tool {
 			return requeue(ctx, ec, r)
 		},
 	})
+}
+
+// attachmentToRetry refuses a retry of a message's file by m at now: one m
+// may not read is not there to it, one of a retracted message is withheld,
+// and only the message's author, or someone who decides actions for the
+// conversation's opener, sends it back to be converted.
+func attachmentToRetry(ctx context.Context, q dbq.Querier, m *domain.Member, now time.Time, in ConversationRenditionRetryIn) error {
+	a, err := findAttachment(ctx, q, in.CourseID, in.AttachmentID)
+	if err != nil {
+		return err
+	}
+	c, err := findConversation(ctx, q, in.CourseID, a.ConversationID)
+	if err != nil {
+		return err
+	}
+	if ok, err := newAddressing(q, now).mayRead(ctx, m, c); err != nil {
+		return err
+	} else if !ok {
+		return errNoAttachment
+	}
+	if a.Retracted {
+		return errAttachmentRetracted
+	}
+	if a.AuthorMemberID != m.ID {
+		staff, err := oversees(ctx, q, m, c.OpenerMemberID)
+		if err != nil {
+			return err
+		}
+		if !staff {
+			return apperr.Forbid("only the message's author, or someone who decides actions for the "+
+				"conversation's opener, sends its file back to be converted").With("reason", "not_your_message")
+		}
+	}
+	return nil
 }

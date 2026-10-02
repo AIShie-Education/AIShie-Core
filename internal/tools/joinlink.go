@@ -305,6 +305,13 @@ func joinLinkCreate() tool.Tool {
 		Kind: tool.Write, Gate: invitesMembers,
 		HTTP:      tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/join-links"},
 		SecretOut: []string{"token"},
+		Check: func(in JoinLinkCreateIn) error {
+			if in.MaxUses != nil && (*in.MaxUses < 1 || *in.MaxUses > MaxJoinLinkUses) {
+				return apperr.Invalid("max_uses must be from 1 to %d", MaxJoinLinkUses)
+			}
+			_, err := joinDomains(in.AllowedEmailDomains)
+			return err
+		},
 		Resolve: func(_ context.Context, _ dbq.Querier, in JoinLinkCreateIn) (tool.Target, error) {
 			return tool.Target{CourseID: in.CourseID, Type: "course_join_link"}, nil
 		},
@@ -317,13 +324,7 @@ func joinLinkCreate() tool.Tool {
 				"without approval").With("reason", "not_by_proposal")
 		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in JoinLinkCreateIn) (JoinLinkCreateOut, error) {
-			if in.MaxUses != nil && (*in.MaxUses < 1 || *in.MaxUses > MaxJoinLinkUses) {
-				return JoinLinkCreateOut{}, apperr.Invalid("max_uses must be from 1 to %d", MaxJoinLinkUses)
-			}
-			domains, err := joinDomains(in.AllowedEmailDomains)
-			if err != nil {
-				return JoinLinkCreateOut{}, err
-			}
+			domains, _ := joinDomains(in.AllowedEmailDomains) // as Check took them
 			student := "student"
 			preset, err := findPreset(ctx, ec.Q, in.CourseID, &student, nil)
 			if err != nil {
@@ -477,6 +478,8 @@ type JoinLinkRevokeIn struct {
 	LinkID uuid.UUID `json:"link_id"`
 }
 
+var errLinkRevoked = apperr.Conflicts("the join link is revoked already")
+
 func joinLinkRevoke() tool.Tool {
 	return tool.Define(tool.Spec[JoinLinkRevokeIn, OK]{
 		Name: "course.join_link_revoke",
@@ -493,6 +496,13 @@ func joinLinkRevoke() tool.Tool {
 			}
 			return tool.Target{CourseID: in.CourseID, Type: "course_join_link", ID: &in.LinkID}, nil
 		},
+		Validate: func(ctx context.Context, q dbq.Querier, _ *domain.Member, _ time.Time, in JoinLinkRevokeIn) error {
+			l, err := q.GetJoinLinkInCourse(ctx, dbq.GetJoinLinkInCourseParams{ID: in.LinkID, CourseID: in.CourseID})
+			if err == nil && l.RevokedAt != nil {
+				return errLinkRevoked
+			}
+			return err
+		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in JoinLinkRevokeIn) (OK, error) {
 			// Held as a join holds it: a join in flight finishes first, and
 			// one after this finds the link revoked.
@@ -504,7 +514,7 @@ func joinLinkRevoke() tool.Tool {
 				return OK{}, err
 			}
 			if n == 0 {
-				return OK{}, apperr.Conflicts("the join link is revoked already")
+				return OK{}, errLinkRevoked
 			}
 			ec.Emit(events.Event{Type: EventJoinLinkRevoked, CourseID: &in.CourseID, SubjectType: "course_join_link", SubjectID: &in.LinkID})
 			return OK{OK: true}, nil

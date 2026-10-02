@@ -278,7 +278,6 @@ func TestWhatMayBeGraded(t *testing.T) {
 		{"a rolled-up component", m{"component_id": c.Assignments, "student_member_id": yuki.Member, "score": 1}, apperr.FailedPrecondition},
 		{"the course total", m{"component_id": c.Total, "student_member_id": yuki.Member, "score": 1}, apperr.FailedPrecondition},
 		{"someone who is not a student", m{"component_id": c.Midterm, "student_member_id": c.SatoM, "score": 1}, apperr.FailedPrecondition},
-		{"a negative score", m{"submission_id": yuki.HW3, "score": -1}, apperr.InvalidArgument},
 		{"a rubric version from nowhere", m{"submission_id": yuki.HW3, "score": 1, "rubric_version_id": uuid.New()}, apperr.FailedPrecondition},
 	}
 	for i, tc := range cases {
@@ -292,6 +291,11 @@ func TestWhatMayBeGraded(t *testing.T) {
 	}
 	if _, err := c.Call(c.Sato, "grade.submit", m{"course_id": c.Course, "submission_id": yuki.HW3, "student_member_id": yuki.Member, "score": 1}, "z"); !apperr.Is(err, apperr.InvalidArgument) {
 		t.Fatalf("student_member_id with submission_id: %v", err)
+	}
+	// A score below zero is refused as the arguments are read, before
+	// anything is attempted.
+	if _, err := c.Call(c.Sato, "grade.submit", m{"course_id": c.Course, "submission_id": yuki.HW3, "score": -1}, "y"); !apperr.Is(err, apperr.InvalidArgument) {
+		t.Fatalf("a negative score: %v", err)
 	}
 	if n := c.Count(`SELECT count(*) FROM grade`); n != 0 {
 		t.Fatalf("%d grades written by calls that should all have failed", n)
@@ -894,13 +898,19 @@ func TestAnApprovedPostPassesOverDraftsPostedMeanwhile(t *testing.T) {
 	mid := testkit.Result[tools.GradeSubmitOut](t, b.do(t, b.sato, "grade.submit",
 		m{"course_id": b.course, "component_id": b.midterm, "student_member_id": b.yukiM, "score": 50})).GradeID
 	both := m{"course_id": b.course, "assignment_id": b.hw3, "grade_ids": []uuid.UUID{yukis, mid}}
+	// Only a proposal stores drafts beside the assignment: a call giving
+	// both is refused as it is read, recording nothing, whether it would
+	// have been carried out or proposed.
 	for _, by := range []struct {
 		what  string
 		actor uuid.UUID
 	}{{"a call", b.sato}, {"a proposal", bot}} {
-		if out := b.MustCall(by.actor, "grade.post", both, "both"); out.Status != domain.StatusFailed ||
-			out.Error.Code != apperr.InvalidArgument || !strings.Contains(out.Error.Message, "exactly one") {
-			t.Fatalf("%s giving drafts beside the assignment: %+v", by.what, out)
+		out, err := b.Call(by.actor, "grade.post", both, "both")
+		if e, ok := apperr.As(err); !ok || e.Code != apperr.InvalidArgument || !strings.Contains(e.Message, "exactly one") {
+			t.Fatalf("%s giving drafts beside the assignment: %+v %v", by.what, out, err)
+		}
+		if n := b.Count(`SELECT count(*) FROM action WHERE actor_id = $1 AND idempotency_key = 'both'`, by.actor); n != 0 {
+			t.Fatalf("%s giving drafts beside the assignment is recorded", by.what)
 		}
 	}
 	if posted(mid) {
@@ -925,8 +935,9 @@ func TestAnApprovedPostPassesOverDraftsPostedMeanwhile(t *testing.T) {
 // A proposal that names its drafts by id is approved as one that has them
 // pinned for an assignment: a draft posted by hand while it waits is out
 // already, as proposed, and the approval posts the rest; one replaced
-// meanwhile fails it, without sending the approver to regrade. A call naming
-// a posted grade is still told it is posted, and a proposal naming one is
+// meanwhile fails it, without sending the approver to regrade, and so does
+// every one having been posted meanwhile, with nothing left to post. A call
+// naming a posted grade is still told it is posted, and a proposal naming one is
 // refused as it is made.
 func TestAnApprovedPostOfNamedDraftsPassesOverOnesPostedMeanwhile(t *testing.T) {
 	b := build(t)
@@ -980,11 +991,35 @@ func TestAnApprovedPostOfNamedDraftsPassesOverOnesPostedMeanwhile(t *testing.T) 
 	yukis, kens = draft(b.submit(t, b.yuki, "revised"), 85), draft(kensWork, 75)
 	proposal = propose("post-again", yukis, kens)
 	replacement := draft(kensWork, 78)
-	if v := approve(proposal); v.Outcome != domain.StatusFailed || !strings.Contains(v.Error.Message, "replaced") || strings.Contains(v.Error.Message, "regrade") {
+	if v := approve(proposal); v.Outcome != domain.StatusFailed || v.Error.Code != apperr.Conflict ||
+		!strings.HasSuffix(v.Error.Message, "has been replaced since it was proposed; propose posting again") {
 		t.Fatalf("approving after Ken's draft was replaced: %+v", v.Error)
 	}
 	if posted(yukis) || posted(kens) || posted(replacement) {
 		t.Fatal("a draft was posted by an approval that failed")
+	}
+
+	// Every draft a proposal names, or has pinned for the assignment, is
+	// posted by hand while it waits: approving it has nothing left to
+	// post, and does not send the approver to regrade.
+	b.do(t, b.sato, "grade.post", m{"course_id": b.course, "grade_ids": []uuid.UUID{yukis, replacement}})
+	for _, by := range []struct {
+		what string
+		args func(grades ...uuid.UUID) m
+	}{
+		{"naming its drafts", func(grades ...uuid.UUID) m { return m{"course_id": b.course, "grade_ids": grades} }},
+		{"for an assignment", func(...uuid.UUID) m { return m{"course_id": b.course, "assignment_id": b.hw3} }},
+	} {
+		yukis, replacement = draft(b.submit(t, b.yuki, by.what), 86), draft(b.submit(t, b.ken, by.what), 76)
+		out := b.MustCall(bot, "grade.post", by.args(yukis, replacement), "post-all-"+by.what)
+		if out.Status != domain.StatusProposed {
+			t.Fatalf("the bot's proposal %s: %+v", by.what, out)
+		}
+		b.do(t, b.sato, "grade.post", m{"course_id": b.course, "grade_ids": []uuid.UUID{yukis, replacement}})
+		if v := approve(out.ActionID); v.Outcome != domain.StatusFailed || v.Error.Code != apperr.FailedPrecondition ||
+			!strings.Contains(v.Error.Message, "there is nothing left for it to post") {
+			t.Fatalf("approving the proposal %s after every draft was posted by hand: %+v", by.what, v.Error)
+		}
 	}
 }
 

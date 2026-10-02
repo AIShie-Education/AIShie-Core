@@ -122,3 +122,15 @@ func grantable(g *domain.Member, p domain.Perm) domain.Level {
 func validScope(s string) bool { return s == domain.ScopeAll || s == domain.ScopeListed }
 
 var validRoles = map[string]bool{"student": true, "instructor": true, "ta": true, "observer": true, "assistant": true}
+
+// errRole refuses a roster role that is not one.
+var errRole = apperr.Invalid("role must be student, instructor, ta, observer or assistant")
+
+// checkPermChange holds the levels a change names to what a change is: at
+// least one, each a permission there is, at a level there is.
+func checkPermChange(over PermLevels) error {
+	if len(over) == 0 {
+		return apperr.Invalid("perms is empty: nothing to change")
+	}
+	return (permSet{}).apply(over)
+}

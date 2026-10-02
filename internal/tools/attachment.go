@@ -262,22 +262,20 @@ func attachmentsOf(ctx context.Context, q dbq.Querier, messages []uuid.UUID) (ma
 	return out, err
 }
 
-// checkProposedFiles is what a message that is to wait for a decision is
-// held to, as to its files, when it is proposed (Pin): that they may be
-// carried (checkAttachments), are young enough to outlast the proposal
-// (checkUploadAge), and fit in the conversation as it holds files now, or
-// in a conversation of their own for one that is to be opened (nil). All of
-// it is asked again when it is approved.
-func checkProposedFiles(ctx context.Context, d Deps, q dbq.Querier, m *domain.Member, courseID uuid.UUID, conversation *uuid.UUID,
-	now time.Time, files []AttachmentIn) error {
+// checkMessageFiles is what a message is held to, as to its files, before
+// it is written or proposed, and when a proposal of it is approved
+// (Validate): that they may be carried (checkAttachments), and fit in the
+// conversation as it holds files now, or in a conversation of their own for
+// one that is to be opened (nil). A message being written asks it again as
+// it claims them, under the conversation's lock; a proposal is held as well
+// to files young enough to outlast it (checkUploadAge, in Pin).
+func checkMessageFiles(ctx context.Context, d Deps, q dbq.Querier, m *domain.Member, courseID uuid.UUID, conversation *uuid.UUID,
+	files []AttachmentIn) error {
 	if len(files) == 0 {
 		return nil
 	}
 	bytes, err := checkAttachments(ctx, d, q, m, courseID, files)
 	if err != nil {
-		return err
-	}
-	if err := checkUploadAge(ctx, d, now, tokensOf(files)...); err != nil {
 		return err
 	}
 	if conversation == nil {

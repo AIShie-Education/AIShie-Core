@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/AIShie-Education/AIShie-Core/internal/apperr"
 	"github.com/AIShie-Education/AIShie-Core/internal/authz"
@@ -68,52 +69,37 @@ const (
 	CancelWithdrawn = "withdrawn"
 )
 
-// Decide approves or rejects a proposal. It runs as the Execute of
-// action.decide, inside that action's savepoint.
-func (p *Pipeline) Decide(ctx context.Context, ec *tool.ExecCtx, in DecideIn) (DecideOut, error) {
+// CheckDecision is action.decide's Check: a decision is to approve or to
+// reject.
+func CheckDecision(in DecideIn) error {
 	if in.Decision != DecisionApprove && in.Decision != DecisionReject {
-		return DecideOut{}, apperr.Invalid("decision must be %q or %q", DecisionApprove, DecisionReject)
+		return apperr.Invalid("decision must be %q or %q", DecisionApprove, DecisionReject)
 	}
-	// The proposer's seat first, then the proposal: the order a removal of
-	// that seat takes them in (the seat, then its proposals) and the order
-	// every write takes its caller's seat in. A pause, narrowing or removal
-	// of the proposer then waits for the decision, or the decision waits
-	// for it and sees what it did. For a delegate's proposal its principal's
-	// seat comes second, as a delegate's own calls take the two: whatever
-	// the principal loses then applies to the approval too. Whose proposal
-	// it is, and whose delegate that seat is, never change, so they are read
-	// before anything is locked.
-	if ahead, err := ec.Q.GetActionInCourse(ctx, dbq.GetActionInCourseParams{ID: in.ActionID, CourseID: &in.CourseID}); err == nil && ahead.MemberID != nil {
-		if err := ec.Q.ShareSeats(ctx, []uuid.UUID{*ahead.MemberID}); err != nil {
-			return DecideOut{}, err
-		}
-		principal, err := ec.Q.GetSeatPrincipal(ctx, *ahead.MemberID)
-		if err != nil {
-			return DecideOut{}, err
-		}
-		if principal != nil {
-			if err := ec.Q.ShareSeats(ctx, []uuid.UUID{*principal}); err != nil {
-				return DecideOut{}, err
-			}
-		}
-	}
-	prop, err := ec.Q.GetActionInCourseForUpdate(ctx, dbq.GetActionInCourseForUpdateParams{ID: in.ActionID, CourseID: &in.CourseID})
-	if errors.Is(err, pgx.ErrNoRows) {
-		return DecideOut{}, apperr.Missing("no such action in this course")
-	}
-	if err != nil {
-		return DecideOut{}, err
-	}
+	return nil
+}
+
+// errNoAction is what an action id that is not one of the course's answers.
+var errNoAction = apperr.Missing("no such action in this course")
+
+// refuseDecision says why actor, from seat m, may not decide proposal prop
+// as decision says now, or nil when they may; and, when they may, whether
+// they decide it as the owner of the agent that proposed it (byOwner). It
+// writes nothing. Decide asks it of the proposal under its lock, and
+// action.decide's Validate (ValidateDecision) before a decision is proposed,
+// carried out or approved, so that nobody is asked to approve a decision
+// that approving would refuse. What it asks can change while a proposed
+// decision waits — the proposal decided by someone else, withdrawn, its
+// agent's owner's level for it — and is asked again when it is approved.
+func (p *Pipeline) refuseDecision(ctx context.Context, q dbq.Querier, actor domain.Actor, m *domain.Member, prop dbq.Action, decision string, now time.Time) (byOwner bool, err error) {
 	if prop.Status != string(domain.StatusProposed) {
-		return DecideOut{}, apperr.Conflicts("the action is %s, not awaiting a decision", prop.Status)
+		return false, apperr.Conflicts("the action is %s, not awaiting a decision", prop.Status)
 	}
-	if ec.Member == nil || prop.MemberID == nil {
-		return DecideOut{}, apperr.Forbid("only a course member decides a member's proposal")
+	if m == nil || prop.MemberID == nil {
+		return false, apperr.Forbid("only a course member decides a member's proposal")
 	}
-	byOwner := false
-	if same, err := sameParty(ctx, ec.Q, prop.ActorID, ec.Actor.ID); err != nil {
-		return DecideOut{}, err
-	} else if *prop.MemberID == ec.Member.ID || same {
+	if same, err := sameParty(ctx, q, prop.ActorID, actor.ID); err != nil {
+		return false, err
+	} else if *prop.MemberID == m.ID || same {
 		// The database refuses the same seat too; saying so here is kinder.
 		// The actor is compared here as well: someone removed and seated
 		// again has a new seat, and is still who made the proposal. So is
@@ -121,28 +107,111 @@ func (p *Pipeline) Decide(ctx context.Context, ec *tool.ExecCtx, in DecideIn) (D
 		// another of the owner's agents anything it did. Its owner decides
 		// what it proposed only where they could have done it themselves
 		// without anyone's confirmation (ownerJudges).
-		owner, may, err := p.ownerJudges(ctx, ec.Q, ec.Actor, ec.Member.ID, prop, ec.Now)
+		owner, may, refused, err := p.ownerJudges(ctx, q, actor, m.ID, prop, now)
 		switch {
 		case err != nil:
-			return DecideOut{}, err
+			return false, err
+		case owner && refused != nil:
+			return false, errOwnerWouldBeRefused(refused)
 		case owner && !may:
-			return DecideOut{}, errOwnerNotAutonomous("decide")
+			return false, errOwnerNotAutonomous("decide")
 		case !may:
-			return DecideOut{}, apperr.Forbid("nobody decides their own proposal, nor their owner's, nor another agent's of their owner")
+			return false, apperr.Forbid("nobody decides their own proposal, nor their owner's, nor another agent's of their owner")
 		}
 		byOwner = true
 	}
-	if own, err := judgesOwn(ctx, ec.Q, prop, ec.Member.ID, ec.Actor.ID); err != nil {
-		return DecideOut{}, err
+	if own, err := judgesOwn(ctx, q, prop, m.ID, actor.ID); err != nil {
+		return false, err
 	} else if own {
-		return DecideOut{}, apperr.Forbid("nobody decides their own proposal, even at one remove: this one decides or reviews an action of yours")
+		return false, apperr.Forbid("nobody decides their own proposal, even at one remove: this one decides or reviews an action of yours")
 	}
-	if in.Decision == DecisionApprove {
-		if own, err := closesOwnEscalation(ctx, ec.Q, prop, ec.Actor.ID); err != nil {
-			return DecideOut{}, err
+	if decision == DecisionApprove {
+		if own, err := closesOwnEscalation(ctx, q, prop, actor.ID); err != nil {
+			return false, err
 		} else if own {
-			return DecideOut{}, apperr.Forbid("an escalation is for someone else to look at")
+			return false, apperr.Forbid("an escalation is for someone else to look at")
 		}
+	}
+	return byOwner, nil
+}
+
+// ValidateDecision is action.decide's Validate: what Decide would refuse the
+// decision in, made from seat m at now, before anything of it is decided
+// (refuseDecision), asked of the proposal under the lock Decide takes it
+// with (LockProposal), which the call keeps.
+func (p *Pipeline) ValidateDecision(ctx context.Context, q dbq.Querier, m *domain.Member, now time.Time, in DecideIn) error {
+	prop, err := LockProposal(ctx, q, in.CourseID, in.ActionID)
+	if err != nil {
+		return err
+	}
+	actor, err := seatActor(ctx, q, m)
+	if err != nil {
+		return err
+	}
+	_, err = p.refuseDecision(ctx, q, actor, m, prop, in.Decision, now)
+	return err
+}
+
+// seatActor is the actor of seat m, which a decision or a review is made
+// from; the zero actor for no seat, which both refuse.
+func seatActor(ctx context.Context, q dbq.Querier, m *domain.Member) (domain.Actor, error) {
+	if m == nil {
+		return domain.Actor{}, nil
+	}
+	return authz.LoadActor(ctx, q, m.ActorID)
+}
+
+// LockProposal takes proposal id of course for a decision about it: the
+// proposer's seat first, then the proposal, the order a removal of that seat
+// takes them in (the seat, then its proposals) and the order every write
+// takes its caller's seat in. A pause, narrowing or removal of the proposer
+// then waits for the decision, or the decision waits for it and sees what
+// it did. For a delegate's proposal its principal's seat comes second, as a
+// delegate's own calls take the two: whatever the principal loses then
+// applies to the approval too. Whose proposal it is, and whose delegate that
+// seat is, never change, so they are read before anything is locked.
+//
+// Decide takes it so, and ValidateDecision before it, ahead of whatever the
+// proposed tool's Validate locks as it asks whether approving would be
+// refused (ownerJudges): an approval takes the proposal and then those, and
+// an owner's decision must not take them the other way round. So does the
+// gate of an owner below autonomous for action_decide (Gate.OwnAgents),
+// once it has found the proposal to be their own agent's and before it asks
+// the same: that is asked as the call is authorized, before
+// ValidateDecision. Anyone else that gate meets is denied without it.
+func LockProposal(ctx context.Context, q dbq.Querier, course, id uuid.UUID) (dbq.Action, error) {
+	if ahead, err := q.GetActionInCourse(ctx, dbq.GetActionInCourseParams{ID: id, CourseID: &course}); err == nil && ahead.MemberID != nil {
+		if err := q.ShareSeats(ctx, []uuid.UUID{*ahead.MemberID}); err != nil {
+			return dbq.Action{}, err
+		}
+		principal, err := q.GetSeatPrincipal(ctx, *ahead.MemberID)
+		if err != nil {
+			return dbq.Action{}, err
+		}
+		if principal != nil {
+			if err := q.ShareSeats(ctx, []uuid.UUID{*principal}); err != nil {
+				return dbq.Action{}, err
+			}
+		}
+	}
+	prop, err := q.GetActionInCourseForUpdate(ctx, dbq.GetActionInCourseForUpdateParams{ID: id, CourseID: &course})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return prop, errNoAction
+	}
+	return prop, err
+}
+
+// Decide approves or rejects a proposal. It runs as the Execute of
+// action.decide, inside that action's savepoint, on a decision CheckDecision
+// has taken.
+func (p *Pipeline) Decide(ctx context.Context, ec *tool.ExecCtx, in DecideIn) (DecideOut, error) {
+	prop, err := LockProposal(ctx, ec.Q, in.CourseID, in.ActionID)
+	if err != nil {
+		return DecideOut{}, err
+	}
+	byOwner, err := p.refuseDecision(ctx, ec.Q, ec.Actor, ec.Member, prop, in.Decision, ec.Now)
+	if err != nil {
+		return DecideOut{}, err
 	}
 	out := DecideOut{ActionID: prop.ID, ByOwner: byOwner}
 	// What the event says of the decision, and the record of a rejection:
@@ -188,7 +257,10 @@ func (p *Pipeline) Decide(ctx context.Context, ec *tool.ExecCtx, in DecideIn) (D
 	if !ok {
 		return cancel(CancelToolNoLongerHere, nil)
 	}
-	args, err := t.Decode(prop.Payload)
+	// Read back by the schema alone: arguments it no longer takes are a tool
+	// that is no longer here, and arguments the tool's Check refuses fail
+	// below, as Execute would have failed them.
+	args, err := t.Parse(prop.Payload)
 	if err != nil {
 		return cancel(CancelToolNoLongerHere, map[string]any{"detail": err.Error()})
 	}
@@ -218,8 +290,19 @@ func (p *Pipeline) Decide(ctx context.Context, ec *tool.ExecCtx, in DecideIn) (D
 		out.Outcome, out.Error = domain.StatusFailed, e
 		return out, nil
 	}
+	// A proposal queued before Check refused what it says: nothing that
+	// Check refuses is queued now.
+	if t.Check != nil {
+		if err := t.Check(args); err != nil {
+			e, ok := apperr.As(err)
+			if !ok {
+				return DecideOut{}, err
+			}
+			return fail(e)
+		}
+	}
 	if t.Validate != nil {
-		if err := validate(ctx, ec.Tx, t, a.decision.Member, args); err != nil {
+		if err := validate(ctx, ec.Tx, t, a.decision.Member, ec.Now, args); err != nil {
 			if transient(err) {
 				// Lost a deadlock: nothing is wrong with the proposal. The
 				// decision is undone and made again, once, in a fresh
@@ -228,6 +311,16 @@ func (p *Pipeline) Decide(ctx context.Context, ec *tool.ExecCtx, in DecideIn) (D
 				// can work.
 				return DecideOut{}, err
 			}
+			e, ok := isCallerFault(err)
+			if !ok {
+				return DecideOut{}, err
+			}
+			return fail(e)
+		}
+	}
+	// What changed since it was proposed, which no call is refused for.
+	if t.Since != nil {
+		if err := t.Since(ctx, ec.Q, prop.CreatedAt, args); err != nil {
 			e, ok := isCallerFault(err)
 			if !ok {
 				return DecideOut{}, err
@@ -274,7 +367,7 @@ func (p *Pipeline) Decide(ctx context.Context, ec *tool.ExecCtx, in DecideIn) (D
 // someone owns acts only as their delegate, so it is them, at one remove.
 // One party judges nothing of its own, but for its owner's judging an
 // agent's action they could have done themselves (ownerJudges).
-func sameParty(ctx context.Context, q *dbq.Queries, a, b uuid.UUID) (bool, error) {
+func sameParty(ctx context.Context, q dbq.Querier, a, b uuid.UUID) (bool, error) {
 	if a == b {
 		return true, nil
 	}
@@ -295,48 +388,135 @@ func sameParty(ctx context.Context, q *dbq.Queries, a, b uuid.UUID) (bool, error
 // else of the party — the agent itself, its sibling — and nobody judging an
 // action of the party through a decision about it (judgesOwn) is let by it.
 // It is the same rule for approving and rejecting, and for reviewing.
-func (p *Pipeline) ownerJudges(ctx context.Context, q dbq.Querier, actor domain.Actor, seat uuid.UUID, a dbq.Action, now time.Time) (owner, may bool, err error) {
+//
+// A proposal they could not have made themselves without its being refused
+// is not theirs to decide either: one whose arguments the tool's Check
+// refuses, or that its Validate refuses as approving it now would run it,
+// as the proposer's (refusal). That refusal is returned as refused, for
+// Decide to say why; an owner who wants such a proposal gone takes it back
+// (action.withdraw), and someone else may reject it. What has been carried
+// out already, reviewed afterwards, is not asked again.
+func (p *Pipeline) ownerJudges(ctx context.Context, q dbq.Querier, actor domain.Actor, seat uuid.UUID, a dbq.Action, now time.Time) (owner, may bool, refused *apperr.Error, err error) {
 	if a.MemberID == nil || *a.MemberID == seat || a.ActorID == actor.ID {
-		return false, false, nil
+		return false, false, nil, nil
 	}
 	did, err := q.GetActor(ctx, a.ActorID)
 	if err != nil {
-		return false, false, err
+		return false, false, nil, err
 	}
 	if did.OwnerActorID == nil || *did.OwnerActorID != actor.ID {
-		return false, false, nil
+		return false, false, nil, nil
 	}
 	t, ok := p.reg.Get(a.ActionType)
 	if !ok {
-		return true, false, nil
+		return true, false, nil, nil
 	}
+	gated := t
 	if len(t.OwnerJudgedBy) > 0 {
 		// A permission no person holds, conversation_answer: the owner is
 		// measured by what judging it is instead (tool.Spec.OwnerJudgedBy).
-		t.Gate.Perms, t.Gate.Any, t.Gate.OwnAgents = t.OwnerJudgedBy, false, nil
+		gated.Gate.Perms, gated.Gate.Any, gated.Gate.OwnAgents = t.OwnerJudgedBy, false, nil
 	}
-	args, err := t.Decode(a.Payload)
+	args, err := t.Parse(a.Payload)
 	if err != nil {
-		return true, false, nil
+		return true, false, nil, nil
 	}
-	got, err := p.authorize(ctx, q, t, args, actor, uuid.Nil, &seat, now)
+	got, err := p.authorize(ctx, q, gated, args, actor, uuid.Nil, &seat, now)
 	if err != nil {
 		// A target gone, or not found in the course: not something they
 		// could do now. Anything else is a fault, and says so.
 		if _, ok := apperr.As(err); ok {
-			return true, false, nil
+			return true, false, nil, nil
 		}
-		return true, false, err
+		return true, false, nil, err
 	}
-	return true, got.decision.Level == domain.Autonomous, nil
+	if got.decision.Level != domain.Autonomous {
+		return true, false, nil, nil
+	}
+	if a.Status == string(domain.StatusProposed) {
+		if refused, err = refusal(ctx, q, t, a, args, now); err != nil {
+			return true, false, nil, unsure{err}
+		}
+		if refused != nil {
+			return true, false, refused, nil
+		}
+	}
+	return true, true, nil, nil
 }
 
-// OwnerMayJudge is ownerJudges for the approval and review queues, which say
-// of each action whether it is the caller's to decide (yours_to_decide): true
-// when the caller, from seat, is the owner of the agent that did a and could
-// have done it themselves just now without anyone's confirmation.
+// unsure is a fault met while asking whether approving a proposal would be
+// refused (refusal): a decision fails on it, as approving would, while a
+// queue does not say the proposal is the owner's to decide
+// (OwnerMayJudgeListed).
+type unsure struct{ err error }
+
+func (u unsure) Error() string { return u.err.Error() }
+func (u unsure) Unwrap() error { return u.err }
+
+// refusal is what approving proposal a, of tool t with arguments args, would
+// be refused with at now for what it asks, before anything is carried out:
+// the tool's Check, its Validate, run as approving it runs it, against the
+// proposer's seat, and its Since, of what changed since a was proposed. nil
+// when none refuses it. It writes nothing; Validate may take its locks,
+// which q's transaction, if it has one, keeps.
+func refusal(ctx context.Context, q dbq.Querier, t tool.Tool, a dbq.Action, args any, now time.Time) (*apperr.Error, error) {
+	refused := func(err error) (*apperr.Error, error) {
+		if e, ok := apperr.As(err); ok {
+			return e, nil
+		}
+		return nil, err
+	}
+	if t.Check != nil {
+		if err := t.Check(args); err != nil {
+			return refused(err)
+		}
+	}
+	if t.Validate != nil && a.MemberID != nil {
+		proposer, err := authz.LoadMember(ctx, q, *a.MemberID)
+		if err != nil {
+			return refused(err)
+		}
+		if err := t.Validate(ctx, q, proposer, now, args); err != nil {
+			return refused(err)
+		}
+	}
+	if t.Since != nil {
+		if err := t.Since(ctx, q, a.CreatedAt, args); err != nil {
+			return refused(err)
+		}
+	}
+	return nil, nil
+}
+
+// OwnerMayJudge is ownerJudges for the gate of a decision or a review about
+// one action (action.decide, action.review): true when the caller, from
+// seat, is the owner of the agent that did a and could have done it
+// themselves just now without anyone's confirmation, and, for a proposal,
+// approving it now would not be refused for what it asks. A fault met on
+// the way is returned, whatever it is, so that the call fails with nothing
+// recorded, as Decide's own asking fails it: a denial recorded for a file
+// store that did not answer would be replayed to a retry under the same key
+// long after it answers again.
 func (p *Pipeline) OwnerMayJudge(ctx context.Context, q dbq.Querier, actor domain.Actor, seat uuid.UUID, a dbq.Action, now time.Time) (bool, error) {
-	_, may, err := p.ownerJudges(ctx, q, actor, seat, a, now)
+	_, may, _, err := p.ownerJudges(ctx, q, actor, seat, a, now)
+	return may, err
+}
+
+// OwnerMayJudgeListed is OwnerMayJudge for the approval and review queues,
+// which say of each action whether it is the caller's to decide
+// (yours_to_decide) and record nothing. A fault outside the database met
+// while asking whether approving a proposal would be refused — a file store
+// that does not answer while a grade's feedback files are looked at, say —
+// leaves it not theirs, rather than failing the whole queue: deciding it
+// would fail on the same fault. One of the database's is returned, as any
+// other is: the transaction it was met in may be over.
+func (p *Pipeline) OwnerMayJudgeListed(ctx context.Context, q dbq.Querier, actor domain.Actor, seat uuid.UUID, a dbq.Action, now time.Time) (bool, error) {
+	may, err := p.OwnerMayJudge(ctx, q, actor, seat, a, now)
+	var u unsure
+	var pgErr *pgconn.PgError
+	if errors.As(err, &u) && !errors.As(u.err, &pgErr) {
+		return false, nil
+	}
 	return may, err
 }
 
@@ -348,6 +528,17 @@ func errOwnerNotAutonomous(what string) *apperr.Error {
 		With("reason", "owner_not_autonomous")
 }
 
+// errOwnerWouldBeRefused refuses an agent's owner a decision about its
+// proposal that, approved now, would be refused as refused says.
+// Its reason is its own, owner_would_be_refused: the owner may well hold the
+// action at autonomous, and what stands in the way is refusal, which says
+// why.
+func errOwnerWouldBeRefused(refused *apperr.Error) *apperr.Error {
+	return apperr.Forbid("you decide what your agent proposed only where you would do it yourself without anyone's confirmation, "+
+		"and approved now it would be refused (%s); take it back with action.withdraw, or someone else rejects it", refused.Message).
+		With("reason", "owner_would_be_refused").With("refusal", refused)
+}
+
 // judgesOwn reports whether a is a decision or a review about an action of
 // member's, or of actor's party (sameParty) in any seat, at any remove. The CHECKs on action
 // compare a row with its own decider only, and a decision can itself wait
@@ -357,7 +548,7 @@ func errOwnerNotAutonomous(what string) *apperr.Error {
 // proposal would be their own two and an agent's. The chain runs back in
 // time — an action can only be about one that was there before it — so it
 // ends.
-func judgesOwn(ctx context.Context, q *dbq.Queries, a dbq.Action, member, actor uuid.UUID) (bool, error) {
+func judgesOwn(ctx context.Context, q dbq.Querier, a dbq.Action, member, actor uuid.UUID) (bool, error) {
 	for (a.ActionType == ToolActionDecide || a.ActionType == ToolActionReview) && a.TargetID != nil {
 		about, err := q.GetActionInCourse(ctx, dbq.GetActionInCourseParams{ID: *a.TargetID, CourseID: a.CourseID})
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -384,7 +575,7 @@ func judgesOwn(ctx context.Context, q *dbq.Queries, a dbq.Action, member, actor 
 // the escalation or fails. The review is carried out as its proposer, and
 // Review checks only them; whoever approves it is checked here. Saying no
 // closes nothing, so a rejection anywhere on the way down is not this.
-func closesOwnEscalation(ctx context.Context, q *dbq.Queries, a dbq.Action, actor uuid.UUID) (bool, error) {
+func closesOwnEscalation(ctx context.Context, q dbq.Querier, a dbq.Action, actor uuid.UUID) (bool, error) {
 	for a.ActionType == ToolActionDecide && a.TargetID != nil {
 		var d DecideIn
 		if json.Unmarshal(a.Payload, &d) != nil || d.Decision != DecisionApprove {
@@ -484,54 +675,57 @@ type ReviewOut struct {
 	ByOwner bool `json:"by_owner,omitempty" jsonschema:"true when you reviewed it as the owner of the agent that did it"`
 }
 
-// Review records that a human has looked at a pending_review action after the
-// fact. It undoes nothing. Putting right what the action did is another
-// action (a regrade), with its own row.
-func (p *Pipeline) Review(ctx context.Context, ec *tool.ExecCtx, in ReviewIn) (ReviewOut, error) {
+// CheckReview is action.review's Check: a review finds an action reviewed,
+// or escalates it.
+func CheckReview(in ReviewIn) error {
 	if in.Outcome != ReviewReviewed && in.Outcome != ReviewEscalated {
-		return ReviewOut{}, apperr.Invalid("outcome must be %q or %q", ReviewReviewed, ReviewEscalated)
+		return apperr.Invalid("outcome must be %q or %q", ReviewReviewed, ReviewEscalated)
 	}
-	row, err := ec.Q.GetActionInCourseForUpdate(ctx, dbq.GetActionInCourseForUpdateParams{ID: in.ActionID, CourseID: &in.CourseID})
-	if errors.Is(err, pgx.ErrNoRows) {
-		return ReviewOut{}, apperr.Missing("no such action in this course")
-	}
-	if err != nil {
-		return ReviewOut{}, err
-	}
+	return nil
+}
+
+// refuseReview says why actor, from seat m, may not review action row as
+// outcome says now, or nil when they may; and, when they may, whether they
+// review it as the owner of the agent that did it (byOwner). It writes
+// nothing. Review asks it of the action under its lock, and action.review's
+// Validate (ValidateReview) before a review is proposed, carried out or
+// approved. What it asks can change while a proposed review waits — the
+// action reviewed by someone else, or escalated — and is asked again when
+// it is approved.
+func (p *Pipeline) refuseReview(ctx context.Context, q dbq.Querier, actor domain.Actor, m *domain.Member, row dbq.Action, outcome string, now time.Time) (byOwner bool, err error) {
 	from := domain.ReviewState(row.ReviewState)
-	if !canReview(from, domain.ReviewState(in.Outcome)) {
+	if !canReview(from, domain.ReviewState(outcome)) {
 		if from == domain.ReviewEscalated {
-			return ReviewOut{}, apperr.Conflicts("the action is already escalated")
+			return false, apperr.Conflicts("the action is already escalated")
 		}
-		return ReviewOut{}, apperr.Conflicts("the action is not awaiting review")
+		return false, apperr.Conflicts("the action is not awaiting review")
 	}
-	if ec.Member == nil {
-		return ReviewOut{}, apperr.Forbid("only a course member reviews")
+	if m == nil {
+		return false, apperr.Forbid("only a course member reviews")
 	}
-	byOwner := false
-	if same, err := sameParty(ctx, ec.Q, row.ActorID, ec.Actor.ID); err != nil {
-		return ReviewOut{}, err
-	} else if (row.MemberID != nil && *row.MemberID == ec.Member.ID) || same {
+	if same, err := sameParty(ctx, q, row.ActorID, actor.ID); err != nil {
+		return false, err
+	} else if (row.MemberID != nil && *row.MemberID == m.ID) || same {
 		// The database refuses only the same seat; the actor is compared
 		// here, so a seat taken since is refused too, and so is its party:
 		// an agent does not review its owner's action, nor a sibling's. Its
 		// owner reviews what it did only where they could have done it
 		// themselves without anyone's confirmation (ownerJudges).
-		owner, may, err := p.ownerJudges(ctx, ec.Q, ec.Actor, ec.Member.ID, row, ec.Now)
+		owner, may, _, err := p.ownerJudges(ctx, q, actor, m.ID, row, now)
 		switch {
 		case err != nil:
-			return ReviewOut{}, err
+			return false, err
 		case owner && !may:
-			return ReviewOut{}, errOwnerNotAutonomous("review")
+			return false, errOwnerNotAutonomous("review")
 		case !may:
-			return ReviewOut{}, apperr.Forbid("nobody reviews their own action, nor their owner's, nor another agent's of their owner")
+			return false, apperr.Forbid("nobody reviews their own action, nor their owner's, nor another agent's of their owner")
 		}
 		byOwner = true
 	}
-	if own, err := judgesOwn(ctx, ec.Q, row, ec.Member.ID, ec.Actor.ID); err != nil {
-		return ReviewOut{}, err
+	if own, err := judgesOwn(ctx, q, row, m.ID, actor.ID); err != nil {
+		return false, err
 	} else if own {
-		return ReviewOut{}, apperr.Forbid("nobody reviews their own action, even at one remove: this one decides or reviews an action of yours")
+		return false, apperr.Forbid("nobody reviews their own action, even at one remove: this one decides or reviews an action of yours")
 	}
 	if from == domain.ReviewEscalated {
 		// An escalation asks for a second reviewer, so whoever raised it does
@@ -539,13 +733,51 @@ func (p *Pipeline) Review(ctx context.Context, ec *tool.ExecCtx, in ReviewIn) (R
 		// they have taken since. Approving someone else's escalation is
 		// raising it too. Approving someone else's review that closes it is
 		// refused in Decide (closesOwnEscalation).
-		mine, err := ec.Q.EscalatedBy(ctx, dbq.EscalatedByParams{ActionID: row.ID, ActorID: ec.Actor.ID})
+		mine, err := q.EscalatedBy(ctx, dbq.EscalatedByParams{ActionID: row.ID, ActorID: actor.ID})
 		if err != nil {
-			return ReviewOut{}, err
+			return false, err
 		}
 		if mine {
-			return ReviewOut{}, apperr.Forbid("an escalation is for someone else to look at")
+			return false, apperr.Forbid("an escalation is for someone else to look at")
 		}
+	}
+	return byOwner, nil
+}
+
+// ValidateReview is action.review's Validate: what Review would refuse the
+// review in, made from seat m at now, before anything of it is recorded
+// (refuseReview), asked of the action as it stands, without its lock.
+func (p *Pipeline) ValidateReview(ctx context.Context, q dbq.Querier, m *domain.Member, now time.Time, in ReviewIn) error {
+	row, err := q.GetActionInCourse(ctx, dbq.GetActionInCourseParams{ID: in.ActionID, CourseID: &in.CourseID})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return errNoAction
+	}
+	if err != nil {
+		return err
+	}
+	actor, err := seatActor(ctx, q, m)
+	if err != nil {
+		return err
+	}
+	_, err = p.refuseReview(ctx, q, actor, m, row, in.Outcome, now)
+	return err
+}
+
+// Review records that a human has looked at a pending_review action after the
+// fact. It undoes nothing. Putting right what the action did is another
+// action (a regrade), with its own row. It runs on an outcome CheckReview
+// has taken.
+func (p *Pipeline) Review(ctx context.Context, ec *tool.ExecCtx, in ReviewIn) (ReviewOut, error) {
+	row, err := ec.Q.GetActionInCourseForUpdate(ctx, dbq.GetActionInCourseForUpdateParams{ID: in.ActionID, CourseID: &in.CourseID})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ReviewOut{}, errNoAction
+	}
+	if err != nil {
+		return ReviewOut{}, err
+	}
+	byOwner, err := p.refuseReview(ctx, ec.Q, ec.Actor, ec.Member, row, in.Outcome, ec.Now)
+	if err != nil {
+		return ReviewOut{}, err
 	}
 	n, err := ec.Q.SetActionReview(ctx, dbq.SetActionReviewParams{
 		ID: row.ID, ReviewState: in.Outcome, ReviewedByMemberID: &ec.Member.ID, ReviewedAt: &ec.Now,

@@ -174,7 +174,7 @@ func memberRemoveOrphan() tool.Tool {
 			if m.CourseID != in.CourseID || m.Status == domain.MemberRemoved {
 				return MemberExpireOut{}, ErrNotOrphaned
 			}
-			orphaned, err := ec.Q.SeatOrphaned(ctx, dbq.SeatOrphanedParams{MemberID: m.ID, Now: &ec.Now})
+			orphaned, err := ec.Q.SeatOrphaned(ctx, dbq.SeatOrphanedParams{MemberID: m.ID, Now: ec.Now})
 			if err != nil {
 				return MemberExpireOut{}, err
 			}

@@ -127,17 +127,6 @@ func callerFault(err error) bool {
 	return errors.As(err, &e)
 }
 
-// whichFile refuses, before anything is written or proposed, a write of a
-// text that names a file of another version. What else is wrong with it the
-// write itself says.
-func whichFile(ctx context.Context, q dbq.Querier, version, file uuid.UUID) error {
-	_, err := textFileOf(ctx, q, version, file)
-	if errors.Is(err, errNoSuchFile) {
-		return err
-	}
-	return nil
-}
-
 // textParts cuts a text into the parts document.text reads it in, each at
 // most TextPartBytes: whole pages where they fit, a page being what starts
 // at a heading of the second level ("## "), as the transcription heads each
@@ -421,11 +410,11 @@ func lockText(ctx context.Context, ec *tool.ExecCtx, courseID, documentID, versi
 	case !courseLevel(st.doc.Kind):
 		return st, errNoText()
 	case st.doc.Status != "active":
-		return st, apperr.Conflicts("the document is archived").With("reason", "document_archived")
+		return st, errTextDocumentArchived()
 	}
 	v, err := ec.Q.GetVersionOfDocument(ctx, dbq.GetVersionOfDocumentParams{ID: versionID, DocumentID: st.doc.ID})
 	if errors.Is(err, pgx.ErrNoRows) {
-		return st, apperr.Missing("no such version of this document")
+		return st, errNoSuchVersion
 	}
 	if err != nil {
 		return st, err
@@ -452,14 +441,75 @@ func lockText(ctx context.Context, ec *tool.ExecCtx, courseID, documentID, versi
 }
 
 // changedSince refuses a change made from a revision of the text that is not
-// the one there now.
-func changedSince(text dbq.DocumentVersionText, base *int32) error {
-	if base != nil && *base != text.Revision {
-		return apperr.Conflicts("the text has changed since revision %d; it is at revision %d", *base, text.Revision).
-			With("reason", "text_changed").With("revision", text.Revision)
+// revision, the one there now.
+func changedSince(revision int32, base *int32) error {
+	if base != nil && *base != revision {
+		return apperr.Conflicts("the text has changed since revision %d; it is at revision %d", *base, revision).
+			With("reason", "text_changed").With("revision", revision)
 	}
 	return nil
 }
+
+// textToChange is what a change of the text version of a file of a version
+// is refused for as things stand, read without the locks lockText takes:
+// what lockText refuses, which file it is of among them, and a text that
+// has changed since base. It gives the text as it stands, if there is one
+// yet: of a version from before there were text versions there may be
+// none, which the change itself queues, at its first revision.
+// document.text_update and document.text_retranscribe ask it before a
+// change is carried out or proposed, and when a proposal is approved
+// (Validate), so that nobody is asked to approve one that approving would
+// refuse; lockText and changedSince ask it again, held, as the change is
+// made.
+func textToChange(ctx context.Context, q dbq.Querier, courseID, documentID, versionID, fileID uuid.UUID,
+	base *int32) (text *dbq.GetTextViewRow, err error) {
+	doc, err := loadDocument(ctx, q, courseID, documentID)
+	if err != nil {
+		return nil, err
+	}
+	switch {
+	case !courseLevel(doc.Kind):
+		return nil, errNoText()
+	case doc.Status != "active":
+		return nil, errTextDocumentArchived()
+	}
+	v, err := q.GetVersionOfDocument(ctx, dbq.GetVersionOfDocumentParams{ID: versionID, DocumentID: doc.ID})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, errNoSuchVersion
+	}
+	if err != nil {
+		return nil, err
+	}
+	if v.PurgedAt != nil {
+		return nil, errNoText()
+	}
+	f, err := textFileOf(ctx, q, v.ID, fileID)
+	if err != nil {
+		return nil, err
+	}
+	r, err := q.GetTextView(ctx, dbq.GetTextViewParams{VersionID: v.ID, FileID: f.ID})
+	if errors.Is(err, pgx.ErrNoRows) {
+		// The change queues it, at its first revision, and is held to that.
+		return nil, changedSince(firstTextRevision, base)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &r, changedSince(r.Revision, base)
+}
+
+// firstTextRevision is the revision a text version is made at: the
+// column's default (migration 0020).
+const firstTextRevision = 1
+
+// errTextDocumentArchived refuses a change of the text of an archived
+// document's version.
+func errTextDocumentArchived() *apperr.Error {
+	return apperr.Conflicts("the document is archived").With("reason", "document_archived")
+}
+
+// errNoSuchVersion is what a version that is not the document's answers.
+var errNoSuchVersion = apperr.Missing("no such version of this document")
 
 func documentTextUpdate() tool.Tool {
 	return tool.Define(tool.Spec[DocumentTextUpdateIn, DocumentTextChangeOut]{
@@ -472,14 +522,15 @@ func documentTextUpdate() tool.Tool {
 			"since (text_changed). Giving the text it already is changes nothing (changed: false).",
 		Kind: tool.Write, Gate: anyDocumentWrite, MaxRequestBytes: textRequestBytes,
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/documents/{document_id}/versions/{version_id}/text"},
+		Check: func(in DocumentTextUpdateIn) error {
+			return checkText(in.Body)
+		},
 		Resolve: func(ctx context.Context, q dbq.Querier, in DocumentTextUpdateIn) (tool.Target, error) {
 			return textTarget(ctx, q, in.CourseID, in.DocumentID, in.VersionID)
 		},
-		Validate: func(ctx context.Context, q dbq.Querier, _ *domain.Member, in DocumentTextUpdateIn) error {
-			if err := checkText(in.Body); err != nil {
-				return err
-			}
-			return whichFile(ctx, q, in.VersionID, in.FileID)
+		Validate: func(ctx context.Context, q dbq.Querier, _ *domain.Member, _ time.Time, in DocumentTextUpdateIn) error {
+			_, err := textToChange(ctx, q, in.CourseID, in.DocumentID, in.VersionID, in.FileID, in.BaseRevision)
+			return err
 		},
 		Pin: func(ctx context.Context, q dbq.Querier, _ *domain.Member, _ time.Time, in DocumentTextUpdateIn) (DocumentTextUpdateIn, error) {
 			var err error
@@ -487,15 +538,12 @@ func documentTextUpdate() tool.Tool {
 			return in, err
 		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in DocumentTextUpdateIn) (DocumentTextChangeOut, error) {
-			if err := checkText(in.Body); err != nil {
-				return DocumentTextChangeOut{}, err
-			}
 			st, err := lockText(ctx, ec, in.CourseID, in.DocumentID, in.VersionID, in.FileID)
 			if err != nil {
 				return DocumentTextChangeOut{}, err
 			}
 			text := st.text
-			if err := changedSince(text, in.BaseRevision); err != nil {
+			if err := changedSince(text.Revision, in.BaseRevision); err != nil {
 				return DocumentTextChangeOut{}, err
 			}
 			out := DocumentTextChangeOut{VersionID: text.VersionID, FileID: text.FileID, Status: textDone, Revision: text.Revision}
@@ -530,22 +578,9 @@ func documentTextRetranscribe() tool.Tool {
 		},
 		// Nobody is asked to approve discarding staff's text without saying
 		// so; whoever approves it is asked again when it is carried out.
-		Validate: func(ctx context.Context, q dbq.Querier, _ *domain.Member, in DocumentTextRetranscribeIn) error {
-			if err := whichFile(ctx, q, in.VersionID, in.FileID); err != nil {
-				return err
-			}
-			f, err := textFileOf(ctx, q, in.VersionID, in.FileID)
-			if callerFault(err) {
-				return nil // the call itself says what is wrong
-			}
-			if err != nil {
-				return err
-			}
-			r, err := q.GetTextView(ctx, dbq.GetTextViewParams{VersionID: in.VersionID, FileID: f.ID})
-			if errors.Is(err, pgx.ErrNoRows) {
-				return nil
-			}
-			if err != nil {
+		Validate: func(ctx context.Context, q dbq.Querier, _ *domain.Member, _ time.Time, in DocumentTextRetranscribeIn) error {
+			r, err := textToChange(ctx, q, in.CourseID, in.DocumentID, in.VersionID, in.FileID, in.BaseRevision)
+			if err != nil || r == nil {
 				return err
 			}
 			return keepsStaffText(r.Source, in.DiscardEdit)
@@ -561,7 +596,7 @@ func documentTextRetranscribe() tool.Tool {
 				return DocumentTextChangeOut{}, err
 			}
 			doc, text := st.doc, st.text
-			if err := changedSince(text, in.BaseRevision); err != nil {
+			if err := changedSince(text.Revision, in.BaseRevision); err != nil {
 				return DocumentTextChangeOut{}, err
 			}
 			if err := keepsStaffText(text.Source, in.DiscardEdit); err != nil {

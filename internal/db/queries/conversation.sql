@@ -86,6 +86,9 @@ SELECT EXISTS (
       AND a.action_type = 'conversation.answer' AND a.status = 'proposed' AND a.member_id = sqlc.arg(member_id)::uuid
       AND a.payload->>'in_reply_to_message_id' = sqlc.arg(in_reply_to_message_id)::uuid::text)::bool AS pending;
 
+-- name: MessageRetracted :one
+SELECT EXISTS (SELECT 1 FROM conversation_message_retraction WHERE message_id = $1)::bool AS retracted;
+
 -- name: InsertRetraction :execrows
 INSERT INTO conversation_message_retraction (message_id, course_id, retracted_by_member_id, created_by_action_id, reason, created_at)
 VALUES ($1, $2, $3, $4, sqlc.narg(reason), $5)

@@ -88,6 +88,12 @@ func courseCreate() tool.Tool {
 			"A department administrator creates courses in the departments they administer and beneath them.",
 		Kind: tool.Write, Gate: administrators,
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses"},
+		Check: func(in CourseCreateIn) error {
+			if strings.TrimSpace(in.Code) == "" || strings.TrimSpace(in.Title) == "" {
+				return apperr.Invalid("code and title are required")
+			}
+			return nil
+		},
 		Resolve: func(ctx context.Context, q dbq.Querier, in CourseCreateIn) (tool.Target, error) {
 			if _, err := findDepartment(ctx, q, in.DeptID, "no such department"); err != nil {
 				return tool.Target{}, err
@@ -95,9 +101,6 @@ func courseCreate() tool.Tool {
 			return tool.Target{Type: "course", DeptID: &in.DeptID}, nil
 		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in CourseCreateIn) (CourseCreateOut, error) {
-			if strings.TrimSpace(in.Code) == "" || strings.TrimSpace(in.Title) == "" {
-				return CourseCreateOut{}, apperr.Invalid("code and title are required")
-			}
 			if ok, err := ec.Q.TermExists(ctx, in.TermID); err != nil {
 				return CourseCreateOut{}, err
 			} else if !ok {
@@ -142,6 +145,12 @@ func courseUpdate() tool.Tool {
 			"instructors do it from their seat with course.update_details.",
 		Kind: tool.Write, Gate: administrators,
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}"},
+		Check: func(in CourseUpdateIn) error {
+			if in.Title != nil && strings.TrimSpace(*in.Title) == "" {
+				return apperr.Invalid("title cannot be empty")
+			}
+			return nil
+		},
 		Resolve: func(ctx context.Context, q dbq.Querier, in CourseUpdateIn) (tool.Target, error) {
 			return platformCourse(ctx, q, in.CourseID)
 		},
@@ -151,9 +160,6 @@ func courseUpdate() tool.Tool {
 				return OK{}, err
 			}
 			if in.Title != nil {
-				if strings.TrimSpace(*in.Title) == "" {
-					return OK{}, apperr.Invalid("title cannot be empty")
-				}
 				c.Title = *in.Title
 			}
 			if in.Description != nil {
@@ -191,16 +197,19 @@ func courseUpdateDetails() tool.Tool {
 			"so (changed: false).",
 		Kind: tool.Write, Gate: tool.Gate{Perms: []domain.Perm{domain.PermMemberManage}},
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/details"},
+		Check: func(in CourseUpdateDetailsIn) error {
+			if in.Title == nil && in.Description == nil {
+				return apperr.Invalid("give title, description or both")
+			}
+			if in.Title != nil && strings.TrimSpace(*in.Title) == "" {
+				return apperr.Invalid("title cannot be empty")
+			}
+			return nil
+		},
 		Resolve: func(_ context.Context, _ dbq.Querier, in CourseUpdateDetailsIn) (tool.Target, error) {
 			return tool.Target{CourseID: in.CourseID, Type: "course", ID: &in.CourseID}, nil
 		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in CourseUpdateDetailsIn) (CourseUpdateDetailsOut, error) {
-			if in.Title == nil && in.Description == nil {
-				return CourseUpdateDetailsOut{}, apperr.Invalid("give title, description or both")
-			}
-			if in.Title != nil && strings.TrimSpace(*in.Title) == "" {
-				return CourseUpdateDetailsOut{}, apperr.Invalid("title cannot be empty")
-			}
 			c, err := ec.Q.LockCourseDetails(ctx, in.CourseID)
 			if err != nil {
 				return CourseUpdateDetailsOut{}, err
@@ -464,6 +473,64 @@ func (s seating) listsItself() bool {
 // or was given longer while seat() looked at it.
 var errSeated = apperr.Conflicts("the actor already has a seat in this course; change it, or remove it and add again for a fresh start")
 
+// seatedNow refuses a seat for actor while it holds a live one in the
+// course that is neither past its expiry at now nor orphaned, which seat()
+// would remove first: member.add asks it before a seat is proposed or given
+// (Validate), and seat() as it seats the actor, where it may take the seat
+// that is in the way.
+func seatedNow(ctx context.Context, q dbq.Querier, courseID, actor uuid.UUID, now time.Time) error {
+	live, err := q.GetLiveMembership(ctx, dbq.GetLiveMembershipParams{CourseID: courseID, ActorID: actor})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if live.ExpiresAt != nil && !live.ExpiresAt.After(now) {
+		return nil
+	}
+	orphaned, err := q.SeatOrphaned(ctx, dbq.SeatOrphanedParams{MemberID: live.ID, Now: now})
+	if err != nil || orphaned {
+		return err
+	}
+	return errSeated
+}
+
+// seatable holds the actor a seat is for, and what the seat would hold, to
+// what anyone may be seated with: an active actor that is seated at all, an
+// owned agent only as its owner's delegate, and no level above what the seat
+// may hold. seat() asks it of the actor it has taken; member.add's Validate
+// of the actor as it stands.
+func seatable(ctx context.Context, q dbq.Querier, a dbq.Actor, s seating) error {
+	if a.Status != domain.ActorActive {
+		return apperr.Precondition("the actor is suspended")
+	}
+	switch a.Kind {
+	case "system":
+		return apperr.Precondition("the system actor is not seated in courses")
+	case "service":
+		// The database refuses it too (course_member_not_a_service).
+		return apperr.Precondition("a site service is not seated in courses")
+	}
+	// An agent someone owns acts only as its owner's delegate, and only its
+	// owner seats it so. The database refuses it too.
+	if s.principal == nil && a.OwnerActorID != nil {
+		return apperr.Precondition("the agent belongs to someone: its owner brings it in, with member.add_delegate")
+	}
+	// No more than the seat may hold at all, whoever seats it: an agent
+	// decides only by proposal, and a delegate holds no more than its
+	// principal (domain.Ceiling). A preset's level is cut down; a level the
+	// call named is refused.
+	var principal *domain.Member
+	if s.principal != nil {
+		var err error
+		if principal, err = authz.LoadMember(ctx, q, *s.principal); err != nil {
+			return err
+		}
+	}
+	return toCeilings(isAgent(a.Kind), principal, s.perms, s.named)
+}
+
 // seat adds a member: a new course_member row with the preset copied onto it.
 // preset_id is kept as provenance only — nothing reads it afterwards, so
 // editing the preset later changes nobody already seated.
@@ -477,32 +544,7 @@ func seat(ctx context.Context, ec *tool.ExecCtx, s seating) (uuid.UUID, error) {
 	if err != nil {
 		return uuid.Nil, err
 	}
-	if a.Status != domain.ActorActive {
-		return uuid.Nil, apperr.Precondition("the actor is suspended")
-	}
-	switch a.Kind {
-	case "system":
-		return uuid.Nil, apperr.Precondition("the system actor is not seated in courses")
-	case "service":
-		// The database refuses it too (course_member_not_a_service).
-		return uuid.Nil, apperr.Precondition("a site service is not seated in courses")
-	}
-	// An agent someone owns acts only as its owner's delegate, and only its
-	// owner seats it so. The database refuses it too.
-	if s.principal == nil && a.OwnerActorID != nil {
-		return uuid.Nil, apperr.Precondition("the agent belongs to someone: its owner brings it in, with member.add_delegate")
-	}
-	// No more than the seat may hold at all, whoever seats it: an agent
-	// decides only by proposal, and a delegate holds no more than its
-	// principal (domain.Ceiling). A preset's level is cut down; a level the
-	// call named is refused.
-	var principal *domain.Member
-	if s.principal != nil {
-		if principal, err = authz.LoadMember(ctx, ec.Q, *s.principal); err != nil {
-			return uuid.Nil, err
-		}
-	}
-	if err := toCeilings(isAgent(a.Kind), principal, s.perms, s.named); err != nil {
+	if err := seatable(ctx, ec.Q, a, s); err != nil {
 		return uuid.Nil, err
 	}
 	// A seat whose expiry has passed is removed now rather than by the next
@@ -515,7 +557,7 @@ func seat(ctx context.Context, ec *tool.ExecCtx, s seating) (uuid.UUID, error) {
 		return uuid.Nil, err
 	default:
 		expired := live.ExpiresAt != nil && !live.ExpiresAt.After(ec.Now)
-		orphaned, err := ec.Q.SeatOrphaned(ctx, dbq.SeatOrphanedParams{MemberID: live.ID, Now: &ec.Now})
+		orphaned, err := ec.Q.SeatOrphaned(ctx, dbq.SeatOrphanedParams{MemberID: live.ID, Now: ec.Now})
 		if err != nil {
 			return uuid.Nil, err
 		}
@@ -552,7 +594,7 @@ func seat(ctx context.Context, ec *tool.ExecCtx, s seating) (uuid.UUID, error) {
 		}
 	}
 	if s.expiresAt != nil && !s.expiresAt.After(ec.Now) {
-		return uuid.Nil, apperr.Invalid("expires_at is in the past")
+		return uuid.Nil, errExpiresInPast
 	}
 
 	id := ids.New()
@@ -616,21 +658,8 @@ func writeScope(ctx context.Context, q *dbq.Queries, courseID, memberID uuid.UUI
 
 func writeStudentScope(ctx context.Context, q *dbq.Queries, courseID, memberID uuid.UUID, studentScope string, students []uuid.UUID) error {
 	students = dedupe(students)
-	if studentScope != domain.ScopeListed && len(students) > 0 {
-		return apperr.Invalid("listed_students only makes sense with student_scope = listed")
-	}
-	if len(students) > 0 {
-		// The member's own id is counted like any other: a new seat's row is
-		// already visible in this transaction, so a student may list itself,
-		// and a seat that is not a student's cannot — it would reach nothing,
-		// yet be measured as reaching someone when it is next granted to.
-		n, err := q.CountStudentsOfCourse(ctx, dbq.CountStudentsOfCourseParams{CourseID: courseID, MemberIds: students})
-		if err != nil {
-			return err
-		}
-		if int(n) != len(students) {
-			return apperr.Precondition("listed_students must all be current students of this course")
-		}
+	if err := checkStudentList(ctx, q, courseID, studentScope, students); err != nil {
+		return err
 	}
 	if err := q.ClearStudentScope(ctx, memberID); err != nil {
 		return err
@@ -645,8 +674,50 @@ func writeStudentScope(ctx context.Context, q *dbq.Queries, courseID, memberID u
 
 func writeAssignmentScope(ctx context.Context, q *dbq.Queries, courseID, memberID uuid.UUID, assignmentScope string, assignments []uuid.UUID) error {
 	assignments = dedupe(assignments)
+	if err := checkAssignmentList(ctx, q, courseID, assignmentScope, assignments); err != nil {
+		return err
+	}
+	if err := q.ClearAssignmentScope(ctx, memberID); err != nil {
+		return err
+	}
+	for _, a := range assignments {
+		if err := q.AddAssignmentScope(ctx, dbq.AddAssignmentScopeParams{MemberID: memberID, AssignmentID: a}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// checkStudentList holds a seat's student list to its scope and its course:
+// a list only for a scope that is one, of the course's current students.
+// writeStudentScope asks it as it writes the list, and a Validate before
+// the change is made or proposed.
+func checkStudentList(ctx context.Context, q dbq.Querier, courseID uuid.UUID, studentScope string, students []uuid.UUID) error {
+	students = dedupe(students)
+	if studentScope != domain.ScopeListed && len(students) > 0 {
+		return errStudentList
+	}
+	if len(students) > 0 {
+		// The member's own id is counted like any other: a new seat's row is
+		// already visible in this transaction, so a student may list itself,
+		// and a seat that is not a student's cannot — it would reach nothing,
+		// yet be measured as reaching someone when it is next granted to.
+		n, err := q.CountStudentsOfCourse(ctx, dbq.CountStudentsOfCourseParams{CourseID: courseID, MemberIds: students})
+		if err != nil {
+			return err
+		}
+		if int(n) != len(students) {
+			return apperr.Precondition("listed_students must all be current students of this course")
+		}
+	}
+	return nil
+}
+
+// checkAssignmentList is checkStudentList for a seat's assignment list.
+func checkAssignmentList(ctx context.Context, q dbq.Querier, courseID uuid.UUID, assignmentScope string, assignments []uuid.UUID) error {
+	assignments = dedupe(assignments)
 	if assignmentScope != domain.ScopeListed && len(assignments) > 0 {
-		return apperr.Invalid("listed_assignments only makes sense with assignment_scope = listed")
+		return errAssignmentList
 	}
 	if len(assignments) > 0 {
 		n, err := q.CountAssignmentsOfCourse(ctx, dbq.CountAssignmentsOfCourseParams{CourseID: courseID, AssignmentIds: assignments})
@@ -657,13 +728,24 @@ func writeAssignmentScope(ctx context.Context, q *dbq.Queries, courseID, memberI
 			return apperr.Precondition("listed_assignments must all be assignments of this course")
 		}
 	}
-	if err := q.ClearAssignmentScope(ctx, memberID); err != nil {
-		return err
+	return nil
+}
+
+// A list given with a scope that is not one, refused whether the call names
+// the scope (Check) or the seat or its preset says it (Validate, Execute).
+var (
+	errStudentList    = apperr.Invalid("listed_students only makes sense with student_scope = listed")
+	errAssignmentList = apperr.Invalid("listed_assignments only makes sense with assignment_scope = listed")
+)
+
+// checkListsGiven refuses a list given with a scope, also given, that is not
+// a list: what the arguments say alone, for a Check.
+func checkListsGiven(studentScope *string, students []uuid.UUID, assignmentScope *string, assignments []uuid.UUID) error {
+	if studentScope != nil && *studentScope != domain.ScopeListed && len(students) > 0 {
+		return errStudentList
 	}
-	for _, a := range assignments {
-		if err := q.AddAssignmentScope(ctx, dbq.AddAssignmentScopeParams{MemberID: memberID, AssignmentID: a}); err != nil {
-			return err
-		}
+	if assignmentScope != nil && *assignmentScope != domain.ScopeListed && len(assignments) > 0 {
+		return errAssignmentList
 	}
 	return nil
 }

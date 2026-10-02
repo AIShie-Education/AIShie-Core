@@ -231,6 +231,44 @@ func (in SubmissionCreateIn) studentOf(m *domain.Member) uuid.UUID {
 	return m.ID
 }
 
+var errNoAssignment = apperr.Missing("no such assignment in this course")
+
+// errOpenDraft refuses a new attempt while draft is open.
+func errOpenDraft(draft uuid.UUID) error {
+	return apperr.Conflicts("there is already an open draft; edit or submit that one").With("submission_id", draft)
+}
+
+// submitter is whose work a new attempt in starts, made by m, if that is a
+// current student m's scope reaches. submission.create asks it before a
+// proposal is queued (Validate), and again as it starts it.
+func submitter(ctx context.Context, q dbq.Querier, m *domain.Member, in SubmissionCreateIn) (uuid.UUID, error) {
+	student := in.studentOf(m)
+	if in.StudentMemberID == nil {
+		// A student's scope normally lists themselves. If it has been
+		// emptied, it reaches nobody, themselves included: scope
+		// fails closed here as everywhere.
+		if reason, err := authz.CheckScope(ctx, q, m, authz.Target{StudentMemberIDs: []uuid.UUID{student}}); err != nil {
+			return student, err
+		} else if reason != authz.ReasonNone {
+			return student, apperr.Forbid("you are outside your own student scope").With("reason", string(reason))
+		}
+	}
+	// The composite key proves the member is in this course. That
+	// they are a student is ours to check: work is handed in by, and
+	// grades are given to, people on the roster as students.
+	entry, err := q.GetRosterEntry(ctx, dbq.GetRosterEntryParams{ID: student, CourseID: in.CourseID})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return student, apperr.Missing("no such member in this course")
+	}
+	if err != nil {
+		return student, err
+	}
+	if entry.Role != "student" || entry.Status != domain.MemberActive {
+		return student, apperr.Precondition("work is submitted by, or for, a current student of the course")
+	}
+	return student, nil
+}
+
 func submissionCreate() tool.Tool {
 	return tool.Define(tool.Spec[SubmissionCreateIn, SubmissionCreateOut]{
 		Name: "submission.create",
@@ -252,37 +290,38 @@ func submissionCreate() tool.Tool {
 			// the call runs; Execute checks their scope itself.
 			return t, nil
 		},
+		Validate: func(ctx context.Context, q dbq.Querier, m *domain.Member, _ time.Time, in SubmissionCreateIn) error {
+			student, err := submitter(ctx, q, m, in)
+			if err != nil {
+				return err
+			}
+			a, err := q.GetAssignmentInCourse(ctx, dbq.GetAssignmentInCourseParams{ID: in.AssignmentID, CourseID: in.CourseID})
+			if err != nil {
+				return err
+			}
+			if a.PublishedAt == nil {
+				return errNoAssignment
+			}
+			prior, err := q.ListSubmissionsOf(ctx, dbq.ListSubmissionsOfParams{AssignmentID: a.ID, StudentMemberID: student})
+			if err != nil {
+				return err
+			}
+			if len(prior) > 0 && prior[0].State == stateDraft {
+				return errOpenDraft(prior[0].ID)
+			}
+			return nil
+		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in SubmissionCreateIn) (SubmissionCreateOut, error) {
-			student := in.studentOf(ec.Member)
-			if in.StudentMemberID == nil {
-				// A student's scope normally lists themselves. If it has been
-				// emptied, it reaches nobody, themselves included: scope
-				// fails closed here as everywhere.
-				if reason, err := authz.CheckScope(ctx, ec.Q, ec.Member, authz.Target{StudentMemberIDs: []uuid.UUID{student}}); err != nil {
-					return SubmissionCreateOut{}, err
-				} else if reason != authz.ReasonNone {
-					return SubmissionCreateOut{}, apperr.Forbid("you are outside your own student scope").With("reason", string(reason))
-				}
-			}
-			// The composite key proves the member is in this course. That
-			// they are a student is ours to check: work is handed in by, and
-			// grades are given to, people on the roster as students.
-			entry, err := ec.Q.GetRosterEntry(ctx, dbq.GetRosterEntryParams{ID: student, CourseID: in.CourseID})
-			if errors.Is(err, pgx.ErrNoRows) {
-				return SubmissionCreateOut{}, apperr.Missing("no such member in this course")
-			}
+			student, err := submitter(ctx, ec.Q, ec.Member, in)
 			if err != nil {
 				return SubmissionCreateOut{}, err
-			}
-			if entry.Role != "student" || entry.Status != domain.MemberActive {
-				return SubmissionCreateOut{}, apperr.Precondition("work is submitted by, or for, a current student of the course")
 			}
 			a, err := ec.Q.GetAssignmentForSubmission(ctx, dbq.GetAssignmentForSubmissionParams{ID: in.AssignmentID, CourseID: in.CourseID})
 			if err != nil {
 				return SubmissionCreateOut{}, err
 			}
 			if a.PublishedAt == nil {
-				return SubmissionCreateOut{}, apperr.Missing("no such assignment in this course")
+				return SubmissionCreateOut{}, errNoAssignment
 			}
 
 			prior, err := ec.Q.LockSubmissionsOf(ctx, dbq.LockSubmissionsOfParams{AssignmentID: a.ID, StudentMemberID: student})
@@ -293,7 +332,7 @@ func submissionCreate() tool.Tool {
 			if len(prior) > 0 {
 				switch latest := prior[0]; latest.State {
 				case stateDraft:
-					return SubmissionCreateOut{}, apperr.Conflicts("there is already an open draft; edit or submit that one").With("submission_id", latest.ID)
+					return SubmissionCreateOut{}, errOpenDraft(latest.ID)
 				case stateMissing:
 					// Late work takes the placeholder over — unless someone has
 					// graded the placeholder, or proposed a grade for it that
@@ -342,18 +381,27 @@ func submissionUpdateDraft() tool.Tool {
 		Resolve: func(ctx context.Context, q dbq.Querier, in SubmissionUpdateDraftIn) (tool.Target, error) {
 			return submissionTarget(ctx, q, in.CourseID, in.SubmissionID)
 		},
+		Validate: func(ctx context.Context, q dbq.Querier, _ *domain.Member, _ time.Time, in SubmissionUpdateDraftIn) error {
+			sub, err := q.GetSubmissionInCourse(ctx, dbq.GetSubmissionInCourseParams{ID: in.SubmissionID, CourseID: in.CourseID})
+			if err == nil && sub.State != stateDraft {
+				return errNoLongerDraft
+			}
+			return err
+		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in SubmissionUpdateDraftIn) (OK, error) {
 			n, err := ec.Q.UpdateSubmissionDraft(ctx, dbq.UpdateSubmissionDraftParams{ID: in.SubmissionID, Body: &in.Body})
 			if err != nil {
 				return OK{}, err
 			}
 			if n == 0 {
-				return OK{}, apperr.Conflicts("the submission is no longer a draft; start a new attempt to submit again")
+				return OK{}, errNoLongerDraft
 			}
 			return OK{OK: true}, nil
 		},
 	})
 }
+
+var errNoLongerDraft = apperr.Conflicts("the submission is no longer a draft; start a new attempt to submit again")
 
 // SubmissionSubmitIn names the draft to hand in, and may say what it is
 // being handed in as. A proposal always says: Pin records it as it stands
@@ -391,6 +439,24 @@ func (in SubmissionSubmitIn) sameInstructions(inForce *uuid.UUID) error {
 		return apperr.Precondition("instructions_version_id is not the version of the instructions students read now")
 	}
 	return nil
+}
+
+// handIn refuses to hand s in as in asks: s is not a draft, holds nothing,
+// or does not hold what in says it hands in. submission.submit asks it
+// before a proposal is queued (Validate), and again, under the submission's
+// lock, as it hands it in. It returns the draft's files.
+func (in SubmissionSubmitIn) handIn(ctx context.Context, q dbq.Querier, s dbq.Submission) ([]uuid.UUID, error) {
+	if s.State != stateDraft {
+		return nil, apperr.Conflicts("the submission is %s, not a draft", s.State)
+	}
+	files, err := draftFiles(ctx, q, s.ID)
+	if err != nil {
+		return nil, err
+	}
+	if (s.Body == nil || *s.Body == "") && len(files) == 0 {
+		return nil, apperr.Precondition("there is nothing to hand in: the draft has no text and no files")
+	}
+	return files, in.sameDraft(s.Body, files)
 }
 
 func textOf(body *string) string {
@@ -485,6 +551,14 @@ func submissionSubmit() tool.Tool {
 			in.Body, in.Files, in.InstructionsVersionID = &text, files, inForce
 			return in, nil
 		},
+		Validate: func(ctx context.Context, q dbq.Querier, _ *domain.Member, _ time.Time, in SubmissionSubmitIn) error {
+			sub, err := q.GetSubmissionFull(ctx, dbq.GetSubmissionFullParams{ID: in.SubmissionID, CourseID: in.CourseID})
+			if err != nil {
+				return err
+			}
+			_, err = in.handIn(ctx, q, sub)
+			return err
+		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in SubmissionSubmitIn) (SubmissionSubmitOut, error) {
 			s, err := ec.Q.GetSubmissionFullForUpdate(ctx, dbq.GetSubmissionFullForUpdateParams{ID: in.SubmissionID, CourseID: in.CourseID})
 			if err != nil {
@@ -494,14 +568,7 @@ func submissionSubmit() tool.Tool {
 			if err != nil {
 				return SubmissionSubmitOut{}, err
 			}
-			files, err := draftFiles(ctx, ec.Q, s.ID)
-			if err != nil {
-				return SubmissionSubmitOut{}, err
-			}
-			if (s.Body == nil || *s.Body == "") && len(files) == 0 {
-				return SubmissionSubmitOut{}, apperr.Precondition("there is nothing to hand in: the draft has no text and no files")
-			}
-			if err := in.sameDraft(s.Body, files); err != nil {
+			if _, err := in.handIn(ctx, ec.Q, s); err != nil {
 				return SubmissionSubmitOut{}, err
 			}
 			// Pin what the student was told. If the instructions are edited
@@ -552,6 +619,11 @@ type SubmissionSetLatenessIn struct {
 	State        string    `json:"state" jsonschema:"submitted or late"`
 }
 
+// errLateness refuses switching the lateness of an attempt that is state.
+func errLateness(state string) error {
+	return apperr.Conflicts("the submission is %s; only a submitted or late attempt can be switched, and only to the other", state)
+}
+
 // Correcting lateness is the one change a submitted attempt allows. It is
 // gated by perm_grade_submit, not perm_submission_write: otherwise a student,
 // who may write their own submissions, could un-late themselves.
@@ -562,13 +634,26 @@ func submissionSetLateness() tool.Tool {
 			"It is the only thing about a submitted attempt that can change, and it is for graders, not for the student.",
 		Kind: tool.Write, Gate: tool.Gate{Perms: []domain.Perm{domain.PermGradeSubmit}},
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/submissions/{submission_id}/lateness"},
+		Check: func(in SubmissionSetLatenessIn) error {
+			if in.State != stateSubmitted && in.State != stateLate {
+				return apperr.Invalid("state must be submitted or late")
+			}
+			return nil
+		},
 		Resolve: func(ctx context.Context, q dbq.Querier, in SubmissionSetLatenessIn) (tool.Target, error) {
 			return submissionTarget(ctx, q, in.CourseID, in.SubmissionID)
 		},
-		Execute: func(ctx context.Context, ec *tool.ExecCtx, in SubmissionSetLatenessIn) (OK, error) {
-			if in.State != stateSubmitted && in.State != stateLate {
-				return OK{}, apperr.Invalid("state must be submitted or late")
+		Validate: func(ctx context.Context, q dbq.Querier, _ *domain.Member, _ time.Time, in SubmissionSetLatenessIn) error {
+			sub, err := q.GetSubmissionInCourse(ctx, dbq.GetSubmissionInCourseParams{ID: in.SubmissionID, CourseID: in.CourseID})
+			if err != nil {
+				return err
 			}
+			if (sub.State != stateSubmitted && sub.State != stateLate) || sub.State == in.State {
+				return errLateness(sub.State)
+			}
+			return nil
+		},
+		Execute: func(ctx context.Context, ec *tool.ExecCtx, in SubmissionSetLatenessIn) (OK, error) {
 			s, err := ec.Q.GetSubmissionInCourse(ctx, dbq.GetSubmissionInCourseParams{ID: in.SubmissionID, CourseID: in.CourseID})
 			if err != nil {
 				return OK{}, err
@@ -578,7 +663,7 @@ func submissionSetLateness() tool.Tool {
 				return OK{}, err
 			}
 			if n == 0 {
-				return OK{}, apperr.Conflicts("the submission is %s; only a submitted or late attempt can be switched, and only to the other", s.State)
+				return OK{}, errLateness(s.State)
 			}
 			ec.Emit(events.Event{Type: EventSubmissionLateness, CourseID: &in.CourseID, SubjectType: "submission", SubjectID: &s.ID,
 				StudentMemberID: &s.StudentMemberID, AssignmentID: &s.AssignmentID, Payload: map[string]any{"state": in.State}})
@@ -595,6 +680,37 @@ type SubmissionRecordMissingIn struct {
 
 type SubmissionIDOut struct {
 	SubmissionID uuid.UUID `json:"submission_id"`
+}
+
+// missable refuses recording that in's student handed nothing in for an
+// assignment published at publishedAt: one not published, which a caller m
+// who may not see it does not see at all, or someone who is not a current
+// student. submission.record_missing asks it before a proposal is queued
+// (Validate), and again as it records it.
+func missable(ctx context.Context, q dbq.Querier, m *domain.Member, in SubmissionRecordMissingIn, publishedAt *time.Time) error {
+	if publishedAt == nil {
+		if !canSeeUnpublished(m) {
+			return errNoAssignment
+		}
+		return apperr.Precondition("the assignment is not published; nobody can have missed it")
+	}
+	entry, err := q.GetRosterEntry(ctx, dbq.GetRosterEntryParams{ID: in.StudentMemberID, CourseID: in.CourseID})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return apperr.Missing("no such member in this course")
+	}
+	if err != nil {
+		return err
+	}
+	if entry.Role != "student" || entry.Status == domain.MemberRemoved {
+		return apperr.Precondition("only a current student of the course hands work in")
+	}
+	return nil
+}
+
+// errHasSubmission refuses a 'missing' row for a student who has a
+// submission already, latest, in state.
+func errHasSubmission(state string, latest uuid.UUID) error {
+	return apperr.Conflicts("the student already has a submission (%s) for this assignment", state).With("submission_id", latest)
 }
 
 // submissionRecordMissing is by hand what the sweep does when a due date
@@ -620,6 +736,23 @@ func submissionRecordMissing() tool.Tool {
 			t.Scope.StudentMemberIDs = []uuid.UUID{in.StudentMemberID}
 			return t, nil
 		},
+		Validate: func(ctx context.Context, q dbq.Querier, m *domain.Member, _ time.Time, in SubmissionRecordMissingIn) error {
+			a, err := q.GetAssignmentInCourse(ctx, dbq.GetAssignmentInCourseParams{ID: in.AssignmentID, CourseID: in.CourseID})
+			if err != nil {
+				return err
+			}
+			if err := missable(ctx, q, m, in, a.PublishedAt); err != nil {
+				return err
+			}
+			prior, err := q.ListSubmissionsOf(ctx, dbq.ListSubmissionsOfParams{AssignmentID: a.ID, StudentMemberID: in.StudentMemberID})
+			if err != nil {
+				return err
+			}
+			if len(prior) > 0 {
+				return errHasSubmission(prior[0].State, prior[0].ID)
+			}
+			return nil
+		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in SubmissionRecordMissingIn) (SubmissionIDOut, error) {
 			// The assignment first: to a caller who may not see an
 			// unpublished one, it is not there, whoever the student is.
@@ -627,29 +760,15 @@ func submissionRecordMissing() tool.Tool {
 			if err != nil {
 				return SubmissionIDOut{}, err
 			}
-			if a.PublishedAt == nil {
-				if !canSeeUnpublished(ec.Member) {
-					return SubmissionIDOut{}, apperr.Missing("no such assignment in this course")
-				}
-				return SubmissionIDOut{}, apperr.Precondition("the assignment is not published; nobody can have missed it")
-			}
-			entry, err := ec.Q.GetRosterEntry(ctx, dbq.GetRosterEntryParams{ID: in.StudentMemberID, CourseID: in.CourseID})
-			if errors.Is(err, pgx.ErrNoRows) {
-				return SubmissionIDOut{}, apperr.Missing("no such member in this course")
-			}
-			if err != nil {
+			if err := missable(ctx, ec.Q, ec.Member, in, a.PublishedAt); err != nil {
 				return SubmissionIDOut{}, err
-			}
-			if entry.Role != "student" || entry.Status == domain.MemberRemoved {
-				return SubmissionIDOut{}, apperr.Precondition("only a current student of the course hands work in")
 			}
 			prior, err := ec.Q.LockSubmissionsOf(ctx, dbq.LockSubmissionsOfParams{AssignmentID: a.ID, StudentMemberID: in.StudentMemberID})
 			if err != nil {
 				return SubmissionIDOut{}, err
 			}
 			if len(prior) > 0 {
-				return SubmissionIDOut{}, apperr.Conflicts("the student already has a submission (%s) for this assignment", prior[0].State).
-					With("submission_id", prior[0].ID)
+				return SubmissionIDOut{}, errHasSubmission(prior[0].State, prior[0].ID)
 			}
 			id := ids.New()
 			n, err := ec.Q.InsertMissingSubmission(ctx, dbq.InsertMissingSubmissionParams{ID: id, AssignmentID: a.ID,

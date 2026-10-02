@@ -303,6 +303,38 @@ func checkExistingGrades(how *string) error {
 	return nil
 }
 
+// gradeScore is a grade entered on a piece of work, by its score.
+type gradeScore struct {
+	id    uuid.UUID
+	score decimal.Decimal
+}
+
+// rebaseRefusal is what rebase refuses of grades entered on a piece of work,
+// by their scores, carried from points from to points to as how says,
+// before it writes anything. A change of what the work is worth asks it of
+// the grades as they stand before it is carried out, proposed or approved
+// (Validate: assignment.update, component.update), and rebase again of the
+// grades it holds.
+func rebaseRefusal(grades []gradeScore, from, to decimal.Decimal, how string) error {
+	if len(grades) == 0 {
+		return nil
+	}
+	if how == existingKeepScores {
+		for _, g := range grades {
+			if g.score.GreaterThan(to) && !g.score.GreaterThan(from) {
+				return apperr.Precondition("grade %s is %s, which was within the %s points it was given out of and is above the %s it would be out of; rescale, or regrade it first",
+					g.id, g.score, from, to).With("reason", "score_above_points").With("grade_id", g.id)
+			}
+		}
+		return nil
+	}
+	if from.IsZero() {
+		return apperr.Precondition("the work was worth nothing, so there is nothing to rescale its grades from; keep their scores instead").
+			With("reason", "nothing_to_rescale")
+	}
+	return nil
+}
+
 // rescaledScore is a score out of from, as a score out of to, to four
 // decimal places.
 func rescaledScore(score, from, to decimal.Decimal) decimal.Decimal {
@@ -326,18 +358,12 @@ func rescaledScore(score, from, to decimal.Decimal) decimal.Decimal {
 // alone. Work that was worth nothing has nothing to rescale from.
 func rebase(ctx context.Context, ec *tool.ExecCtx, courseID uuid.UUID, assignmentID *uuid.UUID,
 	grades []dbq.LockLiveEnteredGradesOfAssignmentRow, from, to decimal.Decimal, how string) (int, error) {
-	if how == existingKeepScores {
-		for _, g := range grades {
-			if g.Score.GreaterThan(to) && !g.Score.GreaterThan(from) {
-				return 0, apperr.Precondition("grade %s is %s, which was within the %s points it was given out of and is above the %s it would be out of; rescale, or regrade it first",
-					g.ID, g.Score, from, to).With("reason", "score_above_points").With("grade_id", g.ID)
-			}
-		}
-		return 0, nil
+	scores := make([]gradeScore, len(grades))
+	for i, g := range grades {
+		scores[i] = gradeScore{id: g.ID, score: g.Score}
 	}
-	if from.IsZero() {
-		return 0, apperr.Precondition("the work was worth nothing, so there is nothing to rescale its grades from; keep their scores instead").
-			With("reason", "nothing_to_rescale")
+	if err := rebaseRefusal(scores, from, to, how); err != nil || how == existingKeepScores {
+		return 0, err
 	}
 	written := 0
 	for _, g := range grades {

@@ -175,6 +175,16 @@ WHERE s.assignment_id = $1 AND g.origin = 'entered' AND g.superseded_by IS NULL
 ORDER BY g.id
 FOR UPDATE OF g;
 
+-- name: ListLiveEnteredGradeScoresOfAssignment :many
+-- LockLiveEnteredGradesOfAssignment's grades, by their scores, without the
+-- lock: what a change of the assignment's points is held to before it is
+-- carried out, proposed or approved.
+SELECT g.id, g.score
+FROM grade g
+JOIN submission s ON s.id = g.submission_id
+WHERE s.assignment_id = $1 AND g.origin = 'entered' AND g.superseded_by IS NULL
+ORDER BY g.id;
+
 -- name: LockLiveEnteredGradesOfComponent :many
 -- Every live grade entered directly on the component, draft or posted.
 SELECT g.id, g.student_member_id, g.submission_id, g.component_id, g.score, g.feedback, g.breakdown,
@@ -183,6 +193,14 @@ FROM grade g
 WHERE g.component_id = $1 AND g.origin = 'entered' AND g.superseded_by IS NULL
 ORDER BY g.id
 FOR UPDATE;
+
+-- name: ListLiveEnteredGradeScoresOfComponent :many
+-- LockLiveEnteredGradesOfComponent's grades, by their scores, without the
+-- lock, as ListLiveEnteredGradeScoresOfAssignment.
+SELECT g.id, g.score
+FROM grade g
+WHERE g.component_id = $1 AND g.origin = 'entered' AND g.superseded_by IS NULL
+ORDER BY g.id;
 
 -- name: MoveFeedbackFiles :exec
 -- A grade's feedback files go with it when it is written again without

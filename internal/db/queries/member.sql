@@ -42,12 +42,12 @@ SELECT id, status, expires_at FROM course_member WHERE course_id = $1 AND actor_
 -- one comes back. An agent's owner never changes now (migration 0014); the
 -- last kind is a seat an agent kept in an archived course when it changed
 -- hands before that, where only this could find it once the course is
--- opened again. With no clock (now null), a principal's expiry is not judged:
--- whoever asks leaves it to seat(), which has one. ListOrphanedSeats is the
--- same rule for every seat, and the authorization queries' owner_matches
--- its other half: a change to one is a change to all three.
+-- opened again. A principal's expiry is judged at now, which every caller
+-- gives. ListOrphanedSeats is the same rule for every seat, and the
+-- authorization queries' owner_matches its other half: a change to one is a
+-- change to all three.
 SELECT (CASE WHEN m.principal_member_id IS NULL THEN a.owner_actor_id IS NOT NULL
-             ELSE p.status = 'removed' OR coalesce(p.expires_at <= sqlc.arg(now), false)
+             ELSE p.status = 'removed' OR coalesce(p.expires_at <= sqlc.arg(now)::timestamptz, false)
                   OR a.owner_actor_id IS DISTINCT FROM p.actor_id END)::bool AS orphaned
 FROM course_member m
 JOIN actor a ON a.id = m.actor_id
@@ -175,6 +175,15 @@ SELECT EXISTS (
       AND (expires_at IS NULL OR expires_at > sqlc.arg(now)) AND id <> sqlc.arg(except_member_id)
       AND (id = sqlc.arg(principal_member_id) OR principal_member_id = sqlc.arg(principal_member_id))
 )::bool;
+
+-- name: ListLiveSeatsByRole :many
+-- LockLiveSeatsByRole without the lock: the seats a member.update_perms_bulk
+-- made now would change, each of which it is held to before it is carried
+-- out, proposed or approved.
+SELECT id FROM course_member
+WHERE course_id = $1 AND role = sqlc.arg(role) AND status <> 'removed'
+  AND (expires_at IS NULL OR expires_at > sqlc.arg(now)) AND id <> sqlc.arg(except_member_id)
+ORDER BY id;
 
 -- name: LockLiveSeatsByRole :many
 -- Every seat of one roster role that is not removed or past its expiry,

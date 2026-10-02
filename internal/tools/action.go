@@ -52,18 +52,28 @@ func ownAgentsAction(d Deps, judge bool) tool.OwnAgentsFunc {
 		if err != nil {
 			return domain.Denied, err
 		}
-		if judge {
-			if may, err := d.Pipeline.OwnerMayJudge(ctx, q, caller, seat.ID, a, now); err != nil || !may {
-				return domain.Denied, err
-			}
-			return domain.Autonomous, nil
-		}
+		// Whose it is comes first, and an agent's owner never changes: no
+		// one else's call waits on the proposal below.
 		did, err := q.GetActor(ctx, a.ActorID)
 		if err != nil {
 			return domain.Denied, err
 		}
 		if did.OwnerActorID == nil || *did.OwnerActorID != caller.ID {
 			return domain.Denied, nil
+		}
+		if judge {
+			if a.Status == string(domain.StatusProposed) {
+				// Taken as a decision about it takes it, before what
+				// asking whether approving it would be refused locks
+				// (pipeline.LockProposal): an approval under way holds it
+				// and goes on to take those.
+				if a, err = pipeline.LockProposal(ctx, q, target.CourseID, a.ID); err != nil {
+					return domain.Denied, err
+				}
+			}
+			if may, err := d.Pipeline.OwnerMayJudge(ctx, q, caller, seat.ID, a, now); err != nil || !may {
+				return domain.Denied, err
+			}
 		}
 		return domain.Autonomous, nil
 	}
@@ -110,15 +120,27 @@ func actionDecide(d Deps) tool.Tool {
 			"allowed to do it; if not, or if the proposal is too old, it is cancelled instead. Nobody decides their own proposal, " +
 			"nor their owner's, nor another agent's of their owner, nor a decision someone else proposed about any of those, " +
 			"nor approves closing an escalation they raised or approved. An agent's owner decides its proposal only where " +
-			"they could do the same themselves without anyone's confirmation: their own level for it autonomous, and its " +
-			"target within their reach; by_owner then says so. That needs no action_decide of their own, and is done at " +
-			"once, as their own doing of it: a student confirms her own agent's drafts of her work.",
-		Kind: tool.Write,
-		Gate: ownAgentsGate(d, true),
-		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/actions/{action_id}/decide"},
+			"they could do the same themselves without anyone's confirmation: their own level for it autonomous, its " +
+			"target within their reach, and the tool's own checks of what it asks passing as approving it now would run them; " +
+			"by_owner then says so. That needs no action_decide of their own, and is done at " +
+			"once, as their own doing of it: a student confirms her own agent's drafts of her work. An owner whose own " +
+			"level or reach falls short is refused (owner_not_autonomous), and one whose agent's proposal approving now " +
+			"would refuse is refused with that refusal in details.refusal (owner_would_be_refused): either way, if they " +
+			"hold action_decide; one who does not is refused as anyone without it is (permission_denied). A decision " +
+			"that would be refused as it is made, about a proposal that no longer waits or is not the caller's to " +
+			"decide, is refused at once, and never waits for anyone's confirmation.",
+		Kind:  tool.Write,
+		Gate:  ownAgentsGate(d, true),
+		HTTP:  tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/actions/{action_id}/decide"},
+		Check: pipeline.CheckDecision,
 		Resolve: func(ctx context.Context, q dbq.Querier, in pipeline.DecideIn) (tool.Target, error) {
 			return actionTarget(ctx, q, in.CourseID, in.ActionID)
 		},
+		// Whether the proposal waits for a decision, and whether it is the
+		// caller's to decide: asked before a decision is proposed, so that
+		// nobody is asked to approve one that approving would refuse, and
+		// again under the proposal's lock as it is made.
+		Validate: d.Pipeline.ValidateDecision,
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in pipeline.DecideIn) (pipeline.DecideOut, error) {
 			return d.Pipeline.Decide(ctx, ec, in)
 		},
@@ -133,12 +155,15 @@ func actionReview(d Deps) tool.Tool {
 			"reviews their own action, their owner's or another agent's of their owner; an agent's owner reviews what it " +
 			"did only where they could do the same themselves without anyone's confirmation, and then needs no " +
 			"action_decide of their own.",
-		Kind: tool.Write,
-		Gate: ownAgentsGate(d, true),
-		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/actions/{action_id}/review"},
+		Kind:  tool.Write,
+		Gate:  ownAgentsGate(d, true),
+		HTTP:  tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/actions/{action_id}/review"},
+		Check: pipeline.CheckReview,
 		Resolve: func(ctx context.Context, q dbq.Querier, in pipeline.ReviewIn) (tool.Target, error) {
 			return actionTarget(ctx, q, in.CourseID, in.ActionID)
 		},
+		// As action.decide's.
+		Validate: d.Pipeline.ValidateReview,
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in pipeline.ReviewIn) (pipeline.ReviewOut, error) {
 			return d.Pipeline.Review(ctx, ec, in)
 		},
@@ -165,7 +190,7 @@ type ActionView struct {
 	Result             json.RawMessage `json:"result,omitempty"`
 	CreatedAt          time.Time       `json:"created_at"`
 	// YoursToDecide is set in the approval and review queues.
-	YoursToDecide *bool `json:"yours_to_decide,omitempty" jsonschema:"in the approval and review queues: false when the action is yours, your owner's or another agent's of your owner, and when it is your own agent's and you could not do the same yourself without anyone's confirmation (your own level for it below autonomous, or its target beyond your reach): someone else decides and reviews those; true otherwise, though a decision about a decision may still be refused at one remove"`
+	YoursToDecide *bool `json:"yours_to_decide,omitempty" jsonschema:"in the approval and review queues: false when the action is yours, your owner's or another agent's of your owner, and when it is your own agent's and you could not do the same yourself without anyone's confirmation (your own level for it below autonomous, or its target beyond your reach, or, for a proposal, the tool's own checks of what it asks refuse it as approving it now would run them): someone else decides and reviews those; true otherwise, though a decision about a decision may still be refused at one remove"`
 }
 
 func viewAction(a dbq.Action) ActionView {
@@ -206,7 +231,8 @@ func actionPage(rows []dbq.Action, limit int32) ActionListOut {
 // pipeline.Review), which the queue lists all the same, since it is the
 // course's queue and someone else's to clear; but for the caller's own
 // agent's, where the caller could have done it themselves without anyone's
-// confirmation (pipeline.OwnerMayJudge), measured now as a decision would be.
+// confirmation (pipeline.OwnerMayJudgeListed), measured now as a decision
+// would be.
 func queuePage(ctx context.Context, rc *tool.ReadCtx, p *pipeline.Pipeline, rows []dbq.Action, limit int32) (ActionListOut, error) {
 	out := actionPage(rows, limit)
 	if len(rows) == 0 {
@@ -223,7 +249,7 @@ func queuePage(ctx context.Context, rc *tool.ReadCtx, p *pipeline.Pipeline, rows
 	for i, r := range rows {
 		yours := !slices.Contains(ours, r.ActorID)
 		if !yours && rc.Member != nil {
-			if yours, err = p.OwnerMayJudge(ctx, rc.Q, rc.Actor, rc.Member.ID, r, rc.Now); err != nil {
+			if yours, err = p.OwnerMayJudgeListed(ctx, rc.Q, rc.Actor, rc.Member.ID, r, rc.Now); err != nil {
 				return out, err
 			}
 		}
@@ -379,6 +405,20 @@ func actionWithdraw() tool.Tool {
 		Resolve: func(ctx context.Context, q dbq.Querier, in ActionWithdrawIn) (tool.Target, error) {
 			return actionTarget(ctx, q, in.CourseID, in.ActionID)
 		},
+		// Whose the proposal is, and whether it still waits: asked before a
+		// withdrawal is proposed, and again under the proposal's lock as it
+		// is made.
+		Validate: func(ctx context.Context, q dbq.Querier, m *domain.Member, _ time.Time, in ActionWithdrawIn) error {
+			prop, err := q.GetActionInCourse(ctx, dbq.GetActionInCourseParams{ID: in.ActionID, CourseID: &in.CourseID})
+			if errors.Is(err, pgx.ErrNoRows) {
+				return apperr.Missing("no such action in this course")
+			}
+			if err != nil {
+				return err
+			}
+			_, err = withdrawable(ctx, q, m.ActorID, prop)
+			return err
+		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in ActionWithdrawIn) (OK, error) {
 			prop, err := ec.Q.GetActionInCourseForUpdate(ctx, dbq.GetActionInCourseForUpdateParams{ID: in.ActionID, CourseID: &in.CourseID})
 			if errors.Is(err, pgx.ErrNoRows) {
@@ -387,20 +427,9 @@ func actionWithdraw() tool.Tool {
 			if err != nil {
 				return OK{}, err
 			}
-			// Whose it is never changes: the proposer, and an agent's owner.
-			var byOwner map[string]any
-			if prop.ActorID != ec.Actor.ID {
-				did, err := ec.Q.GetActor(ctx, prop.ActorID)
-				if err != nil {
-					return OK{}, err
-				}
-				if did.OwnerActorID == nil || *did.OwnerActorID != ec.Actor.ID {
-					return OK{}, apperr.Forbid("only whoever proposed it, or the owner of the agent that did, withdraws a proposal")
-				}
-				byOwner = map[string]any{"by_owner": true}
-			}
-			if prop.Status != string(domain.StatusProposed) {
-				return OK{}, apperr.Conflicts("the action is %s, not awaiting a decision", prop.Status)
+			byOwner, err := withdrawable(ctx, ec.Q, ec.Actor.ID, prop)
+			if err != nil {
+				return OK{}, err
 			}
 			_, stored := pipeline.Cancellation(pipeline.CancelWithdrawn, byOwner)
 			n, err := ec.Q.CancelProposal(ctx, dbq.CancelProposalParams{ID: prop.ID, Result: stored})
@@ -423,4 +452,26 @@ func actionWithdraw() tool.Tool {
 			return OK{OK: true}, nil
 		},
 	})
+}
+
+// withdrawable says why actor may not withdraw proposal prop, or nil when
+// they may; and, when they may, what the cancellation records of an owner
+// withdrawing their agent's (by_owner), nil for the proposer's own. Whose a
+// proposal is never changes: the proposer, and an agent's owner.
+func withdrawable(ctx context.Context, q dbq.Querier, actor uuid.UUID, prop dbq.Action) (map[string]any, error) {
+	var byOwner map[string]any
+	if prop.ActorID != actor {
+		did, err := q.GetActor(ctx, prop.ActorID)
+		if err != nil {
+			return nil, err
+		}
+		if did.OwnerActorID == nil || *did.OwnerActorID != actor {
+			return nil, apperr.Forbid("only whoever proposed it, or the owner of the agent that did, withdraws a proposal")
+		}
+		byOwner = map[string]any{"by_owner": true}
+	}
+	if prop.Status != string(domain.StatusProposed) {
+		return nil, apperr.Conflicts("the action is %s, not awaiting a decision", prop.Status)
+	}
+	return byOwner, nil
 }

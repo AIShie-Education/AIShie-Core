@@ -299,37 +299,62 @@ func memberAdd() tool.Tool {
 			"brings it in as their delegate, with member.add_delegate.",
 		Kind: tool.Write, Gate: manageMembers,
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/members"},
+		Check: func(in MemberAddIn) error {
+			if (in.Preset == nil) == (in.PresetID == nil) {
+				return apperr.Invalid("give exactly one of preset and preset_id")
+			}
+			// What the preset says is held to the same by the database.
+			if (in.Role != nil && !validRoles[*in.Role]) || (in.StudentScope != nil && !validScope(*in.StudentScope)) ||
+				(in.AssignmentScope != nil && !validScope(*in.AssignmentScope)) {
+				return apperr.Invalid("role or scope is not one of the allowed values")
+			}
+			if err := checkListsGiven(in.StudentScope, in.ListedStudents, in.AssignmentScope, in.ListedAssignments); err != nil {
+				return err
+			}
+			return (permSet{}).apply(in.Perms)
+		},
 		Resolve: func(_ context.Context, _ dbq.Querier, in MemberAddIn) (tool.Target, error) {
 			return tool.Target{CourseID: in.CourseID, Type: "course_member"}, nil
 		},
-		Execute: func(ctx context.Context, ec *tool.ExecCtx, in MemberAddIn) (MemberIDOut, error) {
-			preset, err := findPreset(ctx, ec.Q, in.CourseID, in.Preset, in.PresetID)
+		// Everything the seat is held to that the course can tell before it
+		// is made, so that nobody is asked to approve a seat that could
+		// never be given; and, as seat() refuses them, an expiry already
+		// past and an actor seated already, by a seat neither past its
+		// expiry nor orphaned, which are the moment's.
+		Validate: func(ctx context.Context, q dbq.Querier, m *domain.Member, now time.Time, in MemberAddIn) error {
+			s, err := memberAddSeating(ctx, q, m, in)
 			if err != nil {
-				return MemberIDOut{}, err
+				return err
 			}
-			s := seating{courseID: in.CourseID, actorID: in.ActorID, preset: &preset, perms: presetPerms(preset),
-				role: preset.Role, studentScope: preset.StudentScope, assignmentScope: preset.AssignmentScope,
-				listedStudents: in.ListedStudents, listedAssignments: in.ListedAssignments, expiresAt: asStored(in.ExpiresAt),
-				named: in.Perms}
-			if in.Role != nil {
-				s.role = *in.Role
+			a, err := q.GetActor(ctx, in.ActorID)
+			if errors.Is(err, pgx.ErrNoRows) {
+				return apperr.Missing("no such actor")
 			}
-			if in.StudentScope != nil {
-				s.studentScope = *in.StudentScope
+			if err != nil {
+				return err
 			}
-			if in.AssignmentScope != nil {
-				s.assignmentScope = *in.AssignmentScope
+			if err := seatable(ctx, q, a, s); err != nil {
+				return err
 			}
-			if !validRoles[s.role] || !validScope(s.studentScope) || !validScope(s.assignmentScope) {
-				return MemberIDOut{}, apperr.Invalid("role or scope is not one of the allowed values")
+			if !s.listsItself() {
+				if err := checkStudentList(ctx, q, in.CourseID, s.studentScope, s.listedStudents); err != nil {
+					return err
+				}
 			}
-			if err := s.perms.apply(in.Perms); err != nil {
-				return MemberIDOut{}, err
+			if err := checkAssignmentList(ctx, q, in.CourseID, s.assignmentScope, s.listedAssignments); err != nil {
+				return err
 			}
-			if err := withinGranter(ctx, ec.Q, ec.Member, s.perms, s.listsItself(), s.studentScope, s.listedStudents, s.assignmentScope, s.listedAssignments); err != nil {
-				return MemberIDOut{}, err
+			if err := seatedNow(ctx, q, in.CourseID, in.ActorID, now); err != nil {
+				return err
 			}
-			if err := outlastsGranter(ec.Member, s.expiresAt); err != nil {
+			if s.expiresAt != nil && !s.expiresAt.After(now) {
+				return errExpiresInPast
+			}
+			return nil
+		},
+		Execute: func(ctx context.Context, ec *tool.ExecCtx, in MemberAddIn) (MemberIDOut, error) {
+			s, err := memberAddSeating(ctx, ec.Q, ec.Member, in)
+			if err != nil {
 				return MemberIDOut{}, err
 			}
 			id, err := seat(ctx, ec, s)
@@ -337,6 +362,42 @@ func memberAdd() tool.Tool {
 		},
 	})
 }
+
+// memberAddSeating is the seat member.add would make for granter g: the
+// preset, with what the call overrides, held to what g may hand out
+// (withinGranter, outlastsGranter).
+func memberAddSeating(ctx context.Context, q dbq.Querier, g *domain.Member, in MemberAddIn) (seating, error) {
+	preset, err := findPreset(ctx, q, in.CourseID, in.Preset, in.PresetID)
+	if err != nil {
+		return seating{}, err
+	}
+	s := seating{courseID: in.CourseID, actorID: in.ActorID, preset: &preset, perms: presetPerms(preset),
+		role: preset.Role, studentScope: preset.StudentScope, assignmentScope: preset.AssignmentScope,
+		listedStudents: in.ListedStudents, listedAssignments: in.ListedAssignments, expiresAt: asStored(in.ExpiresAt),
+		named: in.Perms}
+	if in.Role != nil {
+		s.role = *in.Role
+	}
+	if in.StudentScope != nil {
+		s.studentScope = *in.StudentScope
+	}
+	if in.AssignmentScope != nil {
+		s.assignmentScope = *in.AssignmentScope
+	}
+	if err := s.perms.apply(in.Perms); err != nil {
+		return seating{}, err
+	}
+	if err := withinGranter(ctx, q, g, s.perms, s.listsItself(), s.studentScope, s.listedStudents, s.assignmentScope, s.listedAssignments); err != nil {
+		return seating{}, err
+	}
+	if err := outlastsGranter(g, s.expiresAt); err != nil {
+		return seating{}, err
+	}
+	return s, nil
+}
+
+// errExpiresInPast refuses a new seat that would have ended already.
+var errExpiresInPast = apperr.Invalid("expires_at is in the past")
 
 // findPreset looks a preset up by id or by name. A name means the course's
 // department's own preset of that name if there is one, else the built-in.
@@ -513,10 +574,35 @@ func loadOther(ctx context.Context, ec *tool.ExecCtx, courseID, memberID uuid.UU
 	if err != nil {
 		return m, err
 	}
-	if m.Status == domain.MemberRemoved || (m.ExpiresAt != nil && !m.ExpiresAt.After(ec.Now)) {
-		return m, apperr.Conflicts("the member has been removed; seat the actor again for a fresh start")
+	return m, seatGone(m, ec.Now)
+}
+
+// seatGone refuses a seat that is removed, or whose expiry has passed by
+// now: loadOther's refusal, and otherSeat's.
+func seatGone(m dbq.GetMemberInCourseRow, now time.Time) error {
+	if m.Status == domain.MemberRemoved || (m.ExpiresAt != nil && !m.ExpiresAt.After(now)) {
+		return apperr.Conflicts("the member has been removed; seat the actor again for a fresh start")
 	}
-	return m, nil
+	return nil
+}
+
+// otherSeat is loadOther for Validate: the same refusals, of the seat as it
+// stands at now, read without a lock.
+func otherSeat(ctx context.Context, q dbq.Querier, caller *domain.Member, now time.Time, courseID, memberID uuid.UUID) (dbq.GetMemberInCourseRow, error) {
+	if memberID == caller.ID {
+		return dbq.GetMemberInCourseRow{}, apperr.Forbid("not on your own membership")
+	}
+	if err := notYourPrincipals(ctx, q, caller, memberID); err != nil {
+		return dbq.GetMemberInCourseRow{}, err
+	}
+	m, err := q.GetMemberInCourse(ctx, dbq.GetMemberInCourseParams{ID: memberID, CourseID: courseID})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return m, apperr.Missing("no such member in this course")
+	}
+	if err != nil {
+		return m, err
+	}
+	return m, seatGone(m, now)
 }
 
 // notYourPrincipals refuses a delegate acting on its principal's seat, or on
@@ -530,7 +616,7 @@ func loadOther(ctx context.Context, ec *tool.ExecCtx, courseID, memberID uuid.UU
 // no runtime between it and Core to hold it back. Whose delegate a seat is
 // never changes, so it is read before anything is locked, and the call is
 // refused before either seat is taken FOR UPDATE.
-func notYourPrincipals(ctx context.Context, q *dbq.Queries, caller *domain.Member, memberID uuid.UUID) error {
+func notYourPrincipals(ctx context.Context, q dbq.Querier, caller *domain.Member, memberID uuid.UUID) error {
 	principal := caller.PrincipalID
 	if principal == nil {
 		return nil
@@ -590,7 +676,7 @@ type shape struct {
 	agent bool
 }
 
-func shapeOf(ctx context.Context, q *dbq.Queries, m dbq.GetMemberInCourseRow) (shape, error) {
+func shapeOf(ctx context.Context, q dbq.Querier, m dbq.GetMemberInCourseRow) (shape, error) {
 	s := shape{perms: memberPerms(m), studentScope: m.StudentScope, assignmentScope: m.AssignmentScope, expiresAt: m.ExpiresAt,
 		principal: m.PrincipalMemberID, agent: isAgent(m.ActorKind)}
 	var err error
@@ -643,17 +729,23 @@ func opens(fromKind string, from []uuid.UUID, toKind string, to []uuid.UUID) boo
 // (withinCeilings), and, for a delegate's seat, within its principal's as
 // well (withinPrincipal).
 func grant(ctx context.Context, ec *tool.ExecCtx, before, after shape) error {
+	return grantBy(ctx, ec.Q, ec.Member, before, after)
+}
+
+// grantBy is grant by granter g, read through q: Validate asks it before a
+// change is made or proposed, and Execute again as it is made.
+func grantBy(ctx context.Context, q dbq.Querier, g *domain.Member, before, after shape) error {
 	if !after.widens(before) {
 		return nil
 	}
-	if err := withinGranter(ctx, ec.Q, ec.Member, after.perms, false, after.studentScope, after.students, after.assignmentScope, after.assignments); err != nil {
+	if err := withinGranter(ctx, q, g, after.perms, false, after.studentScope, after.students, after.assignmentScope, after.assignments); err != nil {
 		return err
 	}
-	if err := outlastsGranter(ec.Member, after.expiresAt); err != nil {
+	if err := outlastsGranter(g, after.expiresAt); err != nil {
 		return err
 	}
 	if after.principal != nil {
-		return withinPrincipal(ctx, ec.Q, *after.principal, after)
+		return withinPrincipal(ctx, q, *after.principal, after)
 	}
 	return withinCeilings(after.agent, nil, after.perms)
 }
@@ -669,7 +761,7 @@ func grant(ctx context.Context, ec *tool.ExecCtx, before, after shape) error {
 // not removed meanwhile; member.update_perms_bulk reads it as it stands.
 // Either way a principal narrowed meanwhile narrows the delegate all the
 // same, since authorization caps it.
-func withinPrincipal(ctx context.Context, q *dbq.Queries, principalID uuid.UUID, after shape) error {
+func withinPrincipal(ctx context.Context, q dbq.Querier, principalID uuid.UUID, after shape) error {
 	p, err := authz.LoadMember(ctx, q, principalID)
 	if err != nil {
 		return err
@@ -703,25 +795,29 @@ func memberUpdatePerms() tool.Tool {
 			"for as long as their seat lasts — must be within what you hold yourself, and within what the seat may hold " +
 			"at all (perm_ceilings in member.get; above it the refusal gives the same reason code). Lowering is always allowed.",
 		Kind: tool.Write, Gate: manageMembers,
-		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/members/{member_id}/perms"},
+		HTTP:  tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/members/{member_id}/perms"},
+		Check: func(in MemberUpdatePermsIn) error { return checkPermChange(in.Perms) },
 		Resolve: func(ctx context.Context, q dbq.Querier, in MemberUpdatePermsIn) (tool.Target, error) {
 			return resolveMember(ctx, q, in.CourseID, in.MemberID)
+		},
+		Validate: func(ctx context.Context, q dbq.Querier, m *domain.Member, now time.Time, in MemberUpdatePermsIn) error {
+			seat, err := otherSeat(ctx, q, m, now, in.CourseID, in.MemberID)
+			if err != nil {
+				return err
+			}
+			before, after, err := permsChanged(ctx, q, seat, in.Perms)
+			if err != nil {
+				return err
+			}
+			return grantBy(ctx, q, m, before, after)
 		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in MemberUpdatePermsIn) (OK, error) {
 			m, err := loadOther(ctx, ec, in.CourseID, in.MemberID)
 			if err != nil {
 				return OK{}, err
 			}
-			if len(in.Perms) == 0 {
-				return OK{}, apperr.Invalid("perms is empty: nothing to change")
-			}
-			before, err := shapeOf(ctx, ec.Q, m)
+			before, after, err := permsChanged(ctx, ec.Q, m, in.Perms)
 			if err != nil {
-				return OK{}, err
-			}
-			after := before
-			after.perms = memberPerms(m)
-			if err := after.perms.apply(in.Perms); err != nil {
 				return OK{}, err
 			}
 			if err := grant(ctx, ec, before, after); err != nil {
@@ -734,6 +830,17 @@ func memberUpdatePerms() tool.Tool {
 			return OK{OK: true}, nil
 		},
 	})
+}
+
+// permsChanged is what seat m holds, and what it would hold with the levels
+// over changed.
+func permsChanged(ctx context.Context, q dbq.Querier, m dbq.GetMemberInCourseRow, over PermLevels) (before, after shape, err error) {
+	if before, err = shapeOf(ctx, q, m); err != nil {
+		return before, after, err
+	}
+	after = before
+	after.perms = memberPerms(m)
+	return before, after, after.perms.apply(over)
 }
 
 type MemberRescopeIn struct {
@@ -755,54 +862,62 @@ func memberRescope() tool.Tool {
 			"everything the member will then hold must be within what you hold yourself. Narrowing is always allowed.",
 		Kind: tool.Write, Gate: manageMembers,
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/members/{member_id}/scope"},
+		Check: func(in MemberRescopeIn) error {
+			if in.ClearExpiry && in.ExpiresAt != nil {
+				return apperr.Invalid("give expires_at or clear_expiry, not both")
+			}
+			// What the seat says now is held to the same by the database.
+			if (in.StudentScope != nil && !validScope(*in.StudentScope)) || (in.AssignmentScope != nil && !validScope(*in.AssignmentScope)) {
+				return apperr.Invalid("a scope is all or listed")
+			}
+			return checkListsGiven(in.StudentScope, in.ListedStudents, in.AssignmentScope, in.ListedAssignments)
+		},
 		Resolve: func(ctx context.Context, q dbq.Querier, in MemberRescopeIn) (tool.Target, error) {
 			return resolveMember(ctx, q, in.CourseID, in.MemberID)
+		},
+		// Whether expires_at has passed is the moment's: asked here at
+		// each, as Execute asks it.
+		Validate: func(ctx context.Context, q dbq.Querier, m *domain.Member, now time.Time, in MemberRescopeIn) error {
+			seat, err := otherSeat(ctx, q, m, now, in.CourseID, in.MemberID)
+			if err != nil {
+				return err
+			}
+			if in.ExpiresAt != nil && !in.ExpiresAt.After(now) {
+				return errRescopeExpiresInPast
+			}
+			before, after, err := in.rescoped(ctx, q, seat)
+			if err != nil {
+				return err
+			}
+			if in.ListedStudents != nil || after.studentScope != domain.ScopeListed {
+				if err := checkStudentList(ctx, q, in.CourseID, after.studentScope, in.ListedStudents); err != nil {
+					return err
+				}
+			}
+			if in.ListedAssignments != nil || after.assignmentScope != domain.ScopeListed {
+				if err := checkAssignmentList(ctx, q, in.CourseID, after.assignmentScope, in.ListedAssignments); err != nil {
+					return err
+				}
+			}
+			return grantBy(ctx, q, m, before, after)
 		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in MemberRescopeIn) (OK, error) {
 			m, err := loadOther(ctx, ec, in.CourseID, in.MemberID)
 			if err != nil {
 				return OK{}, err
 			}
-			switch {
-			case in.ClearExpiry && in.ExpiresAt != nil:
-				return OK{}, apperr.Invalid("give expires_at or clear_expiry, not both")
-			case in.ExpiresAt != nil && !in.ExpiresAt.After(ec.Now):
-				return OK{}, apperr.Invalid("expires_at is in the past; to end a membership now, remove it")
+			if in.ExpiresAt != nil && !in.ExpiresAt.After(ec.Now) {
+				return OK{}, errRescopeExpiresInPast
 			}
-			before, err := shapeOf(ctx, ec.Q, m)
+			before, after, err := in.rescoped(ctx, ec.Q, m)
 			if err != nil {
 				return OK{}, err
-			}
-			after := before
-			if in.StudentScope != nil {
-				after.studentScope = *in.StudentScope
-			}
-			if in.AssignmentScope != nil {
-				after.assignmentScope = *in.AssignmentScope
-			}
-			if !validScope(after.studentScope) || !validScope(after.assignmentScope) {
-				return OK{}, apperr.Invalid("a scope is all or listed")
-			}
-			// A list that was not sent is kept as it is — not re-checked, so
-			// a student who has since left does not make an unrelated change
-			// fail — unless the scope it belongs to is no longer a list.
-			students, assignments := in.ListedStudents, in.ListedAssignments
-			if students != nil || after.studentScope != domain.ScopeListed {
-				after.students = dedupe(students)
-			}
-			if assignments != nil || after.assignmentScope != domain.ScopeListed {
-				after.assignments = dedupe(assignments)
-			}
-			switch {
-			case in.ClearExpiry:
-				after.expiresAt = nil
-			case in.ExpiresAt != nil:
-				after.expiresAt = asStored(in.ExpiresAt)
 			}
 			if err := grant(ctx, ec, before, after); err != nil {
 				return OK{}, err
 			}
 
+			students, assignments := in.ListedStudents, in.ListedAssignments
 			if err := ec.Q.SetMemberScopeKinds(ctx, dbq.SetMemberScopeKindsParams{ID: m.ID, StudentScope: after.studentScope, AssignmentScope: after.assignmentScope}); err != nil {
 				return OK{}, err
 			}
@@ -827,12 +942,61 @@ func memberRescope() tool.Tool {
 	})
 }
 
+var errRescopeExpiresInPast = apperr.Invalid("expires_at is in the past; to end a membership now, remove it")
+
+// rescoped is what seat m holds, and what it would hold rescoped by in.
+func (in MemberRescopeIn) rescoped(ctx context.Context, q dbq.Querier, m dbq.GetMemberInCourseRow) (before, after shape, err error) {
+	if before, err = shapeOf(ctx, q, m); err != nil {
+		return before, after, err
+	}
+	after = before
+	if in.StudentScope != nil {
+		after.studentScope = *in.StudentScope
+	}
+	if in.AssignmentScope != nil {
+		after.assignmentScope = *in.AssignmentScope
+	}
+	// A list that was not sent is kept as it is — not re-checked, so
+	// a student who has since left does not make an unrelated change
+	// fail — unless the scope it belongs to is no longer a list.
+	if in.ListedStudents != nil || after.studentScope != domain.ScopeListed {
+		after.students = dedupe(in.ListedStudents)
+	}
+	if in.ListedAssignments != nil || after.assignmentScope != domain.ScopeListed {
+		after.assignments = dedupe(in.ListedAssignments)
+	}
+	switch {
+	case in.ClearExpiry:
+		after.expiresAt = nil
+	case in.ExpiresAt != nil:
+		after.expiresAt = asStored(in.ExpiresAt)
+	}
+	return before, after, nil
+}
+
 func memberSetStatus(name, desc, path, from, to, event string) tool.Tool {
 	return tool.Define(tool.Spec[MemberIDIn, OK]{
 		Name: name, Description: desc, Kind: tool.Write, Gate: manageMembers,
 		HTTP: tool.Route{Method: "POST", Pattern: path},
 		Resolve: func(ctx context.Context, q dbq.Querier, in MemberIDIn) (tool.Target, error) {
 			return resolveMember(ctx, q, in.CourseID, in.MemberID)
+		},
+		Validate: func(ctx context.Context, q dbq.Querier, g *domain.Member, now time.Time, in MemberIDIn) error {
+			m, err := otherSeat(ctx, q, g, now, in.CourseID, in.MemberID)
+			if err != nil {
+				return err
+			}
+			if m.Status != from {
+				return apperr.Conflicts("the member is %s, not %s", m.Status, from)
+			}
+			if to != domain.MemberActive {
+				return nil
+			}
+			held, err := shapeOf(ctx, q, m)
+			if err != nil {
+				return err
+			}
+			return grantBy(ctx, q, g, shape{}, held)
 		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in MemberIDIn) (OK, error) {
 			m, err := loadOther(ctx, ec, in.CourseID, in.MemberID)
@@ -892,6 +1056,10 @@ func memberRemove() tool.Tool {
 		Resolve: func(ctx context.Context, q dbq.Querier, in MemberIDIn) (tool.Target, error) {
 			return resolveMember(ctx, q, in.CourseID, in.MemberID)
 		},
+		Validate: func(ctx context.Context, q dbq.Querier, m *domain.Member, now time.Time, in MemberIDIn) error {
+			_, err := otherSeat(ctx, q, m, now, in.CourseID, in.MemberID)
+			return err
+		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in MemberIDIn) (MemberRemoveOut, error) {
 			m, err := loadOther(ctx, ec, in.CourseID, in.MemberID)
 			if err != nil {
@@ -948,34 +1116,40 @@ func memberUpdatePermsBulk() tool.Tool {
 			"another agent of its principal's.",
 		Kind: tool.Write, Gate: manageMembers,
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/members/bulk-perms"},
+		Check: func(in MemberUpdatePermsBulkIn) error {
+			if !validRoles[in.Role] {
+				return errRole
+			}
+			return checkPermChange(in.Perms)
+		},
 		Resolve: func(_ context.Context, _ dbq.Querier, in MemberUpdatePermsBulkIn) (tool.Target, error) {
 			return tool.Target{CourseID: in.CourseID, Type: "course_member"}, nil
 		},
+		// Which seats the role takes in is the moment's, as is whether one
+		// has expired: asked of the seats there are before the change is
+		// proposed, so that nobody is asked to approve one that some seat
+		// refuses, and of those there are when it is approved, and again,
+		// under their locks, as it is made. A seat that joins the role
+		// while a proposal waits is asked of when it is approved.
+		Validate: func(ctx context.Context, q dbq.Querier, m *domain.Member, now time.Time, in MemberUpdatePermsBulkIn) error {
+			if err := bulkNotYourPrincipals(ctx, q, m, now, in); err != nil {
+				return err
+			}
+			seats, err := q.ListLiveSeatsByRole(ctx, dbq.ListLiveSeatsByRoleParams{
+				CourseID: in.CourseID, Role: in.Role, Now: &now, ExceptMemberID: m.ID})
+			if err != nil {
+				return err
+			}
+			for _, id := range seats {
+				if _, _, err := bulkChange(ctx, q, m, in, id); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in MemberUpdatePermsBulkIn) (MemberUpdatePermsBulkOut, error) {
-			if !validRoles[in.Role] {
-				return MemberUpdatePermsBulkOut{}, apperr.Invalid("role must be student, instructor, ta, observer or assistant")
-			}
-			if len(in.Perms) == 0 {
-				return MemberUpdatePermsBulkOut{}, apperr.Invalid("perms is empty: nothing to change")
-			}
-			if err := (permSet{}).apply(in.Perms); err != nil {
+			if err := bulkNotYourPrincipals(ctx, ec.Q, ec.Member, ec.Now, in); err != nil {
 				return MemberUpdatePermsBulkOut{}, err
-			}
-			// A delegate's call that would reach its principal's seat, or
-			// another of its principal's agents' (notYourPrincipals), is
-			// refused whole, before any seat is locked: all of them change,
-			// or none.
-			principal := ec.Member.PrincipalID
-			if principal != nil {
-				reaches, err := ec.Q.PrincipalsSeatsHaveRole(ctx, dbq.PrincipalsSeatsHaveRoleParams{CourseID: in.CourseID,
-					Role: in.Role, Now: &ec.Now, ExceptMemberID: ec.Member.ID, PrincipalMemberID: *principal})
-				if err != nil {
-					return MemberUpdatePermsBulkOut{}, err
-				}
-				if reaches {
-					return MemberUpdatePermsBulkOut{}, errNotYourPrincipal("every seat with the role " + in.Role +
-						" includes your principal's, or another agent of your principal's; change the others one by one")
-				}
 			}
 			// In id order, so that two of these at once take the seats in the
 			// same order and one waits for the other.
@@ -986,29 +1160,8 @@ func memberUpdatePermsBulk() tool.Tool {
 			}
 			out := MemberUpdatePermsBulkOut{}
 			for _, id := range seats {
-				m, err := ec.Q.GetMemberInCourse(ctx, dbq.GetMemberInCourseParams{ID: id, CourseID: in.CourseID})
+				m, after, err := bulkChange(ctx, ec.Q, ec.Member, in, id)
 				if err != nil {
-					return MemberUpdatePermsBulkOut{}, err
-				}
-				// Asked above; asked again of the seats as they are locked, in
-				// case one was seated meanwhile.
-				if principal != nil && (m.ID == *principal || (m.PrincipalMemberID != nil && *m.PrincipalMemberID == *principal)) {
-					return MemberUpdatePermsBulkOut{}, errNotYourPrincipal("every seat with the role "+in.Role+
-						" includes your principal's, or another agent of your principal's").With("member_id", m.ID)
-				}
-				before, err := shapeOf(ctx, ec.Q, m)
-				if err != nil {
-					return MemberUpdatePermsBulkOut{}, err
-				}
-				after := before
-				after.perms = memberPerms(m)
-				if err := after.perms.apply(in.Perms); err != nil {
-					return MemberUpdatePermsBulkOut{}, err
-				}
-				if err := grant(ctx, ec, before, after); err != nil {
-					if e, ok := apperr.As(err); ok {
-						return MemberUpdatePermsBulkOut{}, e.With("member_id", id)
-					}
 					return MemberUpdatePermsBulkOut{}, err
 				}
 				if err := setPerms(ctx, ec.Q, m.ID, after.perms); err != nil {
@@ -1020,6 +1173,53 @@ func memberUpdatePermsBulk() tool.Tool {
 			return out, nil
 		},
 	})
+}
+
+// bulkNotYourPrincipals refuses a delegate's member.update_perms_bulk whole
+// when the role takes in its principal's seat, or another of its
+// principal's agents' (notYourPrincipals), before any seat is locked: all
+// of them change, or none.
+func bulkNotYourPrincipals(ctx context.Context, q dbq.Querier, g *domain.Member, now time.Time, in MemberUpdatePermsBulkIn) error {
+	if g.PrincipalID == nil {
+		return nil
+	}
+	reaches, err := q.PrincipalsSeatsHaveRole(ctx, dbq.PrincipalsSeatsHaveRoleParams{CourseID: in.CourseID,
+		Role: in.Role, Now: &now, ExceptMemberID: g.ID, PrincipalMemberID: *g.PrincipalID})
+	if err != nil {
+		return err
+	}
+	if reaches {
+		return errNotYourPrincipal("every seat with the role " + in.Role +
+			" includes your principal's, or another agent of your principal's; change the others one by one")
+	}
+	return nil
+}
+
+// bulkChange is member.update_perms_bulk's change to one seat, id, by
+// granter g: the seat, and what it would hold, held to grantBy, a refusal
+// naming the seat (member_id).
+func bulkChange(ctx context.Context, q dbq.Querier, g *domain.Member, in MemberUpdatePermsBulkIn, id uuid.UUID) (dbq.GetMemberInCourseRow, shape, error) {
+	m, err := q.GetMemberInCourse(ctx, dbq.GetMemberInCourseParams{ID: id, CourseID: in.CourseID})
+	if err != nil {
+		return m, shape{}, err
+	}
+	// Asked of the role as a whole first (bulkNotYourPrincipals); asked
+	// again of each seat, in case one was seated meanwhile.
+	if p := g.PrincipalID; p != nil && (m.ID == *p || (m.PrincipalMemberID != nil && *m.PrincipalMemberID == *p)) {
+		return m, shape{}, errNotYourPrincipal("every seat with the role "+in.Role+
+			" includes your principal's, or another agent of your principal's").With("member_id", m.ID)
+	}
+	before, after, err := permsChanged(ctx, q, m, in.Perms)
+	if err != nil {
+		return m, after, err
+	}
+	if err := grantBy(ctx, q, g, before, after); err != nil {
+		if e, ok := apperr.As(err); ok {
+			return m, after, e.With("member_id", id)
+		}
+		return m, after, err
+	}
+	return m, after, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -1066,20 +1266,32 @@ func memberSetRole() tool.Tool {
 			"(not_your_principal). Giving a seat the role it has changes nothing and says so (changed: false).",
 		Kind: tool.Write, Gate: manageMembers,
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/members/{member_id}/role"},
+		Check: func(in MemberSetRoleIn) error {
+			if !validRoles[in.Role] {
+				return errRole
+			}
+			return nil
+		},
 		Resolve: func(ctx context.Context, q dbq.Querier, in MemberSetRoleIn) (tool.Target, error) {
 			return resolveMember(ctx, q, in.CourseID, in.MemberID)
 		},
-		Execute: func(ctx context.Context, ec *tool.ExecCtx, in MemberSetRoleIn) (MemberSetRoleOut, error) {
-			if !validRoles[in.Role] {
-				return MemberSetRoleOut{}, apperr.Invalid("role must be student, instructor, ta, observer or assistant")
+		Validate: func(ctx context.Context, q dbq.Querier, g *domain.Member, now time.Time, in MemberSetRoleIn) error {
+			m, err := otherSeat(ctx, q, g, now, in.CourseID, in.MemberID)
+			if err != nil {
+				return err
 			}
+			if m.PrincipalMemberID != nil {
+				return errDelegateSeatRole
+			}
+			return nil
+		},
+		Execute: func(ctx context.Context, ec *tool.ExecCtx, in MemberSetRoleIn) (MemberSetRoleOut, error) {
 			m, err := loadOther(ctx, ec, in.CourseID, in.MemberID)
 			if err != nil {
 				return MemberSetRoleOut{}, err
 			}
 			if m.PrincipalMemberID != nil {
-				return MemberSetRoleOut{}, apperr.Precondition("a delegate's seat is its principal's agent, always assistant, and on no roster").
-					With("reason", "delegate_seat")
+				return MemberSetRoleOut{}, errDelegateSeatRole
 			}
 			out := MemberSetRoleOut{Role: in.Role, Previous: m.Role, Changed: m.Role != in.Role}
 			if !out.Changed {
@@ -1094,3 +1306,6 @@ func memberSetRole() tool.Tool {
 		},
 	})
 }
+
+var errDelegateSeatRole = apperr.Precondition("a delegate's seat is its principal's agent, always assistant, and on no roster").
+	With("reason", "delegate_seat")
