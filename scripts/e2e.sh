@@ -39,8 +39,10 @@
 # assistant be refused at once an assignment worth less than nothing,
 # nothing of it recorded, and propose one he may make without anyone's
 # confirmation, which he then approves himself, as he does its next version of the
-# lecture, with its files. Then he shows a join link: a new student
-# registers through it, a registered one joins, and once he revokes it, it
+# lecture, with its files. He deletes a quiz for good, with the student's
+# work on it, its grade and its brief, confirming what goes with it, which an
+# agent of his may not, and its files leave the store at the next sweep.
+# Then he shows a join link: a new student registers through it, a registered one joins, and once he revokes it, it
 # seats nobody; his agents, without member_invite, make none. Then a student
 # with no email registers through another link with her student number as
 # her login ID, and signs in with it; forgets her password, and he gives her
@@ -441,8 +443,8 @@ call 403 POST "$C/documents/$DOC/versions/$VERSION/text" "$YUKI" "{\"file_id\":\
 step "Sato uploads a lecture of three files and its text; Yuki reads it and downloads each file under its name; the service transcribes each file on its own, for Yuki to read file by file"
 # docfile CONTENT_TYPE FILE [FILENAME] — a URL for a file of Sato's material, named FILENAME if given, and
 # FILE PUT to it; its token left in $UPLOAD.
-docfile() {
-  local q="kind=material&content_type=$1" put
+docfile() { # CONTENT_TYPE FILE [FILENAME] [ACTOR] [KIND] → UPLOAD
+  local q="kind=${5:-material}&content_type=$1" put
   [ -z "${3:-}" ] || q="$q&filename=$3"
   call 200 GET "$C/upload-url?$q" "${4:-$SATO}"
   put=$(json "$WORK/body" 'd["result"]["upload_url"]')
@@ -998,6 +1000,76 @@ call 200 GET "$C/documents/$W3" "$SATO"
   fail "the approved version: $(cat "$WORK/body")"
 curl -sf -o "$WORK/got" "$(json "$WORK/body" 'd["result"]["version"]["files"][0]["download_url"]')" || fail "download of the approved slides"
 cmp -s "$WORK/week3-slides.pdf" "$WORK/got" || fail "the approved slides are not what the assistant uploaded"
+
+step "Sato deletes Quiz 1 for good, with Yuki's work, its grade and its brief, once a confirmation of less than there is has been refused; an agent of his may not delete work, and deletes an empty quiz at once; Quiz 1 is not found afterwards, saying it was deleted, Yuki is told, and its files leave the store at the next sweep"
+printf '%%PDF-1.7 quiz one' >"$WORK/quiz.pdf"
+docfile application/pdf "$WORK/quiz.pdf" quiz.pdf "$SATO" instructions
+call 200 POST "$C/documents" "$SATO" "{\"kind\":\"instructions\",\"title\":\"Quiz 1 brief\",\"files\":[{\"upload_token\":\"$UPLOAD\"}]}"
+QUIZ_BRIEF=$(json "$WORK/body" 'd["result"]["document_id"]')
+call 200 POST "$C/documents/$QUIZ_BRIEF/publish" "$SATO"
+call 200 POST "$C/assignments" "$SATO" "{\"title\":\"Quiz 1\",\"points_possible\":10,\"component_id\":\"$BUCKET\",\"instructions_document_id\":\"$QUIZ_BRIEF\"}"
+QUIZ=$(json "$WORK/body" 'd["result"]["id"]')
+call 200 POST "$C/assignments/$QUIZ/publish" "$SATO"
+call 200 POST "$C/submissions" "$YUKI" "{\"assignment_id\":\"$QUIZ\",\"body\":\"My answers.\"}"
+QUIZ_SUB=$(json "$WORK/body" 'd["result"]["submission_id"]')
+printf '%%PDF-1.7 my answers' >"$WORK/answers.pdf"
+docfile application/pdf "$WORK/answers.pdf" answers.pdf "$YUKI" submission
+call 200 POST "$C/documents" "$YUKI" "{\"kind\":\"submission\",\"submission_id\":\"$QUIZ_SUB\",\"title\":\"answers.pdf\",\"files\":[{\"upload_token\":\"$UPLOAD\"}]}"
+call 200 POST "$C/submissions/$QUIZ_SUB/submit" "$YUKI"
+call 200 POST "$C/grades" "$SATO" "{\"submission_id\":\"$QUIZ_SUB\",\"score\":8}"
+QUIZ_GRADE=$(json "$WORK/body" 'd["result"]["grade_id"]')
+call 200 POST "$C/grades/post" "$SATO" "{\"grade_ids\":[\"$QUIZ_GRADE\"]}"
+call 200 GET "$C/assignments/$QUIZ/delete-preview" "$SATO"
+[ "$(json "$WORK/body" '[d["result"]["counts"][k] for k in ("submissions", "handed_in", "grades", "posted", "files", "documents")], d["result"]["counts"]["totals"] > 0, [x["title"] for x in d["result"]["documents"]], d["result"]["refusal"]')" = \
+  "[1, 1, 1, 1, 2, 1] True ['Quiz 1 brief'] None" ] || fail "what goes with Quiz 1: $(cat "$WORK/body")"
+CONFIRM=$(json "$WORK/body" 'json.dumps(d["result"]["counts"])')
+# An agent of Sato's that writes assignments without anyone's confirmation,
+# over the whole class: refused on Yuki's work, recorded.
+call 200 POST /v1/me/agents "$SATO" '{"display_name":"Tidier","hosting":"mcp"}'
+TIDIER_ID=$(json "$WORK/body" 'd["result"]["actor_id"]')
+call 200 POST "/v1/me/agents/$TIDIER_ID/tokens" "$SATO" '{"label":"e2e"}'
+TIDIER=$(json "$WORK/body" 'd["result"]["token"]')
+call 200 POST "$C/delegates" "$SATO" "{\"actor_id\":\"$TIDIER_ID\",\"perms\":{\"assignment_write\":\"autonomous\"},\"student_scope\":\"all\"}"
+call 200 GET "$C/assignments/$QUIZ/delete-preview" "$TIDIER"
+[ "$(json "$WORK/body" 'd["result"]["refusal"]')" = people_only ] || fail "the agent's preview of Quiz 1: $(cat "$WORK/body")"
+call 403 POST "$C/assignments/$QUIZ/delete" "$TIDIER" "{\"confirm\":$CONFIRM}"
+[ "$(reason)" = people_only ] || fail "the agent deleting work refused, but not as people_only: $(cat "$WORK/body")"
+# Sato, shown less than there is, is refused, and told what there is.
+call 409 POST "$C/assignments/$QUIZ/delete" "$SATO" \
+  '{"confirm":{"submissions":0,"handed_in":0,"drafts":0,"missing":0,"grades":0,"posted":0,"files":0,"documents":0,"proposals":0,"totals":0}}'
+[ "$(json "$WORK/body" 'd["error"]["details"]["reason"], d["error"]["details"]["current"]["submissions"]')" = "confirm_stale 1" ] ||
+  fail "a stale confirmation: $(cat "$WORK/body")"
+KEY=delete-quiz-1 call 200 POST "$C/assignments/$QUIZ/delete" "$SATO" "{\"confirm\":$CONFIRM}"
+[ "$(json "$WORK/body" 'd["result"]["deleted"], d["result"]["title"], d["result"]["removed"]["files"], d["result"]["files_queued"]')" = "True Quiz 1 2 2" ] ||
+  fail "Sato deleting Quiz 1: $(cat "$WORK/body")"
+DELETION=$(json "$WORK/body" 'd["action_id"]')
+KEY=delete-quiz-1 call 200 POST "$C/assignments/$QUIZ/delete" "$SATO" "{\"confirm\":$CONFIRM}" # a retry: what it did, nothing done twice
+[ "$(json "$WORK/body" 'd["replayed"], d["action_id"]')" = "True $DELETION" ] || fail "the deletion retried: $(cat "$WORK/body")"
+call 404 GET "$C/assignments/$QUIZ" "$YUKI"
+[ "$(json "$WORK/body" 'd["error"]["details"]["reason"], d["error"]["details"]["by_action_id"]')" = "deleted $DELETION" ] ||
+  fail "Quiz 1 afterwards: $(cat "$WORK/body")"
+call 200 GET "$C/events" "$YUKI"
+[ "$(json "$WORK/body" '[e["payload"]["title"] for e in d["result"]["events"] if e["type"] == "assignment.deleted"]')" = "['Quiz 1']" ] ||
+  fail "Yuki is not told Quiz 1 was deleted: $(cat "$WORK/body")"
+call 200 GET "$C/grades" "$YUKI"
+json "$WORK/body" '"'"$QUIZ_GRADE"'" not in [g["id"] for g in d["result"]["grades"]] or sys.exit("Yuki still has her grade on Quiz 1")' >/dev/null
+# Quiz 2, which nobody has started on, the agent deletes at once.
+call 200 POST "$C/assignments" "$SATO" '{"title":"Quiz 2","points_possible":10}'
+QUIZ2=$(json "$WORK/body" 'd["result"]["id"]')
+call 200 GET "$C/assignments/$QUIZ2/delete-preview" "$TIDIER"
+call 200 POST "$C/assignments/$QUIZ2/delete" "$TIDIER" "{\"confirm\":$(json "$WORK/body" 'json.dumps(d["result"]["counts"])')}"
+# The files wait in the store, queued, until the sweep: the server sweeps
+# as it starts.
+KEYS=$(psql -X -At -d "$DB" -c "SELECT storage_key FROM blob_deletion WHERE queued_by_action_id = '$DELETION' ORDER BY 1")
+[ "$(printf '%s\n' "$KEYS" | grep -c .)" = 2 ] || fail "Quiz 1's files are not queued: $KEYS"
+for k in $KEYS; do [ -f "$WORK/blobs/$k" ] || fail "$k left the store before the sweep"; done
+kill "$SERVER_PID"
+wait "$SERVER_PID" 2>/dev/null || true
+start
+for _ in $(seq 1 100); do [ "$(psql -X -At -d "$DB" -c 'SELECT count(*) FROM blob_deletion')" = 0 ] && break; sleep 0.1; done
+[ "$(psql -X -At -d "$DB" -c 'SELECT count(*) FROM blob_deletion')" = 0 ] || fail "the sweep left files queued"
+for k in $KEYS; do [ ! -e "$WORK/blobs/$k" ] || fail "$k is still in the store after the sweep"; done
+echo "  Quiz 1's two files left the store at the sweep"
 
 step "Wei, who has no email, registers through a new link with her student number as her login ID, and signs in with it"
 call 200 POST "$C/join-links" "$SATO" '{}'
