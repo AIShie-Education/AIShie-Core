@@ -45,6 +45,7 @@ type Querier interface {
 	// written there meanwhile.
 	ClaimTexts(ctx context.Context, arg ClaimTextsParams) ([]ClaimTextsRow, error)
 	ClearAssignmentScope(ctx context.Context, memberID uuid.UUID) error
+	// Of the submitted and feedback files deleted with it.
 	ClearPublishedVersions(ctx context.Context, ids []uuid.UUID) error
 	ClearStudentScope(ctx context.Context, memberID uuid.UUID) error
 	CloseConversation(ctx context.Context, arg CloseConversationParams) (int64, error)
@@ -124,8 +125,10 @@ type Querier interface {
 	// fails closed.
 	DeleteAssignmentScopes(ctx context.Context, assignmentID uuid.UUID) (int64, error)
 	DeleteBlobDeletion(ctx context.Context, storageKey string) error
-	// Purged first, so that their files and texts are gone (document_version_guarded).
+	// Of the submitted and feedback files deleted with it, purged first, so
+	// that their files and texts are gone (document_version_guarded).
 	DeleteDocumentVersions(ctx context.Context, documentIds []uuid.UUID) (int64, error)
+	// The submitted and feedback files deleted with it (document_kept).
 	DeleteDocuments(ctx context.Context, ids []uuid.UUID) (int64, error)
 	// The respondent's answer is posted, or proposed, the question it answers
 	// withdrawn (the opener's newest message retracted), or the conversation
@@ -532,12 +535,14 @@ type Querier interface {
 	// The course's actions about the assignment, other than its deletions
 	// (assignment.delete), that no deletion has emptied yet: those whose target
 	// is the assignment, one of its submissions or of the grades given on them,
-	// or one of the documents deleted or purged with it (document_ids); those
-	// whose arguments name one of them as assignment_id, submission_id,
-	// grade_id or document_id, or whose result does as id, submission_id,
-	// grade_id or document_id (what a call made: assignment.create's id,
-	// submission.create's submission_id); and, at any remove, the decisions,
-	// reviews, withdrawals and expiries of those (target_type action).
+	// or one of the submitted and feedback files deleted with it (document_ids,
+	// never its instructions or rubric, which stay, with what was done to
+	// them); those whose arguments name one of them as assignment_id,
+	// submission_id, grade_id or document_id, or whose result does as id,
+	// submission_id, grade_id or document_id (what a call made:
+	// assignment.create's id, submission.create's submission_id); and, at any
+	// remove, the decisions, reviews, withdrawals and expiries of those
+	// (target_type action).
 	ListActionsAboutAssignment(ctx context.Context, arg ListActionsAboutAssignmentParams) ([]ListActionsAboutAssignmentRow, error)
 	// exclude_types leaves out whole action types: a chat's messages from a
 	// list of what one has done, say.
@@ -561,21 +566,6 @@ type Querier interface {
 	// name. Ended ones only with include_removed. With the names of who holds
 	// each, who made it and who ended it.
 	ListAppointments(ctx context.Context, arg ListAppointmentsParams) ([]ListAppointmentsRow, error)
-	// The instructions and the rubric the assignment names, not purged, each
-	// saying whether it is the assignment's own, to be purged with it. Naming a
-	// document does not make it so: whoever writes assignments may name any of
-	// the course's, and purging is for administrators (document.purge). Nor does
-	// work that whoever writes and grades assignments can make for it alone: a
-	// 'missing' placeholder, which whoever grades records, work handed in for a
-	// student by someone else (submission_write), and a grade given on either.
-	// It is the assignment's own where work a student handed in to it, from
-	// their own seat or by an agent of theirs, as the action that handed it in
-	// says, pinned one of its versions as the instructions, or a grade given on
-	// that work pins one as the rubric; and nothing else uses it: no other
-	// assignment names it, no submission to another assignment pins one of its
-	// versions, and no grade but those given on the assignment's own
-	// submissions pins one. Any other is kept as it is.
-	ListAssignmentDocuments(ctx context.Context, assignmentID uuid.UUID) ([]ListAssignmentDocumentsRow, error)
 	// Every current student of the course whom the caller's student scope
 	// reaches, with their latest attempt at one assignment, if any: the students
 	// who have not started are rows too, with no submission. The caller's
@@ -782,7 +772,7 @@ type Querier interface {
 	ListOrphanedSeats(ctx context.Context, arg ListOrphanedSeatsParams) ([]ListOrphanedSeatsRow, error)
 	// The submitted files of every submission to the assignment, and the
 	// feedback files of every grade given on them, superseded ones included, in
-	// id order: deleted with it.
+	// id order: deleted with it, and the only documents that are.
 	ListOwnedDocumentsOfAssignment(ctx context.Context, assignmentID uuid.UUID) ([]uuid.UUID, error)
 	ListPendingReviewActions(ctx context.Context, arg ListPendingReviewActionsParams) ([]Action, error)
 	// The review queue likewise: their own agents' actions under review.
@@ -907,7 +897,10 @@ type Querier interface {
 	// the course stands and by assignment.delete under the locks it takes, and
 	// the statements that take it. The guards of migration 0030 let these
 	// deletes through only in the transaction that has written the
-	// assignment's row of assignment_deletion.
+	// assignment's row of assignment_deletion. The only documents they reach are
+	// the submitted files of its submissions and the feedback files of the
+	// grades given on them: its instructions and rubric, and the course's
+	// material, are left as they are.
 	// The assignment, held FOR UPDATE for the whole of its deletion: it holds off
 	// the KEY SHARE that a new submission's foreign key takes, and an event's or
 	// a scope row's, and ShareAssignments; a grader's FOR SHARE
@@ -1284,8 +1277,9 @@ type Querier interface {
 	// versions: archiving it waits for the write, or the write sees it.
 	ShareDocument(ctx context.Context, id uuid.UUID) (string, error)
 	// A document an assignment is about to name as its instructions or rubric,
-	// held FOR KEY SHARE until the assignment is written: a purge, which locks
-	// it FOR UPDATE, waits, or is waited for and seen.
+	// held FOR KEY SHARE until the assignment is written: a purge
+	// (document.purge), which locks it FOR UPDATE, waits, or is waited for and
+	// seen.
 	ShareDocumentInCourse(ctx context.Context, arg ShareDocumentInCourseParams) (ShareDocumentInCourseRow, error)
 	// KEY SHARE on the given seats, in id order: what taking them before some
 	// other lock looks like, where that lock would otherwise be held while one of

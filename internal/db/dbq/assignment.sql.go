@@ -335,6 +335,32 @@ func (q *Queries) ShareAssignments(ctx context.Context, ids []uuid.UUID) ([]uuid
 	return items, nil
 }
 
+const shareDocumentInCourse = `-- name: ShareDocumentInCourse :one
+SELECT id, kind, purged_at FROM document WHERE id = $1 AND course_id = $2 FOR KEY SHARE
+`
+
+type ShareDocumentInCourseParams struct {
+	ID       uuid.UUID
+	CourseID uuid.UUID
+}
+
+type ShareDocumentInCourseRow struct {
+	ID       uuid.UUID
+	Kind     string
+	PurgedAt *time.Time
+}
+
+// A document an assignment is about to name as its instructions or rubric,
+// held FOR KEY SHARE until the assignment is written: a purge
+// (document.purge), which locks it FOR UPDATE, waits, or is waited for and
+// seen.
+func (q *Queries) ShareDocumentInCourse(ctx context.Context, arg ShareDocumentInCourseParams) (ShareDocumentInCourseRow, error) {
+	row := q.db.QueryRow(ctx, shareDocumentInCourse, arg.ID, arg.CourseID)
+	var i ShareDocumentInCourseRow
+	err := row.Scan(&i.ID, &i.Kind, &i.PurgedAt)
+	return i, err
+}
+
 const unpublishAssignment = `-- name: UnpublishAssignment :execrows
 UPDATE assignment SET published_at = NULL WHERE id = $1 AND published_at IS NOT NULL
 `

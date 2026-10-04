@@ -2361,14 +2361,26 @@ SELECT pg_temp.ok('a version is purged: its sources stay, naming no file', $q$
 -- 30c1 Yuki's hand-in to HW9 · 30c2 Ken's draft of it · 30c3 Yuki's hand-in to HW10
 -- 30d1 Yuki's grade on HW9, regraded by 30d2 · 30d3 hers on HW10 · 30d4 Ken's Assignments total, naming HW9
 -- 30e1 Yuki's file, its version 30f1 of one Word file, 30fd01 · 30e2 feedback on 30d2, its version 30f2 of text
+-- 30e3 HW9's instructions, its version 30f3, which Yuki's hand-in pins · 30e6 HW9's rubric, its version 30f6, which 30d2 pins
+-- 30e4 Yuki's file handed in to HW10, its version 30f4 · 30e5 feedback on Ken's total 30d4, its version 30f5
 -- 30b1 the grades' action · 30b2 the deletion's · 30b3 the grader's proposal to grade Ken's draft
 SELECT pg_temp.ok('an assignment with work, grades, files, events, a scope row and a total naming it', $q$
-    INSERT INTO assignment (id, course_id, component_id, title, points_possible, published_at) VALUES
-        ('00000000-0000-0000-0000-0000000030a1', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000000062', 'HW9', 10, now()),
-        ('00000000-0000-0000-0000-0000000030a2', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000000062', 'HW10', 10, now());
-    INSERT INTO submission (id, assignment_id, course_id, student_member_id, state, submitted_at) VALUES
-        ('00000000-0000-0000-0000-0000000030c1', '00000000-0000-0000-0000-0000000030a1', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000000052', 'submitted', now()),
-        ('00000000-0000-0000-0000-0000000030c3', '00000000-0000-0000-0000-0000000030a2', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000000052', 'submitted', now());
+    INSERT INTO document (id, course_id, kind, title) VALUES
+        ('00000000-0000-0000-0000-0000000030e3', '00000000-0000-0000-0000-000000000041', 'instructions', 'HW9 brief'),
+        ('00000000-0000-0000-0000-0000000030e6', '00000000-0000-0000-0000-000000000041', 'rubric', 'HW9 rubric');
+    INSERT INTO document_version (id, document_id, seq, body_md, author_member_id) VALUES
+        ('00000000-0000-0000-0000-0000000030f3', '00000000-0000-0000-0000-0000000030e3', 1, 'Write.', '00000000-0000-0000-0000-000000000051'),
+        ('00000000-0000-0000-0000-0000000030f6', '00000000-0000-0000-0000-0000000030e6', 1, 'Marks.', '00000000-0000-0000-0000-000000000051');
+    UPDATE document SET published_version_id = '00000000-0000-0000-0000-0000000030f3' WHERE id = '00000000-0000-0000-0000-0000000030e3';
+    UPDATE document SET published_version_id = '00000000-0000-0000-0000-0000000030f6' WHERE id = '00000000-0000-0000-0000-0000000030e6';
+    INSERT INTO assignment (id, course_id, component_id, title, points_possible, published_at, instructions_document_id, rubric_document_id) VALUES
+        ('00000000-0000-0000-0000-0000000030a1', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000000062', 'HW9', 10, now(),
+         '00000000-0000-0000-0000-0000000030e3', '00000000-0000-0000-0000-0000000030e6'),
+        ('00000000-0000-0000-0000-0000000030a2', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000000062', 'HW10', 10, now(), NULL, NULL);
+    INSERT INTO submission (id, assignment_id, course_id, student_member_id, state, submitted_at, instructions_version_id) VALUES
+        ('00000000-0000-0000-0000-0000000030c1', '00000000-0000-0000-0000-0000000030a1', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000000052', 'submitted', now(),
+         '00000000-0000-0000-0000-0000000030f3'),
+        ('00000000-0000-0000-0000-0000000030c3', '00000000-0000-0000-0000-0000000030a2', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000000052', 'submitted', now(), NULL);
     INSERT INTO submission (id, assignment_id, course_id, student_member_id) VALUES ('00000000-0000-0000-0000-0000000030c2', '00000000-0000-0000-0000-0000000030a1', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000000058');
     INSERT INTO action (id, actor_id, course_id, member_id, action_type, target_type, target_id, payload, idempotency_key,
                         authz_result, status, executed_at) VALUES
@@ -2377,10 +2389,10 @@ SELECT pg_temp.ok('an assignment with work, grades, files, events, a scope row a
         ('00000000-0000-0000-0000-0000000030b3', '00000000-0000-0000-0000-000000000036', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000000053', 'grade.submit', 'submission', '00000000-0000-0000-0000-0000000030c2', '{"score": 1}', 'k-30b3', 'confirm_required',
          'proposed', NULL);
     INSERT INTO grade (id, student_member_id, submission_id, origin, score, grader_member_id, created_by_action_id, posted_at,
-                       posted_by_member_id, superseded_by) VALUES
-        ('00000000-0000-0000-0000-0000000030d1', '00000000-0000-0000-0000-000000000052', '00000000-0000-0000-0000-0000000030c1', 'entered', 7, '00000000-0000-0000-0000-000000000051', '00000000-0000-0000-0000-0000000030b1', now(), '00000000-0000-0000-0000-000000000051', '00000000-0000-0000-0000-0000000030d2'),
-        ('00000000-0000-0000-0000-0000000030d2', '00000000-0000-0000-0000-000000000052', '00000000-0000-0000-0000-0000000030c1', 'entered', 8, '00000000-0000-0000-0000-000000000051', '00000000-0000-0000-0000-0000000030b1', now(), '00000000-0000-0000-0000-000000000051', NULL),
-        ('00000000-0000-0000-0000-0000000030d3', '00000000-0000-0000-0000-000000000052', '00000000-0000-0000-0000-0000000030c3', 'entered', 9, '00000000-0000-0000-0000-000000000051', '00000000-0000-0000-0000-0000000030b1', now(), '00000000-0000-0000-0000-000000000051', NULL);
+                       posted_by_member_id, superseded_by, rubric_version_id) VALUES
+        ('00000000-0000-0000-0000-0000000030d1', '00000000-0000-0000-0000-000000000052', '00000000-0000-0000-0000-0000000030c1', 'entered', 7, '00000000-0000-0000-0000-000000000051', '00000000-0000-0000-0000-0000000030b1', now(), '00000000-0000-0000-0000-000000000051', '00000000-0000-0000-0000-0000000030d2', '00000000-0000-0000-0000-0000000030f6'),
+        ('00000000-0000-0000-0000-0000000030d2', '00000000-0000-0000-0000-000000000052', '00000000-0000-0000-0000-0000000030c1', 'entered', 8, '00000000-0000-0000-0000-000000000051', '00000000-0000-0000-0000-0000000030b1', now(), '00000000-0000-0000-0000-000000000051', NULL, '00000000-0000-0000-0000-0000000030f6'),
+        ('00000000-0000-0000-0000-0000000030d3', '00000000-0000-0000-0000-000000000052', '00000000-0000-0000-0000-0000000030c3', 'entered', 9, '00000000-0000-0000-0000-000000000051', '00000000-0000-0000-0000-0000000030b1', now(), '00000000-0000-0000-0000-000000000051', NULL, NULL);
     INSERT INTO grade (id, student_member_id, component_id, origin, score, breakdown, grader_member_id, created_by_action_id, posted_at,
                        posted_by_member_id)
     VALUES ('00000000-0000-0000-0000-0000000030d4', '00000000-0000-0000-0000-000000000058', '00000000-0000-0000-0000-000000000062', 'computed', 80,
@@ -2388,10 +2400,14 @@ SELECT pg_temp.ok('an assignment with work, grades, files, events, a scope row a
             '00000000-0000-0000-0000-000000000051', '00000000-0000-0000-0000-0000000030b1', now(), '00000000-0000-0000-0000-000000000051');
     INSERT INTO document (id, course_id, kind, title, submission_id, grade_id) VALUES
         ('00000000-0000-0000-0000-0000000030e1', '00000000-0000-0000-0000-000000000041', 'submission', 'essay.docx', '00000000-0000-0000-0000-0000000030c1', NULL),
-        ('00000000-0000-0000-0000-0000000030e2', '00000000-0000-0000-0000-000000000041', 'feedback', 'Notes', NULL, '00000000-0000-0000-0000-0000000030d2');
+        ('00000000-0000-0000-0000-0000000030e2', '00000000-0000-0000-0000-000000000041', 'feedback', 'Notes', NULL, '00000000-0000-0000-0000-0000000030d2'),
+        ('00000000-0000-0000-0000-0000000030e4', '00000000-0000-0000-0000-000000000041', 'submission', 'notes.md', '00000000-0000-0000-0000-0000000030c3', NULL),
+        ('00000000-0000-0000-0000-0000000030e5', '00000000-0000-0000-0000-000000000041', 'feedback', 'On your total', NULL, '00000000-0000-0000-0000-0000000030d4');
     INSERT INTO document_version (id, document_id, seq, body_md, author_member_id) VALUES
         ('00000000-0000-0000-0000-0000000030f1', '00000000-0000-0000-0000-0000000030e1', 1, NULL, '00000000-0000-0000-0000-000000000052'),
-        ('00000000-0000-0000-0000-0000000030f2', '00000000-0000-0000-0000-0000000030e2', 1, 'Well argued.', '00000000-0000-0000-0000-000000000051');
+        ('00000000-0000-0000-0000-0000000030f2', '00000000-0000-0000-0000-0000000030e2', 1, 'Well argued.', '00000000-0000-0000-0000-000000000051'),
+        ('00000000-0000-0000-0000-0000000030f4', '00000000-0000-0000-0000-0000000030e4', 1, 'My notes.', '00000000-0000-0000-0000-000000000052'),
+        ('00000000-0000-0000-0000-0000000030f5', '00000000-0000-0000-0000-0000000030e5', 1, 'Steady work.', '00000000-0000-0000-0000-000000000051');
     INSERT INTO document_version_file (id, version_id, document_id, position, filename, storage_key, content_type, byte_size)
     VALUES ('00000000-0000-0000-0000-00000030fd01', '00000000-0000-0000-0000-0000000030f1', '00000000-0000-0000-0000-0000000030e1', 1, 'essay.docx', 'k/30fd01',
             'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 10);
@@ -2431,25 +2447,88 @@ SELECT pg_temp.fails('nor are assignments truncated', '23001', $q$
     TRUNCATE assignment CASCADE $q$);
 SELECT pg_temp.fails('a deletion is whole by commit: the assignment it records is gone', '23514', $q$
     INSERT INTO assignment_deletion (assignment_id, course_id, title, was_published, action_id, deleted_by_actor_id,
-                                     deleted_by_member_id, deleted_at, submissions, grades, files, documents, proposals, totals)
-    VALUES ('00000000-0000-0000-0000-0000000030a1', '00000000-0000-0000-0000-000000000041', 'HW9', true, '00000000-0000-0000-0000-0000000030b2', '00000000-0000-0000-0000-000000000034', '00000000-0000-0000-0000-000000000051', now(), 2, 1, 1, 0, 1, 1) $q$);
+                                     deleted_by_member_id, deleted_at, submissions, grades, files, proposals, totals)
+    VALUES ('00000000-0000-0000-0000-0000000030a1', '00000000-0000-0000-0000-000000000041', 'HW9', true, '00000000-0000-0000-0000-0000000030b2', '00000000-0000-0000-0000-000000000034', '00000000-0000-0000-0000-000000000051', now(), 2, 1, 1, 1, 1) $q$);
 SELECT pg_temp.fails('it counts nothing below zero', '23514', $q$
     INSERT INTO assignment_deletion (assignment_id, course_id, title, was_published, action_id, deleted_by_actor_id,
-                                     deleted_by_member_id, deleted_at, submissions, grades, files, documents, proposals, totals)
-    VALUES ('00000000-0000-0000-0000-0000000030a1', '00000000-0000-0000-0000-000000000041', 'HW9', true, '00000000-0000-0000-0000-0000000030b2', '00000000-0000-0000-0000-000000000034', '00000000-0000-0000-0000-000000000051', now(), -1, 1, 1, 0, 1, 1) $q$);
+                                     deleted_by_member_id, deleted_at, submissions, grades, files, proposals, totals)
+    VALUES ('00000000-0000-0000-0000-0000000030a1', '00000000-0000-0000-0000-000000000041', 'HW9', true, '00000000-0000-0000-0000-0000000030b2', '00000000-0000-0000-0000-000000000034', '00000000-0000-0000-0000-000000000051', now(), -1, 1, 1, 1, 1) $q$);
 SELECT pg_temp.fails('and it is made from a seat of its course', '23503', $q$
     INSERT INTO assignment_deletion (assignment_id, course_id, title, was_published, action_id, deleted_by_actor_id,
-                                     deleted_by_member_id, deleted_at, submissions, grades, files, documents, proposals, totals)
-    VALUES ('00000000-0000-0000-0000-0000000030a1', '00000000-0000-0000-0000-000000000041', 'HW9', true, '00000000-0000-0000-0000-0000000030b2', '00000000-0000-0000-0000-000000000034', '00000000-0000-0000-0000-000000000055', now(), 2, 1, 1, 0, 1, 1) $q$);
+                                     deleted_by_member_id, deleted_at, submissions, grades, files, proposals, totals)
+    VALUES ('00000000-0000-0000-0000-0000000030a1', '00000000-0000-0000-0000-000000000041', 'HW9', true, '00000000-0000-0000-0000-0000000030b2', '00000000-0000-0000-0000-000000000034', '00000000-0000-0000-0000-000000000055', now(), 2, 1, 1, 1, 1) $q$);
 SELECT pg_temp.fails('a deletion opens the path for its own assignment alone', '23001', $q$
     INSERT INTO assignment_deletion (assignment_id, course_id, title, was_published, action_id, deleted_by_actor_id,
-                                     deleted_by_member_id, deleted_at, submissions, grades, files, documents, proposals, totals)
-    VALUES ('00000000-0000-0000-0000-0000000030a1', '00000000-0000-0000-0000-000000000041', 'HW9', true, '00000000-0000-0000-0000-0000000030b2', '00000000-0000-0000-0000-000000000034', '00000000-0000-0000-0000-000000000051', now(), 2, 1, 1, 0, 1, 1);
+                                     deleted_by_member_id, deleted_at, submissions, grades, files, proposals, totals)
+    VALUES ('00000000-0000-0000-0000-0000000030a1', '00000000-0000-0000-0000-000000000041', 'HW9', true, '00000000-0000-0000-0000-0000000030b2', '00000000-0000-0000-0000-000000000034', '00000000-0000-0000-0000-000000000051', now(), 2, 1, 1, 1, 1);
     DELETE FROM grade WHERE id = '00000000-0000-0000-0000-0000000030d3' $q$);
+SELECT pg_temp.fails('nor for any document but the files of its work: not the course''s material', '23001', $q$
+    INSERT INTO assignment_deletion (assignment_id, course_id, title, was_published, action_id, deleted_by_actor_id,
+                                     deleted_by_member_id, deleted_at, submissions, grades, files, proposals, totals)
+    VALUES ('00000000-0000-0000-0000-0000000030a1', '00000000-0000-0000-0000-000000000041', 'HW9', true, '00000000-0000-0000-0000-0000000030b2', '00000000-0000-0000-0000-000000000034', '00000000-0000-0000-0000-000000000051', now(), 2, 1, 1, 1, 1);
+    DELETE FROM document WHERE id = '00000000-0000-0000-0000-0000000000e1' $q$);
+SELECT pg_temp.fails('nor a version of its instructions, purged', '23001', $q$
+    INSERT INTO assignment_deletion (assignment_id, course_id, title, was_published, action_id, deleted_by_actor_id,
+                                     deleted_by_member_id, deleted_at, submissions, grades, files, proposals, totals)
+    VALUES ('00000000-0000-0000-0000-0000000030a1', '00000000-0000-0000-0000-000000000041', 'HW9', true, '00000000-0000-0000-0000-0000000030b2', '00000000-0000-0000-0000-000000000034', '00000000-0000-0000-0000-000000000051', now(), 2, 1, 1, 1, 1);
+    UPDATE document_version SET body_md = NULL, purged_at = now(), purged_by_actor_id = '00000000-0000-0000-0000-000000000034', purge_reason = 'assignment_deleted'
+    WHERE id = '00000000-0000-0000-0000-0000000030f3';
+    DELETE FROM document_version WHERE id = '00000000-0000-0000-0000-0000000030f3' $q$);
+SELECT pg_temp.fails('nor its instructions', '23001', $q$
+    INSERT INTO assignment_deletion (assignment_id, course_id, title, was_published, action_id, deleted_by_actor_id,
+                                     deleted_by_member_id, deleted_at, submissions, grades, files, proposals, totals)
+    VALUES ('00000000-0000-0000-0000-0000000030a1', '00000000-0000-0000-0000-000000000041', 'HW9', true, '00000000-0000-0000-0000-0000000030b2', '00000000-0000-0000-0000-000000000034', '00000000-0000-0000-0000-000000000051', now(), 2, 1, 1, 1, 1);
+    DELETE FROM document WHERE id = '00000000-0000-0000-0000-0000000030e3' $q$);
+SELECT pg_temp.fails('nor its rubric', '23001', $q$
+    INSERT INTO assignment_deletion (assignment_id, course_id, title, was_published, action_id, deleted_by_actor_id,
+                                     deleted_by_member_id, deleted_at, submissions, grades, files, proposals, totals)
+    VALUES ('00000000-0000-0000-0000-0000000030a1', '00000000-0000-0000-0000-000000000041', 'HW9', true, '00000000-0000-0000-0000-0000000030b2', '00000000-0000-0000-0000-000000000034', '00000000-0000-0000-0000-000000000051', now(), 2, 1, 1, 1, 1);
+    DELETE FROM document WHERE id = '00000000-0000-0000-0000-0000000030e6' $q$);
+SELECT pg_temp.fails('nor a version of a file handed in to another assignment, purged', '23001', $q$
+    INSERT INTO assignment_deletion (assignment_id, course_id, title, was_published, action_id, deleted_by_actor_id,
+                                     deleted_by_member_id, deleted_at, submissions, grades, files, proposals, totals)
+    VALUES ('00000000-0000-0000-0000-0000000030a1', '00000000-0000-0000-0000-000000000041', 'HW9', true, '00000000-0000-0000-0000-0000000030b2', '00000000-0000-0000-0000-000000000034', '00000000-0000-0000-0000-000000000051', now(), 2, 1, 1, 1, 1);
+    UPDATE document_version SET body_md = NULL, purged_at = now(), purged_by_actor_id = '00000000-0000-0000-0000-000000000034', purge_reason = 'assignment_deleted'
+    WHERE id = '00000000-0000-0000-0000-0000000030f4';
+    DELETE FROM document_version WHERE id = '00000000-0000-0000-0000-0000000030f4' $q$);
+SELECT pg_temp.fails('nor that file', '23001', $q$
+    INSERT INTO assignment_deletion (assignment_id, course_id, title, was_published, action_id, deleted_by_actor_id,
+                                     deleted_by_member_id, deleted_at, submissions, grades, files, proposals, totals)
+    VALUES ('00000000-0000-0000-0000-0000000030a1', '00000000-0000-0000-0000-000000000041', 'HW9', true, '00000000-0000-0000-0000-0000000030b2', '00000000-0000-0000-0000-000000000034', '00000000-0000-0000-0000-000000000051', now(), 2, 1, 1, 1, 1);
+    DELETE FROM document WHERE id = '00000000-0000-0000-0000-0000000030e4' $q$);
+SELECT pg_temp.fails('nor feedback on a total', '23001', $q$
+    INSERT INTO assignment_deletion (assignment_id, course_id, title, was_published, action_id, deleted_by_actor_id,
+                                     deleted_by_member_id, deleted_at, submissions, grades, files, proposals, totals)
+    VALUES ('00000000-0000-0000-0000-0000000030a1', '00000000-0000-0000-0000-000000000041', 'HW9', true, '00000000-0000-0000-0000-0000000030b2', '00000000-0000-0000-0000-000000000034', '00000000-0000-0000-0000-000000000051', now(), 2, 1, 1, 1, 1);
+    DELETE FROM document WHERE id = '00000000-0000-0000-0000-0000000030e5' $q$);
+SELECT pg_temp.fails('nor is its instructions made into a file of its work', '23001', $q$
+    INSERT INTO assignment_deletion (assignment_id, course_id, title, was_published, action_id, deleted_by_actor_id,
+                                     deleted_by_member_id, deleted_at, submissions, grades, files, proposals, totals)
+    VALUES ('00000000-0000-0000-0000-0000000030a1', '00000000-0000-0000-0000-000000000041', 'HW9', true, '00000000-0000-0000-0000-0000000030b2', '00000000-0000-0000-0000-000000000034', '00000000-0000-0000-0000-000000000051', now(), 2, 1, 1, 1, 1);
+    UPDATE document SET kind = 'submission', submission_id = '00000000-0000-0000-0000-0000000030c1' WHERE id = '00000000-0000-0000-0000-0000000030e3' $q$);
+SELECT pg_temp.fails('nor a file of other work moved into it', '23001', $q$
+    INSERT INTO assignment_deletion (assignment_id, course_id, title, was_published, action_id, deleted_by_actor_id,
+                                     deleted_by_member_id, deleted_at, submissions, grades, files, proposals, totals)
+    VALUES ('00000000-0000-0000-0000-0000000030a1', '00000000-0000-0000-0000-000000000041', 'HW9', true, '00000000-0000-0000-0000-0000000030b2', '00000000-0000-0000-0000-000000000034', '00000000-0000-0000-0000-000000000051', now(), 2, 1, 1, 1, 1);
+    UPDATE document SET submission_id = '00000000-0000-0000-0000-0000000030c1' WHERE id = '00000000-0000-0000-0000-0000000030e4' $q$);
+SELECT pg_temp.fails('nor feedback on a total moved to a grade of its work', '23001', $q$
+    INSERT INTO assignment_deletion (assignment_id, course_id, title, was_published, action_id, deleted_by_actor_id,
+                                     deleted_by_member_id, deleted_at, submissions, grades, files, proposals, totals)
+    VALUES ('00000000-0000-0000-0000-0000000030a1', '00000000-0000-0000-0000-000000000041', 'HW9', true, '00000000-0000-0000-0000-0000000030b2', '00000000-0000-0000-0000-000000000034', '00000000-0000-0000-0000-000000000051', now(), 2, 1, 1, 1, 1);
+    UPDATE document SET grade_id = '00000000-0000-0000-0000-0000000030d2' WHERE id = '00000000-0000-0000-0000-0000000030e5' $q$);
+SELECT pg_temp.fails('a document keeps its kind, outside a deletion too', '23001', $q$
+    UPDATE document SET kind = 'rubric' WHERE id = '00000000-0000-0000-0000-0000000000e1' $q$);
+SELECT pg_temp.fails('and its course', '23001', $q$
+    UPDATE document SET course_id = '00000000-0000-0000-0000-000000000042' WHERE id = '00000000-0000-0000-0000-0000000000e1' $q$);
+SELECT pg_temp.fails('and feedback goes to no grade on other work', '23001', $q$
+    UPDATE document SET grade_id = '00000000-0000-0000-0000-0000000030d3' WHERE id = '00000000-0000-0000-0000-0000000030e2' $q$);
+SELECT pg_temp.ok('but to the grade that replaces its own, on the same submission', $q$
+    UPDATE document SET grade_id = '00000000-0000-0000-0000-0000000030d1' WHERE id = '00000000-0000-0000-0000-0000000030e2';
+    UPDATE document SET grade_id = '00000000-0000-0000-0000-0000000030d2' WHERE id = '00000000-0000-0000-0000-0000000030e2' $q$);
 SELECT pg_temp.ok('deleted for good in one transaction with its record: its work, grades, files, events and scope rows go, and the rest stays', $q$
     INSERT INTO assignment_deletion (assignment_id, course_id, title, was_published, action_id, deleted_by_actor_id,
-                                     deleted_by_member_id, deleted_at, submissions, grades, files, documents, proposals, totals)
-    VALUES ('00000000-0000-0000-0000-0000000030a1', '00000000-0000-0000-0000-000000000041', 'HW9', true, '00000000-0000-0000-0000-0000000030b2', '00000000-0000-0000-0000-000000000034', '00000000-0000-0000-0000-000000000051', now(), 2, 1, 1, 0, 1, 1);
+                                     deleted_by_member_id, deleted_at, submissions, grades, files, proposals, totals)
+    VALUES ('00000000-0000-0000-0000-0000000030a1', '00000000-0000-0000-0000-000000000041', 'HW9', true, '00000000-0000-0000-0000-0000000030b2', '00000000-0000-0000-0000-000000000034', '00000000-0000-0000-0000-000000000051', now(), 2, 1, 1, 1, 1);
     INSERT INTO blob_deletion (storage_key, course_id, queued_by_action_id, queued_at, next_try_at)
     VALUES ('k/30fd01', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-0000000030b2', now(), now());
     UPDATE action SET status = 'cancelled' WHERE id = '00000000-0000-0000-0000-0000000030b3';
@@ -2482,6 +2561,10 @@ SELECT pg_temp.ok('deleted for good in one transaction with its record: its work
            OR NOT EXISTS (SELECT 1 FROM assignment WHERE id = '00000000-0000-0000-0000-0000000030a2')
            OR NOT EXISTS (SELECT 1 FROM action WHERE id = '00000000-0000-0000-0000-0000000030b1' AND payload = '{}' AND redacted_by_action_id = '00000000-0000-0000-0000-0000000030b2') THEN
             RAISE EXCEPTION 'what was not the assignment''s went with it, or its record';
+        END IF;
+        IF (SELECT count(*) FROM document WHERE id IN ('00000000-0000-0000-0000-0000000030e3', '00000000-0000-0000-0000-0000000030e6', '00000000-0000-0000-0000-0000000030e4', '00000000-0000-0000-0000-0000000030e5') AND purged_at IS NULL AND status = 'active') <> 4
+           OR (SELECT count(*) FROM document_version WHERE id IN ('00000000-0000-0000-0000-0000000030f3', '00000000-0000-0000-0000-0000000030f6', '00000000-0000-0000-0000-0000000030f4', '00000000-0000-0000-0000-0000000030f5') AND purged_at IS NULL AND body_md IS NOT NULL) <> 4 THEN
+            RAISE EXCEPTION 'its instructions or rubric, or a file of other work, went with it or was purged';
         END IF;
     END $chk$ $q$);
 SELECT pg_temp.fails('a deletion is kept as it was recorded', '23001', $q$

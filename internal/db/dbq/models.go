@@ -127,7 +127,6 @@ type AssignmentDeletion struct {
 	Submissions       int32
 	Grades            int32
 	Files             int32
-	Documents         int32
 	Proposals         int32
 	Totals            int32
 }

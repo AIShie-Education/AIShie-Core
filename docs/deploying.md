@@ -693,17 +693,21 @@ Run all of these as root on the server.
   them as the call named them.
 - **Migration 0030, deleting an assignment for good:** whoever writes
   assignments may delete one for good, with every submission to it, their
-  files and the grades given on them, the instructions and rubric its work
-  was done under purged where nothing else uses them, after reading what goes
+  files and the grades given on them, after reading what goes
   (`assignment.delete_preview`, `assignment.delete`; docs/schema.md §2.5,
-  An assignment is deleted for good). The migration adds the record of
+  An assignment is deleted for good). Its instructions and rubric are left
+  in the course as they are: purging a course's document stays an
+  administrator's (`document.purge`). The migration adds the record of
   deletions (`assignment_deletion`), a queue of files to delete from the
   store (`blob_deletion`) and a mark on the actions a deletion empties
   (`action.redacted_by_action_id`), and opens the database's guards to a
   deletion alone: from then on a submission, a grade, a submitted or
   feedback file and its versions, an event filed under an assignment and an
   assignment are deleted only by one, and a draft submission no longer by
-  anyone either, which 0001 allowed and nothing did. It changes no row.
+  anyone either, which 0001 allowed and nothing did. Material, instructions
+  and rubrics are never deleted, and a document's kind, course and
+  submission no longer change, nor a feedback file move to a grade on other
+  work: nothing in either release changes them. It changes no row.
   - **Its indexes.** It makes nine indexes, so that a deletion does not read
     whole tables once for each row it takes: on `event`, `grade` (two),
     `submission`, `action`, `assignment` (two) and

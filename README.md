@@ -68,11 +68,11 @@ In place so far:
   worked out, and final grades' treating ungraded work as zero undone;
 - an assignment deleted for good by whoever writes assignments, once they
   have read what goes with it and confirmed it: its submissions, their files
-  and its grades go, the instructions and rubric its students' work was done
-  under are purged where nothing else uses them, the proposals about it are
-  cancelled and the totals it counted in worked out again; an agent deletes
-  only one nobody has started on; one record of it stays, in the action log
-  and in the feed, and its files leave the store at the next sweep.
+  and its grades go, its instructions and rubric are left in the course as
+  they are, the proposals about it are cancelled and the totals it counted
+  in worked out again; an agent deletes only one nobody has started on; one
+  record of it stays, in the action log and in the feed, and its work's
+  files leave the store at the next sweep.
 
 `make e2e` runs the real binary against a scratch database and, with nothing
 but `curl`, builds the worked example from docs/schema.md §5 from an empty
@@ -101,9 +101,10 @@ revoked; a student with no email registers through another with her student
 number as her login ID and signs in with it, is given a temporary password by
 the instructor when she forgets hers, and sets her own before anything else,
 and the instructor cannot reset a TA's; the instructor deletes a quiz for
-good, with the student's work on it, its grade and its brief, once a
-confirmation of less than there is has been refused, which an agent of his
-may not, and its files leave the store at the next sweep; root exports the course's
+good, with the student's work on it and its grade, once a confirmation of
+less than there is has been refused, which an agent of his may not, its
+brief staying in the course as it was, and the work's file leaves the store
+at the next sweep; root exports the course's
 conversations for audit and downloads both files, the question the student
 withdrew in them, marked, a department's administrator exports only what is
 beneath her, and the instructor, the student and an agent are refused; Core vouches for the instructor to an agent runtime, and the

@@ -63,10 +63,10 @@ BEGIN
          $q$DELETE FROM assignment WHERE id = '00000000-0000-0000-0020-000000000071'$q$),
         ('nor is the assignment recorded as deleted while it stands',
          $q$INSERT INTO assignment_deletion (assignment_id, course_id, title, was_published, action_id, deleted_by_actor_id,
-                                             deleted_by_member_id, deleted_at, submissions, grades, files, documents, proposals, totals)
+                                             deleted_by_member_id, deleted_at, submissions, grades, files, proposals, totals)
             VALUES ('00000000-0000-0000-0020-000000000071', '00000000-0000-0000-0018-000000000041', 'Care plan', true,
                     '00000000-0000-0000-0030-0000000000b1', '00000000-0000-0000-0018-000000000031',
-                    '00000000-0000-0000-0018-000000000051', now(), 1, 0, 2, 0, 0, 0);
+                    '00000000-0000-0000-0018-000000000051', now(), 1, 0, 2, 0, 0);
             SET CONSTRAINTS assignment_deletion_whole IMMEDIATE$q$)
     LOOP
         BEGIN
@@ -81,10 +81,10 @@ SET CONSTRAINTS ALL DEFERRED;
 
 -- The deletion, as assignment.delete makes it.
 INSERT INTO assignment_deletion (assignment_id, course_id, title, was_published, action_id, deleted_by_actor_id,
-                                 deleted_by_member_id, deleted_at, submissions, grades, files, documents, proposals, totals)
+                                 deleted_by_member_id, deleted_at, submissions, grades, files, proposals, totals)
 VALUES ('00000000-0000-0000-0020-000000000071', '00000000-0000-0000-0018-000000000041', 'Care plan', true,
         '00000000-0000-0000-0030-0000000000b1', '00000000-0000-0000-0018-000000000031', '00000000-0000-0000-0018-000000000051',
-        now(), 1, 0, 2, 0, 0, 0);
+        now(), 1, 0, 2, 0, 0);
 INSERT INTO blob_deletion (storage_key, course_id, queued_by_action_id, queued_at, next_try_at)
 SELECT f.storage_key, '00000000-0000-0000-0018-000000000041', '00000000-0000-0000-0030-0000000000b1', now(), now()
 FROM document_version_file f

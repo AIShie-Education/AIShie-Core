@@ -164,9 +164,9 @@ func (b AssignmentBody) check() error {
 // A document a is to name that before, the assignment as it was, did not
 // (all of them, for one being created) is held FOR KEY SHARE until the
 // assignment is written, and refused if it was purged (document_purged):
-// a purge, document.purge's or an assignment's deletion's, locks it FOR
-// UPDATE, and either waits for this or is seen by it, so that no
-// assignment comes to name a tombstone. One the assignment named already
+// an administrator's purge (document.purge) locks it FOR UPDATE, and either
+// waits for this or is seen by it, so that no assignment comes to name a
+// tombstone. One the assignment named already
 // is read as before: an assignment whose instructions an administrator
 // purged is still changed as ever.
 func checkAssignment(ctx context.Context, q dbq.Querier, courseID uuid.UUID, before, a dbq.GetAssignmentInCourseRow, lock bool) error {

@@ -3,7 +3,10 @@
 -- the course stands and by assignment.delete under the locks it takes, and
 -- the statements that take it. The guards of migration 0030 let these
 -- deletes through only in the transaction that has written the
--- assignment's row of assignment_deletion.
+-- assignment's row of assignment_deletion. The only documents they reach are
+-- the submitted files of its submissions and the feedback files of the
+-- grades given on them: its instructions and rubric, and the course's
+-- material, are left as they are.
 
 -- name: LockAssignmentForDelete :one
 -- The assignment, held FOR UPDATE for the whole of its deletion: it holds off
@@ -58,57 +61,14 @@ SELECT DISTINCT s.student_member_id FROM submission s WHERE s.assignment_id = $1
 -- name: ListOwnedDocumentsOfAssignment :many
 -- The submitted files of every submission to the assignment, and the
 -- feedback files of every grade given on them, superseded ones included, in
--- id order: deleted with it.
+-- id order: deleted with it, and the only documents that are.
 SELECT d.id
 FROM document d
-WHERE d.submission_id IN (SELECT s.id FROM submission s WHERE s.assignment_id = sqlc.arg(assignment_id))
-   OR d.grade_id IN (SELECT g.id FROM grade g JOIN submission s ON s.id = g.submission_id
-                     WHERE s.assignment_id = sqlc.arg(assignment_id))
-ORDER BY d.id;
-
--- name: ListAssignmentDocuments :many
--- The instructions and the rubric the assignment names, not purged, each
--- saying whether it is the assignment's own, to be purged with it. Naming a
--- document does not make it so: whoever writes assignments may name any of
--- the course's, and purging is for administrators (document.purge). Nor does
--- work that whoever writes and grades assignments can make for it alone: a
--- 'missing' placeholder, which whoever grades records, work handed in for a
--- student by someone else (submission_write), and a grade given on either.
--- It is the assignment's own where work a student handed in to it, from
--- their own seat or by an agent of theirs, as the action that handed it in
--- says, pinned one of its versions as the instructions, or a grade given on
--- that work pins one as the rubric; and nothing else uses it: no other
--- assignment names it, no submission to another assignment pins one of its
--- versions, and no grade but those given on the assignment's own
--- submissions pins one. Any other is kept as it is.
-WITH handed_in (id, instructions_version_id) AS (
-    SELECT s.id, s.instructions_version_id
-    FROM submission s
-    WHERE s.assignment_id = sqlc.arg(assignment_id) AND s.state IN ('submitted', 'late')
-      AND EXISTS (SELECT 1 FROM action x JOIN course_member c ON c.id = x.member_id
-                  WHERE x.target_type = 'submission' AND x.target_id = s.id
-                    AND x.action_type = 'submission.submit' AND x.status = 'executed'
-                    AND s.student_member_id IN (c.id, c.principal_member_id))
-)
-SELECT d.id, d.kind, d.title,
-       ((EXISTS (SELECT 1 FROM handed_in h JOIN document_version v ON v.id = h.instructions_version_id
-                 WHERE v.document_id = d.id)
-         OR EXISTS (SELECT 1 FROM grade g
-                    JOIN handed_in h ON h.id = g.submission_id
-                    JOIN document_version v ON v.id = g.rubric_version_id
-                    WHERE v.document_id = d.id))
-        AND NOT EXISTS (SELECT 1 FROM assignment o
-                        WHERE o.id <> a.id AND (o.instructions_document_id = d.id OR o.rubric_document_id = d.id))
-        AND NOT EXISTS (SELECT 1 FROM submission s JOIN document_version v ON v.id = s.instructions_version_id
-                        WHERE v.document_id = d.id AND s.assignment_id <> a.id)
-        AND NOT EXISTS (SELECT 1 FROM grade g JOIN document_version v ON v.id = g.rubric_version_id
-                        WHERE v.document_id = d.id
-                          AND (g.submission_id IS NULL
-                               OR g.submission_id NOT IN (SELECT s.id FROM submission s WHERE s.assignment_id = a.id))))::bool
-           AS own
-FROM assignment a
-JOIN document d ON d.id = a.instructions_document_id OR d.id = a.rubric_document_id
-WHERE a.id = sqlc.arg(assignment_id) AND d.purged_at IS NULL
+WHERE (d.kind = 'submission'
+       AND d.submission_id IN (SELECT s.id FROM submission s WHERE s.assignment_id = sqlc.arg(assignment_id)))
+   OR (d.kind = 'feedback'
+       AND d.grade_id IN (SELECT g.id FROM grade g JOIN submission s ON s.id = g.submission_id
+                          WHERE s.assignment_id = sqlc.arg(assignment_id)))
 ORDER BY d.id;
 
 -- name: ListFileKeysOfDocuments :many
@@ -129,12 +89,14 @@ ORDER BY r.storage_key;
 -- The course's actions about the assignment, other than its deletions
 -- (assignment.delete), that no deletion has emptied yet: those whose target
 -- is the assignment, one of its submissions or of the grades given on them,
--- or one of the documents deleted or purged with it (document_ids); those
--- whose arguments name one of them as assignment_id, submission_id,
--- grade_id or document_id, or whose result does as id, submission_id,
--- grade_id or document_id (what a call made: assignment.create's id,
--- submission.create's submission_id); and, at any remove, the decisions,
--- reviews, withdrawals and expiries of those (target_type action).
+-- or one of the submitted and feedback files deleted with it (document_ids,
+-- never its instructions or rubric, which stay, with what was done to
+-- them); those whose arguments name one of them as assignment_id,
+-- submission_id, grade_id or document_id, or whose result does as id,
+-- submission_id, grade_id or document_id (what a call made:
+-- assignment.create's id, submission.create's submission_id); and, at any
+-- remove, the decisions, reviews, withdrawals and expiries of those
+-- (target_type action).
 WITH RECURSIVE about (id) AS (
     SELECT sqlc.arg(assignment_id)::uuid
   UNION
@@ -175,10 +137,10 @@ ORDER BY a.id;
 -- the guarded path (assignment_being_deleted) for this assignment, in this
 -- transaction.
 INSERT INTO assignment_deletion (assignment_id, course_id, title, was_published, action_id, deleted_by_actor_id,
-                                 deleted_by_member_id, deleted_at, submissions, grades, files, documents, proposals, totals)
+                                 deleted_by_member_id, deleted_at, submissions, grades, files, proposals, totals)
 VALUES (sqlc.arg(assignment_id), sqlc.arg(course_id), sqlc.arg(title), sqlc.arg(was_published), sqlc.arg(action_id),
         sqlc.arg(deleted_by_actor_id), sqlc.arg(deleted_by_member_id), sqlc.arg(deleted_at), sqlc.arg(submissions),
-        sqlc.arg(grades), sqlc.arg(files), sqlc.arg(documents), sqlc.arg(proposals), sqlc.arg(totals));
+        sqlc.arg(grades), sqlc.arg(files), sqlc.arg(proposals), sqlc.arg(totals));
 
 -- name: QueueBlobDeletions :execrows
 -- Files to delete from the store once this transaction has committed, due
@@ -199,13 +161,16 @@ SET payload = '{}'::jsonb, result = NULL,
 WHERE id = ANY(sqlc.arg(ids)::uuid[]) AND redacted_by_action_id IS NULL;
 
 -- name: ClearPublishedVersions :exec
+-- Of the submitted and feedback files deleted with it.
 UPDATE document SET published_version_id = NULL WHERE id = ANY(sqlc.arg(ids)::uuid[]) AND published_version_id IS NOT NULL;
 
 -- name: DeleteDocumentVersions :execrows
--- Purged first, so that their files and texts are gone (document_version_guarded).
+-- Of the submitted and feedback files deleted with it, purged first, so
+-- that their files and texts are gone (document_version_guarded).
 DELETE FROM document_version WHERE document_id = ANY(sqlc.arg(document_ids)::uuid[]);
 
 -- name: DeleteDocuments :execrows
+-- The submitted and feedback files deleted with it (document_kept).
 DELETE FROM document WHERE id = ANY(sqlc.arg(ids)::uuid[]);
 
 -- name: DeleteGradesOfAssignment :execrows
@@ -247,12 +212,6 @@ WHERE c.id = g.component_id AND c.course_id = sqlc.arg(course_id)::uuid AND g.or
 -- name: ListActionsRedactedAt :many
 -- When each of these actions, the deletions that emptied others, ran.
 SELECT id, executed_at FROM action WHERE id = ANY(sqlc.arg(ids)::uuid[]);
-
--- name: ShareDocumentInCourse :one
--- A document an assignment is about to name as its instructions or rubric,
--- held FOR KEY SHARE until the assignment is written: a purge, which locks
--- it FOR UPDATE, waits, or is waited for and seen.
-SELECT id, kind, purged_at FROM document WHERE id = $1 AND course_id = $2 FOR KEY SHARE;
 
 -- ---------------------------------------------------------------------------
 -- The queue of files to delete from the store (the job runner)

@@ -23,12 +23,11 @@ import (
 // only one nobody has started on; what pointed at it reads that it was
 // deleted, and the totals it counted in are worked out again without it.
 
-// deletionCounts is confirm with every count n, naming no document to
-// purge: what a caller who was shown at least as much as there is, and no
-// document, sends.
+// deletionCounts is confirm with every count n: what a caller who was shown
+// at least as much as there is sends.
 func deletionCounts(n int) m {
 	return m{"submissions": n, "handed_in": n, "drafts": n, "missing": n, "grades": n, "posted": n, "files": n,
-		"documents": n, "proposals": n, "totals": n, "document_ids": []uuid.UUID{}}
+		"proposals": n, "totals": n}
 }
 
 // deletionPreview is what deleting assignment would take, as actor is shown it.
@@ -74,9 +73,9 @@ func refusal(p tools.AssignmentDeletePreviewOut) string {
 
 // HW3, with its brief, Yuki's work with its file graded and posted with
 // feedback, Ken's work waiting for the grader's proposal, and Aoi's draft,
-// goes for good, with everything that is its; what is not its stays, what
-// pointed at it says it was deleted, and the totals it counted in are worked
-// out again without it.
+// goes for good, with everything that is its; what is not its stays, its
+// brief among it, what pointed at it says it was deleted, and the totals it
+// counted in are worked out again without it.
 func TestAnAssignmentIsDeletedForGoodWithEverythingThatIsIts(t *testing.T) {
 	b := build(t)
 	ctx := context.Background()
@@ -118,31 +117,36 @@ func TestAnAssignmentIsDeletedForGoodWithEverythingThatIsIts(t *testing.T) {
 	conv, question := b.open(t, b.yuki, b.tutorM, "What does the brief ask for?")
 	answer := b.sourced(t, conv, question, []m{{"document_id": brief.DocumentID, "version_id": *brief.VersionID, "file_id": brief.FileIDs[0]}})
 
-	// The files that are HW3's, as the store holds them.
-	var keys []string
-	rows, err := b.Pool.Query(ctx, `SELECT f.storage_key FROM document_version_file f JOIN document d ON d.id = f.document_id
-		WHERE d.id = $1 OR d.submission_id = $2 OR d.grade_id = $3 ORDER BY 1`, brief.DocumentID, yukiWork, yukiGrade)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for rows.Next() {
-		var k string
-		if err := rows.Scan(&k); err != nil {
+	// The files that are HW3's work's, and its brief's, as the store holds
+	// them.
+	keysOf := func(where string, args ...any) []string {
+		t.Helper()
+		var keys []string
+		rows, err := b.Pool.Query(ctx, `SELECT f.storage_key FROM document_version_file f JOIN document d ON d.id = f.document_id
+			WHERE `+where+` ORDER BY 1`, args...)
+		if err != nil {
 			t.Fatal(err)
 		}
-		keys = append(keys, k)
+		for rows.Next() {
+			var k string
+			if err := rows.Scan(&k); err != nil {
+				t.Fatal(err)
+			}
+			keys = append(keys, k)
+		}
+		rows.Close()
+		return keys
 	}
-	rows.Close()
-	if len(keys) != 3 {
-		t.Fatalf("HW3's files: %v", keys)
+	keys, briefKeys := keysOf(`d.submission_id = $1 OR d.grade_id = $2`, yukiWork, yukiGrade), keysOf(`d.id = $1`, brief.DocumentID)
+	if len(keys) != 2 || len(briefKeys) != 1 {
+		t.Fatalf("HW3's work's files: %v; its brief's: %v", keys, briefKeys)
 	}
+	briefBefore, _ := b.courseDocuments(t)
 
 	// What goes, counted, never named; Sato may.
 	p := b.deletionPreview(t, b.sato, b.hw3)
-	want := tools.DeletionCounts{Submissions: 3, HandedIn: 2, Drafts: 1, Grades: 1, Posted: 1, Files: 3, Documents: 1, Proposals: 1, Totals: 1,
-		DocumentIDs: []uuid.UUID{brief.DocumentID}}
-	if !reflect.DeepEqual(p.Counts, want) || p.Title != "HW3" || !p.Published || !p.InGrade || p.Refusal != nil ||
-		len(p.Documents) != 1 || p.Documents[0].ID != brief.DocumentID || p.Documents[0].Kind != "instructions" || len(p.KeptDocuments) != 0 {
+	want := tools.DeletionCounts{Submissions: 3, HandedIn: 2, Drafts: 1, Grades: 1, Posted: 1, Files: 2, Proposals: 1, Totals: 1}
+	if !reflect.DeepEqual(p.Counts, want) || p.Title != "HW3" || !p.Published || !p.InGrade || p.Refusal != nil {
 		t.Fatalf("the preview: %+v, want counts %+v", p, want)
 	}
 
@@ -153,8 +157,8 @@ func TestAnAssignmentIsDeletedForGoodWithEverythingThatIsIts(t *testing.T) {
 	deletion := *out.ActionID
 	got := testkit.Result[tools.AssignmentDeleteOut](t, out)
 	if !got.Deleted || got.AssignmentID != b.hw3 || got.Title != "HW3" ||
-		got.Removed != (tools.DeletionRemoved{Submissions: 3, Grades: 1, Files: 3, Documents: 1}) ||
-		got.ProposalsCancelled != 1 || got.FilesQueued != 3 || got.Snapshots != 2 {
+		got.Removed != (tools.DeletionRemoved{Submissions: 3, Grades: 1, Files: 2}) ||
+		got.ProposalsCancelled != 1 || got.FilesQueued != 2 || got.Snapshots != 2 {
 		t.Fatalf("what the deletion says it did: %+v", got)
 	}
 
@@ -175,37 +179,37 @@ func TestAnAssignmentIsDeletedForGoodWithEverythingThatIsIts(t *testing.T) {
 			t.Errorf("%s: %d rows left", what, n)
 		}
 	}
-	// Its files are queued to leave the store, and are there until they do.
+	// Its work's files are queued to leave the store, and are there until
+	// they do.
 	if n := b.Count(`SELECT count(*) FROM blob_deletion WHERE storage_key = ANY($1) AND queued_by_action_id = $2 AND attempts = 0`,
-		keys, deletion); n != 3 {
-		t.Fatalf("%d of its 3 files are queued", n)
+		keys, deletion); n != 2 {
+		t.Fatalf("%d of its work's 2 files are queued", n)
 	}
-	for _, k := range keys {
+	for _, k := range append(slices.Clone(keys), briefKeys...) {
 		if _, err := b.Blob.Stat(ctx, k); err != nil {
-			t.Fatalf("a queued file went before the job runner took it: %v", err)
+			t.Fatalf("a file went before the job runner took it: %v", err)
 		}
 	}
 
-	// Its brief is purged, by Sato, saying why, and an answer that relied on
-	// it says only that a source was removed, to everyone; the source's row
-	// stays, naming no file.
-	if n := b.Count(`SELECT count(*) FROM document WHERE id = $1 AND status = 'archived' AND purged_at IS NOT NULL
-		AND purged_by_actor_id = $2 AND purge_reason = 'assignment_deleted'`, brief.DocumentID, b.sato); n != 1 {
-		t.Fatal("the brief is not purged as a purge would leave it")
+	// Its brief is left in the course as it was: neither purged nor
+	// archived, its file neither queued nor gone, and what was done to it
+	// not emptied. An answer that relied on it reads as before, and an
+	// export made now names its file.
+	if after, _ := b.courseDocuments(t); after != briefBefore {
+		t.Fatalf("deleting HW3 changed the course's documents:\nbefore %s\nafter  %s", briefBefore, after)
 	}
-	if n := b.Count(`SELECT count(*) FROM document_version WHERE document_id = $1 AND (purged_at IS NULL OR body_md IS NOT NULL)`,
-		brief.DocumentID); n != 0 {
-		t.Fatal("a version of the brief is not purged")
+	if n := b.Count(`SELECT count(*) FROM blob_deletion WHERE storage_key = ANY($1)`, briefKeys); n != 0 {
+		t.Fatal("the brief's file is queued to leave the store")
 	}
-	for who, reader := range map[string]uuid.UUID{"Yuki": b.yuki, "Sato": b.sato} {
-		if got := b.sourcesOf(t, reader, conv, answer); len(got) != 1 || !got[0].Restricted || got[0].DocumentID != nil {
-			t.Fatalf("%s reads the answer's source as %+v", who, got)
-		}
+	if n := b.Count(`SELECT count(*) FROM action WHERE target_id = $1 OR result->>'document_id' = $1::text`, brief.DocumentID); n == 0 ||
+		b.Count(`SELECT count(*) FROM action WHERE (target_id = $1 OR result->>'document_id' = $1::text) AND redacted_by_action_id IS NOT NULL`,
+			brief.DocumentID) != 0 {
+		t.Fatal("what was done to the brief was emptied with HW3")
 	}
-	if n := b.Count(`SELECT count(*) FROM conversation_message_source WHERE message_id = $1 AND file_id IS NULL`, answer); n != 1 {
-		t.Fatal("the answer's source is not kept, naming no file")
+	if got := b.sourcesOf(t, b.sato, conv, answer); len(got) != 1 || got[0].Restricted || got[0].DocumentID == nil ||
+		*got[0].DocumentID != brief.DocumentID || got[0].FileID == nil || *got[0].FileID != brief.FileIDs[0] {
+		t.Fatalf("Sato reads the answer's source as %+v", got)
 	}
-	// An export made now says so too.
 	a := &audit{built: b}
 	exportOut, _ := a.export(t, b.Root, m{"course_id": b.course})
 	x := a.files(t, exportOut)
@@ -215,7 +219,7 @@ func TestAnAssignmentIsDeletedForGoodWithEverythingThatIsIts(t *testing.T) {
 			sources = list(obj(msg)["sources"])
 		}
 	}
-	if len(sources) != 1 || obj(sources[0])["purged"] != true || obj(sources[0])["file_id"] != nil {
+	if len(sources) != 1 || obj(sources[0])["purged"] == true || obj(sources[0])["file_id"] != brief.FileIDs[0].String() {
 		t.Fatalf("the answer's source, exported after the deletion: %v", sources)
 	}
 
@@ -245,7 +249,7 @@ func TestAnAssignmentIsDeletedForGoodWithEverythingThatIsIts(t *testing.T) {
 		}
 	}
 	for what, typ := range map[string]string{"HW3's creation": "assignment.create", "its publishing": "assignment.publish",
-		"its update": "assignment.update", "the brief's creation": "document.create", "Yuki's draft": "submission.create",
+		"its update": "assignment.update", "Yuki's file": "document.create", "Yuki's draft": "submission.create",
 		"her hand-in": "submission.submit", "the post": "grade.post"} {
 		if n := b.Count(`SELECT count(*) FROM action WHERE course_id = $1 AND action_type = $2 AND redacted_by_action_id = $3`,
 			b.course, typ, deletion); n == 0 {
@@ -255,7 +259,7 @@ func TestAnAssignmentIsDeletedForGoodWithEverythingThatIsIts(t *testing.T) {
 	if n := b.Count(`SELECT count(*) FROM action WHERE action_type LIKE 'conversation.%' AND redacted_by_action_id IS NOT NULL`); n != 0 {
 		t.Fatalf("%d actions of the conversation were emptied", n)
 	}
-	if n := b.Count(`SELECT count(*) FROM action WHERE id = $1 AND redacted_by_action_id IS NULL AND payload->'confirm'->>'files' = '3'
+	if n := b.Count(`SELECT count(*) FROM action WHERE id = $1 AND redacted_by_action_id IS NULL AND payload->'confirm'->>'files' = '2'
 		AND result->>'title' = 'HW3'`, deletion); n != 1 {
 		t.Fatal("the deletion's own action is not kept whole")
 	}
@@ -265,7 +269,7 @@ func TestAnAssignmentIsDeletedForGoodWithEverythingThatIsIts(t *testing.T) {
 	}
 	if n := b.Count(`SELECT count(*) FROM assignment_deletion WHERE assignment_id = $1 AND title = 'HW3' AND was_published
 		AND action_id = $2 AND deleted_by_actor_id = $3 AND deleted_by_member_id = $4 AND submissions = 3 AND grades = 1
-		AND files = 3 AND documents = 1 AND proposals = 1 AND totals = 1`, b.hw3, deletion, b.sato, b.satoM); n != 1 {
+		AND files = 2 AND proposals = 1 AND totals = 1`, b.hw3, deletion, b.sato, b.satoM); n != 1 {
 		t.Fatal("the record of the deletion is not as it went")
 	}
 
@@ -277,8 +281,7 @@ func TestAnAssignmentIsDeletedForGoodWithEverythingThatIsIts(t *testing.T) {
 			if e.Type == "assignment.deleted" {
 				var p map[string]any
 				_ = json.Unmarshal(e.Payload, &p)
-				if e.AssignmentID != nil || *e.SubjectID != b.hw3 || p["title"] != "HW3" || p["submissions"] != nil ||
-					len(list(p["purged_document_ids"])) != 1 || *e.ActionID != deletion {
+				if e.AssignmentID != nil || *e.SubjectID != b.hw3 || p["title"] != "HW3" || len(p) != 1 || *e.ActionID != deletion {
 					t.Fatalf("%s is told %+v %v", who, e, p)
 				}
 				n++
@@ -312,7 +315,7 @@ func TestAnAssignmentIsDeletedForGoodWithEverythingThatIsIts(t *testing.T) {
 	}
 
 	// Asked about again, it was deleted, when and by which action.
-	_, err = b.Call(b.sato, "assignment.get", m{"course_id": b.course, "assignment_id": b.hw3}, "")
+	_, err := b.Call(b.sato, "assignment.get", m{"course_id": b.course, "assignment_id": b.hw3}, "")
 	if e, ok := apperr.As(err); !ok || e.Code != apperr.NotFound || e.Details["reason"] != "deleted" || e.Details["by_action_id"] != deletion {
 		t.Fatalf("assignment.get of HW3: %v", err)
 	}
@@ -356,7 +359,7 @@ func TestWhoDeletesAnAssignment(t *testing.T) {
 	b.delegate(t, b.sato, bot, m{"perms": m{"assignment_write": "autonomous"}, "student_scope": "all"})
 	draft := empty("Draft quiz", false)
 	p := b.deletionPreview(t, bot, draft)
-	if p.Refusal != nil || !reflect.DeepEqual(p.Counts, tools.DeletionCounts{DocumentIDs: []uuid.UUID{}}) {
+	if p.Refusal != nil || !reflect.DeepEqual(p.Counts, tools.DeletionCounts{}) {
 		t.Fatalf("the agent's preview of an empty assignment: %+v", p)
 	}
 	if out := b.MustCall(bot, "assignment.delete", deleteArgs(b, draft, p.Counts), "bot-draft"); out.Status != domain.StatusExecuted {
@@ -493,90 +496,12 @@ func TestADeletionIsHeldToWhatItWasShown(t *testing.T) {
 	if out := b.MustCall(b.sato, "assignment.delete", deleteArgs(b, b.hw3, deletionCounts(9)), "shown-more"); out.Status != domain.StatusExecuted {
 		t.Fatalf("deleting with a confirmation of more than there is: %+v", out)
 	}
-	// Without a confirmation, or one that is not counts, or that does not
-	// say which documents it was shown, it is not a call.
-	unnamed := deletionCounts(9)
-	delete(unnamed, "document_ids")
+	// Without a confirmation, or one that is not counts, it is not a call.
 	for _, args := range []m{{"course_id": b.course, "assignment_id": b.hw4(t)},
 		{"course_id": b.course, "assignment_id": b.hw4(t), "confirm": m{"submissions": 1}},
-		{"course_id": b.course, "assignment_id": b.hw4(t), "confirm": unnamed},
 		{"course_id": b.course, "assignment_id": b.hw4(t), "confirm": deletionCounts(-1)}} {
 		if _, err := b.Call(b.sato, "assignment.delete", args, "malformed-"+uuid.NewString()); !apperr.Is(err, apperr.InvalidArgument) {
 			t.Fatalf("a deletion confirming %v: %v", args["confirm"], err)
-		}
-	}
-}
-
-// The deletion purges no document its caller was not shown, even where the
-// counts are as they were: HW3, pointed after the preview at another brief
-// its work was done under, is refused, and neither brief is purged until
-// the preview is read again; a confirmation naming no document purges none.
-func TestADeletionPurgesNoDocumentItDidNotShow(t *testing.T) {
-	b := build(t)
-	brief := func(title string) uuid.UUID {
-		id := testkit.Result[tools.DocumentCreateOut](t, b.do(t, b.sato, "document.create", m{"course_id": b.course,
-			"kind": "instructions", "title": title, "body_md": title + ", in full."})).DocumentID
-		b.do(t, b.sato, "document.publish", m{"course_id": b.course, "document_id": id})
-		return id
-	}
-	point := func(at uuid.UUID) {
-		b.do(t, b.sato, "assignment.update", m{"course_id": b.course, "assignment_id": b.hw3, "instructions_document_id": at})
-	}
-	// Yuki hands HW3 in under the final exam brief, Ken under HW3's brief:
-	// each is HW3's own.
-	exam, hw3 := brief("Final exam brief"), brief("HW3 brief")
-	point(exam)
-	b.submit(t, b.yuki, "Yuki's essay")
-	point(hw3)
-	b.submit(t, b.ken, "Ken's essay")
-
-	p := b.deletionPreview(t, b.sato, b.hw3)
-	if len(p.Documents) != 1 || p.Documents[0].ID != hw3 || !slices.Equal(p.Counts.DocumentIDs, []uuid.UUID{hw3}) {
-		t.Fatalf("the preview: %+v", p)
-	}
-	point(exam)
-	if now := b.deletionPreview(t, b.sato, b.hw3); now.Counts.Documents != p.Counts.Documents || now.Counts.Files != p.Counts.Files ||
-		!slices.Equal(now.Counts.DocumentIDs, []uuid.UUID{exam}) {
-		t.Fatalf("the preview once HW3 points at the exam brief: %+v", now)
-	}
-	out := b.MustCall(b.sato, "assignment.delete", deleteArgs(b, b.hw3, p.Counts), "shown-hw3-brief")
-	if out.Status != domain.StatusFailed || out.Error.Code != apperr.Conflict || reason(out) != "confirm_stale" {
-		t.Fatalf("deleting it, shown another brief than it would purge: %+v", out)
-	}
-	current, _ := json.Marshal(out.Error.Details["current"])
-	var now tools.DeletionCounts
-	if err := json.Unmarshal(current, &now); err != nil || !slices.Equal(now.DocumentIDs, []uuid.UUID{exam}) {
-		t.Fatalf("the refusal says there is now %s", current)
-	}
-	if n := b.Count(`SELECT count(*) FROM document WHERE id = ANY($1) AND purged_at IS NOT NULL`, []uuid.UUID{exam, hw3}); n != 0 {
-		t.Fatalf("refused, it purged %d briefs all the same", n)
-	}
-	// Read again, it goes, with the brief now shown.
-	p = b.deletionPreview(t, b.sato, b.hw3)
-	if out := b.MustCall(b.sato, "assignment.delete", deleteArgs(b, b.hw3, p.Counts), "shown-exam-brief"); out.Status != domain.StatusExecuted {
-		t.Fatalf("deleting it, shown the exam brief: %+v", out)
-	}
-	for d, purged := range map[uuid.UUID]bool{exam: true, hw3: false} {
-		if n := b.Count(`SELECT count(*) FROM document WHERE id = $1 AND purged_at IS NOT NULL`, d); (n == 1) != purged {
-			t.Errorf("document %s purged: %v, want %v", d, n == 1, purged)
-		}
-	}
-	// A confirmation naming no document, however large its counts, purges
-	// none: it is refused where there is one to purge.
-	hw4 := b.hw4(t)
-	b.do(t, b.sato, "assignment.update", m{"course_id": b.course, "assignment_id": hw4, "instructions_document_id": brief("HW4 brief")})
-	work := testkit.Result[tools.SubmissionCreateOut](t, b.do(t, b.yuki, "submission.create",
-		m{"course_id": b.course, "assignment_id": hw4, "body": "Mine."})).SubmissionID
-	b.do(t, b.yuki, "submission.submit", m{"course_id": b.course, "submission_id": work})
-	if p := b.deletionPreview(t, b.sato, hw4); len(p.Counts.DocumentIDs) != 1 {
-		t.Fatalf("HW4's preview: %+v", p)
-	}
-	for _, ids := range []any{nil, []uuid.UUID{}, []uuid.UUID{exam}} {
-		confirm := deletionCounts(9)
-		confirm["document_ids"] = ids
-		if out := b.MustCall(b.sato, "assignment.delete", deleteArgs(b, hw4, confirm), "unnamed-"+uuid.NewString()); out.Status != domain.StatusFailed ||
-			reason(out) != "confirm_stale" {
-			t.Fatalf("deleting HW4 confirming documents %v: %+v", ids, out)
 		}
 	}
 }
@@ -642,188 +567,265 @@ func TestAnAssignmentTakenOutOfTheGradeLeavesNoScoreInTheTotalsOnceDeleted(t *te
 	}
 }
 
-// Its instructions and rubric, which its work was handed in and graded
-// under, are purged with it only when nothing else uses them: another
-// assignment naming one, or work handed in under one of its versions for
-// another assignment, keeps it as it is.
-func TestOnlyWhatIsAnAssignmentsAloneIsPurgedWithIt(t *testing.T) {
-	b := build(t)
-	doc := func(kind, title string) uuid.UUID {
-		id := testkit.Result[tools.DocumentCreateOut](t, b.do(t, b.sato, "document.create", m{"course_id": b.course, "kind": kind,
-			"title": title, "body_md": title + ", in full."})).DocumentID
-		b.do(t, b.sato, "document.publish", m{"course_id": b.course, "document_id": id})
-		return id
+// courseDocuments is everything a purge (document.purge) changes of the
+// course's material, instructions and rubrics, as the database holds it: the
+// documents, their versions, their files, the files' texts and PDFs, the
+// answers' sources that name them, and what was done to them; and the keys
+// of their files and PDFs in the store. Deleting an assignment leaves all of
+// it as it was.
+func (b *built) courseDocuments(t *testing.T) (state string, keys []string) {
+	t.Helper()
+	const docs = `SELECT id FROM document WHERE course_id = $1 AND kind IN ('material', 'instructions', 'rubric')`
+	if err := b.Pool.QueryRow(t.Context(), `SELECT jsonb_build_object(
+		'documents', (SELECT jsonb_agg(to_jsonb(d) ORDER BY d.id) FROM document d WHERE d.id IN (`+docs+`)),
+		'versions', (SELECT jsonb_agg(to_jsonb(v) ORDER BY v.id) FROM document_version v WHERE v.document_id IN (`+docs+`)),
+		'files', (SELECT jsonb_agg(to_jsonb(f) ORDER BY f.id) FROM document_version_file f WHERE f.document_id IN (`+docs+`)),
+		'texts', (SELECT jsonb_agg(to_jsonb(x) ORDER BY to_jsonb(x)::text) FROM document_version_text x WHERE x.document_id IN (`+docs+`)),
+		'renditions', (SELECT jsonb_agg(to_jsonb(r) ORDER BY r.id) FROM file_rendition r
+		               JOIN document_version_file f ON f.id = r.file_id WHERE f.document_id IN (`+docs+`)),
+		'sources', (SELECT jsonb_agg(to_jsonb(s) ORDER BY s.message_id, s.position) FROM conversation_message_source s
+		            WHERE s.document_id IN (`+docs+`)),
+		'actions', (SELECT jsonb_agg(to_jsonb(a) ORDER BY a.id) FROM action a
+		            WHERE a.target_id IN (`+docs+`) OR a.result->>'document_id' IN (SELECT id::text FROM (`+docs+`) d))
+		)::text`, b.course).Scan(&state); err != nil {
+		t.Fatal(err)
 	}
-	name := func(assignment, instructions, rubric uuid.UUID) {
-		args := m{"course_id": b.course, "assignment_id": assignment}
-		if instructions != uuid.Nil {
-			args["instructions_document_id"] = instructions
+	rows, err := b.Pool.Query(t.Context(), `SELECT f.storage_key FROM document_version_file f WHERE f.document_id IN (`+docs+`)
+		UNION SELECT r.storage_key FROM file_rendition r JOIN document_version_file f ON f.id = r.file_id
+		WHERE f.document_id IN (`+docs+`) AND r.storage_key IS NOT NULL ORDER BY 1`, b.course)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var k string
+		if err := rows.Scan(&k); err != nil {
+			t.Fatal(err)
 		}
-		if rubric != uuid.Nil {
-			args["rubric_document_id"] = rubric
-		}
-		b.do(t, b.sato, "assignment.update", args)
+		keys = append(keys, k)
 	}
-	shared, own, pinned, other := doc("instructions", "Essay brief"), doc("rubric", "HW3 rubric"), doc("instructions", "Old brief"),
-		doc("instructions", "New brief")
-	hw4 := b.hw4(t)
-	name(b.hw3, shared, own)
-	name(hw4, shared, uuid.Nil)
-	// HW3's work is handed in under the shared brief, and graded under
-	// HW3's rubric.
-	b.gradeHW3(t, b.yuki, 80, false)
-	// Quiz was handed in under the old brief, which then moved to HW5, and
-	// work is handed in to HW5 under it too.
-	quiz, hw5 := b.assignment(t, "Quiz", true, false), b.assignment(t, "HW5", true, false)
-	handIn := func(student, assignment uuid.UUID) {
-		work := testkit.Result[tools.SubmissionCreateOut](t, b.do(t, student, "submission.create",
-			m{"course_id": b.course, "assignment_id": assignment, "body": "Done."})).SubmissionID
-		b.do(t, student, "submission.submit", m{"course_id": b.course, "submission_id": work})
-	}
-	name(quiz, pinned, uuid.Nil)
-	handIn(b.yuki, quiz)
-	name(quiz, other, uuid.Nil)
-	name(hw5, pinned, uuid.Nil)
-	handIn(b.ken, hw5)
+	return state, keys
+}
 
-	p := b.deletionPreview(t, b.sato, b.hw3)
-	if len(p.Documents) != 1 || p.Documents[0].ID != own || len(p.KeptDocuments) != 1 || p.KeptDocuments[0].ID != shared || p.Counts.Documents != 1 {
-		t.Fatalf("HW3's preview: purged %+v, kept %+v", p.Documents, p.KeptDocuments)
+// leftAsTheyWere fails t unless the course's material, instructions and
+// rubrics are as before, and every file of theirs is in the store, queued
+// to leave it by nothing.
+func (b *built) leftAsTheyWere(t *testing.T, what, before string, keys []string) {
+	t.Helper()
+	if after, _ := b.courseDocuments(t); after != before {
+		t.Errorf("%s changed the course's documents:\nbefore %s\nafter  %s", what, before, after)
 	}
-	b.do(t, b.sato, "assignment.delete", deleteArgs(b, b.hw3, p.Counts))
-	p = b.deletionPreview(t, b.sato, hw5)
-	if len(p.Documents) != 0 || len(p.KeptDocuments) != 1 || p.KeptDocuments[0].ID != pinned {
-		t.Fatalf("HW5's preview: purged %+v, kept %+v", p.Documents, p.KeptDocuments)
+	if n := b.Count(`SELECT count(*) FROM blob_deletion WHERE storage_key = ANY($1)`, keys); n != 0 {
+		t.Errorf("%s queued %d of the course's documents' files to leave the store", what, n)
 	}
-	b.do(t, b.sato, "assignment.delete", deleteArgs(b, hw5, p.Counts))
-	for d, purged := range map[uuid.UUID]bool{own: true, shared: false, pinned: false, other: false} {
-		if n := b.Count(`SELECT count(*) FROM document WHERE id = $1 AND purged_at IS NOT NULL`, d); (n == 1) != purged {
-			t.Errorf("document %s purged: %v, want %v", d, n == 1, purged)
+	for _, k := range keys {
+		if _, err := b.Blob.Stat(t.Context(), k); err != nil {
+			t.Errorf("%s took %s from the store: %v", what, k, err)
 		}
-	}
-	// What a purged document was is named by no assignment again.
-	out := b.MustCall(b.sato, "assignment.update", m{"course_id": b.course, "assignment_id": hw4, "rubric_document_id": own}, "rename-rubric")
-	if out.Status != domain.StatusFailed || reason(out) != "document_purged" {
-		t.Fatalf("naming a purged rubric: %+v", out)
 	}
 }
 
-// Naming a document does not make it an assignment's to purge. A brief
-// another assignment has moved off, or a rubric no assignment ever named,
-// pointed at by an assignment made for the purpose and nobody's work, stays
-// as it is when that assignment is deleted, by an agent or by a person:
-// purging is for administrators (document.purge), and a deletion purges
-// only what its own work was done under.
-func TestNamingADocumentDoesNotMakeItAnAssignmentsToPurge(t *testing.T) {
+// publishedDoc is a document of kind Sato writes and publishes, with text
+// and a file.
+func (b *built) publishedDoc(t *testing.T, kind, title string) tools.DocumentCreateOut {
+	t.Helper()
+	out := testkit.Result[tools.DocumentCreateOut](t, b.do(t, b.sato, "document.create", m{"course_id": b.course, "kind": kind,
+		"title": title, "body_md": title + ", in full.", "files": b.fileOn(t, b.sato, kind, kind+".pdf")}))
+	b.do(t, b.sato, "document.publish", m{"course_id": b.course, "document_id": out.DocumentID})
+	return out
+}
+
+// Deleting an assignment leaves its instructions and rubric in the course as
+// they are, whatever was done under them. HW3, pointed at a published brief
+// and a published rubric, with Yuki's and Ken's work handed in under the
+// brief's first version, Sato's draft grades on it under each of the
+// rubric's two versions, and the tutor's answer relying on the brief and on
+// a lecture, goes; the brief and the rubric, and every version of each, are
+// neither purged nor archived, Sato reads every version with its text and
+// its file, their files stay in the store, queued by nothing, the answer's
+// sources read as before, and once HW4 names them Yuki reads the brief
+// again. Material is no assignment's to name.
+func TestDeletingAnAssignmentLeavesItsInstructionsAndRubricInTheCourse(t *testing.T) {
 	b := build(t)
-	doc := func(kind, title string) uuid.UUID {
-		id := testkit.Result[tools.DocumentCreateOut](t, b.do(t, b.sato, "document.create", m{"course_id": b.course, "kind": kind,
-			"title": title, "body_md": title + ", in full."})).DocumentID
-		b.do(t, b.sato, "document.publish", m{"course_id": b.course, "document_id": id})
-		return id
+	brief, rubric, lecture := b.publishedDoc(t, "instructions", "HW3 brief"), b.publishedDoc(t, "rubric", "HW3 rubric"),
+		b.publishedDoc(t, "material", "Lecture 3")
+	out := b.MustCall(b.sato, "assignment.update", m{"course_id": b.course, "assignment_id": b.hw3,
+		"instructions_document_id": lecture.DocumentID}, "name-material")
+	if out.Status != domain.StatusFailed || out.Error.Code != apperr.FailedPrecondition {
+		t.Fatalf("naming a lecture as HW3's instructions: %+v", out)
 	}
-	old, current, spare := doc("instructions", "Old brief"), doc("instructions", "New brief"), doc("rubric", "Spare rubric")
-	b.do(t, b.sato, "assignment.update", m{"course_id": b.course, "assignment_id": b.hw3, "instructions_document_id": old})
-	b.do(t, b.sato, "assignment.update", m{"course_id": b.course, "assignment_id": b.hw3, "instructions_document_id": current})
-	// Neither Sato nor his assistant may purge a document.
+	b.do(t, b.sato, "assignment.update", m{"course_id": b.course, "assignment_id": b.hw3,
+		"instructions_document_id": brief.DocumentID, "rubric_document_id": rubric.DocumentID})
+
+	// Yuki and Ken hand in under the brief's first version, and the brief is
+	// written again; Sato grades Yuki under the rubric's first version and
+	// Ken under its second, neither posted.
+	yuki, ken := b.submit(t, b.yuki, "Yuki's essay"), b.submit(t, b.ken, "Ken's essay")
+	add := func(doc uuid.UUID, body string) uuid.UUID {
+		return testkit.Result[tools.DocumentVersionOut](t, b.do(t, b.sato, "document.add_version",
+			m{"course_id": b.course, "document_id": doc, "body_md": body, "publish": true})).VersionID
+	}
+	add(brief.DocumentID, "HW3 brief, corrected.")
+	b.do(t, b.sato, "grade.submit", m{"course_id": b.course, "submission_id": yuki, "score": 8})
+	add(rubric.DocumentID, "HW3 rubric, corrected.")
+	b.do(t, b.sato, "grade.submit", m{"course_id": b.course, "submission_id": ken, "score": 6})
+	if n := b.Count(`SELECT count(*) FROM submission s JOIN document_version v ON v.id = s.instructions_version_id
+		WHERE s.id = ANY($1) AND v.document_id = $2`, []uuid.UUID{yuki, ken}, brief.DocumentID); n != 2 {
+		t.Fatalf("%d of the two hand-ins are pinned to the brief: the test shows nothing", n)
+	}
+	if n := b.Count(`SELECT count(DISTINCT g.rubric_version_id) FROM grade g JOIN document_version v ON v.id = g.rubric_version_id
+		WHERE g.submission_id = ANY($1) AND g.posted_at IS NULL AND v.document_id = $2`, []uuid.UUID{yuki, ken}, rubric.DocumentID); n != 2 {
+		t.Fatalf("the draft grades pin %d of the rubric's two versions: the test shows nothing", n)
+	}
+	conv, question := b.open(t, b.yuki, b.tutorM, "What does the brief ask for?")
+	answer := b.sourced(t, conv, question, []m{
+		{"document_id": brief.DocumentID, "version_id": *brief.VersionID, "file_id": brief.FileIDs[0]},
+		{"document_id": lecture.DocumentID, "version_id": *lecture.VersionID, "file_id": lecture.FileIDs[0]}})
+	sourcesBefore := b.sourcesOf(t, b.sato, conv, answer)
+
+	before, keys := b.courseDocuments(t)
+	if len(keys) < 3 {
+		t.Fatalf("the course's documents' files: %v", keys)
+	}
+	p := b.deletionPreview(t, b.sato, b.hw3)
+	if p.Counts.Files != 0 || p.Counts.HandedIn != 2 || p.Counts.Grades != 2 {
+		t.Fatalf("the preview: %+v", p)
+	}
+	if out := b.MustCall(b.sato, "assignment.delete", deleteArgs(b, b.hw3, p.Counts), "delete-hw3"); out.Status != domain.StatusExecuted ||
+		testkit.Result[tools.AssignmentDeleteOut](t, out).FilesQueued != 0 {
+		t.Fatalf("deleting HW3: %+v", out)
+	}
+	b.leftAsTheyWere(t, "deleting HW3", before, keys)
+
+	for _, doc := range []uuid.UUID{brief.DocumentID, rubric.DocumentID} {
+		versions := testkit.Result[tools.DocumentVersionsOut](t, b.do(t, b.sato, "document.versions",
+			m{"course_id": b.course, "document_id": doc})).Versions
+		if len(versions) != 2 {
+			t.Fatalf("document %s has %d versions", doc, len(versions))
+		}
+		for _, v := range versions {
+			got := b.get(t, b.sato, m{"document_id": doc, "version_id": v.ID})
+			if got.Purged != nil || got.Status != "active" || got.Version == nil || got.Version.Purged != nil || got.Version.BodyMD == nil {
+				t.Fatalf("Sato reads version %d of %s as %+v", v.Seq, doc, got)
+			}
+			if v.Seq == 1 && len(got.Version.Files) != 1 {
+				t.Fatalf("the first version of %s has no file: %+v", doc, got.Version)
+			}
+		}
+	}
+	if got := b.sourcesOf(t, b.sato, conv, answer); !reflect.DeepEqual(got, sourcesBefore) {
+		t.Fatalf("Sato reads the answer's sources as %+v, before %+v", got, sourcesBefore)
+	}
+	// Named again, they are an assignment's as before.
+	hw4 := b.hw4(t)
+	b.do(t, b.sato, "assignment.update", m{"course_id": b.course, "assignment_id": hw4,
+		"instructions_document_id": brief.DocumentID, "rubric_document_id": rubric.DocumentID})
+	if got := b.get(t, b.yuki, m{"document_id": brief.DocumentID}); got.Version == nil || got.Version.BodyMD == nil ||
+		*got.Version.BodyMD != "HW3 brief, corrected." {
+		t.Fatalf("Yuki reads the brief, named by HW4, as %+v", got.Version)
+	}
+}
+
+// No seat without an administrator's rights purges anything of the course's
+// documents by deleting an assignment, by any route the reviews of the
+// deletion found. Sato and his assistant, neither of whom may purge a
+// document, delete assignments that name a spare brief and a spare rubric
+// and nobody's work (by the assistant and by Sato); that have a missing
+// record graded under them; that have work Sato handed in for Yuki, graded;
+// that have Yuki's own work, graded under a rubric named after she handed
+// it in; that have work Yuki's agent handed in for her, graded; and that
+// were pointed at another brief after the preview was read. After each the
+// course's material, instructions and rubrics are as they were, and their
+// files in the store, queued by nothing.
+func TestNoSeatPurgesADocumentByDeletingAnAssignment(t *testing.T) {
+	b := build(t)
+	brief, rubric := b.publishedDoc(t, "instructions", "Spare brief").DocumentID, b.publishedDoc(t, "rubric", "Spare rubric").DocumentID
+	other, lecture := b.publishedDoc(t, "instructions", "Another brief"), b.publishedDoc(t, "material", "Lecture 1")
+	conv, question := b.open(t, b.yuki, b.tutorM, "Where do I start?")
+	b.sourced(t, conv, question, []m{{"document_id": lecture.DocumentID, "version_id": *lecture.VersionID, "file_id": lecture.FileIDs[0]}})
 	bot := b.agent(t, b.sato, "Sato's assistant")
 	b.delegate(t, b.sato, bot, m{"perms": m{"assignment_write": "autonomous"}, "student_scope": "all"})
 	for _, who := range []uuid.UUID{b.sato, bot} {
-		b.try(t, who, "document.purge", m{"course_id": b.course, "document_id": old, "reason": "Not wanted."}, apperr.Forbidden)
-	}
-
-	for who, actor := range map[string]uuid.UUID{"the assistant": bot, "Sato": b.sato} {
-		scratch := testkit.Result[tools.IDOut](t, b.do(t, actor, "assignment.create", m{"course_id": b.course, "title": "Scratch",
-			"points_possible": 10, "instructions_document_id": old, "rubric_document_id": spare})).ID
-		p := b.deletionPreview(t, actor, scratch)
-		if p.Refusal != nil || len(p.Documents) != 0 || p.Counts.Documents != 0 || len(p.Counts.DocumentIDs) != 0 || len(p.KeptDocuments) != 2 {
-			t.Fatalf("%s's preview of an empty assignment naming the old brief and a spare rubric: %+v", who, p)
-		}
-		out := b.MustCall(actor, "assignment.delete", deleteArgs(b, scratch, p.Counts), "scratch-"+who)
-		if out.Status != domain.StatusExecuted || testkit.Result[tools.AssignmentDeleteOut](t, out).Removed.Documents != 0 {
-			t.Fatalf("%s deleting it: %+v", who, out)
+		for _, d := range []uuid.UUID{brief, rubric, other.DocumentID, lecture.DocumentID} {
+			b.try(t, who, "document.purge", m{"course_id": b.course, "document_id": d, "reason": "Not wanted."}, apperr.Forbidden)
 		}
 	}
-	for _, d := range []uuid.UUID{old, current, spare} {
-		if n := b.Count(`SELECT count(*) FROM document WHERE id = $1 AND purged_at IS NULL AND status = 'active'`, d); n != 1 {
-			t.Errorf("document %s was purged or archived with an assignment that only named it", d)
+	named := func(by uuid.UUID, title string, instructions, rubric uuid.UUID) uuid.UUID {
+		t.Helper()
+		args := m{"course_id": b.course, "title": title, "points_possible": 10, "instructions_document_id": instructions}
+		if rubric != uuid.Nil {
+			args["rubric_document_id"] = rubric
 		}
-	}
-	if n := b.Count(`SELECT count(*) FROM document_version WHERE purged_at IS NOT NULL`); n != 0 {
-		t.Fatalf("%d versions were purged", n)
-	}
-}
-
-// Nor does work that whoever writes and grades assignments can make for one
-// alone. Sato, who may not purge a document, names a spare brief and a spare
-// rubric, each with a file, from an assignment made for the purpose,
-// records Ken missing on it and grades the placeholder, and hands work in
-// for Yuki himself and grades that too: deleting it purges neither, and
-// queues none of their files. Work a student hands in does make the brief
-// it was handed in under the assignment's own, by an agent of theirs as
-// much as from their own seat.
-func TestWorkMadeForAStudentDoesNotMakeADocumentAnAssignmentsToPurge(t *testing.T) {
-	b := build(t)
-	doc := func(kind, title string) uuid.UUID {
-		id := testkit.Result[tools.DocumentCreateOut](t, b.do(t, b.sato, "document.create", m{"course_id": b.course, "kind": kind,
-			"title": title, "body_md": title + ", in full.", "files": b.fileOn(t, b.sato, kind, kind+".pdf")})).DocumentID
-		b.do(t, b.sato, "document.publish", m{"course_id": b.course, "document_id": id})
+		id := testkit.Result[tools.IDOut](t, b.do(t, by, "assignment.create", args)).ID
+		b.do(t, by, "assignment.publish", m{"course_id": b.course, "assignment_id": id})
 		return id
 	}
-	brief, rubric := doc("instructions", "Spare brief"), doc("rubric", "Spare rubric")
-	for _, d := range []uuid.UUID{brief, rubric} {
-		b.try(t, b.sato, "document.purge", m{"course_id": b.course, "document_id": d, "reason": "Not wanted."}, apperr.Forbidden)
+	deleted := func(by, assignment uuid.UUID, route string, confirm *tools.DeletionCounts) {
+		t.Helper()
+		before, keys := b.courseDocuments(t)
+		if confirm == nil {
+			p := b.deletionPreview(t, by, assignment)
+			if p.Refusal != nil {
+				t.Fatalf("%s: the preview refuses it: %+v", route, p)
+			}
+			confirm = &p.Counts
+		}
+		out := b.MustCall(by, "assignment.delete", deleteArgs(b, assignment, *confirm), "delete-"+uuid.NewString())
+		if out.Status != domain.StatusExecuted {
+			t.Fatalf("%s: deleting it: %+v", route, out)
+		}
+		b.leftAsTheyWere(t, route, before, keys)
 	}
-	scratch := testkit.Result[tools.IDOut](t, b.do(t, b.sato, "assignment.create", m{"course_id": b.course, "title": "Scratch",
-		"points_possible": 10, "instructions_document_id": brief, "rubric_document_id": rubric})).ID
-	b.do(t, b.sato, "assignment.publish", m{"course_id": b.course, "assignment_id": scratch})
-
-	// Ken recorded missing, the placeholder graded, a draft never posted.
-	missing := testkit.Result[tools.SubmissionIDOut](t, b.do(t, b.sato, "submission.record_missing",
-		m{"course_id": b.course, "assignment_id": scratch, "student_member_id": b.kenM})).SubmissionID
-	b.do(t, b.sato, "grade.submit", m{"course_id": b.course, "submission_id": missing, "score": 0})
-	// Work handed in for Yuki, by Sato, under the spare brief, and graded
-	// under the spare rubric.
-	forYuki := testkit.Result[tools.SubmissionCreateOut](t, b.do(t, b.sato, "submission.create",
-		m{"course_id": b.course, "assignment_id": scratch, "student_member_id": b.yukiM, "body": "Typed in for her."})).SubmissionID
-	b.do(t, b.sato, "submission.submit", m{"course_id": b.course, "submission_id": forYuki})
-	b.do(t, b.sato, "grade.submit", m{"course_id": b.course, "submission_id": forYuki, "score": 5})
-	if n := b.Count(`SELECT count(*) FROM submission s JOIN document_version v ON v.id = s.instructions_version_id
-		WHERE s.id = $1 AND v.document_id = $2`, forYuki, brief); n != 1 {
-		t.Fatal("the work handed in for Yuki is not pinned to the spare brief: the test shows nothing")
-	}
-	if n := b.Count(`SELECT count(*) FROM grade g JOIN document_version v ON v.id = g.rubric_version_id
-		WHERE g.submission_id = ANY($1) AND v.document_id = $2`, []uuid.UUID{missing, forYuki}, rubric); n != 2 {
-		t.Fatalf("%d of the two grades are pinned to the spare rubric: the test shows nothing", n)
-	}
-
-	p := b.deletionPreview(t, b.sato, scratch)
-	if p.Refusal != nil || len(p.Documents) != 0 || p.Counts.Documents != 0 || len(p.Counts.DocumentIDs) != 0 || len(p.KeptDocuments) != 2 ||
-		p.Counts.HandedIn != 1 || p.Counts.Missing != 1 || p.Counts.Grades != 2 || p.Counts.Files != 0 {
-		t.Fatalf("the preview of an assignment with only work Sato made for it: %+v", p)
-	}
-	out := b.MustCall(b.sato, "assignment.delete", deleteArgs(b, scratch, p.Counts), "scratch")
-	if out.Status != domain.StatusExecuted || testkit.Result[tools.AssignmentDeleteOut](t, out).Removed.Documents != 0 {
-		t.Fatalf("deleting it: %+v", out)
-	}
-	for _, d := range []uuid.UUID{brief, rubric} {
-		if n := b.Count(`SELECT count(*) FROM document WHERE id = $1 AND purged_at IS NULL AND status = 'active'`, d); n != 1 {
-			t.Errorf("document %s was purged or archived with an assignment only Sato's own work was done for", d)
+	pinned := func(route, query string, args ...any) {
+		t.Helper()
+		if b.Count(query, args...) == 0 {
+			t.Fatalf("%s: nothing is pinned to the document: the test shows nothing", route)
 		}
 	}
-	if n := b.Count(`SELECT count(*) FROM blob_deletion`); n != 0 {
-		t.Fatalf("%d files were queued to leave the store", n)
-	}
+	const briefPinned = `SELECT count(*) FROM submission s JOIN document_version v ON v.id = s.instructions_version_id
+		WHERE s.assignment_id = $1 AND v.document_id = $2`
+	const rubricPinned = `SELECT count(*) FROM grade g JOIN submission s ON s.id = g.submission_id
+		JOIN document_version v ON v.id = g.rubric_version_id WHERE s.assignment_id = $1 AND v.document_id = $2`
 
-	// Yuki's own agent hands work in to a quiz, under its brief, by
-	// proposals Sato approves: the brief is the quiz's own.
-	bot := b.agent(t, b.yuki, "Yuki's helper")
-	seat := b.delegate(t, b.yuki, bot, m{})
+	// Named, and nobody's work: by the assistant, and by Sato.
+	deleted(bot, named(bot, "Named by the assistant", brief, rubric), "the assistant's assignment naming them", nil)
+	deleted(b.sato, named(b.sato, "Named by Sato", brief, rubric), "Sato's assignment naming them", nil)
+
+	// A missing record, graded.
+	missing := named(b.sato, "Missing", brief, rubric)
+	placeholder := testkit.Result[tools.SubmissionIDOut](t, b.do(t, b.sato, "submission.record_missing",
+		m{"course_id": b.course, "assignment_id": missing, "student_member_id": b.kenM})).SubmissionID
+	b.do(t, b.sato, "grade.submit", m{"course_id": b.course, "submission_id": placeholder, "score": 0})
+	pinned("a missing record", rubricPinned, missing, rubric)
+	deleted(b.sato, missing, "a graded missing record", nil)
+
+	// Work Sato hands in for Yuki, graded.
+	forYuki := named(b.sato, "For Yuki", brief, rubric)
+	work := testkit.Result[tools.SubmissionCreateOut](t, b.do(t, b.sato, "submission.create",
+		m{"course_id": b.course, "assignment_id": forYuki, "student_member_id": b.yukiM, "body": "Typed in for her."})).SubmissionID
+	b.do(t, b.sato, "submission.submit", m{"course_id": b.course, "submission_id": work})
+	b.do(t, b.sato, "grade.submit", m{"course_id": b.course, "submission_id": work, "score": 5})
+	pinned("work handed in for Yuki", briefPinned, forYuki, brief)
+	pinned("work handed in for Yuki", rubricPinned, forYuki, rubric)
+	deleted(b.sato, forYuki, "work handed in for a student, graded", nil)
+
+	// Yuki's own work, handed in under another brief, then graded under the
+	// spare rubric, named after she handed it in.
+	own := named(b.sato, "Yuki's own", other.DocumentID, uuid.Nil)
+	work = testkit.Result[tools.SubmissionCreateOut](t, b.do(t, b.yuki, "submission.create",
+		m{"course_id": b.course, "assignment_id": own, "body": "Mine."})).SubmissionID
+	b.do(t, b.yuki, "submission.submit", m{"course_id": b.course, "submission_id": work})
+	b.do(t, b.sato, "assignment.update", m{"course_id": b.course, "assignment_id": own, "rubric_document_id": rubric})
+	b.do(t, b.sato, "grade.submit", m{"course_id": b.course, "submission_id": work, "score": 7})
+	pinned("Yuki's own work", briefPinned, own, other.DocumentID)
+	pinned("Yuki's own work", rubricPinned, own, rubric)
+	deleted(b.sato, own, "a student's own work, graded under a rubric named afterwards", nil)
+
+	// Work Yuki's agent hands in for her, by proposals Sato approves,
+	// graded.
+	helper := b.agent(t, b.yuki, "Yuki's helper")
+	seat := b.delegate(t, b.yuki, helper, m{})
 	b.do(t, b.sato, "member.update_perms", m{"course_id": b.course, "member_id": seat, "perms": m{"submission_write": "confirm_required"}})
-	quizBrief := doc("instructions", "Quiz brief")
-	quiz := testkit.Result[tools.IDOut](t, b.do(t, b.sato, "assignment.create", m{"course_id": b.course, "title": "Quiz",
-		"points_possible": 10, "instructions_document_id": quizBrief})).ID
-	b.do(t, b.sato, "assignment.publish", m{"course_id": b.course, "assignment_id": quiz})
 	approve := func(out pipeline.Outcome) json.RawMessage {
 		t.Helper()
 		if out.Status != domain.StatusProposed {
@@ -835,19 +837,36 @@ func TestWorkMadeForAStudentDoesNotMakeADocumentAnAssignmentsToPurge(t *testing.
 		}
 		return d.Result
 	}
+	byAgent := named(b.sato, "By Yuki's helper", brief, rubric)
 	var draft tools.SubmissionCreateOut
-	if err := json.Unmarshal(approve(b.MustCall(bot, "submission.create", m{"course_id": b.course, "assignment_id": quiz,
-		"student_member_id": b.yukiM, "body": "My answers."}, "bot-draft")), &draft); err != nil {
+	if err := json.Unmarshal(approve(b.MustCall(helper, "submission.create", m{"course_id": b.course, "assignment_id": byAgent,
+		"student_member_id": b.yukiM, "body": "My answers."}, "helper-draft")), &draft); err != nil {
 		t.Fatal(err)
 	}
-	approve(b.MustCall(bot, "submission.submit", m{"course_id": b.course, "submission_id": draft.SubmissionID}, "bot-submit"))
-	p = b.deletionPreview(t, b.sato, quiz)
-	if len(p.Documents) != 1 || p.Documents[0].ID != quizBrief || len(p.KeptDocuments) != 0 || p.Counts.HandedIn != 1 {
-		t.Fatalf("the preview of the quiz Yuki's agent handed work in to: %+v", p)
+	approve(b.MustCall(helper, "submission.submit", m{"course_id": b.course, "submission_id": draft.SubmissionID}, "helper-submit"))
+	b.do(t, b.sato, "grade.submit", m{"course_id": b.course, "submission_id": draft.SubmissionID, "score": 9})
+	pinned("the helper's hand-in", briefPinned, byAgent, brief)
+	pinned("the helper's hand-in", rubricPinned, byAgent, rubric)
+	deleted(b.sato, byAgent, "work a student's agent handed in, graded", nil)
+
+	// Ken's own work, handed in under the spare brief, and the assignment
+	// pointed at another brief once the preview was read.
+	moved := named(b.sato, "Moved", brief, uuid.Nil)
+	work = testkit.Result[tools.SubmissionCreateOut](t, b.do(t, b.ken, "submission.create",
+		m{"course_id": b.course, "assignment_id": moved, "body": "Ken's."})).SubmissionID
+	b.do(t, b.ken, "submission.submit", m{"course_id": b.course, "submission_id": work})
+	p := b.deletionPreview(t, b.sato, moved)
+	b.do(t, b.sato, "assignment.update", m{"course_id": b.course, "assignment_id": moved, "instructions_document_id": other.DocumentID})
+	pinned("Ken's work", briefPinned, moved, brief)
+	deleted(b.sato, moved, "an assignment pointed at another brief after its preview", &p.Counts)
+
+	for _, d := range []uuid.UUID{brief, rubric, other.DocumentID, lecture.DocumentID} {
+		if n := b.Count(`SELECT count(*) FROM document WHERE id = $1 AND purged_at IS NULL AND status = 'active'`, d); n != 1 {
+			t.Errorf("document %s was purged or archived", d)
+		}
 	}
-	b.do(t, b.sato, "assignment.delete", deleteArgs(b, quiz, p.Counts))
-	if n := b.Count(`SELECT count(*) FROM document WHERE id = $1 AND purged_at IS NOT NULL AND purged_by_actor_id = $2`, quizBrief, b.sato); n != 1 {
-		t.Fatal("the quiz's brief, which Yuki's agent handed her work in under, was not purged with it")
+	if n := b.Count(`SELECT count(*) FROM document_version WHERE purged_at IS NOT NULL`); n != 0 {
+		t.Fatalf("%d versions are purged", n)
 	}
 }
 
@@ -881,18 +900,17 @@ func TestACallRacingADeletionIsRefusedCleanly(t *testing.T) {
 	for _, race := range []string{"submission.submit", "grade.submit", "document.create"} {
 		t.Run(race, func(t *testing.T) {
 			b := build(t)
-			brief := testkit.Result[tools.DocumentCreateOut](t, b.do(t, b.sato, "document.create", m{"course_id": b.course,
-				"kind": "instructions", "title": "HW3 brief", "body_md": "Write."})).DocumentID
-			b.do(t, b.sato, "document.publish", m{"course_id": b.course, "document_id": brief})
-			b.do(t, b.sato, "assignment.update", m{"course_id": b.course, "assignment_id": b.hw3, "instructions_document_id": brief})
 			yukiWork, grade := b.gradeHW3(t, b.yuki, 80, false)
+			notes := testkit.Result[tools.DocumentCreateOut](t, b.do(t, b.sato, "document.create", m{"course_id": b.course,
+				"kind": "feedback", "grade_id": grade, "title": "Notes", "body_md": "Well argued."})).DocumentID
 			kenDraft := testkit.Result[tools.SubmissionCreateOut](t, b.do(t, b.ken, "submission.create",
 				m{"course_id": b.course, "assignment_id": b.hw3, "body": "Almost."})).SubmissionID
 			p := b.deletionPreview(t, b.sato, b.hw3)
 
 			// The deletion holds HW3, its work and its grades, and waits for
-			// the brief, which a new version is being added to.
-			release := heldBy(t, b, `SELECT 1 FROM document WHERE id = $1 FOR UPDATE`, brief)
+			// the feedback on Yuki's grade, which a new version is being
+			// added to.
+			release := heldBy(t, b, `SELECT 1 FROM document WHERE id = $1 FOR UPDATE`, notes)
 			deleting := b.inFlight(b.sato, "assignment.delete", deleteArgs(b, b.hw3, p.Counts), "racing-delete")
 			b.waitingFor(t, 1, deleting)
 			var racing <-chan callResult
@@ -902,7 +920,7 @@ func TestACallRacingADeletionIsRefusedCleanly(t *testing.T) {
 			case "grade.submit":
 				racing = b.inFlight(b.sato, race, m{"course_id": b.course, "submission_id": yukiWork, "score": 85}, "racing")
 			case "document.create":
-				racing = b.inFlight(b.sato, race, m{"course_id": b.course, "kind": "feedback", "grade_id": grade, "title": "Notes",
+				racing = b.inFlight(b.sato, race, m{"course_id": b.course, "kind": "feedback", "grade_id": grade, "title": "More notes",
 					"body_md": "Good."}, "racing")
 			}
 			b.waitingFor(t, 2, racing)

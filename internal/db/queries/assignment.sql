@@ -74,6 +74,13 @@ FOR KEY SHARE;
 SELECT id, course_id, kind, title, status, published_version_id
 FROM document WHERE id = $1 AND course_id = $2;
 
+-- name: ShareDocumentInCourse :one
+-- A document an assignment is about to name as its instructions or rubric,
+-- held FOR KEY SHARE until the assignment is written: a purge
+-- (document.purge), which locks it FOR UPDATE, waits, or is waited for and
+-- seen.
+SELECT id, kind, purged_at FROM document WHERE id = $1 AND course_id = $2 FOR KEY SHARE;
+
 -- name: ListAssignments :many
 -- Scope is applied here, not afterwards, a delegate's principal's included. A
 -- member who may not write assignments sees only published ones.
