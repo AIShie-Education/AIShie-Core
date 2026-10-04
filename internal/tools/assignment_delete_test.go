@@ -525,6 +525,42 @@ func TestAnArchivedCourseKeepsItsAssignments(t *testing.T) {
 	}
 }
 
+// An assignment taken out of the grade before it is deleted leaves the
+// totals it once counted in as an assignment in the grade does: those
+// written while it counted keep their number, and their line of it says
+// only that it was deleted, never what the student scored on it.
+func TestAnAssignmentTakenOutOfTheGradeLeavesNoScoreInTheTotalsOnceDeleted(t *testing.T) {
+	b := build(t)
+	b.gradeHW3(t, b.yuki, 90, true)
+	if total, _ := b.totalOf(t, b.bucket, b.yukiM); !total.Equal(decimal.NewFromInt(90)) {
+		t.Fatalf("Yuki's Assignments total before: %s", total)
+	}
+	b.do(t, b.sato, "assignment.update", m{"course_id": b.course, "assignment_id": b.hw3, "clear_component": true})
+	scored := `SELECT count(*) FROM grade WHERE origin = 'computed' AND breakdown::text LIKE '%' || $1::text || '%'
+		AND NOT breakdown->'items' @> jsonb_build_array(jsonb_build_object('id', $1::text, 'deleted', true))`
+	if n := b.Count(scored, b.hw3); n == 0 {
+		t.Fatal("no total written while HW3 counted names it: the test shows nothing")
+	}
+
+	p := b.deletionPreview(t, b.sato, b.hw3)
+	if p.InGrade || p.Counts.Totals != 0 {
+		t.Fatalf("the preview of an assignment out of the grade: %+v", p)
+	}
+	got := testkit.Result[tools.AssignmentDeleteOut](t, b.MustCall(b.sato, "assignment.delete", deleteArgs(b, b.hw3, p.Counts), "delete-moved-out"))
+	if !got.Deleted || got.Snapshots != 0 {
+		t.Fatalf("deleting it: %+v", got)
+	}
+	if n := b.Count(scored, b.hw3); n != 0 {
+		t.Fatalf("%d totals still say what Yuki scored on HW3", n)
+	}
+	if n := b.Count(`SELECT count(*) FROM grade WHERE student_member_id = $1 AND component_id = $2 AND origin = 'computed'
+		AND superseded_by IS NOT NULL AND score = 90
+		AND breakdown->'items' @> jsonb_build_array(jsonb_build_object('id', $3::text, 'kind', 'assignment', 'deleted', true))`,
+		b.yukiM, b.bucket, b.hw3); n != 1 {
+		t.Fatalf("%d of Yuki's earlier Assignments totals say HW3 was deleted, keeping their number; want the one", n)
+	}
+}
+
 // Its instructions and rubric are purged with it only when nothing else
 // uses them: another assignment naming one, or work handed in under one of
 // its versions for another assignment, keeps it as it is.

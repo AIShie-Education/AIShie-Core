@@ -1506,7 +1506,8 @@ Nothing else opens: a computed total, material, instructions and rubrics are nev
 an assignment's id deleted is never used again. Then it queues the files, purges its files'
 versions, which takes their files, texts and renditions, deletes them and their documents, the
 grades, the submissions, the scope rows and the events, purges its instructions and rubric,
-deletes the assignment, and works the totals out again. It writes one event, filed under its
+deletes the assignment, works the totals out again, and empties its line in every total that
+still names it (§2.7). It writes one event, filed under its
 own action: `assignment.deleted` for an assignment students could see, which everyone who reads
 the course is told, or `assignment.deleted_unreleased`, for those who write assignments; its
 payload is the title and the documents it purged, never counts, since students are not told
@@ -1872,7 +1873,9 @@ serves HW3, the midterm, the assignments bucket and the course total.
   written again without it, as a change of the scheme writes them (`grade.total_updated`, the
   old superseded); a total written before keeps its number, which is what the student was
   shown, and the line of its working that was the assignment's becomes
-  `{"id": …, "kind": "assignment", "deleted": true}`: nothing of the grade it was stays.
+  `{"id": …, "kind": "assignment", "deleted": true}`: nothing of the grade it was stays. So
+  too where it counted once and was taken out of the grade before it was deleted: every total
+  whose working still names it loses its line.
 - **Every grade names the action that created it.** When a student disputes an agent's mark,
   `created_by_action_id` is the whole query: which agent, which membership, who approved.
 

@@ -590,16 +590,19 @@ func deleteAssignment(ctx context.Context, d Deps, ec *tool.ExecCtx, in Assignme
 		return AssignmentDeleteOut{}, assignmentGone(ctx, q, in.CourseID, a.ID)
 	}
 
-	// The totals it counted in, worked out again without it, as a change to
-	// the scheme works them out; those superseded keep their number, and
-	// the line of their working that was its says it was deleted.
+	// The totals it counts in, worked out again without it, as a change to
+	// the scheme works them out. Then every total whose working still names
+	// it keeps its number, and the line that was its says it was deleted:
+	// whether it counts now, or counted once and was taken out of the grade
+	// (assignment.update clear_component) before it was deleted, nothing of
+	// the grade it was stays.
 	if del.rewritesTotals() {
 		if out.Snapshots, err = rewriteTotals(ctx, ec, in.CourseID, nil, *a.ComponentID); err != nil {
 			return AssignmentDeleteOut{}, err
 		}
-		if _, err := q.RedactTotalsLine(ctx, dbq.RedactTotalsLineParams{CourseID: in.CourseID, AssignmentID: a.ID}); err != nil {
-			return AssignmentDeleteOut{}, err
-		}
+	}
+	if _, err := q.RedactTotalsLine(ctx, dbq.RedactTotalsLineParams{CourseID: in.CourseID, AssignmentID: a.ID}); err != nil {
+		return AssignmentDeleteOut{}, err
 	}
 
 	typ := EventAssignmentDeleted
