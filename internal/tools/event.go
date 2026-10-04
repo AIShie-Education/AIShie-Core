@@ -55,6 +55,11 @@ var visibility = map[string][]domain.Perm{
 	// Those who were told it was published are told it was taken back.
 	EventAssignmentUnpublished: {domain.PermDocumentRead},
 	EventAssignmentDuePassed:   {domain.PermDocumentRead},
+	// And that it was deleted, for good; one nobody could see is news for
+	// those who write assignments. The event names no assignment, which is
+	// gone, so no assignment scope applies to it: staff listed for other
+	// assignments read its title.
+	EventAssignmentDeleted: {domain.PermDocumentRead}, EventAssignmentDeletedUnreleased: {domain.PermAssignmentWrite},
 
 	EventComponentCreated: {domain.PermGradeRead}, EventComponentUpdated: {domain.PermGradeRead},
 	EventComponentMoved: {domain.PermGradeRead},

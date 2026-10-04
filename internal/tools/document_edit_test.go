@@ -272,3 +272,29 @@ func TestAPurgedDocumentStaysArchived(t *testing.T) {
 		t.Fatal("the list does not say the document was purged")
 	}
 }
+
+// What an administrator purged is named by no assignment again: naming a
+// purged rubric, from an assignment made or changed, is refused
+// (document_purged), and an assignment that named it already is changed as
+// ever.
+func TestAPurgedDocumentIsNamedByNoAssignmentAgain(t *testing.T) {
+	b := build(t)
+	rubric := testkit.Result[tools.DocumentCreateOut](t, b.do(t, b.sato, "document.create", m{"course_id": b.course, "kind": "rubric",
+		"title": "HW3 rubric", "body_md": "Ten marks for the argument."})).DocumentID
+	b.do(t, b.sato, "document.publish", m{"course_id": b.course, "document_id": rubric})
+	b.do(t, b.sato, "assignment.update", m{"course_id": b.course, "assignment_id": b.hw3, "rubric_document_id": rubric})
+	b.do(t, b.admin, "document.purge", m{"course_id": b.course, "document_id": rubric, "reason": "Attached by mistake."})
+
+	hw4 := b.assignment(t, "HW4", true, true)
+	for what, call := range map[string]m{
+		"naming it from HW4": {"tool": "assignment.update", "args": m{"course_id": b.course, "assignment_id": hw4, "rubric_document_id": rubric}},
+		"making HW5 with it": {"tool": "assignment.create", "args": m{"course_id": b.course, "title": "HW5", "points_possible": 10,
+			"rubric_document_id": rubric}},
+	} {
+		out := b.MustCall(b.sato, call["tool"].(string), call["args"].(m), "purged-"+uuid.NewString())
+		if out.Status != domain.StatusFailed || out.Error.Code != apperr.FailedPrecondition || reason(out) != "document_purged" {
+			t.Fatalf("%s: %+v", what, out)
+		}
+	}
+	b.do(t, b.sato, "assignment.update", m{"course_id": b.course, "assignment_id": b.hw3, "title": "Homework 3"})
+}

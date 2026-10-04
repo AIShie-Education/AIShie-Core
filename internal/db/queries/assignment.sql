@@ -44,12 +44,14 @@ FROM assignment
 WHERE id = $1 AND course_id = $2
 FOR UPDATE;
 
--- name: ShareAssignments :exec
+-- name: ShareAssignments :many
 -- KEY SHARE on the given assignments, in id order, for events.Flush to take
 -- before the event-stream lock: an event's foreign key to its assignment
 -- would otherwise wait under that lock for an unpublish, which is holding
--- the assignment and waiting for the same lock to write its own event.
-SELECT 1 FROM assignment WHERE id = ANY(sqlc.arg(ids)::uuid[]) ORDER BY id FOR KEY SHARE;
+-- the assignment and waiting for the same lock to write its own event. The
+-- ids it took come back: one missing was deleted (assignment.delete), after
+-- this call had last looked at it.
+SELECT id FROM assignment WHERE id = ANY(sqlc.arg(ids)::uuid[]) ORDER BY id FOR KEY SHARE;
 
 -- name: AssignmentHasSubmissions :one
 -- Any row at all: a draft, a hand-in, a 'missing' placeholder.
@@ -71,6 +73,13 @@ FOR KEY SHARE;
 -- name: GetDocumentInCourse :one
 SELECT id, course_id, kind, title, status, published_version_id
 FROM document WHERE id = $1 AND course_id = $2;
+
+-- name: ShareDocumentInCourse :one
+-- A document an assignment is about to name as its instructions or rubric,
+-- held FOR KEY SHARE until the assignment is written: a purge
+-- (document.purge), which locks it FOR UPDATE, waits, or is waited for and
+-- seen.
+SELECT id, kind, purged_at FROM document WHERE id = $1 AND course_id = $2 FOR KEY SHARE;
 
 -- name: ListAssignments :many
 -- Scope is applied here, not afterwards, a delegate's principal's included. A

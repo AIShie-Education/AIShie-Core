@@ -1,8 +1,9 @@
 // Package jobs runs the background sweeps: proposals that have waited too
 // long, memberships past their expiry, delegates' seats whose principal has
 // gone, assignments whose due date has passed, sessions long dead, answers'
-// drafts nobody writes any more, uploaded files that nothing came to point
-// at, and exports of conversations kept as long as they are kept.
+// drafts nobody writes any more, files queued to leave the store with what
+// was deleted, uploaded files that nothing came to point at, and exports of
+// conversations kept as long as they are kept.
 //
 // Nothing here is what makes the system correct. authorize() ignores an
 // expired member from the instant of expiry, and approving a stale proposal
@@ -53,6 +54,9 @@ const (
 	// blobSweepEvery: listing every file the server keeps is not something to
 	// do every minute.
 	blobSweepEvery = time.Hour
+	// queuedFileRetryMost is the longest a file the store refused to delete
+	// waits before it is asked again.
+	queuedFileRetryMost = 24 * time.Hour
 )
 
 type Config struct {
@@ -114,8 +118,8 @@ func (r *Runner) Run(ctx context.Context) {
 		} else if rep.Ran && rep.total() > 0 {
 			r.log.Info("swept", "proposals_expired", rep.ProposalsExpired, "members_expired", rep.MembersExpired, "orphans_removed", rep.OrphansRemoved,
 				"assignments_closed", rep.AssignmentsClosed, "submissions_missing", rep.SubmissionsMissing, "sessions_deleted", rep.SessionsDeleted,
-				"drafts_deleted", rep.DraftsDeleted, "orphan_files_removed", rep.OrphanFilesRemoved,
-				"export_files_removed", rep.ExportFilesRemoved)
+				"drafts_deleted", rep.DraftsDeleted, "queued_files_deleted", rep.QueuedFilesDeleted,
+				"orphan_files_removed", rep.OrphanFilesRemoved, "export_files_removed", rep.ExportFilesRemoved)
 		}
 		select {
 		case <-ctx.Done():
@@ -137,7 +141,10 @@ type Report struct {
 	SessionsDeleted    int64
 	// DraftsDeleted counts answers' drafts nobody has written for
 	// tools.DraftTTL, which reads leave out already.
-	DraftsDeleted      int64
+	DraftsDeleted int64
+	// QueuedFilesDeleted counts the files deleted from the store that a
+	// deletion queued (blob_deletion): an assignment's, deleted for good.
+	QueuedFilesDeleted int
 	OrphanFilesRemoved int
 	// ExportFilesRemoved counts the files of exports of conversations kept
 	// as long as they are kept.
@@ -145,8 +152,8 @@ type Report struct {
 }
 
 func (r Report) total() int64 {
-	return int64(r.ProposalsExpired+r.MembersExpired+r.OrphansRemoved+r.AssignmentsClosed+r.SubmissionsMissing+r.OrphanFilesRemoved+
-		r.ExportFilesRemoved) + r.SessionsDeleted + r.DraftsDeleted
+	return int64(r.ProposalsExpired+r.MembersExpired+r.OrphansRemoved+r.AssignmentsClosed+r.SubmissionsMissing+r.QueuedFilesDeleted+
+		r.OrphanFilesRemoved+r.ExportFilesRemoved) + r.SessionsDeleted + r.DraftsDeleted
 }
 
 // Sweep does one round of everything, if no other instance is doing so.
@@ -250,6 +257,9 @@ func (r *Runner) Sweep(ctx context.Context) (Report, error) {
 	if rep.DraftsDeleted, err = q.DeleteStaleDrafts(ctx, now.Add(-tools.DraftTTL)); err != nil {
 		return rep, fmt.Errorf("stale drafts: %w", err)
 	}
+	if rep.QueuedFilesDeleted, err = r.deleteQueuedFiles(ctx, now); err != nil {
+		return rep, fmt.Errorf("queued files: %w", err)
+	}
 	if rep.OrphanFilesRemoved, err = r.sweepBlobs(ctx, now); err != nil {
 		return rep, fmt.Errorf("orphan files: %w", err)
 	}
@@ -257,6 +267,70 @@ func (r *Runner) Sweep(ctx context.Context) (Report, error) {
 		return rep, fmt.Errorf("export files: %w", err)
 	}
 	return rep, nil
+}
+
+// deleteQueuedFiles deletes from the store the files a deletion queued once
+// their rows had gone (blob_deletion): an assignment's, deleted for good, its
+// submitted and feedback files, the files of the instructions and rubric it
+// purged, and their renditions' PDFs. The deletion queues them rather than
+// deleting them itself, since it may still roll back and the store may be
+// down; the row is the durable record that the file is to go.
+//
+// Every tick takes up to a batch of what is due, the longest due first. A
+// file deleted, or gone already (the filesystem store ignores what is not
+// there, and S3 answers a removal of nothing as done), leaves the queue; one
+// the store refuses stays, asked again after 2^attempts minutes, a day at
+// most, its error kept and logged. Without a store nothing is deleted, and
+// the queue waits for one: nothing queues a file on an installation without
+// a store (no_file_storage).
+func (r *Runner) deleteQueuedFiles(ctx context.Context, now time.Time) (int, error) {
+	if r.cfg.Blob == nil {
+		return 0, nil
+	}
+	q := dbq.New(r.pool)
+	due, err := q.ListDueBlobDeletions(ctx, dbq.ListDueBlobDeletionsParams{Now: now, MaxRows: r.cfg.Batch})
+	if err != nil {
+		return 0, err
+	}
+	deleted := 0
+	for _, f := range due {
+		if err := r.cfg.Blob.Delete(ctx, f.StorageKey); err != nil && !errors.Is(err, blob.ErrNotFound) {
+			r.log.Error("sweep step failed", "step", "queued file", "key", f.StorageKey, "attempts", f.Attempts+1, "err", err)
+			attempts := f.Attempts + 1
+			why := lastError(err)
+			if err := q.PostponeBlobDeletion(ctx, dbq.PostponeBlobDeletionParams{StorageKey: f.StorageKey, Attempts: attempts,
+				NextTryAt: now.Add(retryAfter(attempts)), LastError: &why}); err != nil {
+				return deleted, err
+			}
+			continue
+		}
+		if err := q.DeleteBlobDeletion(ctx, f.StorageKey); err != nil {
+			return deleted, err
+		}
+		deleted++
+	}
+	return deleted, nil
+}
+
+// retryAfter is how long a file the store refused attempts times waits
+// before it is asked again: 2^attempts minutes, a day at most.
+func retryAfter(attempts int32) time.Duration {
+	if attempts >= 11 { // 2^11 minutes is more than a day
+		return queuedFileRetryMost
+	}
+	return min(time.Duration(1<<attempts)*time.Minute, queuedFileRetryMost)
+}
+
+// lastError is what the queue keeps of an error: 1 to 500 characters.
+func lastError(err error) string {
+	why := []rune(strings.TrimSpace(err.Error()))
+	if len(why) == 0 {
+		return "the file store refused, saying nothing"
+	}
+	if len(why) > 500 {
+		why = why[:500]
+	}
+	return string(why)
 }
 
 // sweepExports removes the files of exports of conversations once they are

@@ -15,9 +15,12 @@ exact types and constraints.
 - **Scores and points**: `numeric`, never float.
 - **Status columns**: `text` with a `CHECK`, so adding or renaming a value is a one-line
   migration. The only enum is `autonomy_level`, because it must be ordered.
-- **Deletion**: status columns, not hard deletes. Foreign keys default to `NO ACTION`. Memory
-  (§2.9) is the one thing Core deletes rather than retires: what a person asks to be forgotten
-  is gone, and so is what a retention period ends. No other row points at it. An answer's
+- **Deletion**: status columns, not hard deletes. Foreign keys default to `NO ACTION`. Two
+  things Core deletes rather than retires. Memory (§2.9): what a person asks to be forgotten
+  is gone, and so is what a retention period ends. No other row points at it. And an
+  assignment deleted for good (§2.5, An assignment is deleted for good), with what is its:
+  its submissions, their files, the grades given on them, its events and the scope rows that
+  name it, through one path the database opens to that deletion alone. An answer's
   draft (§2.8) is no record at all: kept in an unlogged table while the answer is written, and
   deleted once it is there. A version's text version (§2.4) is what its file said, as text, and
   is deleted with the file when the version is purged.
@@ -38,6 +41,7 @@ course
  ├ grade_component (tree; root = course total)
  ├ document ── document_version ── document_version_text (its file, transcribed)
  ├ assignment ── submission
+ ├ assignment_deletion (an assignment deleted for good, and how much went with it)
  ├ action
  ├ grade
  ├ conversation ── conversation_message ── conversation_message_retraction
@@ -619,6 +623,7 @@ the nearest one, and the choice is recorded here so that it is a decision and no
 | Finding whom to seat by their whole email or login ID, or whom an actor id names (`member.lookup_actor`) | `perm_member_manage` | whoever seats members has to name them; it lists nobody |
 | Giving a student a temporary password (`member.reset_password`) | `perm_member_manage` at `autonomous`, and by a person | whoever seats the students gives one back the account they seated; never by proposal or under review, since the password is shown to whoever the call returns to, and never to an agent (§2.2, Resetting a student's password) |
 | Unpublishing an assignment nobody has started (`assignment.unpublish`) | `perm_assignment_write` | the undo of publishing it |
+| Deleting an assignment for good, with its work, files and grades (`assignment.delete`), and counting first what would go (`assignment.delete_preview`) | `perm_assignment_write`, reaching every student whose work or total it changes; one that anyone has started on, by a person | whoever sets the work removes it, at their level for it; it takes students' work and rewrites their totals, as moving graded work out of the grade does; an agent deletes only what nobody has started on (§2.5, An assignment is deleted for good) |
 | Deciding, reviewing and reading one's own agent's actions (`action.decide`, `.review`, `.get`), and the queues of them (`action.list_proposed`, `.list_pending_review`) | `perm_action_decide`, or owning the agent | an owner decides and reviews their agent's action where they could have done it themselves (§2.6), which needs no `perm_action_decide`; without it they reach their own agents' actions alone, and anything else is denied as it is to anyone without it |
 | Taking back one's own proposal, or one's own agent's, while nobody has decided it (`action.withdraw`) | `perm_document_read` | the most basic permission a seated member holds; that the proposal is the caller's own, or their own agent's, is what decides, as `action.list_mine` shows only the caller's own |
 | Closing a conversation (`conversation.close`), retracting a message (`conversation.retract`), listing and reading conversations (`conversation.list`, `.get`, `.messages`) | `perm_document_read` | the most basic permission a seated member holds; the conversation decides who may: its two participants, and whoever decides actions for its opener (§2.8) |
@@ -1220,7 +1225,10 @@ brought back — and the version list and `document.list` say when it was purged
 purged version still names it: a submission handed in under it reads the tombstone as what it
 was told, a grade its rubric the same, and neither the work nor the grade changes. A published
 version purged stays the published one, now a tombstone, until another is published; a purged
-version is never published again. A submitted file and a feedback file are their submission's
+version is never published again. Nor is a purged document named again: an assignment made or
+changed to name one as its instructions or rubric is refused (`document_purged`), the document
+held `FOR KEY SHARE` until the assignment is written, so that a purge under way is waited for or
+seen; one that named it already is changed as ever. A submitted file and a feedback file are their submission's
 and grade's, archived with them and never purged. The file is deleted last, once the rows say
 it is gone; if the call then fails to commit, the file is gone and the rows still name it, and
 the call made again with its key purges them, deleting what is gone already being no error.
@@ -1422,6 +1430,16 @@ submission(id, assignment_id, course_id, student_member_id, attempt = 1, body nu
            unique(id, student_member_id))
     composite FK (assignment_id, course_id)     → assignment(id, course_id)
     composite FK (course_id, student_member_id) → course_member(course_id, id)
+
+assignment_deletion(assignment_id pk, course_id→course, title, was_published,
+                    action_id unique→action, deleted_by_actor_id→actor, deleted_by_member_id,
+                    deleted_at, submissions, grades, files, proposals, totals)
+    composite FK (course_id, deleted_by_member_id) → course_member(course_id, id)
+    check: no count below zero;  kept as written;  at commit, the assignment it names is gone
+
+blob_deletion(storage_key pk, course_id→course, queued_by_action_id→action, queued_at,
+              attempts = 0, next_try_at, last_error null)
+    check: attempts ≥ 0;  last_error 1..500 characters
 ```
 
 `course_id` on `submission` is denormalised so the two composite keys make "the assignment and
@@ -1433,13 +1451,98 @@ published by mistake to where it was, while it has no submission of any kind: a 
 or a `missing` row (recorded by hand, or when its due date passed). What the feed has already
 shown stays in it.
 
-**Submissions freeze on submit.** Once `submitted` or `late`, a trigger rejects deletion and
-every change except correcting lateness. Resubmitting is a new `attempt`. The work a grade was
+**Submissions freeze on submit.** Once `submitted` or `late`, a trigger rejects every change
+except correcting lateness; and no submission, in any state, is deleted, but with its
+assignment deleted for good (below). Resubmitting is a new `attempt`. The work a grade was
 given for never changes underneath it. A hand-in that waits for approval counts from when it
 was asked for: `submitted_at`, lateness and the pinned instructions are as of then. It hands in
 the draft as it was then, and is refused on approval if the draft has changed in the meantime,
 even by an edit that was waiting for approval ahead of it: a hand-in is to be proposed once any
 change to its draft that waits for approval has been decided.
+
+**An assignment is deleted for good.** Whoever writes assignments (`perm_assignment_write`)
+deletes one, whatever has become of it: the assignment, every submission to it of every attempt
+and state, the files handed in with them and given as feedback on their grades, every version's,
+the grades given on them, drafts, posted and superseded, its events, and the scope rows that list
+it go, and cannot be brought back. No other document of the course goes or changes with it: its
+instructions and rubric, whatever work was handed in or graded under them, and an earlier one it
+no longer names, are left in the course as they are, every version with its text and files, and
+what the action log holds of what was done to them stays whole; an answer that relied on one
+reads it as before, as each reader may read it now (§2.8). Purging a course's document is an
+administrator's (`document.purge`, §2.4), and deleting an assignment is not: a teacher who wants
+its brief gone archives it, as any document, and an administrator may purge it. So no seat
+without an administrator's rights purges anything by deleting an assignment, however the
+assignment was pointed at a document or work was handed in or graded under one. The proposals
+waiting about it are cancelled (`target_deleted`, with `by_action_id`),
+each telling its proposer by `action.cancelled` as any cancellation does; the posted totals it
+counted in are worked out again without it, as a change to the scheme works them out (§2.7); and
+what the action log holds of what was done to it is emptied (§2.6). A seat that was listed for it
+alone reaches no assignment from then on: it fails closed.
+
+It is two tools. `assignment.delete_preview` reads what would go, counted, naming no person —
+`submissions` (`handed_in`, `drafts`, `missing`), `grades` (`posted`), `files` (those handed in
+and given as feedback; none of its instructions' or rubric's), `proposals` and `totals` (the
+students whose totals are worked out again) — and `refusal`, what deleting it would be refused
+for the caller right now, or null. `assignment.delete` takes those counts back, unchanged, as
+`confirm`: if any count is larger now, it is refused (`confirm_stale`, with `details.current`),
+so that a page or an agent that looked before more was added never deletes more than it was
+shown; one smaller is not. A person deletes at their level for it: at once, reviewed
+afterwards, or by proposal, which on approval runs as the proposer and is held to the counts it
+stored. An agent deletes only an assignment nobody has
+started on, with no submission row of any kind, a `missing` one included, and no grade
+(`people_only`): refused as it calls, before a proposal is queued, and again when one is
+approved, which reads `actor.kind` to refuse and never to grant, as `member.reset_password`
+does; its owner deciding such a proposal is refused `owner_would_be_refused` with that refusal,
+as for any proposal approving would refuse (§2.6).
+It reaches the assignment, every student with a submission row, and, when totals are worked out
+again, every student with one, across assignments, as a change to the scheme does
+(`student_out_of_scope`, `assignment_out_of_scope`); files to delete need a file store
+(`no_file_storage`); an archived course refuses it, as every write.
+
+It is one transaction. It locks the assignment `FOR UPDATE`, its submissions and then their
+grades in id order, and every submitted and feedback file it deletes in id order, and reads
+everything again under those locks, asking again what `Validate` asked; its instructions and
+rubric it neither locks nor reads. It writes the assignment's row of
+`assignment_deletion` first: who, from which seat, by which action, when, its title, whether
+students could see it, and the counts. That row is the one key to the guarded path: an event
+filed under the assignment, a submission, a grade given on one, a submitted or feedback file and
+its versions (once purged), and the assignment are deleted only while a row of
+`assignment_deletion` names the assignment, which only its own transaction sees before it
+commits, and which by commit must find the assignment gone (`assignment_deletion_whole`).
+Nothing else opens: a computed total, material, instructions and rubrics are never deleted; a
+document's kind, course and submission never change, and a feedback file moves only to another
+grade on the same submission, or from a total to a total, so that nothing is made into a file
+of its work (`document_kept`); and an assignment's id deleted is never used again. Then it queues the files,
+purges its files' versions, which takes their files, texts and renditions, deletes them and their
+documents, the grades, the submissions, the scope rows and the events, deletes the assignment,
+works the totals out again, and empties its line in every total that still names it (§2.7). It
+writes one event, filed under its
+own action: `assignment.deleted` for an assignment students could see, which everyone who reads
+the course is told, or `assignment.deleted_unreleased`, for those who write assignments; its
+payload is the title, never counts, since students are not told counts of others' work. Its `assignment_id` is null, the assignment being gone, so assignment
+scope does not filter it: staff listed for other assignments read its title. What stays: the
+deletion's own action, whole (its `confirm`, and in its result the title and what went), its
+row of `assignment_deletion`, that event, the emptied actions, the totals' history, and its
+instructions and rubric, as they were.
+
+The files leave the store after the deletion commits, not in it, since it may yet roll back
+and the store may be down: their keys, and their renditions' PDFs', are queued in
+`blob_deletion`, which the job runner drains every tick, up to a batch, the longest due first.
+A file deleted, or gone already, leaves the queue; one the store refuses waits 2^attempts
+minutes, a day at most, before it is asked again, its error kept. Attaching refuses a key that
+is queued (`already_attached`), as one attached: on this server's disk a file stays at its
+upload's key, and an old upload token must not bring a deleted file back.
+
+Asked about afterwards, the assignment is not found, and the call is told it was deleted, when
+and by which action (`not_found`, `reason` `deleted`, `deleted_at`, `by_action_id`), with
+nothing recorded: `assignment.get` and every tool that names it, or names a submission or grade
+that went with it. The deletion retried under its key replays what it did; under the key of an
+action it emptied, a call is told what became of its target, whatever it sends (`not_found`,
+`target_deleted`, `by_action_id`). A call held up by the deletion's locks is refused as one
+made afterwards is (`deleted`), never with a fault: handing in a draft, grading, the feed's
+`events.Flush` finding an assignment it names gone (`ShareAssignments` says which it held). A
+proposal about it made while it was being deleted waits with no target, and is cancelled
+`target_gone` when anyone decides it.
 
 ### 2.6 Activity
 
@@ -1453,13 +1556,14 @@ action(id, actor_id→actor, course_id null→course, member_id null→course_me
        reviewed_by_member_id null→course_member, reviewed_at null,
        executed_at null, result jsonb null, created_at,
        authority null [platform|department], authority_dept_id null→department,
-       revises_action_id null→action,
+       revises_action_id null→action, redacted_by_action_id null→action,
        unique(actor_id, idempotency_key),
        check(decided_by_member_id ≠ member_id), check(reviewed_by_member_id ≠ member_id),
        check(status agrees with authz_result), check(executed_at set ⇔ status = 'executed'),
        check(authority_dept_id set ⇒ authority = 'department'),
        check(changes_requested ⇒ a decider, a date and a note of 1..2000 characters),
-       check(revises_action_id ≠ id))
+       check(revises_action_id ≠ id),
+       check(redacted_by_action_id set ⇒ payload {}, result null, and ≠ id))
 
 event(seq, type, course_id null→course, action_id null→action,
       subject_type, subject_id null,
@@ -1504,6 +1608,22 @@ the first named none, or it is an `idempotency_conflict`. Nothing ties a revisio
 target to what it revises, and several calls may name one proposal — a revision that failed,
 then one that did not.
 
+**An action about an assignment deleted for good is emptied** (§2.5). Totals, events and
+decisions point at actions, and who did what, when, at what level and with what outcome stays
+accountable, so the rows stay; what they were given and returned goes. The deletion empties every
+action of the course, other than a deletion, whose target is the assignment, a submission to it,
+a grade given on one, or a submitted or feedback file deleted with it, whose arguments name one of those
+as `assignment_id`, `submission_id`, `grade_id` or `document_id`, or whose result names one as
+`id`, `submission_id`, `grade_id` or `document_id` (what a create made); and, at any remove, the
+decisions, reviews, withdrawals and expiries of those. Conversations' actions, a post by
+`grade_ids` alone, and what was done to its instructions and rubric, which stay, are not among
+them. Each becomes a stub: `payload` `{}`, `result` null,
+`payload_hash` the hash of a call that said nothing, and `redacted_by_action_id` the deletion
+(`action_redacted_empty`). The read tools say so, `redacted: {by_action_id, at}`, beside what is
+left. A call retried under the key of a stub is told `not_found`, `target_deleted`, whatever it
+sends; the release before reads a stub as an empty call, and a retry of it as a call of other
+content (`idempotency_conflict`).
+
 `authority` says in what capacity a call outside any course was allowed, when it was not the
 caller's own account's: by a platform role, or by a department administrator's appointment,
 whose department `authority_dept_id` names (§2.10).
@@ -1544,7 +1664,8 @@ lost without harm, whose write is ephemeral: authorized as a write is, and recor
 re-runs `authorize()` for the *proposer* — against the very `course_member` row the proposal
 was made under, not whatever row the actor holds today — and re-resolves the target. If the
 proposer has been removed, paused, expired, re-scoped or downgraded, or the target is gone, the
-proposal becomes `cancelled` and nothing executes. A background sweep cancels proposals older
+proposal becomes `cancelled` and nothing executes; a proposal about an assignment deleted for good
+is cancelled as it is deleted (`target_deleted`, §2.5). A background sweep cancels proposals older
 than a configured TTL; approval checks the same TTL inline, so correctness never depends on
 when the sweep last ran.
 
@@ -1757,6 +1878,13 @@ serves HW3, the midterm, the assignments bucket and the course total.
 - **`breakdown`** holds per-criterion detail for submission grades:
   `[{criterion, points, max, comment}]`. The rubric is prose the model reads; the breakdown is
   its output. Structured criteria tables were dropped as a second copy of the rubric.
+- **A total's history outlives an assignment deleted for good.** The totals it counted in are
+  written again without it, as a change of the scheme writes them (`grade.total_updated`, the
+  old superseded); a total written before keeps its number, which is what the student was
+  shown, and the line of its working that was the assignment's becomes
+  `{"id": …, "kind": "assignment", "deleted": true}`: nothing of the grade it was stays. So
+  too where it counted once and was taken out of the grade before it was deleted: every total
+  whose working still names it loses its line.
 - **Every grade names the action that created it.** When a student disputes an agent's mark,
   `created_by_action_id` is the whole query: which agent, which membership, who approved.
 
@@ -2659,12 +2787,17 @@ respondent's `conversation_answer` decides is who is shown its text.
 | No credential is written for the system actor | trigger on `credential` |
 | A person holds no API token, and an agent nothing but API tokens: none written, moved, changed in kind or brought back live otherwise | trigger `credential_fits_actor_kind` on `credential` |
 | `event` is append-only; `document_version` is too, but for being purged once: its text emptied, who, when and why recorded, nothing else changed; its files go with it | triggers |
+| An event filed under an assignment, a submission, a grade given on one, a submitted or feedback file and its versions once purged, and an assignment are deleted only in the transaction that records the assignment's deletion, and only that assignment's; a computed total, material, instructions and rubrics never; none of those tables is truncated | `assignment_being_deleted()`, triggers `event_append_only`, `submission_frozen_after_submit`, `grade_kept`, `document_kept`, `document_version_append_only`, `assignment_kept`, and each table's `*_no_truncate` |
+| A deletion's record is kept as written, counts nothing below zero, is made from a seat of its course, and by commit finds the assignment it names gone; an assignment's id deleted is never used again | `assignment_deletion_kept`, `_no_truncate`, `assignment_deletion_counts_valid`, composite FK, trigger `assignment_deletion_whole` at commit, `assignment_not_reused` |
+| An emptied action holds no payload and no result, and names an action other than itself | `action_redacted_empty`, `action_redacted_by_fk` (`NOT VALID`: every row before them holds null) |
+| A file is queued to leave the store once, with its attempts not below zero and its last error 1..500 characters | primary key and CHECKs on `blob_deletion` |
 | A version's file is of its version and its document, at a place of its own, and a stored file is one version's file at most; it is written with its version and dated as it is, never to a purged one, and kept as it is: never changed, and deleted only as its version is purged | composite FK, `unique(version_id, position)`, `unique(storage_key)`, triggers `document_version_file_with_its_version`, `document_version_file_kept` |
 | A version is text, files or both, and its files are numbered 1 to n, at most 100 | trigger `document_version_files_whole` on `document_version` and `document_version_file_whole` on `document_version_file`, at commit |
 | A purge says who, when and why; a purged document is material, instructions or a rubric, archived, and stays purged as it was purged | CHECKs and trigger `document_purge_kept` on `document`, CHECKs on `document_version` |
 | An override of a total is on a computed grade, not negative, and says who, when and why | CHECKs on `grade` |
-| A submitted submission never changes | trigger |
+| A submitted submission never changes, and no submission is deleted but with its assignment | trigger |
 | Owner columns match `document.kind`; SSO rows carry an identity | CHECKs |
+| A document's kind, course and submission never change; a feedback file on a submission's grade moves only to another grade on that submission, and one on a total only to another total | trigger `document_kept` |
 | An identity provider's client secret is kept sealed, never in the clear, and its hint is four characters of it at most; its id never changes | CHECKs `sso_provider_secret_sealed`, `sso_provider_secret_hint_valid`, trigger `sso_provider_id_fixed` |
 | Emails are unique regardless of case | unique index on `lower(email)` |
 | Login IDs are unique regardless of case; 1..64 of `[0-9A-Za-z._-]`, so never an `@` or a space; only a person has one | unique index `actor_login_id_key` on `lower(login_id)`, CHECKs `actor_login_id_valid`, `actor_login_id_is_a_persons` |
@@ -2735,6 +2868,16 @@ respondent's `conversation_answer` decides is who is shown its text.
   or one of blanks, or past 2000 characters, before anything is recorded, and stores it trimmed.
 - Re-authorizing the proposer when a proposal is approved, and cancelling proposals past
   their TTL.
+- Deleting an assignment for good (§2.5): only a person deletes one anyone has started on
+  (`people_only`), on the call, before a proposal is queued, and again as one is approved; the
+  deletion is held to the counts it confirms (`confirm_stale`), asked again under its locks;
+  what it empties and keeps (no document of the course but its work's files, whatever was
+  handed in or graded under its instructions and rubric and however it came to name them,
+  which actions are about it, the line of a total it was taken out of before); its files
+  queued and deleted after it commits, and a queued key attached nowhere; a call naming what
+  it took, or racing it, refused `deleted` with no fault, and one under the key of an emptied
+  action refused `target_deleted`. A purged document named again is refused
+  (`document_purged`).
 - A tool's check of what a call's arguments say alone (`tool.Spec.Check`) runs as they are
   decoded, after the schema and before anything else: a name left blank, a number below zero, a
   value that is not one of those allowed, two fields given that exclude each other, a message

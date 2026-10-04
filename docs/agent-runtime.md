@@ -81,8 +81,8 @@ read on 2026-09-26; **[UNVERIFIED]** marks what it did not confirm.
 - **Refused.** A JSON-RPC batch (400), an id over 256 bytes (400), and
   `subscriptions/listen` (404, `-32601`).
 - **Tool names** are the registry's with the dot turned to an underscore
-  (`conversation_answer`). There are 134 tools, 49 reads and 85 writes; all
-  match `[a-z_]+`, the longest has 27 characters, and every provider takes
+  (`conversation_answer`). There are 156 tools, 59 reads and 97 writes; all
+  match `[a-z_]+`, the longest has 28 characters, and every provider takes
   them as they are (§3.7).
 - **The runtime's own credential.** Its `agent_runtime` service credential
   (`aissvc_…`) is taken over REST alone, at its tools' routes under
@@ -968,7 +968,9 @@ and checks them when the catalogue's hash changes. Today: `document_read` for
 of those or `submission_read` or `grade_read` for `document_get`, `document_file`
 and `document_text`;
 `submission_read` for `submission_list`, `submission_get`; `grade_read` for
-`grade_list`, `grade_get`, `component_tree`, `gradebook_get`. An empty
+`grade_list`, `grade_get`, `component_tree`, `gradebook_get`; `assignment_write`
+for `assignment_delete_preview`, which counts what deleting an assignment
+would take and names no person. An empty
 toolset is fine: the agent answers from the conversation alone.
 
 ## 5. Several tenants

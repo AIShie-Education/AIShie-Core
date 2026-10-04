@@ -134,7 +134,7 @@ func submissionRoster() tool.Tool {
 		Query: func(ctx context.Context, rc *tool.ReadCtx, in SubmissionRosterIn) (SubmissionRosterOut, error) {
 			a, err := rc.Q.GetAssignmentInCourse(ctx, dbq.GetAssignmentInCourseParams{ID: in.AssignmentID, CourseID: in.CourseID})
 			if err != nil {
-				return SubmissionRosterOut{}, err
+				return SubmissionRosterOut{}, goneIfNoRows(ctx, rc.Q, in.CourseID, in.AssignmentID, err)
 			}
 			if a.PublishedAt == nil && !canSeeUnpublished(rc.Member) {
 				// As in assignment.get: to this caller it does not exist yet.
@@ -297,7 +297,7 @@ func submissionCreate() tool.Tool {
 			}
 			a, err := q.GetAssignmentInCourse(ctx, dbq.GetAssignmentInCourseParams{ID: in.AssignmentID, CourseID: in.CourseID})
 			if err != nil {
-				return err
+				return goneIfNoRows(ctx, q, in.CourseID, in.AssignmentID, err)
 			}
 			if a.PublishedAt == nil {
 				return errNoAssignment
@@ -318,7 +318,7 @@ func submissionCreate() tool.Tool {
 			}
 			a, err := ec.Q.GetAssignmentForSubmission(ctx, dbq.GetAssignmentForSubmissionParams{ID: in.AssignmentID, CourseID: in.CourseID})
 			if err != nil {
-				return SubmissionCreateOut{}, err
+				return SubmissionCreateOut{}, goneIfNoRows(ctx, ec.Q, in.CourseID, in.AssignmentID, err)
 			}
 			if a.PublishedAt == nil {
 				return SubmissionCreateOut{}, errNoAssignment
@@ -386,7 +386,7 @@ func submissionUpdateDraft() tool.Tool {
 			if err == nil && sub.State != stateDraft {
 				return errNoLongerDraft
 			}
-			return err
+			return workGone(err)
 		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in SubmissionUpdateDraftIn) (OK, error) {
 			n, err := ec.Q.UpdateSubmissionDraft(ctx, dbq.UpdateSubmissionDraftParams{ID: in.SubmissionID, Body: &in.Body})
@@ -524,14 +524,14 @@ func submissionSubmit() tool.Tool {
 		Pin: func(ctx context.Context, q dbq.Querier, _ *domain.Member, _ time.Time, in SubmissionSubmitIn) (SubmissionSubmitIn, error) {
 			s, err := q.GetSubmissionFull(ctx, dbq.GetSubmissionFullParams{ID: in.SubmissionID, CourseID: in.CourseID})
 			if err != nil {
-				return in, err
+				return in, workGone(err)
 			}
 			if s.State != stateDraft {
 				return in, apperr.Conflicts("the submission is %s, not a draft", s.State)
 			}
 			a, err := q.GetAssignmentInCourse(ctx, dbq.GetAssignmentInCourseParams{ID: s.AssignmentID, CourseID: in.CourseID})
 			if err != nil {
-				return in, err
+				return in, goneIfNoRows(ctx, q, in.CourseID, s.AssignmentID, err)
 			}
 			files, err := draftFiles(ctx, q, s.ID)
 			if err != nil {
@@ -554,19 +554,21 @@ func submissionSubmit() tool.Tool {
 		Validate: func(ctx context.Context, q dbq.Querier, _ *domain.Member, _ time.Time, in SubmissionSubmitIn) error {
 			sub, err := q.GetSubmissionFull(ctx, dbq.GetSubmissionFullParams{ID: in.SubmissionID, CourseID: in.CourseID})
 			if err != nil {
-				return err
+				return workGone(err)
 			}
 			_, err = in.handIn(ctx, q, sub)
 			return err
 		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in SubmissionSubmitIn) (SubmissionSubmitOut, error) {
+			// The draft may have gone with its assignment, deleted for good
+			// while the call waited for its lock (assignment.delete).
 			s, err := ec.Q.GetSubmissionFullForUpdate(ctx, dbq.GetSubmissionFullForUpdateParams{ID: in.SubmissionID, CourseID: in.CourseID})
 			if err != nil {
-				return SubmissionSubmitOut{}, err
+				return SubmissionSubmitOut{}, workGone(err)
 			}
 			a, err := ec.Q.GetAssignmentInCourse(ctx, dbq.GetAssignmentInCourseParams{ID: s.AssignmentID, CourseID: in.CourseID})
 			if err != nil {
-				return SubmissionSubmitOut{}, err
+				return SubmissionSubmitOut{}, goneIfNoRows(ctx, ec.Q, in.CourseID, s.AssignmentID, err)
 			}
 			if _, err := in.handIn(ctx, ec.Q, s); err != nil {
 				return SubmissionSubmitOut{}, err
@@ -646,7 +648,7 @@ func submissionSetLateness() tool.Tool {
 		Validate: func(ctx context.Context, q dbq.Querier, _ *domain.Member, _ time.Time, in SubmissionSetLatenessIn) error {
 			sub, err := q.GetSubmissionInCourse(ctx, dbq.GetSubmissionInCourseParams{ID: in.SubmissionID, CourseID: in.CourseID})
 			if err != nil {
-				return err
+				return workGone(err)
 			}
 			if (sub.State != stateSubmitted && sub.State != stateLate) || sub.State == in.State {
 				return errLateness(sub.State)
@@ -656,7 +658,7 @@ func submissionSetLateness() tool.Tool {
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in SubmissionSetLatenessIn) (OK, error) {
 			s, err := ec.Q.GetSubmissionInCourse(ctx, dbq.GetSubmissionInCourseParams{ID: in.SubmissionID, CourseID: in.CourseID})
 			if err != nil {
-				return OK{}, err
+				return OK{}, workGone(err)
 			}
 			n, err := ec.Q.SetSubmissionLateness(ctx, dbq.SetSubmissionLatenessParams{ID: s.ID, State: in.State})
 			if err != nil {
@@ -739,7 +741,7 @@ func submissionRecordMissing() tool.Tool {
 		Validate: func(ctx context.Context, q dbq.Querier, m *domain.Member, _ time.Time, in SubmissionRecordMissingIn) error {
 			a, err := q.GetAssignmentInCourse(ctx, dbq.GetAssignmentInCourseParams{ID: in.AssignmentID, CourseID: in.CourseID})
 			if err != nil {
-				return err
+				return goneIfNoRows(ctx, q, in.CourseID, in.AssignmentID, err)
 			}
 			if err := missable(ctx, q, m, in, a.PublishedAt); err != nil {
 				return err
@@ -758,7 +760,7 @@ func submissionRecordMissing() tool.Tool {
 			// unpublished one, it is not there, whoever the student is.
 			a, err := ec.Q.GetAssignmentForSubmission(ctx, dbq.GetAssignmentForSubmissionParams{ID: in.AssignmentID, CourseID: in.CourseID})
 			if err != nil {
-				return SubmissionIDOut{}, err
+				return SubmissionIDOut{}, goneIfNoRows(ctx, ec.Q, in.CourseID, in.AssignmentID, err)
 			}
 			if err := missable(ctx, ec.Q, ec.Member, in, a.PublishedAt); err != nil {
 				return SubmissionIDOut{}, err

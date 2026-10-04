@@ -305,17 +305,60 @@ func (q *Queries) PublishAssignment(ctx context.Context, arg PublishAssignmentPa
 	return result.RowsAffected(), nil
 }
 
-const shareAssignments = `-- name: ShareAssignments :exec
-SELECT 1 FROM assignment WHERE id = ANY($1::uuid[]) ORDER BY id FOR KEY SHARE
+const shareAssignments = `-- name: ShareAssignments :many
+SELECT id FROM assignment WHERE id = ANY($1::uuid[]) ORDER BY id FOR KEY SHARE
 `
 
 // KEY SHARE on the given assignments, in id order, for events.Flush to take
 // before the event-stream lock: an event's foreign key to its assignment
 // would otherwise wait under that lock for an unpublish, which is holding
-// the assignment and waiting for the same lock to write its own event.
-func (q *Queries) ShareAssignments(ctx context.Context, ids []uuid.UUID) error {
-	_, err := q.db.Exec(ctx, shareAssignments, ids)
-	return err
+// the assignment and waiting for the same lock to write its own event. The
+// ids it took come back: one missing was deleted (assignment.delete), after
+// this call had last looked at it.
+func (q *Queries) ShareAssignments(ctx context.Context, ids []uuid.UUID) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, shareAssignments, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const shareDocumentInCourse = `-- name: ShareDocumentInCourse :one
+SELECT id, kind, purged_at FROM document WHERE id = $1 AND course_id = $2 FOR KEY SHARE
+`
+
+type ShareDocumentInCourseParams struct {
+	ID       uuid.UUID
+	CourseID uuid.UUID
+}
+
+type ShareDocumentInCourseRow struct {
+	ID       uuid.UUID
+	Kind     string
+	PurgedAt *time.Time
+}
+
+// A document an assignment is about to name as its instructions or rubric,
+// held FOR KEY SHARE until the assignment is written: a purge
+// (document.purge), which locks it FOR UPDATE, waits, or is waited for and
+// seen.
+func (q *Queries) ShareDocumentInCourse(ctx context.Context, arg ShareDocumentInCourseParams) (ShareDocumentInCourseRow, error) {
+	row := q.db.QueryRow(ctx, shareDocumentInCourse, arg.ID, arg.CourseID)
+	var i ShareDocumentInCourseRow
+	err := row.Scan(&i.ID, &i.Kind, &i.PurgedAt)
+	return i, err
 }
 
 const unpublishAssignment = `-- name: UnpublishAssignment :execrows

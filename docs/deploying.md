@@ -691,6 +691,71 @@ Run all of these as root on the server.
   `conversation.answer` takes no `sources`; the agent answers again. Going
   down drops the sources and `sources_stated`; each answer's action keeps
   them as the call named them.
+- **Migration 0030, deleting an assignment for good:** whoever writes
+  assignments may delete one for good, with every submission to it, their
+  files and the grades given on them, after reading what goes
+  (`assignment.delete_preview`, `assignment.delete`; docs/schema.md §2.5,
+  An assignment is deleted for good). Its instructions and rubric are left
+  in the course as they are: purging a course's document stays an
+  administrator's (`document.purge`). The migration adds the record of
+  deletions (`assignment_deletion`), a queue of files to delete from the
+  store (`blob_deletion`) and a mark on the actions a deletion empties
+  (`action.redacted_by_action_id`), and opens the database's guards to a
+  deletion alone: from then on a submission, a grade, a submitted or
+  feedback file and its versions, an event filed under an assignment and an
+  assignment are deleted only by one, and a draft submission no longer by
+  anyone either, which 0001 allowed and nothing did. Material, instructions
+  and rubrics are never deleted, and a document's kind, course and
+  submission no longer change, nor a feedback file move to a grade on other
+  work: nothing in either release changes them. It changes no row.
+  - **Its indexes.** It makes nine indexes, so that a deletion does not read
+    whole tables once for each row it takes: on `event`, `grade` (two),
+    `submission`, `action`, `assignment` (two) and
+    `conversation_message_source` (two). Building each holds off writes to
+    its table while it is built, a moment on a school's site. A large site
+    builds them first, without holding anything off, under the names the
+    migration gives them, and the migration then skips them (`IF NOT
+    EXISTS`); with `psql`, as the database's owner (`DATABASE_URL` in the
+    env file), one statement at a time, outside a transaction:
+
+    ```
+    CREATE INDEX CONCURRENTLY IF NOT EXISTS event_assignment_idx ON event (assignment_id) WHERE assignment_id IS NOT NULL;
+    CREATE INDEX CONCURRENTLY IF NOT EXISTS grade_superseded_by_idx ON grade (superseded_by) WHERE superseded_by IS NOT NULL;
+    CREATE INDEX CONCURRENTLY IF NOT EXISTS grade_rubric_version_idx ON grade (rubric_version_id) WHERE rubric_version_id IS NOT NULL;
+    CREATE INDEX CONCURRENTLY IF NOT EXISTS submission_instructions_version_idx ON submission (instructions_version_id) WHERE instructions_version_id IS NOT NULL;
+    CREATE INDEX CONCURRENTLY IF NOT EXISTS action_course_idx ON action (course_id) WHERE course_id IS NOT NULL;
+    CREATE INDEX CONCURRENTLY IF NOT EXISTS assignment_instructions_document_idx ON assignment (instructions_document_id) WHERE instructions_document_id IS NOT NULL;
+    CREATE INDEX CONCURRENTLY IF NOT EXISTS assignment_rubric_document_idx ON assignment (rubric_document_id) WHERE rubric_document_id IS NOT NULL;
+    CREATE INDEX CONCURRENTLY IF NOT EXISTS conversation_message_source_document_idx ON conversation_message_source (document_id);
+    CREATE INDEX CONCURRENTLY IF NOT EXISTS conversation_message_source_version_idx ON conversation_message_source (version_id);
+    ```
+
+    A concurrent build that fails leaves its index behind, marked invalid,
+    which the migration would then take for built: before deploying, `SELECT
+    indexrelid::regclass FROM pg_index WHERE NOT indisvalid;` must name none
+    of them, and `DROP INDEX CONCURRENTLY` one it names before it is built
+    again.
+  - **The files.** A deletion's files leave the store after it commits, at
+    the job runner's next tick (`JOBS`, every `JOBS_INTERVAL`), which asks
+    the store again later, a day apart at most, about a file it refused, and
+    logs why (`queued file`). With the jobs switched off on every instance
+    they wait in the queue, and attach nowhere meanwhile.
+  - **The release before**, while the migration goes in and after a
+    rollback: it never deletes, so no guard bites it; it reads an emptied
+    action as a call that said nothing, and a retry under its key is refused
+    as `idempotency_conflict`; it does not drain the queue, and the files it
+    leaves queued are named by nothing, so its orphan sweep removes them
+    once `PROPOSAL_TTL` and two days have passed (never, without a TTL); it
+    cancels a waiting `assignment.delete` proposal it is asked to decide
+    (`tool_removed`); and a call of its racing a deletion fails, having
+    changed nothing. Going down drops the record, the queue and the mark:
+    the emptied actions stay empty, each deletion's own action keeps its
+    title and counts, and the files still queued are left to the orphan
+    sweep, as above.
+
+  The front end and the agent runtime that know of it come with their own
+  releases, each moving its pin to this one: until then nothing in the site
+  offers it, and an agent finds it in the catalogue.
 - **Migration 0013, `member_invite`:** the permission that makes a course's
   join links. Every seat a person holds got it at its level of
   `member_manage`, and every seat an agent holds got it `denied`, whatever it

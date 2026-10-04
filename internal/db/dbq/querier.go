@@ -45,6 +45,8 @@ type Querier interface {
 	// written there meanwhile.
 	ClaimTexts(ctx context.Context, arg ClaimTextsParams) ([]ClaimTextsRow, error)
 	ClearAssignmentScope(ctx context.Context, memberID uuid.UUID) error
+	// Of the submitted and feedback files deleted with it.
+	ClearPublishedVersions(ctx context.Context, ids []uuid.UUID) error
 	ClearStudentScope(ctx context.Context, memberID uuid.UUID) error
 	CloseConversation(ctx context.Context, arg CloseConversationParams) (int64, error)
 	// Seats that are removed — one, and its delegates' with it — take part in
@@ -78,6 +80,10 @@ type Querier interface {
 	ConversationDetails(ctx context.Context, arg ConversationDetailsParams) ([]ConversationDetailsRow, error)
 	// The agents a person owns that are not suspended: what the limit counts.
 	CountActiveAgentsOf(ctx context.Context, ownerActorID *uuid.UUID) (int64, error)
+	// An assignment's submissions, every attempt and state, by state; and the
+	// grades given on them that are live, drafts and posted: a superseded grade
+	// is the history of the one that replaced it, and is not counted.
+	CountAssignmentWork(ctx context.Context, assignmentID uuid.UUID) (CountAssignmentWorkRow, error)
 	CountAssignmentsInScope(ctx context.Context, arg CountAssignmentsInScopeParams) (int64, error)
 	CountAssignmentsOfCourse(ctx context.Context, arg CountAssignmentsOfCourseParams) (int64, error)
 	CountBuiltinPresets(ctx context.Context) (int64, error)
@@ -114,12 +120,27 @@ type Querier interface {
 	// next one. A service holds service credentials and nothing else
 	// (credential_fits_actor_kind).
 	CredentialLive(ctx context.Context, arg CredentialLiveParams) (bool, error)
+	DeleteAssignment(ctx context.Context, arg DeleteAssignmentParams) (int64, error)
+	// A seat listed for the assignment alone now reaches no assignment: it
+	// fails closed.
+	DeleteAssignmentScopes(ctx context.Context, assignmentID uuid.UUID) (int64, error)
+	DeleteBlobDeletion(ctx context.Context, storageKey string) error
+	// Of the submitted and feedback files deleted with it, purged first, so
+	// that their files and texts are gone (document_version_guarded).
+	DeleteDocumentVersions(ctx context.Context, documentIds []uuid.UUID) (int64, error)
+	// The submitted and feedback files deleted with it (document_kept).
+	DeleteDocuments(ctx context.Context, ids []uuid.UUID) (int64, error)
 	// The respondent's answer is posted, or proposed, the question it answers
 	// withdrawn (the opener's newest message retracted), or the conversation
 	// closed: in the same transaction, its draft is gone.
 	DeleteDraft(ctx context.Context, conversationID uuid.UUID) error
 	// DeleteDraft for the conversations a removal of seats closed.
 	DeleteDrafts(ctx context.Context, conversationIds []uuid.UUID) error
+	DeleteEventsOfAssignment(ctx context.Context, arg DeleteEventsOfAssignmentParams) (int64, error)
+	// Every grade given on the assignment's submissions, whole chains of
+	// superseded grades together: the key from a grade to the one that replaced
+	// it is checked at commit.
+	DeleteGradesOfAssignment(ctx context.Context, assignmentID uuid.UUID) (int64, error)
 	DeleteMemory(ctx context.Context, arg DeleteMemoryParams) (int64, error)
 	DeleteSSOProvider(ctx context.Context, arg DeleteSSOProviderParams) (int64, error)
 	// The sweep: drafts nobody has written for a while, which reads leave out
@@ -129,6 +150,7 @@ type Querier interface {
 	// says nothing the action log does not, so it is the one kind of row that is
 	// actually deleted.
 	DeleteStaleSessions(ctx context.Context, expiredBefore *time.Time) (int64, error)
+	DeleteSubmissionsOfAssignment(ctx context.Context, assignmentID uuid.UUID) (int64, error)
 	// The appointment through which actor administers dept: one at dept, or the
 	// nearest above it. No row: they do not.
 	DepartmentAuthority(ctx context.Context, arg DepartmentAuthorityParams) (DepartmentAuthorityRow, error)
@@ -254,6 +276,8 @@ type Querier interface {
 	// One row at most: an agent's runtime tokens that are not revoked are one at
 	// most (credential_one_runtime_token).
 	GetAgentForRuntime(ctx context.Context, arg GetAgentForRuntimeParams) (GetAgentForRuntimeRow, error)
+	// The record of an assignment of the course deleted for good, if it was.
+	GetAssignmentDeletion(ctx context.Context, arg GetAssignmentDeletionParams) (AssignmentDeletion, error)
 	// GetAssignmentInCourse for a tool about to add a submission to it. KEY SHARE
 	// holds up nothing but LockAssignmentForUnpublish, which it waits for; then
 	// the assignment is read as that left it.
@@ -422,6 +446,10 @@ type Querier interface {
 	// appointment of one person at one department, two made at once included.
 	InsertAppointment(ctx context.Context, arg InsertAppointmentParams) error
 	InsertAssignment(ctx context.Context, arg InsertAssignmentParams) error
+	// The record of the deletion, written before anything is deleted: it opens
+	// the guarded path (assignment_being_deleted) for this assignment, in this
+	// transaction.
+	InsertAssignmentDeletion(ctx context.Context, arg InsertAssignmentDeletionParams) error
 	InsertComponent(ctx context.Context, arg InsertComponentParams) error
 	// Conversations (docs/schema.md §2.8). Who may address whom is decided in
 	// Go, by one function (tools.addressing), from the seats as authorization
@@ -504,9 +532,23 @@ type Querier interface {
 	// retracted, when nothing is. Asked under the conversation's row lock, which
 	// a retraction of the opener's message takes too.
 	LatestOpenerMessage(ctx context.Context, conversationID uuid.UUID) (LatestOpenerMessageRow, error)
+	// The course's actions about the assignment, other than its deletions
+	// (assignment.delete), that no deletion has emptied yet: those whose target
+	// is the assignment, one of its submissions or of the grades given on them,
+	// or one of the submitted and feedback files deleted with it (document_ids,
+	// never its instructions or rubric, which stay, with what was done to
+	// them); those whose arguments name one of them as assignment_id,
+	// submission_id, grade_id or document_id, or whose result does as id,
+	// submission_id, grade_id or document_id (what a call made:
+	// assignment.create's id, submission.create's submission_id); and, at any
+	// remove, the decisions, reviews, withdrawals and expiries of those
+	// (target_type action).
+	ListActionsAboutAssignment(ctx context.Context, arg ListActionsAboutAssignmentParams) ([]ListActionsAboutAssignmentRow, error)
 	// exclude_types leaves out whole action types: a chat's messages from a
 	// list of what one has done, say.
 	ListActionsByMember(ctx context.Context, arg ListActionsByMemberParams) ([]Action, error)
+	// When each of these actions, the deletions that emptied others, ran.
+	ListActionsRedactedAt(ctx context.Context, ids []uuid.UUID) ([]ListActionsRedactedAtRow, error)
 	// Everyone registered, as GetActorView sees them: people and agents, not the
 	// system actor, which nobody registers or manages, nor a service, whose
 	// credentials are listed with service.list_credentials. The search is a piece of
@@ -580,6 +622,10 @@ type Querier interface {
 	ListDocumentRenditionStates(ctx context.Context, documentID uuid.UUID) ([]ListDocumentRenditionStatesRow, error)
 	// The live drafts waiting to be posted for one assignment.
 	ListDraftGradeIDsForAssignment(ctx context.Context, arg ListDraftGradeIDsForAssignmentParams) ([]uuid.UUID, error)
+	// ---------------------------------------------------------------------------
+	// The queue of files to delete from the store (the job runner)
+	// ---------------------------------------------------------------------------
+	ListDueBlobDeletions(ctx context.Context, arg ListDueBlobDeletionsParams) ([]ListDueBlobDeletionsRow, error)
 	// What a sign-in reads: the providers switched on, in the sign-in page's
 	// order, with what signing in through each takes, the sealed secret among it.
 	ListEnabledSSOProviders(ctx context.Context) ([]ListEnabledSSOProvidersRow, error)
@@ -618,6 +664,8 @@ type Querier interface {
 	// cancelled is its result's. An answer's sources are as it named them, ids
 	// alone; null when it did not say.
 	ListExportProposals(ctx context.Context, arg ListExportProposalsParams) ([]ListExportProposalsRow, error)
+	// The keys of the files of every version of the documents, in order.
+	ListFileKeysOfDocuments(ctx context.Context, documentIds []uuid.UUID) ([]string, error)
 	ListGradeDocuments(ctx context.Context, gradeID *uuid.UUID) ([]ListGradeDocumentsRow, error)
 	// Assignments that count toward the grade. An unpublished one cannot have a
 	// submission, so it cannot have a grade; it is left out rather than shown to
@@ -722,6 +770,10 @@ type Querier interface {
 	// the same rule for one seat, and the authorization queries' owner_matches
 	// its other half: a change to one is a change to all three.
 	ListOrphanedSeats(ctx context.Context, arg ListOrphanedSeatsParams) ([]ListOrphanedSeatsRow, error)
+	// The submitted files of every submission to the assignment, and the
+	// feedback files of every grade given on them, superseded ones included, in
+	// id order: deleted with it, and the only documents that are.
+	ListOwnedDocumentsOfAssignment(ctx context.Context, assignmentID uuid.UUID) ([]uuid.UUID, error)
 	ListPendingReviewActions(ctx context.Context, arg ListPendingReviewActionsParams) ([]Action, error)
 	// The review queue likewise: their own agents' actions under review.
 	ListPendingReviewActionsOfAgentsOf(ctx context.Context, arg ListPendingReviewActionsOfAgentsOfParams) ([]Action, error)
@@ -800,6 +852,9 @@ type Querier interface {
 	ListStudentsGradedOnAssignment(ctx context.Context, assignmentID uuid.UUID) ([]uuid.UUID, error)
 	// Every student of the course who has a total written down.
 	ListStudentsWithLiveTotals(ctx context.Context, courseID uuid.UUID) ([]uuid.UUID, error)
+	// The students with a submission row of any kind for the assignment: whose
+	// work its deletion takes.
+	ListStudentsWithSubmissionsTo(ctx context.Context, assignmentID uuid.UUID) ([]uuid.UUID, error)
 	// Current students of the course with no submission row at all for the
 	// assignment: not a draft, not a hand-in, not an earlier 'missing'. A paused
 	// student is one: the seat carries on when resumed, and the sweep does not
@@ -837,6 +892,21 @@ type Querier interface {
 	// its standing read under the lock. NO KEY UPDATE, as LockOwnerForAgents,
 	// not UPDATE: every action row naming the agent holds KEY SHARE on the row.
 	LockAgentForHosting(ctx context.Context, id uuid.UUID) error
+	// Deleting an assignment for good (docs/schema.md §2.5, An assignment is
+	// deleted for good): what goes with it, read by assignment.delete_preview as
+	// the course stands and by assignment.delete under the locks it takes, and
+	// the statements that take it. The guards of migration 0030 let these
+	// deletes through only in the transaction that has written the
+	// assignment's row of assignment_deletion. The only documents they reach are
+	// the submitted files of its submissions and the feedback files of the
+	// grades given on them: its instructions and rubric, and the course's
+	// material, are left as they are.
+	// The assignment, held FOR UPDATE for the whole of its deletion: it holds off
+	// the KEY SHARE that a new submission's foreign key takes, and an event's or
+	// a scope row's, and ShareAssignments; a grader's FOR SHARE
+	// (ShareAssignmentForGrading); and an update's or a publish's NO KEY UPDATE.
+	// It is the first lock the deletion takes after its caller's seat.
+	LockAssignmentForDelete(ctx context.Context, arg LockAssignmentForDeleteParams) (LockAssignmentForDeleteRow, error)
 	// FOR UPDATE, not the NO KEY UPDATE of an ordinary update: it conflicts with
 	// the KEY SHARE that inserting a submission takes, and that
 	// GetAssignmentForSubmission takes before it checks that the assignment is
@@ -905,6 +975,9 @@ type Querier interface {
 	// Held until the transaction ends. See events.Flush for why.
 	LockEventStream(ctx context.Context, arg LockEventStreamParams) error
 	LockGradesInCourse(ctx context.Context, arg LockGradesInCourseParams) ([]uuid.UUID, error)
+	// Every grade given on a submission to the assignment, superseded ones
+	// included, held in id order, after the submissions.
+	LockGradesOfAssignment(ctx context.Context, assignmentID uuid.UUID) ([]uuid.UUID, error)
 	// Calls with one key take turns from the start, before anything else is
 	// locked. A retry of a call still in flight waits here holding nothing, and
 	// then finds the first call's row; without this it would wait for that row
@@ -987,6 +1060,9 @@ type Querier interface {
 	LockSubmissionForGrading(ctx context.Context, id uuid.UUID) (string, error)
 	// All of one student's attempts at one assignment, locked, newest first.
 	LockSubmissionsOf(ctx context.Context, arg LockSubmissionsOfParams) ([]LockSubmissionsOfRow, error)
+	// Every submission to the assignment, every attempt and state, held in id
+	// order: nothing is added to one (a file, a grade) while it is deleted.
+	LockSubmissionsOfAssignment(ctx context.Context, assignmentID uuid.UUID) ([]uuid.UUID, error)
 	// A file's text version, held for a change to it. Whoever changes it holds
 	// the document first, as adding and purging a version do.
 	LockText(ctx context.Context, arg LockTextParams) (DocumentVersionText, error)
@@ -1046,6 +1122,7 @@ type Querier interface {
 	// roster role but student.
 	PasswordResetFacts(ctx context.Context, id uuid.UUID) (PasswordResetFactsRow, error)
 	PostGrade(ctx context.Context, arg PostGradeParams) (int64, error)
+	PostponeBlobDeletion(ctx context.Context, arg PostponeBlobDeletionParams) error
 	// Whether a principal's own seat, or the seat of another of its delegates
 	// than except, is among the seats of one roster role that are not removed or
 	// past their expiry: what a delegate's member.update_perms_bulk would reach,
@@ -1068,6 +1145,9 @@ type Querier interface {
 	// for a new one. Under the row's lock, so that two writes at once are
 	// ordered by it.
 	PutDraft(ctx context.Context, arg PutDraftParams) (int64, error)
+	// Files to delete from the store once this transaction has committed, due
+	// at once. A key queued already stays as it is.
+	QueueBlobDeletions(ctx context.Context, arg QueueBlobDeletionsParams) (int64, error)
 	// A text version for a file of a version from before there were any, which
 	// nobody queued (the backfill queued the published and the latest): asked
 	// for by staff, it is queued as an upload is.
@@ -1076,6 +1156,15 @@ type Querier interface {
 	// Only a suspension the owner made: one an administrator made, or one made
 	// before this was recorded, is an administrator's to lift.
 	ReactivateAgentByOwner(ctx context.Context, arg ReactivateAgentByOwnerParams) (int64, error)
+	// Empties actions about an assignment deleted for good, naming the deletion:
+	// who did what, when, on what and with what outcome stay; what they were
+	// given and returned go, and their hash is an empty call's.
+	RedactActions(ctx context.Context, arg RedactActionsParams) (int64, error)
+	// The line of a deleted assignment in the working of the course's totals
+	// that still name it, superseded ones: it says the assignment was deleted,
+	// and nothing of the grade it was. The total's number is kept: it is what
+	// the student was shown.
+	RedactTotalsLine(ctx context.Context, arg RedactTotalsLineParams) (int64, error)
 	ReleaseJobLock(ctx context.Context, key int64) (bool, error)
 	// What a revoked credential had claimed, back in the queue for another,
 	// that claim not counted. The courses come back, to wake whoever waits.
@@ -1084,6 +1173,8 @@ type Querier interface {
 	// that claim not counted. The courses come back, to wake whoever waits.
 	ReleaseTexts(ctx context.Context, arg ReleaseTextsParams) ([]uuid.UUID, error)
 	RenameDepartment(ctx context.Context, arg RenameDepartmentParams) error
+	// The PDFs of the files of every version of the documents.
+	RenditionKeysOfDocuments(ctx context.Context, documentIds []uuid.UUID) ([]string, error)
 	// The PDFs of the files of these versions, which go from the file store
 	// when the versions are purged.
 	RenditionKeysOfVersions(ctx context.Context, versionIds []uuid.UUID) ([]string, error)
@@ -1178,11 +1269,18 @@ type Querier interface {
 	// KEY SHARE on the given assignments, in id order, for events.Flush to take
 	// before the event-stream lock: an event's foreign key to its assignment
 	// would otherwise wait under that lock for an unpublish, which is holding
-	// the assignment and waiting for the same lock to write its own event.
-	ShareAssignments(ctx context.Context, ids []uuid.UUID) error
+	// the assignment and waiting for the same lock to write its own event. The
+	// ids it took come back: one missing was deleted (assignment.delete), after
+	// this call had last looked at it.
+	ShareAssignments(ctx context.Context, ids []uuid.UUID) ([]uuid.UUID, error)
 	// The document's status, held FOR SHARE for a write about one of its
 	// versions: archiving it waits for the write, or the write sees it.
 	ShareDocument(ctx context.Context, id uuid.UUID) (string, error)
+	// A document an assignment is about to name as its instructions or rubric,
+	// held FOR KEY SHARE until the assignment is written: a purge
+	// (document.purge), which locks it FOR UPDATE, waits, or is waited for and
+	// seen.
+	ShareDocumentInCourse(ctx context.Context, arg ShareDocumentInCourseParams) (ShareDocumentInCourseRow, error)
 	// KEY SHARE on the given seats, in id order: what taking them before some
 	// other lock looks like, where that lock would otherwise be held while one of
 	// them is waited for. A delegate's seat and its principal's are not taken
@@ -1206,7 +1304,10 @@ type Querier interface {
 	// change to one is a change to all four.
 	SiteChatOf(ctx context.Context, arg SiteChatOfParams) ([]SiteChatOfRow, error)
 	// Whether a file has been attached: to a version of a document, as one of
-	// its files, or to a message of a conversation.
+	// its files, or to a message of a conversation; or was, and is queued to be
+	// deleted from the store with what it was attached to (blob_deletion). On
+	// this server's disk a file stays at its upload's key, and an old upload
+	// token must not bring a deleted file back.
 	StorageKeyInUse(ctx context.Context, storageKey *string) (bool, error)
 	StudentCountedAsZero(ctx context.Context, studentMemberID uuid.UUID) (bool, error)
 	// A grade entered, or proposed and not yet decided: either way, one is on its
