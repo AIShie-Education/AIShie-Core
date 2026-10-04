@@ -1351,3 +1351,130 @@ func TestAnExportsFilesAreRemovedOnceTheyAreADayOld(t *testing.T) {
 		t.Fatalf("a removed export's file: %+v %v", got, err)
 	}
 }
+
+// deleteWithFile gives a student's draft of a new assignment a file, and has
+// Sato delete the assignment for good, confirming what its preview showed:
+// the draft's upload token, the key its file is kept under, and the action
+// that queued it.
+func (f *fixture) deleteWithFile(t *testing.T) (token, key string, deletion uuid.UUID) {
+	t.Helper()
+	quiz := testkit.Result[tools.IDOut](t, f.MustCall(f.Sato, "assignment.create", m{"course_id": f.Course, "title": "Quiz",
+		"points_possible": 10}, "quiz-"+uuid.NewString())).ID
+	f.MustCall(f.Sato, "assignment.publish", m{"course_id": f.Course, "assignment_id": quiz}, "publish-"+uuid.NewString())
+	yuki := f.Students[0].Actor
+	draft := testkit.Result[tools.SubmissionCreateOut](t, f.MustCall(yuki, "submission.create",
+		m{"course_id": f.Course, "assignment_id": quiz}, "draft-"+uuid.NewString())).SubmissionID
+	token, _ = f.uploadAs(t, yuki, "submission")
+	if out := f.MustCall(yuki, "document.create", m{"course_id": f.Course, "kind": "submission", "title": "answers.txt",
+		"submission_id": draft, "files": []m{{"upload_token": token, "filename": "answers.txt"}}}, "file-"+uuid.NewString()); out.Status != domain.StatusExecuted {
+		t.Fatalf("Yuki's file: %+v", out)
+	}
+	if err := f.Pool.QueryRow(context.Background(), `SELECT f.storage_key FROM document_version_file f JOIN document d ON d.id = f.document_id
+		WHERE d.submission_id = $1`, draft).Scan(&key); err != nil {
+		t.Fatal(err)
+	}
+	preview := testkit.Result[tools.AssignmentDeletePreviewOut](t, f.MustCall(f.Sato, "assignment.delete_preview",
+		m{"course_id": f.Course, "assignment_id": quiz}, ""))
+	out := f.MustCall(f.Sato, "assignment.delete", m{"course_id": f.Course, "assignment_id": quiz, "confirm": preview.Counts},
+		"delete-"+uuid.NewString())
+	if out.Status != domain.StatusExecuted || testkit.Result[tools.AssignmentDeleteOut](t, out).FilesQueued != 1 {
+		t.Fatalf("deleting the quiz: %+v", out)
+	}
+	return token, key, *out.ActionID
+}
+
+// The files of an assignment deleted for good leave the store once the
+// deletion has committed, at the next tick, from the queue it wrote; until
+// then the upload they came from attaches nowhere again. However the store
+// keeps them.
+func TestQueuedFilesLeaveTheStore(t *testing.T) {
+	for name, wrap := range stores {
+		t.Run(name, func(t *testing.T) {
+			f := setupWith(t, 1, wrap)
+			store := wrap(f.Blob)
+			f.runner = jobs.New(f.Pool, f.P, f.system, jobs.Config{Blob: store}, nil)
+			ctx := context.Background()
+			token, key, deletion := f.deleteWithFile(t)
+			if n := f.Count(`SELECT count(*) FROM blob_deletion WHERE storage_key = $1 AND queued_by_action_id = $2`, key, deletion); n != 1 {
+				t.Fatal("the file is not queued")
+			}
+			if _, err := store.Stat(ctx, key); err != nil {
+				t.Fatalf("the file left the store before the deletion was swept: %v", err)
+			}
+
+			// Its upload, named again on another draft, is attached nowhere.
+			yuki := f.Students[0].Actor
+			draft := testkit.Result[tools.SubmissionCreateOut](t, f.MustCall(yuki, "submission.create",
+				m{"course_id": f.Course, "assignment_id": f.HW4}, "hw4")).SubmissionID
+			out := f.MustCall(yuki, "document.create", m{"course_id": f.Course, "kind": "submission", "title": "again.txt",
+				"submission_id": draft, "files": []m{{"upload_token": token, "filename": "again.txt"}}}, "again")
+			if out.Status != domain.StatusFailed || out.Error.Details["reason"] != "already_attached" {
+				t.Fatalf("a deleted file's upload attached again: %+v", out)
+			}
+
+			if rep := f.sweep(t); rep.QueuedFilesDeleted != 1 {
+				t.Fatalf("%+v, want the queued file deleted", rep)
+			}
+			if _, err := store.Stat(ctx, key); !errors.Is(err, blob.ErrNotFound) {
+				t.Fatalf("the file is still in the store: %v", err)
+			}
+			if n := f.Count(`SELECT count(*) FROM blob_deletion`); n != 0 {
+				t.Fatalf("%d files are still queued", n)
+			}
+			if rep := f.sweep(t); rep.QueuedFilesDeleted != 0 {
+				t.Fatalf("%+v, and nothing is queued", rep)
+			}
+		})
+	}
+}
+
+// A file the store will not delete stays queued, asked again later, and
+// later still the more it refuses; one gone already leaves the queue as
+// one deleted does.
+func TestAQueuedFileTheStoreRefusesIsAskedAgainLater(t *testing.T) {
+	f := setup(t, 1)
+	ctx := context.Background()
+	_, key, _ := f.deleteWithFile(t)
+	store := stubborn{Store: f.Blob, keep: map[string]bool{key: true}}
+	f.runner = jobs.New(f.Pool, f.P, f.system, jobs.Config{Blob: store}, nil)
+
+	if rep := f.sweep(t); rep.QueuedFilesDeleted != 0 {
+		t.Fatalf("%+v, and the store refused", rep)
+	}
+	var attempts int
+	var next time.Time
+	var why string
+	if err := f.Pool.QueryRow(ctx, `SELECT attempts, next_try_at, last_error FROM blob_deletion WHERE storage_key = $1`, key).Scan(
+		&attempts, &next, &why); err != nil {
+		t.Fatal(err)
+	}
+	if attempts != 1 || !next.Equal(f.now.Add(2*time.Minute).Truncate(time.Microsecond)) || why != "access denied" {
+		t.Fatalf("after one refusal: %d attempts, next at %s (now %s), %q", attempts, next, f.now, why)
+	}
+	// Not due yet: not asked.
+	f.now = f.now.Add(time.Minute)
+	if rep := f.sweep(t); rep.QueuedFilesDeleted != 0 || f.Count(`SELECT attempts FROM blob_deletion`) != 1 {
+		t.Fatalf("asked again before it was due: %+v", rep)
+	}
+	// Due, and refused again: twice as long.
+	f.now = f.now.Add(time.Minute)
+	f.sweep(t)
+	if err := f.Pool.QueryRow(ctx, `SELECT attempts, next_try_at FROM blob_deletion WHERE storage_key = $1`, key).Scan(&attempts, &next); err != nil {
+		t.Fatal(err)
+	}
+	if attempts != 2 || !next.Equal(f.now.Add(4*time.Minute).Truncate(time.Microsecond)) {
+		t.Fatalf("after two refusals: %d attempts, next at %s (now %s)", attempts, next, f.now)
+	}
+	// Gone meanwhile, by other means: done, as deleted.
+	if err := f.Blob.Delete(ctx, key); err != nil {
+		t.Fatal(err)
+	}
+	delete(store.keep, key)
+	f.now = f.now.Add(4 * time.Minute)
+	if rep := f.sweep(t); rep.QueuedFilesDeleted != 1 {
+		t.Fatalf("%+v, want the file gone already taken off the queue", rep)
+	}
+	if n := f.Count(`SELECT count(*) FROM blob_deletion`); n != 0 {
+		t.Fatalf("%d files are still queued", n)
+	}
+}
