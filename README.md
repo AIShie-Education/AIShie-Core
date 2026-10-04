@@ -65,7 +65,14 @@ In place so far:
 - records that can be corrected, with their history kept: a seat's roster
   role, what graded work is worth and where it counts (its grades rescaled or
   kept, the totals following), a computed total overridden beside the number
-  worked out, and final grades' treating ungraded work as zero undone.
+  worked out, and final grades' treating ungraded work as zero undone;
+- an assignment deleted for good by whoever writes assignments, once they
+  have read what goes with it and confirmed it: its submissions, their files
+  and its grades go, its instructions and rubric are purged where nothing
+  else uses them, the proposals about it are cancelled and the totals it
+  counted in worked out again; an agent deletes only one nobody has started
+  on; one record of it stays, in the action log and in the feed, and its
+  files leave the store at the next sweep.
 
 `make e2e` runs the real binary against a scratch database and, with nothing
 but `curl`, builds the worked example from docs/schema.md §5 from an empty
@@ -93,7 +100,10 @@ registered one joins, and which seats nobody once
 revoked; a student with no email registers through another with her student
 number as her login ID and signs in with it, is given a temporary password by
 the instructor when she forgets hers, and sets her own before anything else,
-and the instructor cannot reset a TA's; root exports the course's
+and the instructor cannot reset a TA's; the instructor deletes a quiz for
+good, with the student's work on it, its grade and its brief, once a
+confirmation of less than there is has been refused, which an agent of his
+may not, and its files leave the store at the next sweep; root exports the course's
 conversations for audit and downloads both files, the question the student
 withdrew in them, marked, a department's administrator exports only what is
 beneath her, and the instructor, the student and an agent are refused; Core vouches for the instructor to an agent runtime, and the
@@ -112,8 +122,9 @@ more.
 
 - background sweeps, run as the system actor and recorded like any other
   action: stale proposals cancelled, expired memberships removed, missing
-  submissions marked when a due date passes, uploads that nothing came to
-  point at removed. Every instance may run them; Postgres advisory locks see
+  submissions marked when a due date passes, the files of what was deleted
+  for good removed from the store, uploads that nothing came to point at
+  removed. Every instance may run them; Postgres advisory locks see
   that one does.
 
 - single sign-on over OpenID Connect (written against ADFS), through the
@@ -674,7 +685,9 @@ the course stands fails at once instead), `403` denied, and a failure
 with its error's own status, `400`, `403`, `404`, `409` or `422`, or `429`, with
 `Retry-After`, for an agent writing to its memory faster than it may. A proposal
 replayed says what has become of it: `202` while it waits, `200` executed,
-`409` rejected or sent back for changes, `422` cancelled, or its failure's status. An answer with no
+`409` rejected or sent back for changes, `422` cancelled, or its failure's status;
+one whose record was emptied when its assignment was deleted for good is
+answered `404` (`target_deleted`), whatever is sent. An answer with no
 top-level `action_id` recorded nothing, whatever its status: among them every
 `401` and every other `429`, a `400` or `404` for a call that was never attempted (its
 arguments refused by the schema, or by its tool's check of what they say alone, such as a
