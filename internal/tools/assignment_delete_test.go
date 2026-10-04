@@ -754,6 +754,103 @@ func TestNamingADocumentDoesNotMakeItAnAssignmentsToPurge(t *testing.T) {
 	}
 }
 
+// Nor does work that whoever writes and grades assignments can make for one
+// alone. Sato, who may not purge a document, names a spare brief and a spare
+// rubric, each with a file, from an assignment made for the purpose,
+// records Ken missing on it and grades the placeholder, and hands work in
+// for Yuki himself and grades that too: deleting it purges neither, and
+// queues none of their files. Work a student hands in does make the brief
+// it was handed in under the assignment's own, by an agent of theirs as
+// much as from their own seat.
+func TestWorkMadeForAStudentDoesNotMakeADocumentAnAssignmentsToPurge(t *testing.T) {
+	b := build(t)
+	doc := func(kind, title string) uuid.UUID {
+		id := testkit.Result[tools.DocumentCreateOut](t, b.do(t, b.sato, "document.create", m{"course_id": b.course, "kind": kind,
+			"title": title, "body_md": title + ", in full.", "files": b.fileOn(t, b.sato, kind, kind+".pdf")})).DocumentID
+		b.do(t, b.sato, "document.publish", m{"course_id": b.course, "document_id": id})
+		return id
+	}
+	brief, rubric := doc("instructions", "Spare brief"), doc("rubric", "Spare rubric")
+	for _, d := range []uuid.UUID{brief, rubric} {
+		b.try(t, b.sato, "document.purge", m{"course_id": b.course, "document_id": d, "reason": "Not wanted."}, apperr.Forbidden)
+	}
+	scratch := testkit.Result[tools.IDOut](t, b.do(t, b.sato, "assignment.create", m{"course_id": b.course, "title": "Scratch",
+		"points_possible": 10, "instructions_document_id": brief, "rubric_document_id": rubric})).ID
+	b.do(t, b.sato, "assignment.publish", m{"course_id": b.course, "assignment_id": scratch})
+
+	// Ken recorded missing, the placeholder graded, a draft never posted.
+	missing := testkit.Result[tools.SubmissionIDOut](t, b.do(t, b.sato, "submission.record_missing",
+		m{"course_id": b.course, "assignment_id": scratch, "student_member_id": b.kenM})).SubmissionID
+	b.do(t, b.sato, "grade.submit", m{"course_id": b.course, "submission_id": missing, "score": 0})
+	// Work handed in for Yuki, by Sato, under the spare brief, and graded
+	// under the spare rubric.
+	forYuki := testkit.Result[tools.SubmissionCreateOut](t, b.do(t, b.sato, "submission.create",
+		m{"course_id": b.course, "assignment_id": scratch, "student_member_id": b.yukiM, "body": "Typed in for her."})).SubmissionID
+	b.do(t, b.sato, "submission.submit", m{"course_id": b.course, "submission_id": forYuki})
+	b.do(t, b.sato, "grade.submit", m{"course_id": b.course, "submission_id": forYuki, "score": 5})
+	if n := b.Count(`SELECT count(*) FROM submission s JOIN document_version v ON v.id = s.instructions_version_id
+		WHERE s.id = $1 AND v.document_id = $2`, forYuki, brief); n != 1 {
+		t.Fatal("the work handed in for Yuki is not pinned to the spare brief: the test shows nothing")
+	}
+	if n := b.Count(`SELECT count(*) FROM grade g JOIN document_version v ON v.id = g.rubric_version_id
+		WHERE g.submission_id = ANY($1) AND v.document_id = $2`, []uuid.UUID{missing, forYuki}, rubric); n != 2 {
+		t.Fatalf("%d of the two grades are pinned to the spare rubric: the test shows nothing", n)
+	}
+
+	p := b.deletionPreview(t, b.sato, scratch)
+	if p.Refusal != nil || len(p.Documents) != 0 || p.Counts.Documents != 0 || len(p.Counts.DocumentIDs) != 0 || len(p.KeptDocuments) != 2 ||
+		p.Counts.HandedIn != 1 || p.Counts.Missing != 1 || p.Counts.Grades != 2 || p.Counts.Files != 0 {
+		t.Fatalf("the preview of an assignment with only work Sato made for it: %+v", p)
+	}
+	out := b.MustCall(b.sato, "assignment.delete", deleteArgs(b, scratch, p.Counts), "scratch")
+	if out.Status != domain.StatusExecuted || testkit.Result[tools.AssignmentDeleteOut](t, out).Removed.Documents != 0 {
+		t.Fatalf("deleting it: %+v", out)
+	}
+	for _, d := range []uuid.UUID{brief, rubric} {
+		if n := b.Count(`SELECT count(*) FROM document WHERE id = $1 AND purged_at IS NULL AND status = 'active'`, d); n != 1 {
+			t.Errorf("document %s was purged or archived with an assignment only Sato's own work was done for", d)
+		}
+	}
+	if n := b.Count(`SELECT count(*) FROM blob_deletion`); n != 0 {
+		t.Fatalf("%d files were queued to leave the store", n)
+	}
+
+	// Yuki's own agent hands work in to a quiz, under its brief, by
+	// proposals Sato approves: the brief is the quiz's own.
+	bot := b.agent(t, b.yuki, "Yuki's helper")
+	seat := b.delegate(t, b.yuki, bot, m{})
+	b.do(t, b.sato, "member.update_perms", m{"course_id": b.course, "member_id": seat, "perms": m{"submission_write": "confirm_required"}})
+	quizBrief := doc("instructions", "Quiz brief")
+	quiz := testkit.Result[tools.IDOut](t, b.do(t, b.sato, "assignment.create", m{"course_id": b.course, "title": "Quiz",
+		"points_possible": 10, "instructions_document_id": quizBrief})).ID
+	b.do(t, b.sato, "assignment.publish", m{"course_id": b.course, "assignment_id": quiz})
+	approve := func(out pipeline.Outcome) json.RawMessage {
+		t.Helper()
+		if out.Status != domain.StatusProposed {
+			t.Fatalf("the agent's call: %+v", out)
+		}
+		d := testkit.Result[pipeline.DecideOut](t, b.do(t, b.sato, "action.decide", m{"course_id": b.course, "action_id": out.ActionID, "decision": "approve"}))
+		if d.Outcome != domain.StatusExecuted {
+			t.Fatalf("approving the agent's call: %+v", d)
+		}
+		return d.Result
+	}
+	var draft tools.SubmissionCreateOut
+	if err := json.Unmarshal(approve(b.MustCall(bot, "submission.create", m{"course_id": b.course, "assignment_id": quiz,
+		"student_member_id": b.yukiM, "body": "My answers."}, "bot-draft")), &draft); err != nil {
+		t.Fatal(err)
+	}
+	approve(b.MustCall(bot, "submission.submit", m{"course_id": b.course, "submission_id": draft.SubmissionID}, "bot-submit"))
+	p = b.deletionPreview(t, b.sato, quiz)
+	if len(p.Documents) != 1 || p.Documents[0].ID != quizBrief || len(p.KeptDocuments) != 0 || p.Counts.HandedIn != 1 {
+		t.Fatalf("the preview of the quiz Yuki's agent handed work in to: %+v", p)
+	}
+	b.do(t, b.sato, "assignment.delete", deleteArgs(b, quiz, p.Counts))
+	if n := b.Count(`SELECT count(*) FROM document WHERE id = $1 AND purged_at IS NOT NULL AND purged_by_actor_id = $2`, quizBrief, b.sato); n != 1 {
+		t.Fatal("the quiz's brief, which Yuki's agent handed her work in under, was not purged with it")
+	}
+}
+
 // A deletion needs somewhere to delete its files from.
 func TestADeletionWithFilesNeedsAFileStore(t *testing.T) {
 	b := buildOn(t, testkit.NewPlatformWithDeps(t, func(d *tools.Deps) { d.Blob = nil }))

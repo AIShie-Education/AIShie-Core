@@ -1462,22 +1462,25 @@ deletes one, whatever has become of it: the assignment, every submission to it o
 and state, the files handed in with them and given as feedback on their grades, every version's,
 the grades given on them, drafts, posted and superseded, its events, and the scope rows that list
 it go, and cannot be brought back. Its own instructions and rubric are purged, as
-`document.purge` purges (§2.4), by the deleter, `purge_reason` `assignment_deleted`: those its
-own work was done under, work handed in to it having pinned one of their versions as its
-instructions or a grade given on that work as its rubric, where nothing else uses them: no other
+`document.purge` purges (§2.4), by the deleter, `purge_reason` `assignment_deleted`: those a
+student's work was done under, work a student handed in to it, from their own seat or by an agent
+of theirs, as the action that handed it in says, having pinned one of their versions as its
+instructions, or a grade given on that work as its rubric, where nothing else uses them: no other
 assignment names one, no submission to another assignment pins one of its versions, and no grade
 but those given on the assignment's own submissions pins one. Naming a document does not make it
 the assignment's: whoever writes assignments may name any of the course's, and purging one is
 for administrators, so an assignment made only to name a document, and deleted, takes nothing
-with it. One it names that its work was not done under is left as it is, and so is one something
-else uses, and an earlier one it no longer names. A purge keeps the row and loses the content,
-which is what an answer that relied on one needs: its source stays, names no file, and reads
-`restricted` to everyone (§2.8). The proposals waiting about it are cancelled
-(`target_deleted`, with `by_action_id`), each telling its proposer by `action.cancelled` as any
-cancellation does; the posted totals it counted in are worked out again without it, as a change
-to the scheme works them out (§2.7); and what the action log holds of what was done to it is
-emptied (§2.6). A seat that was listed for it alone reaches no assignment from then on: it fails
-closed.
+with it. Nor does work that whoever writes and grades assignments can make for it alone: a
+`missing` placeholder, which whoever grades records, work handed in for a student by someone
+else (`perm_submission_write`), and a grade given on either. One it names that no student's
+work was done under is left as it is, and so is one something else uses, and an earlier one it
+no longer names. A purge keeps the row and loses the content, which is what an answer that
+relied on one needs: its source stays, names no file, and reads `restricted` to everyone
+(§2.8). The proposals waiting about it are cancelled (`target_deleted`, with `by_action_id`),
+each telling its proposer by `action.cancelled` as any cancellation does; the posted totals it
+counted in are worked out again without it, as a change to the scheme works them out (§2.7); and
+what the action log holds of what was done to it is emptied (§2.6). A seat that was listed for it
+alone reaches no assignment from then on: it fails closed.
 
 It is two tools. `assignment.delete_preview` reads what would go, counted, naming no person —
 `submissions` (`handed_in`, `drafts`, `missing`), `grades` (`posted`), `files`, `documents`
@@ -2869,11 +2872,11 @@ respondent's `conversation_answer` decides is who is shown its text.
 - Deleting an assignment for good (§2.5): only a person deletes one anyone has started on
   (`people_only`), on the call, before a proposal is queued, and again as one is approved; the
   deletion is held to the counts and the documents it confirms (`confirm_stale`), asked again
-  under its locks; what it empties, purges and keeps (which documents are its own, which
-  actions are about it, the line of a total it was taken out of before); its files queued and
-  deleted after it commits, and a queued key attached nowhere; a call naming what it took, or
-  racing it, refused `deleted` with no fault, and one under the key of an emptied action
-  refused `target_deleted`.
+  under its locks; what it empties, purges and keeps (which documents are its own, by work a
+  student handed in, which actions are about it, the line of a total it was taken out of
+  before); its files queued and deleted after it commits, and a queued key attached nowhere; a
+  call naming what it took, or racing it, refused `deleted` with no fault, and one under the
+  key of an emptied action refused `target_deleted`.
 - A tool's check of what a call's arguments say alone (`tool.Spec.Check`) runs as they are
   decoded, after the schema and before anything else: a name left blank, a number below zero, a
   value that is not one of those allowed, two fields given that exclude each other, a message

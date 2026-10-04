@@ -564,14 +564,18 @@ type Querier interface {
 	// The instructions and the rubric the assignment names, not purged, each
 	// saying whether it is the assignment's own, to be purged with it. Naming a
 	// document does not make it so: whoever writes assignments may name any of
-	// the course's, and purging is for administrators (document.purge). It is
-	// the assignment's own where the assignment's own work was done under it,
-	// work handed in to it pinning one of its versions as the instructions or a
-	// grade given on that work pinning one as the rubric, and nothing else uses
-	// it: no other assignment names it, no submission to another assignment
-	// pins one of its versions, and no grade but those given on the
-	// assignment's own submissions pins one. Any other is kept as it is.
-	ListAssignmentDocuments(ctx context.Context, id uuid.UUID) ([]ListAssignmentDocumentsRow, error)
+	// the course's, and purging is for administrators (document.purge). Nor does
+	// work that whoever writes and grades assignments can make for it alone: a
+	// 'missing' placeholder, which whoever grades records, work handed in for a
+	// student by someone else (submission_write), and a grade given on either.
+	// It is the assignment's own where work a student handed in to it, from
+	// their own seat or by an agent of theirs, as the action that handed it in
+	// says, pinned one of its versions as the instructions, or a grade given on
+	// that work pins one as the rubric; and nothing else uses it: no other
+	// assignment names it, no submission to another assignment pins one of its
+	// versions, and no grade but those given on the assignment's own
+	// submissions pins one. Any other is kept as it is.
+	ListAssignmentDocuments(ctx context.Context, assignmentID uuid.UUID) ([]ListAssignmentDocumentsRow, error)
 	// Every current student of the course whom the caller's student scope
 	// reaches, with their latest attempt at one assignment, if any: the students
 	// who have not started are rows too, with no submission. The caller's
