@@ -99,6 +99,12 @@ func TestArgumentsAreCheckedBeforeAnythingIsProposed(t *testing.T) {
 		{tool: "assignment.create",
 			invalid: in(m{"title": "HW5"}),
 			message: "title and points_possible are required"},
+		// What deleting it takes, confirmed as the preview counted it: none
+		// of it below zero.
+		{tool: "assignment.delete",
+			valid:   in(m{"assignment_id": b.hw3, "confirm": deletionCounts(9)}),
+			invalid: in(m{"assignment_id": b.hw3, "confirm": deletionCounts(-1)}),
+			message: "confirm's counts are none of them below zero: send back the counts assignment.delete_preview gave"},
 		{tool: "assignment.update",
 			valid:   in(m{"assignment_id": b.hw3, "title": "Homework 3"}),
 			invalid: in(m{"assignment_id": b.hw3, "title": "   "}),

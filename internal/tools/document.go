@@ -169,6 +169,9 @@ var unreleased = map[string]string{
 	EventTextUpdated:          EventTextUpdatedUnreleased,
 	EventRubricTextUpdated:    EventRubricTextUpdatedUnreleased,
 	EventDraftTextUpdated:     EventDraftTextUpdatedUnreleased,
+	// Not a document's, but told the same way: an assignment deleted before
+	// students could see it is news for those who write assignments.
+	EventAssignmentDeleted: EventAssignmentDeletedUnreleased,
 }
 
 // emitDocumentEvent emits an event about a document of the given kind.
@@ -650,7 +653,7 @@ func documentCreate(d Deps) tool.Tool {
 			case kindSubmission:
 				s, err := q.GetSubmissionFull(ctx, dbq.GetSubmissionFullParams{ID: *in.SubmissionID, CourseID: in.CourseID})
 				if err != nil {
-					return err
+					return workGone(err)
 				}
 				if s.State != stateDraft {
 					return errFileNotToADraft(s.State)
@@ -658,7 +661,7 @@ func documentCreate(d Deps) tool.Tool {
 			case kindFeedback:
 				g, err := q.GetGradeFull(ctx, dbq.GetGradeFullParams{ID: *in.GradeID, CourseID: in.CourseID})
 				if err != nil {
-					return err
+					return workGone(err)
 				}
 				if g.SupersededBy != nil {
 					return errFeedbackToAReplacedGrade
@@ -681,7 +684,7 @@ func documentCreate(d Deps) tool.Tool {
 				// waits for it, and then finds it handed in.
 				s, err := ec.Q.GetSubmissionFullForUpdate(ctx, dbq.GetSubmissionFullForUpdateParams{ID: *in.SubmissionID, CourseID: in.CourseID})
 				if err != nil {
-					return DocumentCreateOut{}, err
+					return DocumentCreateOut{}, workGone(err)
 				}
 				if s.State != stateDraft {
 					return DocumentCreateOut{}, errFileNotToADraft(s.State)
@@ -690,7 +693,7 @@ func documentCreate(d Deps) tool.Tool {
 			case kindFeedback:
 				g, err := ec.Q.GetGradeFull(ctx, dbq.GetGradeFullParams{ID: *in.GradeID, CourseID: in.CourseID})
 				if err != nil {
-					return DocumentCreateOut{}, err
+					return DocumentCreateOut{}, workGone(err)
 				}
 				// A computed total takes feedback files as an entered grade does:
 				// whoever posts may say something about it (grade.comment_total),
@@ -1040,7 +1043,7 @@ func draftOnly(ctx context.Context, q dbq.Querier, courseID uuid.UUID, doc dbq.G
 		s, err = q.GetSubmissionFull(ctx, dbq.GetSubmissionFullParams{ID: *doc.SubmissionID, CourseID: courseID})
 	}
 	if err != nil {
-		return err
+		return workGone(err)
 	}
 	if s.State != stateDraft {
 		return errHandedIn

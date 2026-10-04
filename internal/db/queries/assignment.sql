@@ -44,12 +44,14 @@ FROM assignment
 WHERE id = $1 AND course_id = $2
 FOR UPDATE;
 
--- name: ShareAssignments :exec
+-- name: ShareAssignments :many
 -- KEY SHARE on the given assignments, in id order, for events.Flush to take
 -- before the event-stream lock: an event's foreign key to its assignment
 -- would otherwise wait under that lock for an unpublish, which is holding
--- the assignment and waiting for the same lock to write its own event.
-SELECT 1 FROM assignment WHERE id = ANY(sqlc.arg(ids)::uuid[]) ORDER BY id FOR KEY SHARE;
+-- the assignment and waiting for the same lock to write its own event. The
+-- ids it took come back: one missing was deleted (assignment.delete), after
+-- this call had last looked at it.
+SELECT id FROM assignment WHERE id = ANY(sqlc.arg(ids)::uuid[]) ORDER BY id FOR KEY SHARE;
 
 -- name: AssignmentHasSubmissions :one
 -- Any row at all: a draft, a hand-in, a 'missing' placeholder.

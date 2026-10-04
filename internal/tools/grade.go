@@ -207,7 +207,7 @@ func loadSubject(ctx context.Context, q dbq.Querier, courseID uuid.UUID, submiss
 		}
 		a, err := q.GetAssignmentInCourse(ctx, dbq.GetAssignmentInCourseParams{ID: sub.AssignmentID, CourseID: courseID})
 		if err != nil {
-			return s, err
+			return s, goneIfNoRows(ctx, q, courseID, sub.AssignmentID, err)
 		}
 		s.student, s.submission, s.assignment = sub.StudentMemberID, &sub, &a
 
@@ -547,15 +547,17 @@ func gradeSubmit(d Deps) tool.Tool {
 // component's points are held still by the tree lock checkSubject takes.
 func lockGradeTarget(ctx context.Context, q dbq.Querier, courseID uuid.UUID, s *gradeSubject) error {
 	if s.submission != nil {
+		// Either may have gone with the assignment, deleted for good while
+		// the call waited for it (assignment.delete).
 		a, err := q.ShareAssignmentForGrading(ctx, dbq.ShareAssignmentForGradingParams{ID: s.assignment.ID, CourseID: courseID})
 		if err != nil {
-			return err
+			return goneIfNoRows(ctx, q, courseID, s.assignment.ID, err)
 		}
 		fresh := dbq.GetAssignmentInCourseRow(a)
 		s.assignment = &fresh
 		state, err := q.LockSubmissionForGrading(ctx, s.submission.ID)
 		if err != nil {
-			return err
+			return workGone(err)
 		}
 		s.submission.State = state
 		return nil
@@ -571,7 +573,7 @@ func lockGradeTarget(ctx context.Context, q dbq.Querier, courseID uuid.UUID, s *
 func holdWorth(ctx context.Context, q dbq.Querier, courseID uuid.UUID, s gradeSubject) error {
 	if s.assignment != nil {
 		_, err := q.ShareAssignmentForGrading(ctx, dbq.ShareAssignmentForGradingParams{ID: s.assignment.ID, CourseID: courseID})
-		return err
+		return goneIfNoRows(ctx, q, courseID, s.assignment.ID, err)
 	}
 	return q.LockCourseComponents(ctx, courseID)
 }

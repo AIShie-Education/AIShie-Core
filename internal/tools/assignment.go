@@ -99,11 +99,11 @@ type AssignmentIDIn struct {
 	AssignmentID uuid.UUID `json:"assignment_id"`
 }
 
+// assignmentTarget resolves an assignment of the course; one deleted for good
+// is not found, and the call is told it was deleted (assignmentGone).
 func assignmentTarget(ctx context.Context, q dbq.Querier, courseID, id uuid.UUID) (tool.Target, error) {
-	if _, err := q.GetAssignmentInCourse(ctx, dbq.GetAssignmentInCourseParams{ID: id, CourseID: courseID}); errors.Is(err, pgx.ErrNoRows) {
-		return tool.Target{}, apperr.Missing("no such assignment in this course")
-	} else if err != nil {
-		return tool.Target{}, err
+	if _, err := q.GetAssignmentInCourse(ctx, dbq.GetAssignmentInCourseParams{ID: id, CourseID: courseID}); err != nil {
+		return tool.Target{}, goneIfNoRows(ctx, q, courseID, id, err)
 	}
 	return tool.Target{CourseID: courseID, Type: "assignment", ID: &id, Scope: authz.Target{AssignmentIDs: []uuid.UUID{id}}}, nil
 }
@@ -120,7 +120,7 @@ func assignmentGet() tool.Tool {
 		Query: func(ctx context.Context, rc *tool.ReadCtx, in AssignmentIDIn) (AssignmentView, error) {
 			a, err := rc.Q.GetAssignmentInCourse(ctx, dbq.GetAssignmentInCourseParams{ID: in.AssignmentID, CourseID: in.CourseID})
 			if err != nil {
-				return AssignmentView{}, err
+				return AssignmentView{}, goneIfNoRows(ctx, rc.Q, in.CourseID, in.AssignmentID, err)
 			}
 			if a.PublishedAt == nil && !canSeeUnpublished(rc.Member) {
 				// To this caller an unpublished assignment does not exist yet.
@@ -160,23 +160,49 @@ func (b AssignmentBody) check() error {
 // component is a bucket of this course. lock takes the component tree's
 // lock first, as Execute does; Validate asks it of the tree as it stands,
 // before the call is carried out or proposed.
-func checkAssignment(ctx context.Context, q dbq.Querier, courseID uuid.UUID, a dbq.GetAssignmentInCourseRow, lock bool) error {
+//
+// A document a is to name that before, the assignment as it was, did not
+// (all of them, for one being created) is held FOR KEY SHARE until the
+// assignment is written, and refused if it was purged (document_purged):
+// a purge, document.purge's or an assignment's deletion's, locks it FOR
+// UPDATE, and either waits for this or is seen by it, so that no
+// assignment comes to name a tombstone. One the assignment named already
+// is read as before: an assignment whose instructions an administrator
+// purged is still changed as ever.
+func checkAssignment(ctx context.Context, q dbq.Querier, courseID uuid.UUID, before, a dbq.GetAssignmentInCourseRow, lock bool) error {
 	for _, d := range []struct {
-		id   *uuid.UUID
-		kind string
-	}{{a.InstructionsDocumentID, "instructions"}, {a.RubricDocumentID, "rubric"}} {
+		id, was *uuid.UUID
+		kind    string
+	}{{a.InstructionsDocumentID, before.InstructionsDocumentID, "instructions"}, {a.RubricDocumentID, before.RubricDocumentID, "rubric"}} {
 		if d.id == nil {
 			continue
 		}
-		doc, err := q.GetDocumentInCourse(ctx, dbq.GetDocumentInCourseParams{ID: *d.id, CourseID: courseID})
-		if errors.Is(err, pgx.ErrNoRows) {
-			return apperr.Precondition("the %s document is not a document of this course", d.kind)
+		var kind string
+		if sameID(d.id, d.was) {
+			doc, err := q.GetDocumentInCourse(ctx, dbq.GetDocumentInCourseParams{ID: *d.id, CourseID: courseID})
+			if errors.Is(err, pgx.ErrNoRows) {
+				return apperr.Precondition("the %s document is not a document of this course", d.kind)
+			}
+			if err != nil {
+				return err
+			}
+			kind = doc.Kind
+		} else {
+			doc, err := q.ShareDocumentInCourse(ctx, dbq.ShareDocumentInCourseParams{ID: *d.id, CourseID: courseID})
+			if errors.Is(err, pgx.ErrNoRows) {
+				return apperr.Precondition("the %s document is not a document of this course", d.kind)
+			}
+			if err != nil {
+				return err
+			}
+			if doc.PurgedAt != nil {
+				return apperr.Precondition("the %s document has been purged, and nothing is to be read in it", d.kind).
+					With("reason", "document_purged").With("document_id", doc.ID)
+			}
+			kind = doc.Kind
 		}
-		if err != nil {
-			return err
-		}
-		if doc.Kind != d.kind {
-			return apperr.Precondition("that document is of kind %s, not %s", doc.Kind, d.kind)
+		if kind != d.kind {
+			return apperr.Precondition("that document is of kind %s, not %s", kind, d.kind)
 		}
 	}
 	// Published means students can read it. assignment.publish insists the
@@ -266,12 +292,12 @@ func assignmentCreate() tool.Tool {
 		Validate: func(ctx context.Context, q dbq.Querier, _ *domain.Member, _ time.Time, in AssignmentCreateIn) error {
 			a := dbq.GetAssignmentInCourseRow{CourseID: in.CourseID}
 			in.applyTo(&a)
-			return checkAssignment(ctx, q, in.CourseID, a, false)
+			return checkAssignment(ctx, q, in.CourseID, dbq.GetAssignmentInCourseRow{}, a, false)
 		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in AssignmentCreateIn) (IDOut, error) {
 			a := dbq.GetAssignmentInCourseRow{ID: ids.New(), CourseID: in.CourseID}
 			in.applyTo(&a)
-			if err := checkAssignment(ctx, ec.Q, in.CourseID, a, true); err != nil {
+			if err := checkAssignment(ctx, ec.Q, in.CourseID, dbq.GetAssignmentInCourseRow{}, a, true); err != nil {
 				return IDOut{}, err
 			}
 			if err := ec.Q.InsertAssignment(ctx, dbq.InsertAssignmentParams{
@@ -398,7 +424,7 @@ func assignmentUpdate() tool.Tool {
 					}
 				}
 			}
-			return checkAssignment(ctx, q, in.CourseID, a, false)
+			return checkAssignment(ctx, q, in.CourseID, before, a, false)
 		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in AssignmentUpdateIn) (SchemeChangeOut, error) {
 			// Read under the row's lock. Every column is written back, and a
@@ -433,7 +459,7 @@ func assignmentUpdate() tool.Tool {
 					return SchemeChangeOut{}, err
 				}
 			}
-			if err := checkAssignment(ctx, ec.Q, in.CourseID, a, true); err != nil {
+			if err := checkAssignment(ctx, ec.Q, in.CourseID, before, a, true); err != nil {
 				return SchemeChangeOut{}, err
 			}
 			if err := ec.Q.UpdateAssignment(ctx, dbq.UpdateAssignmentParams{

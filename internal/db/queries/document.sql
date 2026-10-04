@@ -169,9 +169,13 @@ SELECT EXISTS (
 
 -- name: StorageKeyInUse :one
 -- Whether a file has been attached: to a version of a document, as one of
--- its files, or to a message of a conversation.
+-- its files, or to a message of a conversation; or was, and is queued to be
+-- deleted from the store with what it was attached to (blob_deletion). On
+-- this server's disk a file stays at its upload's key, and an old upload
+-- token must not bring a deleted file back.
 SELECT (EXISTS (SELECT 1 FROM document_version_file WHERE storage_key = sqlc.narg(storage_key)::text)
-     OR EXISTS (SELECT 1 FROM conversation_attachment WHERE storage_key = sqlc.narg(storage_key)::text))::bool AS in_use;
+     OR EXISTS (SELECT 1 FROM conversation_attachment WHERE storage_key = sqlc.narg(storage_key)::text)
+     OR EXISTS (SELECT 1 FROM blob_deletion WHERE storage_key = sqlc.narg(storage_key)::text))::bool AS in_use;
 
 -- name: LockStorageKey :exec
 -- Serialises attaching one upload. Held until the transaction ends.

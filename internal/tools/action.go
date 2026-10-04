@@ -193,12 +193,20 @@ type ActionView struct {
 	Result             json.RawMessage `json:"result,omitempty" jsonschema:"what the call returned; for a rejected proposal, or one sent back for changes, the decision: decision.reason is why, or what to change"`
 	CreatedAt          time.Time       `json:"created_at"`
 	RevisesActionID    *uuid.UUID      `json:"revises_action_id,omitempty" jsonschema:"the proposal this one revises: its proposer's own, sent back for changes, whose result says what was asked"`
+	// Redacted is set on an action about an assignment deleted for good.
+	Redacted *ActionRedaction `json:"redacted,omitempty" jsonschema:"set when what the action was about was deleted for good (assignment.delete): its payload and result were emptied then, and say nothing"`
 	// YoursToDecide is set in the approval and review queues.
 	YoursToDecide *bool `json:"yours_to_decide,omitempty" jsonschema:"in the approval and review queues: false when the action is yours, your owner's or another agent's of your owner, and when it is your own agent's and you could not do the same yourself without anyone's confirmation (your own level for it below autonomous, or its target beyond your reach, or, for a proposal, the tool's own checks of what it asks refuse it as approving it now would run them): someone else decides and reviews those; true otherwise, though a decision about a decision may still be refused at one remove"`
 }
 
+// ActionRedaction says which deletion emptied an action, and when.
+type ActionRedaction struct {
+	ByActionID uuid.UUID  `json:"by_action_id" jsonschema:"the assignment.delete that emptied it"`
+	At         *time.Time `json:"at,omitempty" jsonschema:"when it did"`
+}
+
 func viewAction(a dbq.Action) ActionView {
-	return ActionView{
+	v := ActionView{
 		ID: a.ID, ActorID: a.ActorID, MemberID: a.MemberID, ActionType: a.ActionType,
 		TargetType: a.TargetType, TargetID: a.TargetID, Payload: a.Payload,
 		AuthzResult: string(a.AuthzResult), Status: a.Status,
@@ -206,6 +214,38 @@ func viewAction(a dbq.Action) ActionView {
 		ReviewState: a.ReviewState, ReviewedByMemberID: a.ReviewedByMemberID, ReviewedAt: a.ReviewedAt,
 		ExecutedAt: a.ExecutedAt, Result: a.Result, CreatedAt: a.CreatedAt, RevisesActionID: a.RevisesActionID,
 	}
+	if a.RedactedByActionID != nil {
+		v.Redacted = &ActionRedaction{ByActionID: *a.RedactedByActionID}
+	}
+	return v
+}
+
+// redactedAt says, of each action in views that a deletion emptied, when it
+// did: when the deletion ran.
+func redactedAt(ctx context.Context, q dbq.Querier, views []ActionView) error {
+	var by []uuid.UUID
+	for _, v := range views {
+		if v.Redacted != nil {
+			by = append(by, v.Redacted.ByActionID)
+		}
+	}
+	if len(by) == 0 {
+		return nil
+	}
+	rows, err := q.ListActionsRedactedAt(ctx, dedupe(by))
+	if err != nil {
+		return err
+	}
+	at := make(map[uuid.UUID]*time.Time, len(rows))
+	for _, r := range rows {
+		at[r.ID] = r.ExecutedAt
+	}
+	for i := range views {
+		if r := views[i].Redacted; r != nil {
+			r.At = at[r.ByActionID]
+		}
+	}
+	return nil
 }
 
 type ActionListIn struct {
@@ -241,6 +281,9 @@ func queuePage(ctx context.Context, rc *tool.ReadCtx, p *pipeline.Pipeline, rows
 	out := actionPage(rows, limit)
 	if len(rows) == 0 {
 		return out, nil
+	}
+	if err := redactedAt(ctx, rc.Q, out.Actions); err != nil {
+		return out, err
 	}
 	actors := make([]uuid.UUID, 0, len(rows))
 	for _, r := range rows {
@@ -355,7 +398,11 @@ func actionListMine() tool.Tool {
 			rows, err := rc.Q.ListActionsByMember(ctx, dbq.ListActionsByMemberParams{
 				CourseID: &in.CourseID, MemberID: &rc.Member.ID, After: in.after(), MaxRows: in.limit(), ExcludeTypes: exclude,
 			})
-			return actionPage(rows, in.limit()), err
+			if err != nil {
+				return ActionListOut{}, err
+			}
+			out := actionPage(rows, in.limit())
+			return out, redactedAt(ctx, rc.Q, out.Actions)
 		},
 	})
 }
@@ -381,7 +428,14 @@ func actionGet(d Deps) tool.Tool {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return ActionView{}, apperr.Missing("no such action in this course")
 			}
-			return viewAction(a), err
+			if err != nil {
+				return ActionView{}, err
+			}
+			v := []ActionView{viewAction(a)}
+			if err := redactedAt(ctx, rc.Q, v); err != nil {
+				return ActionView{}, err
+			}
+			return v[0], nil
 		},
 	})
 }

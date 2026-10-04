@@ -305,17 +305,34 @@ func (q *Queries) PublishAssignment(ctx context.Context, arg PublishAssignmentPa
 	return result.RowsAffected(), nil
 }
 
-const shareAssignments = `-- name: ShareAssignments :exec
-SELECT 1 FROM assignment WHERE id = ANY($1::uuid[]) ORDER BY id FOR KEY SHARE
+const shareAssignments = `-- name: ShareAssignments :many
+SELECT id FROM assignment WHERE id = ANY($1::uuid[]) ORDER BY id FOR KEY SHARE
 `
 
 // KEY SHARE on the given assignments, in id order, for events.Flush to take
 // before the event-stream lock: an event's foreign key to its assignment
 // would otherwise wait under that lock for an unpublish, which is holding
-// the assignment and waiting for the same lock to write its own event.
-func (q *Queries) ShareAssignments(ctx context.Context, ids []uuid.UUID) error {
-	_, err := q.db.Exec(ctx, shareAssignments, ids)
-	return err
+// the assignment and waiting for the same lock to write its own event. The
+// ids it took come back: one missing was deleted (assignment.delete), after
+// this call had last looked at it.
+func (q *Queries) ShareAssignments(ctx context.Context, ids []uuid.UUID) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, shareAssignments, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const unpublishAssignment = `-- name: UnpublishAssignment :execrows

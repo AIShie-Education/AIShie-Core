@@ -311,7 +311,15 @@ func stamp(buf *events.Buffer, actionID uuid.UUID) func(events.Event) {
 // under the same key is a bug in the caller, and saying "done" to a request
 // that was never made would hide it; so is the same call revising another
 // proposal, or one where the first revised none, or the other way round.
+//
+// A call whose action was emptied since, as one about an assignment deleted
+// for good (assignment.delete), has no stored outcome to give: whatever is
+// sent, it is told its target was deleted, and by which action.
 func replay(a dbq.Action, hash string, revises *uuid.UUID) (Outcome, error) {
+	if a.RedactedByActionID != nil {
+		return Outcome{}, apperr.Missing("what this %s call was about has been deleted for good, and its record emptied", a.ActionType).
+			With("reason", CancelTargetDeleted).With("action_id", a.ID).With("by_action_id", *a.RedactedByActionID)
+	}
 	if a.PayloadHash != hash || !sameID(a.RevisesActionID, revises) {
 		return Outcome{}, apperr.New(apperr.IdempotencyConflict,
 			"this idempotency key was already used for a different %s call; use a new key for a new request", a.ActionType).

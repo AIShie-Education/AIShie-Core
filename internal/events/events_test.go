@@ -10,6 +10,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/AIShie-Education/AIShie-Core/internal/apperr"
 	"github.com/AIShie-Education/AIShie-Core/internal/db/dbq"
 	"github.com/AIShie-Education/AIShie-Core/internal/events"
 	"github.com/AIShie-Education/AIShie-Core/internal/ids"
@@ -138,5 +139,31 @@ func TestFlushNotifiesOnCommitAlone(t *testing.T) {
 		if got[i] != want[i] {
 			t.Errorf("notification %d = %+v, want %+v", i, got[i], want[i])
 		}
+	}
+}
+
+// An event names an assignment that a deletion took (assignment.delete)
+// while the call that wrote it was under way, having taken no lock on it
+// before: Flush refuses the call as one naming it afterwards is refused,
+// not found, deleted, rather than failing on the event's foreign key; and
+// writes nothing.
+func TestFlushRefusesAnEventOfAnAssignmentDeletedMeanwhile(t *testing.T) {
+	c := testkit.NewCS101(t, 1)
+	ctx := context.Background()
+	gone := ids.New() // as the assignment's id reads once the deletion has committed
+	tx, err := c.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	buf := &events.Buffer{}
+	buf.Emit(events.Event{Type: "assignment.updated", CourseID: &c.Course, SubjectType: "assignment", SubjectID: &c.HW3, AssignmentID: &c.HW3})
+	buf.Emit(events.Event{Type: "submission.submitted", CourseID: &c.Course, SubjectType: "submission", AssignmentID: &gone})
+	err = events.Flush(ctx, dbq.New(tx), buf)
+	if e, ok := apperr.As(err); !ok || e.Code != apperr.NotFound || e.Details["reason"] != "deleted" {
+		t.Fatalf("flushing an event of an assignment that is gone: %v", err)
+	}
+	if n := c.Count(`SELECT count(*) FROM event WHERE course_id = $1`, c.Course); n != 0 {
+		t.Fatalf("%d events written", n)
 	}
 }

@@ -81,6 +81,7 @@ type Action struct {
 	Authority          *string
 	AuthorityDeptID    *uuid.UUID
 	RevisesActionID    *uuid.UUID
+	RedactedByActionID *uuid.UUID
 }
 
 type Actor struct {
@@ -112,6 +113,33 @@ type Assignment struct {
 	DueAt                  *time.Time
 	PublishedAt            *time.Time
 	CreatedAt              time.Time
+}
+
+type AssignmentDeletion struct {
+	AssignmentID      uuid.UUID
+	CourseID          uuid.UUID
+	Title             string
+	WasPublished      bool
+	ActionID          uuid.UUID
+	DeletedByActorID  uuid.UUID
+	DeletedByMemberID uuid.UUID
+	DeletedAt         time.Time
+	Submissions       int32
+	Grades            int32
+	Files             int32
+	Documents         int32
+	Proposals         int32
+	Totals            int32
+}
+
+type BlobDeletion struct {
+	StorageKey       string
+	CourseID         uuid.UUID
+	QueuedByActionID uuid.UUID
+	QueuedAt         time.Time
+	Attempts         int32
+	NextTryAt        time.Time
+	LastError        *string
 }
 
 type Cancelled struct {

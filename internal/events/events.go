@@ -17,6 +17,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/AIShie-Education/AIShie-Core/internal/apperr"
 	"github.com/AIShie-Education/AIShie-Core/internal/db/dbq"
 	"github.com/AIShie-Education/AIShie-Core/internal/wake"
 )
@@ -129,10 +130,18 @@ func Flush(ctx context.Context, q *dbq.Queries, b *Buffer) error {
 		}
 	}
 	// So with an event's assignment, which assignment.unpublish holds FOR
-	// UPDATE until it has taken the stream lock to write its own event.
+	// UPDATE until it has taken the stream lock to write its own event. One
+	// that is not there to be held was deleted for good (assignment.delete)
+	// while the call was under way, which took no lock on it before: the
+	// call is refused as one naming it afterwards is, rather than failing on
+	// the event's foreign key.
 	if assignments := assignmentsOf(b.events); len(assignments) > 0 {
-		if err := q.ShareAssignments(ctx, assignments); err != nil {
+		held, err := q.ShareAssignments(ctx, assignments)
+		if err != nil {
 			return fmt.Errorf("event assignments: %w", err)
+		}
+		if len(held) != len(assignments) {
+			return apperr.Missing("the assignment this call is about was deleted just now").With("reason", "deleted")
 		}
 	}
 	for _, key := range lockKeys(b.events) {

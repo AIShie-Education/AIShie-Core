@@ -78,6 +78,9 @@ const (
 	CancelToolNoLongerHere = "tool_removed"
 	// The proposer took it back (action.withdraw).
 	CancelWithdrawn = "withdrawn"
+	// What it was about was deleted for good (assignment.delete), whose
+	// action by_action_id names.
+	CancelTargetDeleted = "target_deleted"
 )
 
 // CheckDecision is action.decide's Check: a decision is to approve, to
