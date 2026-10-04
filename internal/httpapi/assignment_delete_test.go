@@ -29,8 +29,11 @@ func TestAnAssignmentIsDeletedForGoodOverHTTP(t *testing.T) {
 		t.Fatalf("a student's preview: %d %s", r.Status, r.Raw)
 	}
 
+	if ids, ok := counts["document_ids"].([]any); !ok || len(ids) != 0 {
+		t.Fatalf("the preview names the documents it would purge as a list: %s", preview.Raw)
+	}
 	none := map[string]any{"submissions": 0, "handed_in": 0, "drafts": 0, "missing": 0, "grades": 0, "posted": 0, "files": 0,
-		"documents": 0, "proposals": 0, "totals": 0}
+		"documents": 0, "proposals": 0, "totals": 0, "document_ids": []any{}}
 	stale := a.do(nil, "POST", hw3+"/delete", sato, m{"confirm": none}, key("stale")...)
 	if stale.Status != 409 || stale.str("error", "details", "reason") != "confirm_stale" || stale.str("action_id") == "" {
 		t.Fatalf("a stale confirmation: %d %s", stale.Status, stale.Raw)

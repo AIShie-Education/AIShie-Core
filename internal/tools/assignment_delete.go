@@ -21,8 +21,9 @@ import (
 // Deleting an assignment for good (docs/schema.md §2.5, An assignment is
 // deleted for good). assignment.delete_preview says what would go with it,
 // and whether its caller may; assignment.delete takes it, given back the
-// counts the preview showed, so that a page or an agent that looked before
-// more was added cannot delete more than it was shown.
+// counts the preview showed and the documents it would purge, so that a
+// page or an agent that looked before more was added, or before the
+// assignment named other documents, cannot delete more than it was shown.
 
 const (
 	ToolAssignmentDelete        = "assignment.delete"
@@ -56,8 +57,10 @@ func assignmentDeleteTools(d Deps) []tool.Tool {
 	return []tool.Tool{assignmentDeletePreview(d), assignmentDelete(d)}
 }
 
-// DeletionCounts is what goes with an assignment, counted: what the preview
-// shows, and what assignment.delete is given back (confirm).
+// DeletionCounts is what goes with an assignment, counted, and the
+// documents purged with it, named: what the preview shows, and what
+// assignment.delete is given back (confirm). A count can say how much goes,
+// not which document: the ids say that, since a purge cannot be undone.
 type DeletionCounts struct {
 	Submissions int `json:"submissions" jsonschema:"every submission to it: every attempt and state, handed in, a draft, or recorded as missing"`
 	HandedIn    int `json:"handed_in" jsonschema:"of those, handed in, on time or late"`
@@ -66,17 +69,28 @@ type DeletionCounts struct {
 	Grades      int `json:"grades" jsonschema:"live grades given on them, drafts and posted; the history of each goes with it and is not counted"`
 	Posted      int `json:"posted" jsonschema:"of those, posted"`
 	Files       int `json:"files" jsonschema:"files deleted from storage: those handed in and given as feedback, every version's, and those of the documents purged with it; their PDF renditions go too and are not counted"`
-	Documents   int `json:"documents" jsonschema:"its instructions and rubric purged with it, since nothing else uses them"`
+	Documents   int `json:"documents" jsonschema:"its instructions and rubric purged with it: those its own work was done under, which nothing else uses"`
 	Proposals   int `json:"proposals" jsonschema:"proposals about it waiting for a decision, which are cancelled"`
 	Totals      int `json:"totals" jsonschema:"students whose posted totals are worked out again without it, the change recorded"`
+	// DocumentIDs is never nil in what the preview shows, so that it is
+	// sent back as a list.
+	DocumentIDs []uuid.UUID `json:"document_ids" jsonschema:"the ids of those documents: none but these is purged"`
 }
 
-// above names the counts of c that are larger than of was: what more would
-// go than was shown.
+// above says whether more would go, as c has it, than was shown in was: a
+// count larger, or a document purged that was not shown.
 func (c DeletionCounts) above(was DeletionCounts) bool {
-	return c.Submissions > was.Submissions || c.HandedIn > was.HandedIn || c.Drafts > was.Drafts ||
+	if c.Submissions > was.Submissions || c.HandedIn > was.HandedIn || c.Drafts > was.Drafts ||
 		c.Missing > was.Missing || c.Grades > was.Grades || c.Posted > was.Posted || c.Files > was.Files ||
-		c.Documents > was.Documents || c.Proposals > was.Proposals || c.Totals > was.Totals
+		c.Documents > was.Documents || c.Proposals > was.Proposals || c.Totals > was.Totals {
+		return true
+	}
+	for _, id := range c.DocumentIDs {
+		if !slices.Contains(was.DocumentIDs, id) {
+			return true
+		}
+	}
+	return false
 }
 
 func (c DeletionCounts) check() error {
@@ -104,8 +118,8 @@ type deletion struct {
 	// that is worked out again.
 	students, totals []uuid.UUID
 	// owned are the submitted and feedback files, deleted; purged, its
-	// instructions and rubric that nothing else uses, purged; kept, those
-	// it names that something else uses.
+	// own instructions and rubric, those its work was done under that
+	// nothing else uses, purged; kept, the others it names.
 	owned         []uuid.UUID
 	purged, kept  []DeletionDocument
 	keys          []string
@@ -169,12 +183,13 @@ func readDeletion(ctx context.Context, q dbq.Querier, courseID uuid.UUID, a dbq.
 	}
 	for _, doc := range named {
 		v := DeletionDocument{ID: doc.ID, Kind: doc.Kind, Title: doc.Title}
-		if doc.Exclusive {
+		if doc.Own {
 			d.purged = append(d.purged, v)
 		} else {
 			d.kept = append(d.kept, v)
 		}
 	}
+	d.counts.DocumentIDs = d.purgedIDs()
 	gone := d.gone()
 	files, err := q.ListFileKeysOfDocuments(ctx, gone)
 	if err != nil {
@@ -216,8 +231,9 @@ func (d deletion) refusal(agent bool, confirm *DeletionCounts, store bool) *appe
 		return apperr.Forbid("an agent does not delete an assignment that has work or grades; a person deletes it").
 			With("reason", DeletePeopleOnly)
 	case confirm != nil && d.counts.above(*confirm):
-		return apperr.Conflicts("more would go with the assignment than you were shown; read what goes with it again "+
-			"(assignment.delete_preview) and confirm that").With("reason", DeleteConfirmStale).With("current", d.counts)
+		return apperr.Conflicts("more would go with the assignment than you were shown, or a document you were not shown "+
+			"would be purged; read what goes with it again (assignment.delete_preview) and confirm that").
+			With("reason", DeleteConfirmStale).With("current", d.counts)
 	case len(d.keys) > 0 && !store:
 		return apperr.Precondition("this installation has no file storage configured, so the assignment's files cannot be removed").
 			With("reason", DeleteNoFileStorage)
@@ -272,8 +288,8 @@ type AssignmentDeletePreviewOut struct {
 	Published     bool               `json:"published" jsonschema:"students can see it, and the feed will tell them it was deleted"`
 	InGrade       bool               `json:"in_grade" jsonschema:"it counts toward a component of the grading scheme"`
 	Counts        DeletionCounts     `json:"counts" jsonschema:"what goes with it; send these back unchanged as confirm to assignment.delete"`
-	Documents     []DeletionDocument `json:"documents" jsonschema:"its instructions and rubric, purged with it: answers that relied on them say only that a source was removed"`
-	KeptDocuments []DeletionDocument `json:"kept_documents" jsonschema:"instructions or a rubric it names that something else uses, kept as they are"`
+	Documents     []DeletionDocument `json:"documents" jsonschema:"its own instructions and rubric, those its work was done under that nothing else uses, purged with it: answers that relied on them say only that a source was removed"`
+	KeptDocuments []DeletionDocument `json:"kept_documents" jsonschema:"instructions or a rubric it names that are not its own, kept as they are: something else uses them, or no work handed in to it or graded was done under them"`
 	Refusal       *string            `json:"refusal" jsonschema:"what assignment.delete would refuse right now for you (people_only, student_out_of_scope, course_archived, no_file_storage, ...), or null"`
 }
 
@@ -281,9 +297,10 @@ func assignmentDeletePreview(d Deps) tool.Tool {
 	return tool.Define(tool.Spec[AssignmentIDIn, AssignmentDeletePreviewOut]{
 		Name: ToolAssignmentDeletePreview,
 		Description: "What deleting an assignment for good would take with it, counted: its submissions, its grades, its " +
-			"files, its instructions and rubric where nothing else uses them, the proposals about it waiting, and the " +
-			"students whose totals are worked out again; never names. refusal says what assignment.delete would refuse " +
-			"you right now, or is null. Send counts back unchanged as confirm to assignment.delete.",
+			"files, its own instructions and rubric (those its work was done under, where nothing else uses them; any " +
+			"other it names is kept), the proposals about it waiting, and the students whose totals are worked out " +
+			"again; never names a person. refusal says what assignment.delete would refuse you right now, or is null. " +
+			"Send counts back unchanged as confirm to assignment.delete.",
 		Kind: tool.Read, Gate: writeAssignments,
 		HTTP: tool.Route{Method: "GET", Pattern: "/v1/courses/{course_id}/assignments/{assignment_id}/delete-preview"},
 		Resolve: func(ctx context.Context, q dbq.Querier, in AssignmentIDIn) (tool.Target, error) {
@@ -337,7 +354,7 @@ func assignmentDeletePreview(d Deps) tool.Tool {
 type AssignmentDeleteIn struct {
 	tool.InCourse
 	AssignmentID uuid.UUID      `json:"assignment_id"`
-	Confirm      DeletionCounts `json:"confirm" jsonschema:"the counts assignment.delete_preview gave, sent back unchanged: what you were shown goes, and if more would go now the call is refused (confirm_stale)"`
+	Confirm      DeletionCounts `json:"confirm" jsonschema:"the counts assignment.delete_preview gave, document_ids among them, sent back unchanged: what you were shown goes, and if more would go now, or a document you were not shown would be purged, the call is refused (confirm_stale)"`
 }
 
 // DeletionRemoved is what went with an assignment.
@@ -380,13 +397,14 @@ func assignmentDelete(d Deps) tool.Tool {
 	return tool.Define(tool.Spec[AssignmentDeleteIn, AssignmentDeleteOut]{
 		Name: ToolAssignmentDelete,
 		Description: "Delete an assignment for good. It cannot be undone: the assignment, every submission to it with its " +
-			"files, and every grade given on them go; its instructions and rubric are purged where nothing else uses " +
-			"them; proposals about it waiting are cancelled; and the posted totals it counted in are worked out again " +
-			"without it, the change recorded. Read assignment.delete_preview first and send its counts back unchanged as " +
-			"confirm: if more would go than you were shown, the call is refused (confirm_stale), and you read the preview " +
-			"again. An agent deletes only an assignment nobody has started on, with no submission of any kind and no " +
-			"grade (people_only); a person deletes one with work. It reaches every student whose work or total it " +
-			"changes. An archived course refuses it.",
+			"files, and every grade given on them go; its own instructions and rubric, those its work was done under, are " +
+			"purged where nothing else uses them, and any other it names is kept; proposals about it waiting are " +
+			"cancelled; and the posted totals it counted in are worked out again without it, the change recorded. Read " +
+			"assignment.delete_preview first and send its counts back unchanged as confirm: if more would go than you " +
+			"were shown, or a document you were not shown would be purged, the call is refused (confirm_stale), and you " +
+			"read the preview again. An agent deletes only an assignment nobody has started on, with no submission of " +
+			"any kind and no grade (people_only); a person deletes one with work. It reaches every student whose work or " +
+			"total it changes. An archived course refuses it.",
 		Kind: tool.Write, Gate: writeAssignments,
 		HTTP:  tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/assignments/{assignment_id}/delete"},
 		Check: func(in AssignmentDeleteIn) error { return in.Confirm.check() },
@@ -573,8 +591,8 @@ func deleteAssignment(ctx context.Context, d Deps, ec *tool.ExecCtx, in Assignme
 	if _, err := q.DeleteEventsOfAssignment(ctx, dbq.DeleteEventsOfAssignmentParams{CourseID: &in.CourseID, AssignmentID: &a.ID}); err != nil {
 		return AssignmentDeleteOut{}, err
 	}
-	// Its instructions and rubric, where nothing else uses them, purged as
-	// document.purge purges: what pointed at them reads the tombstone.
+	// Its own instructions and rubric, purged as document.purge purges:
+	// what pointed at them reads the tombstone.
 	for _, doc := range del.purged {
 		if err := purge(doc.ID); err != nil {
 			return AssignmentDeleteOut{}, err

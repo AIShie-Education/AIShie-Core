@@ -970,7 +970,7 @@ and `document_text`;
 `submission_read` for `submission_list`, `submission_get`; `grade_read` for
 `grade_list`, `grade_get`, `component_tree`, `gradebook_get`; `assignment_write`
 for `assignment_delete_preview`, which counts what deleting an assignment
-would take and names nothing. An empty
+would take and names no person. An empty
 toolset is fine: the agent answers from the conversation alone.
 
 ## 5. Several tenants

@@ -1461,33 +1461,41 @@ change to its draft that waits for approval has been decided.
 deletes one, whatever has become of it: the assignment, every submission to it of every attempt
 and state, the files handed in with them and given as feedback on their grades, every version's,
 the grades given on them, drafts, posted and superseded, its events, and the scope rows that list
-it go, and cannot be brought back. Its instructions and rubric are purged, as `document.purge`
-purges (§2.4), by the deleter, `purge_reason` `assignment_deleted`, where nothing else uses them:
-no other assignment names one, no submission to another assignment pins one of its versions, and
-no grade but those given on the assignment's own submissions pins one. One that something else
-uses is left as it is, and so is an earlier one it no longer names. A purge keeps the row and
-loses the content, which is what an answer that relied on one needs: its source stays, names no
-file, and reads `restricted` to everyone (§2.8). The proposals waiting about it are cancelled
+it go, and cannot be brought back. Its own instructions and rubric are purged, as
+`document.purge` purges (§2.4), by the deleter, `purge_reason` `assignment_deleted`: those its
+own work was done under, work handed in to it having pinned one of their versions as its
+instructions or a grade given on that work as its rubric, where nothing else uses them: no other
+assignment names one, no submission to another assignment pins one of its versions, and no grade
+but those given on the assignment's own submissions pins one. Naming a document does not make it
+the assignment's: whoever writes assignments may name any of the course's, and purging one is
+for administrators, so an assignment made only to name a document, and deleted, takes nothing
+with it. One it names that its work was not done under is left as it is, and so is one something
+else uses, and an earlier one it no longer names. A purge keeps the row and loses the content,
+which is what an answer that relied on one needs: its source stays, names no file, and reads
+`restricted` to everyone (§2.8). The proposals waiting about it are cancelled
 (`target_deleted`, with `by_action_id`), each telling its proposer by `action.cancelled` as any
 cancellation does; the posted totals it counted in are worked out again without it, as a change
 to the scheme works them out (§2.7); and what the action log holds of what was done to it is
 emptied (§2.6). A seat that was listed for it alone reaches no assignment from then on: it fails
 closed.
 
-It is two tools. `assignment.delete_preview` reads what would go, counted and never named —
+It is two tools. `assignment.delete_preview` reads what would go, counted, naming no person —
 `submissions` (`handed_in`, `drafts`, `missing`), `grades` (`posted`), `files`, `documents`
-(those purged, by title, beside `kept_documents`), `proposals` and `totals` (the students whose
-totals are worked out again) — and `refusal`, what deleting it would be refused for the caller
-right now, or null. `assignment.delete` takes those counts back, unchanged, as `confirm`: if
-any count is larger now, it is refused (`confirm_stale`, with `details.current`), so that a
-page or an agent that looked before more was added never deletes more than it was shown; one
-smaller is not. A person deletes at their level for it: at once, reviewed afterwards, or by
-proposal, which on approval runs as the proposer and is held to the counts it stored. An agent
-deletes only an assignment nobody has started on, with no submission row of any kind, a
-`missing` one included, and no grade (`people_only`): refused as it calls, before a proposal is
-queued, and again when one is approved, which reads `actor.kind` to refuse and never to grant,
-as `member.reset_password` does; its owner deciding such a proposal is refused
-`owner_would_be_refused` with that refusal, as for any proposal approving would refuse (§2.6).
+(those purged, by title, beside `kept_documents`; their ids in the counts, `document_ids`),
+`proposals` and `totals` (the students whose totals are worked out again) — and `refusal`, what
+deleting it would be refused for the caller right now, or null. `assignment.delete` takes those
+counts back, unchanged, as `confirm`: if any count is larger now, or a document would be purged
+that `document_ids` does not name, it is refused (`confirm_stale`, with `details.current`), so
+that a page or an agent that looked before more was added, or before the assignment named
+another document, never deletes more than it was shown, since a count says how many documents
+are purged but not which; one smaller is not. A person deletes at their level for it: at once,
+reviewed afterwards, or by proposal, which on approval runs as the proposer and is held to the
+counts it stored, and the documents they name. An agent deletes only an assignment nobody has
+started on, with no submission row of any kind, a `missing` one included, and no grade
+(`people_only`): refused as it calls, before a proposal is queued, and again when one is
+approved, which reads `actor.kind` to refuse and never to grant, as `member.reset_password`
+does; its owner deciding such a proposal is refused `owner_would_be_refused` with that refusal,
+as for any proposal approving would refuse (§2.6).
 It reaches the assignment, every student with a submission row, and, when totals are worked out
 again, every student with one, across assignments, as a change to the scheme does
 (`student_out_of_scope`, `assignment_out_of_scope`); files to delete need a file store
@@ -1505,7 +1513,7 @@ commits, and which by commit must find the assignment gone (`assignment_deletion
 Nothing else opens: a computed total, material, instructions and rubrics are never deleted, and
 an assignment's id deleted is never used again. Then it queues the files, purges its files'
 versions, which takes their files, texts and renditions, deletes them and their documents, the
-grades, the submissions, the scope rows and the events, purges its instructions and rubric,
+grades, the submissions, the scope rows and the events, purges its own instructions and rubric,
 deletes the assignment, works the totals out again, and empties its line in every total that
 still names it (§2.7). It writes one event, filed under its
 own action: `assignment.deleted` for an assignment students could see, which everyone who reads
@@ -2860,11 +2868,12 @@ respondent's `conversation_answer` decides is who is shown its text.
   their TTL.
 - Deleting an assignment for good (§2.5): only a person deletes one anyone has started on
   (`people_only`), on the call, before a proposal is queued, and again as one is approved; the
-  deletion is held to the counts it confirms (`confirm_stale`), asked again under its locks;
-  what it empties, purges and keeps (which documents are its alone, which actions are about
-  it); its files queued and deleted after it commits, and a queued key attached nowhere; a call
-  naming what it took, or racing it, refused `deleted` with no fault, and one under the key of an
-  emptied action refused `target_deleted`.
+  deletion is held to the counts and the documents it confirms (`confirm_stale`), asked again
+  under its locks; what it empties, purges and keeps (which documents are its own, which
+  actions are about it, the line of a total it was taken out of before); its files queued and
+  deleted after it commits, and a queued key attached nowhere; a call naming what it took, or
+  racing it, refused `deleted` with no fault, and one under the key of an emptied action
+  refused `target_deleted`.
 - A tool's check of what a call's arguments say alone (`tool.Spec.Check`) runs as they are
   decoded, after the schema and before anything else: a name left blank, a number below zero, a
   value that is not one of those allowed, two fields given that exclude each other, a message

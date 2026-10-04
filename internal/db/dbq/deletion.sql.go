@@ -365,15 +365,21 @@ func (q *Queries) ListActionsRedactedAt(ctx context.Context, ids []uuid.UUID) ([
 
 const listAssignmentDocuments = `-- name: ListAssignmentDocuments :many
 SELECT d.id, d.kind, d.title,
-       (NOT EXISTS (SELECT 1 FROM assignment o
-                    WHERE o.id <> a.id AND (o.instructions_document_id = d.id OR o.rubric_document_id = d.id))
+       ((EXISTS (SELECT 1 FROM submission s JOIN document_version v ON v.id = s.instructions_version_id
+                 WHERE v.document_id = d.id AND s.assignment_id = a.id)
+         OR EXISTS (SELECT 1 FROM grade g
+                    JOIN submission s ON s.id = g.submission_id
+                    JOIN document_version v ON v.id = g.rubric_version_id
+                    WHERE v.document_id = d.id AND s.assignment_id = a.id))
+        AND NOT EXISTS (SELECT 1 FROM assignment o
+                        WHERE o.id <> a.id AND (o.instructions_document_id = d.id OR o.rubric_document_id = d.id))
         AND NOT EXISTS (SELECT 1 FROM submission s JOIN document_version v ON v.id = s.instructions_version_id
                         WHERE v.document_id = d.id AND s.assignment_id <> a.id)
         AND NOT EXISTS (SELECT 1 FROM grade g JOIN document_version v ON v.id = g.rubric_version_id
                         WHERE v.document_id = d.id
                           AND (g.submission_id IS NULL
                                OR g.submission_id NOT IN (SELECT s.id FROM submission s WHERE s.assignment_id = a.id))))::bool
-           AS exclusive
+           AS own
 FROM assignment a
 JOIN document d ON d.id = a.instructions_document_id OR d.id = a.rubric_document_id
 WHERE a.id = $1 AND d.purged_at IS NULL
@@ -381,18 +387,22 @@ ORDER BY d.id
 `
 
 type ListAssignmentDocumentsRow struct {
-	ID        uuid.UUID
-	Kind      string
-	Title     string
-	Exclusive bool
+	ID    uuid.UUID
+	Kind  string
+	Title string
+	Own   bool
 }
 
 // The instructions and the rubric the assignment names, not purged, each
-// saying whether it is the assignment's alone (exclusive), to be purged
-// with it: no other assignment names it, no submission to another
-// assignment pins one of its versions, and no grade but those given on the
-// assignment's own submissions pins one. One that something else uses is
-// kept as it is.
+// saying whether it is the assignment's own, to be purged with it. Naming a
+// document does not make it so: whoever writes assignments may name any of
+// the course's, and purging is for administrators (document.purge). It is
+// the assignment's own where the assignment's own work was done under it,
+// work handed in to it pinning one of its versions as the instructions or a
+// grade given on that work pinning one as the rubric, and nothing else uses
+// it: no other assignment names it, no submission to another assignment
+// pins one of its versions, and no grade but those given on the
+// assignment's own submissions pins one. Any other is kept as it is.
 func (q *Queries) ListAssignmentDocuments(ctx context.Context, id uuid.UUID) ([]ListAssignmentDocumentsRow, error) {
 	rows, err := q.db.Query(ctx, listAssignmentDocuments, id)
 	if err != nil {
@@ -406,7 +416,7 @@ func (q *Queries) ListAssignmentDocuments(ctx context.Context, id uuid.UUID) ([]
 			&i.ID,
 			&i.Kind,
 			&i.Title,
-			&i.Exclusive,
+			&i.Own,
 		); err != nil {
 			return nil, err
 		}

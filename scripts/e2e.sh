@@ -1020,8 +1020,8 @@ call 200 POST "$C/grades" "$SATO" "{\"submission_id\":\"$QUIZ_SUB\",\"score\":8}
 QUIZ_GRADE=$(json "$WORK/body" 'd["result"]["grade_id"]')
 call 200 POST "$C/grades/post" "$SATO" "{\"grade_ids\":[\"$QUIZ_GRADE\"]}"
 call 200 GET "$C/assignments/$QUIZ/delete-preview" "$SATO"
-[ "$(json "$WORK/body" '[d["result"]["counts"][k] for k in ("submissions", "handed_in", "grades", "posted", "files", "documents")], d["result"]["counts"]["totals"] > 0, [x["title"] for x in d["result"]["documents"]], d["result"]["refusal"]')" = \
-  "[1, 1, 1, 1, 2, 1] True ['Quiz 1 brief'] None" ] || fail "what goes with Quiz 1: $(cat "$WORK/body")"
+[ "$(json "$WORK/body" '[d["result"]["counts"][k] for k in ("submissions", "handed_in", "grades", "posted", "files", "documents")], d["result"]["counts"]["totals"] > 0, [x["title"] for x in d["result"]["documents"]], d["result"]["counts"]["document_ids"] == [x["id"] for x in d["result"]["documents"]], d["result"]["refusal"]')" = \
+  "[1, 1, 1, 1, 2, 1] True ['Quiz 1 brief'] True None" ] || fail "what goes with Quiz 1: $(cat "$WORK/body")"
 CONFIRM=$(json "$WORK/body" 'json.dumps(d["result"]["counts"])')
 # An agent of Sato's that writes assignments without anyone's confirmation,
 # over the whole class: refused on Yuki's work, recorded.
@@ -1036,7 +1036,7 @@ call 403 POST "$C/assignments/$QUIZ/delete" "$TIDIER" "{\"confirm\":$CONFIRM}"
 [ "$(reason)" = people_only ] || fail "the agent deleting work refused, but not as people_only: $(cat "$WORK/body")"
 # Sato, shown less than there is, is refused, and told what there is.
 call 409 POST "$C/assignments/$QUIZ/delete" "$SATO" \
-  '{"confirm":{"submissions":0,"handed_in":0,"drafts":0,"missing":0,"grades":0,"posted":0,"files":0,"documents":0,"proposals":0,"totals":0}}'
+  '{"confirm":{"submissions":0,"handed_in":0,"drafts":0,"missing":0,"grades":0,"posted":0,"files":0,"documents":0,"proposals":0,"totals":0,"document_ids":[]}}'
 [ "$(json "$WORK/body" 'd["error"]["details"]["reason"], d["error"]["details"]["current"]["submissions"]')" = "confirm_stale 1" ] ||
   fail "a stale confirmation: $(cat "$WORK/body")"
 KEY=delete-quiz-1 call 200 POST "$C/assignments/$QUIZ/delete" "$SATO" "{\"confirm\":$CONFIRM}"

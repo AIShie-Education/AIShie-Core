@@ -693,8 +693,8 @@ Run all of these as root on the server.
   them as the call named them.
 - **Migration 0030, deleting an assignment for good:** whoever writes
   assignments may delete one for good, with every submission to it, their
-  files and the grades given on them, its instructions and rubric purged
-  where nothing else uses them, after reading what goes
+  files and the grades given on them, the instructions and rubric its work
+  was done under purged where nothing else uses them, after reading what goes
   (`assignment.delete_preview`, `assignment.delete`; docs/schema.md §2.5,
   An assignment is deleted for good). The migration adds the record of
   deletions (`assignment_deletion`), a queue of files to delete from the

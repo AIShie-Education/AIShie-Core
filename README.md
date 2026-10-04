@@ -68,11 +68,11 @@ In place so far:
   worked out, and final grades' treating ungraded work as zero undone;
 - an assignment deleted for good by whoever writes assignments, once they
   have read what goes with it and confirmed it: its submissions, their files
-  and its grades go, its instructions and rubric are purged where nothing
-  else uses them, the proposals about it are cancelled and the totals it
-  counted in worked out again; an agent deletes only one nobody has started
-  on; one record of it stays, in the action log and in the feed, and its
-  files leave the store at the next sweep.
+  and its grades go, the instructions and rubric its work was done under are
+  purged where nothing else uses them, the proposals about it are cancelled
+  and the totals it counted in worked out again; an agent deletes only one
+  nobody has started on; one record of it stays, in the action log and in
+  the feed, and its files leave the store at the next sweep.
 
 `make e2e` runs the real binary against a scratch database and, with nothing
 but `curl`, builds the worked example from docs/schema.md §5 from an empty
