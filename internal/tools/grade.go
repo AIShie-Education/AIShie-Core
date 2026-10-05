@@ -427,7 +427,9 @@ func gradeSubmit(d Deps) tool.Tool {
 			"shared record with its feedback and files, and a draft for each member of the work given from it, the group's " +
 			"score unless the member is adjusted (adjustments: a score of their own, or plus or minus, each with a reason), " +
 			"an adjustment carried from their earlier grade otherwise. Each member's draft is posted with grade.post, and " +
-			"changed alone with grade.adjust.",
+			"changed alone with grade.adjust. Once a grade on a group's work is posted, a new group grade for it is refused " +
+			"(group_grade_posted): it is changed with grade.regrade, which also gives a member added to the work since a " +
+			"grade from it.",
 		Kind: tool.Write,
 		Gate: tool.Gate{Perms: []domain.Perm{domain.PermGradeSubmit}},
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/grades"},
@@ -1011,8 +1013,9 @@ type GradeRegradeIn struct {
 	GradeContent
 	TreatUngradedAsZero bool `json:"treat_ungraded_as_zero,omitempty"`
 	// A member's grade from a group grade regrades the group's.
-	Adjustments []AdjustmentIn `json:"adjustments,omitempty" jsonschema:"a member's grade from a group grade: members whose new grade differs from the group's, as in grade.submit; each other member's adjustment is carried from their grade. A proposal records every member's, as it will be written"`
-	Members     []uuid.UUID    `json:"members,omitzero" jsonschema:"a member's grade from a group grade: the members whose grades it writes again; if given, they must be. A proposal records them, and is refused on approval if they have changed (members_changed)"`
+	Adjustments    []AdjustmentIn `json:"adjustments,omitempty" jsonschema:"a member's grade from a group grade: members whose new grade differs from the group's, as in grade.submit; each other member's adjustment is carried from their grade. A proposal records every member's, as it will be written"`
+	Members        []uuid.UUID    `json:"members,omitzero" jsonschema:"a member's grade from a group grade: the members whose grades it writes, those whose grade came from the group grade and any added to the work since with none on it; if given, they must be. A proposal records them, and is refused on approval if they have changed (members_changed)"`
+	ReplacesGrades []uuid.UUID    `json:"replaces_grades,omitzero" jsonschema:"a member's grade from a group grade: the posted grades it replaces, each member's from the group grade, as they are when the call is made; if given, they must be. A proposal records them, and is refused on approval if one has been replaced since, by an adjustment or otherwise (grades_changed)"`
 }
 
 type GradeRegradeOut struct {
@@ -1024,12 +1027,29 @@ type GradeRegradeOut struct {
 }
 
 // groupRegrade is what regrading a member's grade from a group grade writes
-// again: the posted grades given from that group grade, each with its
-// adjustment as it will be written.
+// again: the posted grades given from that group grade, and a grade for each
+// member added to the work since with none on it, each with its adjustment
+// as it will be written.
 type groupRegrade struct {
 	from   []dbq.ListLiveGradesFromGroupGradeRow
 	writes []memberWrite
 }
+
+// replaced are the grades it replaces: every one given from the group grade.
+func (r groupRegrade) replaced() []uuid.UUID {
+	out := make([]uuid.UUID, len(r.from))
+	for i, f := range r.from {
+		out[i] = f.ID
+	}
+	return out
+}
+
+// errGradesChanged refuses approving a regrade of a group's grade once a
+// grade it was proposed to replace has been replaced meanwhile, by an
+// adjustment or otherwise: the proposal pinned each member's adjustment as
+// it was then, and approving it would write over what was decided since.
+var errGradesChanged = apperr.Conflicts("a member's grade has changed since this was proposed, by an adjustment or otherwise; "+
+	"look again, and propose it again").With("reason", ReasonGradesChanged)
 
 // students are the members whose grades it writes again.
 func (r groupRegrade) students() []uuid.UUID {
@@ -1042,8 +1062,13 @@ func (r groupRegrade) students() []uuid.UUID {
 
 // regradeOfGroup works out regrading the group grade g was given from, as in
 // asks, by by: refused while a grade from it is still a draft, for an
-// adjustment of a member it does not write again, for a score out of bounds,
-// and, where in names the members, when they are not those it writes.
+// adjustment of a member it does not write, for a score out of bounds, and,
+// where in names the members or the grades it replaces, when they are not
+// those it writes and replaces. It writes a posted grade for each member
+// whose grade came from g's group grade, and for each member of the work
+// (s.members) with no grade on it, one added since it was graded
+// (submission.set_members): the student the teacher forgot to place gets
+// the group's grade too.
 func (in GradeRegradeIn) regradeOfGroup(ctx context.Context, q dbq.Querier, g dbq.GetGradesInCourseRow, s gradeSubject, by uuid.UUID) (groupRegrade, error) {
 	var r groupRegrade
 	var err error
@@ -1051,32 +1076,49 @@ func (in GradeRegradeIn) regradeOfGroup(ctx context.Context, q dbq.Querier, g db
 		return r, err
 	}
 	carried := map[uuid.UUID]adjustment{}
-	var posted []uuid.UUID
+	replaces := map[uuid.UUID]uuid.UUID{}
+	var members []uuid.UUID
 	for _, f := range r.from {
 		if f.PostedAt == nil {
 			return r, apperr.Precondition("a grade from this group grade is still a draft; post it first, then regrade the group's").
 				With("reason", ReasonGroupGradePartlyPosted).With("grade_id", f.ID)
 		}
-		posted = append(posted, f.StudentMemberID)
+		members = append(members, f.StudentMemberID)
+		replaces[f.StudentMemberID] = f.ID
 		carried[f.StudentMemberID] = adjustmentOf(f.AdjustKind, f.AdjustPoints, f.AdjustReason, f.AdjustByMemberID)
 	}
-	if in.Members != nil && !sameMembers(in.Members, posted) {
+	if in.ReplacesGrades != nil && !sameMembers(in.ReplacesGrades, r.replaced()) {
+		return r, errGradesChanged
+	}
+	live, err := q.ListLiveMemberGrades(ctx, &s.submission.ID)
+	if err != nil {
+		return r, err
+	}
+	graded := map[uuid.UUID]bool{}
+	for _, l := range live {
+		graded[l.StudentMemberID] = true
+	}
+	for _, m := range s.members {
+		if !graded[m] {
+			members = append(members, m)
+		}
+	}
+	if in.Members != nil && !sameMembers(in.Members, members) {
 		return r, errMembersChanged
 	}
-	adjs, err := adjustmentsFor(posted, carried, in.Adjustments, by)
+	adjs, err := adjustmentsFor(members, carried, in.Adjustments, by)
 	if err != nil {
 		return r, err
 	}
 	if err := checkMemberScores(in.Score, adjs, s.pointsPossible(), in.AllowExtra); err != nil {
 		return r, err
 	}
-	byStudent := map[uuid.UUID]uuid.UUID{}
-	for _, f := range r.from {
-		byStudent[f.StudentMemberID] = f.ID
-	}
-	for _, m := range sortedMembers(posted) {
-		old := byStudent[m]
-		r.writes = append(r.writes, memberWrite{student: m, replaces: &old, adj: adjs[m]})
+	for _, m := range sortedMembers(members) {
+		w := memberWrite{student: m, adj: adjs[m]}
+		if old, ok := replaces[m]; ok {
+			w.replaces = &old
+		}
+		r.writes = append(r.writes, w)
 	}
 	return r, nil
 }
@@ -1110,7 +1152,7 @@ func gradeRegrade(d Deps) tool.Tool {
 			return apperr.Precondition("the grade is still a draft; submit a new draft instead")
 		case g.SupersededBy != nil:
 			return apperr.Conflicts("the grade has already been replaced")
-		case g.GroupGradeID == nil && (len(in.Adjustments) > 0 || in.Members != nil):
+		case g.GroupGradeID == nil && (len(in.Adjustments) > 0 || in.Members != nil || in.ReplacesGrades != nil):
 			return errNotAGroupAssignment
 		}
 		return nil
@@ -1120,8 +1162,10 @@ func gradeRegrade(d Deps) tool.Tool {
 		Description: "Replace a posted grade. The old grade is kept and marked superseded, the new one is posted " +
 			"at once, and the student's totals are written down again if they changed. A member's grade given from a " +
 			"group grade regrades the group's as a whole: a new group grade, and a new posted grade for each member whose " +
-			"grade came from the old one, adjustments carried unless named; refused while any grade from it is still a " +
-			"draft (group_grade_partly_posted). It reaches every member then. One member alone is changed with grade.adjust.",
+			"grade came from the old one, adjustments carried unless named, and for each member added to the work since " +
+			"with no grade on it; refused while any grade from it is still a draft (group_grade_partly_posted). It " +
+			"reaches every member then. A proposal of it records the grades it replaces, and is refused on approval if one " +
+			"has been replaced since (grades_changed). One member alone is changed with grade.adjust.",
 		Kind: tool.Write,
 		// Regrading writes a grade and makes it visible in one step, so it
 		// takes both permissions and runs at the lower of the two levels.
@@ -1190,6 +1234,7 @@ func gradeRegrade(d Deps) tool.Tool {
 				}
 				in.Members = r.students()
 				in.Adjustments = pinnedAdjustments(in.Members, adjs)
+				in.ReplacesGrades = r.replaced()
 			}
 			return in, nil
 		},

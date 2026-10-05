@@ -746,10 +746,12 @@ func documentCreate(d Deps) tool.Tool {
 				// beside it. Once handed in, nothing more may be added. The
 				// state is read under the row's lock, the one the hand-in
 				// takes: a file that comes while the draft is being handed in
-				// waits for it, and then finds it handed in.
-				s, err := ec.Q.GetSubmissionFullForUpdate(ctx, dbq.GetSubmissionFullForUpdateParams{ID: *in.SubmissionID, CourseID: in.CourseID})
+				// waits for it, and then finds it handed in. A group's draft
+				// is held with its group, as the hand-in holds it, and takes
+				// no file from a member moved out of it meanwhile.
+				s, err := holdDraft(ctx, ec, in.CourseID, *in.SubmissionID)
 				if err != nil {
-					return DocumentCreateOut{}, workGone(err)
+					return DocumentCreateOut{}, err
 				}
 				if s.State != stateDraft {
 					return DocumentCreateOut{}, errFileNotToADraft(s.State)
@@ -1069,7 +1071,7 @@ func documentArchive() tool.Tool {
 			if err != nil {
 				return err
 			}
-			if err := draftOnly(ctx, q, in.CourseID, doc, false); err != nil {
+			if err := draftOnly(ctx, q, in.CourseID, doc); err != nil {
 				return err
 			}
 			if doc.Status == "archived" {
@@ -1150,28 +1152,31 @@ var (
 
 // handedIn refuses a change to a submitted file once its submission has
 // been handed in: its files are frozen with it. The state is read under the
-// submission's lock, the one the hand-in takes, as document.create reads it.
+// submission's lock, the one the hand-in takes, as document.create reads it;
+// a group's draft is held with its group, and refused to a member moved out
+// of it meanwhile (holdDraft).
 func handedIn(ctx context.Context, ec *tool.ExecCtx, courseID uuid.UUID, doc dbq.GetDocumentWithOwnerRow) error {
-	return draftOnly(ctx, ec.Q, courseID, doc, true)
-}
-
-// draftOnly is handedIn, read under the submission's lock when lock says so,
-// and without it otherwise: for a tool's Validate, which asks it before a
-// proposal is queued, and whose tool asks it again, locked, as it is carried
-// out.
-func draftOnly(ctx context.Context, q dbq.Querier, courseID uuid.UUID, doc dbq.GetDocumentWithOwnerRow, lock bool) error {
 	if doc.SubmissionID == nil {
 		return nil
 	}
-	var s dbq.GetSubmissionFullRow
-	var err error
-	if lock {
-		var locked dbq.GetSubmissionFullForUpdateRow
-		locked, err = q.GetSubmissionFullForUpdate(ctx, dbq.GetSubmissionFullForUpdateParams{ID: *doc.SubmissionID, CourseID: courseID})
-		s = dbq.GetSubmissionFullRow(locked)
-	} else {
-		s, err = q.GetSubmissionFull(ctx, dbq.GetSubmissionFullParams{ID: *doc.SubmissionID, CourseID: courseID})
+	s, err := holdDraft(ctx, ec, courseID, *doc.SubmissionID)
+	if err != nil {
+		return err
 	}
+	if s.State != stateDraft {
+		return errHandedIn
+	}
+	return nil
+}
+
+// draftOnly is handedIn, read without the locks: for a tool's Validate,
+// which asks it before a proposal is queued, and whose tool asks it again,
+// locked, as it is carried out.
+func draftOnly(ctx context.Context, q dbq.Querier, courseID uuid.UUID, doc dbq.GetDocumentWithOwnerRow) error {
+	if doc.SubmissionID == nil {
+		return nil
+	}
+	s, err := q.GetSubmissionFull(ctx, dbq.GetSubmissionFullParams{ID: *doc.SubmissionID, CourseID: courseID})
 	if err != nil {
 		return workGone(err)
 	}
@@ -1227,7 +1232,7 @@ func documentUpdate() tool.Tool {
 			if err != nil {
 				return err
 			}
-			return draftOnly(ctx, q, in.CourseID, doc, false)
+			return draftOnly(ctx, q, in.CourseID, doc)
 		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in DocumentUpdateIn) (DocumentChangeOut, error) {
 			doc, err := loadDocument(ctx, ec.Q, in.CourseID, in.DocumentID)
@@ -1288,7 +1293,7 @@ func documentUnarchive() tool.Tool {
 			if err != nil {
 				return err
 			}
-			if err := draftOnly(ctx, q, in.CourseID, doc, false); err != nil {
+			if err := draftOnly(ctx, q, in.CourseID, doc); err != nil {
 				return err
 			}
 			if doc.PurgedAt != nil {

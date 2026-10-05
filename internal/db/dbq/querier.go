@@ -768,7 +768,11 @@ type Querier interface {
 	// The groups of the sets, with their sizes now, the oldest first.
 	ListGroupsOfSets(ctx context.Context, setIds []uuid.UUID) ([]ListGroupsOfSetsRow, error)
 	// The set's groups not archived, each with its latest attempt at the
-	// assignment, if any, the oldest group first.
+	// assignment that the reader may read, if any, the oldest group first: one
+	// of whose students (submission_students) the reader's student scope
+	// reaches, and their principal's, as authorize() reaches a group's work. A
+	// member is shown the group's draft and the attempts they are part of, not
+	// one handed in before they joined.
 	ListGroupsWithLatestWork(ctx context.Context, arg ListGroupsWithLatestWorkParams) ([]ListGroupsWithLatestWorkRow, error)
 	// The groups of the assignment's set, not archived, with no submission row
 	// at all for it: not a draft, not a hand-in, not an earlier 'missing'. One
@@ -912,6 +916,12 @@ type Querier interface {
 	// after which the row is read again as it left it: an assignment unpublished
 	// meanwhile is not listed, and the event goes out under its unreleased name.
 	ListPublishedAssignmentsUsingDocument(ctx context.Context, documentID *uuid.UUID) ([]uuid.UUID, error)
+	// ListWorkOfGroups, of the submissions the reader may read: one of whose
+	// students (submission_students) the reader's student scope reaches, and
+	// their principal's, as authorize() reaches a group's work. A member reads
+	// the group's draft and the attempts they are part of, not one handed in
+	// before they joined.
+	ListReadableWorkOfGroups(ctx context.Context, arg ListReadableWorkOfGroupsParams) ([]ListReadableWorkOfGroupsRow, error)
 	// The renditions of the given files of messages.
 	ListRenditionsOfAttachments(ctx context.Context, attachmentIds []uuid.UUID) ([]FileRendition, error)
 	// Renditions (docs/schema.md §2.4, Renditions): the PDF an Office or

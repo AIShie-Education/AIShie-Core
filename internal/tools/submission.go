@@ -133,7 +133,7 @@ type RosterGroup struct {
 	GroupID             uuid.UUID    `json:"group_id"`
 	Name                string       `json:"name"`
 	Members             []WorkMember `json:"members" jsonschema:"its members now that the caller's student scope reaches; names to those who may read the member list"`
-	State               string       `json:"state" jsonschema:"not_started, draft, submitted, late or missing: its latest attempt's"`
+	State               string       `json:"state" jsonschema:"not_started, draft, submitted, late or missing: its latest attempt's that the caller may read, not_started for none"`
 	SubmissionID        *uuid.UUID   `json:"submission_id,omitempty"`
 	Attempt             *int32       `json:"attempt,omitempty"`
 	SubmittedAt         *time.Time   `json:"submitted_at,omitempty"`
@@ -143,7 +143,7 @@ type RosterGroup struct {
 type SubmissionRosterOut struct {
 	Students []RosterEntry `json:"students"`
 	// Groups is a group assignment's, on the first page.
-	Groups []RosterGroup `json:"groups,omitempty" jsonschema:"on a group assignment, the first page only: each group of its set, not archived, with a member the caller's scope reaches, and where its work stands"`
+	Groups []RosterGroup `json:"groups,omitempty" jsonschema:"on a group assignment, the first page only: each group of its set, not archived, with a member the caller's scope reaches, and where its latest work the caller may read stands; a member is shown the group's draft and the attempts they are part of"`
 	Next   *uuid.UUID    `json:"next,omitempty"`
 }
 
@@ -246,7 +246,12 @@ func groupRoster(ctx context.Context, rc *tool.ReadCtx, in SubmissionRosterIn, s
 	if in.After != nil {
 		return out, nil
 	}
-	groups, err := rc.Q.ListGroupsWithLatestWork(ctx, dbq.ListGroupsWithLatestWorkParams{AssignmentID: in.AssignmentID, SetID: set})
+	// Where each group's work stands, of the work the caller may read: a
+	// member is shown the group's draft and the attempts they are part of,
+	// and not one handed in before they joined.
+	groups, err := rc.Q.ListGroupsWithLatestWork(ctx, dbq.ListGroupsWithLatestWorkParams{AssignmentID: in.AssignmentID, SetID: set,
+		StudentAll: rc.Scope.StudentAll, MemberID: rc.Scope.MemberID,
+		PrincipalStudentAll: rc.Scope.PrincipalStudentAll, PrincipalID: rc.Scope.PrincipalID})
 	if err != nil || len(groups) == 0 {
 		return out, err
 	}
@@ -605,9 +610,25 @@ func submissionCreate() tool.Tool {
 // createGroupWork is submission.create on a group assignment: the group's
 // next attempt, or its 'missing' row taken over, as a student's is.
 func createGroupWork(ctx context.Context, ec *tool.ExecCtx, in SubmissionCreateIn, a dbq.GetAssignmentInCourseRow) (SubmissionCreateOut, error) {
+	seen, _, err := workGroup(ctx, ec.Q, ec.Member, in, *a.GroupSetID)
+	if err != nil {
+		return SubmissionCreateOut{}, err
+	}
+	// The group FOR SHARE, as a hand-in takes it: placing students and a
+	// split hold the groups they touch FOR UPDATE, and look for work under
+	// it, so a move and the start of the work are one after the other.
+	// Whose group it is, and whether the caller reaches its members, are
+	// worked out again under it: one moved out meanwhile starts nothing in
+	// the group they left.
+	if _, err := ec.Q.ShareGroup(ctx, dbq.ShareGroupParams{ID: seen.ID, CourseID: in.CourseID}); err != nil {
+		return SubmissionCreateOut{}, err
+	}
 	g, _, err := workGroup(ctx, ec.Q, ec.Member, in, *a.GroupSetID)
 	if err != nil {
 		return SubmissionCreateOut{}, err
+	}
+	if g.ID != seen.ID {
+		return SubmissionCreateOut{}, errGroupChanged
 	}
 	out := SubmissionCreateOut{GroupID: &g.ID}
 	prior, err := ec.Q.LockGroupSubmissionsOf(ctx, dbq.LockGroupSubmissionsOfParams{AssignmentID: a.ID, GroupID: g.ID})
@@ -703,11 +724,14 @@ func submissionUpdateDraft() tool.Tool {
 			return in.editable(sub)
 		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in SubmissionUpdateDraftIn) (SubmissionUpdateDraftOut, error) {
-			s, err := ec.Q.GetSubmissionFullForUpdate(ctx, dbq.GetSubmissionFullForUpdateParams{ID: in.SubmissionID, CourseID: in.CourseID})
+			// A group's draft with its group held, and the editor still one
+			// of it (or reaching one): a member moved out meanwhile writes
+			// nothing of the group they left.
+			s, err := holdDraft(ctx, ec, in.CourseID, in.SubmissionID)
 			if err != nil {
-				return SubmissionUpdateDraftOut{}, workGone(err)
+				return SubmissionUpdateDraftOut{}, err
 			}
-			if err := in.editable(dbq.GetSubmissionFullRow(s)); err != nil {
+			if err := in.editable(s); err != nil {
 				return SubmissionUpdateDraftOut{}, err
 			}
 			revision, err := ec.Q.UpdateSubmissionDraft(ctx, dbq.UpdateSubmissionDraftParams{ID: in.SubmissionID, Body: &in.Body,
@@ -947,6 +971,11 @@ func submissionSubmit() tool.Tool {
 				if err := ec.Q.LockWorkMembersOfAssignment(ctx, s.AssignmentID); err != nil {
 					return SubmissionSubmitOut{}, err
 				}
+			}
+			// Who hands a group's draft in is one of its members now, under
+			// the group's lock, or reaches one: not one moved out meanwhile.
+			if err := draftStillReached(ctx, ec, s); err != nil {
+				return SubmissionSubmitOut{}, err
 			}
 			if _, err := in.handIn(ctx, ec.Q, s); err != nil {
 				return SubmissionSubmitOut{}, err

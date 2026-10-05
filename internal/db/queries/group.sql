@@ -186,6 +186,26 @@ JOIN assignment a ON a.id = s.assignment_id
 WHERE s.group_id = ANY(sqlc.arg(group_ids)::uuid[])
 ORDER BY s.group_id, s.assignment_id, s.attempt DESC;
 
+-- name: ListReadableWorkOfGroups :many
+-- ListWorkOfGroups, of the submissions the reader may read: one of whose
+-- students (submission_students) the reader's student scope reaches, and
+-- their principal's, as authorize() reaches a group's work. A member reads
+-- the group's draft and the attempts they are part of, not one handed in
+-- before they joined.
+SELECT s.group_id::uuid AS group_id, s.assignment_id, a.title, s.id AS submission_id, s.attempt, s.state
+FROM submission s
+JOIN assignment a ON a.id = s.assignment_id
+WHERE s.group_id = ANY(sqlc.arg(group_ids)::uuid[])
+  AND (sqlc.arg(student_all)::bool OR EXISTS (
+        SELECT 1 FROM submission_students(s.id) AS st(member_id)
+        JOIN member_student_scope y ON y.student_member_id = st.member_id
+        WHERE y.member_id = sqlc.arg(member_id)))
+  AND (sqlc.arg(principal_student_all)::bool OR EXISTS (
+        SELECT 1 FROM submission_students(s.id) AS st(member_id)
+        JOIN member_student_scope py ON py.student_member_id = st.member_id
+        WHERE py.member_id = sqlc.arg(principal_id)))
+ORDER BY s.group_id, s.assignment_id, s.attempt DESC;
+
 -- name: ListAssignmentsOfSets :many
 -- The assignments using each of the sets, within the caller's assignment
 -- scope; one not published only for whoever may see it.

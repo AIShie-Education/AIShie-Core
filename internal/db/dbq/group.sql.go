@@ -696,6 +696,77 @@ func (q *Queries) ListMembershipHistory(ctx context.Context, setID uuid.UUID) ([
 	return items, nil
 }
 
+const listReadableWorkOfGroups = `-- name: ListReadableWorkOfGroups :many
+SELECT s.group_id::uuid AS group_id, s.assignment_id, a.title, s.id AS submission_id, s.attempt, s.state
+FROM submission s
+JOIN assignment a ON a.id = s.assignment_id
+WHERE s.group_id = ANY($1::uuid[])
+  AND ($2::bool OR EXISTS (
+        SELECT 1 FROM submission_students(s.id) AS st(member_id)
+        JOIN member_student_scope y ON y.student_member_id = st.member_id
+        WHERE y.member_id = $3))
+  AND ($4::bool OR EXISTS (
+        SELECT 1 FROM submission_students(s.id) AS st(member_id)
+        JOIN member_student_scope py ON py.student_member_id = st.member_id
+        WHERE py.member_id = $5))
+ORDER BY s.group_id, s.assignment_id, s.attempt DESC
+`
+
+type ListReadableWorkOfGroupsParams struct {
+	GroupIds            []uuid.UUID
+	StudentAll          bool
+	MemberID            uuid.UUID
+	PrincipalStudentAll bool
+	PrincipalID         uuid.UUID
+}
+
+type ListReadableWorkOfGroupsRow struct {
+	GroupID      uuid.UUID
+	AssignmentID uuid.UUID
+	Title        string
+	SubmissionID uuid.UUID
+	Attempt      int32
+	State        string
+}
+
+// ListWorkOfGroups, of the submissions the reader may read: one of whose
+// students (submission_students) the reader's student scope reaches, and
+// their principal's, as authorize() reaches a group's work. A member reads
+// the group's draft and the attempts they are part of, not one handed in
+// before they joined.
+func (q *Queries) ListReadableWorkOfGroups(ctx context.Context, arg ListReadableWorkOfGroupsParams) ([]ListReadableWorkOfGroupsRow, error) {
+	rows, err := q.db.Query(ctx, listReadableWorkOfGroups,
+		arg.GroupIds,
+		arg.StudentAll,
+		arg.MemberID,
+		arg.PrincipalStudentAll,
+		arg.PrincipalID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListReadableWorkOfGroupsRow
+	for rows.Next() {
+		var i ListReadableWorkOfGroupsRow
+		if err := rows.Scan(
+			&i.GroupID,
+			&i.AssignmentID,
+			&i.Title,
+			&i.SubmissionID,
+			&i.Attempt,
+			&i.State,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listStudentSeats = `-- name: ListStudentSeats :many
 SELECT m.id, m.role, m.status, (m.expires_at IS NULL OR m.expires_at > now())::bool AS unexpired
 FROM course_member m
