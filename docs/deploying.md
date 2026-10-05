@@ -756,6 +756,66 @@ Run all of these as root on the server.
   The front end and the agent runtime that know of it come with their own
   releases, each moving its pin to this one: until then nothing in the site
   offers it, and an agent finds it in the catalogue.
+- **Migration 0031, group assignments:** a course keeps group sets, their
+  groups and who was in which group when (`group_set`, `course_group`,
+  `group_membership`), formed by hand, by a random split and by students
+  signing themselves up; an assignment that names a set takes one piece of
+  work from each group (`submission.group_id`), whose work it is kept frozen
+  as it was handed in (`submission_member`, which every submission now has),
+  graded once for the group (`group_grade`), each member given a grade from
+  it, adjusted with a reason where the grader says (docs/schema.md §2.5,
+  §2.5a, §2.7). It needs nothing of the operator. It writes one row of
+  `submission_member` for every submission there is, its student, and moves
+  each grade's key on a submission to it; the constraints it adds to the
+  rows there are go in unchecked (`NOT VALID`), since every such row holds
+  them.
+  - **Its indexes.** It rebuilds one live posted grade per submission as one
+    per student on a piece of work, and makes indexes on the new columns.
+    Building each holds off writes to its table while it is built. On a large
+    site, build the rebuilt one first, without holding anything off, under
+    the name the migration gives it, and the migration then takes it in
+    place of the old one; with `psql`, as the database's owner, outside a
+    transaction:
+
+    ```
+    CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS one_live_submission_member_grade ON grade (submission_id, student_member_id) WHERE posted_at IS NOT NULL AND superseded_by IS NULL;
+    ```
+
+    The others are on columns the migration adds, empty until group work is
+    made, and are built as it goes in. As for 0030's, a concurrent build
+    that fails leaves its index behind, invalid: check `SELECT
+    indexrelid::regclass FROM pg_index WHERE NOT indisvalid;` before
+    deploying.
+  - **The release before**, while the migration goes in and after a
+    rollback: it never writes group work, so no guard bites what it does
+    with a student's: a submission it writes is given its row of
+    `submission_member` by the database, its grades satisfy the moved key,
+    and it posts and deletes as ever. Where this release has made group
+    work, its reads of a group's submission fail (a null student it cannot
+    read), and deleting a group assignment fails whole, changing nothing; a
+    student's own work it tries to start on a group assignment is refused,
+    and its due sweep's `missing` rows there are passed over, unwritten, so
+    that this release's sweep, under a key of its own (`:groups`), records
+    the groups. It posts one member's grade on a group's work while no
+    other member's there is posted, its check of one posted grade per
+    submission refusing the rest; regrading one member's grade from a group
+    grade writes a plain grade, which this release then reads as given apart
+    from the group's and carries no adjustment from. The front end before this
+    release starts and hands in a group's work (the group is the caller's),
+    and is refused editing a group's draft, which names a revision it does
+    not know (`base_revision_required`).
+  - **Going down** refuses, changing nothing, while any submission is a
+    group's: the schema before cannot hold a group's work, and a down
+    migration deletes no student's work. Delete the group assignments first
+    (`assignment.delete`), or restore a backup taken before 0031. A refused
+    down leaves `migrate version` saying 30, dirty: `aishie-core migrate
+    force 31` puts it back. Lost going down: the sets, groups and
+    memberships and their history; which assignments were group
+    assignments (they become individual, having no work); drafts'
+    revisions, and who handed each submission in.
+
+  The front end and the agent runtime that know of it come with their own
+  releases, each moving its pin to this one.
 - **Migration 0013, `member_invite`:** the permission that makes a course's
   join links. Every seat a person holds got it at its level of
   `member_manage`, and every seat an agent holds got it `denied`, whatever it
