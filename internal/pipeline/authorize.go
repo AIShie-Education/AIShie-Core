@@ -166,7 +166,10 @@ func (p *Pipeline) authorize(ctx context.Context, q dbq.Querier, t tool.Tool, in
 				return a, nil
 			}
 		}
-		if t.Gate.Any && len(target.Perms) == 0 {
+		// A Read whose target names none is governed by whichever of them
+		// the caller holds: reading needs only to be allowed. A write must
+		// say, since the level it runs at is the governing permission's.
+		if t.Gate.Any && len(target.Perms) == 0 && write {
 			return a, fmt.Errorf("%s: its gate is Any, so its Resolve must name the governing permission", t.Name)
 		}
 		if len(target.Perms) > 0 {

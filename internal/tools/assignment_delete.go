@@ -75,6 +75,7 @@ type DeletionCounts struct {
 	Files       int `json:"files" jsonschema:"files deleted from storage: those handed in and given as feedback, a group grade's among them, every version's; their PDF renditions go too and are not counted. The instructions' and the rubric's are not among them: those stay in the course"`
 	Proposals   int `json:"proposals" jsonschema:"proposals about it waiting for a decision, which are cancelled"`
 	Totals      int `json:"totals" jsonschema:"students whose posted totals are worked out again without it, the change recorded"`
+	PeerReviews int `json:"peer_reviews,omitempty" jsonschema:"peer evaluations of its groups' members, the current sheets; each one's earlier sheets and its peer form go with them. A confirm that leaves it out is taken as 0"`
 }
 
 // above says whether more would go, as c has it, than was shown in was: a
@@ -82,11 +83,11 @@ type DeletionCounts struct {
 func (c DeletionCounts) above(was DeletionCounts) bool {
 	return c.Submissions > was.Submissions || c.HandedIn > was.HandedIn || c.Drafts > was.Drafts ||
 		c.Missing > was.Missing || c.Grades > was.Grades || c.Posted > was.Posted || c.Files > was.Files ||
-		c.Proposals > was.Proposals || c.Totals > was.Totals
+		c.Proposals > was.Proposals || c.Totals > was.Totals || c.PeerReviews > was.PeerReviews
 }
 
 func (c DeletionCounts) check() error {
-	if min(c.Submissions, c.HandedIn, c.Drafts, c.Missing, c.Grades, c.Posted, c.Files, c.Proposals, c.Totals) < 0 {
+	if min(c.Submissions, c.HandedIn, c.Drafts, c.Missing, c.Grades, c.Posted, c.Files, c.Proposals, c.Totals, c.PeerReviews) < 0 {
 		return apperr.Invalid("confirm's counts are none of them below zero: send back the counts assignment.delete_preview gave")
 	}
 	return nil
@@ -99,8 +100,8 @@ type deletion struct {
 	a      dbq.GetAssignmentInCourseRow
 	counts DeletionCounts
 	// students have a submission row of any kind; totals have a live total
-	// that is worked out again.
-	students, totals []uuid.UUID
+	// that is worked out again; raters wrote a peer evaluation of it.
+	students, totals, raters []uuid.UUID
 	// owned are the submitted and feedback files, deleted: the only
 	// documents it reaches. keys are their files', and their PDFs'.
 	owned         []uuid.UUID
@@ -114,18 +115,21 @@ type deletion struct {
 func (d deletion) rewritesTotals() bool { return d.a.PublishedAt != nil && d.a.ComponentID != nil }
 
 // scope is what deleting it reaches: the assignment, every student whose
-// work goes with it, and, when the totals are worked out again, every
-// student who has one, over the whole course, as a change to the scheme
-// reaches them (schemeScope).
+// work or peer evaluation goes with it, and, when the totals are worked out
+// again, every student who has one, over the whole course, as a change to
+// the scheme reaches them (schemeScope).
 func (d deletion) scope() authz.Target {
-	t := authz.Target{AssignmentIDs: []uuid.UUID{d.a.ID}, StudentMemberIDs: dedupe(append(slices.Clone(d.students), d.totals...))}
+	t := authz.Target{AssignmentIDs: []uuid.UUID{d.a.ID},
+		StudentMemberIDs: dedupe(append(append(slices.Clone(d.students), d.totals...), d.raters...))}
 	t.SpansAssignments = d.rewritesTotals()
 	return t
 }
 
 // hasWork says whether anyone has started on it: a submission row of any
-// kind, or a grade.
-func (d deletion) hasWork() bool { return d.counts.Submissions > 0 || d.counts.Grades > 0 }
+// kind, a grade, or a peer evaluation.
+func (d deletion) hasWork() bool {
+	return d.counts.Submissions > 0 || d.counts.Grades > 0 || d.counts.PeerReviews > 0
+}
 
 // readDeletion reads what deleting a takes with it.
 func readDeletion(ctx context.Context, q dbq.Querier, courseID uuid.UUID, a dbq.GetAssignmentInCourseRow) (deletion, error) {
@@ -137,6 +141,12 @@ func readDeletion(ctx context.Context, q dbq.Querier, courseID uuid.UUID, a dbq.
 	d.counts = DeletionCounts{Submissions: int(work.Submissions), HandedIn: int(work.HandedIn), Drafts: int(work.Drafts),
 		Missing: int(work.Missing), Grades: int(work.Grades), Posted: int(work.Posted)}
 	if d.students, err = q.ListStudentsWithSubmissionsTo(ctx, a.ID); err != nil {
+		return d, err
+	}
+	if d.counts.PeerReviews, err = countPeerReviews(ctx, q, a.ID); err != nil {
+		return d, err
+	}
+	if d.raters, err = q.ListPeerRaters(ctx, a.ID); err != nil {
 		return d, err
 	}
 	if d.owned, err = q.ListOwnedDocumentsOfAssignment(ctx, a.ID); err != nil {
@@ -239,8 +249,8 @@ func assignmentDeletePreview(d Deps) tool.Tool {
 	return tool.Define(tool.Spec[AssignmentIDIn, AssignmentDeletePreviewOut]{
 		Name: ToolAssignmentDeletePreview,
 		Description: "What deleting an assignment for good would take with it, counted: its submissions, its grades, the " +
-			"files handed in and given as feedback, the proposals about it waiting, and the students whose totals are " +
-			"worked out again; never names a person. Its instructions and rubric are left in the course as they are. " +
+			"files handed in and given as feedback, the peer evaluations of its groups' members, the proposals about it " +
+			"waiting, and the students whose totals are worked out again; never names a person. Its instructions and rubric are left in the course as they are. " +
 			"refusal says what assignment.delete would refuse you right now, or is null. Send counts back unchanged as " +
 			"confirm to assignment.delete.",
 		Kind: tool.Read, Gate: writeAssignments,
@@ -304,6 +314,7 @@ type DeletionRemoved struct {
 	Submissions int `json:"submissions"`
 	Grades      int `json:"grades"`
 	Files       int `json:"files"`
+	PeerReviews int `json:"peer_reviews,omitempty"`
 }
 
 type AssignmentDeleteOut struct {
@@ -338,14 +349,15 @@ func assignmentDelete(d Deps) tool.Tool {
 	return tool.Define(tool.Spec[AssignmentDeleteIn, AssignmentDeleteOut]{
 		Name: ToolAssignmentDelete,
 		Description: "Delete an assignment for good. It cannot be undone: the assignment, every submission to it with its " +
-			"files, and every grade given on them with its feedback files go; its instructions and rubric are left in the " +
+			"files, every grade given on them with its feedback files, and its peer form with every peer evaluation go; its " +
+			"instructions and rubric are left in the " +
 			"course as they are; proposals about it waiting are cancelled; and the posted totals it counted in are worked " +
 			"out again without it, the change recorded. Read " +
 			"assignment.delete_preview first and send its counts back unchanged as confirm: if more would go than you " +
 			"were shown, the call is refused (confirm_stale), and you " +
 			"read the preview again. An agent deletes only an assignment nobody has started on, with no submission of " +
-			"any kind and no grade (people_only); a person deletes one with work. It reaches every student whose work or " +
-			"total it changes. An archived course refuses it.",
+			"any kind, no grade and no peer evaluation (people_only); a person deletes one with work. It reaches every " +
+			"student whose work, peer evaluation or total it changes. An archived course refuses it.",
 		Kind: tool.Write, Gate: writeAssignments,
 		HTTP:  tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/assignments/{assignment_id}/delete"},
 		Check: func(in AssignmentDeleteIn) error { return in.Confirm.check() },
@@ -385,7 +397,10 @@ func assignmentDelete(d Deps) tool.Tool {
 // grades given on them in id order, and the group grades, every submitted
 // and feedback file deleted with it in id order, and each student's totals
 // as they are written again. A group's work goes as a student's does, whose
-// it was (submission_member) with it; its group, the course's, stays. It reaches no other document: its instructions and rubric
+// it was (submission_member) with it; its group, the course's, stays. Its
+// peer form and every sheet written on it go with the assignment, by
+// cascade; a sheet is written under the assignment FOR SHARE, which this
+// holds off. It reaches no other document: its instructions and rubric
 // are neither locked, read for what they hold, nor changed.
 func deleteAssignment(ctx context.Context, d Deps, ec *tool.ExecCtx, in AssignmentDeleteIn) (AssignmentDeleteOut, error) {
 	q := ec.Q
@@ -446,7 +461,8 @@ func deleteAssignment(ctx context.Context, d Deps, ec *tool.ExecCtx, in Assignme
 		return AssignmentDeleteOut{}, err
 	}
 	out := AssignmentDeleteOut{Deleted: true, AssignmentID: a.ID, Title: a.Title,
-		Removed: DeletionRemoved{Submissions: del.counts.Submissions, Grades: del.counts.Grades, Files: del.counts.Files}}
+		Removed: DeletionRemoved{Submissions: del.counts.Submissions, Grades: del.counts.Grades, Files: del.counts.Files,
+			PeerReviews: del.counts.PeerReviews}}
 
 	// The files leave the store once this has committed, from the queue.
 	if len(del.keys) > 0 {
@@ -569,4 +585,11 @@ func workGone(err error) error {
 		return errWorkDeleted
 	}
 	return err
+}
+
+// countPeerReviews is how many current sheets of peer evaluation the
+// assignment has.
+func countPeerReviews(ctx context.Context, q dbq.Querier, a uuid.UUID) (int, error) {
+	n, err := q.CountCurrentPeerSheets(ctx, a)
+	return int(n), err
 }

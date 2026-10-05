@@ -65,6 +65,10 @@ func TestArgumentsAreCheckedBeforeAnythingIsProposed(t *testing.T) {
 	// A group set with one group, for the group tools.
 	set := testkit.Result[tools.IDOut](t, b.do(t, b.sato, "group_set.create", in(m{"name": "Projects"}))).ID
 	group := testkit.Result[tools.GroupCreateOut](t, b.do(t, b.sato, "group.create", in(m{"set_id": set, "groups": []m{{"name": "Team 1"}}}))).GroupIDs[0]
+	// A group assignment of the set, for peer evaluation.
+	project := testkit.Result[tools.IDOut](t, b.do(t, b.sato, "assignment.create",
+		in(m{"title": "Project", "points_possible": 100, "group_set_id": set}))).ID
+	closes := time.Now().Add(time.Hour)
 
 	cases := []struct {
 		tool string
@@ -406,6 +410,39 @@ func TestArgumentsAreCheckedBeforeAnythingIsProposed(t *testing.T) {
 		{tool: "grade.submit",
 			invalid: in(m{"submission_id": kenWork, "score": 5, "adjustments": []m{{"student_member_id": b.kenM, "kind": "none", "points": 1}}}),
 			message: "an adjustment of kind none takes no points and no reason"},
+		// Peer evaluation.
+		{tool: "peer_form.set",
+			valid:   in(m{"assignment_id": project, "kind": "share", "opens": "on_hand_in", "closes_at": closes, "weight": 20}),
+			invalid: in(m{"assignment_id": project, "kind": "rating", "opens": "on_hand_in", "closes_at": closes, "weight": 20}),
+			message: "a rating form has 1 to 10 criteria"},
+		{tool: "peer_form.set",
+			invalid: in(m{"assignment_id": project, "kind": "rating", "criteria": []m{{"key": "Effort", "label": "Effort"}},
+				"scale_min": 1, "scale_max": 5, "opens": "on_hand_in", "closes_at": closes, "weight": 0}),
+			message: `a criterion's key is 1 to 32 of a-z, 0-9 and _: "Effort"`},
+		{tool: "peer_form.set",
+			invalid: in(m{"assignment_id": project, "kind": "rating", "criteria": []m{{"key": "effort", "label": "Effort"}},
+				"scale_min": 2, "scale_max": 5, "opens": "on_hand_in", "closes_at": closes, "weight": 0}),
+			message: "a rating form's scale is from scale_min, 0 or 1, to scale_max, above it and at most 10"},
+		{tool: "peer_form.set",
+			invalid: in(m{"assignment_id": project, "kind": "share", "opens": "at", "closes_at": closes, "weight": 20}),
+			message: "a form that opens at a time says when, opens_at, before closes_at"},
+		{tool: "peer_form.set",
+			invalid: in(m{"assignment_id": project, "kind": "share", "opens": "on_hand_in", "closes_at": closes, "weight": 101}),
+			message: "weight is 0 to 100"},
+		{tool: "peer_review.submit",
+			valid: in(m{"assignment_id": project, "entries": []m{{"student_member_id": b.kenM, "share": 100}}}), wantValid: domain.StatusFailed,
+			invalid: in(m{"assignment_id": project, "entries": []m{{"student_member_id": b.kenM, "share": 60}, {"student_member_id": b.yukiM, "share": 30}}}),
+			message: "the shares add up to 90, not 100"},
+		{tool: "peer_review.submit",
+			invalid: in(m{"assignment_id": project, "entries": []m{{"student_member_id": b.kenM, "share": 50, "ratings": m{"effort": 3}}}}),
+			message: "an entry gives ratings or a share, one of them"},
+		{tool: "peer_review.submit",
+			invalid: in(m{"assignment_id": project, "entries": []m{{"student_member_id": b.kenM, "share": 50}, {"student_member_id": b.kenM, "share": 50}}}),
+			message: "member " + b.kenM.String() + " is evaluated twice"},
+		{tool: "grade.apply_peer",
+			valid: in(m{"assignment_id": project}), wantValid: domain.StatusFailed,
+			invalid: in(m{"assignment_id": project, "form_version": 1}),
+			message: "form_version and grades are what a proposal records; a call gives neither"},
 		// The site's services: what they write back.
 		{tool: "agent_runtime.rendition_complete",
 			invalid: m{"rendition_id": uuid.New(), "lease_id": uuid.New(), "status": "done", "page_count": 3},

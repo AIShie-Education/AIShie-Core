@@ -75,7 +75,9 @@ type Gate struct {
 	// permission that actually governs (Target.Perms, which becomes
 	// required). Reading a document is like this — which permission applies
 	// depends on whether it turns out to be a lecture, a rubric or someone's
-	// submission.
+	// submission. A Read whose target names none is governed by whichever of
+	// them the caller holds: reading peer evaluation's results is for those
+	// who enter grades or post them.
 	Any bool
 	// Platform lists platform roles, for the few operations outside any
 	// course. No ladder applies: allowed outright, or not at all.

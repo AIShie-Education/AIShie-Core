@@ -415,14 +415,26 @@ func (in AssignmentUpdateIn) changesGroupSet(before dbq.GetAssignmentInCourseRow
 }
 
 // groupSetChangeable refuses changing which set id names once it has a
-// submission of any kind.
-func groupSetChangeable(ctx context.Context, q dbq.Querier, id uuid.UUID) error {
+// submission of any kind, and making it individual work while its peer form
+// is enabled (individual: the change leaves it naming no set).
+func groupSetChangeable(ctx context.Context, q dbq.Querier, id uuid.UUID, individual bool) error {
 	started, err := q.AssignmentHasSubmissions(ctx, id)
 	if err != nil {
 		return err
 	}
 	if started {
 		return errAssignmentHasWork
+	}
+	if !individual {
+		return nil
+	}
+	peer, err := q.PeerFormEnabled(ctx, id)
+	if err != nil {
+		return err
+	}
+	if peer {
+		return apperr.Precondition("the assignment has a peer form, enabled: switch it off first (peer_form.set, enabled false), then make it individual work").
+			With("reason", ReasonPeerFormExists)
 	}
 	return nil
 }
@@ -442,7 +454,7 @@ func assignmentUpdate() tool.Tool {
 			"Either rewrites, at once, the posted totals it changes, with history, and so must reach every student who has " +
 			"one, over the whole course. A grade proposed out of the old points is refused when it is approved. Whether it " +
 			"is group work, and of which set (group_set_id, clear_group_set), changes only while nobody has started on it " +
-			"(assignment_has_work).",
+			"(assignment_has_work), and it is made individual work only once its peer form is switched off (peer_form_exists).",
 		Kind: tool.Write, Gate: writeAssignments,
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/assignments/{assignment_id}"},
 		Check: func(in AssignmentUpdateIn) error {
@@ -490,7 +502,7 @@ func assignmentUpdate() tool.Tool {
 			}
 			a := in.updated(before)
 			if in.changesGroupSet(before) {
-				if err := groupSetChangeable(ctx, q, a.ID); err != nil {
+				if err := groupSetChangeable(ctx, q, a.ID, a.GroupSetID == nil); err != nil {
 					return err
 				}
 				if err := checkGroupSet(ctx, q, in.CourseID, before, a); err != nil {
@@ -550,12 +562,12 @@ func assignmentUpdate() tool.Tool {
 				return SchemeChangeOut{}, goneIfNoRows(ctx, ec.Q, in.CourseID, in.AssignmentID, err)
 			}
 			setChanges := in.changesGroupSet(before)
+			a := in.updated(before)
 			if setChanges {
-				if err := groupSetChangeable(ctx, ec.Q, before.ID); err != nil {
+				if err := groupSetChangeable(ctx, ec.Q, before.ID, a.GroupSetID == nil); err != nil {
 					return SchemeChangeOut{}, err
 				}
 			}
-			a := in.updated(before)
 			if err := checkGroupSet(ctx, ec.Q, in.CourseID, before, a); err != nil {
 				return SchemeChangeOut{}, err
 			}

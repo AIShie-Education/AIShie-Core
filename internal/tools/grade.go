@@ -155,6 +155,7 @@ type GradeSubmitOut struct {
 	GradeID      uuid.UUID        `json:"grade_id,omitzero" jsonschema:"the grade written; absent for a group's work, whose members' grades are in member_grades"`
 	GroupGradeID *uuid.UUID       `json:"group_grade_id,omitempty" jsonschema:"a group's work: the group grade, the shared record of what the group was given"`
 	MemberGrades []MemberGradeOut `json:"member_grades,omitempty" jsonschema:"a group's work: each member's draft grade from it, with their score and adjustment"`
+	Peer         string           `json:"peer,omitempty" jsonschema:"a group's work with a peer form that counts: counted, each member not adjusted by you moved by what they received; window_open, its window still open and nothing counted yet"`
 }
 
 // gradeSubject is what a grade is for: a submission, or a component for a
@@ -426,7 +427,8 @@ func gradeSubmit(d Deps) tool.Tool {
 			"A new draft replaces any earlier draft for the same work. A group's work is graded once: a group grade, the " +
 			"shared record with its feedback and files, and a draft for each member of the work given from it, the group's " +
 			"score unless the member is adjusted (adjustments: a score of their own, or plus or minus, each with a reason), " +
-			"an adjustment carried from their earlier grade otherwise. Each member's draft is posted with grade.post, and " +
+			"an adjustment carried from their earlier grade otherwise; a member you do not adjust is moved by peer evaluation " +
+			"where its form counts and its window has closed (peer). Each member's draft is posted with grade.post, and " +
 			"changed alone with grade.adjust.",
 		Kind: tool.Write,
 		Gate: tool.Gate{Perms: []domain.Perm{domain.PermGradeSubmit}},
@@ -1021,6 +1023,7 @@ type GradeRegradeOut struct {
 	Snapshots    int              `json:"snapshots"`
 	GroupGradeID *uuid.UUID       `json:"group_grade_id,omitempty" jsonschema:"a member's grade from a group grade: the group's new grade"`
 	MemberGrades []MemberGradeOut `json:"member_grades,omitempty" jsonschema:"a member's grade from a group grade: each member's new posted grade from it"`
+	Peer         string           `json:"peer,omitempty" jsonschema:"as grade.submit says it"`
 }
 
 // groupRegrade is what regrading a member's grade from a group grade writes
@@ -1058,7 +1061,9 @@ func (in GradeRegradeIn) regradeOfGroup(ctx context.Context, q dbq.Querier, g db
 				With("reason", ReasonGroupGradePartlyPosted).With("grade_id", f.ID)
 		}
 		posted = append(posted, f.StudentMemberID)
-		carried[f.StudentMemberID] = adjustmentOf(f.AdjustKind, f.AdjustPoints, f.AdjustReason, f.AdjustByMemberID)
+		// A grader's adjustment is carried; peer evaluation's is worked
+		// out again.
+		carried[f.StudentMemberID] = adjustmentOf(f.AdjustKind, f.AdjustPoints, f.AdjustReason, f.AdjustByMemberID).manual()
 	}
 	if in.Members != nil && !sameMembers(in.Members, posted) {
 		return r, errMembersChanged
@@ -1277,11 +1282,11 @@ func (in GradeRegradeIn) regradeGroup(ctx context.Context, d Deps, ec *tool.Exec
 	} else if reason != authz.ReasonNone {
 		return GradeRegradeOut{}, apperr.Forbid("a member whose grade it writes again is outside your scope").With("reason", string(reason))
 	}
-	gg, grades, err := writeGroupGrade(ctx, d, ec, in.CourseID, s, in.GradeContent, rubric, r.writes, true, ec.Now)
+	gg, grades, peer, err := writeGroupGrade(ctx, d, ec, in.CourseID, s, in.GradeContent, rubric, r.writes, true, ec.Now)
 	if err != nil {
 		return GradeRegradeOut{}, err
 	}
-	out := GradeRegradeOut{Replaces: old.ID, GroupGradeID: &gg, MemberGrades: grades}
+	out := GradeRegradeOut{Replaces: old.ID, GroupGradeID: &gg, MemberGrades: grades, Peer: peer}
 	changed := map[uuid.UUID][]uuid.UUID{}
 	for _, g := range grades {
 		changed[g.StudentMemberID] = []uuid.UUID{s.changedItem()}

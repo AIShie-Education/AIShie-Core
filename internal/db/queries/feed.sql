@@ -8,7 +8,7 @@ SELECT g.id, g.student_member_id, g.submission_id, g.component_id, s.assignment_
        g.feedback, g.breakdown, g.rubric_version_id, g.grader_member_id, g.created_by_action_id,
        g.posted_at, g.posted_by_member_id, g.superseded_by, g.created_at,
        g.override_score, g.override_reason, g.override_by_member_id, g.overridden_at,
-       g.group_grade_id, g.adjust_kind, g.adjust_points, g.adjust_reason, g.adjust_by_member_id,
+       g.group_grade_id, g.adjust_kind, g.adjust_points, g.adjust_reason, g.adjust_by_member_id, g.adjust_detail,
        s.group_id, cg.name AS group_name, gg.score AS group_score
 FROM grade g
 JOIN course_member sm ON sm.id = g.student_member_id
@@ -36,7 +36,7 @@ SELECT g.id, g.student_member_id, g.submission_id, g.component_id, s.assignment_
        g.feedback, g.breakdown, g.rubric_version_id, g.grader_member_id, g.created_by_action_id,
        g.posted_at, g.posted_by_member_id, g.superseded_by, g.created_at,
        g.override_score, g.override_reason, g.override_by_member_id, g.overridden_at,
-       g.group_grade_id, g.adjust_kind, g.adjust_points, g.adjust_reason, g.adjust_by_member_id,
+       g.group_grade_id, g.adjust_kind, g.adjust_points, g.adjust_reason, g.adjust_by_member_id, g.adjust_detail,
        s.group_id, cg.name AS group_name, gg.score AS group_score
 FROM grade g
 JOIN course_member sm ON sm.id = g.student_member_id

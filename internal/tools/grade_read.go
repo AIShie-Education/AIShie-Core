@@ -91,7 +91,7 @@ func viewGrade(g dbq.GetGradeFullRow) GradeView {
 		NoTotal: g.Origin == "computed" && voidTotal(g.Breakdown), Override: viewOverride(g)}
 	if g.GroupGradeID != nil {
 		v.Group = &GradeGroup{GroupGradeID: *g.GroupGradeID, GroupID: g.GroupID, GroupName: g.GroupName, Score: g.GroupScore.Decimal,
-			Adjustment: adjustmentOf(g.AdjustKind, g.AdjustPoints, g.AdjustReason, g.AdjustByMemberID).view()}
+			Adjustment: adjustmentOf(g.AdjustKind, g.AdjustPoints, g.AdjustReason, g.AdjustByMemberID).withDetail(g.AdjustDetail).view()}
 	}
 	return v
 }
@@ -107,7 +107,9 @@ func viewOverride(g dbq.GetGradeFullRow) *TotalOverride {
 // overrode a total and why.
 //
 // A member reads their own adjustment, its reason included: it explains the
-// grade they were given. Who made it is for those who grade.
+// grade they were given. Who made it is for those who grade. Of a peer
+// adjustment, a member reads their factor and the weight; how many raters
+// rated them, which in a small group tells too much, is for those who grade.
 func forReader(v GradeView, m *domain.Member) GradeView {
 	if v.Override != nil && !seesDrafts(m) {
 		o := *v.Override
@@ -117,6 +119,11 @@ func forReader(v GradeView, m *domain.Member) GradeView {
 	if v.Group != nil && v.Group.Adjustment != nil && !seesDrafts(m) {
 		gr, a := *v.Group, *v.Group.Adjustment
 		a.ByMemberID = nil
+		if a.Detail != nil {
+			d := *a.Detail
+			d.Raters, d.FormVersion = nil, nil
+			a.Detail = &d
+		}
 		gr.Adjustment = &a
 		v.Group = &gr
 	}
