@@ -122,6 +122,10 @@ func (in PeerReviewSubmitIn) sheetFor(ctx context.Context, q dbq.Querier, m *dom
 	} else if reason != authz.ReasonNone {
 		return s, apperr.Forbid("you are outside your own scope").With("reason", string(reason))
 	}
+	if a.PublishedAt == nil {
+		// To a student an unpublished assignment does not exist yet.
+		return s, apperr.Missing("no such assignment in this course")
+	}
 	if f == nil {
 		return s, errNoPeerForm()
 	}
@@ -368,6 +372,22 @@ type PeerResultsOut struct {
 	Groups []PeerGroupResult `json:"groups" jsonschema:"each group whose circle lies wholly within your student scope"`
 }
 
+// groupOfAssignment refuses a group that is not of the assignment's set.
+func groupOfAssignment(ctx context.Context, q dbq.Querier, courseID, assignment, group uuid.UUID) error {
+	a, err := q.GetAssignmentInCourse(ctx, dbq.GetAssignmentInCourseParams{ID: assignment, CourseID: courseID})
+	if err != nil {
+		return goneIfNoRows(ctx, q, courseID, assignment, err)
+	}
+	g, err := loadGroup(ctx, q, courseID, group)
+	if err != nil {
+		return err
+	}
+	if a.GroupSetID == nil || g.SetID != *a.GroupSetID {
+		return apperr.Missing("no such group in this assignment's group set")
+	}
+	return nil
+}
+
 // peerResultsTarget is what reading the results reaches: the assignment,
 // and, for one group, every member of its circle.
 func peerResultsTarget(ctx context.Context, q dbq.Querier, in PeerResultsIn) (tool.Target, error) {
@@ -381,7 +401,7 @@ func peerResultsTarget(ctx context.Context, q dbq.Querier, in PeerResultsIn) (to
 	if in.GroupID == nil {
 		return t, nil
 	}
-	if _, err := loadGroup(ctx, q, in.CourseID, *in.GroupID); err != nil {
+	if err := groupOfAssignment(ctx, q, in.CourseID, in.AssignmentID, *in.GroupID); err != nil {
 		return t, err
 	}
 	c, err := circleOf(ctx, q, in.AssignmentID, *in.GroupID)

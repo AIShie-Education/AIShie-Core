@@ -1872,8 +1872,8 @@ self-evaluation; a sheet covers exactly those (`sheet_incomplete`), a rater's ow
 with self-evaluation (`self_evaluation_off`), each a rating of every criterion on the scale
 (`bad_rating`) or a share, the shares adding up to exactly 100 (`bad_share_total`).
 
-**A sheet** is written by `peer_review.submit` (`perm_submission_write`, the caller's own): only
-by a person, never by an agent, its owner's or any other's, whatever it holds (`people_only`,
+**A sheet** is written by `peer_review.submit` (`perm_submission_write`, the caller's own), on a
+published assignment: only by a person, never by an agent, its owner's or any other's, whatever it holds (`people_only`,
 reading `actor.kind` to refuse as `member.reset_password` does): a peer evaluation is a person's
 judgment of their classmates. Written again while the window is open, the new sheet supersedes
 the old, which is kept; one rater's sheets are written one after the other (a transaction lock
@@ -1896,8 +1896,8 @@ since the action log holds what a sheet said, for those who decide actions, as e
 payload does) and `students_see` (`own_sheet`, `own_average` where shared, `own_adjustment` where
 it counts). Those who grade read everything: `peer_review.results` (any of `perm_grade_submit`
 and `perm_grade_post`: holding either is enough, a read whose target names no permission being
-governed by whichever the caller holds), for each group whose circle lies wholly within their
-student scope, gives each member's sheet and when, who rated them, what their peers gave them
+governed by whichever the caller holds), for each group of the assignment's set whose circle lies
+wholly within their student scope, or the one named, gives each member's sheet and when, who rated them, what their peers gave them
 (the average on each criterion, or each share), what they gave themselves, their factor and the
 score it would give at the form's weight from the group's score now, their live grade, and flags,
 and every sheet with who wrote it, its entries and comments.

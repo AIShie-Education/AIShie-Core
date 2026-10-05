@@ -255,6 +255,15 @@ func TestAPeerFormIsSetOnAGroupAssignment(t *testing.T) {
 	b.do(t, b.sato, "assignment.update", m{"course_id": b.course, "assignment_id": lab, "clear_group_set": true})
 	labForm["version"] = 2
 	b.refusedAs(t, b.sato, "peer_form.set", labForm, apperr.FailedPrecondition, tools.ReasonNotAGroupAssignment)
+
+	// An assignment not published yet is none of a student's to evaluate on.
+	draft := testkit.Result[tools.IDOut](t, b.do(t, b.sato, "assignment.create", m{"course_id": b.course, "title": "Next project",
+		"points_possible": 10, "group_set_id": w.set})).ID
+	b.do(t, b.sato, "peer_form.set", m{"course_id": b.course, "assignment_id": draft, "kind": "share", "opens": "at",
+		"opens_at": time.Now().Add(-time.Minute), "closes_at": soon, "weight": 0})
+	early := w.sheetArgs(b.kenM, 40, w.aoiM, 40, w.renM, 20)
+	early["assignment_id"] = draft
+	b.refusedAs(t, b.yuki, "peer_review.submit", early, apperr.NotFound, "")
 }
 
 // The members of a group's circle evaluate each other once the window opens
@@ -382,6 +391,11 @@ func TestAGroupsMembersEvaluateEachOther(t *testing.T) {
 	if one := w.results(t, b.sato, m{"group_id": w.duo}); len(one.Groups) != 1 || one.Groups[0].GroupID != w.duo {
 		t.Fatalf("the Duo's alone: %+v", one.Groups)
 	}
+	// A group of another set is none of the project's.
+	labs := b.groupSet(t, "Labs", nil)
+	lab := b.groupsIn(t, labs, m{"name": "Lab 1"})[0]
+	b.place(t, labs, false, b.yukiM, lab, b.kenM, lab)
+	b.refusedAs(t, b.sato, "peer_review.results", m{"course_id": b.course, "assignment_id": w.hw, "group_id": lab}, apperr.NotFound, "")
 }
 
 // Counted, peer evaluation moves each member's grade from the group's at the
