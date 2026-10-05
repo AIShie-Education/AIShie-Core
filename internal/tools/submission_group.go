@@ -114,10 +114,34 @@ func errGroupEmpty(group uuid.UUID) error {
 }
 
 // LeftOut is a member a group's work was not handed in for, because another
-// group's work for the assignment names them already.
+// group's work for the assignment names them already. That work is named
+// only to whom it is told (readableLeftOut).
 type LeftOut struct {
-	MemberID     uuid.UUID `json:"member_id"`
-	SubmissionID uuid.UUID `json:"submission_id" jsonschema:"the other group's work that names them"`
+	MemberID     uuid.UUID  `json:"member_id"`
+	SubmissionID *uuid.UUID `json:"submission_id,omitempty" jsonschema:"the other group's work that names them, if you may read it; left out if you may not"`
+}
+
+// readableLeftOut is left as m is told it: each member, whom the members
+// handed in for leave out already, and the other group's work that names
+// them only where m may read that work, as submission.get reaches it
+// (readsWork). Which work it is, and its id, a UUIDv7 that says when it was
+// made, are another group's, not told to a member of one who hands in
+// (§2.5, What each member sees); the member's id says why they are left out.
+func readableLeftOut(ctx context.Context, q dbq.Querier, m *domain.Member, assignment uuid.UUID, left []LeftOut) ([]LeftOut, error) {
+	out := make([]LeftOut, 0, len(left))
+	for _, l := range left {
+		if l.SubmissionID != nil {
+			reads, err := readsWork(ctx, q, m, *l.SubmissionID, assignment)
+			if err != nil {
+				return nil, err
+			}
+			if !reads {
+				l.SubmissionID = nil
+			}
+		}
+		out = append(out, l)
+	}
+	return out, nil
 }
 
 // membersFor is whom group's work for assignment is handed in, or recorded
@@ -137,7 +161,7 @@ func membersFor(ctx context.Context, q dbq.Querier, assignment, group uuid.UUID)
 	left = []LeftOut{}
 	for _, o := range other {
 		named[o.MemberID] = true
-		left = append(left, LeftOut{MemberID: o.MemberID, SubmissionID: o.SubmissionID})
+		left = append(left, LeftOut{MemberID: o.MemberID, SubmissionID: &o.SubmissionID})
 	}
 	for _, m := range live {
 		if !named[m] {

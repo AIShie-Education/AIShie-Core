@@ -51,8 +51,9 @@ func (b *built) attachmentOf(t *testing.T, actor, file uuid.UUID) tools.Conversa
 }
 
 // refusedAs insists a call failed, or was refused before it was attempted,
-// with code and, when given, the reason its details say.
-func (b *built) refusedAs(t *testing.T, actor uuid.UUID, name string, args m, code apperr.Code, why string) {
+// with code and, when given, the reason its details say, and returns the
+// refusal.
+func (b *built) refusedAs(t *testing.T, actor uuid.UUID, name string, args m, code apperr.Code, why string) *apperr.Error {
 	t.Helper()
 	b.key++
 	out, err := b.Call(actor, name, args, "refused-"+uuid.NewString())
@@ -71,6 +72,7 @@ func (b *built) refusedAs(t *testing.T, actor uuid.UUID, name string, args m, co
 	if e.Code != code || (why != "" && e.Details["reason"] != why) {
 		t.Fatalf("%s: %+v, want %s %s", name, e, code, why)
 	}
+	return e
 }
 
 func files(views []tools.AttachmentView) []string {

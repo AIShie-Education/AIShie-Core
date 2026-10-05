@@ -756,10 +756,20 @@ func (in PeerFormSetIn) settable(ctx context.Context, q dbq.Querier, a dbq.GetAs
 	return nil
 }
 
+// microseconds is t as the database keeps it, to the microsecond: a time
+// said again with more digits than that is the same time, and the same form.
+func microseconds(t *time.Time) *time.Time {
+	if t == nil {
+		return nil
+	}
+	u := t.Truncate(time.Microsecond)
+	return &u
+}
+
 // applied is the form once in is applied to now's (nil for none).
 func (in PeerFormSetIn) applied(now *dbq.PeerForm) (dbq.PeerForm, error) {
 	next := dbq.PeerForm{AssignmentID: in.AssignmentID, CourseID: in.CourseID, Enabled: true, Kind: in.Kind, ScaleMin: in.ScaleMin,
-		ScaleMax: in.ScaleMax, Opens: in.Opens, OpensAt: in.OpensAt, ClosesAt: in.ClosesAt, Weight: in.Weight,
+		ScaleMax: in.ScaleMax, Opens: in.Opens, OpensAt: microseconds(in.OpensAt), ClosesAt: in.ClosesAt.Truncate(time.Microsecond), Weight: in.Weight,
 		ShareWithStudents: peerShareNone}
 	if now != nil {
 		next.Enabled, next.SelfEvaluation, next.ShareWithStudents = now.Enabled, now.SelfEvaluation, now.ShareWithStudents

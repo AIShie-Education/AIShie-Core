@@ -275,6 +275,32 @@ func errGroupGradePosted(grade uuid.UUID) error {
 		With("reason", ReasonGroupGradePosted).With("grade_id", grade)
 }
 
+// errDraftChangedMeanwhile refuses a group grade entered while a member's
+// draft was replaced by another call (grade.adjust): the adjustment this one
+// would carry is the one it found before, not the one written meanwhile, and
+// its draft would be a second beside that one.
+var errDraftChangedMeanwhile = apperr.Conflicts("a member's draft grade on this work was replaced while this call was being "+
+	"made; look again, and call again").With("reason", ReasonGradesChanged)
+
+// noGradeLeft refuses writing a member's new draft from a group grade beside
+// a live grade of theirs on the work, asked once their drafts are
+// superseded. memberAdjustments looked under the work's lock, but grade.post
+// and grade.adjust take the grades and not the work: a draft being posted
+// then is passed over by the supersede, which waits for the post and then
+// finds it posted, and the draft grade.adjust writes in place of one is
+// never seen by it. Either would be left live beside the new draft, and the
+// first could never be posted.
+func noGradeLeft(ctx context.Context, q dbq.Querier, submission, student uuid.UUID) error {
+	live, err := q.ListLiveGradesOfMemberOnWork(ctx, dbq.ListLiveGradesOfMemberOnWorkParams{SubmissionID: &submission, StudentMemberID: student})
+	switch {
+	case err != nil || len(live) == 0:
+		return err
+	case live[0].PostedAt != nil:
+		return errGroupGradePosted(live[0].ID)
+	}
+	return errDraftChangedMeanwhile
+}
+
 // adjustmentsFor is each member's adjustment: the one the call names, or
 // else the one carried; one named the same as the one carried keeps who made
 // it. A member named who is not a member of the work is refused.
@@ -392,6 +418,9 @@ func writeGroupGrade(ctx context.Context, d Deps, ec *tool.ExecCtx, courseID uui
 			if err := ec.Q.SupersedeSubmissionDrafts(ctx, dbq.SupersedeSubmissionDraftsParams{NewID: &id, SubmissionID: &s.submission.ID,
 				StudentMemberID: w.student}); err != nil {
 				return uuid.Nil, nil, "", err
+			}
+			if err := noGradeLeft(ctx, ec.Q, s.submission.ID, w.student); err != nil {
+				return uuid.Nil, nil, err
 			}
 		}
 		row := dbq.InsertGradeParams{ID: id, StudentMemberID: w.student, SubmissionID: &s.submission.ID, Origin: "entered", Score: score,
