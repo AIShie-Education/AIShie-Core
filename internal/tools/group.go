@@ -1798,17 +1798,28 @@ func (in GroupSignUpIn) plan(ctx context.Context, q dbq.Querier, m *domain.Membe
 func readableWork(ctx context.Context, q dbq.Querier, m *domain.Member, work []WorkDetail) ([]WorkDetail, error) {
 	var out []WorkDetail
 	for _, w := range work {
-		students, err := workStudents(ctx, q, w.SubmissionID)
-		if err != nil {
+		if reads, err := readsWork(ctx, q, m, w.SubmissionID, w.AssignmentID); err != nil {
 			return nil, err
-		}
-		t := authz.AnyOf(students)
-		t.AssignmentIDs = []uuid.UUID{w.AssignmentID}
-		if reason, err := authz.CheckScope(ctx, q, m, t); err != nil {
-			return nil, err
-		} else if reason == authz.ReasonNone {
+		} else if reads {
 			out = append(out, w)
 		}
 	}
 	return out, nil
+}
+
+// readsWork says whether m may read submission, of assignment, as
+// submission.get reaches it (workScope): their scope reaches the assignment
+// and any of the work's students.
+func readsWork(ctx context.Context, q dbq.Querier, m *domain.Member, submission, assignment uuid.UUID) (bool, error) {
+	students, err := workStudents(ctx, q, submission)
+	if err != nil {
+		return false, err
+	}
+	t := authz.AnyOf(students)
+	t.AssignmentIDs = []uuid.UUID{assignment}
+	reason, err := authz.CheckScope(ctx, q, m, t)
+	if err != nil {
+		return false, err
+	}
+	return reason == authz.ReasonNone, nil
 }

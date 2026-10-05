@@ -762,7 +762,7 @@ type SubmissionSubmitOut struct {
 	State       string      `json:"state" jsonschema:"submitted, or late if the due date had passed"`
 	SubmittedAt time.Time   `json:"submitted_at"`
 	Members     []uuid.UUID `json:"members" jsonschema:"whose work it is, as it was handed in: its student, or the group's members now"`
-	LeftOut     []LeftOut   `json:"left_out" jsonschema:"members of the group it was not handed in for: another group's work for the assignment names them"`
+	LeftOut     []LeftOut   `json:"left_out" jsonschema:"members of the group it was not handed in for: another group's work for the assignment names them. That work is named only to a caller who may read it"`
 }
 
 // sameDraft refuses to hand in anything but what the call says it is
@@ -877,8 +877,8 @@ func submissionSubmit() tool.Tool {
 			"then in force, as of that moment. It hands in the draft as it was then, and is refused on approval if the " +
 			"draft has changed meanwhile, so propose it only after any change to the draft that is waiting for approval " +
 			"has been decided. A group's draft is handed in by any member, for the group's members now (members), " +
-			"leaving out and naming (left_out) any whom another group's work for the assignment names already; a " +
-			"proposal of it is refused on approval if the members have changed.",
+			"leaving out and naming (left_out) any whom another group's work for the assignment names already, and that " +
+			"work only to a caller who may read it; a proposal of it is refused on approval if the members have changed.",
 		Kind: tool.Write, Gate: writeSubmissions,
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/submissions/{submission_id}/submit"},
 		Resolve: func(ctx context.Context, q dbq.Querier, in SubmissionSubmitIn) (tool.Target, error) {
@@ -1008,9 +1008,16 @@ func submissionSubmit() tool.Tool {
 			if a.DueAt != nil && at.After(*a.DueAt) {
 				out.State = stateLate
 			}
-			// Whom it is handed in for, as it is now, under the locks.
+			// Whom it is handed in for, as it is now, under the locks; of
+			// those left out, the work that names them as the caller (for a
+			// proposal, the proposer) may read it, which is what the action's
+			// result keeps.
 			if s.GroupID != nil {
-				if out.Members, out.LeftOut, err = membersFor(ctx, ec.Q, s.AssignmentID, *s.GroupID); err != nil {
+				var left []LeftOut
+				if out.Members, left, err = membersFor(ctx, ec.Q, s.AssignmentID, *s.GroupID); err != nil {
+					return SubmissionSubmitOut{}, err
+				}
+				if out.LeftOut, err = readableLeftOut(ctx, ec.Q, ec.Member, s.AssignmentID, left); err != nil {
 					return SubmissionSubmitOut{}, err
 				}
 			} else {

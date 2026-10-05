@@ -1544,7 +1544,12 @@ database holds the rule whichever release writes (`assignment_group_set_fixed`,
   group's work's members takes. It writes a row (`hand_in`) for each member of the group now,
   leaving out, and naming in `left_out`, any whom another group's work for the assignment names
   already: a student is part of one group's work for an assignment, so that the gradebook has one
-  piece of work per student per assignment, as before. A group with nobody to hand in for is
+  piece of work per student per assignment, as before. `left_out` gives each such member's
+  `member_id`, which `members` leaving them out says already, and the other work's
+  `submission_id` only where the caller (for a proposal, the proposer) may read that work, as
+  `submission.get` reaches it (What each member sees): a member who hands in is not told which
+  work of another group names a member left out, nor its id, which, a UUIDv7, says when it was
+  made. The action's result keeps what the caller was told. A group with nobody to hand in for is
   refused `group_empty`. It records who handed it in (`submitted_by_member_id`; for a proposal,
   the proposer). A proposal of it records the group's members then, and approving it is refused
   if they have changed (`members_changed`). Its caller's scope is asked again of the group's
@@ -3226,9 +3231,9 @@ respondent's `conversation_answer` decides is who is shown its text.
   a group's regrade, the members it gives a grade and the grades its proposal replaces, and
   `grade.adjust` held to the permissions it was decided under; no new group grade beside a
   posted one, nor beside a draft posted or adjusted while it was entered; rescaling group grades;
-  and that no member of one group, through any read, refusal or the feed, learns anything of
-  another group's work, grades or membership, nor of their own group's work handed in before they
-  joined.
+  and that no member of one group, through any read, refusal, hand-in's result or the feed,
+  learns anything of another group's work, grades or membership, nor of their own group's work
+  handed in before they joined.
 - An identity provider's client secret is sealed before it is written, and in no answer, action
   or log line; a sign-in goes through the provider its state names, as it is now, and one
   switched off signs nobody in; the operator's provider wins over a site's of its name; linking

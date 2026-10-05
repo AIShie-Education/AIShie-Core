@@ -778,3 +778,74 @@ func TestASignUpRefusedForHandedInWorkNamesOnlyWhatTheCallerReads(t *testing.T) 
 		}
 	}
 }
+
+// A hand-in that leaves a member out names the other group's work that names
+// them only to a caller who may read it, as submission.get reaches it (§2.5,
+// Handing it in; What each member sees): Team A hands in for Yuki and Ken,
+// and Ken is moved to Team B. Aoi, handing Team B's work in, is told Ken is
+// left out and nothing of Team A's work, in the call's result and in the
+// action's; Ken, handing Team B's work in for another assignment, is shown
+// Team A's work, which is his.
+func TestAHandInNamesOnlyTheLeftOutWorkTheCallerReads(t *testing.T) {
+	b := build(t)
+	actors, s := b.seatStudents(t, "Aoi")
+	aoi, aoiM := actors["Aoi"], s["Aoi"]
+	set := b.groupSet(t, "Projects", nil)
+	g := b.groupsIn(t, set, m{"name": "Team A"}, m{"name": "Team B"})
+	teamA, teamB := g[0], g[1]
+	b.place(t, set, false, b.yukiM, teamA, b.kenM, teamA, aoiM, teamB)
+	proposal, report := b.groupAssignment(t, "Proposal", set), b.groupAssignment(t, "Report", set)
+
+	handInA := func(hw uuid.UUID) uuid.UUID {
+		t.Helper()
+		work := testkit.Result[tools.SubmissionCreateOut](t, b.do(t, b.yuki, "submission.create",
+			m{"course_id": b.course, "assignment_id": hw, "body": "Team A's"})).SubmissionID
+		handed := testkit.Result[tools.SubmissionSubmitOut](t, b.do(t, b.yuki, "submission.submit", m{"course_id": b.course, "submission_id": work}))
+		if !sameSet(handed.Members, []uuid.UUID{b.yukiM, b.kenM}) || len(handed.LeftOut) != 0 {
+			t.Fatalf("Team A's hand-in: %+v", handed)
+		}
+		return work
+	}
+	proposalA, reportA := handInA(proposal), handInA(report)
+	b.place(t, set, true, b.kenM, teamB)
+
+	// Aoi hands Team B's proposal in: Ken is left out, and nothing says
+	// which work names him.
+	proposalB := testkit.Result[tools.SubmissionCreateOut](t, b.do(t, aoi, "submission.create",
+		m{"course_id": b.course, "assignment_id": proposal, "body": "Team B's"})).SubmissionID
+	out := b.do(t, aoi, "submission.submit", m{"course_id": b.course, "submission_id": proposalB})
+	handed := testkit.Result[tools.SubmissionSubmitOut](t, out)
+	if !slices.Equal(handed.Members, []uuid.UUID{aoiM}) || len(handed.LeftOut) != 1 || handed.LeftOut[0].MemberID != b.kenM ||
+		handed.LeftOut[0].SubmissionID != nil {
+		t.Fatalf("Team B's hand-in, as Aoi is told it: %+v", handed)
+	}
+	if strings.Contains(string(out.Result), proposalA.String()) || strings.Contains(string(out.Result), "submission_id") {
+		t.Fatalf("Aoi's hand-in names Team A's work: %s", out.Result)
+	}
+	var stored string
+	if err := b.Pool.QueryRow(t.Context(), `SELECT result::text FROM action WHERE id = $1`, *out.ActionID).Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(stored, proposalA.String()) || !strings.Contains(stored, b.kenM.String()) {
+		t.Fatalf("Aoi's hand-in as its action keeps it: %s", stored)
+	}
+	mine, err := json.Marshal(testkit.Result[tools.ActionListOut](t, b.do(t, aoi, "action.list_mine", m{"course_id": b.course})))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(mine), proposalA.String()) || strings.Contains(string(mine), reportA.String()) {
+		t.Fatalf("Aoi's actions name Team A's work: %s", mine)
+	}
+	b.refusedAs(t, aoi, "submission.get", m{"course_id": b.course, "submission_id": proposalA}, apperr.Forbidden, "student_out_of_scope")
+
+	// Ken hands Team B's report in: he is left out of it, and shown Team
+	// A's, which names him and which he reads.
+	reportB := testkit.Result[tools.SubmissionCreateOut](t, b.do(t, aoi, "submission.create",
+		m{"course_id": b.course, "assignment_id": report, "body": "Team B's"})).SubmissionID
+	handed = testkit.Result[tools.SubmissionSubmitOut](t, b.do(t, b.ken, "submission.submit", m{"course_id": b.course, "submission_id": reportB}))
+	if !slices.Equal(handed.Members, []uuid.UUID{aoiM}) || len(handed.LeftOut) != 1 || handed.LeftOut[0].MemberID != b.kenM ||
+		handed.LeftOut[0].SubmissionID == nil || *handed.LeftOut[0].SubmissionID != reportA {
+		t.Fatalf("Team B's hand-in, as Ken is told it: %+v", handed)
+	}
+	b.do(t, b.ken, "submission.get", m{"course_id": b.course, "submission_id": reportA})
+}
