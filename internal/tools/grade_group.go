@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"encoding/json"
 	"slices"
 	"strings"
 	"time"
@@ -29,8 +30,13 @@ import (
 // minus the group's), with a reason and who made it. An adjustment is carried
 // from the member's previous live grade on the same work whenever their grade
 // is written again, until a call changes it; kind none takes it away.
+//
+// A third kind, peer, is peer evaluation's (docs/schema.md §2.5b): what the
+// member received from their group, counted at the form's weight, worked out
+// whenever their grade is written while the form counts and its window has
+// closed, never carried, and never in place of a grader's own adjustment.
 
-const adjustReplace, adjustDelta, adjustNone = "replace", "delta", "none"
+const adjustReplace, adjustDelta, adjustNone, adjustPeer = "replace", "delta", "none", "peer"
 
 // maxAdjustReason is the longest reason for an adjustment, in characters.
 const maxAdjustReason = 500
@@ -88,19 +94,41 @@ func checkAdjustments(adjs []AdjustmentIn) error {
 }
 
 // adjustment is a member's adjustment as it is written on their grade; a
-// kind of "" is none.
+// kind of "" is none. A peer adjustment has no reason and nobody who made
+// it, and says what it was worked out from (detail).
 type adjustment struct {
 	kind   string
 	points decimal.Decimal
 	reason string
 	by     uuid.UUID
+	detail *PeerDetail
 }
 
 func (a adjustment) none() bool { return a.kind == "" }
 
-// same: the same adjustment, whoever made it.
+// manual is the adjustment a grader made: a peer adjustment is none of
+// theirs, and is worked out again, never carried.
+func (a adjustment) manual() adjustment {
+	if a.kind == adjustPeer {
+		return adjustment{}
+	}
+	return a
+}
+
+// same: the same adjustment, whoever made it; a peer adjustment, the same
+// points from the same factor at the same weight.
 func (a adjustment) same(b adjustment) bool {
-	return a.kind == b.kind && (a.none() || (a.points.Equal(b.points) && a.reason == b.reason))
+	switch {
+	case a.kind != b.kind:
+		return false
+	case a.none():
+		return true
+	case !a.points.Equal(b.points) || a.reason != b.reason:
+		return false
+	case a.kind == adjustPeer:
+		return a.detail != nil && b.detail != nil && a.detail.Factor.Equal(b.detail.Factor) && a.detail.Weight == b.detail.Weight
+	}
+	return true
 }
 
 // columns are the grade's columns for it.
@@ -108,8 +136,16 @@ func (a adjustment) columns(row *dbq.InsertGradeParams) {
 	if a.none() {
 		return
 	}
-	kind, reason, by := a.kind, a.reason, a.by
-	row.AdjustKind, row.AdjustPoints, row.AdjustReason, row.AdjustByMemberID = &kind, decimal.NullDecimal{Decimal: a.points, Valid: true}, &reason, &by
+	kind := a.kind
+	row.AdjustKind, row.AdjustPoints = &kind, decimal.NullDecimal{Decimal: a.points, Valid: true}
+	if a.kind == adjustPeer {
+		if a.detail != nil {
+			row.AdjustDetail, _ = json.Marshal(a.detail)
+		}
+		return
+	}
+	reason, by := a.reason, a.by
+	row.AdjustReason, row.AdjustByMemberID = &reason, &by
 }
 
 // named is the adjustment a call names, made by by; none for kind none.
@@ -135,13 +171,39 @@ func adjustmentOf(kind *string, points decimal.NullDecimal, reason *string, by *
 	return a
 }
 
+// withDetail is a with what a peer adjustment was worked out from, as the
+// grade row keeps it (adjust_detail); one the release before carried on
+// keeps none.
+func (a adjustment) withDetail(raw []byte) adjustment {
+	if a.kind != adjustPeer || len(raw) == 0 {
+		return a
+	}
+	var d PeerDetail
+	if json.Unmarshal(raw, &d) == nil {
+		a.detail = &d
+	}
+	return a
+}
+
 // AdjustmentView is a member's adjustment as a grade shows it: what, by how
 // much and why to the member too; who made it to those who grade.
 type AdjustmentView struct {
-	Kind       string          `json:"kind" jsonschema:"replace or delta"`
-	Points     decimal.Decimal `json:"points" jsonschema:"replace: their score; delta: what was added to the group's score"`
+	Kind       string          `json:"kind" jsonschema:"replace, delta, or peer: peer evaluation, counted at the form's weight"`
+	Points     decimal.Decimal `json:"points" jsonschema:"replace: their score; delta and peer: what was added to the group's score"`
 	Reason     *string         `json:"reason,omitempty"`
 	ByMemberID *uuid.UUID      `json:"by_member_id,omitempty" jsonschema:"who made it; for those who grade"`
+	Detail     *PeerDetail     `json:"detail,omitempty" jsonschema:"peer: what it was worked out from"`
+}
+
+// PeerDetail is what a peer adjustment was worked out from: the member's
+// factor, what they received from their group against an even share, and
+// the form's weight; to those who grade, how many raters rated them and the
+// form's version as it was.
+type PeerDetail struct {
+	Factor      decimal.Decimal `json:"factor" jsonschema:"what the member received against an even share: 1 is even"`
+	Weight      int32           `json:"weight" jsonschema:"the percentage of the grade peer evaluation moved"`
+	Raters      *int            `json:"raters,omitempty" jsonschema:"how many raters rated them; for those who grade"`
+	FormVersion *int32          `json:"form_version,omitempty" jsonschema:"the peer form's version it was worked out under; for those who grade"`
 }
 
 func (a adjustment) view() *AdjustmentView {
@@ -157,6 +219,10 @@ func (a adjustment) view() *AdjustmentView {
 		by := a.by
 		v.ByMemberID = &by
 	}
+	if a.detail != nil {
+		d := *a.detail
+		v.Detail = &d
+	}
 	return v
 }
 
@@ -168,7 +234,7 @@ func memberScore(g decimal.Decimal, a adjustment, max decimal.Decimal, allowExtr
 	switch a.kind {
 	case adjustReplace:
 		score = a.points
-	case adjustDelta:
+	case adjustDelta, adjustPeer:
 		score = g.Add(a.points)
 	}
 	if score.IsNegative() {
@@ -183,7 +249,8 @@ func memberScore(g decimal.Decimal, a adjustment, max decimal.Decimal, allowExtr
 
 // carriedAdjustments are the adjustments of each member's latest live grade
 // from a group grade on the work, of its live grades (ListLiveMemberGrades):
-// their draft if they have one, or their posted grade.
+// their draft if they have one, or their posted grade. A peer adjustment is
+// not carried: it is worked out again.
 func carriedAdjustments(live []dbq.ListLiveMemberGradesRow) map[uuid.UUID]adjustment {
 	out := map[uuid.UUID]adjustment{}
 	for _, r := range live {
@@ -194,7 +261,7 @@ func carriedAdjustments(live []dbq.ListLiveMemberGradesRow) map[uuid.UUID]adjust
 			out[r.StudentMemberID] = adjustment{}
 			continue
 		}
-		out[r.StudentMemberID] = adjustmentOf(r.AdjustKind, r.AdjustPoints, r.AdjustReason, r.AdjustByMemberID)
+		out[r.StudentMemberID] = adjustmentOf(r.AdjustKind, r.AdjustPoints, r.AdjustReason, r.AdjustByMemberID).manual()
 	}
 	return out
 }
@@ -303,25 +370,32 @@ type memberWrite struct {
 // grade from it: a draft replacing their earlier drafts, or, posted, the
 // grade it replaces (replaces), or the first they are given on the work.
 // The feedback files go to the group grade. Each member is told by an event
-// of their own.
+// of their own. A member a grader did not adjust is given peer evaluation's
+// adjustment where it counts now; it returns how peer evaluation stands
+// (counted, window_open, or "").
 func writeGroupGrade(ctx context.Context, d Deps, ec *tool.ExecCtx, courseID uuid.UUID, s gradeSubject, c GradeContent,
-	rubric *uuid.UUID, writes []memberWrite, posted bool, createdAt time.Time) (uuid.UUID, []MemberGradeOut, error) {
+	rubric *uuid.UUID, writes []memberWrite, posted bool, createdAt time.Time) (uuid.UUID, []MemberGradeOut, string, error) {
 	breakdown, err := breakdownJSON(c.Breakdown)
 	if err != nil {
-		return uuid.Nil, nil, err
+		return uuid.Nil, nil, "", err
 	}
 	max := s.pointsPossible()
+	pc, err := loadPeerCount(ctx, ec.Q, courseID, s.assignment.ID, s.submission.GroupID, ec.Now)
+	if err != nil {
+		return uuid.Nil, nil, "", err
+	}
 	gg := ids.New()
 	if err := ec.Q.InsertGroupGrade(ctx, dbq.InsertGroupGradeParams{ID: gg, CourseID: courseID, SubmissionID: s.submission.ID,
 		Score: c.Score, OutOf: max, AllowExtra: c.AllowExtra, Feedback: c.Feedback, Breakdown: breakdown, RubricVersionID: rubric,
 		GraderMemberID: ec.Member.ID, CreatedByActionID: ec.ActionID, CreatedAt: createdAt}); err != nil {
-		return uuid.Nil, nil, err
+		return uuid.Nil, nil, "", err
 	}
 	out := make([]MemberGradeOut, 0, len(writes))
 	for _, w := range writes {
+		w.adj = pc.adjust(w.student, w.adj, c.Score, max, c.AllowExtra)
 		score, err := memberScore(c.Score, w.adj, max, c.AllowExtra)
 		if err != nil {
-			return uuid.Nil, nil, err
+			return uuid.Nil, nil, "", err
 		}
 		id := ids.New()
 		typ := events.GradeCreated
@@ -335,18 +409,18 @@ func writeGroupGrade(ctx context.Context, d Deps, ec *tool.ExecCtx, courseID uui
 			// The old row first: the deferred key lets it name a row that is
 			// not there yet, and the other order would be two live grades.
 			if n, err := ec.Q.SupersedeGrade(ctx, dbq.SupersedeGradeParams{ID: *w.replaces, NewID: &id}); err != nil {
-				return uuid.Nil, nil, err
+				return uuid.Nil, nil, "", err
 			} else if n == 0 {
-				return uuid.Nil, nil, apperr.Conflicts("grade %s was replaced by someone else just now", *w.replaces)
+				return uuid.Nil, nil, "", apperr.Conflicts("grade %s was replaced by someone else just now", *w.replaces)
 			}
 			typ, payload["replaces"] = events.GradeRegraded, *w.replaces
 		default:
 			if err := ec.Q.SupersedeSubmissionDrafts(ctx, dbq.SupersedeSubmissionDraftsParams{NewID: &id, SubmissionID: &s.submission.ID,
 				StudentMemberID: w.student}); err != nil {
-				return uuid.Nil, nil, err
+				return uuid.Nil, nil, "", err
 			}
 			if err := noGradeLeft(ctx, ec.Q, s.submission.ID, w.student); err != nil {
-				return uuid.Nil, nil, err
+				return uuid.Nil, nil, "", err
 			}
 		}
 		row := dbq.InsertGradeParams{ID: id, StudentMemberID: w.student, SubmissionID: &s.submission.ID, Origin: "entered", Score: score,
@@ -357,14 +431,14 @@ func writeGroupGrade(ctx context.Context, d Deps, ec *tool.ExecCtx, courseID uui
 		}
 		w.adj.columns(&row)
 		if err := ec.Q.InsertGrade(ctx, row); err != nil {
-			return uuid.Nil, nil, err
+			return uuid.Nil, nil, "", err
 		}
 		student := w.student
 		ec.Emit(events.Event{Type: typ, CourseID: &courseID, SubjectType: "grade", SubjectID: &id, StudentMemberID: &student,
 			AssignmentID: &s.assignment.ID, Payload: payload})
 		out = append(out, MemberGradeOut{StudentMemberID: w.student, GradeID: id, Score: score, Adjustment: w.adj.view()})
 	}
-	return gg, out, attachGroupFeedbackFiles(ctx, d, ec, courseID, gg, c.FeedbackFiles)
+	return gg, out, pc.state, attachGroupFeedbackFiles(ctx, d, ec, courseID, gg, c.FeedbackFiles)
 }
 
 // attachGroupFeedbackFiles records each file as a feedback document of the
@@ -402,17 +476,19 @@ func sortedMembers(members []uuid.UUID) []uuid.UUID {
 type GradeAdjustIn struct {
 	tool.InCourse
 	GradeID uuid.UUID        `json:"grade_id" jsonschema:"a member's live grade given from a group grade, a draft or posted"`
-	Kind    string           `json:"kind" jsonschema:"replace: a score of their own; delta: plus or minus the group's; none: no adjustment, their score the group's"`
+	Kind    string           `json:"kind" jsonschema:"replace: a score of their own; delta: plus or minus the group's; none: no adjustment of yours, their score the group's, moved by peer evaluation where it counts"`
 	Points  *decimal.Decimal `json:"points,omitempty" jsonschema:"replace: their score; delta: what is added to the group's score, below zero to take away"`
 	Reason  *string          `json:"reason,omitempty" jsonschema:"why, 1 to 500 characters: shown to the member, and kept"`
 }
 
 type GradeAdjustOut struct {
-	GradeID   uuid.UUID       `json:"grade_id" jsonschema:"the member's grade now"`
-	Replaces  *uuid.UUID      `json:"replaces,omitempty" jsonschema:"the grade it replaced; absent when nothing changed"`
-	Score     decimal.Decimal `json:"score"`
-	Changed   bool            `json:"changed" jsonschema:"false when the grade already said this: nothing was done"`
-	Snapshots int             `json:"snapshots" jsonschema:"how many of the member's posted totals were written down again"`
+	GradeID    uuid.UUID       `json:"grade_id" jsonschema:"the member's grade now"`
+	Replaces   *uuid.UUID      `json:"replaces,omitempty" jsonschema:"the grade it replaced; absent when nothing changed"`
+	Score      decimal.Decimal `json:"score"`
+	Adjustment *AdjustmentView `json:"adjustment,omitempty" jsonschema:"the member's adjustment now: yours, or, with none, peer evaluation's where it counts"`
+	Changed    bool            `json:"changed" jsonschema:"false when the grade already said this: nothing was done"`
+	Snapshots  int             `json:"snapshots" jsonschema:"how many of the member's posted totals were written down again"`
+	Peer       string          `json:"peer,omitempty" jsonschema:"with a peer form that counts: counted, or window_open, its window still open and nothing counted yet"`
 }
 
 // adjustable is the grade grade.adjust names, the group grade it was given
@@ -471,7 +547,8 @@ func gradeAdjust() tool.Tool {
 			"old kept as history and the member's totals written again (gated as grade.regrade, the lower of grade_submit " +
 			"and grade_post); a draft posted while the call is being made is refused (posted_meanwhile), and called again " +
 			"is gated as a regrade. The score is held to zero and, unless the group grade allows extra, to the points " +
-			"possible. A grade not given from a group grade is refused (not_from_a_group_grade).",
+			"possible. Your adjustment wins over peer evaluation's; with none, peer evaluation counts where its form " +
+			"counts and its window has closed. A grade not given from a group grade is refused (not_from_a_group_grade).",
 		Kind:  tool.Write,
 		Gate:  tool.Gate{Any: true, Perms: []domain.Perm{domain.PermGradeSubmit, domain.PermGradePost}},
 		HTTP:  tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/grades/{grade_id}/adjust"},
@@ -531,7 +608,16 @@ func gradeAdjust() tool.Tool {
 			if a.g.PostedAt != nil && !slices.Contains(ec.Perms, domain.PermGradePost) {
 				return GradeAdjustOut{}, errPostedMeanwhile
 			}
-			score, adj, err := a.check(in, ec.Member.ID)
+			_, adj, err := a.check(in, ec.Member.ID)
+			if err != nil {
+				return GradeAdjustOut{}, err
+			}
+			pc, err := loadPeerCount(ctx, ec.Q, in.CourseID, a.subject.assignment.ID, a.subject.submission.GroupID, ec.Now)
+			if err != nil {
+				return GradeAdjustOut{}, err
+			}
+			adj = pc.adjust(a.g.StudentMemberID, adj, a.gg.Score, a.subject.pointsPossible(), a.gg.AllowExtra)
+			score, err := memberScore(a.gg.Score, adj, a.subject.pointsPossible(), a.gg.AllowExtra)
 			if err != nil {
 				return GradeAdjustOut{}, err
 			}
@@ -539,8 +625,8 @@ func gradeAdjust() tool.Tool {
 			if err != nil {
 				return GradeAdjustOut{}, err
 			}
-			if adjustmentOf(full.AdjustKind, full.AdjustPoints, full.AdjustReason, full.AdjustByMemberID).same(adj) {
-				return GradeAdjustOut{GradeID: a.g.ID, Score: a.g.Score}, nil
+			if was := adjustmentOf(full.AdjustKind, full.AdjustPoints, full.AdjustReason, full.AdjustByMemberID).withDetail(full.AdjustDetail); was.same(adj) && score.Equal(full.Score) {
+				return GradeAdjustOut{GradeID: a.g.ID, Score: a.g.Score, Adjustment: was.view(), Peer: pc.state}, nil
 			}
 			id := ids.New()
 			if n, err := ec.Q.SupersedeGrade(ctx, dbq.SupersedeGradeParams{ID: a.g.ID, NewID: &id}); err != nil {
@@ -566,7 +652,7 @@ func gradeAdjust() tool.Tool {
 			student := a.g.StudentMemberID
 			ec.Emit(events.Event{Type: typ, CourseID: &in.CourseID, SubjectType: "grade", SubjectID: &id, StudentMemberID: &student,
 				AssignmentID: a.g.AssignmentID, Payload: map[string]any{"replaces": a.g.ID, "group_grade_id": a.gg.ID, "adjusted": true}})
-			out := GradeAdjustOut{GradeID: id, Replaces: &a.g.ID, Score: score, Changed: true}
+			out := GradeAdjustOut{GradeID: id, Replaces: &a.g.ID, Score: score, Adjustment: adj.view(), Changed: true, Peer: pc.state}
 			if a.g.PostedAt != nil {
 				out.Snapshots, err = snapshot(ctx, ec, in.CourseID, map[uuid.UUID][]uuid.UUID{student: {a.subject.changedItem()}}, gradecalc.Policy{})
 			}
@@ -623,9 +709,9 @@ func (in GradeSubmitIn) gradeGroupWork(ctx context.Context, d Deps, ec *tool.Exe
 	for _, m := range sortedMembers(s.members) {
 		writes = append(writes, memberWrite{student: m, adj: adjs[m]})
 	}
-	gg, grades, err := writeGroupGrade(ctx, d, ec, in.CourseID, s, in.GradeContent, rubric, writes, false, ec.ActionCreatedAt)
+	gg, grades, peer, err := writeGroupGrade(ctx, d, ec, in.CourseID, s, in.GradeContent, rubric, writes, false, ec.ActionCreatedAt)
 	if err != nil {
 		return GradeSubmitOut{}, err
 	}
-	return GradeSubmitOut{GroupGradeID: &gg, MemberGrades: grades}, nil
+	return GradeSubmitOut{GroupGradeID: &gg, MemberGrades: grades, Peer: peer}, nil
 }

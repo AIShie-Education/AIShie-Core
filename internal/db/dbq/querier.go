@@ -93,6 +93,8 @@ type Querier interface {
 	CountBuiltinPresets(ctx context.Context) (int64, error)
 	CountComponentAssignments(ctx context.Context, componentID *uuid.UUID) (int64, error)
 	CountComponentChildren(ctx context.Context, parentID *uuid.UUID) (int64, error)
+	// The current sheets of the assignment: what deleting it counts.
+	CountCurrentPeerSheets(ctx context.Context, assignmentID uuid.UUID) (int32, error)
 	// One use more, never past the limit: none when the limit is reached, and
 	// the CHECK course_join_link_uses_counted refuses it whatever asks.
 	CountJoinLinkUse(ctx context.Context, id uuid.UUID) (int64, error)
@@ -414,6 +416,12 @@ type Querier interface {
 	// The actor's live password, and whether someone else set it for them to
 	// change (must_change).
 	GetPasswordCredential(ctx context.Context, actorID uuid.UUID) (GetPasswordCredentialRow, error)
+	// Peer evaluation within a group (docs/schema.md §2.5b, Peer evaluation):
+	// an assignment's peer form, its raters' sheets and what they gave each
+	// member. Who is in a group's circle is worked out in the tool, from the
+	// group's work and live_group_members (migration 0031).
+	// The form -------------------------------------------------------------------
+	GetPeerForm(ctx context.Context, arg GetPeerFormParams) (PeerForm, error)
 	GetPreset(ctx context.Context, id uuid.UUID) (PermissionPreset, error)
 	// What a call of the runtime's is about: the rendition's course.
 	GetRenditionForService(ctx context.Context, id uuid.UUID) (GetRenditionForServiceRow, error)
@@ -461,6 +469,9 @@ type Querier interface {
 	// Whether a grade given from the group grade is live, a draft or posted:
 	// one regraded since is the history of the one that replaced it.
 	GroupGradeIsLive(ctx context.Context, groupGradeID *uuid.UUID) (bool, error)
+	// Whether the group has handed work in for the assignment, on time or late:
+	// what opens a form that opens on hand-in, for the group.
+	GroupHasHandedIn(ctx context.Context, arg GroupHasHandedInParams) (bool, error)
 	// Another group of the set, not archived, by the same name in any case.
 	GroupNameTaken(ctx context.Context, arg GroupNameTakenParams) (bool, error)
 	// Another set of the course, not archived, by the same name in any case.
@@ -554,6 +565,10 @@ type Querier interface {
 	// A student's; for a group assignment the database passes it over
 	// (submission_fits_assignment), and nothing is written.
 	InsertMissingSubmission(ctx context.Context, arg InsertMissingSubmissionParams) (int64, error)
+	InsertPeerForm(ctx context.Context, arg InsertPeerFormParams) error
+	InsertPeerReview(ctx context.Context, arg InsertPeerReviewParams) error
+	// Written with its sheet (peer_review_entry_kept), its course the sheet's.
+	InsertPeerReviewEntry(ctx context.Context, arg InsertPeerReviewEntryParams) error
 	InsertPreset(ctx context.Context, arg InsertPresetParams) error
 	// A person who registers through a join link: their email and their login
 	// ID, whichever they give, are theirs to vouch for alone (email_verified,
@@ -597,6 +612,10 @@ type Querier interface {
 	// The seq of a conversation's newest message, 0 while it has none; with at,
 	// of the newest written at or before it.
 	LastMessageSeq(ctx context.Context, arg LastMessageSeqParams) (int32, error)
+	// Circles --------------------------------------------------------------------
+	// The group's latest work for the assignment that is not a draft: handed in
+	// or recorded missing. Its members are the group's circle.
+	LatestHandedWorkOfGroup(ctx context.Context, arg LatestHandedWorkOfGroupParams) (LatestHandedWorkOfGroupRow, error)
 	// The opener's newest message: the one an answer is to answer, unless it is
 	// retracted, when nothing is. Asked under the conversation's row lock, which
 	// a retraction of the opener's message takes too.
@@ -690,6 +709,9 @@ type Querier interface {
 	ListCredentialsForActor(ctx context.Context, actorID uuid.UUID) ([]ListCredentialsForActorRow, error)
 	// The stays of these students in groups of the set that have not ended.
 	ListCurrentMemberships(ctx context.Context, arg ListCurrentMembershipsParams) ([]ListCurrentMembershipsRow, error)
+	// The current sheets of these raters for the assignment, entry by entry,
+	// with each rater's name.
+	ListCurrentPeerSheets(ctx context.Context, arg ListCurrentPeerSheetsParams) ([]ListCurrentPeerSheetsRow, error)
 	// The proposals of its owner's to seat an agent as their delegate that wait
 	// for a decision. Only the owner's: nobody else may ask to seat it.
 	ListDelegateRequestsFor(ctx context.Context, targetID *uuid.UUID) ([]ListDelegateRequestsForRow, error)
@@ -816,6 +838,10 @@ type Querier interface {
 	// Every live grade given from a group grade, a draft or posted, held in id
 	// order: what regrading the group's grade writes again.
 	ListLiveGradesFromGroupGrade(ctx context.Context, groupGradeID *uuid.UUID) ([]ListLiveGradesFromGroupGradeRow, error)
+	// Every live grade of the assignment given from a group grade, a draft or
+	// posted, with the group grade's score and whether it allows extra, and the
+	// work's group: what counting peer evaluation writes again.
+	ListLiveGradesFromGroupGrades(ctx context.Context, assignmentID uuid.UUID) ([]ListLiveGradesFromGroupGradesRow, error)
 	// The student's live grades on the work, a draft or posted, one posted
 	// first. A group grade entered asks it of each member once their drafts are
 	// superseded, before their new one is written: a grade live then came in,
@@ -905,6 +931,9 @@ type Querier interface {
 	// ones included, in id order: deleted with it, and the only documents that
 	// are.
 	ListOwnedDocumentsOfAssignment(ctx context.Context, assignmentID uuid.UUID) ([]uuid.UUID, error)
+	// Everyone who wrote a sheet for the assignment, current or not: whose
+	// sheets go when it is deleted.
+	ListPeerRaters(ctx context.Context, assignmentID uuid.UUID) ([]uuid.UUID, error)
 	ListPendingReviewActions(ctx context.Context, arg ListPendingReviewActionsParams) ([]Action, error)
 	// The review queue likewise: their own agents' actions under review.
 	ListPendingReviewActionsOfAgentsOf(ctx context.Context, arg ListPendingReviewActionsOfAgentsOfParams) ([]Action, error)
@@ -1036,6 +1065,10 @@ type Querier interface {
 	ListWorkOfGroups(ctx context.Context, groupIds []uuid.UUID) ([]ListWorkOfGroupsRow, error)
 	LiveAppointment(ctx context.Context, arg LiveAppointmentParams) (DepartmentAdmin, error)
 	LiveComponentGradeExists(ctx context.Context, arg LiveComponentGradeExistsParams) (bool, error)
+	// Grades ---------------------------------------------------------------------
+	// The newest group grade on the work that a live grade is given from, a
+	// draft or posted: the group's score as it stands.
+	LiveGroupGradeOfWork(ctx context.Context, submissionID uuid.UUID) (GroupGrade, error)
 	// A group's members now, in id order.
 	LiveMembersOf(ctx context.Context, groupID uuid.UUID) ([]uuid.UUID, error)
 	// Whether one of the students has a live posted grade given from the group
@@ -1213,6 +1246,12 @@ type Querier interface {
 	// row through its foreign key, and FOR UPDATE would wait for all of them,
 	// and deadlock with another call of the owner's doing the same.
 	LockOwnerForAgents(ctx context.Context, id uuid.UUID) error
+	// The form, held FOR UPDATE: peer_form.set.
+	LockPeerForm(ctx context.Context, arg LockPeerFormParams) (PeerForm, error)
+	// Sheets ---------------------------------------------------------------------
+	// One writer of a rater's sheet for an assignment at a time: the current
+	// sheet is replaced, or the first written, by one call while another waits.
+	LockPeerSheet(ctx context.Context, arg LockPeerSheetParams) error
 	// A delegate's principal, KEY SHARE, to the end of a call the delegate
 	// writes: removing, pausing or narrowing the principal waits for the call,
 	// or the call waits for it and, reading the row again here, sees what it
@@ -1315,6 +1354,9 @@ type Querier interface {
 	// caller's. seated_otherwise: a seat, not removed, in any course, under any
 	// roster role but student.
 	PasswordResetFacts(ctx context.Context, id uuid.UUID) (PasswordResetFactsRow, error)
+	PeerFormEnabled(ctx context.Context, assignmentID uuid.UUID) (bool, error)
+	// Whether a sheet names the form: its shape no longer changes.
+	PeerFormInUse(ctx context.Context, assignmentID uuid.UUID) (bool, error)
 	PostGrade(ctx context.Context, arg PostGradeParams) (int64, error)
 	PostponeBlobDeletion(ctx context.Context, arg PostponeBlobDeletionParams) error
 	// Whether a principal's own seat, or the seat of another of its delegates
@@ -1488,6 +1530,10 @@ type Querier interface {
 	// or a change of the set's sign-up (FOR UPDATE) is one after the other with
 	// them, never interleaved.
 	ShareGroupSet(ctx context.Context, arg ShareGroupSetParams) (GroupSet, error)
+	// The form, held FOR SHARE to the end of the call: a sheet written, or a
+	// grade worked out from the sheets, against the form as it stands, which a
+	// change of it (FOR UPDATE) waits for or is waited for by.
+	SharePeerForm(ctx context.Context, arg SharePeerFormParams) (PeerForm, error)
 	// KEY SHARE on the given seats, in id order: what taking them before some
 	// other lock looks like, where that lock would otherwise be held while one of
 	// them is waited for. A delegate's seat and its principal's are not taken
@@ -1533,6 +1579,9 @@ type Querier interface {
 	SubtreeHeight(ctx context.Context, deptID uuid.UUID) (int32, error)
 	SupersedeComponentDrafts(ctx context.Context, arg SupersedeComponentDraftsParams) error
 	SupersedeGrade(ctx context.Context, arg SupersedeGradeParams) (int64, error)
+	// The rater's current sheet, superseded by the new one about to be written
+	// (a deferred key): the id of the one replaced.
+	SupersedePeerSheet(ctx context.Context, arg SupersedePeerSheetParams) (uuid.UUID, error)
 	// A new draft replaces the student's earlier drafts for the same submission:
 	// on a group's work, each member's by that member's new one.
 	SupersedeSubmissionDrafts(ctx context.Context, arg SupersedeSubmissionDraftsParams) error
@@ -1573,6 +1622,8 @@ type Querier interface {
 	// Given a version, only that version is changed: no row comes back if it
 	// has moved on since (0 changes whatever it is).
 	UpdateMemoryBody(ctx context.Context, arg UpdateMemoryBodyParams) (int32, error)
+	// The form as a change leaves it, its version counted.
+	UpdatePeerForm(ctx context.Context, arg UpdatePeerFormParams) (int32, error)
 	// Built-ins (dept_id null) are policy shipped with the system; only a
 	// department's own presets are edited here.
 	UpdatePreset(ctx context.Context, arg UpdatePresetParams) (int64, error)
@@ -1588,6 +1639,9 @@ type Querier interface {
 	// have moved on: it is what they, or their student, were told. A group's
 	// work is within scope through any of its students (submission_students).
 	VersionPinnedInScope(ctx context.Context, arg VersionPinnedInScopeParams) (bool, error)
+	// The groups whose work for the assignment, handed in or recorded missing,
+	// names the student.
+	WorkGroupsNaming(ctx context.Context, arg WorkGroupsNamingParams) ([]uuid.UUID, error)
 }
 
 var _ Querier = (*Queries)(nil)

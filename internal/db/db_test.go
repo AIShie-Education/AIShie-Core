@@ -671,16 +671,27 @@ func TestGroupWorkKeepsMigration0031FromGoingDown(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer m.Close()
-	if err := m.Up(); err != nil {
-		t.Fatalf("up: %v", err)
-	}
-	latest, err := db.LatestEmbedded()
+	// Up to 0031 itself, as many steps as there are migrations to it:
+	// golang-migrate counts steps, not versions. What comes after it is
+	// gone down first in its own tests (src/tests/down).
+	entries, err := fs.ReadDir(dbfiles.FS, dbfiles.MigrationsDir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if latest != 31 {
-		// Only the newest migration's down is run here.
-		t.Skipf("the newest migration is %d, not 0031", latest)
+	upTo, found := 0, false
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".up.sql") {
+			upTo++
+			if found = strings.HasSuffix(e.Name(), "_group_work.up.sql"); found {
+				break
+			}
+		}
+	}
+	if !found {
+		t.Fatal("no group work migration")
+	}
+	if err := m.Steps(upTo); err != nil {
+		t.Fatalf("up to 0031: %v", err)
 	}
 	exec := func(sql string, args ...any) {
 		t.Helper()

@@ -78,6 +78,17 @@ In place so far:
   it, adjusted where the grader says, by a score of their own or plus or
   minus, with a reason the member reads; and no member of one group learns
   anything of another's work or grades;
+- peer evaluation within a group: on a form the teacher sets for a group
+  assignment, members rate each other's contribution on criteria or split
+  100 points among themselves, and themselves too if the form says, while
+  its window is open for their group, each rater's sheet replaced whole and
+  kept; those who grade read every sheet and each member's factor against
+  an even share, with flags; counted at the form's weight once the window
+  closes, it moves each member's grade from the group's, a grader's own
+  adjustment winning, and switched off or at a weight of 0 it is taken out
+  of every grade again; only people write one, and no student reads another's
+  sheet, what was said of them or who rated them, only their own average
+  where the form shares it;
 - an assignment deleted for good by whoever writes assignments, once they
   have read what goes with it and confirmed it: its submissions, their files
   and its grades go, its instructions and rubric are left in the course as
@@ -115,7 +126,11 @@ and he places another by hand; a team writes its draft together over
 revisions, a stale edit refused, and hands it in for both; each team is
 graded once, a member adjusted with a reason, posted, and each member reads
 their own grade, the team's and their adjustment, and nothing of another's;
-and a random split by a seed deals the same pairs twice; a student with no
+the team evaluates its members' contribution, a sheet of another team
+refused and the results the instructor's alone, and once it closes peer
+evaluation moves a member's grade while the instructor's own adjustment of
+the other stays, and, switched off, is taken out of it again; and a random
+split by a seed deals the same pairs twice; a student with no
 email registers through another with her student
 number as her login ID and signs in with it, is given a temporary password by
 the instructor when she forgets hers, and sets her own before anything else,

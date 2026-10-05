@@ -360,9 +360,10 @@ func rescaledScore(score, from, to decimal.Decimal) decimal.Decimal {
 // A group's work is carried the same way, as a whole: each group grade a live
 // grade is given from is written again, its score in proportion and its
 // feedback files moved to it, and each member's grade from it written again
-// pointing to it, a replace or delta adjustment in proportion too; keep_scores
-// is refused if the group's score, or a member's, would be above the new
-// points.
+// pointing to it, a replace or delta adjustment in proportion too, a peer
+// adjustment worked out again from its recorded factor at its recorded
+// weight; keep_scores is refused if the group's score, or a member's, would
+// be above the new points.
 func rebase(ctx context.Context, ec *tool.ExecCtx, courseID uuid.UUID, assignmentID *uuid.UUID,
 	grades []dbq.LockLiveEnteredGradesOfAssignmentRow, from, to decimal.Decimal, how string) (int, error) {
 	scores := make([]gradeScore, len(grades))
@@ -385,7 +386,9 @@ func rebase(ctx context.Context, ec *tool.ExecCtx, courseID uuid.UUID, assignmen
 	// Each group grade written again, if its work's scores move.
 	moved := map[uuid.UUID]uuid.UUID{} // old group grade → new
 	newScore := map[uuid.UUID]decimal.Decimal{}
+	extra := map[uuid.UUID]bool{}
 	for _, gg := range groups {
+		extra[gg.ID] = gg.AllowExtra
 		score := rescaledScore(gg.Score, from, to)
 		same := score.Equal(gg.Score)
 		for _, g := range grades {
@@ -412,14 +415,17 @@ func rebase(ctx context.Context, ec *tool.ExecCtx, courseID uuid.UUID, assignmen
 	for _, g := range grades {
 		score := rescaledScore(g.Score, from, to)
 		var groupGrade *uuid.UUID
-		adj := adjustmentOf(g.AdjustKind, g.AdjustPoints, g.AdjustReason, g.AdjustByMemberID)
+		adj := adjustmentOf(g.AdjustKind, g.AdjustPoints, g.AdjustReason, g.AdjustByMemberID).withDetail(g.AdjustDetail)
 		if g.GroupGradeID != nil {
 			newGroupGrade, ok := moved[*g.GroupGradeID]
 			if !ok {
 				continue
 			}
 			groupGrade = &newGroupGrade
-			if !adj.none() {
+			switch {
+			case adj.kind == adjustPeer:
+				adj = adj.rescaledPeer(newScore[*g.GroupGradeID], to, extra[*g.GroupGradeID], from, to)
+			case !adj.none():
 				adj.points = rescaledScore(adj.points, from, to)
 			}
 			score = rescaledMemberScore(newScore[*g.GroupGradeID], adj)
@@ -474,7 +480,7 @@ func rescaledMemberScore(g decimal.Decimal, a adjustment) decimal.Decimal {
 	switch a.kind {
 	case adjustReplace:
 		return a.points
-	case adjustDelta:
+	case adjustDelta, adjustPeer:
 		return decimal.Max(g.Add(a.points), decimal.Zero)
 	}
 	return g

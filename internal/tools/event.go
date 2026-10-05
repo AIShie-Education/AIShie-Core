@@ -62,6 +62,14 @@ var visibility = map[string][]domain.Perm{
 	EventGroupMemberAdded:   {domain.PermMemberRead, domain.PermSubmissionRead},
 	EventGroupMemberRemoved: {domain.PermMemberRead, domain.PermSubmissionRead},
 
+	// A peer form is part of setting the work: news of it is for those who
+	// set it, filed under its assignment. A sheet written is filed under its
+	// rater, ids only, never what it says: for those who grade and read
+	// submissions, within their scope, and for the rater; nobody else of the
+	// group learns of it.
+	EventPeerFormUpdated:     {domain.PermAssignmentWrite},
+	EventPeerReviewSubmitted: {domain.PermGradeSubmit, domain.PermGradePost, domain.PermSubmissionRead},
+
 	// Unpublished work is for those who write assignments.
 	EventAssignmentCreated:   {domain.PermAssignmentWrite},
 	EventAssignmentUpdated:   {domain.PermAssignmentWrite},

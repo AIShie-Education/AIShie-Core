@@ -469,6 +469,7 @@ type Grade struct {
 	AdjustPoints       decimal.NullDecimal
 	AdjustReason       *string
 	AdjustByMemberID   *uuid.UUID
+	AdjustDetail       []byte
 }
 
 type GradeComponent struct {
@@ -580,6 +581,48 @@ type MemoryWriteCount struct {
 	HolderActorID uuid.UUID
 	Hour          time.Time
 	N             int32
+}
+
+type PeerForm struct {
+	AssignmentID      uuid.UUID
+	CourseID          uuid.UUID
+	Enabled           bool
+	Kind              string
+	Criteria          []byte
+	ScaleMin          *int32
+	ScaleMax          *int32
+	SelfEvaluation    bool
+	Opens             string
+	OpensAt           *time.Time
+	ClosesAt          time.Time
+	Weight            int32
+	ShareWithStudents string
+	Version           int32
+	CreatedByMemberID uuid.UUID
+	CreatedAt         time.Time
+	UpdatedByMemberID uuid.UUID
+	UpdatedAt         time.Time
+}
+
+type PeerReview struct {
+	ID                uuid.UUID
+	CourseID          uuid.UUID
+	AssignmentID      uuid.UUID
+	GroupID           uuid.UUID
+	RaterMemberID     uuid.UUID
+	Comment           *string
+	CreatedByActionID uuid.UUID
+	CreatedAt         time.Time
+	SupersededBy      *uuid.UUID
+}
+
+type PeerReviewEntry struct {
+	ReviewID      uuid.UUID
+	CourseID      uuid.UUID
+	RateeMemberID uuid.UUID
+	Ratings       []byte
+	Share         *int32
+	Comment       *string
 }
 
 type PermissionPreset struct {

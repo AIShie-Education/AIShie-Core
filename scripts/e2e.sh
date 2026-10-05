@@ -50,7 +50,11 @@
 # by hand; a team writes its draft together over revisions, a stale edit
 # refused, and hands it in for both; each team is graded once, a member
 # adjusted with a reason, and posted, and each member reads their own grade,
-# the team's score and their adjustment, and nothing of another's; and a
+# the team's score and their adjustment, and nothing of another's; the team
+# evaluates its members' contribution, a sheet of another team refused and
+# the results his alone, and, once it closes, peer evaluation moves a
+# member's grade while his own adjustment of the other stays, and, switched
+# off, is taken out of it again; and a
 # random split by a seed deals the same pairs twice. Then a student
 # with no email registers through another link with her student number as
 # her login ID, and signs in with it; forgets her password, and he gives her
@@ -1164,6 +1168,54 @@ call 200 GET "$C/events?since_seq=0&limit=500" "$AOI"
   fail "Aoi's feed tells her of another student: $(cat "$WORK/body")"
 [ "$(json "$WORK/body" 'sorted(set(e["type"] for e in d["result"]["events"] if e["type"] in ("group.member_added", "submission.submitted", "grade.posted") and e.get("assignment_id") in (None, "'"$PROJECT"'")))')" = \
   "['grade.posted', 'group.member_added', 'submission.submitted']" ] || fail "Aoi's feed of her team: $(cat "$WORK/body")"
+
+step "Sato adds peer evaluation to the term project, members rating themselves too, counted at 20 %; Yuki and Aoi split 100 points between them, Hana's sheet of Team 1 refused; nobody but Sato reads the results, nor learns from the form that a sheet has been written; closed and counted, Aoi's grade moves and Yuki's own adjustment stays; switched off and counted again, Aoi's grade is the team's again"
+PEER_FORM="{\"kind\":\"share\",\"self_evaluation\":true,\"opens\":\"on_hand_in\",\"closes_at\":\"$DEADLINE\",\"weight\":20,\"share_with_students\":\"own_average\"}"
+call 200 POST "$C/assignments/$PROJECT/peer-form" "$SATO" "$PEER_FORM"
+[ "$(json "$WORK/body" 'd["result"]["version"], d["result"]["students_see"]')" = "1 ['own_sheet', 'own_average', 'own_adjustment']" ] ||
+  fail "the peer form: $(cat "$WORK/body")"
+call 200 GET "$C/assignments/$PROJECT/peer-form" "$YUKI"
+[ "$(json "$WORK/body" 'd["result"]["task"]["window"]["state"], sorted(d["result"]["task"]["to_evaluate"])')" = "$(python3 -c "print('open', sorted(['$YUKI_M', '$AOI_M']))")" ] ||
+  fail "Yuki's peer task: $(cat "$WORK/body")"
+call 400 POST "$C/assignments/$PROJECT/peer-reviews" "$HANA" "{\"entries\":[{\"student_member_id\":\"$YUKI_M\",\"share\":50},{\"student_member_id\":\"$AOI_M\",\"share\":50}]}"
+[ "$(reason)" = sheet_incomplete ] || fail "Hana's sheet of Team 1: $(cat "$WORK/body")"
+call 200 POST "$C/assignments/$PROJECT/peer-reviews" "$YUKI" "{\"entries\":[{\"student_member_id\":\"$YUKI_M\",\"share\":55},{\"student_member_id\":\"$AOI_M\",\"share\":45,\"comment\":\"Did the analysis\"}]}"
+call 200 POST "$C/assignments/$PROJECT/peer-reviews" "$AOI" "{\"entries\":[{\"student_member_id\":\"$YUKI_M\",\"share\":50},{\"student_member_id\":\"$AOI_M\",\"share\":50}]}"
+call 200 GET "$C/assignments/$PROJECT/peer-form" "$YUKI"
+[ "$(json "$WORK/body" 'len(d["result"]["task"]["sheet"]["entries"]), "rater_name" in d["result"]["task"]["sheet"], "own_average" in d["result"]["task"]')" = "2 False False" ] ||
+  fail "Yuki's own sheet as she reads it: $(cat "$WORK/body")"
+call 200 GET "$C/assignments/$PROJECT/peer-form" "$HANA"
+[ "$(json "$WORK/body" '"in_use" in d["result"]["form"]')" = False ] || fail "Hana is told whether a sheet has been written: $(cat "$WORK/body")"
+call 200 GET "$C/assignments/$PROJECT/peer-form" "$SATO"
+[ "$(json "$WORK/body" 'd["result"]["form"]["in_use"]')" = True ] || fail "the form in use, as Sato reads it: $(cat "$WORK/body")"
+call 403 GET "$C/assignments/$PROJECT/peer-results" "$YUKI"
+call 200 GET "$C/assignments/$PROJECT/peer-results" "$SATO"
+[ "$(json "$WORK/body" '[sorted((m["display_name"], m["factor"]) for m in g["members"]) for g in d["result"]["groups"] if g["group_id"] == "'"$TEAM1"'"]')" = \
+  "[[('Aoi', 0.95), ('Yuki', 1.05)]]" ] || fail "the peer results: $(cat "$WORK/body")"
+call 422 POST "$C/assignments/$PROJECT/apply-peer" "$SATO"
+[ "$(reason)" = window_open ] || fail "counting it while open: $(cat "$WORK/body")"
+PAST=$(python3 -c 'import datetime; print((datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=1)).isoformat())')
+IF_MATCH='"1"' call 200 POST "$C/assignments/$PROJECT/peer-form" "$SATO" "{\"kind\":\"share\",\"opens\":\"on_hand_in\",\"closes_at\":\"$PAST\",\"weight\":20}"
+call 422 POST "$C/assignments/$PROJECT/peer-reviews" "$AOI" "{\"entries\":[{\"student_member_id\":\"$YUKI_M\",\"share\":40},{\"student_member_id\":\"$AOI_M\",\"share\":60}]}"
+[ "$(reason)" = window_closed ] || fail "a sheet once closed: $(cat "$WORK/body")"
+call 200 POST "$C/assignments/$PROJECT/apply-peer" "$SATO"
+[ "$(json "$WORK/body" '[(w["student_member_id"], w["score"], w["posted"]) for w in d["result"]["written"]]')" = "[('$AOI_M', 89.1, True)]" ] ||
+  fail "counting it: $(cat "$WORK/body")"
+call 200 GET "$C/grades?assignment_id=$PROJECT" "$AOI"
+[ "$(json "$WORK/body" '[(g["score"], g["group"]["adjustment"]["kind"], g["group"]["adjustment"]["points"], g["group"]["adjustment"]["detail"]) for g in d["result"]["grades"]]')" = \
+  "[(89.1, 'peer', -0.9, {'factor': 0.95, 'weight': 20})]" ] || fail "Aoi's grade: $(cat "$WORK/body")"
+call 200 GET "$C/grades?assignment_id=$PROJECT" "$YUKI"
+[ "$(json "$WORK/body" '[(g["score"], g["group"]["adjustment"]["kind"]) for g in d["result"]["grades"]]')" = "[(95, 'delta')]" ] ||
+  fail "Yuki's grade, Sato's adjustment: $(cat "$WORK/body")"
+IF_MATCH='"2"' call 200 POST "$C/assignments/$PROJECT/peer-form" "$SATO" "{\"kind\":\"share\",\"opens\":\"on_hand_in\",\"closes_at\":\"$PAST\",\"weight\":20,\"enabled\":false}"
+call 200 POST "$C/assignments/$PROJECT/apply-peer" "$SATO"
+[ "$(json "$WORK/body" '[(w["student_member_id"], w["score"], w["posted"], "adjustment" in w) for w in d["result"]["written"]]')" = "[('$AOI_M', 90, True, False)]" ] ||
+  fail "taking it away: $(cat "$WORK/body")"
+call 200 GET "$C/grades?assignment_id=$PROJECT" "$AOI"
+[ "$(json "$WORK/body" '[(g["score"], g["group"].get("adjustment")) for g in d["result"]["grades"]]')" = "[(90, None)]" ] || fail "Aoi's grade switched off: $(cat "$WORK/body")"
+call 422 POST "$C/assignments/$PROJECT/apply-peer" "$SATO"
+[ "$(reason)" = peer_not_counted ] || fail "counting it again switched off: $(cat "$WORK/body")"
+echo "  Aoi 89.1, peer evaluation moving the team's 90 by -0.9; Yuki's 95 Sato's; switched off, Aoi 90 again"
 
 step "Sato splits the class at random into lab pairs: the seed deals them, and the same seed in another set deals the same pairs"
 pairs() { # NAME → PAIRS, the pairs dealt

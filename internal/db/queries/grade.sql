@@ -39,10 +39,10 @@ SELECT document_id FROM document_version WHERE id = $1;
 INSERT INTO grade (id, student_member_id, submission_id, component_id, origin, score, feedback, breakdown,
                    rubric_version_id, grader_member_id, created_by_action_id, posted_at, posted_by_member_id, created_at,
                    override_score, override_reason, override_by_member_id, overridden_at,
-                   group_grade_id, adjust_kind, adjust_points, adjust_reason, adjust_by_member_id)
+                   group_grade_id, adjust_kind, adjust_points, adjust_reason, adjust_by_member_id, adjust_detail)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18,
         sqlc.narg(group_grade_id), sqlc.narg(adjust_kind), sqlc.narg(adjust_points), sqlc.narg(adjust_reason),
-        sqlc.narg(adjust_by_member_id));
+        sqlc.narg(adjust_by_member_id), sqlc.narg(adjust_detail));
 
 -- name: SupersedeSubmissionDrafts :exec
 -- A new draft replaces the student's earlier drafts for the same submission:
@@ -176,7 +176,7 @@ ORDER BY 1;
 -- held in id order, as grade.post holds the drafts it posts.
 SELECT g.id, g.student_member_id, g.submission_id, g.component_id, g.score, g.feedback, g.breakdown,
        g.rubric_version_id, g.posted_at, g.group_grade_id, g.adjust_kind, g.adjust_points, g.adjust_reason,
-       g.adjust_by_member_id
+       g.adjust_by_member_id, g.adjust_detail
 FROM grade g
 JOIN submission s ON s.id = g.submission_id
 WHERE s.assignment_id = $1 AND g.origin = 'entered' AND g.superseded_by IS NULL
@@ -197,7 +197,7 @@ ORDER BY g.id;
 -- Every live grade entered directly on the component, draft or posted.
 SELECT g.id, g.student_member_id, g.submission_id, g.component_id, g.score, g.feedback, g.breakdown,
        g.rubric_version_id, g.posted_at, g.group_grade_id, g.adjust_kind, g.adjust_points, g.adjust_reason,
-       g.adjust_by_member_id
+       g.adjust_by_member_id, g.adjust_detail
 FROM grade g
 WHERE g.component_id = $1 AND g.origin = 'entered' AND g.superseded_by IS NULL
 ORDER BY g.id

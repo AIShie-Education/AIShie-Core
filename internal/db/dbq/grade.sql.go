@@ -382,10 +382,10 @@ const insertGrade = `-- name: InsertGrade :exec
 INSERT INTO grade (id, student_member_id, submission_id, component_id, origin, score, feedback, breakdown,
                    rubric_version_id, grader_member_id, created_by_action_id, posted_at, posted_by_member_id, created_at,
                    override_score, override_reason, override_by_member_id, overridden_at,
-                   group_grade_id, adjust_kind, adjust_points, adjust_reason, adjust_by_member_id)
+                   group_grade_id, adjust_kind, adjust_points, adjust_reason, adjust_by_member_id, adjust_detail)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18,
         $19, $20, $21, $22,
-        $23)
+        $23, $24)
 `
 
 type InsertGradeParams struct {
@@ -412,6 +412,7 @@ type InsertGradeParams struct {
 	AdjustPoints       decimal.NullDecimal
 	AdjustReason       *string
 	AdjustByMemberID   *uuid.UUID
+	AdjustDetail       []byte
 }
 
 func (q *Queries) InsertGrade(ctx context.Context, arg InsertGradeParams) error {
@@ -439,6 +440,7 @@ func (q *Queries) InsertGrade(ctx context.Context, arg InsertGradeParams) error 
 		arg.AdjustPoints,
 		arg.AdjustReason,
 		arg.AdjustByMemberID,
+		arg.AdjustDetail,
 	)
 	return err
 }
@@ -1270,7 +1272,7 @@ func (q *Queries) LockGradesInCourse(ctx context.Context, arg LockGradesInCourse
 const lockLiveEnteredGradesOfAssignment = `-- name: LockLiveEnteredGradesOfAssignment :many
 SELECT g.id, g.student_member_id, g.submission_id, g.component_id, g.score, g.feedback, g.breakdown,
        g.rubric_version_id, g.posted_at, g.group_grade_id, g.adjust_kind, g.adjust_points, g.adjust_reason,
-       g.adjust_by_member_id
+       g.adjust_by_member_id, g.adjust_detail
 FROM grade g
 JOIN submission s ON s.id = g.submission_id
 WHERE s.assignment_id = $1 AND g.origin = 'entered' AND g.superseded_by IS NULL
@@ -1293,6 +1295,7 @@ type LockLiveEnteredGradesOfAssignmentRow struct {
 	AdjustPoints     decimal.NullDecimal
 	AdjustReason     *string
 	AdjustByMemberID *uuid.UUID
+	AdjustDetail     []byte
 }
 
 // Every live grade entered on the assignment's submissions, draft or posted,
@@ -1321,6 +1324,7 @@ func (q *Queries) LockLiveEnteredGradesOfAssignment(ctx context.Context, assignm
 			&i.AdjustPoints,
 			&i.AdjustReason,
 			&i.AdjustByMemberID,
+			&i.AdjustDetail,
 		); err != nil {
 			return nil, err
 		}
@@ -1335,7 +1339,7 @@ func (q *Queries) LockLiveEnteredGradesOfAssignment(ctx context.Context, assignm
 const lockLiveEnteredGradesOfComponent = `-- name: LockLiveEnteredGradesOfComponent :many
 SELECT g.id, g.student_member_id, g.submission_id, g.component_id, g.score, g.feedback, g.breakdown,
        g.rubric_version_id, g.posted_at, g.group_grade_id, g.adjust_kind, g.adjust_points, g.adjust_reason,
-       g.adjust_by_member_id
+       g.adjust_by_member_id, g.adjust_detail
 FROM grade g
 WHERE g.component_id = $1 AND g.origin = 'entered' AND g.superseded_by IS NULL
 ORDER BY g.id
@@ -1357,6 +1361,7 @@ type LockLiveEnteredGradesOfComponentRow struct {
 	AdjustPoints     decimal.NullDecimal
 	AdjustReason     *string
 	AdjustByMemberID *uuid.UUID
+	AdjustDetail     []byte
 }
 
 // Every live grade entered directly on the component, draft or posted.
@@ -1384,6 +1389,7 @@ func (q *Queries) LockLiveEnteredGradesOfComponent(ctx context.Context, componen
 			&i.AdjustPoints,
 			&i.AdjustReason,
 			&i.AdjustByMemberID,
+			&i.AdjustDetail,
 		); err != nil {
 			return nil, err
 		}

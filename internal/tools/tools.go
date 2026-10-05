@@ -107,6 +107,7 @@ func RegisterAll(reg *tool.Registry, d Deps) {
 	reg.Register(agentRuntimeTools()...)
 	reg.Register(renditionTools(d)...)
 	reg.Register(gradeTools(d)...)
+	reg.Register(peerTools()...)
 	reg.Register(gradeReadTools()...)
 	reg.Register(actionTools(d)...)
 	reg.Register(conversationTools(d)...)

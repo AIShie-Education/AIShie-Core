@@ -816,6 +816,37 @@ Run all of these as root on the server.
 
   The front end and the agent runtime that know of it come with their own
   releases, each moving its pin to this one.
+- **Migration 0032, peer evaluation:** a group assignment may have a peer
+  form (`peer_form`), on which the members of each group evaluate each
+  other's contribution, rating each other on criteria or splitting 100
+  points, within a window; each rater's sheet (`peer_review`, its entries
+  in `peer_review_entry`) is kept as history when written again; and what
+  each member received, counted at the form's weight once the window has
+  closed, moves their grade from the group's as an adjustment of a third
+  kind, `peer`, with what it was worked out from (`grade.adjust_detail`)
+  (docs/schema.md §2.5b, §2.7). It needs nothing of the operator, and
+  changes no row: the constraints it adds to `grade` go in unchecked (`NOT
+  VALID`), since every grade there is holds them, and the tables it makes
+  are empty.
+  - **The release before**, while the migration goes in and after a
+    rollback: it knows no peer form, and offers none. It deletes an
+    assignment with its peer form and sheets by cascade, which the guards
+    let through for an assignment being deleted. Writing a member's grade
+    again (a regrade of the group's, an adjustment, a rescale), it carries a
+    peer adjustment on as one of a kind it does not know, by its points, with
+    an empty reason and the nil member as who made it, which the database
+    takes as none (`grade_peer_adjustment_unsaid`); it gives the member the
+    group's score then, and this release, reading an adjustment with no
+    detail, works it out again the next time it writes the grade, or at
+    once with `grade.apply_peer`.
+  - **Going down** rewrites each peer adjustment as a `delta` of the same
+    points, its reason `peer evaluation` and its author the grade's grader:
+    the score is what the student was given, and stays. Lost going down:
+    the forms, every sheet with its entries and comments, and the factors
+    behind peer adjustments, and that they were peer evaluation's.
+
+  The front end and the agent runtime that know of it come with their own
+  releases, each moving its pin to this one.
 - **Migration 0013, `member_invite`:** the permission that makes a course's
   join links. Every seat a person holds got it at its level of
   `member_manage`, and every seat an agent holds got it `denied`, whatever it

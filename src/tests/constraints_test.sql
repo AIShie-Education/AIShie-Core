@@ -2913,6 +2913,165 @@ SELECT pg_temp.fails('nor to a grade', '23001', $q$
     UPDATE document SET group_grade_id = NULL, grade_id = '00000000-0000-0000-0000-0000000031f1' WHERE id = '00000000-0000-0000-0000-000000003131' $q$);
 SELECT pg_temp.ok('but to the group grade that replaces its own, on the same work', $q$
     UPDATE document SET group_grade_id = '00000000-0000-0000-0000-0000000031e2' WHERE id = '00000000-0000-0000-0000-000000003131' $q$);
+-- Peer evaluation (migration 0032) -------------------------------------------
+-- Project's share form (31a1), opening on hand-in · 32a1 Lab report, a group
+-- assignment of Projects, its rating form, self-evaluation on
+-- 3211, 3212 Yuki's sheets of Project, the first superseded · 3213 Mio's
+-- 3214 Yuki's of the lab report
+SELECT pg_temp.ok('a share form of Project, opening on hand-in, at 20 %', $q$
+    INSERT INTO peer_form (assignment_id, course_id, kind, criteria, scale_min, scale_max, self_evaluation, opens, opens_at, closes_at, weight, share_with_students, created_by_member_id, updated_by_member_id) VALUES ('00000000-0000-0000-0000-0000000031a1', '00000000-0000-0000-0000-000000000041', 'share', NULL, NULL, NULL, false, 'on_hand_in', NULL, now() + interval '1 day', 20, 'none', '00000000-0000-0000-0000-000000000051', '00000000-0000-0000-0000-000000000051') $q$);
+SELECT pg_temp.fails('a form is of an assignment of its course', '23503', $q$
+    INSERT INTO peer_form (assignment_id, course_id, kind, criteria, scale_min, scale_max, self_evaluation, opens, opens_at, closes_at, weight, share_with_students, created_by_member_id, updated_by_member_id) VALUES ('00000000-0000-0000-0000-0000000031a2', '00000000-0000-0000-0000-000000000042', 'share', NULL, NULL, NULL, false, 'on_hand_in', NULL, now() + interval '1 day', 20, 'none', '00000000-0000-0000-0000-000000000051', '00000000-0000-0000-0000-000000000051') $q$);
+SELECT pg_temp.fails('an assignment has one form', '23505', $q$
+    INSERT INTO peer_form (assignment_id, course_id, kind, criteria, scale_min, scale_max, self_evaluation, opens, opens_at, closes_at, weight, share_with_students, created_by_member_id, updated_by_member_id) VALUES ('00000000-0000-0000-0000-0000000031a1', '00000000-0000-0000-0000-000000000041', 'share', NULL, NULL, NULL, false, 'on_hand_in', NULL, now() + interval '1 day', 20, 'none', '00000000-0000-0000-0000-000000000051', '00000000-0000-0000-0000-000000000051') $q$);
+SELECT pg_temp.fails('a share form has no criteria', '23514', $q$
+    INSERT INTO peer_form (assignment_id, course_id, kind, criteria, scale_min, scale_max, self_evaluation, opens, opens_at, closes_at, weight, share_with_students, created_by_member_id, updated_by_member_id) VALUES ('00000000-0000-0000-0000-0000000031a2', '00000000-0000-0000-0000-000000000041', 'share', '[{"key": "effort", "label": "Effort", "weight": 1}, {"key": "quality", "label": "Quality", "weight": 2}]', NULL, NULL, false, 'on_hand_in', NULL, now() + interval '1 day', 20, 'none', '00000000-0000-0000-0000-000000000051', '00000000-0000-0000-0000-000000000051') $q$);
+SELECT pg_temp.fails('nor a scale', '23514', $q$
+    INSERT INTO peer_form (assignment_id, course_id, kind, criteria, scale_min, scale_max, self_evaluation, opens, opens_at, closes_at, weight, share_with_students, created_by_member_id, updated_by_member_id) VALUES ('00000000-0000-0000-0000-0000000031a2', '00000000-0000-0000-0000-000000000041', 'share', NULL, 1, 5, false, 'on_hand_in', NULL, now() + interval '1 day', 20, 'none', '00000000-0000-0000-0000-000000000051', '00000000-0000-0000-0000-000000000051') $q$);
+SELECT pg_temp.fails('a rating form has criteria', '23514', $q$
+    INSERT INTO peer_form (assignment_id, course_id, kind, criteria, scale_min, scale_max, self_evaluation, opens, opens_at, closes_at, weight, share_with_students, created_by_member_id, updated_by_member_id) VALUES ('00000000-0000-0000-0000-0000000031a2', '00000000-0000-0000-0000-000000000041', 'rating', NULL, 1, 5, false, 'on_hand_in', NULL, now() + interval '1 day', 20, 'none', '00000000-0000-0000-0000-000000000051', '00000000-0000-0000-0000-000000000051') $q$);
+SELECT pg_temp.fails('and a scale', '23514', $q$
+    INSERT INTO peer_form (assignment_id, course_id, kind, criteria, scale_min, scale_max, self_evaluation, opens, opens_at, closes_at, weight, share_with_students, created_by_member_id, updated_by_member_id) VALUES ('00000000-0000-0000-0000-0000000031a2', '00000000-0000-0000-0000-000000000041', 'rating', '[{"key": "effort", "label": "Effort", "weight": 1}, {"key": "quality", "label": "Quality", "weight": 2}]', NULL, NULL, false, 'on_hand_in', NULL, now() + interval '1 day', 20, 'none', '00000000-0000-0000-0000-000000000051', '00000000-0000-0000-0000-000000000051') $q$);
+SELECT pg_temp.fails('from 0 or 1', '23514', $q$
+    INSERT INTO peer_form (assignment_id, course_id, kind, criteria, scale_min, scale_max, self_evaluation, opens, opens_at, closes_at, weight, share_with_students, created_by_member_id, updated_by_member_id) VALUES ('00000000-0000-0000-0000-0000000031a2', '00000000-0000-0000-0000-000000000041', 'rating', '[{"key": "effort", "label": "Effort", "weight": 1}, {"key": "quality", "label": "Quality", "weight": 2}]', 2, 5, false, 'on_hand_in', NULL, now() + interval '1 day', 20, 'none', '00000000-0000-0000-0000-000000000051', '00000000-0000-0000-0000-000000000051') $q$);
+SELECT pg_temp.fails('to at most 10', '23514', $q$
+    INSERT INTO peer_form (assignment_id, course_id, kind, criteria, scale_min, scale_max, self_evaluation, opens, opens_at, closes_at, weight, share_with_students, created_by_member_id, updated_by_member_id) VALUES ('00000000-0000-0000-0000-0000000031a2', '00000000-0000-0000-0000-000000000041', 'rating', '[{"key": "effort", "label": "Effort", "weight": 1}, {"key": "quality", "label": "Quality", "weight": 2}]', 1, 11, false, 'on_hand_in', NULL, now() + interval '1 day', 20, 'none', '00000000-0000-0000-0000-000000000051', '00000000-0000-0000-0000-000000000051') $q$);
+SELECT pg_temp.fails('its criteria keyed distinctly', '23514', $q$
+    INSERT INTO peer_form (assignment_id, course_id, kind, criteria, scale_min, scale_max, self_evaluation, opens, opens_at, closes_at, weight, share_with_students, created_by_member_id, updated_by_member_id) VALUES ('00000000-0000-0000-0000-0000000031a2', '00000000-0000-0000-0000-000000000041', 'rating', '[{"key": "effort", "label": "Effort", "weight": 1}, {"key": "effort", "label": "Effort again", "weight": 1}]', 1, 5, false, 'on_hand_in', NULL, now() + interval '1 day', 20, 'none', '00000000-0000-0000-0000-000000000051', '00000000-0000-0000-0000-000000000051') $q$);
+SELECT pg_temp.fails('each key of a-z, 0-9 and _', '23514', $q$
+    INSERT INTO peer_form (assignment_id, course_id, kind, criteria, scale_min, scale_max, self_evaluation, opens, opens_at, closes_at, weight, share_with_students, created_by_member_id, updated_by_member_id) VALUES ('00000000-0000-0000-0000-0000000031a2', '00000000-0000-0000-0000-000000000041', 'rating', '[{"key": "Effort", "label": "Effort", "weight": 1}]', 1, 5, false, 'on_hand_in', NULL, now() + interval '1 day', 20, 'none', '00000000-0000-0000-0000-000000000051', '00000000-0000-0000-0000-000000000051') $q$);
+SELECT pg_temp.fails('each labelled', '23514', $q$
+    INSERT INTO peer_form (assignment_id, course_id, kind, criteria, scale_min, scale_max, self_evaluation, opens, opens_at, closes_at, weight, share_with_students, created_by_member_id, updated_by_member_id) VALUES ('00000000-0000-0000-0000-0000000031a2', '00000000-0000-0000-0000-000000000041', 'rating', '[{"key": "effort", "label": " ", "weight": 1}]', 1, 5, false, 'on_hand_in', NULL, now() + interval '1 day', 20, 'none', '00000000-0000-0000-0000-000000000051', '00000000-0000-0000-0000-000000000051') $q$);
+SELECT pg_temp.fails('each weighed 0.1 to 10', '23514', $q$
+    INSERT INTO peer_form (assignment_id, course_id, kind, criteria, scale_min, scale_max, self_evaluation, opens, opens_at, closes_at, weight, share_with_students, created_by_member_id, updated_by_member_id) VALUES ('00000000-0000-0000-0000-0000000031a2', '00000000-0000-0000-0000-000000000041', 'rating', '[{"key": "effort", "label": "Effort", "weight": 11}]', 1, 5, false, 'on_hand_in', NULL, now() + interval '1 day', 20, 'none', '00000000-0000-0000-0000-000000000051', '00000000-0000-0000-0000-000000000051') $q$);
+SELECT pg_temp.fails('saying nothing else', '23514', $q$
+    INSERT INTO peer_form (assignment_id, course_id, kind, criteria, scale_min, scale_max, self_evaluation, opens, opens_at, closes_at, weight, share_with_students, created_by_member_id, updated_by_member_id) VALUES ('00000000-0000-0000-0000-0000000031a2', '00000000-0000-0000-0000-000000000041', 'rating', '[{"key": "effort", "label": "Effort", "weight": 1, "hidden": true}]', 1, 5, false, 'on_hand_in', NULL, now() + interval '1 day', 20, 'none', '00000000-0000-0000-0000-000000000051', '00000000-0000-0000-0000-000000000051') $q$);
+SELECT pg_temp.fails('1 to 10 of them', '23514', $q$
+    INSERT INTO peer_form (assignment_id, course_id, kind, criteria, scale_min, scale_max, self_evaluation, opens, opens_at, closes_at, weight, share_with_students, created_by_member_id, updated_by_member_id) VALUES ('00000000-0000-0000-0000-0000000031a2', '00000000-0000-0000-0000-000000000041', 'rating', '[]', 1, 5, false, 'on_hand_in', NULL, now() + interval '1 day', 20, 'none', '00000000-0000-0000-0000-000000000051', '00000000-0000-0000-0000-000000000051') $q$);
+SELECT pg_temp.fails('a form opening at a time says when', '23514', $q$
+    INSERT INTO peer_form (assignment_id, course_id, kind, criteria, scale_min, scale_max, self_evaluation, opens, opens_at, closes_at, weight, share_with_students, created_by_member_id, updated_by_member_id) VALUES ('00000000-0000-0000-0000-0000000031a2', '00000000-0000-0000-0000-000000000041', 'share', NULL, NULL, NULL, false, 'at', NULL, now() + interval '1 day', 20, 'none', '00000000-0000-0000-0000-000000000051', '00000000-0000-0000-0000-000000000051') $q$);
+SELECT pg_temp.fails('before it closes', '23514', $q$
+    INSERT INTO peer_form (assignment_id, course_id, kind, criteria, scale_min, scale_max, self_evaluation, opens, opens_at, closes_at, weight, share_with_students, created_by_member_id, updated_by_member_id) VALUES ('00000000-0000-0000-0000-0000000031a2', '00000000-0000-0000-0000-000000000041', 'share', NULL, NULL, NULL, false, 'at', now() + interval '2 days', now() + interval '1 day', 20, 'none', '00000000-0000-0000-0000-000000000051', '00000000-0000-0000-0000-000000000051') $q$);
+SELECT pg_temp.fails('and one opening on hand-in says no time', '23514', $q$
+    INSERT INTO peer_form (assignment_id, course_id, kind, criteria, scale_min, scale_max, self_evaluation, opens, opens_at, closes_at, weight, share_with_students, created_by_member_id, updated_by_member_id) VALUES ('00000000-0000-0000-0000-0000000031a2', '00000000-0000-0000-0000-000000000041', 'share', NULL, NULL, NULL, false, 'on_hand_in', now(), now() + interval '1 day', 20, 'none', '00000000-0000-0000-0000-000000000051', '00000000-0000-0000-0000-000000000051') $q$);
+SELECT pg_temp.fails('its weight is 0 to 100', '23514', $q$
+    INSERT INTO peer_form (assignment_id, course_id, kind, criteria, scale_min, scale_max, self_evaluation, opens, opens_at, closes_at, weight, share_with_students, created_by_member_id, updated_by_member_id) VALUES ('00000000-0000-0000-0000-0000000031a2', '00000000-0000-0000-0000-000000000041', 'share', NULL, NULL, NULL, false, 'on_hand_in', NULL, now() + interval '1 day', 101, 'none', '00000000-0000-0000-0000-000000000051', '00000000-0000-0000-0000-000000000051') $q$);
+SELECT pg_temp.fails('and it shares none, or a member''s own average', '23514', $q$
+    INSERT INTO peer_form (assignment_id, course_id, kind, criteria, scale_min, scale_max, self_evaluation, opens, opens_at, closes_at, weight, share_with_students, created_by_member_id, updated_by_member_id) VALUES ('00000000-0000-0000-0000-0000000031a2', '00000000-0000-0000-0000-000000000041', 'share', NULL, NULL, NULL, false, 'on_hand_in', NULL, now() + interval '1 day', 20, 'everything', '00000000-0000-0000-0000-000000000051', '00000000-0000-0000-0000-000000000051') $q$);
+SELECT pg_temp.ok('Yuki''s sheet of Team A, of Mio, its entry in its sheet''s course', $q$
+    INSERT INTO peer_review (id, course_id, assignment_id, group_id, rater_member_id, comment, created_by_action_id) VALUES ('00000000-0000-0000-0000-000000003211', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-0000000031a1', '00000000-0000-0000-0000-000000003111', '00000000-0000-0000-0000-000000000052', NULL, '00000000-0000-0000-0000-0000000031b1');
+    INSERT INTO peer_review_entry (review_id, course_id, ratee_member_id, ratings, share) VALUES ('00000000-0000-0000-0000-000000003211', '00000000-0000-0000-0000-000000000042', '00000000-0000-0000-0000-000000003151', NULL, 100);
+    DO $chk$
+    BEGIN
+        IF (SELECT course_id FROM peer_review_entry WHERE review_id = '00000000-0000-0000-0000-000000003211') <> '00000000-0000-0000-0000-000000000041' THEN
+            RAISE EXCEPTION 'the entry is not of its sheet''s course';
+        END IF;
+    END $chk$ $q$);
+SELECT pg_temp.fails('an entry is written with its sheet, never after', '23001', $q$
+    SELECT set_config('aishie.peer_reviews_written', '', true);
+    INSERT INTO peer_review_entry (review_id, course_id, ratee_member_id, ratings, share) VALUES ('00000000-0000-0000-0000-000000003211', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000000052', NULL, 0) $q$);
+SELECT pg_temp.fails('a member does not evaluate themselves on a form without self-evaluation', '23514', $q$
+    INSERT INTO peer_review (id, course_id, assignment_id, group_id, rater_member_id, comment, created_by_action_id) VALUES ('00000000-0000-0000-0000-000000003213', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-0000000031a1', '00000000-0000-0000-0000-000000003111', '00000000-0000-0000-0000-000000003151', NULL, '00000000-0000-0000-0000-0000000031b1');
+    INSERT INTO peer_review_entry (review_id, course_id, ratee_member_id, ratings, share) VALUES ('00000000-0000-0000-0000-000000003213', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000003151', NULL, 100) $q$);
+SELECT pg_temp.fails('a share form''s entry is a share', '23514', $q$
+    INSERT INTO peer_review (id, course_id, assignment_id, group_id, rater_member_id, comment, created_by_action_id) VALUES ('00000000-0000-0000-0000-000000003213', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-0000000031a1', '00000000-0000-0000-0000-000000003111', '00000000-0000-0000-0000-000000003151', NULL, '00000000-0000-0000-0000-0000000031b1');
+    INSERT INTO peer_review_entry (review_id, course_id, ratee_member_id, ratings, share) VALUES ('00000000-0000-0000-0000-000000003213', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000000052', '{"effort": 3}', NULL) $q$);
+SELECT pg_temp.fails('a share is 0 to 100', '23514', $q$
+    INSERT INTO peer_review (id, course_id, assignment_id, group_id, rater_member_id, comment, created_by_action_id) VALUES ('00000000-0000-0000-0000-000000003213', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-0000000031a1', '00000000-0000-0000-0000-000000003111', '00000000-0000-0000-0000-000000003151', NULL, '00000000-0000-0000-0000-0000000031b1');
+    INSERT INTO peer_review_entry (review_id, course_id, ratee_member_id, ratings, share) VALUES ('00000000-0000-0000-0000-000000003213', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000000052', NULL, 101) $q$);
+SELECT pg_temp.fails('an entry gives something', '23514', $q$
+    INSERT INTO peer_review (id, course_id, assignment_id, group_id, rater_member_id, comment, created_by_action_id) VALUES ('00000000-0000-0000-0000-000000003213', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-0000000031a1', '00000000-0000-0000-0000-000000003111', '00000000-0000-0000-0000-000000003151', NULL, '00000000-0000-0000-0000-0000000031b1');
+    INSERT INTO peer_review_entry (review_id, course_id, ratee_member_id, ratings, share) VALUES ('00000000-0000-0000-0000-000000003213', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000000052', NULL, NULL) $q$);
+SELECT pg_temp.fails('its comment at most 1000 characters', '23514', $q$
+    INSERT INTO peer_review (id, course_id, assignment_id, group_id, rater_member_id, comment, created_by_action_id) VALUES ('00000000-0000-0000-0000-000000003213', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-0000000031a1', '00000000-0000-0000-0000-000000003111', '00000000-0000-0000-0000-000000003151', NULL, '00000000-0000-0000-0000-0000000031b1');
+    INSERT INTO peer_review_entry (review_id, course_id, ratee_member_id, share, comment) VALUES ('00000000-0000-0000-0000-000000003213', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000000052', 100, repeat('x', 1001)) $q$);
+SELECT pg_temp.fails('a sheet''s comment at most 2000', '23514', $q$
+    INSERT INTO peer_review (id, course_id, assignment_id, group_id, rater_member_id, comment, created_by_action_id) VALUES ('00000000-0000-0000-0000-000000003213', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-0000000031a1', '00000000-0000-0000-0000-000000003111', '00000000-0000-0000-0000-000000003151', repeat('x', 2001), '00000000-0000-0000-0000-0000000031b1') $q$);
+SELECT pg_temp.fails('a sheet is of an assignment with a form', '23503', $q$
+    INSERT INTO peer_review (id, course_id, assignment_id, group_id, rater_member_id, comment, created_by_action_id) VALUES ('00000000-0000-0000-0000-000000003213', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-0000000031a2', '00000000-0000-0000-0000-000000003111', '00000000-0000-0000-0000-000000003151', NULL, '00000000-0000-0000-0000-0000000031b1') $q$);
+SELECT pg_temp.fails('in a group of its course', '23503', $q$
+    INSERT INTO peer_review (id, course_id, assignment_id, group_id, rater_member_id, comment, created_by_action_id) VALUES ('00000000-0000-0000-0000-000000003213', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-0000000031a1', '00000000-0000-0000-0000-000000003114', '00000000-0000-0000-0000-000000003151', NULL, '00000000-0000-0000-0000-0000000031b1') $q$);
+SELECT pg_temp.fails('by a member of its course', '23503', $q$
+    INSERT INTO peer_review (id, course_id, assignment_id, group_id, rater_member_id, comment, created_by_action_id) VALUES ('00000000-0000-0000-0000-000000003213', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-0000000031a1', '00000000-0000-0000-0000-000000003111', '00000000-0000-0000-0000-000000000055', NULL, '00000000-0000-0000-0000-0000000031b1') $q$);
+SELECT pg_temp.fails('one current sheet per rater per assignment', '23505', $q$
+    INSERT INTO peer_review (id, course_id, assignment_id, group_id, rater_member_id, comment, created_by_action_id) VALUES ('00000000-0000-0000-0000-000000003212', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-0000000031a1', '00000000-0000-0000-0000-000000003111', '00000000-0000-0000-0000-000000000052', NULL, '00000000-0000-0000-0000-0000000031b1') $q$);
+SELECT pg_temp.ok('a newer sheet supersedes it, the old kept', $q$
+    UPDATE peer_review SET superseded_by = '00000000-0000-0000-0000-000000003212' WHERE id = '00000000-0000-0000-0000-000000003211';
+    INSERT INTO peer_review (id, course_id, assignment_id, group_id, rater_member_id, comment, created_by_action_id) VALUES ('00000000-0000-0000-0000-000000003212', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-0000000031a1', '00000000-0000-0000-0000-000000003111', '00000000-0000-0000-0000-000000000052', NULL, '00000000-0000-0000-0000-0000000031b1');
+    INSERT INTO peer_review_entry (review_id, course_id, ratee_member_id, ratings, share) VALUES ('00000000-0000-0000-0000-000000003212', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000003151', NULL, 100);
+    INSERT INTO peer_review (id, course_id, assignment_id, group_id, rater_member_id, comment, created_by_action_id) VALUES ('00000000-0000-0000-0000-000000003213', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-0000000031a1', '00000000-0000-0000-0000-000000003111', '00000000-0000-0000-0000-000000003151', NULL, '00000000-0000-0000-0000-0000000031b1');
+    INSERT INTO peer_review_entry (review_id, course_id, ratee_member_id, ratings, share) VALUES ('00000000-0000-0000-0000-000000003213', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000000052', NULL, 100);
+    SET CONSTRAINTS ALL IMMEDIATE;
+    SET CONSTRAINTS ALL DEFERRED $q$);
+SELECT pg_temp.fails('superseded only by the same rater''s sheet', '23503', $q$
+    UPDATE peer_review SET superseded_by = '00000000-0000-0000-0000-000000003213' WHERE id = '00000000-0000-0000-0000-000000003212' $q$);
+SELECT pg_temp.fails('and once', '23001', $q$
+    UPDATE peer_review SET superseded_by = '00000000-0000-0000-0000-000000003213' WHERE id = '00000000-0000-0000-0000-000000003211' $q$);
+SELECT pg_temp.fails('a sheet changes only by being superseded', '23001', $q$
+    UPDATE peer_review SET comment = 'Better' WHERE id = '00000000-0000-0000-0000-000000003212' $q$);
+SELECT pg_temp.fails('a sheet is not deleted', '23001', $q$
+    DELETE FROM peer_review WHERE id = '00000000-0000-0000-0000-000000003212' $q$);
+SELECT pg_temp.fails('nor truncated', '23001', $q$
+    TRUNCATE peer_review CASCADE $q$);
+SELECT pg_temp.fails('an entry is never changed', '23001', $q$
+    UPDATE peer_review_entry SET share = 90 WHERE review_id = '00000000-0000-0000-0000-000000003212' $q$);
+SELECT pg_temp.fails('nor deleted, but with its sheet', '23001', $q$
+    DELETE FROM peer_review_entry WHERE review_id = '00000000-0000-0000-0000-000000003212' $q$);
+SELECT pg_temp.fails('nor truncated', '23001', $q$
+    TRUNCATE peer_review_entry $q$);
+SELECT pg_temp.fails('a form''s shape is fixed once a sheet names it', '23001', $q$
+    UPDATE peer_form SET self_evaluation = true WHERE assignment_id = '00000000-0000-0000-0000-0000000031a1' $q$);
+SELECT pg_temp.fails('it stays its assignment''s', '23001', $q$
+    UPDATE peer_form SET assignment_id = '00000000-0000-0000-0000-0000000031a2' WHERE assignment_id = '00000000-0000-0000-0000-0000000031a1' $q$);
+SELECT pg_temp.ok('its dates, weight and sharing change', $q$
+    UPDATE peer_form SET closes_at = now() + interval '2 days', weight = 30, share_with_students = 'own_average', version = version + 1 WHERE assignment_id = '00000000-0000-0000-0000-0000000031a1' $q$);
+SELECT pg_temp.fails('switched off, it takes no new sheet', '23514', $q$
+    UPDATE peer_form SET enabled = false WHERE assignment_id = '00000000-0000-0000-0000-0000000031a1';
+    INSERT INTO peer_review (id, course_id, assignment_id, group_id, rater_member_id, comment, created_by_action_id) VALUES ('00000000-0000-0000-0000-000000003214', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-0000000031a1', '00000000-0000-0000-0000-000000003112', '00000000-0000-0000-0000-000000000058', NULL, '00000000-0000-0000-0000-0000000031b1') $q$);
+SELECT pg_temp.ok('Lab report''s rating form, self-evaluation on, and Yuki''s sheet of it, herself among those rated', $q$
+    INSERT INTO assignment (id, course_id, title, points_possible, published_at, group_set_id) VALUES ('00000000-0000-0000-0000-0000000032a1', '00000000-0000-0000-0000-000000000041', 'Lab report', 20, now(), '00000000-0000-0000-0000-000000003105');
+    INSERT INTO peer_form (assignment_id, course_id, kind, criteria, scale_min, scale_max, self_evaluation, opens, opens_at, closes_at, weight, share_with_students, created_by_member_id, updated_by_member_id) VALUES ('00000000-0000-0000-0000-0000000032a1', '00000000-0000-0000-0000-000000000041', 'rating', '[{"key": "effort", "label": "Effort", "weight": 1}, {"key": "quality", "label": "Quality", "weight": 2}]', 1, 5, true, 'at', now() - interval '1 hour', now() + interval '1 day', 20, 'none', '00000000-0000-0000-0000-000000000051', '00000000-0000-0000-0000-000000000051');
+    INSERT INTO peer_review (id, course_id, assignment_id, group_id, rater_member_id, comment, created_by_action_id) VALUES ('00000000-0000-0000-0000-000000003214', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-0000000032a1', '00000000-0000-0000-0000-000000003111', '00000000-0000-0000-0000-000000000052', NULL, '00000000-0000-0000-0000-0000000031b1');
+    INSERT INTO peer_review_entry (review_id, course_id, ratee_member_id, ratings, share) VALUES ('00000000-0000-0000-0000-000000003214', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000000052', '{"effort": 3, "quality": 4}', NULL);
+    INSERT INTO peer_review_entry (review_id, course_id, ratee_member_id, ratings, share) VALUES ('00000000-0000-0000-0000-000000003214', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000003151', '{"effort": 5, "quality": 5}', NULL) $q$);
+SELECT pg_temp.fails('a rating of every criterion', '23514', $q$
+    INSERT INTO peer_review (id, course_id, assignment_id, group_id, rater_member_id, comment, created_by_action_id) VALUES ('00000000-0000-0000-0000-000000003215', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-0000000032a1', '00000000-0000-0000-0000-000000003112', '00000000-0000-0000-0000-000000000058', NULL, '00000000-0000-0000-0000-0000000031b1');
+    INSERT INTO peer_review_entry (review_id, course_id, ratee_member_id, ratings, share) VALUES ('00000000-0000-0000-0000-000000003215', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000000052', '{"effort": 3}', NULL) $q$);
+SELECT pg_temp.fails('and of nothing else', '23514', $q$
+    INSERT INTO peer_review (id, course_id, assignment_id, group_id, rater_member_id, comment, created_by_action_id) VALUES ('00000000-0000-0000-0000-000000003215', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-0000000032a1', '00000000-0000-0000-0000-000000003112', '00000000-0000-0000-0000-000000000058', NULL, '00000000-0000-0000-0000-0000000031b1');
+    INSERT INTO peer_review_entry (review_id, course_id, ratee_member_id, ratings, share) VALUES ('00000000-0000-0000-0000-000000003215', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000000052', '{"effort": 3, "quality": 4, "humour": 5}', NULL) $q$);
+SELECT pg_temp.fails('a whole number', '23514', $q$
+    INSERT INTO peer_review (id, course_id, assignment_id, group_id, rater_member_id, comment, created_by_action_id) VALUES ('00000000-0000-0000-0000-000000003215', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-0000000032a1', '00000000-0000-0000-0000-000000003112', '00000000-0000-0000-0000-000000000058', NULL, '00000000-0000-0000-0000-0000000031b1');
+    INSERT INTO peer_review_entry (review_id, course_id, ratee_member_id, ratings, share) VALUES ('00000000-0000-0000-0000-000000003215', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000000052', '{"effort": 3.5, "quality": 4}', NULL) $q$);
+SELECT pg_temp.fails('on the scale', '23514', $q$
+    INSERT INTO peer_review (id, course_id, assignment_id, group_id, rater_member_id, comment, created_by_action_id) VALUES ('00000000-0000-0000-0000-000000003215', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-0000000032a1', '00000000-0000-0000-0000-000000003112', '00000000-0000-0000-0000-000000000058', NULL, '00000000-0000-0000-0000-0000000031b1');
+    INSERT INTO peer_review_entry (review_id, course_id, ratee_member_id, ratings, share) VALUES ('00000000-0000-0000-0000-000000003215', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000000052', '{"effort": 3, "quality": 6}', NULL) $q$);
+SELECT pg_temp.fails('a number', '23514', $q$
+    INSERT INTO peer_review (id, course_id, assignment_id, group_id, rater_member_id, comment, created_by_action_id) VALUES ('00000000-0000-0000-0000-000000003215', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-0000000032a1', '00000000-0000-0000-0000-000000003112', '00000000-0000-0000-0000-000000000058', NULL, '00000000-0000-0000-0000-0000000031b1');
+    INSERT INTO peer_review_entry (review_id, course_id, ratee_member_id, ratings, share) VALUES ('00000000-0000-0000-0000-000000003215', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000000052', '{"effort": "three", "quality": 4}', NULL) $q$);
+SELECT pg_temp.fails('a rating form''s entry is ratings', '23514', $q$
+    INSERT INTO peer_review (id, course_id, assignment_id, group_id, rater_member_id, comment, created_by_action_id) VALUES ('00000000-0000-0000-0000-000000003215', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-0000000032a1', '00000000-0000-0000-0000-000000003112', '00000000-0000-0000-0000-000000000058', NULL, '00000000-0000-0000-0000-0000000031b1');
+    INSERT INTO peer_review_entry (review_id, course_id, ratee_member_id, ratings, share) VALUES ('00000000-0000-0000-0000-000000003215', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000000052', NULL, 100) $q$);
+SELECT pg_temp.ok('a peer adjustment: the form''s, by nobody and for no reason given, saying what it was worked out from', $q$
+    INSERT INTO grade (id, student_member_id, submission_id, origin, score, grader_member_id, created_by_action_id, group_grade_id, adjust_kind, adjust_points, adjust_reason, adjust_by_member_id, adjust_detail) VALUES ('00000000-0000-0000-0000-0000000032f1', '00000000-0000-0000-0000-000000000052', '00000000-0000-0000-0000-0000000031d1', 'entered', 83.2, '00000000-0000-0000-0000-000000000051', '00000000-0000-0000-0000-0000000031b1', '00000000-0000-0000-0000-0000000031e1', 'peer', 3.2, NULL, NULL, '{"factor": 1.04, "weight": 20, "raters": 1, "form_version": 1}') $q$);
+SELECT pg_temp.fails('a peer adjustment gives no reason', '23514', $q$
+    INSERT INTO grade (student_member_id, submission_id, origin, score, grader_member_id, created_by_action_id, group_grade_id, adjust_kind, adjust_points, adjust_reason, adjust_by_member_id, adjust_detail) VALUES ('00000000-0000-0000-0000-000000000052', '00000000-0000-0000-0000-0000000031d1', 'entered', 83.2, '00000000-0000-0000-0000-000000000051', '00000000-0000-0000-0000-0000000031b1', '00000000-0000-0000-0000-0000000031e1', 'peer', 3.2, 'Pulled their weight', NULL, NULL) $q$);
+SELECT pg_temp.fails('and is made by nobody', '23514', $q$
+    INSERT INTO grade (student_member_id, submission_id, origin, score, grader_member_id, created_by_action_id, group_grade_id, adjust_kind, adjust_points, adjust_reason, adjust_by_member_id, adjust_detail) VALUES ('00000000-0000-0000-0000-000000000052', '00000000-0000-0000-0000-0000000031d1', 'entered', 83.2, '00000000-0000-0000-0000-000000000051', '00000000-0000-0000-0000-0000000031b1', '00000000-0000-0000-0000-0000000031e1', 'peer', 3.2, NULL, '00000000-0000-0000-0000-000000000051', NULL) $q$);
+SELECT pg_temp.ok('the release before''s, carrying one on with an empty reason and the nil member, is taken as by nobody, for no reason given', $q$
+    INSERT INTO grade (id, student_member_id, submission_id, origin, score, grader_member_id, created_by_action_id, group_grade_id, adjust_kind, adjust_points, adjust_reason, adjust_by_member_id, adjust_detail) VALUES ('00000000-0000-0000-0000-0000000032f2', '00000000-0000-0000-0000-000000000052', '00000000-0000-0000-0000-0000000031d1', 'entered', 83.2, '00000000-0000-0000-0000-000000000051', '00000000-0000-0000-0000-0000000031b1', '00000000-0000-0000-0000-0000000031e1', 'peer', 3.2, '', '00000000-0000-0000-0000-000000000000', NULL);
+    DO $chk$
+    BEGIN
+        IF EXISTS (SELECT 1 FROM grade WHERE id = '00000000-0000-0000-0000-0000000032f2' AND (adjust_reason IS NOT NULL OR adjust_by_member_id IS NOT NULL)) THEN
+            RAISE EXCEPTION 'the release before''s peer adjustment says something';
+        END IF;
+    END $chk$ $q$);
+SELECT pg_temp.fails('what it was worked out from is a peer adjustment''s alone', '23514', $q$
+    INSERT INTO grade (student_member_id, submission_id, origin, score, grader_member_id, created_by_action_id, group_grade_id, adjust_kind, adjust_points, adjust_reason, adjust_by_member_id, adjust_detail) VALUES ('00000000-0000-0000-0000-000000000052', '00000000-0000-0000-0000-0000000031d1', 'entered', 85, '00000000-0000-0000-0000-000000000051', '00000000-0000-0000-0000-0000000031b1', '00000000-0000-0000-0000-0000000031e1', 'delta', 5, 'Led it', '00000000-0000-0000-0000-000000000051', '{"factor": 1.04}') $q$);
+SELECT pg_temp.fails('and says it as an object', '23514', $q$
+    INSERT INTO grade (student_member_id, submission_id, origin, score, grader_member_id, created_by_action_id, group_grade_id, adjust_kind, adjust_points, adjust_reason, adjust_by_member_id, adjust_detail) VALUES ('00000000-0000-0000-0000-000000000052', '00000000-0000-0000-0000-0000000031d1', 'entered', 83.2, '00000000-0000-0000-0000-000000000051', '00000000-0000-0000-0000-0000000031b1', '00000000-0000-0000-0000-0000000031e1', 'peer', 3.2, NULL, NULL, '[1.04]') $q$);
+SELECT pg_temp.fails('an adjustment is replace, delta or peer', '23514', $q$
+    INSERT INTO grade (student_member_id, submission_id, origin, score, grader_member_id, created_by_action_id, group_grade_id, adjust_kind, adjust_points, adjust_reason, adjust_by_member_id, adjust_detail) VALUES ('00000000-0000-0000-0000-000000000052', '00000000-0000-0000-0000-0000000031d1', 'entered', 85, '00000000-0000-0000-0000-000000000051', '00000000-0000-0000-0000-0000000031b1', '00000000-0000-0000-0000-0000000031e1', 'bonus', 5, 'Led it', '00000000-0000-0000-0000-000000000051', NULL) $q$);
 SELECT pg_temp.ok('a group assignment deleted for good takes its groups'' work, whose it was, its group grades and their files; the groups stay', $q$
     INSERT INTO action (id, actor_id, course_id, member_id, action_type, target_type, target_id, idempotency_key, authz_result, status, executed_at)
     VALUES ('00000000-0000-0000-0000-0000000031b2', '00000000-0000-0000-0000-000000000034', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000000051', 'assignment.delete', 'assignment', '00000000-0000-0000-0000-0000000031a1', 'k-31b2', 'autonomous', 'executed', now());
@@ -2934,6 +3093,17 @@ SELECT pg_temp.ok('a group assignment deleted for good takes its groups'' work, 
         IF (SELECT count(*) FROM course_group WHERE set_id = '00000000-0000-0000-0000-000000003105') <> 2
            OR (SELECT count(*) FROM group_membership WHERE set_id = '00000000-0000-0000-0000-000000003105' AND left_at IS NULL) <> 3 THEN
             RAISE EXCEPTION 'the groups went with it';
+        END IF;
+    END $chk$ $q$);
+SELECT pg_temp.ok('and its peer form, every sheet and its entries with it; another assignment''s stay', $q$
+    DO $chk$
+    BEGIN
+        IF EXISTS (SELECT 1 FROM peer_form WHERE assignment_id = '00000000-0000-0000-0000-0000000031a1') OR EXISTS (SELECT 1 FROM peer_review WHERE assignment_id = '00000000-0000-0000-0000-0000000031a1')
+           OR EXISTS (SELECT 1 FROM peer_review_entry WHERE review_id IN ('00000000-0000-0000-0000-000000003211', '00000000-0000-0000-0000-000000003212', '00000000-0000-0000-0000-000000003213')) THEN
+            RAISE EXCEPTION 'the group assignment''s peer evaluation is still there';
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM peer_review_entry WHERE review_id = '00000000-0000-0000-0000-000000003214') THEN
+            RAISE EXCEPTION 'the lab report''s went with it';
         END IF;
     END $chk$ $q$);
 
