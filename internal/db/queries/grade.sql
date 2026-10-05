@@ -333,6 +333,16 @@ FROM grade g
 WHERE g.submission_id = $1 AND g.origin = 'entered' AND g.superseded_by IS NULL
 ORDER BY g.student_member_id, g.posted_at NULLS FIRST, g.created_at DESC, g.id DESC;
 
+-- name: ListLiveGradesOfMemberOnWork :many
+-- The student's live grades on the work, a draft or posted, one posted
+-- first. A group grade entered asks it of each member once their drafts are
+-- superseded, before their new one is written: a grade live then came in,
+-- or was posted, while it waited for their drafts.
+SELECT g.id, g.posted_at
+FROM grade g
+WHERE g.submission_id = $1 AND g.student_member_id = $2 AND g.origin = 'entered' AND g.superseded_by IS NULL
+ORDER BY g.posted_at NULLS LAST, g.id;
+
 -- name: ListLiveGradesFromGroupGrade :many
 -- Every live grade given from a group grade, a draft or posted, held in id
 -- order: what regrading the group's grade writes again.

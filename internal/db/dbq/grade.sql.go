@@ -831,6 +831,47 @@ func (q *Queries) ListLiveGradesFromGroupGrade(ctx context.Context, groupGradeID
 	return items, nil
 }
 
+const listLiveGradesOfMemberOnWork = `-- name: ListLiveGradesOfMemberOnWork :many
+SELECT g.id, g.posted_at
+FROM grade g
+WHERE g.submission_id = $1 AND g.student_member_id = $2 AND g.origin = 'entered' AND g.superseded_by IS NULL
+ORDER BY g.posted_at NULLS LAST, g.id
+`
+
+type ListLiveGradesOfMemberOnWorkParams struct {
+	SubmissionID    *uuid.UUID
+	StudentMemberID uuid.UUID
+}
+
+type ListLiveGradesOfMemberOnWorkRow struct {
+	ID       uuid.UUID
+	PostedAt *time.Time
+}
+
+// The student's live grades on the work, a draft or posted, one posted
+// first. A group grade entered asks it of each member once their drafts are
+// superseded, before their new one is written: a grade live then came in,
+// or was posted, while it waited for their drafts.
+func (q *Queries) ListLiveGradesOfMemberOnWork(ctx context.Context, arg ListLiveGradesOfMemberOnWorkParams) ([]ListLiveGradesOfMemberOnWorkRow, error) {
+	rows, err := q.db.Query(ctx, listLiveGradesOfMemberOnWork, arg.SubmissionID, arg.StudentMemberID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListLiveGradesOfMemberOnWorkRow
+	for rows.Next() {
+		var i ListLiveGradesOfMemberOnWorkRow
+		if err := rows.Scan(&i.ID, &i.PostedAt); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listLiveGroupGradesOfAssignment = `-- name: ListLiveGroupGradesOfAssignment :many
 SELECT gg.id, gg.course_id, gg.submission_id, gg.score, gg.out_of, gg.allow_extra, gg.feedback, gg.breakdown, gg.rubric_version_id, gg.grader_member_id, gg.created_by_action_id, gg.created_at
 FROM group_grade gg

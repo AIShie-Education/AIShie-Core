@@ -1550,7 +1550,12 @@ database holds the rule whichever release writes (`assignment_group_set_fixed`,
   group's work's members takes. It writes a row (`hand_in`) for each member of the group now,
   leaving out, and naming in `left_out`, any whom another group's work for the assignment names
   already: a student is part of one group's work for an assignment, so that the gradebook has one
-  piece of work per student per assignment, as before. A group with nobody to hand in for is
+  piece of work per student per assignment, as before. `left_out` gives each such member's
+  `member_id`, which `members` leaving them out says already, and the other work's
+  `submission_id` only where the caller (for a proposal, the proposer) may read that work, as
+  `submission.get` reaches it (What each member sees): a member who hands in is not told which
+  work of another group names a member left out, nor its id, which, a UUIDv7, says when it was
+  made. The action's result keeps what the caller was told. A group with nobody to hand in for is
   refused `group_empty`. It records who handed it in (`submitted_by_member_id`; for a proposal,
   the proposer). A proposal of it records the group's members then, and approving it is refused
   if they have changed (`members_changed`). Its caller's scope is asked again of the group's
@@ -1785,7 +1790,10 @@ Only a student's seat is placed or signs up (`not_a_student`).
   (`signup_closed`: after that it is the teacher's), to a group not archived (`group_archived`)
   below its capacity (`group_full`), and never out of or into a group that has work handed in or
   recorded missing for an assignment of the set (`your_group_has_work`, `group_has_work`):
-  self-service never changes who did handed-in work. Sign-up is the set's to open and close;
+  self-service never changes who did handed-in work. Such a refusal names (`work`), of that work,
+  what the caller may read, as `submission.get` reaches it (§2.5, What each member sees): a
+  student is told why, and shown nothing of another group's work, nor of their own group's
+  handed in before they joined. Sign-up is the set's to open and close;
   capacity is each group's, and setting it to the group's size closes that group alone. A
   student's agent signs up by proposal, which its student confirms.
 
@@ -2381,7 +2389,11 @@ regrade never quietly drops a decision.
   refused if the members have changed (`members_changed`), and by a newer draft, as ever. Once a
   grade on the work is posted it is refused (`group_grade_posted`): a draft beside a posted grade
   could never be posted, and would hold up posting the assignment; the posted grades are changed
-  by `grade.regrade`, or one member's by `grade.adjust`.
+  by `grade.regrade`, or one member's by `grade.adjust`. `grade.post` locks the grades it posts,
+  not the work, so the call asks again of each member once it has replaced their drafts, waiting
+  for any call that held one: a grade of theirs still live then was posted meanwhile
+  (`group_grade_posted`), or is a draft written meanwhile by `grade.adjust` (`grades_changed`),
+  whose adjustment the call did not carry; either refuses it, and it writes nothing.
 - `grade.post` is unchanged: it posts each member's draft, per student, and writes each member's
   totals; one live posted grade per student on a piece of work.
 - `grade.regrade` of a member's grade from a group grade regrades the group's as a whole: a new
@@ -3424,9 +3436,10 @@ respondent's `conversation_answer` decides is who is shown its text.
   hand-in and `left_out`; missing per group and the sweep's `:groups` key; carrying adjustments;
   a group's regrade, the members it gives a grade and the grades its proposal replaces, and
   `grade.adjust` held to the permissions it was decided under; no new group grade beside a
-  posted one; rescaling group grades; and that no member of one group, through any read or the
-  feed, learns anything of another group's work, grades or membership, nor of their own group's
-  work handed in before they joined.
+  posted one, nor beside a draft posted or adjusted while it was entered; rescaling group grades;
+  and that no member of one group, through any read, refusal, hand-in's result or the feed,
+  learns anything of another group's work, grades or membership, nor of their own group's work
+  handed in before they joined.
 - Peer evaluation (§2.5b): who is in a circle, and in which circle a student evaluates; the
   window, opening on hand-in or at a time; a sheet covering exactly whom its writer evaluates,
   its shares adding up to 100; `people_only`; the factor, worked out exactly and given to ten

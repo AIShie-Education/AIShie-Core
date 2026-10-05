@@ -470,12 +470,13 @@ func TestAGroupHandsInOnePieceOfWork(t *testing.T) {
 		t.Fatalf("Team A's hand-in: %+v", handed)
 	}
 	// Yuki moves to Team B as well; Team B's hand-in leaves her out, since
-	// Team A's work names her.
+	// Team A's work names her. Ken, who hands it in, may not read Team A's
+	// work, and is not told which it is.
 	b.place(t, set, true, b.yukiM, teamB)
 	bWork := testkit.Result[tools.SubmissionCreateOut](t, b.do(t, aoi, "submission.create", m{"course_id": b.course, "assignment_id": hw, "body": "Team B's"}))
 	bHanded := testkit.Result[tools.SubmissionSubmitOut](t, b.do(t, b.ken, "submission.submit", m{"course_id": b.course, "submission_id": bWork.SubmissionID}))
 	if !sameSet(bHanded.Members, []uuid.UUID{s["Aoi"], b.kenM}) || len(bHanded.LeftOut) != 1 || bHanded.LeftOut[0].MemberID != b.yukiM ||
-		bHanded.LeftOut[0].SubmissionID != work.SubmissionID {
+		bHanded.LeftOut[0].SubmissionID != nil {
 		t.Fatalf("Team B's hand-in: %+v", bHanded)
 	}
 	// Yuki still reads Team A's work, which is hers; Team B's is not.
