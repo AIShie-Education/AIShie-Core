@@ -36,6 +36,15 @@ type authorized struct {
 	refused *apperr.Error
 }
 
+// perms are the course permissions the call was decided under
+// (tool.ExecCtx.Perms): those its target named, or else the gate's.
+func (a authorized) perms(t tool.Tool) []domain.Perm {
+	if len(a.target.Perms) > 0 {
+		return a.target.Perms
+	}
+	return t.Gate.Perms
+}
+
 // refusal is what a denied call is told.
 func (a authorized) refusal() *apperr.Error {
 	if a.refused != nil {

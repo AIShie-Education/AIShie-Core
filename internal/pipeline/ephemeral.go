@@ -63,7 +63,7 @@ func (p *Pipeline) ephemeral(ctx context.Context, caller Caller, t tool.Tool, in
 		}
 		res, err = t.Execute(ctx, &tool.ExecCtx{
 			Tx: tx, Q: q, Actor: actor, CredentialID: caller.CredentialID, Member: a.decision.Member, Admin: a.admin,
-			Now: now, ActionCreatedAt: now,
+			Perms: a.perms(t), Now: now, ActionCreatedAt: now,
 		}, in)
 		if err != nil {
 			return err

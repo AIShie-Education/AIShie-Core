@@ -53,7 +53,6 @@ const (
 	ReasonWindowOpen        = "window_open"
 	ReasonNotInCircle       = "not_in_circle"
 	ReasonPeerNotCounted    = "peer_not_counted"
-	ReasonGradesChanged     = "grades_changed"
 	ReasonSheetIncomplete   = "sheet_incomplete"
 	ReasonBadShareTotal     = "bad_share_total"
 	ReasonBadRating         = "bad_rating"

@@ -248,15 +248,12 @@ func memberScore(g decimal.Decimal, a adjustment, max decimal.Decimal, allowExtr
 }
 
 // carriedAdjustments are the adjustments of each member's latest live grade
-// from a group grade on the work: their draft if they have one, or their
-// posted grade. A peer adjustment is not carried: it is worked out again.
-func carriedAdjustments(ctx context.Context, q dbq.Querier, submission uuid.UUID) (map[uuid.UUID]adjustment, error) {
-	rows, err := q.ListLiveMemberGrades(ctx, &submission)
-	if err != nil {
-		return nil, err
-	}
+// from a group grade on the work, of its live grades (ListLiveMemberGrades):
+// their draft if they have one, or their posted grade. A peer adjustment is
+// not carried: it is worked out again.
+func carriedAdjustments(live []dbq.ListLiveMemberGradesRow) map[uuid.UUID]adjustment {
 	out := map[uuid.UUID]adjustment{}
-	for _, r := range rows {
+	for _, r := range live {
 		if _, seen := out[r.StudentMemberID]; seen {
 			continue
 		}
@@ -266,7 +263,16 @@ func carriedAdjustments(ctx context.Context, q dbq.Querier, submission uuid.UUID
 		}
 		out[r.StudentMemberID] = adjustmentOf(r.AdjustKind, r.AdjustPoints, r.AdjustReason, r.AdjustByMemberID).manual()
 	}
-	return out, nil
+	return out
+}
+
+// errGroupGradePosted refuses a new group grade for work with a grade posted
+// on it, which a regrade changes: a draft beside a posted grade could never
+// be posted (checkPostable), and would hold up posting the assignment.
+func errGroupGradePosted(grade uuid.UUID) error {
+	return apperr.Precondition("the group's grade on this work is posted: regrade it with grade.regrade, which gives a member "+
+		"added to the work since a grade from it as well, or change one member's with grade.adjust").
+		With("reason", ReasonGroupGradePosted).With("grade_id", grade)
 }
 
 // adjustmentsFor is each member's adjustment: the one the call names, or
@@ -326,7 +332,8 @@ func checkMemberScores(g decimal.Decimal, adjs map[uuid.UUID]adjustment, max dec
 }
 
 // memberWrite is one member's grade a group grade writes: for whom, the
-// grade it replaces (a posted one, on a regrade), and their adjustment.
+// grade it replaces (a posted one, on a regrade; none for a member added to
+// the work since it was graded), and their adjustment.
 type memberWrite struct {
 	student  uuid.UUID
 	replaces *uuid.UUID
@@ -335,10 +342,11 @@ type memberWrite struct {
 
 // writeGroupGrade writes the group grade c gives s's work, and each member's
 // grade from it: a draft replacing their earlier drafts, or, posted, the
-// grade it replaces (replaces). The feedback files go to the group grade.
-// Each member is told by an event of their own. A member a grader did not
-// adjust is given peer evaluation's adjustment where it counts now; it
-// returns how peer evaluation stands (counted, window_open, or "").
+// grade it replaces (replaces), or the first they are given on the work.
+// The feedback files go to the group grade. Each member is told by an event
+// of their own. A member a grader did not adjust is given peer evaluation's
+// adjustment where it counts now; it returns how peer evaluation stands
+// (counted, window_open, or "").
 func writeGroupGrade(ctx context.Context, d Deps, ec *tool.ExecCtx, courseID uuid.UUID, s gradeSubject, c GradeContent,
 	rubric *uuid.UUID, writes []memberWrite, posted bool, createdAt time.Time) (uuid.UUID, []MemberGradeOut, string, error) {
 	breakdown, err := breakdownJSON(c.Breakdown)
@@ -366,7 +374,12 @@ func writeGroupGrade(ctx context.Context, d Deps, ec *tool.ExecCtx, courseID uui
 		id := ids.New()
 		typ := events.GradeCreated
 		payload := map[string]any{"group_grade_id": gg}
-		if posted {
+		switch {
+		case posted && w.replaces == nil:
+			// Added to the work since it was graded: given the group's
+			// grade, posted at once, as the others' are.
+			typ = events.GradePosted
+		case posted:
 			// The old row first: the deferred key lets it name a row that is
 			// not there yet, and the other order would be two live grades.
 			if n, err := ec.Q.SupersedeGrade(ctx, dbq.SupersedeGradeParams{ID: *w.replaces, NewID: &id}); err != nil {
@@ -375,9 +388,11 @@ func writeGroupGrade(ctx context.Context, d Deps, ec *tool.ExecCtx, courseID uui
 				return uuid.Nil, nil, "", apperr.Conflicts("grade %s was replaced by someone else just now", *w.replaces)
 			}
 			typ, payload["replaces"] = events.GradeRegraded, *w.replaces
-		} else if err := ec.Q.SupersedeSubmissionDrafts(ctx, dbq.SupersedeSubmissionDraftsParams{NewID: &id, SubmissionID: &s.submission.ID,
-			StudentMemberID: w.student}); err != nil {
-			return uuid.Nil, nil, "", err
+		default:
+			if err := ec.Q.SupersedeSubmissionDrafts(ctx, dbq.SupersedeSubmissionDraftsParams{NewID: &id, SubmissionID: &s.submission.ID,
+				StudentMemberID: w.student}); err != nil {
+				return uuid.Nil, nil, "", err
+			}
 		}
 		row := dbq.InsertGradeParams{ID: id, StudentMemberID: w.student, SubmissionID: &s.submission.ID, Origin: "entered", Score: score,
 			Feedback: c.Feedback, Breakdown: breakdown, RubricVersionID: rubric, GraderMemberID: ec.Member.ID,
@@ -477,6 +492,11 @@ func loadAdjustable(ctx context.Context, q dbq.Querier, in GradeAdjustIn) (adjus
 	return a, err
 }
 
+// errPostedMeanwhile refuses grade.adjust of a grade that was a draft when
+// the call was decided, and has been posted since.
+var errPostedMeanwhile = apperr.Conflicts("the grade was posted while this call was being made, and changing a posted grade "+
+	"takes grade_post as well; call again").With("reason", ReasonPostedMeanwhile)
+
 // check refuses adjusting a's grade as in says: it has been replaced, or is
 // a computed total, or the score would go out of bounds. It returns the new
 // score and the adjustment.
@@ -496,9 +516,10 @@ func gradeAdjust() tool.Tool {
 			"group's (delta), with a reason, which the member reads with their grade, or none, taking an adjustment " +
 			"away. A draft gets a new draft in its place (gated as grade.submit); a posted grade a new posted grade, the " +
 			"old kept as history and the member's totals written again (gated as grade.regrade, the lower of grade_submit " +
-			"and grade_post). The score is held to zero and, unless the group grade allows extra, to the points possible. " +
-			"Your adjustment wins over peer evaluation's; with none, peer evaluation counts where its form counts and its " +
-			"window has closed. A grade not given from a group grade is refused (not_from_a_group_grade).",
+			"and grade_post); a draft posted while the call is being made is refused (posted_meanwhile), and called again " +
+			"is gated as a regrade. The score is held to zero and, unless the group grade allows extra, to the points " +
+			"possible. Your adjustment wins over peer evaluation's; with none, peer evaluation counts where its form " +
+			"counts and its window has closed. A grade not given from a group grade is refused (not_from_a_group_grade).",
 		Kind:  tool.Write,
 		Gate:  tool.Gate{Any: true, Perms: []domain.Perm{domain.PermGradeSubmit, domain.PermGradePost}},
 		HTTP:  tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/grades/{grade_id}/adjust"},
@@ -548,6 +569,15 @@ func gradeAdjust() tool.Tool {
 			}
 			if a, err = loadAdjustable(ctx, ec.Q, in); err != nil {
 				return GradeAdjustOut{}, err
+			}
+			// Which permissions govern was decided from the grade as Resolve
+			// found it, before the lock. A draft posted since is changed as a
+			// regrade is, and the call was not decided as one: otherwise a
+			// seat that grades but does not post would replace a posted
+			// grade. Called again, it is decided as one; an approval is
+			// decided again as it is carried out.
+			if a.g.PostedAt != nil && !slices.Contains(ec.Perms, domain.PermGradePost) {
+				return GradeAdjustOut{}, errPostedMeanwhile
 			}
 			_, adj, err := a.check(in, ec.Member.ID)
 			if err != nil {
@@ -603,9 +633,10 @@ func gradeAdjust() tool.Tool {
 }
 
 // memberAdjustments is each member's adjustment a grade of s, as in asks,
-// is written with, made by by: refused on a student's own work, for a member
-// not of the work, for a score out of bounds, and, where in names the
-// members, when they are not the work's.
+// is written with, made by by: refused on a student's own work, once a
+// grade on the work is posted, for a member not of the work, for a score
+// out of bounds, and, where in names the members, when they are not the
+// work's.
 func (in GradeSubmitIn) memberAdjustments(ctx context.Context, q dbq.Querier, s gradeSubject, by uuid.UUID) (map[uuid.UUID]adjustment, error) {
 	if !s.group() {
 		if len(in.Adjustments) > 0 || in.Members != nil {
@@ -616,11 +647,16 @@ func (in GradeSubmitIn) memberAdjustments(ctx context.Context, q dbq.Querier, s 
 	if in.Members != nil && !sameMembers(in.Members, s.members) {
 		return nil, errMembersChanged
 	}
-	carried, err := carriedAdjustments(ctx, q, s.submission.ID)
+	live, err := q.ListLiveMemberGrades(ctx, &s.submission.ID)
 	if err != nil {
 		return nil, err
 	}
-	adjs, err := adjustmentsFor(s.members, carried, in.Adjustments, by)
+	for _, g := range live {
+		if g.PostedAt != nil {
+			return nil, errGroupGradePosted(g.ID)
+		}
+	}
+	adjs, err := adjustmentsFor(s.members, carriedAdjustments(live), in.Adjustments, by)
 	if err != nil {
 		return nil, err
 	}

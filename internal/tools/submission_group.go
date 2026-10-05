@@ -147,7 +147,7 @@ func membersFor(ctx context.Context, q dbq.Querier, assignment, group uuid.UUID)
 	return members, left, nil
 }
 
-// sameMembers: the same students, in any order.
+// sameMembers: the same students, or grades, in any order.
 func sameMembers(a, b []uuid.UUID) bool {
 	a, b = slices.Clone(dedupe(a)), slices.Clone(dedupe(b))
 	cmp := func(x, y uuid.UUID) int { return strings.Compare(x.String(), y.String()) }
@@ -158,6 +158,60 @@ func sameMembers(a, b []uuid.UUID) bool {
 
 var errMembersChanged = apperr.Conflicts("the group's members have changed since this was proposed; look again, and propose it again").
 	With("reason", ReasonMembersChanged)
+
+// errGroupChanged refuses starting the work of the caller's group when, held,
+// the group they were found in is no longer theirs: they were moved while
+// the call was being made.
+var errGroupChanged = apperr.Conflicts("your group changed while this call was being made; look again, and start the work of "+
+	"the group you are in now").With("reason", ReasonGroupChanged)
+
+// holdDraft takes submission id of the course for a write to it by ec's
+// member, as a hand-in takes it: a group's work's group FOR SHARE, which a
+// move of one of its members (FOR UPDATE) waits for and holds off, and then
+// the submission FOR UPDATE. A group's draft is then refused to a member
+// who has left the group since the call was authorized
+// (draftStillReached). Whether it is a draft at all is the caller's to ask
+// of what it returns.
+func holdDraft(ctx context.Context, ec *tool.ExecCtx, courseID, id uuid.UUID) (dbq.GetSubmissionFullRow, error) {
+	seen, err := ec.Q.GetSubmissionInCourse(ctx, dbq.GetSubmissionInCourseParams{ID: id, CourseID: courseID})
+	if err != nil {
+		return dbq.GetSubmissionFullRow{}, workGone(err)
+	}
+	if seen.GroupID != nil {
+		if _, err := ec.Q.ShareGroup(ctx, dbq.ShareGroupParams{ID: *seen.GroupID, CourseID: courseID}); err != nil {
+			return dbq.GetSubmissionFullRow{}, err
+		}
+	}
+	locked, err := ec.Q.GetSubmissionFullForUpdate(ctx, dbq.GetSubmissionFullForUpdateParams{ID: id, CourseID: courseID})
+	if err != nil {
+		return dbq.GetSubmissionFullRow{}, workGone(err)
+	}
+	s := dbq.GetSubmissionFullRow(locked)
+	return s, draftStillReached(ctx, ec, s)
+}
+
+// draftStillReached refuses ec's member a write to s, a group's draft, held
+// with its group (holdDraft, or a hand-in's locks), unless their scope
+// reaches one of its students as they are now: the group's members, whom
+// nobody joins or leaves while the group is held. One moved out of the
+// group after the call was authorized writes nothing of its work. Work that
+// is not a draft is the caller's to refuse.
+func draftStillReached(ctx context.Context, ec *tool.ExecCtx, s dbq.GetSubmissionFullRow) error {
+	if s.GroupID == nil || s.State != stateDraft {
+		return nil
+	}
+	students, err := workStudents(ctx, ec.Q, s.ID)
+	if err != nil {
+		return err
+	}
+	if reason, err := authz.CheckScope(ctx, ec.Q, ec.Member, authz.AnyOf(students)); err != nil {
+		return err
+	} else if reason != authz.ReasonNone {
+		return apperr.Forbid("the draft's group has no member within your scope now: its members changed while this call was "+
+			"being made").With("reason", string(reason))
+	}
+	return nil
+}
 
 // groupOf is the group of the set a student counts as a member of now.
 func groupOf(ctx context.Context, q dbq.Querier, set, student uuid.UUID) (*dbq.CurrentGroupOfRow, error) {

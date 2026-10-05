@@ -77,6 +77,10 @@ const (
 	ReasonBadAdjustment          = "bad_adjustment"
 	ReasonBadSplit               = "bad_split"
 	ReasonNameTaken              = "name_taken"
+	ReasonPostedMeanwhile        = "posted_meanwhile"
+	ReasonGroupGradePosted       = "group_grade_posted"
+	ReasonGradesChanged          = "grades_changed"
+	ReasonGroupChanged           = "group_changed"
 )
 
 // How a stay in a group began, and how it ended.
@@ -248,7 +252,7 @@ type GroupView struct {
 	ArchivedAt *time.Time        `json:"archived_at,omitempty"`
 	CreatedAt  time.Time         `json:"created_at"`
 	Members    []GroupMemberView `json:"members,omitempty" jsonschema:"its members now, those the caller's student scope reaches, to those who may read the member list; to a student, their own group's"`
-	Work       []GroupWorkView   `json:"work,omitempty" jsonschema:"group_set.get only: its latest work for each assignment of the set, to those who read submissions or the member list, for a group whose members their student scope reaches"`
+	Work       []GroupWorkView   `json:"work,omitempty" jsonschema:"group_set.get only: its latest work for each assignment of the set that the caller may read, to those who read submissions or the member list, for a group whose members their student scope reaches; a member is shown the group's draft and the attempts they are part of"`
 }
 
 type GroupSetAssignment struct {
@@ -377,7 +381,12 @@ func (v setViewer) views(ctx context.Context, sets []dbq.GroupSet, detail, histo
 	}
 	work := map[uuid.UUID][]GroupWorkView{}
 	if detail && v.work && len(groupIDs) > 0 {
-		rows, err := q.ListWorkOfGroups(ctx, groupIDs)
+		// The latest work of each group the reader may read: a member is
+		// shown the group's draft and the attempts they are part of, and not
+		// one handed in before they joined (§2.5, What each member sees).
+		rows, err := q.ListReadableWorkOfGroups(ctx, dbq.ListReadableWorkOfGroupsParams{GroupIds: groupIDs,
+			StudentAll: rc.Scope.StudentAll, MemberID: rc.Scope.MemberID,
+			PrincipalStudentAll: rc.Scope.PrincipalStudentAll, PrincipalID: rc.Scope.PrincipalID})
 		if err != nil {
 			return nil, err
 		}

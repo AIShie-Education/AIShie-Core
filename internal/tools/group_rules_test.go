@@ -2,6 +2,7 @@ package tools_test
 
 import (
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 
@@ -215,9 +216,8 @@ func TestAStudentsAgentWorksForItsStudentsGroup(t *testing.T) {
 func TestAGroupGradeProposalRecordsItsMembers(t *testing.T) {
 	w := buildTwoGroups(t)
 	b := w.built
-	b.do(t, b.sato, "grade.post", m{"course_id": b.course, "assignment_id": w.hw})
-	// Team B's work, graded again by the grader: it is listed for HW3
-	// alone, so Sato lists it for the project too.
+	// Team A's work, graded again by the grader before anything is posted:
+	// it is listed for HW3 alone, so Sato lists it for the project too.
 	b.do(t, b.sato, "member.rescope", m{"course_id": b.course, "member_id": b.graderM, "assignment_scope": "listed",
 		"listed_assignments": []uuid.UUID{b.hw3, w.hw}})
 	prop := b.MustCall(b.grader, "grade.submit", m{"course_id": b.course, "submission_id": w.workA, "score": 70}, "grader-a")
@@ -350,5 +350,301 @@ func TestTheLastPlaceInAGroupGoesToOneStudent(t *testing.T) {
 	}
 	if v := b.setView(t, b.sato, set, false); v.Groups[0].Size != 1 {
 		t.Fatalf("the group's size: %+v", v.Groups[0])
+	}
+}
+
+// A member's draft grade posted while one who grades but does not post
+// adjusts it is not replaced by them: the call was decided as an adjustment
+// of a draft, and is refused once it finds the grade posted. Called again,
+// it is decided as the regrade it now is, and denied them. Sato, who posts,
+// is told the same in the same race, and adjusts it called again.
+func TestADraftPostedMeanwhileIsAdjustedOnlyAsARegrade(t *testing.T) {
+	w := buildTwoGroups(t)
+	b := w.built
+	tomo := b.person(t, "Tomo", "")
+	b.do(t, b.sato, "member.add", m{"course_id": b.course, "actor_id": tomo, "preset": "ta"})
+	liveScore := func(student uuid.UUID) (decimal.Decimal, bool) {
+		t.Helper()
+		var score decimal.Decimal
+		var posted bool
+		if err := b.Pool.QueryRow(t.Context(), `SELECT score, posted_at IS NOT NULL FROM grade
+			WHERE submission_id = $1 AND student_member_id = $2 AND superseded_by IS NULL`, w.workA, student).Scan(&score, &posted); err != nil {
+			t.Fatal(err)
+		}
+		return score, posted
+	}
+	race := func(actor, grade uuid.UUID, key string) pipeline.Outcome {
+		t.Helper()
+		release := heldBy(t, b, `UPDATE grade SET posted_at = now(), posted_by_member_id = $2 WHERE id = $1`, grade, b.satoM)
+		adjust := b.inFlight(actor, "grade.adjust", m{"course_id": b.course, "grade_id": grade, "kind": "replace", "points": 100,
+			"reason": "Did it all"}, key)
+		b.waitingFor(t, 1, adjust)
+		release()
+		return settled(t, adjust)
+	}
+
+	if out := race(tomo, w.yukiGrade, "tomo-adjust"); out.Status != domain.StatusFailed || out.Error == nil ||
+		out.Error.Details["reason"] != tools.ReasonPostedMeanwhile {
+		t.Fatalf("Tomo's adjustment of a draft posted meanwhile: %+v", out)
+	}
+	if score, posted := liveScore(b.yukiM); !score.Equal(decimal.NewFromInt(80)) || !posted {
+		t.Fatalf("Yuki's grade after Tomo's adjustment: %s, posted %v", score, posted)
+	}
+	b.refusedAs(t, tomo, "grade.adjust", m{"course_id": b.course, "grade_id": w.yukiGrade, "kind": "replace", "points": 100,
+		"reason": "Did it all"}, apperr.Forbidden, "")
+
+	if out := race(b.sato, w.kenGrade, "sato-adjust"); out.Status != domain.StatusFailed || out.Error == nil ||
+		out.Error.Details["reason"] != tools.ReasonPostedMeanwhile {
+		t.Fatalf("Sato's adjustment of a draft posted meanwhile: %+v", out)
+	}
+	again := testkit.Result[tools.GradeAdjustOut](t, b.do(t, b.sato, "grade.adjust", m{"course_id": b.course, "grade_id": w.kenGrade,
+		"kind": "replace", "points": 100, "reason": "Did it all"}))
+	if !again.Changed || again.Snapshots == 0 {
+		t.Fatalf("Sato's adjustment called again: %+v", again)
+	}
+	if score, posted := liveScore(b.kenM); !score.Equal(decimal.NewFromInt(100)) || !posted {
+		t.Fatalf("Ken's grade after Sato's adjustment: %s, posted %v", score, posted)
+	}
+}
+
+// A placement and a write to a group's work are one after the other: a
+// student moved out of her group while she starts its work, edits its draft
+// or hands it in writes nothing of the group she left, and nothing of hers
+// lands where the students moved in would read it.
+func TestAMoveAndAWriteToAGroupsWorkAreOneAfterTheOther(t *testing.T) {
+	b := build(t)
+	actors, s := b.seatStudents(t, "Aoi", "Mio")
+	set := b.groupSet(t, "Projects", nil)
+	g := b.groupsIn(t, set, m{"name": "Team A"}, m{"name": "Team B"})
+	teamA, teamB := g[0], g[1]
+	b.place(t, set, false, b.yukiM, teamA, b.kenM, teamA, s["Aoi"], teamB, s["Mio"], teamB)
+	hw := b.groupAssignment(t, "Project", set)
+	// race holds group as a placement does, starts Sato's placements, which
+	// wait for it first, and then call, which waits after them; and returns
+	// what each came back with.
+	race := func(group uuid.UUID, placements []m, affectsWork bool, actor uuid.UUID, name string, args m) (pipeline.Outcome, pipeline.Outcome) {
+		t.Helper()
+		release := heldBy(t, b, `SELECT 1 FROM course_group WHERE id = $1 FOR UPDATE`, group)
+		move := b.inFlight(b.sato, "group.set_members", m{"course_id": b.course, "set_id": set, "placements": placements,
+			"affects_work": affectsWork}, "move-"+uuid.NewString())
+		b.waitingFor(t, 1, move)
+		write := b.inFlight(actor, name, args, "write-"+uuid.NewString())
+		b.waitingFor(t, 2, move, write)
+		release()
+		return settled(t, move), settled(t, write)
+	}
+
+	// Sato swaps Yuki and Aoi, with no work to acknowledge, while Yuki starts
+	// Team A's: she is in Team B by the time it would start, and starts
+	// nothing.
+	moved, started := race(teamA, []m{{"student_member_id": b.yukiM, "group_id": teamB}, {"student_member_id": s["Aoi"], "group_id": teamA}},
+		false, b.yuki, "submission.create", m{"course_id": b.course, "assignment_id": hw, "body": "Yuki's private plan"})
+	if moved.Status != domain.StatusExecuted {
+		t.Fatalf("the swap: %+v", moved)
+	}
+	if started.Status != domain.StatusFailed || started.Error == nil || started.Error.Details["reason"] != tools.ReasonGroupChanged {
+		t.Fatalf("Yuki's start of the work of the group she was moved out of: %+v", started)
+	}
+	if n := b.Count(`SELECT count(*) FROM submission WHERE assignment_id = $1`, hw); n != 0 {
+		t.Fatalf("%d submissions after Yuki's start was refused", n)
+	}
+
+	// Ken starts Team A's draft; Sato moves him to Team B, the draft
+	// following the group, while he edits it: the edit is refused.
+	draft := testkit.Result[tools.SubmissionCreateOut](t, b.do(t, b.ken, "submission.create",
+		m{"course_id": b.course, "assignment_id": hw, "body": "Ken's start"})).SubmissionID
+	moved, edited := race(teamA, []m{{"student_member_id": b.kenM, "group_id": teamB}}, true,
+		b.ken, "submission.update_draft", m{"course_id": b.course, "submission_id": draft, "body": "Ken's notes", "base_revision": 1})
+	if moved.Status != domain.StatusExecuted {
+		t.Fatalf("Ken's move: %+v", moved)
+	}
+	if edited.Status != domain.StatusFailed || edited.Error == nil || edited.Error.Code != apperr.Forbidden {
+		t.Fatalf("Ken's edit of the draft of the group he was moved out of: %+v", edited)
+	}
+	read := testkit.Result[tools.SubmissionView](t, b.do(t, actors["Aoi"], "submission.get", m{"course_id": b.course, "submission_id": draft}))
+	if read.Body == nil || *read.Body != "Ken's start" || read.Revision != 1 {
+		t.Fatalf("Team A's draft as Aoi reads it: %+v", read)
+	}
+
+	// Mio writes Team B's draft; Sato moves her to Team A while she hands
+	// it in: the hand-in is refused, and the draft is still Team B's to
+	// hand in.
+	other := testkit.Result[tools.SubmissionCreateOut](t, b.do(t, actors["Mio"], "submission.create",
+		m{"course_id": b.course, "assignment_id": hw, "body": "Team B's report"})).SubmissionID
+	moved, handed := race(teamB, []m{{"student_member_id": s["Mio"], "group_id": teamA}}, true,
+		actors["Mio"], "submission.submit", m{"course_id": b.course, "submission_id": other})
+	if moved.Status != domain.StatusExecuted {
+		t.Fatalf("Mio's move: %+v", moved)
+	}
+	if handed.Status != domain.StatusFailed || handed.Error == nil || handed.Error.Code != apperr.Forbidden {
+		t.Fatalf("Mio's hand-in of the draft of the group she was moved out of: %+v", handed)
+	}
+	if n := b.Count(`SELECT count(*) FROM submission WHERE id = $1 AND state = 'draft'`, other); n != 1 {
+		t.Fatal("Team B's draft was handed in by Mio after she left it")
+	}
+	b.do(t, b.yuki, "submission.submit", m{"course_id": b.course, "submission_id": other})
+
+	// Aoi adds a file to Team A's draft while Sato moves her to Team B: the
+	// file is refused.
+	moved, filed := race(teamA, []m{{"student_member_id": s["Aoi"], "group_id": teamB}}, true,
+		actors["Aoi"], "document.create", m{"course_id": b.course, "kind": "submission", "submission_id": draft, "title": "notes.pdf",
+			"files": b.fileOn(t, actors["Aoi"], "submission", "notes.pdf")})
+	if moved.Status != domain.StatusExecuted {
+		t.Fatalf("Aoi's move: %+v", moved)
+	}
+	if filed.Status != domain.StatusFailed || filed.Error == nil || filed.Error.Code != apperr.Forbidden {
+		t.Fatalf("Aoi's file to the draft of the group she was moved out of: %+v", filed)
+	}
+	if n := b.Count(`SELECT count(*) FROM document WHERE submission_id = $1`, draft); n != 0 {
+		t.Fatalf("%d files on Team A's draft after Aoi's was refused", n)
+	}
+}
+
+// A student moved into a group after it handed work in is shown nothing of
+// that work, in group_set.get or submission.roster: a member reads the
+// group's draft and the attempts they are part of. Those who were part of
+// it, and Sato, are shown it still; the group's next attempt is hers.
+func TestAMemberWhoJoinedLaterIsShownNoEarlierWork(t *testing.T) {
+	w := buildTwoGroups(t)
+	b := w.built
+	b.place(t, w.set, true, w.aoiM, w.teamA)
+	workOf := func(v tools.GroupSetView, group uuid.UUID) []uuid.UUID {
+		for _, g := range v.Groups {
+			if g.ID == group {
+				out := []uuid.UUID{}
+				for _, wk := range g.Work {
+					out = append(out, wk.SubmissionID)
+				}
+				return out
+			}
+		}
+		return nil
+	}
+	rosterOf := func(actor uuid.UUID) (tools.SubmissionRosterOut, tools.RosterGroup) {
+		t.Helper()
+		out := testkit.Result[tools.SubmissionRosterOut](t, b.do(t, actor, "submission.roster", m{"course_id": b.course, "assignment_id": w.hw}))
+		for _, g := range out.Groups {
+			if g.GroupID == w.teamA {
+				return out, g
+			}
+		}
+		t.Fatalf("no Team A in the roster: %+v", out.Groups)
+		return out, tools.RosterGroup{}
+	}
+
+	if work := workOf(b.setView(t, w.aoi, w.set, false), w.teamA); len(work) != 0 {
+		t.Fatalf("Team A's work as Aoi is shown it: %v", work)
+	}
+	all, teamA := rosterOf(w.aoi)
+	if teamA.SubmissionID != nil || teamA.State != "not_started" || teamA.SubmittedByMemberID != nil {
+		t.Fatalf("Team A in Aoi's roster: %+v", teamA)
+	}
+	if raw, _ := json.Marshal(all); strings.Contains(string(raw), w.workA.String()) {
+		t.Fatalf("Aoi's roster names Team A's work: %s", raw)
+	}
+	b.refusedAs(t, w.aoi, "submission.get", m{"course_id": b.course, "submission_id": w.workA}, apperr.Forbidden, "student_out_of_scope")
+	for _, who := range []uuid.UUID{b.yuki, b.sato} {
+		if work := workOf(b.setView(t, who, w.set, false), w.teamA); !slices.Equal(work, []uuid.UUID{w.workA}) {
+			t.Fatalf("Team A's work as %s is shown it: %v", who, work)
+		}
+		if _, g := rosterOf(who); g.SubmissionID == nil || *g.SubmissionID != w.workA || g.State != "submitted" {
+			t.Fatalf("Team A in the roster of %s: %+v", who, g)
+		}
+	}
+
+	// The group's next attempt, a draft, is hers to see.
+	next := testkit.Result[tools.SubmissionCreateOut](t, b.do(t, w.aoi, "submission.create",
+		m{"course_id": b.course, "assignment_id": w.hw, "body": "Attempt two"}))
+	if next.Attempt != 2 {
+		t.Fatalf("Team A's next attempt: %+v", next)
+	}
+	if work := workOf(b.setView(t, w.aoi, w.set, false), w.teamA); !slices.Equal(work, []uuid.UUID{next.SubmissionID}) {
+		t.Fatalf("Team A's work as Aoi is shown it once it has a draft: %v", work)
+	}
+	if _, g := rosterOf(w.aoi); g.SubmissionID == nil || *g.SubmissionID != next.SubmissionID || g.State != "draft" {
+		t.Fatalf("Team A in Aoi's roster once it has a draft: %+v", g)
+	}
+}
+
+// Approving a proposal to regrade a group's grade is refused once a grade
+// it was proposed to replace has been replaced since: Yuki's, adjusted
+// meanwhile, which approving it would otherwise write away.
+func TestAGroupRegradeProposalIsRefusedOnceAGradeItReplacesChanged(t *testing.T) {
+	w := buildTwoGroups(t)
+	b := w.built
+	b.do(t, b.sato, "grade.post", m{"course_id": b.course, "assignment_id": w.hw})
+	b.do(t, b.sato, "member.rescope", m{"course_id": b.course, "member_id": b.graderM, "assignment_scope": "listed",
+		"listed_assignments": []uuid.UUID{b.hw3, w.hw}})
+	b.do(t, b.sato, "member.update_perms", m{"course_id": b.course, "member_id": b.graderM, "perms": m{"grade_post": "confirm_required"}})
+	prop := b.MustCall(b.grader, "grade.regrade", m{"course_id": b.course, "grade_id": w.kenGrade, "score": 82}, "grader-regrade")
+	if prop.Status != domain.StatusProposed {
+		t.Fatalf("the grader's regrade: %+v", prop)
+	}
+	var replaces []uuid.UUID
+	var raw []byte
+	if err := b.Pool.QueryRow(t.Context(), `SELECT payload->'replaces_grades' FROM action WHERE id = $1`, prop.ActionID).Scan(&raw); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(raw, &replaces); err != nil || !sameSet(replaces, []uuid.UUID{w.yukiGrade, w.kenGrade}) {
+		t.Fatalf("the proposal records the grades it replaces as %s: %v", raw, err)
+	}
+	adj := testkit.Result[tools.GradeAdjustOut](t, b.do(t, b.sato, "grade.adjust", m{"course_id": b.course, "grade_id": w.yukiGrade,
+		"kind": "delta", "points": 3, "reason": "Presented it"}))
+	res := testkit.Result[pipeline.DecideOut](t, b.do(t, b.sato, "action.decide", m{"course_id": b.course, "action_id": prop.ActionID, "decision": "approve"}))
+	if res.Outcome != domain.StatusFailed || res.Error == nil || res.Error.Details["reason"] != tools.ReasonGradesChanged {
+		t.Fatalf("approving the regrade after Yuki's adjustment: %+v", res)
+	}
+	yuki := testkit.Result[tools.GradeView](t, b.do(t, b.sato, "grade.get", m{"course_id": b.course, "grade_id": adj.GradeID}))
+	if yuki.SupersededBy != nil || !yuki.Score.Equal(decimal.NewFromInt(83)) || yuki.Group == nil || yuki.Group.Adjustment == nil {
+		t.Fatalf("Yuki's grade after the refused approval: %+v %+v", yuki, yuki.Group)
+	}
+}
+
+// Once a group's grade is posted, a student added to its work is given the
+// group's grade by regrading it, posted with the others'; a new group grade
+// beside the posted one, whose drafts could never be posted, is refused, so
+// that nothing holds up posting the assignment.
+func TestAStudentAddedAfterPostingIsGivenTheGroupsGrade(t *testing.T) {
+	w := buildTwoGroups(t)
+	b := w.built
+	b.do(t, b.sato, "grade.post", m{"course_id": b.course, "assignment_id": w.hw})
+	actors, s := b.seatStudents(t, "Mio", "Hana")
+	mio := s["Mio"]
+	b.do(t, b.sato, "submission.set_members", m{"course_id": b.course, "submission_id": w.workA, "add": []uuid.UUID{mio}})
+
+	b.refusedAs(t, b.sato, "grade.submit", m{"course_id": b.course, "submission_id": w.workA, "score": 80},
+		apperr.FailedPrecondition, tools.ReasonGroupGradePosted)
+	re := testkit.Result[tools.GradeRegradeOut](t, b.do(t, b.sato, "grade.regrade", m{"course_id": b.course, "grade_id": w.yukiGrade,
+		"score": 80, "feedback": "Strong analysis."}))
+	scores := map[uuid.UUID]decimal.Decimal{}
+	for _, mg := range re.MemberGrades {
+		scores[mg.StudentMemberID] = mg.Score
+	}
+	if len(scores) != 3 || !scores[mio].Equal(decimal.NewFromInt(80)) || !scores[b.kenM].Equal(decimal.NewFromInt(75)) ||
+		!scores[b.yukiM].Equal(decimal.NewFromInt(80)) {
+		t.Fatalf("the regrade with Mio added: %+v", re.MemberGrades)
+	}
+	if n := b.Count(`SELECT count(*) FROM grade WHERE submission_id = $1 AND superseded_by IS NULL AND posted_at IS NULL`, w.workA); n != 0 {
+		t.Fatalf("%d drafts left on Team A's work", n)
+	}
+	mine := testkit.Result[tools.GradeListOut](t, b.do(t, actors["Mio"], "grade.list", m{"course_id": b.course, "assignment_id": w.hw})).Grades
+	if len(mine) != 1 || mine[0].State != "posted" || !mine[0].Score.Equal(decimal.NewFromInt(80)) || mine[0].Group == nil ||
+		!mine[0].Group.Score.Equal(decimal.NewFromInt(80)) {
+		t.Fatalf("Mio's grades: %+v", mine)
+	}
+	if n := b.Count(`SELECT count(*) FROM event WHERE type = 'grade.posted' AND student_member_id = $1`, mio); n != 1 {
+		t.Fatalf("%d grade.posted events told Mio, want 1", n)
+	}
+
+	// Posting the assignment is held up by nothing: a third team's grade is
+	// posted with it.
+	teamC := b.groupsIn(t, w.set, m{"name": "Team C"})[0]
+	b.place(t, w.set, false, s["Hana"], teamC)
+	workC := testkit.Result[tools.SubmissionCreateOut](t, b.do(t, actors["Hana"], "submission.create",
+		m{"course_id": b.course, "assignment_id": w.hw, "body": "Team C's report"})).SubmissionID
+	b.do(t, actors["Hana"], "submission.submit", m{"course_id": b.course, "submission_id": workC})
+	b.do(t, b.sato, "grade.submit", m{"course_id": b.course, "submission_id": workC, "score": 70})
+	if posted := testkit.Result[tools.GradePostOut](t, b.do(t, b.sato, "grade.post", m{"course_id": b.course, "assignment_id": w.hw})); len(posted.Posted) != 1 {
+		t.Fatalf("posting the assignment: %+v", posted)
 	}
 }

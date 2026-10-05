@@ -221,7 +221,7 @@ func (p *Pipeline) write(ctx context.Context, tx pgx.Tx, caller Caller, t tool.T
 	res, err := savepoint(ctx, tx, func(sp pgx.Tx) (any, error) {
 		return t.Execute(ctx, &tool.ExecCtx{
 			Tx: sp, Q: dbq.New(sp), Actor: actor, CredentialID: caller.CredentialID, Member: a.decision.Member, Admin: a.admin,
-			ActionID: actionID, Now: now, ActionCreatedAt: now, Emit: stamp(buf, actionID),
+			Perms: a.perms(t), ActionID: actionID, Now: now, ActionCreatedAt: now, Emit: stamp(buf, actionID),
 		}, in)
 	})
 	if err != nil {

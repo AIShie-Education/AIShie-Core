@@ -549,14 +549,26 @@ LEFT JOIN submission s ON s.id = (
     SELECT z.id
     FROM submission z
     WHERE z.assignment_id = $1 AND z.group_id = g.id
+      AND ($2::bool OR EXISTS (
+            SELECT 1 FROM submission_students(z.id) AS st(member_id)
+            JOIN member_student_scope y ON y.student_member_id = st.member_id
+            WHERE y.member_id = $3))
+      AND ($4::bool OR EXISTS (
+            SELECT 1 FROM submission_students(z.id) AS st(member_id)
+            JOIN member_student_scope py ON py.student_member_id = st.member_id
+            WHERE py.member_id = $5))
     ORDER BY z.attempt DESC LIMIT 1)
-WHERE g.set_id = $2 AND g.archived_at IS NULL
+WHERE g.set_id = $6 AND g.archived_at IS NULL
 ORDER BY g.created_at, g.id
 `
 
 type ListGroupsWithLatestWorkParams struct {
-	AssignmentID uuid.UUID
-	SetID        uuid.UUID
+	AssignmentID        uuid.UUID
+	StudentAll          bool
+	MemberID            uuid.UUID
+	PrincipalStudentAll bool
+	PrincipalID         uuid.UUID
+	SetID               uuid.UUID
 }
 
 type ListGroupsWithLatestWorkRow struct {
@@ -570,9 +582,20 @@ type ListGroupsWithLatestWorkRow struct {
 }
 
 // The set's groups not archived, each with its latest attempt at the
-// assignment, if any, the oldest group first.
+// assignment that the reader may read, if any, the oldest group first: one
+// of whose students (submission_students) the reader's student scope
+// reaches, and their principal's, as authorize() reaches a group's work. A
+// member is shown the group's draft and the attempts they are part of, not
+// one handed in before they joined.
 func (q *Queries) ListGroupsWithLatestWork(ctx context.Context, arg ListGroupsWithLatestWorkParams) ([]ListGroupsWithLatestWorkRow, error) {
-	rows, err := q.db.Query(ctx, listGroupsWithLatestWork, arg.AssignmentID, arg.SetID)
+	rows, err := q.db.Query(ctx, listGroupsWithLatestWork,
+		arg.AssignmentID,
+		arg.StudentAll,
+		arg.MemberID,
+		arg.PrincipalStudentAll,
+		arg.PrincipalID,
+		arg.SetID,
+	)
 	if err != nil {
 		return nil, err
 	}

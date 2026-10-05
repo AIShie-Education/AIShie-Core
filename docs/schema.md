@@ -1527,7 +1527,11 @@ database holds the rule whichever release writes (`assignment_group_set_fixed`,
   per group (`errOpenDraft`, naming it). Late work takes the group's `missing` row over unless a
   grade is entered or proposed for it, as a student's does: it is a draft again, and its member
   rows go, written anew at the next hand-in. `group_id` on an individual assignment is refused
-  `not_a_group_assignment`.
+  `not_a_group_assignment`. It takes the group FOR SHARE, as a hand-in does, and works out the
+  group, and whether the caller reaches its members, again under it: a student moved out while the
+  call was being made starts nothing in the group they left (`group_changed`, or
+  `student_out_of_scope` for a group named); a placement or a split that comes after finds the
+  work there (`group_has_work`, `kept`).
 - **Writing it together.** A group's draft is read and written by its members now: one who
   leaves the group stops, one who joins starts. Each change of its text counts a revision
   (`revision`, `revised_at`, `revised_by_member_id`), counted by the database
@@ -1535,7 +1539,10 @@ database holds the rule whichever release writes (`assignment_group_set_fixed`,
   (`submission.update_draft`'s `base_revision`, required on a group's draft,
   `base_revision_required`): a stale one is refused `draft_changed`, saying the revision now,
   when and by whom, so that nobody's text is silently lost and no lock is held across requests.
-  On a student's own draft it is optional.
+  On a student's own draft it is optional. An edit, and a file added to the draft, archived,
+  renamed or brought back, hold the group FOR SHARE and then the submission, as a hand-in does,
+  and ask the caller's scope again of the group's members under them: a member moved out while
+  the call was being made writes nothing of the group's work (`student_out_of_scope`).
 - **Handing it in.** Any member hands it in. The hand-in takes, in order, the caller's seat, the
   assignment KEY SHARE, the group FOR SHARE (so that a move of one of its members and a hand-in
   are one after the other), the submission FOR UPDATE, and the assignment's work lock
@@ -1546,13 +1553,16 @@ database holds the rule whichever release writes (`assignment_group_set_fixed`,
   piece of work per student per assignment, as before. A group with nobody to hand in for is
   refused `group_empty`. It records who handed it in (`submitted_by_member_id`; for a proposal,
   the proposer). A proposal of it records the group's members then, and approving it is refused
-  if they have changed (`members_changed`).
+  if they have changed (`members_changed`). Its caller's scope is asked again of the group's
+  members under these locks: a member moved out meanwhile hands nothing in
+  (`student_out_of_scope`).
 - **Attempts** are the group's, as a student's are. The gradebook takes, per student, the live
   posted grade on the highest attempt that has one, unchanged: a student's grades on one
   assignment are all on one group's attempts.
 - **Correcting whose work it is** (`submission.set_members`, gated by `perm_grade_submit` as
   correcting lateness is): a student added to a group's work handed in or missing — the student
-  the teacher forgot to place gets the group's grade without the group handing in again —
+  the teacher forgot to place gets the group's grade without the group handing in again, from
+  `grade.submit` while the group's grade is a draft and from `grade.regrade` once it is posted —
   whom no other group's work for the assignment names (`part_of_other_work`); a member with no
   grade entered or proposed on it taken off (`member_graded`; the grade's key holds it too); at
   least one member stays (`group_empty`). It reaches every member before and after, and says
@@ -1578,7 +1588,9 @@ database holds the rule whichever release writes (`assignment_group_set_fixed`,
   the work of the group they came to. `submission.roster` gives each student their group and
   the state of the work they are part of, or their group's draft, `no_group` for a student in
   none, and, on its first page, each group of the set with a member the caller reaches, and where
-  its latest attempt stands.
+  its latest attempt stands of those the caller may read: one of whose students their scope
+  reaches, as for reading it, so that a member is shown the group's draft and the attempts they
+  are part of, and a group with none `not_started`.
 
 Scope reaches a group's work when it reaches **any** of its students, for reading and writing
 it (§3, `AnyStudentMemberIDs`): each member's own seat, listed for themselves, reaches the
@@ -1779,7 +1791,8 @@ Only a student's seat is placed or signs up (`not_a_student`).
 
 Every write to a set's memberships takes the set FOR SHARE (placing, signing up) or FOR UPDATE (a
 split, `group_set.update`), then the groups it touches FOR UPDATE in id order, then counts; a
-hand-in takes its group FOR SHARE (§2.5, A group's work).
+write to a group's work (starting it, an edit, a file, a hand-in) takes its group FOR SHARE (§2.5,
+A group's work).
 
 **Reading them.** `group_set.list` and `.get` (`perm_document_read`) give each set's groups
 (name, capacity, size, archived), whether students may sign up now and why not (`joinable`,
@@ -1788,7 +1801,8 @@ to those who write assignments), and the caller's group (`my_group_id`). Members
 many students are in no group, come to those who read the member list, for the students their
 scope reaches; a student is shown their own group's members by name. `group_set.get` adds the
 students in no group, each group's latest work for each assignment of the set (to those who read
-submissions or the member list, for groups their scope reaches), and, asked for, every stay
+submissions or the member list, for groups their scope reaches, and of the work they may read, as
+`submission.roster` gives it: §2.5, What each member sees), and, asked for, every stay
 (`include_history`).
 
 **News.** `group_set.created`, `.updated`, `group.created` and `.updated` belong to no student,
@@ -2359,20 +2373,30 @@ regrade never quietly drops a decision.
   returns `group_grade_id` and `member_grades`. A member named who is not of the work is refused
   (`not_a_member_of_work`). Its feedback files are the group grade's. A proposal of it records
   the work's members and every member's adjustment as it will be written; approving it is
-  refused if the members have changed (`members_changed`), and by a newer draft, as ever.
+  refused if the members have changed (`members_changed`), and by a newer draft, as ever. Once a
+  grade on the work is posted it is refused (`group_grade_posted`): a draft beside a posted grade
+  could never be posted, and would hold up posting the assignment; the posted grades are changed
+  by `grade.regrade`, or one member's by `grade.adjust`.
 - `grade.post` is unchanged: it posts each member's draft, per student, and writes each member's
   totals; one live posted grade per student on a piece of work.
 - `grade.regrade` of a member's grade from a group grade regrades the group's as a whole: a new
   group grade, and a new posted grade for each member whose live posted grade came from the old
-  one, adjustments carried unless named; refused while any grade from the old one is still a
-  draft (`group_grade_partly_posted`: post them first). It reaches every member. Feedback files
-  given are the new group grade's; the old ones stay with the old.
+  one, adjustments carried unless named, and for each member of the work with no grade on it, one
+  added since it was graded (`submission.set_members`), told by `grade.posted`; refused while any
+  grade from the old one is still a draft (`group_grade_partly_posted`: post them first). It
+  reaches every member. Feedback files given are the new group grade's; the old ones stay with
+  the old. A proposal of it records the members it writes, every member's adjustment as it will
+  be written and the grades it replaces (`replaces_grades`); approving it is refused if the
+  members have changed (`members_changed`), or if one of those grades has been replaced since
+  (`grades_changed`), by an adjustment or otherwise, which approving it would write away.
 - `grade.adjust {grade_id, kind, points?, reason?}` changes one member's adjustment on a live
   grade from a group grade (`not_from_a_group_grade` otherwise): a draft gets a new draft in its
   place (gated as `grade.submit`), a posted grade a new posted grade, the old superseded and the
   member's totals written again (gated as a regrade). Its gate is any of `grade_submit` and
-  `grade_post`, the grade naming which governs. Events `grade.created` or `grade.regraded`, with
-  `{replaces, group_grade_id, adjusted: true}`.
+  `grade_post`, the grade naming which governs, as the call finds it before it takes the grade's
+  lock: a draft posted after that is refused (`posted_meanwhile`), the call having been decided
+  as a draft's, and called again is decided as a regrade. Events `grade.created` or
+  `grade.regraded`, with `{replaces, group_grade_id, adjusted: true}`.
 - A change of what the work is worth (`existing_grades`, §2.3) carries a group's work as a
   whole: `rescale` writes each live group grade again, its score in proportion (four decimal
   places) and its feedback files moved to it, and each member's grade from it again, pointing to
@@ -3390,10 +3414,14 @@ respondent's `conversation_answer` decides is who is shown its text.
 - Group work (§2.5, §2.5a, §2.7): who counts as a member (`live_group_members()`, read by every
   check); one group's work per student per assignment, under the assignment's work lock; the
   split's deal (golden seeds, package `groupsplit`); sign-up's capacity and deadline, under the
-  groups' locks; placing with `affects_work`; base revisions; the freeze at hand-in and
-  `left_out`; missing per group and the sweep's `:groups` key; carrying adjustments; a group's
-  regrade and `grade.adjust`; rescaling group grades; and that no member of one group, through
-  any read or the feed, learns anything of another group's work, grades or membership.
+  groups' locks; placing with `affects_work`; every write to a group's work under its group's
+  lock, the writer's reach of its members asked again there; base revisions; the freeze at
+  hand-in and `left_out`; missing per group and the sweep's `:groups` key; carrying adjustments;
+  a group's regrade, the members it gives a grade and the grades its proposal replaces, and
+  `grade.adjust` held to the permissions it was decided under; no new group grade beside a
+  posted one; rescaling group grades; and that no member of one group, through any read or the
+  feed, learns anything of another group's work, grades or membership, nor of their own group's
+  work handed in before they joined.
 - Peer evaluation (§2.5b): who is in a circle, and in which circle a student evaluates; the
   window, opening on hand-in or at a time; a sheet covering exactly whom its writer evaluates,
   its shares adding up to 100; `people_only`; the factor, worked out exactly and given to ten

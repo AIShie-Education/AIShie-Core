@@ -188,6 +188,14 @@ type ExecCtx struct {
 	// Admin is who makes an Admin-gated call, for the tool to limit itself
 	// by. The zero value, which every other call has, covers nothing.
 	Admin authz.AdminScope
+	// Perms are the course permissions the call was decided under: the
+	// gate's, or those its target named (Target.Perms), as the target was
+	// found then, before the tool took its locks. A tool whose target names
+	// them by what it finds holds Execute to them, since what it finds
+	// under its locks may have come to call for others: grade.adjust of a
+	// draft that has been posted meanwhile. Nil for a call no course
+	// permission gates.
+	Perms []domain.Perm
 	// Now is when this is being executed. ActionCreatedAt is when the call
 	// was made: the same moment for a direct call, and the moment of the
 	// proposal for an approval, which may be days later. A tool that must

@@ -125,7 +125,9 @@ func counted(f *dbq.PeerForm, now time.Time) error {
 	return nil
 }
 
-func errGradesChanged() error {
+// errPeerGradesChanged refuses approving grade.apply_peer once a grade it
+// would write again, or the form, has changed since it was proposed.
+func errPeerGradesChanged() error {
 	return apperr.Conflicts("the grades, or the peer form, have changed since this was proposed; look again, and propose it again").
 		With("reason", ReasonGradesChanged)
 }
@@ -266,7 +268,7 @@ func gradeApplyPeer() tool.Tool {
 				}
 			}
 			if ec.Approved && !in.samePlan(*f, plan) {
-				return GradeApplyPeerOut{}, errGradesChanged()
+				return GradeApplyPeerOut{}, errPeerGradesChanged()
 			}
 			// Every member whose grade it writes, as they are now.
 			if reason, err := authz.CheckScope(ctx, ec.Q, ec.Member, authz.Target{StudentMemberIDs: planStudents(plan),
