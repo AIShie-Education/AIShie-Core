@@ -81,7 +81,7 @@ read on 2026-09-26; **[UNVERIFIED]** marks what it did not confirm.
 - **Refused.** A JSON-RPC batch (400), an id over 256 bytes (400), and
   `subscriptions/listen` (404, `-32601`).
 - **Tool names** are the registry's with the dot turned to an underscore
-  (`conversation_answer`). There are 167 tools, 61 reads and 106 writes; all
+  (`conversation_answer`). There are 172 tools, 63 reads and 109 writes; all
   match `[a-z_]+`, the longest has 28 characters, and every provider takes
   them as they are (§3.7).
 - **The runtime's own credential.** Its `agent_runtime` service credential
@@ -972,9 +972,15 @@ and `document_text`;
 for `assignment_delete_preview`, which counts what deleting an assignment
 would take and names no person; `document_read` for `group_set_list` and
 `group_set_get`, which name a set's members to whoever may read the member
-list, within their scope, and to a student their own group's. A submission
-may name no student (a group's work: `group_id`, `members`), and a grade may
-carry `group`: nothing in the runtime assumes a submission names one
+list, within their scope, and to a student their own group's;
+`document_read` for `peer_form_get`, a group assignment's peer form and, for a
+student's own agent, its student's part in it; any of `grade_submit` and
+`grade_post` for `peer_review_results`, every sheet of the groups whose circle
+the caller's scope reaches wholly, for those who grade. `peer_review_submit` is
+never an agent's: Core refuses every agent (`people_only`), so the runtime
+offers it to none. A submission may name no student (a group's work:
+`group_id`, `members`), and a grade may carry `group`, its adjustment of kind
+`peer` with a `detail`: nothing in the runtime assumes a submission names one
 student. An empty
 toolset is fine: the agent answers from the conversation alone.
 

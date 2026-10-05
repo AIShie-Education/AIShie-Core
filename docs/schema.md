@@ -19,8 +19,8 @@ exact types and constraints.
   things Core deletes rather than retires. Memory (§2.9): what a person asks to be forgotten
   is gone, and so is what a retention period ends. No other row points at it. And an
   assignment deleted for good (§2.5, An assignment is deleted for good), with what is its:
-  its submissions, their files, the grades given on them, its events and the scope rows that
-  name it, through one path the database opens to that deletion alone. An answer's
+  its submissions, their files, the grades given on them, its peer form and sheets, its events
+  and the scope rows that name it, through one path the database opens to that deletion alone. An answer's
   draft (§2.8) is no record at all: kept in an unlogged table while the answer is written, and
   deleted once it is there. A version's text version (§2.4) is what its file said, as text, and
   is deleted with the file when the version is purged.
@@ -41,8 +41,9 @@ course
  ├ grade_component (tree; root = course total)
  ├ document ── document_version ── document_version_text (its file, transcribed)
  ├ group_set ── course_group ── group_membership (who was in which group when)
- ├ assignment ── submission ── submission_member (whose work it is)
- │                          └─ group_grade (a group's work, graded once)
+ ├ assignment ─┬ submission ── submission_member (whose work it is)
+ │             │            └─ group_grade (a group's work, graded once)
+ │             └ peer_form ── peer_review ── peer_review_entry (a group's members evaluating each other)
  ├ assignment_deletion (an assignment deleted for good, and how much went with it)
  ├ action
  ├ grade
@@ -630,7 +631,12 @@ the nearest one, and the choice is recorded here so that it is a decision and no
 | Reading group sets (`group_set.list`, `.get`) | `perm_document_read`; members' names with `perm_member_read`, within student scope, or one's own groupmates | the most basic permission a seated member holds; people who hand work in together know each other's names |
 | Correcting whose work a group's submission is (`submission.set_members`) | `perm_grade_submit` | as `set_lateness`: with whom a student handed work in is not theirs to declare |
 | Adjusting one member's grade from a group grade (`grade.adjust`) | `perm_grade_submit` for a draft; the lower of it and `perm_grade_post` for a posted grade | as entering a draft, and as a regrade (§2.7, A group's grade) |
-| Deleting an assignment for good, with its work, files and grades (`assignment.delete`), and counting first what would go (`assignment.delete_preview`) | `perm_assignment_write`, reaching every student whose work or total it changes; one that anyone has started on, by a person | whoever sets the work removes it, at their level for it; it takes students' work and rewrites their totals, as moving graded work out of the grade does; an agent deletes only what nobody has started on (§2.5, An assignment is deleted for good) |
+| A group assignment's peer form (`peer_form.set`) | `perm_assignment_write` | part of setting the work (§2.5b) |
+| Reading the peer form, and one's own part in it (`peer_form.get`) | `perm_document_read`, the assignment visible to the caller | the most basic permission a seated member holds; a student's task is their own, and their circle are their groupmates |
+| A peer evaluation (`peer_review.submit`) | `perm_submission_write`, the caller's own, by a person | it is the student's own part of the work, and a person's judgment of their classmates: never an agent's (`people_only`) |
+| Peer evaluation's results (`peer_review.results`) | any of `perm_grade_submit` and `perm_grade_post` | evidence for grading, for those who enter or post grades, of the groups whose circle their scope reaches wholly |
+| Counting peer evaluation in grades (`grade.apply_peer`) | the lower of `perm_grade_submit` and `perm_grade_post` | it writes grades and may regrade posted ones, as a regrade does |
+| Deleting an assignment for good, with its work, files and grades (`assignment.delete`), and counting first what would go (`assignment.delete_preview`) | `perm_assignment_write`, reaching every student whose work, peer evaluation or total it changes; one that anyone has started on, or with a peer evaluation, by a person | whoever sets the work removes it, at their level for it; it takes students' work and rewrites their totals, as moving graded work out of the grade does; an agent deletes only what nobody has started on (§2.5, An assignment is deleted for good) |
 | Deciding, reviewing and reading one's own agent's actions (`action.decide`, `.review`, `.get`), and the queues of them (`action.list_proposed`, `.list_pending_review`) | `perm_action_decide`, or owning the agent | an owner decides and reviews their agent's action where they could have done it themselves (§2.6), which needs no `perm_action_decide`; without it they reach their own agents' actions alone, and anything else is denied as it is to anyone without it |
 | Taking back one's own proposal, or one's own agent's, while nobody has decided it (`action.withdraw`) | `perm_document_read` | the most basic permission a seated member holds; that the proposal is the caller's own, or their own agent's, is what decides, as `action.list_mine` shows only the caller's own |
 | Closing a conversation (`conversation.close`), retracting a message (`conversation.retract`), listing and reading conversations (`conversation.list`, `.get`, `.messages`) | `perm_document_read` | the most basic permission a seated member holds; the conversation decides who may: its two participants, and whoever decides actions for its opener (§2.8) |
@@ -1604,7 +1610,9 @@ A group assignment goes the same way: its groups' work is its submissions, whose
 feedback files; its group set, groups and memberships are the course's and stay. A group's
 attempt counts once in `submissions`, each member's grade in `grades`, and a group grade's
 feedback files in `files`; the deletion reaches every member of every work and every member now
-of a group with a draft.
+of a group with a draft. Its peer form, every sheet and their entries go too, by cascade, counted
+as the current sheets (`peer_reviews`), reaching each rater, and an agent deletes none with a
+sheet (§2.5b).
 
 It is two tools. `assignment.delete_preview` reads what would go, counted, naming no person —
 `submissions` (`handed_in`, `drafts`, `missing`), `grades` (`posted`), `files` (those handed in
@@ -1788,6 +1796,181 @@ and are for whoever reads the course. `group.member_added` (`{set_id, group_id, 
 from_group_id?}`) and `group.member_removed` (`{set_id, group_id, how}`) are filed under the
 student, for those who read the member list or submissions; a split writes one for each student
 it places, which a feed reader groups by `action_id`.
+
+### 2.5b Peer evaluation
+
+```
+peer_form(assignment_id pk, course_id, enabled = true,
+          kind [rating|share], criteria jsonb null, scale_min null, scale_max null,
+          self_evaluation = false, opens [on_hand_in|at], opens_at null, closes_at,
+          weight = 0, share_with_students [none|own_average] = 'none', version = 1,
+          created_by_member_id, created_at, updated_by_member_id, updated_at,
+          unique(assignment_id, course_id))
+    FK (assignment_id, course_id) → assignment(id, course_id) ON DELETE CASCADE
+    composite FKs (course_id, created_by_member_id | updated_by_member_id) → course_member
+    check: rating ⇔ criteria of 1..10 items {key [a-z0-9_]{1,32}, distinct, label 1..200,
+           description ≤ 1000, weight 0.1..10} (peer_criteria_valid) and
+           scale_min ∈ {0, 1} < scale_max ≤ 10;  share ⇒ neither;
+           at ⇔ opens_at, opens_at < closes_at;  weight 0..100
+    trigger: it stays its assignment's; kind, criteria, scale and self_evaluation never change
+             once a sheet names it (peer_form_shape_fixed)
+
+peer_review(id, course_id, assignment_id, group_id, rater_member_id, comment null,
+            created_by_action_id→action, created_at, superseded_by null,
+            unique(id, assignment_id, rater_member_id))
+    FK (assignment_id, course_id) → peer_form(assignment_id, course_id) ON DELETE CASCADE
+    composite FKs (course_id, group_id) → course_group, (course_id, rater_member_id) → course_member,
+                  (superseded_by, assignment_id, rater_member_id) → peer_review  deferred
+    unique(assignment_id, rater_member_id) where superseded_by is null
+    check: comment ≤ 2000 characters
+    trigger: written while its form is enabled; append-only but for superseded_by, set once;
+             deleted only with its assignment deleted for good (peer_review_kept)
+
+peer_review_entry(review_id→peer_review ON DELETE CASCADE, course_id, ratee_member_id,
+                  ratings jsonb null, share null, comment null,
+                  primary key (review_id, ratee_member_id))
+    composite FK (course_id, ratee_member_id) → course_member(course_id, id)
+    check: exactly one of ratings (an object) and share (0..100);  comment ≤ 1000 characters
+    trigger: written with its sheet, in the same transaction, while it is current, its course
+             the sheet's; of the form's kind: a rating of every criterion, a whole number on the
+             scale, and of nothing else, or a share; a rater's own only with self-evaluation;
+             never changed; deleted only with its sheet (peer_review_entry_kept)
+```
+
+A group assignment (§2.5, A group's work) may have a **peer form**: the members of each group
+evaluate each other's contribution. It is one form per assignment, and only of a group
+assignment (`not_a_group_assignment`): `rating`, each member rated on each criterion, a whole
+number on the form's scale, a criterion weighing 0.1 to 10 against the others (1 if not said);
+or `share`, each rater splitting exactly 100 points among those they evaluate. With
+`self_evaluation`, members evaluate themselves too. `weight` is the percentage of each member's
+grade that what they received moves: 0 is reference only. `share_with_students` is `none`, or
+`own_average`: after the window closes, a member reads their own average from their peers.
+
+**Setting it.** `peer_form.set` (`perm_assignment_write`) makes the form or changes it, over the
+version its caller read (`version`, or `If-Match`; omitted, only a new form is made; a change
+since refused `version_mismatch`, with `current_version`); a proposal records the version and
+what it leaves as it was. Once a sheet is written its kind, criteria, scale and self-evaluation
+are fixed (`form_in_use`, and `peer_form_shape_fixed` whichever release writes): a sheet is read
+against the shape it was written to. Its dates, weight and sharing change; `enabled: false`
+stops new sheets and stops it counting, and keeps what was written. A change rewrites no grade
+(`grade.apply_peer` does). An assignment with a form enabled is not made individual work
+(`peer_form_exists`): switch the form off first. Its news is `peer_form.updated`, filed under
+the assignment, for those who write assignments.
+
+**The window** is open for a group while the form is enabled and `closes_at` has not passed,
+from `opens_at` (`opens: at`), or once the group has handed work in, on time or late
+(`opens: on_hand_in`). Before, `window_not_open`; after, `window_closed`. There is no sweep:
+it is compared with the moment as it is asked.
+
+**Who evaluates whom.** A group's **circle** for the assignment is the members of its latest
+work that is not a draft (handed in or recorded missing, `submission_member`), or, with none,
+its members now less those another group's work for the assignment names. A student evaluates
+in the circle of a group whose work names them, or else of their group of the set now; one who
+joined a group after its work was handed in is in its group and not its circle
+(`not_in_circle`). Every member of a circle evaluates every other, and themselves with
+self-evaluation; a sheet covers exactly those (`sheet_incomplete`), a rater's own entry only
+with self-evaluation (`self_evaluation_off`), each a rating of every criterion on the scale
+(`bad_rating`) or a share, the shares adding up to exactly 100 (`bad_share_total`).
+
+**A sheet** is written by `peer_review.submit` (`perm_submission_write`, the caller's own): only
+by a person, never by an agent, its owner's or any other's, whatever it holds (`people_only`,
+reading `actor.kind` to refuse as `member.reset_password` does): a peer evaluation is a person's
+judgment of their classmates. Written again while the window is open, the new sheet supersedes
+the old, which is kept; one rater's sheets are written one after the other (a transaction lock
+on the assignment and the rater). It takes the assignment FOR SHARE, the form FOR SHARE (a
+change of it takes it FOR UPDATE), that lock, and the group FOR SHARE, as a hand-in does. Its
+news is `peer_review.submitted`, filed under the rater, ids only, for those who grade or read
+submissions, within their scope: no other member of the group learns of it. Sheets written
+before a circle changed stay; what counts is what a member of the circle now gave another member
+of it now.
+
+**Who reads what.** To a student a sheet is anonymous and private: they read their own current
+sheet (`peer_form.get`'s `task`), never another's, nor what was said of them, nor who rated them.
+`peer_form.get` (`perm_document_read`, the assignment visible to them) gives everyone the form,
+and a student in a group of the set, or a student's own agent, their task: the group, its circle
+by name, whom they evaluate (`to_evaluate`), the window, their current sheet, and, where the
+form shares it, after it closes, their own average from two peers or more (`own_average`: the
+average on each criterion, or, for a share form, what they received against an even share as a
+percentage), never a comment. The form says so: `visible_to` (`graders`, and `action_record`,
+since the action log holds what a sheet said, for those who decide actions, as every write's
+payload does) and `students_see` (`own_sheet`, `own_average` where shared, `own_adjustment` where
+it counts). Those who grade read everything: `peer_review.results` (any of `perm_grade_submit`
+and `perm_grade_post`: holding either is enough, a read whose target names no permission being
+governed by whichever the caller holds), for each group whose circle lies wholly within their
+student scope, gives each member's sheet and when, who rated them, what their peers gave them
+(the average on each criterion, or each share), what they gave themselves, their factor and the
+score it would give at the form's weight from the group's score now, their live grade, and flags,
+and every sheet with who wrote it, its entries and comments.
+
+**The factor** (package `peercalc`, WebPA's fair share). For a circle C of n members and the
+raters R ⊆ C with a sheet, x(r, m) is what r gave m: for a rating form the sum over the
+criteria of weight × rating, for a share form the share. A rater's entries about members of C
+(k_r of them: n − 1, or n with self-evaluation) are normalised, f(r, m) = x(r, m) / Σ x(r, ·),
+and a rater whose entries add up to nothing drops out of R. Then
+
+```
+F(m) = ( Σ_{r ∈ R rating m} f(r, m) ) / ( Σ_{r ∈ R rating m} 1 / k_r )
+```
+
+what m received over an even share from the same raters, and 1 when nobody in R rated m. Each
+rater hands out exactly 1, so an even contributor's F is 1. It is worked out exactly, as a
+fraction, and given to ten places, half away from zero. With group score G, weight w = weight
+/ 100 and points possible P,
+
+```
+S(m) = round2( G × (1 − w + w × F(m)) )
+```
+
+rounded once, at the end, to two places, half away from zero; never below 0, never above P
+unless the group grade allows extra. Flags: `low` (F < 0.8), `high` (F > 1.2),
+`self_above_peers` (what a member gave themselves, against an even share, 0.3 or more above
+their factor from their peers alone), per rater `uniform` (gave everyone they rated, two or
+more, the same) and `missing` (no sheet), and per circle `pair_without_self_evaluation`: in a
+pair with self-evaluation off each rater's one entry is the whole of what they hand out, so F
+is always 1, and a pair is moderated only with self-evaluation on.
+
+For a group of four on a share form, self-evaluation off, a weight of 20 % and G = 80 of 100,
+where A gives B 40, C 40, D 20; B gives A 40, C 40, D 20; C gives A 40, B 40, D 20; and D gives
+A 40, B 30, C 30:
+
+| Member | Received | F | S | Adjustment |
+|---|---|---|---|---|
+| A | 0.40 + 0.40 + 0.40 | 1.2 | 80 × (0.8 + 0.24) = 83.20 | `peer +3.20` |
+| B | 0.40 + 0.40 + 0.30 | 1.1 | 80 × (0.8 + 0.22) = 81.60 | `peer +1.60` |
+| C | 0.40 + 0.40 + 0.30 | 1.1 | 81.60 | `peer +1.60` |
+| D | 0.20 + 0.20 + 0.20 | 0.6 | 80 × (0.8 + 0.12) = 73.60 | `peer −6.40` |
+
+The factors add up to 4 and the adjustments to 0. Had D sent no sheet, A, B and C would each be
+rated by two (an even share 2/3) and given 0.80, so 1.2, and D, rated by all three, 0.6.
+
+**Counting it in grades.** A member's score S is written on their grade as an adjustment of its
+own kind (§2.7): `peer`, `adjust_points` S − G, said by nobody and for no reason given (it is the
+form's), with what it was worked out from (`adjust_detail`: `factor`, `weight`, and, for those
+who grade, `raters` and `form_version`). It is written whenever a member's grade from a group
+grade is written — `grade.submit`, `grade.regrade`, `grade.adjust` with `kind: none`, a rescale —
+while the form is enabled, counts (a weight above 0) and its window has closed; before it closes
+members get none, and the call's result says `peer: window_open` (`counted` once it does). A
+member nobody rated gets none. It is never carried from an earlier grade, but worked out again;
+and a member a grader adjusted (`replace` or `delta`) keeps that adjustment: a teacher's
+decision wins over the form's. A rescale works a peer adjustment out again from its recorded
+factor, at its recorded weight. `grade.apply_peer` (the lower of `perm_grade_submit` and
+`perm_grade_post`, as a regrade) writes again, at once, every live grade of the assignment given
+from a group grade whose peer adjustment would change — after the window closes, or the weight
+changes — a draft as a draft and a posted grade posted, the old superseded and the member's
+totals written again (`grade.created` or `grade.regraded`, `{replaces, group_grade_id, peer:
+true}`); refused while the window is open (`window_open`) or when the form does not count
+(`peer_not_counted`). It reaches every member whose grade it writes. A proposal of it records
+the form's version and each grade it writes with the member's factor, and approving it is
+refused if any has changed since (`grades_changed`). A member learns their own result through
+their grade — the group's score, their own score and the weight are theirs to see — and never
+anyone else's.
+
+**Deleting.** An assignment deleted for good (§2.5) takes its form, every sheet and its entries
+by cascade, which the guards let through for an assignment being deleted, and empties the
+actions that wrote them. The preview counts the current sheets (`peer_reviews`; a `confirm` that
+leaves it out is taken as 0, so a page that never knew of them is refused `confirm_stale` and
+shown them on its next preview); the deletion reaches their raters, and an agent deletes no
+assignment with a sheet (`people_only`). Groups, the course's, stay.
 
 ### 2.6 Activity
 
@@ -2080,8 +2263,8 @@ grade(id, student_member_id→course_member,
       superseded_by null→grade, created_at,
       override_score null, override_reason null, override_by_member_id null→course_member,
       overridden_at null,
-      group_grade_id null, adjust_kind null [replace|delta], adjust_points null,
-      adjust_reason null, adjust_by_member_id null→course_member,
+      group_grade_id null, adjust_kind null [replace|delta|peer], adjust_points null,
+      adjust_reason null, adjust_by_member_id null→course_member, adjust_detail jsonb null,
       unique(id, student_member_id))
     composite FK (submission_id, student_member_id) → submission_member(submission_id, member_id)
     composite FK (superseded_by, student_member_id) → grade(id, student_member_id)  deferred
@@ -2090,7 +2273,10 @@ grade(id, student_member_id→course_member,
            columns, on a computed total, not negative, a reason of 1..500 characters;
            an adjustment: a kind exactly when points, only on a grade from a group grade,
            replace or delta with a reason of 1..500 characters and who made it, a replaced
-           score not negative
+           score not negative, peer with neither (said by nobody, for no reason given), and a
+           detail, an object, only on a peer adjustment
+    trigger: a peer adjustment's empty reason and nil member, as the release before carries
+             one on, taken as none (grade_peer_adjustment_unsaid)
 
     unique(submission_id, student_member_id) where posted_at is not null and superseded_by is null
     unique(component_id, student_member_id)  where posted_at is not null and superseded_by is null
@@ -2192,9 +2378,20 @@ regrade never quietly drops a decision.
   places) and its feedback files moved to it, and each member's grade from it again, pointing to
   it, a `replace` or `delta` in proportion; `keep_scores` is refused if the group's score, or a
   member's, would be above the new points.
+- **Peer evaluation's adjustment.** Where the assignment's peer form counts and its window has
+  closed (§2.5b), a member a grader did not adjust is given an adjustment of a third kind, `peer`:
+  what they received from their group, against an even share, moving their score from the
+  group's at the form's weight, said by nobody and for no reason given, with what it was worked
+  out from (`adjust_detail`: `{factor, weight, raters, form_version}`). It is worked out whenever
+  the member's grade from a group grade is written, never carried (a grader's own adjustment is,
+  and wins over it), and written again for the whole assignment by `grade.apply_peer`.
+  `grade.submit`, `.regrade` and `.adjust` say how it stood (`peer: counted` or
+  `window_open`).
 - `grade.get` and `.list` add `group` to a member's grade: `{group_grade_id, group_id,
-  group_name, score, adjustment: {kind, points, reason, by_member_id}}`, the score the group's
-  and the adjustment the member's own, its reason included; who made it is for those who grade.
+  group_name, score, adjustment: {kind, points, reason, by_member_id, detail}}`, the score the
+  group's and the adjustment the member's own, its reason included; who made it is for those who
+  grade, and of a peer adjustment's detail, the member reads its factor and weight, and those who
+  grade its raters and form version too.
   A member reads only their own grade, never another member's score or adjustment. A group
   grade's feedback files come with each member's grade (`feedback_files`), and are read by those
   who grade, and by a member while their own grade from it is posted and live; withdrawn by
@@ -3132,6 +3329,10 @@ respondent's `conversation_answer` decides is who is shown its text.
 | A group grade is of a group's work handed in or missing, in its course, kept as written, deleted only with its assignment; a grade from it is on the same submission | trigger `group_grade_kept`, composite FK |
 | An adjustment says what it is, by how much, why and who, on a grade from a group grade | CHECKs on `grade` |
 | A feedback file belongs to one grade or one group grade | CHECK `document_owner_one` |
+| A peer form is its assignment's, one to an assignment, in its course, and goes with it; it says what its kind needs (criteria and a scale for a rating form, neither for a share form), its window opens before it closes, its weight is 0..100; its kind, criteria, scale and self-evaluation never change once a sheet names it | primary key, composite FK `ON DELETE CASCADE`, CHECKs on `peer_form` (`peer_criteria_valid()`), trigger `peer_form_shape_fixed` |
+| A sheet is written while its form is enabled, by a member of its course, in a group of its course; one current sheet per rater per assignment; it changes only by being superseded, once, by the same rater's newer sheet for the assignment, and goes only with its assignment | trigger `peer_review_kept`, partial unique index `peer_review_one_current`, composite FKs (`peer_review_superseded_by_fk`, deferred), `peer_review_no_truncate` |
+| An entry is written with its sheet, in the same transaction, while it is current; it is of the form's kind (every criterion rated, a whole number on the scale, nothing else; or a share of 0..100), a rater's own only with self-evaluation; never changed, and deleted only with its sheet | trigger `peer_review_entry_kept`, CHECKs on `peer_review_entry`, `peer_review_entry_no_truncate` |
+| A peer adjustment is said by nobody, for no reason given; only it has a detail, an object | CHECKs `grade_adjust_kind_valid`, `grade_adjust_peer_unsaid`, `grade_adjust_detail_of_peer`; trigger `grade_peer_adjustment_unsaid` |
 | An identity provider's client secret is kept sealed, never in the clear, and its hint is four characters of it at most; its id never changes | CHECKs `sso_provider_secret_sealed`, `sso_provider_secret_hint_valid`, trigger `sso_provider_id_fixed` |
 | Emails are unique regardless of case | unique index on `lower(email)` |
 | Login IDs are unique regardless of case; 1..64 of `[0-9A-Za-z._-]`, so never an `@` or a space; only a person has one | unique index `actor_login_id_key` on `lower(login_id)`, CHECKs `actor_login_id_valid`, `actor_login_id_is_a_persons` |
@@ -3193,6 +3394,14 @@ respondent's `conversation_answer` decides is who is shown its text.
   `left_out`; missing per group and the sweep's `:groups` key; carrying adjustments; a group's
   regrade and `grade.adjust`; rescaling group grades; and that no member of one group, through
   any read or the feed, learns anything of another group's work, grades or membership.
+- Peer evaluation (§2.5b): who is in a circle, and in which circle a student evaluates; the
+  window, opening on hand-in or at a time; a sheet covering exactly whom its writer evaluates,
+  its shares adding up to 100; `people_only`; the factor, worked out exactly and given to ten
+  places, the score rounded once and held to its bounds, and the flags (golden examples, package
+  `peercalc`); a grader's adjustment winning over peer evaluation's, which is never carried;
+  what `grade.apply_peer` writes again, and a proposal's factors; and that no student, through
+  any read or the feed, reads another's sheet, what was said of them or who rated them, and
+  their own average only from two peers or more once the window has closed.
 - An identity provider's client secret is sealed before it is written, and in no answer, action
   or log line; a sign-in goes through the provider its state names, as it is now, and one
   switched off signs nobody in; the operator's provider wins over a site's of its name; linking
@@ -3637,6 +3846,8 @@ them (three rows of `submission_member`, `hand_in`).
 - **Organisation hierarchy** above `department`; cross-course administrative roles beyond
   `platform_role`.
 - **Embeddings and semantic search** of memory (§2.9): full text and recency in v1.
+- **Penalising a member who writes no peer evaluation.** The results flag it (`missing`); the
+  teacher adjusts the member's grade if they mean to.
 - **The concept graph**, quizzes, retention policy.
 - **One inbox for every course.** `conversation.inbox` is per course; an agent seated in
   several polls, or long-polls, each (from `me.memberships`).
