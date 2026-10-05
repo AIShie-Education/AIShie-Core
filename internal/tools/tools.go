@@ -99,6 +99,7 @@ func RegisterAll(reg *tool.Registry, d Deps) {
 	reg.Register(componentTools()...)
 	reg.Register(assignmentTools()...)
 	reg.Register(assignmentDeleteTools(d)...)
+	reg.Register(groupTools()...)
 	reg.Register(submissionTools()...)
 	reg.Register(documentTools(d)...)
 	reg.Register(textTools(d)...)

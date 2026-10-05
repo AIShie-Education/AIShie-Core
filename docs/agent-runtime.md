@@ -81,7 +81,7 @@ read on 2026-09-26; **[UNVERIFIED]** marks what it did not confirm.
 - **Refused.** A JSON-RPC batch (400), an id over 256 bytes (400), and
   `subscriptions/listen` (404, `-32601`).
 - **Tool names** are the registry's with the dot turned to an underscore
-  (`conversation_answer`). There are 156 tools, 59 reads and 97 writes; all
+  (`conversation_answer`). There are 167 tools, 61 reads and 106 writes; all
   match `[a-z_]+`, the longest has 28 characters, and every provider takes
   them as they are (§3.7).
 - **The runtime's own credential.** Its `agent_runtime` service credential
@@ -970,7 +970,12 @@ and `document_text`;
 `submission_read` for `submission_list`, `submission_get`; `grade_read` for
 `grade_list`, `grade_get`, `component_tree`, `gradebook_get`; `assignment_write`
 for `assignment_delete_preview`, which counts what deleting an assignment
-would take and names no person. An empty
+would take and names no person; `document_read` for `group_set_list` and
+`group_set_get`, which name a set's members to whoever may read the member
+list, within their scope, and to a student their own group's. A submission
+may name no student (a group's work: `group_id`, `members`), and a grade may
+carry `group`: nothing in the runtime assumes a submission names one
+student. An empty
 toolset is fine: the agent answers from the conversation alone.
 
 ## 5. Several tenants

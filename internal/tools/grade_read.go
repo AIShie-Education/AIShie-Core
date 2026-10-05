@@ -44,6 +44,19 @@ type GradeView struct {
 	NoTotal bool `json:"no_total,omitempty" jsonschema:"for a computed total: nothing beneath it counts any more, so it has no value, and its score of 0 means nothing"`
 	// A person's number for a computed total, beside the one worked out.
 	Override *TotalOverride `json:"override,omitempty" jsonschema:"for a computed total, a person's number in place of the score worked out, which stays beside it; it is what counts in everything rolled up above"`
+	// A member's grade given from a group grade.
+	Group *GradeGroup `json:"group,omitempty" jsonschema:"for a grade given from a group grade: the group, its score, and this member's adjustment, if any"`
+}
+
+// GradeGroup is what a member's grade from a group grade says of it: the
+// group's score, and the member's own adjustment, its reason included; who
+// made it is for those who grade.
+type GradeGroup struct {
+	GroupGradeID uuid.UUID       `json:"group_grade_id"`
+	GroupID      *uuid.UUID      `json:"group_id,omitempty"`
+	GroupName    *string         `json:"group_name,omitempty"`
+	Score        decimal.Decimal `json:"score" jsonschema:"the group's score; the member's own is the grade's score"`
+	Adjustment   *AdjustmentView `json:"adjustment,omitempty" jsonschema:"how this member's score differs from the group's, and why; absent when it does not"`
 }
 
 // TotalOverride is what a person put in place of a total worked out. Who and
@@ -71,11 +84,16 @@ func viewGrade(g dbq.GetGradeFullRow) GradeView {
 	case g.PostedAt != nil:
 		state = "posted"
 	}
-	return GradeView{ID: g.ID, StudentMemberID: g.StudentMemberID, SubmissionID: g.SubmissionID, ComponentID: g.ComponentID,
+	v := GradeView{ID: g.ID, StudentMemberID: g.StudentMemberID, SubmissionID: g.SubmissionID, ComponentID: g.ComponentID,
 		AssignmentID: g.AssignmentID, Origin: g.Origin, Score: g.Score, Feedback: g.Feedback, Breakdown: g.Breakdown,
 		RubricVersionID: g.RubricVersionID, GraderMemberID: g.GraderMemberID, CreatedByActionID: g.CreatedByActionID,
 		State: state, PostedAt: g.PostedAt, SupersededBy: g.SupersededBy, CreatedAt: g.CreatedAt,
 		NoTotal: g.Origin == "computed" && voidTotal(g.Breakdown), Override: viewOverride(g)}
+	if g.GroupGradeID != nil {
+		v.Group = &GradeGroup{GroupGradeID: *g.GroupGradeID, GroupID: g.GroupID, GroupName: g.GroupName, Score: g.GroupScore.Decimal,
+			Adjustment: adjustmentOf(g.AdjustKind, g.AdjustPoints, g.AdjustReason, g.AdjustByMemberID).view()}
+	}
+	return v
 }
 
 func viewOverride(g dbq.GetGradeFullRow) *TotalOverride {
@@ -87,11 +105,20 @@ func viewOverride(g dbq.GetGradeFullRow) *TotalOverride {
 
 // forReader leaves out of a grade what only those who grade are told: who
 // overrode a total and why.
+//
+// A member reads their own adjustment, its reason included: it explains the
+// grade they were given. Who made it is for those who grade.
 func forReader(v GradeView, m *domain.Member) GradeView {
 	if v.Override != nil && !seesDrafts(m) {
 		o := *v.Override
 		o.Reason, o.ByMemberID = nil, nil
 		v.Override = &o
+	}
+	if v.Group != nil && v.Group.Adjustment != nil && !seesDrafts(m) {
+		gr, a := *v.Group, *v.Group.Adjustment
+		a.ByMemberID = nil
+		gr.Adjustment = &a
+		v.Group = &gr
 	}
 	return v
 }
@@ -151,9 +178,11 @@ type GradeIDIn struct {
 
 func gradeGet() tool.Tool {
 	return tool.Define(tool.Spec[GradeIDIn, GradeView]{
-		Name:        "grade.get",
-		Description: "One grade in full: score, feedback, per-criterion breakdown, the rubric version it was given against, and the action that made it.",
-		Kind:        tool.Read, Gate: readGrades,
+		Name: "grade.get",
+		Description: "One grade in full: score, feedback, per-criterion breakdown, the rubric version it was given against, " +
+			"and the action that made it. A member's grade from a group grade says the group's score and the member's own " +
+			"adjustment, and its feedback files include the group's.",
+		Kind: tool.Read, Gate: readGrades,
 		HTTP: tool.Route{Method: "GET", Pattern: "/v1/courses/{course_id}/grades/{grade_id}"},
 		Resolve: func(ctx context.Context, q dbq.Querier, in GradeIDIn) (tool.Target, error) {
 			g, err := q.GetGradeFull(ctx, dbq.GetGradeFullParams{ID: in.GradeID, CourseID: in.CourseID})
@@ -182,10 +211,23 @@ func gradeGet() tool.Tool {
 			}
 			v := forReader(viewGrade(g), rc.Member)
 			files, err := rc.Q.ListGradeDocuments(ctx, &g.ID)
+			if err != nil {
+				return v, err
+			}
 			for _, f := range files {
 				v.FeedbackFiles = append(v.FeedbackFiles, FileRef{DocumentID: f.ID, Title: f.Title})
 			}
-			return v, err
+			if g.GroupGradeID != nil {
+				// The group's shared feedback comes with each member's grade.
+				shared, err := rc.Q.ListGroupGradeDocuments(ctx, g.GroupGradeID)
+				if err != nil {
+					return v, err
+				}
+				for _, f := range shared {
+					v.FeedbackFiles = append(v.FeedbackFiles, FileRef{DocumentID: f.ID, Title: f.Title})
+				}
+			}
+			return v, nil
 		},
 	})
 }

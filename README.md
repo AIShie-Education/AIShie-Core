@@ -22,8 +22,9 @@ In place so far:
   session from a password or single sign-on) and the REST API, whose routes
   are generated from the tool registry;
 - the tool catalogue: actors, terms, departments, presets, courses, members,
-  the grading scheme, assignments, submissions, grades, documents, the
-  approval and review queues, and the event feed — all scope-filtered in SQL;
+  the grading scheme, assignments, group sets and their groups, submissions,
+  grades, documents, the approval and review queues, and the event feed — all
+  scope-filtered in SQL;
 - agents people own: registered by the person, brought into a course as their
   delegate, and never able to do more there than the person's own seat; given
   `member_manage`, one manages the course's members for the person, never the
@@ -66,6 +67,17 @@ In place so far:
   role, what graded work is worth and where it counts (its grades rescaled or
   kept, the totals following), a computed total overridden beside the number
   worked out, and final grades' treating ungraded work as zero undone;
+- group assignments (小組作業): a course's reusable group sets, their groups
+  formed by hand, by a random split that a seed deals the same way each
+  time, and by students signing themselves up to groups the teacher opened,
+  up to each group's capacity and until a deadline, every stay kept as
+  history; an assignment that names a set takes one piece of work from each
+  group, its draft written by the group's members together over revisions,
+  a stale edit refused, and handed in by any of them for the group's
+  members then; graded once for the group, each member given a grade from
+  it, adjusted where the grader says, by a score of their own or plus or
+  minus, with a reason the member reads; and no member of one group learns
+  anything of another's work or grades;
 - an assignment deleted for good by whoever writes assignments, once they
   have read what goes with it and confirmed it: its submissions, their files
   and its grades go, its instructions and rubric are left in the course as
@@ -97,7 +109,14 @@ does; once the runtime stops hosting the tutor, she asks it nothing more; anothe
 instructor's seat, is asked nothing in the site and works over MCP; the
 instructor shows a join link, through which a new student registers and a
 registered one joins, and which seats nobody once
-revoked; a student with no email registers through another with her student
+revoked; a group assignment goes from sign-up to posted grades: students
+sign up to the project teams the instructor opened, one finding a team full,
+and he places another by hand; a team writes its draft together over
+revisions, a stale edit refused, and hands it in for both; each team is
+graded once, a member adjusted with a reason, posted, and each member reads
+their own grade, the team's and their adjustment, and nothing of another's;
+and a random split by a seed deals the same pairs twice; a student with no
+email registers through another with her student
 number as her login ID and signs in with it, is given a temporary password by
 the instructor when she forgets hers, and sets her own before anything else,
 and the instructor cannot reset a TA's; the instructor deletes a quiz for
@@ -123,7 +142,8 @@ more.
 
 - background sweeps, run as the system actor and recorded like any other
   action: stale proposals cancelled, expired memberships removed, missing
-  submissions marked when a due date passes, the files of what was deleted
+  submissions marked when a due date passes (each group's, for a group
+  assignment), the files of what was deleted
   for good removed from the store, uploads that nothing came to point at
   removed. Every instance may run them; Postgres advisory locks see
   that one does.

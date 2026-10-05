@@ -42,11 +42,21 @@ type AssignmentView struct {
 	PointsPossible         decimal.Decimal `json:"points_possible"`
 	DueAt                  *time.Time      `json:"due_at,omitempty"`
 	PublishedAt            *time.Time      `json:"published_at,omitempty" jsonschema:"absent while students cannot see it yet"`
+	GroupSetID             *uuid.UUID      `json:"group_set_id,omitempty" jsonschema:"a group assignment's group set: each group of it hands one piece of work in"`
+	// MyGroup is assignment.get's, for a group assignment.
+	MyGroup *MyGroup `json:"my_group,omitempty" jsonschema:"assignment.get, on a group assignment: the caller's group in its set now (for a student's own agent, its student's), absent when in none"`
+}
+
+// MyGroup is the caller's group on a group assignment.
+type MyGroup struct {
+	GroupID uuid.UUID `json:"group_id"`
+	Name    string    `json:"name"`
 }
 
 func viewAssignment(a dbq.GetAssignmentInCourseRow) AssignmentView {
 	return AssignmentView{ID: a.ID, ComponentID: a.ComponentID, Title: a.Title, InstructionsDocumentID: a.InstructionsDocumentID,
-		RubricDocumentID: a.RubricDocumentID, PointsPossible: a.PointsPossible, DueAt: a.DueAt, PublishedAt: a.PublishedAt}
+		RubricDocumentID: a.RubricDocumentID, PointsPossible: a.PointsPossible, DueAt: a.DueAt, PublishedAt: a.PublishedAt,
+		GroupSetID: a.GroupSetID}
 }
 
 type AssignmentListIn struct {
@@ -84,7 +94,7 @@ func assignmentList() tool.Tool {
 			for _, r := range rows {
 				out.Assignments = append(out.Assignments, AssignmentView{ID: r.ID, ComponentID: r.ComponentID, Title: r.Title,
 					InstructionsDocumentID: r.InstructionsDocumentID, RubricDocumentID: r.RubricDocumentID,
-					PointsPossible: r.PointsPossible, DueAt: r.DueAt, PublishedAt: r.PublishedAt})
+					PointsPossible: r.PointsPossible, DueAt: r.DueAt, PublishedAt: r.PublishedAt, GroupSetID: r.GroupSetID})
 			}
 			if len(rows) > 0 && len(rows) == int(in.limit()) {
 				out.Next = &rows[len(rows)-1].ID
@@ -110,9 +120,10 @@ func assignmentTarget(ctx context.Context, q dbq.Querier, courseID, id uuid.UUID
 
 func assignmentGet() tool.Tool {
 	return tool.Define(tool.Spec[AssignmentIDIn, AssignmentView]{
-		Name:        "assignment.get",
-		Description: "One assignment: what it is worth, when it is due, and the documents holding its instructions and rubric.",
-		Kind:        tool.Read, Gate: tool.Gate{Perms: []domain.Perm{domain.PermDocumentRead}},
+		Name: "assignment.get",
+		Description: "One assignment: what it is worth, when it is due, and the documents holding its instructions and rubric. " +
+			"A group assignment names its group set, and the caller's group in it (my_group).",
+		Kind: tool.Read, Gate: tool.Gate{Perms: []domain.Perm{domain.PermDocumentRead}},
 		HTTP: tool.Route{Method: "GET", Pattern: "/v1/courses/{course_id}/assignments/{assignment_id}"},
 		Resolve: func(ctx context.Context, q dbq.Querier, in AssignmentIDIn) (tool.Target, error) {
 			return assignmentTarget(ctx, q, in.CourseID, in.AssignmentID)
@@ -126,7 +137,17 @@ func assignmentGet() tool.Tool {
 				// To this caller an unpublished assignment does not exist yet.
 				return AssignmentView{}, apperr.Missing("no such assignment in this course")
 			}
-			return viewAssignment(a), nil
+			v := viewAssignment(a)
+			if a.GroupSetID != nil {
+				mine, err := groupOf(ctx, rc.Q, *a.GroupSetID, selfOf(rc.Member))
+				if err != nil {
+					return v, err
+				}
+				if mine != nil {
+					v.MyGroup = &MyGroup{GroupID: mine.ID, Name: mine.Name}
+				}
+			}
+			return v, nil
 		},
 	})
 }
@@ -140,6 +161,7 @@ type AssignmentBody struct {
 	InstructionsDocumentID *uuid.UUID       `json:"instructions_document_id,omitempty" jsonschema:"a document of kind instructions, in this course"`
 	RubricDocumentID       *uuid.UUID       `json:"rubric_document_id,omitempty" jsonschema:"a document of kind rubric, in this course"`
 	DueAt                  *time.Time       `json:"due_at,omitempty"`
+	GroupSetID             *uuid.UUID       `json:"group_set_id,omitempty" jsonschema:"make it a group assignment of this group set of the course, not archived: each group of it hands one piece of work in. Changed only while it has no submission of any kind (assignment_has_work)"`
 }
 
 // check holds what is given to the rules of an assignment that need nothing
@@ -266,7 +288,31 @@ func (b AssignmentBody) applyTo(a *dbq.GetAssignmentInCourseRow) {
 	if b.DueAt != nil {
 		a.DueAt = b.DueAt
 	}
+	if b.GroupSetID != nil {
+		a.GroupSetID = b.GroupSetID
+	}
 }
+
+// checkGroupSet refuses a's naming set newly, before naming what it named:
+// a set of another course is not found, and an archived one is refused.
+func checkGroupSet(ctx context.Context, q dbq.Querier, courseID uuid.UUID, before, a dbq.GetAssignmentInCourseRow) error {
+	if a.GroupSetID == nil || sameID(a.GroupSetID, before.GroupSetID) {
+		return nil
+	}
+	set, err := loadSet(ctx, q, courseID, *a.GroupSetID)
+	if err != nil {
+		return err
+	}
+	if set.ArchivedAt != nil {
+		return errSetArchived()
+	}
+	return nil
+}
+
+// errAssignmentHasWork refuses changing which set an assignment names once
+// anyone has started on it.
+var errAssignmentHasWork = apperr.Precondition("the assignment has submissions — a draft, a hand-in, or a 'missing' row — so whether it is group work no longer changes").
+	With("reason", ReasonAssignmentHasWork)
 
 type AssignmentCreateIn struct {
 	tool.InCourse
@@ -277,7 +323,8 @@ func assignmentCreate() tool.Tool {
 	return tool.Define(tool.Spec[AssignmentCreateIn, IDOut]{
 		Name: "assignment.create",
 		Description: "Create an assignment. It starts unpublished: students do not see it, and cannot submit to it, until " +
-			"assignment.publish. title and points_possible are required.",
+			"assignment.publish. title and points_possible are required. Naming a group set (group_set_id) makes it a " +
+			"group assignment: each group of the set hands one piece of work in, graded once for the group.",
 		Kind: tool.Write, Gate: writeAssignments,
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/assignments"},
 		Check: func(in AssignmentCreateIn) error {
@@ -292,18 +339,24 @@ func assignmentCreate() tool.Tool {
 		Validate: func(ctx context.Context, q dbq.Querier, _ *domain.Member, _ time.Time, in AssignmentCreateIn) error {
 			a := dbq.GetAssignmentInCourseRow{CourseID: in.CourseID}
 			in.applyTo(&a)
+			if err := checkGroupSet(ctx, q, in.CourseID, dbq.GetAssignmentInCourseRow{}, a); err != nil {
+				return err
+			}
 			return checkAssignment(ctx, q, in.CourseID, dbq.GetAssignmentInCourseRow{}, a, false)
 		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in AssignmentCreateIn) (IDOut, error) {
 			a := dbq.GetAssignmentInCourseRow{ID: ids.New(), CourseID: in.CourseID}
 			in.applyTo(&a)
+			if err := checkGroupSet(ctx, ec.Q, in.CourseID, dbq.GetAssignmentInCourseRow{}, a); err != nil {
+				return IDOut{}, err
+			}
 			if err := checkAssignment(ctx, ec.Q, in.CourseID, dbq.GetAssignmentInCourseRow{}, a, true); err != nil {
 				return IDOut{}, err
 			}
 			if err := ec.Q.InsertAssignment(ctx, dbq.InsertAssignmentParams{
 				ID: a.ID, CourseID: a.CourseID, ComponentID: a.ComponentID, Title: a.Title,
 				InstructionsDocumentID: a.InstructionsDocumentID, RubricDocumentID: a.RubricDocumentID,
-				PointsPossible: a.PointsPossible, DueAt: a.DueAt, CreatedAt: ec.Now,
+				PointsPossible: a.PointsPossible, DueAt: a.DueAt, CreatedAt: ec.Now, GroupSetID: a.GroupSetID,
 			}); err != nil {
 				return IDOut{}, err
 			}
@@ -326,6 +379,7 @@ type AssignmentUpdateIn struct {
 	AssignmentBody
 	ClearDueAt     bool `json:"clear_due_at,omitempty"`
 	ClearComponent bool `json:"clear_component,omitempty" jsonschema:"take it out of the grade"`
+	ClearGroupSet  bool `json:"clear_group_set,omitempty" jsonschema:"make it individual work again; only while it has no submission of any kind (assignment_has_work)"`
 	// ExistingGrades says what becomes of the grades already entered when
 	// what the work is worth changes.
 	ExistingGrades *string `json:"existing_grades,omitempty" jsonschema:"rescale or keep_scores: what becomes of grades already entered when points_possible changes, required once any has been. rescale converts each score in proportion (45 of 50 becomes 90 of 100) in a new grade that replaces it, the old one kept; keep_scores leaves each score as it is, out of the new points. Either rewrites the totals it changes, and needs grade_submit and grade_post as well"`
@@ -348,7 +402,29 @@ func (in AssignmentUpdateIn) updated(a dbq.GetAssignmentInCourseRow) dbq.GetAssi
 	if in.ClearComponent {
 		a.ComponentID = nil
 	}
+	if in.ClearGroupSet {
+		a.GroupSetID = nil
+	}
 	return a
+}
+
+// changesGroupSet says whether in asks to change which set the assignment
+// names, as it stands before.
+func (in AssignmentUpdateIn) changesGroupSet(before dbq.GetAssignmentInCourseRow) bool {
+	return !sameID(in.updated(before).GroupSetID, before.GroupSetID)
+}
+
+// groupSetChangeable refuses changing which set id names once it has a
+// submission of any kind.
+func groupSetChangeable(ctx context.Context, q dbq.Querier, id uuid.UUID) error {
+	started, err := q.AssignmentHasSubmissions(ctx, id)
+	if err != nil {
+		return err
+	}
+	if started {
+		return errAssignmentHasWork
+	}
+	return nil
 }
 
 // movesInScheme reports whether a change is to what the work is worth or
@@ -364,10 +440,17 @@ func assignmentUpdate() tool.Tool {
 			"it: a change of points says what becomes of them (existing_grades: rescale or keep_scores), and needs " +
 			"grade_submit and grade_post as well; moving it to another component, or out of the grade, needs nothing more. " +
 			"Either rewrites, at once, the posted totals it changes, with history, and so must reach every student who has " +
-			"one, over the whole course. A grade proposed out of the old points is refused when it is approved.",
+			"one, over the whole course. A grade proposed out of the old points is refused when it is approved. Whether it " +
+			"is group work, and of which set (group_set_id, clear_group_set), changes only while nobody has started on it " +
+			"(assignment_has_work).",
 		Kind: tool.Write, Gate: writeAssignments,
-		HTTP:  tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/assignments/{assignment_id}"},
-		Check: func(in AssignmentUpdateIn) error { return in.check() },
+		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/assignments/{assignment_id}"},
+		Check: func(in AssignmentUpdateIn) error {
+			if in.GroupSetID != nil && in.ClearGroupSet {
+				return apperr.Invalid("give group_set_id or clear_group_set, not both")
+			}
+			return in.check()
+		},
 		Resolve: func(ctx context.Context, q dbq.Querier, in AssignmentUpdateIn) (tool.Target, error) {
 			t, err := assignmentTarget(ctx, q, in.CourseID, in.AssignmentID)
 			if err != nil {
@@ -406,6 +489,14 @@ func assignmentUpdate() tool.Tool {
 				return err
 			}
 			a := in.updated(before)
+			if in.changesGroupSet(before) {
+				if err := groupSetChangeable(ctx, q, a.ID); err != nil {
+					return err
+				}
+				if err := checkGroupSet(ctx, q, in.CourseID, before, a); err != nil {
+					return err
+				}
+			}
 			if points, _ := movesInScheme(before, a); points {
 				graded, err := q.ListLiveEnteredGradeScoresOfAssignment(ctx, a.ID)
 				if err != nil {
@@ -418,6 +509,14 @@ func assignmentUpdate() tool.Tool {
 					scores := make([]gradeScore, len(graded))
 					for i, g := range graded {
 						scores[i] = gradeScore{id: g.ID, score: g.Score}
+					}
+					// A group's score is carried with its members'.
+					groups, err := q.ListLiveGroupGradesOfAssignment(ctx, a.ID)
+					if err != nil {
+						return err
+					}
+					for _, gg := range groups {
+						scores = append(scores, gradeScore{id: gg.ID, score: gg.Score})
 					}
 					if err := rebaseRefusal(scores, before.PointsPossible, a.PointsPossible, *in.ExistingGrades); err != nil {
 						return err
@@ -434,11 +533,32 @@ func assignmentUpdate() tool.Tool {
 			// locked before checkAssignment takes the component-tree lock,
 			// and lockAssignment says why that order is safe. Nobody enters
 			// a grade for it meanwhile: grade.submit holds the row FOR SHARE.
-			before, err := lockAssignment(ctx, ec.Q, in.CourseID, in.AssignmentID)
+			var before dbq.GetAssignmentInCourseRow
+			var err error
+			if in.GroupSetID != nil || in.ClearGroupSet {
+				// Which set it names changes under the assignment FOR UPDATE,
+				// as unpublishing it is checked: work being started holds the
+				// key share this waits for, or waits for this and is read
+				// against what it leaves.
+				var locked dbq.LockAssignmentForGroupSetRow
+				locked, err = ec.Q.LockAssignmentForGroupSet(ctx, dbq.LockAssignmentForGroupSetParams{ID: in.AssignmentID, CourseID: in.CourseID})
+				before = dbq.GetAssignmentInCourseRow(locked)
+			} else {
+				before, err = lockAssignment(ctx, ec.Q, in.CourseID, in.AssignmentID)
+			}
 			if err != nil {
-				return SchemeChangeOut{}, err
+				return SchemeChangeOut{}, goneIfNoRows(ctx, ec.Q, in.CourseID, in.AssignmentID, err)
+			}
+			setChanges := in.changesGroupSet(before)
+			if setChanges {
+				if err := groupSetChangeable(ctx, ec.Q, before.ID); err != nil {
+					return SchemeChangeOut{}, err
+				}
 			}
 			a := in.updated(before)
+			if err := checkGroupSet(ctx, ec.Q, in.CourseID, before, a); err != nil {
+				return SchemeChangeOut{}, err
+			}
 			points, place := movesInScheme(before, a)
 			var graded []dbq.LockLiveEnteredGradesOfAssignmentRow
 			if points || place {
@@ -468,8 +588,16 @@ func assignmentUpdate() tool.Tool {
 			}); err != nil {
 				return SchemeChangeOut{}, err
 			}
+			if setChanges {
+				if err := ec.Q.SetAssignmentGroupSet(ctx, dbq.SetAssignmentGroupSetParams{ID: a.ID, GroupSetID: a.GroupSetID}); err != nil {
+					return SchemeChangeOut{}, err
+				}
+			}
 			out := SchemeChangeOut{OK: true}
 			payload := map[string]any{"due_at_changed": !sameTime(a.DueAt, before.DueAt)}
+			if setChanges {
+				payload["group_set_changed"] = true
+			}
 			if len(graded) > 0 {
 				if points {
 					if out.Rescaled, err = rebase(ctx, ec, in.CourseID, &a.ID, graded, before.PointsPossible, a.PointsPossible, *in.ExistingGrades); err != nil {

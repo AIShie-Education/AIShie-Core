@@ -109,17 +109,34 @@ func courseLevel(kind string) bool {
 	return kind == kindMaterial || kind == kindInstructions || kind == kindRubric
 }
 
-// ownerScope is whose an owned document is, for steps 4 and 5.
-func ownerScope(d dbq.GetDocumentWithOwnerRow) authz.Target {
+// ownerScope is whose an owned document is, for steps 4 and 5. A group's
+// submitted file is its work's, any of whose students reaches it, as the
+// work is reached (workScope); a group grade's feedback file is its work's
+// too: any of its students for reading it, which is held further to their
+// grade from it being posted (feedbackWithheld), and every one of them for
+// writing it, as grading the work is.
+func ownerScope(ctx context.Context, q dbq.Querier, d dbq.GetDocumentWithOwnerRow, write bool) (authz.Target, error) {
 	switch {
 	case d.SubmissionStudent != nil:
-		return authz.Target{StudentMemberIDs: []uuid.UUID{*d.SubmissionStudent}, AssignmentIDs: []uuid.UUID{*d.SubmissionAssignment}}
+		return authz.Target{StudentMemberIDs: []uuid.UUID{*d.SubmissionStudent}, AssignmentIDs: []uuid.UUID{*d.SubmissionAssignment}}, nil
+	case d.SubmissionGroup != nil:
+		students, err := workStudents(ctx, q, *d.SubmissionID)
+		return authz.Target{AnyStudents: true, AnyStudentMemberIDs: students, AssignmentIDs: []uuid.UUID{*d.SubmissionAssignment}}, err
+	case d.GroupGradeSubmission != nil:
+		students, err := workStudents(ctx, q, *d.GroupGradeSubmission)
+		t := authz.Target{AssignmentIDs: []uuid.UUID{*d.GroupGradeAssignment}}
+		if write {
+			t.StudentMemberIDs = students
+		} else {
+			t.AnyStudents, t.AnyStudentMemberIDs = true, students
+		}
+		return t, err
 	case d.GradeStudent != nil && d.GradeAssignment != nil:
-		return authz.Target{StudentMemberIDs: []uuid.UUID{*d.GradeStudent}, AssignmentIDs: []uuid.UUID{*d.GradeAssignment}}
+		return authz.Target{StudentMemberIDs: []uuid.UUID{*d.GradeStudent}, AssignmentIDs: []uuid.UUID{*d.GradeAssignment}}, nil
 	case d.GradeStudent != nil:
-		return authz.Target{StudentMemberIDs: []uuid.UUID{*d.GradeStudent}, SpansAssignments: true}
+		return authz.Target{StudentMemberIDs: []uuid.UUID{*d.GradeStudent}, SpansAssignments: true}, nil
 	}
-	return authz.Target{}
+	return authz.Target{}, nil
 }
 
 func loadDocument(ctx context.Context, q dbq.Querier, courseID, id uuid.UUID) (dbq.GetDocumentWithOwnerRow, error) {
@@ -135,9 +152,24 @@ func documentTarget(ctx context.Context, q dbq.Querier, courseID, id uuid.UUID, 
 	if err != nil {
 		return tool.Target{}, err
 	}
-	t := tool.Target{CourseID: courseID, Type: "document", ID: &id, Scope: ownerScope(d), Perms: []domain.Perm{perm(d.Kind)}}
-	if d.Kind == kindFeedback && d.GradePostedAt != nil && perm(kindFeedback) == domain.PermGradeSubmit {
-		t.Perms = feedbackWritePerms(true)
+	write := perm(kindFeedback) == domain.PermGradeSubmit
+	scope, err := ownerScope(ctx, q, d, write)
+	if err != nil {
+		return tool.Target{}, err
+	}
+	t := tool.Target{CourseID: courseID, Type: "document", ID: &id, Scope: scope, Perms: []domain.Perm{perm(d.Kind)}}
+	if d.Kind == kindFeedback && write {
+		posted := d.GradePostedAt != nil
+		if d.GroupGradeID != nil {
+			// A group grade's feedback is a release once any grade given
+			// from it is posted.
+			if posted, err = q.GroupGradeHasPostedGrade(ctx, d.GroupGradeID); err != nil {
+				return tool.Target{}, err
+			}
+		}
+		if posted {
+			t.Perms = feedbackWritePerms(true)
+		}
 	}
 	return t, nil
 }
@@ -577,7 +609,8 @@ type DocumentCreateIn struct {
 	Kind         string     `json:"kind" jsonschema:"material, instructions, rubric, submission or feedback"`
 	Title        string     `json:"title"`
 	SubmissionID *uuid.UUID `json:"submission_id,omitempty" jsonschema:"required for kind submission: the draft this file belongs to"`
-	GradeID      *uuid.UUID `json:"grade_id,omitempty" jsonschema:"required for kind feedback: the grade this file belongs to"`
+	GradeID      *uuid.UUID `json:"grade_id,omitempty" jsonschema:"for kind feedback: the grade this file belongs to; or group_grade_id"`
+	GroupGradeID *uuid.UUID `json:"group_grade_id,omitempty" jsonschema:"for kind feedback on a group's work: the group grade this file belongs to, the group's shared feedback, which each member reads once their grade from it is posted"`
 	SortOrder    int32      `json:"sort_order,omitempty"`
 	Content
 }
@@ -611,11 +644,11 @@ func documentCreate(d Deps) tool.Tool {
 			t := tool.Target{CourseID: in.CourseID, Type: "document", Perms: []domain.Perm{writePerm(in.Kind)}}
 			switch {
 			case courseLevel(in.Kind):
-				if in.SubmissionID != nil || in.GradeID != nil {
+				if in.SubmissionID != nil || in.GradeID != nil || in.GroupGradeID != nil {
 					return t, apperr.Invalid("%s does not belong to a submission or a grade", in.Kind)
 				}
 			case in.Kind == kindSubmission:
-				if in.SubmissionID == nil || in.GradeID != nil {
+				if in.SubmissionID == nil || in.GradeID != nil || in.GroupGradeID != nil {
 					return t, apperr.Invalid("a submission file needs submission_id, and only that")
 				}
 				owner, err := submissionTarget(ctx, q, in.CourseID, *in.SubmissionID)
@@ -623,6 +656,31 @@ func documentCreate(d Deps) tool.Tool {
 					return t, err
 				}
 				t.Scope = owner.Scope
+			case in.Kind == kindFeedback && in.GroupGradeID != nil:
+				if in.GradeID != nil || in.SubmissionID != nil {
+					return t, apperr.Invalid("a feedback file needs grade_id or group_grade_id, and only one of them")
+				}
+				gg, err := q.GetGroupGrade(ctx, dbq.GetGroupGradeParams{ID: *in.GroupGradeID, CourseID: in.CourseID})
+				if errors.Is(err, pgx.ErrNoRows) {
+					return t, apperr.Missing("no such group grade in this course")
+				}
+				if err != nil {
+					return t, err
+				}
+				posted, err := q.GroupGradeHasPostedGrade(ctx, &gg.ID)
+				if err != nil {
+					return t, err
+				}
+				// Every member, as grading the work reaches them.
+				s, err := q.GetSubmissionInCourse(ctx, dbq.GetSubmissionInCourseParams{ID: gg.SubmissionID, CourseID: in.CourseID})
+				if err != nil {
+					return t, err
+				}
+				t.Perms = feedbackWritePerms(posted)
+				t.Scope, err = everyStudentScope(ctx, q, s)
+				if err != nil {
+					return t, err
+				}
 			case in.Kind == kindFeedback:
 				if in.GradeID == nil || in.SubmissionID != nil {
 					return t, apperr.Invalid("a feedback file needs grade_id, and only that")
@@ -659,6 +717,12 @@ func documentCreate(d Deps) tool.Tool {
 					return errFileNotToADraft(s.State)
 				}
 			case kindFeedback:
+				if in.GroupGradeID != nil {
+					if err := groupGradeLive(ctx, q, in.CourseID, *in.GroupGradeID); err != nil {
+						return err
+					}
+					break
+				}
 				g, err := q.GetGradeFull(ctx, dbq.GetGradeFullParams{ID: *in.GradeID, CourseID: in.CourseID})
 				if err != nil {
 					return workGone(err)
@@ -675,22 +739,50 @@ func documentCreate(d Deps) tool.Tool {
 		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in DocumentCreateIn) (DocumentCreateOut, error) {
 			ev := events.Event{Type: EventDocumentCreated, CourseID: &in.CourseID, SubjectType: "document", Payload: map[string]any{"kind": in.Kind}}
+			var fanOut []uuid.UUID
 			switch in.Kind {
 			case kindSubmission:
 				// The freeze trigger guards the submission row, not the files
 				// beside it. Once handed in, nothing more may be added. The
 				// state is read under the row's lock, the one the hand-in
 				// takes: a file that comes while the draft is being handed in
-				// waits for it, and then finds it handed in.
-				s, err := ec.Q.GetSubmissionFullForUpdate(ctx, dbq.GetSubmissionFullForUpdateParams{ID: *in.SubmissionID, CourseID: in.CourseID})
+				// waits for it, and then finds it handed in. A group's draft
+				// is held with its group, as the hand-in holds it, and takes
+				// no file from a member moved out of it meanwhile.
+				s, err := holdDraft(ctx, ec, in.CourseID, *in.SubmissionID)
 				if err != nil {
-					return DocumentCreateOut{}, workGone(err)
+					return DocumentCreateOut{}, err
 				}
 				if s.State != stateDraft {
 					return DocumentCreateOut{}, errFileNotToADraft(s.State)
 				}
-				ev.Type, ev.StudentMemberID, ev.AssignmentID = EventSubmissionFileAdded, &s.StudentMemberID, &s.AssignmentID
+				ev.Type, ev.StudentMemberID, ev.AssignmentID = EventSubmissionFileAdded, s.StudentMemberID, &s.AssignmentID
+				if s.GroupID != nil {
+					if fanOut, err = workStudents(ctx, ec.Q, s.ID); err != nil {
+						return DocumentCreateOut{}, err
+					}
+					ev.Payload["group_id"] = *s.GroupID
+				}
 			case kindFeedback:
+				if in.GroupGradeID != nil {
+					if err := groupGradeLive(ctx, ec.Q, in.CourseID, *in.GroupGradeID); err != nil {
+						return DocumentCreateOut{}, err
+					}
+					gg, err := ec.Q.GetGroupGrade(ctx, dbq.GetGroupGradeParams{ID: *in.GroupGradeID, CourseID: in.CourseID})
+					if err != nil {
+						return DocumentCreateOut{}, workGone(err)
+					}
+					s, err := ec.Q.GetSubmissionInCourse(ctx, dbq.GetSubmissionInCourseParams{ID: gg.SubmissionID, CourseID: in.CourseID})
+					if err != nil {
+						return DocumentCreateOut{}, workGone(err)
+					}
+					if fanOut, err = workStudents(ctx, ec.Q, s.ID); err != nil {
+						return DocumentCreateOut{}, err
+					}
+					ev.Type, ev.AssignmentID = EventFeedbackFileAdded, &s.AssignmentID
+					ev.Payload["group_grade_id"] = gg.ID
+					break
+				}
 				g, err := ec.Q.GetGradeFull(ctx, dbq.GetGradeFullParams{ID: *in.GradeID, CourseID: in.CourseID})
 				if err != nil {
 					return DocumentCreateOut{}, workGone(err)
@@ -706,7 +798,8 @@ func documentCreate(d Deps) tool.Tool {
 
 			out := DocumentCreateOut{DocumentID: ids.New()}
 			if err := ec.Q.InsertDocument(ctx, dbq.InsertDocumentParams{ID: out.DocumentID, CourseID: in.CourseID, Kind: in.Kind,
-				Title: in.Title, SubmissionID: in.SubmissionID, GradeID: in.GradeID, SortOrder: in.SortOrder, CreatedAt: ec.Now}); err != nil {
+				Title: in.Title, SubmissionID: in.SubmissionID, GradeID: in.GradeID, GroupGradeID: in.GroupGradeID,
+				SortOrder: in.SortOrder, CreatedAt: ec.Now}); err != nil {
 				return DocumentCreateOut{}, err
 			}
 			if !in.empty() {
@@ -723,6 +816,11 @@ func documentCreate(d Deps) tool.Tool {
 				}
 			}
 			ev.SubjectID = &out.DocumentID
+			if fanOut != nil {
+				// A group's work's file: under each of its students.
+				emitToStudents(ec, fanOut, ev)
+				return out, nil
+			}
 			return out, emitDocumentEvent(ctx, ec, in.Kind, ev)
 		},
 	})
@@ -737,6 +835,23 @@ func errFileNotToADraft(state string) *apperr.Error {
 // errFeedbackToAReplacedGrade refuses a feedback file for a grade that has
 // been replaced.
 var errFeedbackToAReplacedGrade = apperr.Conflicts("that grade has been replaced; attach feedback to the grade that replaced it")
+
+// groupGradeLive refuses feedback to a group grade of the course that no live
+// grade is given from: one regraded since, the history of the one that
+// replaced it.
+func groupGradeLive(ctx context.Context, q dbq.Querier, courseID, id uuid.UUID) error {
+	if _, err := q.GetGroupGrade(ctx, dbq.GetGroupGradeParams{ID: id, CourseID: courseID}); err != nil {
+		return workGone(err)
+	}
+	live, err := q.GroupGradeIsLive(ctx, &id)
+	if err != nil {
+		return err
+	}
+	if !live {
+		return errFeedbackToAReplacedGrade
+	}
+	return nil
+}
 
 // ---------------------------------------------------------------------------
 // document.add_version, publish, archive
@@ -956,7 +1071,7 @@ func documentArchive() tool.Tool {
 			if err != nil {
 				return err
 			}
-			if err := draftOnly(ctx, q, in.CourseID, doc, false); err != nil {
+			if err := draftOnly(ctx, q, in.CourseID, doc); err != nil {
 				return err
 			}
 			if doc.Status == "archived" {
@@ -1003,11 +1118,26 @@ func emitFileEvent(ctx context.Context, ec *tool.ExecCtx, courseID uuid.UUID, do
 	}
 	payload["kind"] = doc.Kind
 	ev := events.Event{Type: courseType, CourseID: &courseID, SubjectType: "document", SubjectID: &doc.ID, Payload: payload}
-	switch doc.Kind {
-	case kindSubmission:
+	var work *uuid.UUID // a group's work, whose students are each told
+	switch {
+	case doc.Kind == kindSubmission && doc.SubmissionGroup != nil:
+		ev.Type, ev.AssignmentID, work = submissionType, doc.SubmissionAssignment, doc.SubmissionID
+		payload["group_id"] = *doc.SubmissionGroup
+	case doc.Kind == kindSubmission:
 		ev.Type, ev.StudentMemberID, ev.AssignmentID = submissionType, doc.SubmissionStudent, doc.SubmissionAssignment
-	case kindFeedback:
+	case doc.Kind == kindFeedback && doc.GroupGradeID != nil:
+		ev.Type, ev.AssignmentID, work = feedbackType, doc.GroupGradeAssignment, doc.GroupGradeSubmission
+		payload["group_grade_id"] = *doc.GroupGradeID
+	case doc.Kind == kindFeedback:
 		ev.Type, ev.StudentMemberID, ev.AssignmentID = feedbackType, doc.GradeStudent, doc.GradeAssignment
+	}
+	if work != nil {
+		students, err := workStudents(ctx, ec.Q, *work)
+		if err != nil {
+			return err
+		}
+		emitToStudents(ec, students, ev)
+		return nil
 	}
 	return emitDocumentEvent(ctx, ec, doc.Kind, ev)
 }
@@ -1022,26 +1152,31 @@ var (
 
 // handedIn refuses a change to a submitted file once its submission has
 // been handed in: its files are frozen with it. The state is read under the
-// submission's lock, the one the hand-in takes, as document.create reads it.
+// submission's lock, the one the hand-in takes, as document.create reads it;
+// a group's draft is held with its group, and refused to a member moved out
+// of it meanwhile (holdDraft).
 func handedIn(ctx context.Context, ec *tool.ExecCtx, courseID uuid.UUID, doc dbq.GetDocumentWithOwnerRow) error {
-	return draftOnly(ctx, ec.Q, courseID, doc, true)
-}
-
-// draftOnly is handedIn, read under the submission's lock when lock says so,
-// and without it otherwise: for a tool's Validate, which asks it before a
-// proposal is queued, and whose tool asks it again, locked, as it is carried
-// out.
-func draftOnly(ctx context.Context, q dbq.Querier, courseID uuid.UUID, doc dbq.GetDocumentWithOwnerRow, lock bool) error {
 	if doc.SubmissionID == nil {
 		return nil
 	}
-	var s dbq.Submission
-	var err error
-	if lock {
-		s, err = q.GetSubmissionFullForUpdate(ctx, dbq.GetSubmissionFullForUpdateParams{ID: *doc.SubmissionID, CourseID: courseID})
-	} else {
-		s, err = q.GetSubmissionFull(ctx, dbq.GetSubmissionFullParams{ID: *doc.SubmissionID, CourseID: courseID})
+	s, err := holdDraft(ctx, ec, courseID, *doc.SubmissionID)
+	if err != nil {
+		return err
 	}
+	if s.State != stateDraft {
+		return errHandedIn
+	}
+	return nil
+}
+
+// draftOnly is handedIn, read without the locks: for a tool's Validate,
+// which asks it before a proposal is queued, and whose tool asks it again,
+// locked, as it is carried out.
+func draftOnly(ctx context.Context, q dbq.Querier, courseID uuid.UUID, doc dbq.GetDocumentWithOwnerRow) error {
+	if doc.SubmissionID == nil {
+		return nil
+	}
+	s, err := q.GetSubmissionFull(ctx, dbq.GetSubmissionFullParams{ID: *doc.SubmissionID, CourseID: courseID})
 	if err != nil {
 		return workGone(err)
 	}
@@ -1097,7 +1232,7 @@ func documentUpdate() tool.Tool {
 			if err != nil {
 				return err
 			}
-			return draftOnly(ctx, q, in.CourseID, doc, false)
+			return draftOnly(ctx, q, in.CourseID, doc)
 		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in DocumentUpdateIn) (DocumentChangeOut, error) {
 			doc, err := loadDocument(ctx, ec.Q, in.CourseID, in.DocumentID)
@@ -1158,7 +1293,7 @@ func documentUnarchive() tool.Tool {
 			if err != nil {
 				return err
 			}
-			if err := draftOnly(ctx, q, in.CourseID, doc, false); err != nil {
+			if err := draftOnly(ctx, q, in.CourseID, doc); err != nil {
 				return err
 			}
 			if doc.PurgedAt != nil {
@@ -1544,8 +1679,11 @@ func (r docReader) version(ctx context.Context, courseID, documentID uuid.UUID, 
 
 // versionOf is version, of a document already loaded.
 func (r docReader) versionOf(ctx context.Context, doc dbq.GetDocumentWithOwnerRow, versionID *uuid.UUID) (dbq.GetDocumentWithOwnerRow, *dbq.DocumentVersion, error) {
-	var err error
-	if feedbackWithheld(doc, r.m) {
+	withheld, err := feedbackWithheld(ctx, r.q, doc, r.m, r.scope)
+	if err != nil {
+		return doc, nil, err
+	}
+	if withheld {
 		return doc, nil, apperr.Missing("no such document in this course")
 	}
 	drafts := r.m.Perm(domain.PermDocumentReadDraft).Allowed()
@@ -1628,8 +1766,35 @@ type DocumentVersionsOut struct {
 // archiving it takes back a release (feedbackWritePerms), so like withdrawn
 // material it is withdrawn from anyone who kept the id. Those who grade still
 // read it. It holds for the version list as for the document.
-func feedbackWithheld(doc dbq.GetDocumentWithOwnerRow, m *domain.Member) bool {
-	return doc.Kind == kindFeedback && (doc.GradePostedAt == nil || doc.GradeSupersededBy != nil || doc.Status == "archived") && !seesDrafts(m)
+//
+// A group grade's feedback file is its members' to read while one of them
+// whom the reader reaches — the reader, for a student — has a live posted
+// grade given from it: what each member was given is theirs, and the shared
+// feedback comes with it.
+func feedbackWithheld(ctx context.Context, q dbq.Querier, doc dbq.GetDocumentWithOwnerRow, m *domain.Member, scope authz.ScopeFilter) (bool, error) {
+	if doc.Kind != kindFeedback || seesDrafts(m) {
+		return false, nil
+	}
+	if doc.GroupGradeID == nil {
+		return doc.GradePostedAt == nil || doc.GradeSupersededBy != nil || doc.Status == "archived", nil
+	}
+	if doc.Status == "archived" {
+		return true, nil
+	}
+	posted, err := q.StudentsPostedFromGroupGrade(ctx, doc.GroupGradeID)
+	if err != nil || len(posted) == 0 {
+		return true, err
+	}
+	in, err := reached(ctx, q, scope, posted)
+	if err != nil {
+		return true, err
+	}
+	for _, st := range posted {
+		if in[st] {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 // assignmentWithheld: an instructions or rubric document is withheld from a
@@ -1669,7 +1834,9 @@ func documentVersions() tool.Tool {
 			if err != nil {
 				return DocumentVersionsOut{}, err
 			}
-			if feedbackWithheld(doc, rc.Member) {
+			if withheld, err := feedbackWithheld(ctx, rc.Q, doc, rc.Member, rc.Scope); err != nil {
+				return DocumentVersionsOut{}, err
+			} else if withheld {
 				return DocumentVersionsOut{}, apperr.Missing("no such document in this course")
 			}
 			if courseLevel(doc.Kind) && doc.Kind != kindMaterial {

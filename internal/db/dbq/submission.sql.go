@@ -12,9 +12,60 @@ import (
 	"github.com/google/uuid"
 )
 
+const beginMemberCorrection = `-- name: BeginMemberCorrection :exec
+SELECT set_config('aishie.correcting_submission', ($1::uuid)::text, true)
+`
+
+// Says, for this transaction, that whose work the submission is is being
+// corrected (submission.set_members): submission_member_guarded lets its
+// rows go, which the grade's foreign key still holds while a grade names one.
+func (q *Queries) BeginMemberCorrection(ctx context.Context, submissionID uuid.UUID) error {
+	_, err := q.db.Exec(ctx, beginMemberCorrection, submissionID)
+	return err
+}
+
+const deleteAllSubmissionMembers = `-- name: DeleteAllSubmissionMembers :exec
+DELETE FROM submission_member WHERE submission_id = $1
+`
+
+// A group's 'missing' row taken over by late work, a draft again: whose it
+// is is its group's members now, until it is handed in.
+func (q *Queries) DeleteAllSubmissionMembers(ctx context.Context, submissionID uuid.UUID) error {
+	_, err := q.db.Exec(ctx, deleteAllSubmissionMembers, submissionID)
+	return err
+}
+
+const deleteSubmissionMembers = `-- name: DeleteSubmissionMembers :execrows
+DELETE FROM submission_member WHERE submission_id = $1 AND member_id = ANY($2::uuid[])
+`
+
+type DeleteSubmissionMembersParams struct {
+	SubmissionID uuid.UUID
+	MemberIds    []uuid.UUID
+}
+
+// Of a group's submission: its rows while it is a draft again, or those a
+// correction takes off (BeginMemberCorrection).
+func (q *Queries) DeleteSubmissionMembers(ctx context.Context, arg DeleteSubmissionMembersParams) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteSubmissionMembers, arg.SubmissionID, arg.MemberIds)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const endMemberCorrection = `-- name: EndMemberCorrection :exec
+SELECT set_config('aishie.correcting_submission', '', true)
+`
+
+func (q *Queries) EndMemberCorrection(ctx context.Context) error {
+	_, err := q.db.Exec(ctx, endMemberCorrection)
+	return err
+}
+
 const getSubmissionFull = `-- name: GetSubmissionFull :one
-SELECT id, assignment_id, course_id, student_member_id, attempt, body, instructions_version_id,
-       state, submitted_at, created_at
+SELECT id, assignment_id, course_id, student_member_id, group_id, attempt, body, instructions_version_id,
+       state, submitted_at, created_at, revision, revised_at, revised_by_member_id, submitted_by_member_id
 FROM submission WHERE id = $1 AND course_id = $2
 `
 
@@ -23,27 +74,50 @@ type GetSubmissionFullParams struct {
 	CourseID uuid.UUID
 }
 
-func (q *Queries) GetSubmissionFull(ctx context.Context, arg GetSubmissionFullParams) (Submission, error) {
+type GetSubmissionFullRow struct {
+	ID                    uuid.UUID
+	AssignmentID          uuid.UUID
+	CourseID              uuid.UUID
+	StudentMemberID       *uuid.UUID
+	GroupID               *uuid.UUID
+	Attempt               int32
+	Body                  *string
+	InstructionsVersionID *uuid.UUID
+	State                 string
+	SubmittedAt           *time.Time
+	CreatedAt             time.Time
+	Revision              int32
+	RevisedAt             *time.Time
+	RevisedByMemberID     *uuid.UUID
+	SubmittedByMemberID   *uuid.UUID
+}
+
+func (q *Queries) GetSubmissionFull(ctx context.Context, arg GetSubmissionFullParams) (GetSubmissionFullRow, error) {
 	row := q.db.QueryRow(ctx, getSubmissionFull, arg.ID, arg.CourseID)
-	var i Submission
+	var i GetSubmissionFullRow
 	err := row.Scan(
 		&i.ID,
 		&i.AssignmentID,
 		&i.CourseID,
 		&i.StudentMemberID,
+		&i.GroupID,
 		&i.Attempt,
 		&i.Body,
 		&i.InstructionsVersionID,
 		&i.State,
 		&i.SubmittedAt,
 		&i.CreatedAt,
+		&i.Revision,
+		&i.RevisedAt,
+		&i.RevisedByMemberID,
+		&i.SubmittedByMemberID,
 	)
 	return i, err
 }
 
 const getSubmissionFullForUpdate = `-- name: GetSubmissionFullForUpdate :one
-SELECT id, assignment_id, course_id, student_member_id, attempt, body, instructions_version_id,
-       state, submitted_at, created_at
+SELECT id, assignment_id, course_id, student_member_id, group_id, attempt, body, instructions_version_id,
+       state, submitted_at, created_at, revision, revised_at, revised_by_member_id, submitted_by_member_id
 FROM submission WHERE id = $1 AND course_id = $2
 FOR UPDATE
 `
@@ -53,52 +127,197 @@ type GetSubmissionFullForUpdateParams struct {
 	CourseID uuid.UUID
 }
 
+type GetSubmissionFullForUpdateRow struct {
+	ID                    uuid.UUID
+	AssignmentID          uuid.UUID
+	CourseID              uuid.UUID
+	StudentMemberID       *uuid.UUID
+	GroupID               *uuid.UUID
+	Attempt               int32
+	Body                  *string
+	InstructionsVersionID *uuid.UUID
+	State                 string
+	SubmittedAt           *time.Time
+	CreatedAt             time.Time
+	Revision              int32
+	RevisedAt             *time.Time
+	RevisedByMemberID     *uuid.UUID
+	SubmittedByMemberID   *uuid.UUID
+}
+
 // GetSubmissionFull, locked until the transaction ends, so that what
 // submission.submit checks is what it hands in: an edit to the draft, or a
 // file added to it or archived from it, meanwhile waits, and then finds it
 // handed in.
-func (q *Queries) GetSubmissionFullForUpdate(ctx context.Context, arg GetSubmissionFullForUpdateParams) (Submission, error) {
+func (q *Queries) GetSubmissionFullForUpdate(ctx context.Context, arg GetSubmissionFullForUpdateParams) (GetSubmissionFullForUpdateRow, error) {
 	row := q.db.QueryRow(ctx, getSubmissionFullForUpdate, arg.ID, arg.CourseID)
-	var i Submission
+	var i GetSubmissionFullForUpdateRow
 	err := row.Scan(
 		&i.ID,
 		&i.AssignmentID,
 		&i.CourseID,
 		&i.StudentMemberID,
+		&i.GroupID,
 		&i.Attempt,
 		&i.Body,
 		&i.InstructionsVersionID,
 		&i.State,
 		&i.SubmittedAt,
 		&i.CreatedAt,
+		&i.Revision,
+		&i.RevisedAt,
+		&i.RevisedByMemberID,
+		&i.SubmittedByMemberID,
 	)
 	return i, err
 }
 
+const gradeProposedOnSubmission = `-- name: GradeProposedOnSubmission :one
+SELECT EXISTS (
+    SELECT 1 FROM action
+    WHERE target_type = 'submission' AND target_id = $1 AND action_type IN ('grade.submit', 'grade.regrade', 'grade.adjust')
+      AND status = 'proposed'
+)
+`
+
+// A grade proposed for the submission and not yet decided.
+func (q *Queries) GradeProposedOnSubmission(ctx context.Context, targetID *uuid.UUID) (bool, error) {
+	row := q.db.QueryRow(ctx, gradeProposedOnSubmission, targetID)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
+}
+
+const groupsWithHandedInWork = `-- name: GroupsWithHandedInWork :many
+SELECT DISTINCT ON (s.group_id) s.group_id::uuid AS group_id, s.assignment_id, s.id AS submission_id, s.state
+FROM submission s
+WHERE s.group_id = ANY($1::uuid[]) AND s.state <> 'draft'
+ORDER BY s.group_id, s.assignment_id, s.attempt DESC
+`
+
+type GroupsWithHandedInWorkRow struct {
+	GroupID      uuid.UUID
+	AssignmentID uuid.UUID
+	SubmissionID uuid.UUID
+	State        string
+}
+
+// Of these groups, those with work handed in (not a draft) for an assignment
+// of their set, with it: sign-up never changes who did handed-in work.
+func (q *Queries) GroupsWithHandedInWork(ctx context.Context, groupIds []uuid.UUID) ([]GroupsWithHandedInWorkRow, error) {
+	rows, err := q.db.Query(ctx, groupsWithHandedInWork, groupIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []GroupsWithHandedInWorkRow
+	for rows.Next() {
+		var i GroupsWithHandedInWorkRow
+		if err := rows.Scan(
+			&i.GroupID,
+			&i.AssignmentID,
+			&i.SubmissionID,
+			&i.State,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const insertGroupSubmission = `-- name: InsertGroupSubmission :exec
+INSERT INTO submission (id, assignment_id, course_id, group_id, attempt, body, state, created_at)
+VALUES ($1, $2, $3, $7::uuid, $4, $5, 'draft', $6)
+`
+
+type InsertGroupSubmissionParams struct {
+	ID           uuid.UUID
+	AssignmentID uuid.UUID
+	CourseID     uuid.UUID
+	Attempt      int32
+	Body         *string
+	CreatedAt    time.Time
+	GroupID      uuid.UUID
+}
+
+// A group's draft: whose work it is is the group's members now, until it is
+// handed in (submission_students).
+func (q *Queries) InsertGroupSubmission(ctx context.Context, arg InsertGroupSubmissionParams) error {
+	_, err := q.db.Exec(ctx, insertGroupSubmission,
+		arg.ID,
+		arg.AssignmentID,
+		arg.CourseID,
+		arg.Attempt,
+		arg.Body,
+		arg.CreatedAt,
+		arg.GroupID,
+	)
+	return err
+}
+
 const insertSubmission = `-- name: InsertSubmission :exec
 INSERT INTO submission (id, assignment_id, course_id, student_member_id, attempt, body, state, created_at)
-VALUES ($1, $2, $3, $4, $5, $6, 'draft', $7)
+VALUES ($1, $2, $3, $7::uuid, $4, $5, 'draft', $6)
 `
 
 type InsertSubmissionParams struct {
 	ID              uuid.UUID
 	AssignmentID    uuid.UUID
 	CourseID        uuid.UUID
-	StudentMemberID uuid.UUID
 	Attempt         int32
 	Body            *string
 	CreatedAt       time.Time
+	StudentMemberID uuid.UUID
 }
 
+// A student's draft. Its row of submission_member, its student, is written
+// with it by the database (submission_member_own).
 func (q *Queries) InsertSubmission(ctx context.Context, arg InsertSubmissionParams) error {
 	_, err := q.db.Exec(ctx, insertSubmission,
 		arg.ID,
 		arg.AssignmentID,
 		arg.CourseID,
-		arg.StudentMemberID,
 		arg.Attempt,
 		arg.Body,
 		arg.CreatedAt,
+		arg.StudentMemberID,
+	)
+	return err
+}
+
+const insertSubmissionMembers = `-- name: InsertSubmissionMembers :exec
+INSERT INTO submission_member (submission_id, member_id, course_id, assignment_id, added_at, added_how, added_by_member_id)
+SELECT $1::uuid, x, $2::uuid, $3::uuid, $4::timestamptz,
+       $5::text, $6::uuid
+FROM unnest($7::uuid[]) AS x
+`
+
+type InsertSubmissionMembersParams struct {
+	SubmissionID    uuid.UUID
+	CourseID        uuid.UUID
+	AssignmentID    uuid.UUID
+	AddedAt         time.Time
+	AddedHow        string
+	AddedByMemberID *uuid.UUID
+	MemberIds       []uuid.UUID
+}
+
+// Rows of whose work a group's submission is, as it was handed in, recorded
+// missing or corrected. course_id, assignment_id and group_id are the
+// submission's, which submission_member_guarded writes.
+func (q *Queries) InsertSubmissionMembers(ctx context.Context, arg InsertSubmissionMembersParams) error {
+	_, err := q.db.Exec(ctx, insertSubmissionMembers,
+		arg.SubmissionID,
+		arg.CourseID,
+		arg.AssignmentID,
+		arg.AddedAt,
+		arg.AddedHow,
+		arg.AddedByMemberID,
+		arg.MemberIds,
 	)
 	return err
 }
@@ -184,29 +403,301 @@ func (q *Queries) ListAssignmentRoster(ctx context.Context, arg ListAssignmentRo
 	return items, nil
 }
 
+const listGroupAssignmentRoster = `-- name: ListGroupAssignmentRoster :many
+SELECT m.id AS student_member_id, a.display_name, m.status AS member_status,
+       gm.group_id AS group_id,
+       p.id AS part_submission_id, p.attempt AS part_attempt, p.state AS part_state, p.submitted_at AS part_submitted_at,
+       p.group_id AS part_group_id,
+       d.id AS draft_submission_id, d.attempt AS draft_attempt
+FROM course_member m
+JOIN actor a ON a.id = m.actor_id
+LEFT JOIN group_membership gm ON gm.set_id = $1 AND gm.member_id = m.id AND gm.left_at IS NULL
+LEFT JOIN submission p ON p.id = (
+    SELECT z.id
+    FROM submission_member x JOIN submission z ON z.id = x.submission_id
+    WHERE x.assignment_id = $2 AND x.member_id = m.id
+    ORDER BY z.attempt DESC LIMIT 1)
+LEFT JOIN submission d ON d.id = (
+    SELECT z.id
+    FROM submission z
+    WHERE z.assignment_id = $2 AND z.group_id = gm.group_id AND z.state = 'draft'
+    ORDER BY z.attempt DESC LIMIT 1)
+WHERE m.course_id = $3 AND m.role = 'student' AND m.status <> 'removed'
+  AND m.id > $4
+  AND ($5::bool OR EXISTS (
+        SELECT 1 FROM member_student_scope y WHERE y.member_id = $6 AND y.student_member_id = m.id))
+  AND ($7::bool OR EXISTS (
+        SELECT 1 FROM member_student_scope py WHERE py.member_id = $8 AND py.student_member_id = m.id))
+ORDER BY m.id
+LIMIT $9
+`
+
+type ListGroupAssignmentRosterParams struct {
+	SetID               uuid.UUID
+	AssignmentID        uuid.UUID
+	CourseID            uuid.UUID
+	After               uuid.UUID
+	StudentAll          bool
+	MemberID            uuid.UUID
+	PrincipalStudentAll bool
+	PrincipalID         uuid.UUID
+	MaxRows             int32
+}
+
+type ListGroupAssignmentRosterRow struct {
+	StudentMemberID   uuid.UUID
+	DisplayName       string
+	MemberStatus      string
+	GroupID           *uuid.UUID
+	PartSubmissionID  *uuid.UUID
+	PartAttempt       *int32
+	PartState         *string
+	PartSubmittedAt   *time.Time
+	PartGroupID       *uuid.UUID
+	DraftSubmissionID *uuid.UUID
+	DraftAttempt      *int32
+}
+
+// ListAssignmentRoster for a group assignment: each student with their
+// group in its set now, if any; the latest attempt of the work they are part
+// of (a group's handed in or recorded missing, which names them); and their
+// group's open draft, if it has one.
+func (q *Queries) ListGroupAssignmentRoster(ctx context.Context, arg ListGroupAssignmentRosterParams) ([]ListGroupAssignmentRosterRow, error) {
+	rows, err := q.db.Query(ctx, listGroupAssignmentRoster,
+		arg.SetID,
+		arg.AssignmentID,
+		arg.CourseID,
+		arg.After,
+		arg.StudentAll,
+		arg.MemberID,
+		arg.PrincipalStudentAll,
+		arg.PrincipalID,
+		arg.MaxRows,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListGroupAssignmentRosterRow
+	for rows.Next() {
+		var i ListGroupAssignmentRosterRow
+		if err := rows.Scan(
+			&i.StudentMemberID,
+			&i.DisplayName,
+			&i.MemberStatus,
+			&i.GroupID,
+			&i.PartSubmissionID,
+			&i.PartAttempt,
+			&i.PartState,
+			&i.PartSubmittedAt,
+			&i.PartGroupID,
+			&i.DraftSubmissionID,
+			&i.DraftAttempt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listGroupSubmissionsOf = `-- name: ListGroupSubmissionsOf :many
+SELECT id, attempt, state FROM submission
+WHERE assignment_id = $1 AND group_id = $2::uuid
+ORDER BY attempt DESC
+`
+
+type ListGroupSubmissionsOfParams struct {
+	AssignmentID uuid.UUID
+	GroupID      uuid.UUID
+}
+
+type ListGroupSubmissionsOfRow struct {
+	ID      uuid.UUID
+	Attempt int32
+	State   string
+}
+
+// LockGroupSubmissionsOf, not locked.
+func (q *Queries) ListGroupSubmissionsOf(ctx context.Context, arg ListGroupSubmissionsOfParams) ([]ListGroupSubmissionsOfRow, error) {
+	rows, err := q.db.Query(ctx, listGroupSubmissionsOf, arg.AssignmentID, arg.GroupID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListGroupSubmissionsOfRow
+	for rows.Next() {
+		var i ListGroupSubmissionsOfRow
+		if err := rows.Scan(&i.ID, &i.Attempt, &i.State); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listGroupsWithLatestWork = `-- name: ListGroupsWithLatestWork :many
+SELECT g.id, g.name, s.id AS submission_id, s.attempt, s.state, s.submitted_at, s.submitted_by_member_id
+FROM course_group g
+LEFT JOIN submission s ON s.id = (
+    SELECT z.id
+    FROM submission z
+    WHERE z.assignment_id = $1 AND z.group_id = g.id
+      AND ($2::bool OR EXISTS (
+            SELECT 1 FROM submission_students(z.id) AS st(member_id)
+            JOIN member_student_scope y ON y.student_member_id = st.member_id
+            WHERE y.member_id = $3))
+      AND ($4::bool OR EXISTS (
+            SELECT 1 FROM submission_students(z.id) AS st(member_id)
+            JOIN member_student_scope py ON py.student_member_id = st.member_id
+            WHERE py.member_id = $5))
+    ORDER BY z.attempt DESC LIMIT 1)
+WHERE g.set_id = $6 AND g.archived_at IS NULL
+ORDER BY g.created_at, g.id
+`
+
+type ListGroupsWithLatestWorkParams struct {
+	AssignmentID        uuid.UUID
+	StudentAll          bool
+	MemberID            uuid.UUID
+	PrincipalStudentAll bool
+	PrincipalID         uuid.UUID
+	SetID               uuid.UUID
+}
+
+type ListGroupsWithLatestWorkRow struct {
+	ID                  uuid.UUID
+	Name                string
+	SubmissionID        *uuid.UUID
+	Attempt             *int32
+	State               *string
+	SubmittedAt         *time.Time
+	SubmittedByMemberID *uuid.UUID
+}
+
+// The set's groups not archived, each with its latest attempt at the
+// assignment that the reader may read, if any, the oldest group first: one
+// of whose students (submission_students) the reader's student scope
+// reaches, and their principal's, as authorize() reaches a group's work. A
+// member is shown the group's draft and the attempts they are part of, not
+// one handed in before they joined.
+func (q *Queries) ListGroupsWithLatestWork(ctx context.Context, arg ListGroupsWithLatestWorkParams) ([]ListGroupsWithLatestWorkRow, error) {
+	rows, err := q.db.Query(ctx, listGroupsWithLatestWork,
+		arg.AssignmentID,
+		arg.StudentAll,
+		arg.MemberID,
+		arg.PrincipalStudentAll,
+		arg.PrincipalID,
+		arg.SetID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListGroupsWithLatestWorkRow
+	for rows.Next() {
+		var i ListGroupsWithLatestWorkRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.SubmissionID,
+			&i.Attempt,
+			&i.State,
+			&i.SubmittedAt,
+			&i.SubmittedByMemberID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listSubmissionMembers = `-- name: ListSubmissionMembers :many
+SELECT x.member_id, a.display_name, x.added_at, x.added_how, x.added_by_member_id
+FROM submission_member x
+JOIN course_member m ON m.id = x.member_id
+JOIN actor a ON a.id = m.actor_id
+WHERE x.submission_id = $1
+ORDER BY a.display_name, x.member_id
+`
+
+type ListSubmissionMembersRow struct {
+	MemberID        uuid.UUID
+	DisplayName     string
+	AddedAt         time.Time
+	AddedHow        string
+	AddedByMemberID *uuid.UUID
+}
+
+// Whose work a submission is, as its rows say, with their names and how each
+// came to be part of it.
+func (q *Queries) ListSubmissionMembers(ctx context.Context, submissionID uuid.UUID) ([]ListSubmissionMembersRow, error) {
+	rows, err := q.db.Query(ctx, listSubmissionMembers, submissionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListSubmissionMembersRow
+	for rows.Next() {
+		var i ListSubmissionMembersRow
+		if err := rows.Scan(
+			&i.MemberID,
+			&i.DisplayName,
+			&i.AddedAt,
+			&i.AddedHow,
+			&i.AddedByMemberID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listSubmissions = `-- name: ListSubmissions :many
-SELECT s.id, s.assignment_id, s.course_id, s.student_member_id, s.attempt, s.state, s.submitted_at, s.created_at
+SELECT s.id, s.assignment_id, s.course_id, s.student_member_id, s.group_id, g.name AS group_name, s.attempt, s.state,
+       s.submitted_at, s.created_at, s.revision, s.revised_at, s.revised_by_member_id, s.submitted_by_member_id
 FROM submission s
+LEFT JOIN course_group g ON g.id = s.group_id
 WHERE s.course_id = $1 AND s.id > $2
   AND ($3::uuid IS NULL OR s.assignment_id = $3)
-  AND ($4::uuid IS NULL OR s.student_member_id = $4)
-  AND ($5::bool OR EXISTS (
-        SELECT 1 FROM member_student_scope x WHERE x.member_id = $6 AND x.student_member_id = s.student_member_id))
-  AND ($7::bool OR EXISTS (
-        SELECT 1 FROM member_assignment_scope y WHERE y.member_id = $6 AND y.assignment_id = s.assignment_id))
-  -- A delegate's principal's scope, the same way; "all" for any other seat.
+  AND ($4::uuid IS NULL OR s.group_id = $4)
+  AND ($5::uuid IS NULL OR $5::uuid IN (SELECT submission_students(s.id)))
+  AND ($6::bool OR EXISTS (
+        SELECT 1 FROM submission_students(s.id) st(member_id)
+        JOIN member_student_scope x ON x.student_member_id = st.member_id
+        WHERE x.member_id = $7))
   AND ($8::bool OR EXISTS (
-        SELECT 1 FROM member_student_scope px WHERE px.member_id = $9 AND px.student_member_id = s.student_member_id))
-  AND ($10::bool OR EXISTS (
-        SELECT 1 FROM member_assignment_scope py WHERE py.member_id = $9 AND py.assignment_id = s.assignment_id))
+        SELECT 1 FROM member_assignment_scope y WHERE y.member_id = $7 AND y.assignment_id = s.assignment_id))
+  -- A delegate's principal's scope, the same way; "all" for any other seat.
+  AND ($9::bool OR EXISTS (
+        SELECT 1 FROM submission_students(s.id) pt(member_id)
+        JOIN member_student_scope px ON px.student_member_id = pt.member_id
+        WHERE px.member_id = $10))
+  AND ($11::bool OR EXISTS (
+        SELECT 1 FROM member_assignment_scope py WHERE py.member_id = $10 AND py.assignment_id = s.assignment_id))
 ORDER BY s.id
-LIMIT $11
+LIMIT $12
 `
 
 type ListSubmissionsParams struct {
 	CourseID               uuid.UUID
 	After                  uuid.UUID
 	AssignmentID           *uuid.UUID
+	GroupID                *uuid.UUID
 	StudentMemberID        *uuid.UUID
 	StudentAll             bool
 	MemberID               uuid.UUID
@@ -218,21 +709,32 @@ type ListSubmissionsParams struct {
 }
 
 type ListSubmissionsRow struct {
-	ID              uuid.UUID
-	AssignmentID    uuid.UUID
-	CourseID        uuid.UUID
-	StudentMemberID uuid.UUID
-	Attempt         int32
-	State           string
-	SubmittedAt     *time.Time
-	CreatedAt       time.Time
+	ID                  uuid.UUID
+	AssignmentID        uuid.UUID
+	CourseID            uuid.UUID
+	StudentMemberID     *uuid.UUID
+	GroupID             *uuid.UUID
+	GroupName           *string
+	Attempt             int32
+	State               string
+	SubmittedAt         *time.Time
+	CreatedAt           time.Time
+	Revision            int32
+	RevisedAt           *time.Time
+	RevisedByMemberID   *uuid.UUID
+	SubmittedByMemberID *uuid.UUID
 }
 
+// Scope in SQL: a submission is within it when the seat reaches one of its
+// students (submission_students), and, for a delegate, its principal one of
+// them too. student_member_id finds the work a student is part of: their
+// own, or a group's, which for a group's draft is its members now.
 func (q *Queries) ListSubmissions(ctx context.Context, arg ListSubmissionsParams) ([]ListSubmissionsRow, error) {
 	rows, err := q.db.Query(ctx, listSubmissions,
 		arg.CourseID,
 		arg.After,
 		arg.AssignmentID,
+		arg.GroupID,
 		arg.StudentMemberID,
 		arg.StudentAll,
 		arg.MemberID,
@@ -254,10 +756,16 @@ func (q *Queries) ListSubmissions(ctx context.Context, arg ListSubmissionsParams
 			&i.AssignmentID,
 			&i.CourseID,
 			&i.StudentMemberID,
+			&i.GroupID,
+			&i.GroupName,
 			&i.Attempt,
 			&i.State,
 			&i.SubmittedAt,
 			&i.CreatedAt,
+			&i.Revision,
+			&i.RevisedAt,
+			&i.RevisedByMemberID,
+			&i.SubmittedByMemberID,
 		); err != nil {
 			return nil, err
 		}
@@ -271,7 +779,7 @@ func (q *Queries) ListSubmissions(ctx context.Context, arg ListSubmissionsParams
 
 const listSubmissionsOf = `-- name: ListSubmissionsOf :many
 SELECT id, attempt, state FROM submission
-WHERE assignment_id = $1 AND student_member_id = $2
+WHERE assignment_id = $1 AND student_member_id = $2::uuid
 ORDER BY attempt DESC
 `
 
@@ -309,9 +817,48 @@ func (q *Queries) ListSubmissionsOf(ctx context.Context, arg ListSubmissionsOfPa
 	return items, nil
 }
 
+const lockGroupSubmissionsOf = `-- name: LockGroupSubmissionsOf :many
+SELECT id, attempt, state FROM submission
+WHERE assignment_id = $1 AND group_id = $2::uuid
+ORDER BY attempt DESC
+FOR UPDATE
+`
+
+type LockGroupSubmissionsOfParams struct {
+	AssignmentID uuid.UUID
+	GroupID      uuid.UUID
+}
+
+type LockGroupSubmissionsOfRow struct {
+	ID      uuid.UUID
+	Attempt int32
+	State   string
+}
+
+// All of one group's attempts at one assignment, locked, newest first.
+func (q *Queries) LockGroupSubmissionsOf(ctx context.Context, arg LockGroupSubmissionsOfParams) ([]LockGroupSubmissionsOfRow, error) {
+	rows, err := q.db.Query(ctx, lockGroupSubmissionsOf, arg.AssignmentID, arg.GroupID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []LockGroupSubmissionsOfRow
+	for rows.Next() {
+		var i LockGroupSubmissionsOfRow
+		if err := rows.Scan(&i.ID, &i.Attempt, &i.State); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const lockSubmissionsOf = `-- name: LockSubmissionsOf :many
 SELECT id, attempt, state FROM submission
-WHERE assignment_id = $1 AND student_member_id = $2
+WHERE assignment_id = $1 AND student_member_id = $2::uuid
 ORDER BY attempt DESC
 FOR UPDATE
 `
@@ -338,6 +885,123 @@ func (q *Queries) LockSubmissionsOf(ctx context.Context, arg LockSubmissionsOfPa
 	for rows.Next() {
 		var i LockSubmissionsOfRow
 		if err := rows.Scan(&i.ID, &i.Attempt, &i.State); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const lockWorkMembersOfAssignment = `-- name: LockWorkMembersOfAssignment :exec
+
+SELECT pg_advisory_xact_lock(1095324503, hashtext(($1::uuid)::text))
+`
+
+// Whose work a submission is ---------------------------------------------------
+// Every write of whose work a group's submission is takes it — a hand-in, a
+// 'missing' record, a correction, the due sweep — so that one student comes
+// to be part of one group's work for an assignment: 1095324503 is "AISW".
+func (q *Queries) LockWorkMembersOfAssignment(ctx context.Context, assignmentID uuid.UUID) error {
+	_, err := q.db.Exec(ctx, lockWorkMembersOfAssignment, assignmentID)
+	return err
+}
+
+const memberGradedOnSubmission = `-- name: MemberGradedOnSubmission :many
+SELECT DISTINCT g.student_member_id FROM grade g
+WHERE g.submission_id = $1 AND g.student_member_id = ANY($2::uuid[])
+ORDER BY 1
+`
+
+type MemberGradedOnSubmissionParams struct {
+	SubmissionID *uuid.UUID
+	MemberIds    []uuid.UUID
+}
+
+// Of these students, those a grade on the submission names, any state.
+func (q *Queries) MemberGradedOnSubmission(ctx context.Context, arg MemberGradedOnSubmissionParams) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, memberGradedOnSubmission, arg.SubmissionID, arg.MemberIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []uuid.UUID
+	for rows.Next() {
+		var student_member_id uuid.UUID
+		if err := rows.Scan(&student_member_id); err != nil {
+			return nil, err
+		}
+		items = append(items, student_member_id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const namesOfMembers = `-- name: NamesOfMembers :many
+SELECT m.id, a.display_name FROM course_member m JOIN actor a ON a.id = m.actor_id
+WHERE m.id = ANY($1::uuid[]) ORDER BY a.display_name, m.id
+`
+
+type NamesOfMembersRow struct {
+	ID          uuid.UUID
+	DisplayName string
+}
+
+func (q *Queries) NamesOfMembers(ctx context.Context, ids []uuid.UUID) ([]NamesOfMembersRow, error) {
+	rows, err := q.db.Query(ctx, namesOfMembers, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []NamesOfMembersRow
+	for rows.Next() {
+		var i NamesOfMembersRow
+		if err := rows.Scan(&i.ID, &i.DisplayName); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const otherWorkNaming = `-- name: OtherWorkNaming :many
+SELECT DISTINCT ON (x.member_id) x.member_id, x.submission_id
+FROM submission_member x
+WHERE x.assignment_id = $1 AND x.member_id = ANY($2::uuid[])
+  AND x.group_id IS DISTINCT FROM $3::uuid
+ORDER BY x.member_id, x.submission_id
+`
+
+type OtherWorkNamingParams struct {
+	AssignmentID uuid.UUID
+	MemberIds    []uuid.UUID
+	GroupID      *uuid.UUID
+}
+
+type OtherWorkNamingRow struct {
+	MemberID     uuid.UUID
+	SubmissionID uuid.UUID
+}
+
+// Of these students, those another group's work for the assignment names,
+// with that work: a student is part of one group's work for an assignment.
+func (q *Queries) OtherWorkNaming(ctx context.Context, arg OtherWorkNamingParams) ([]OtherWorkNamingRow, error) {
+	rows, err := q.db.Query(ctx, otherWorkNaming, arg.AssignmentID, arg.MemberIds, arg.GroupID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []OtherWorkNamingRow
+	for rows.Next() {
+		var i OtherWorkNamingRow
+		if err := rows.Scan(&i.MemberID, &i.SubmissionID); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -381,9 +1045,35 @@ func (q *Queries) SetSubmissionLateness(ctx context.Context, arg SetSubmissionLa
 	return result.RowsAffected(), nil
 }
 
+const submissionStudents = `-- name: SubmissionStudents :many
+SELECT st.member_id::uuid AS member_id FROM submission_students($1::uuid) AS st(member_id) ORDER BY 1
+`
+
+// The students of a submission (submission_students): its student; a
+// group's draft's members now; a group's work's rows.
+func (q *Queries) SubmissionStudents(ctx context.Context, submissionID uuid.UUID) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, submissionStudents, submissionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []uuid.UUID
+	for rows.Next() {
+		var member_id uuid.UUID
+		if err := rows.Scan(&member_id); err != nil {
+			return nil, err
+		}
+		items = append(items, member_id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const submitSubmission = `-- name: SubmitSubmission :execrows
 UPDATE submission
-SET state = $2, submitted_at = $3, instructions_version_id = $4
+SET state = $2, submitted_at = $3, instructions_version_id = $4, submitted_by_member_id = $5
 WHERE id = $1 AND state = 'draft'
 `
 
@@ -392,6 +1082,7 @@ type SubmitSubmissionParams struct {
 	State                 string
 	SubmittedAt           *time.Time
 	InstructionsVersionID *uuid.UUID
+	SubmittedByMemberID   *uuid.UUID
 }
 
 func (q *Queries) SubmitSubmission(ctx context.Context, arg SubmitSubmissionParams) (int64, error) {
@@ -400,6 +1091,7 @@ func (q *Queries) SubmitSubmission(ctx context.Context, arg SubmitSubmissionPara
 		arg.State,
 		arg.SubmittedAt,
 		arg.InstructionsVersionID,
+		arg.SubmittedByMemberID,
 	)
 	if err != nil {
 		return 0, err
@@ -407,19 +1099,30 @@ func (q *Queries) SubmitSubmission(ctx context.Context, arg SubmitSubmissionPara
 	return result.RowsAffected(), nil
 }
 
-const updateSubmissionDraft = `-- name: UpdateSubmissionDraft :execrows
-UPDATE submission SET body = $2 WHERE id = $1 AND state = 'draft'
+const updateSubmissionDraft = `-- name: UpdateSubmissionDraft :one
+UPDATE submission SET body = $2, revised_by_member_id = $3, revised_at = $4
+WHERE id = $1 AND state = 'draft'
+RETURNING revision
 `
 
 type UpdateSubmissionDraftParams struct {
-	ID   uuid.UUID
-	Body *string
+	ID                uuid.UUID
+	Body              *string
+	RevisedByMemberID *uuid.UUID
+	RevisedAt         *time.Time
 }
 
-func (q *Queries) UpdateSubmissionDraft(ctx context.Context, arg UpdateSubmissionDraftParams) (int64, error) {
-	result, err := q.db.Exec(ctx, updateSubmissionDraft, arg.ID, arg.Body)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected(), nil
+// A draft's new text, written by whom and when. The database counts the
+// revision (submission_draft_revised); none comes back when it is no
+// longer a draft.
+func (q *Queries) UpdateSubmissionDraft(ctx context.Context, arg UpdateSubmissionDraftParams) (int32, error) {
+	row := q.db.QueryRow(ctx, updateSubmissionDraft,
+		arg.ID,
+		arg.Body,
+		arg.RevisedByMemberID,
+		arg.RevisedAt,
+	)
+	var revision int32
+	err := row.Scan(&revision)
+	return revision, err
 }

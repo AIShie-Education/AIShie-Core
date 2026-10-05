@@ -44,7 +44,14 @@
 # his may not; its brief stays in the course as it was, and the work's file
 # leaves the store at the next sweep.
 # Then he shows a join link: a new student registers through it, a registered one joins, and once he revokes it, it
-# seats nobody; his agents, without member_invite, make none. Then a student
+# seats nobody; his agents, without member_invite, make none. Then a group
+# assignment, from sign-up to posted grades: he opens a set of project teams
+# for sign-up, students sign up, one finding a team full, and he places one
+# by hand; a team writes its draft together over revisions, a stale edit
+# refused, and hands it in for both; each team is graded once, a member
+# adjusted with a reason, and posted, and each member reads their own grade,
+# the team's score and their adjustment, and nothing of another's; and a
+# random split by a seed deals the same pairs twice. Then a student
 # with no email registers through another link with her student number as
 # her login ID, and signs in with it; forgets her password, and he gives her
 # a temporary one; she signs in with that, is made to set her own before
@@ -1080,6 +1087,98 @@ for _ in $(seq 1 100); do [ "$(psql -X -At -d "$DB" -c 'SELECT count(*) FROM blo
 for k in $KEYS; do [ ! -e "$WORK/blobs/$k" ] || fail "$k is still in the store after the sweep"; done
 [ -f "$WORK/blobs/$BRIEF_KEY" ] || fail "the sweep took Quiz 1's brief's file, $BRIEF_KEY"
 echo "  Yuki's file left the store at the sweep; Quiz 1's brief's stayed"
+
+step "A group assignment, from sign-up to posted grades: Sato opens Project teams for sign-up; Yuki and Aoi sign up to Team 1, Hana finds it full and signs up to Team 2, and Sato places Ken there by hand"
+call 200 GET "$C/members?role=student" "$SATO"
+HANA_M=$(json "$WORK/body" '[x["id"] for x in d["result"]["members"] if x["display_name"] == "Hana"][0]')
+DEADLINE=$(python3 -c 'import datetime; print((datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=7)).isoformat())')
+call 200 POST "$C/group-sets" "$SATO" "{\"name\":\"Project teams\",\"description\":\"Teams of two for the term project\",\"signup_open\":true,\"signup_closes_at\":\"$DEADLINE\"}"
+TEAMS=$(json "$WORK/body" 'd["result"]["id"]')
+call 200 POST "$C/group-sets/$TEAMS/groups" "$SATO" '{"groups":[{"name":"Team 1","capacity":2},{"name":"Team 2","capacity":2}]}'
+TEAM1=$(json "$WORK/body" 'd["result"]["group_ids"][0]')
+TEAM2=$(json "$WORK/body" 'd["result"]["group_ids"][1]')
+call 200 GET "$C/group-sets" "$YUKI"
+[ "$(json "$WORK/body" 'd["result"]["sets"][0]["signup"]["joinable"], d["result"]["sets"][0].get("my_group_id")')" = "True None" ] ||
+  fail "the teams as Yuki reads them before signing up: $(cat "$WORK/body")"
+call 200 POST "$C/group-sets/$TEAMS/sign-up" "$YUKI" "{\"group_id\":\"$TEAM1\"}"
+call 200 POST "$C/group-sets/$TEAMS/sign-up" "$AOI" "{\"group_id\":\"$TEAM1\"}"
+call 422 POST "$C/group-sets/$TEAMS/sign-up" "$HANA" "{\"group_id\":\"$TEAM1\"}"
+[ "$(reason)" = group_full ] || fail "Hana signing up to a full team refused, but not as full: $(cat "$WORK/body")"
+call 200 POST "$C/group-sets/$TEAMS/sign-up" "$HANA" "{\"group_id\":\"$TEAM2\"}"
+call 200 POST "$C/group-sets/$TEAMS/members" "$SATO" "{\"placements\":[{\"student_member_id\":\"$KEN_M\",\"group_id\":\"$TEAM2\"}]}"
+[ "$(json "$WORK/body" 'len(d["result"]["moved"]), d["result"]["over_capacity"]')" = "1 []" ] || fail "Ken placed: $(cat "$WORK/body")"
+call 200 GET "$C/group-sets/$TEAMS" "$YUKI"
+[ "$(json "$WORK/body" '[sorted(m["display_name"] for m in g.get("members", [])) for g in d["result"]["groups"]]')" = "[['Aoi', 'Yuki'], []]" ] ||
+  fail "Yuki is shown other than her own team's members: $(cat "$WORK/body")"
+
+step "Sato makes the term project a group assignment of Project teams; Team 1 writes its draft together over revisions, a stale edit refused, and Aoi hands it in for both; Hana hands Team 2's in"
+call 200 POST "$C/assignments" "$SATO" "{\"title\":\"Term project\",\"points_possible\":100,\"component_id\":\"$BUCKET\",\"group_set_id\":\"$TEAMS\"}"
+PROJECT=$(json "$WORK/body" 'd["result"]["id"]')
+call 200 POST "$C/assignments/$PROJECT/publish" "$SATO"
+call 200 GET "$C/assignments/$PROJECT" "$YUKI"
+[ "$(json "$WORK/body" 'd["result"]["group_set_id"], d["result"]["my_group"]["name"]')" = "$TEAMS Team 1" ] || fail "the project as Yuki reads it: $(cat "$WORK/body")"
+call 200 POST "$C/submissions" "$YUKI" "{\"assignment_id\":\"$PROJECT\",\"body\":\"Outline\"}"
+T1_WORK=$(json "$WORK/body" 'd["result"]["submission_id"]')
+[ "$(json "$WORK/body" 'd["result"]["group_id"]')" = "$TEAM1" ] || fail "Yuki's work is not Team 1's: $(cat "$WORK/body")"
+call 400 POST "$C/submissions/$T1_WORK" "$AOI" '{"body":"Outline and method"}'
+[ "$(reason)" = base_revision_required ] || fail "an edit naming no revision: $(cat "$WORK/body")"
+call 200 POST "$C/submissions/$T1_WORK" "$AOI" '{"body":"Outline and method","base_revision":1}'
+[ "$(json "$WORK/body" 'd["result"]["revision"]')" = 2 ] || fail "Aoi's edit: $(cat "$WORK/body")"
+call 409 POST "$C/submissions/$T1_WORK" "$YUKI" '{"body":"Outline, revised","base_revision":1}'
+[ "$(json "$WORK/body" 'd["error"]["details"]["reason"], d["error"]["details"]["current_revision"], d["error"]["details"]["revised_by_member_id"]')" = "draft_changed 2 $AOI_M" ] ||
+  fail "Yuki's stale edit: $(cat "$WORK/body")"
+call 200 POST "$C/submissions/$T1_WORK" "$YUKI" '{"body":"Outline, method and results","base_revision":2}'
+printf '%%PDF-1.7 team one report' >"$WORK/report.pdf"
+docfile application/pdf "$WORK/report.pdf" report.pdf "$AOI" submission
+call 200 POST "$C/documents" "$AOI" "{\"kind\":\"submission\",\"submission_id\":\"$T1_WORK\",\"title\":\"report.pdf\",\"files\":[{\"upload_token\":\"$UPLOAD\"}]}"
+call 200 GET "$C/submissions/$T1_WORK" "$YUKI"
+[ "$(json "$WORK/body" 'd["result"]["revision"], d["result"]["group_name"], len(d["result"]["files"]), sorted(m["display_name"] for m in d["result"]["members"])')" = \
+  "3 Team 1 1 ['Aoi', 'Yuki']" ] || fail "Team 1's draft as Yuki reads it: $(cat "$WORK/body")"
+call 403 GET "$C/submissions/$T1_WORK" "$HANA" # another team's work
+call 200 POST "$C/submissions/$T1_WORK/submit" "$AOI"
+[ "$(json "$WORK/body" 'sorted(d["result"]["members"]), d["result"]["left_out"]')" = "$(python3 -c "print(sorted(['$YUKI_M', '$AOI_M']), [])")" ] ||
+  fail "Team 1's hand-in: $(cat "$WORK/body")"
+call 200 POST "$C/submissions" "$HANA" "{\"assignment_id\":\"$PROJECT\",\"body\":\"Team 2's report\"}"
+T2_WORK=$(json "$WORK/body" 'd["result"]["submission_id"]')
+call 200 POST "$C/submissions/$T2_WORK/submit" "$HANA"
+call 200 GET "$C/assignments/$PROJECT/roster" "$SATO"
+[ "$(json "$WORK/body" 'sorted((g["name"], g["state"], len(g["members"])) for g in d["result"]["groups"])')" = "[('Team 1', 'submitted', 2), ('Team 2', 'submitted', 2)]" ] ||
+  fail "where the teams stand: $(cat "$WORK/body")"
+
+step "Sato grades each team once, Yuki adjusted with a reason, and posts; each member reads their own grade, the team's score and their adjustment; Sato adjusts Hana's posted grade alone"
+call 200 POST "$C/grades" "$SATO" "{\"submission_id\":\"$T1_WORK\",\"score\":90,\"feedback\":\"A careful method.\",\"adjustments\":[{\"student_member_id\":\"$YUKI_M\",\"kind\":\"delta\",\"points\":5,\"reason\":\"Presented the results\"}]}"
+[ "$(json "$WORK/body" 'sorted(float(g["score"]) for g in d["result"]["member_grades"])')" = "[90.0, 95.0]" ] || fail "Team 1's grades: $(cat "$WORK/body")"
+call 200 POST "$C/grades" "$SATO" "{\"submission_id\":\"$T2_WORK\",\"score\":70}"
+HANA_GRADE=$(json "$WORK/body" '[g["grade_id"] for g in d["result"]["member_grades"] if g["student_member_id"] == "'"$HANA_M"'"][0]')
+call 200 POST "$C/grades/post" "$SATO" "{\"assignment_id\":\"$PROJECT\"}"
+[ "$(json "$WORK/body" 'len(d["result"]["posted"])')" = 4 ] || fail "posted: $(cat "$WORK/body")"
+call 200 GET "$C/grades?assignment_id=$PROJECT" "$YUKI"
+[ "$(json "$WORK/body" '[(g["score"], g["group"]["score"], g["group"]["adjustment"]["reason"], "by_member_id" in g["group"]["adjustment"]) for g in d["result"]["grades"]]')" = \
+  "[(95, 90, 'Presented the results', False)]" ] || fail "Yuki's grade: $(cat "$WORK/body")"
+call 200 GET "$C/grades?assignment_id=$PROJECT" "$AOI"
+[ "$(json "$WORK/body" '[(g["score"], g["group"].get("adjustment")) for g in d["result"]["grades"]]')" = "[(90, None)]" ] || fail "Aoi's grade: $(cat "$WORK/body")"
+call 200 POST "$C/grades/$HANA_GRADE/adjust" "$SATO" '{"kind":"replace","points":75,"reason":"Wrote most of the report"}'
+[ "$(json "$WORK/body" 'd["result"]["score"], d["result"]["changed"]')" = "75 True" ] || fail "Hana adjusted: $(cat "$WORK/body")"
+call 200 GET "$C/events?since_seq=0&limit=500" "$AOI"
+[ "$(json "$WORK/body" 'sorted(set(e["type"] for e in d["result"]["events"] if e.get("student_member_id") and e["student_member_id"] != "'"$AOI_M"'"))')" = "[]" ] ||
+  fail "Aoi's feed tells her of another student: $(cat "$WORK/body")"
+[ "$(json "$WORK/body" 'sorted(set(e["type"] for e in d["result"]["events"] if e["type"] in ("group.member_added", "submission.submitted", "grade.posted") and e.get("assignment_id") in (None, "'"$PROJECT"'")))')" = \
+  "['grade.posted', 'group.member_added', 'submission.submitted']" ] || fail "Aoi's feed of her team: $(cat "$WORK/body")"
+
+step "Sato splits the class at random into lab pairs: the seed deals them, and the same seed in another set deals the same pairs"
+pairs() { # NAME → PAIRS, the pairs dealt
+  call 200 POST "$C/group-sets" "$SATO" "{\"name\":\"$1\"}"
+  local set
+  set=$(json "$WORK/body" 'd["result"]["id"]')
+  call 200 POST "$C/group-sets/$set/split" "$SATO" '{"by":"size","n":2,"from":"unassigned","seed":"e2e-pairs","name_prefix":"Pair "}'
+  [ "$(json "$WORK/body" 'd["result"]["seed"], len(d["result"]["created"]), d["result"]["kept"]')" = "e2e-pairs 2 []" ] || fail "the split: $(cat "$WORK/body")"
+  PAIRS=$(json "$WORK/body" 'sorted(sorted(p["student_member_id"] for p in d["result"]["placed"] if p["group_id"] == g["group_id"]) for g in d["result"]["created"])')
+}
+pairs 'Lab pairs'
+FIRST_PAIRS=$PAIRS
+pairs 'Lab pairs, again'
+[ "$FIRST_PAIRS" = "$PAIRS" ] || fail "the same seed dealt two ways: $FIRST_PAIRS and $PAIRS"
+echo "  four students in two pairs, the same way twice"
 
 step "Wei, who has no email, registers through a new link with her student number as her login ID, and signs in with it"
 call 200 POST "$C/join-links" "$SATO" '{}'

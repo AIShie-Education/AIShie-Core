@@ -354,6 +354,73 @@ func TestAPausedStudentIsMarkedMissing(t *testing.T) {
 	}
 }
 
+// On a group assignment the sweep records each group that has members and
+// no submission missing, for its members: not a student in no group, nor an
+// empty group. It runs under a key of its own, ending ":groups", which the
+// release before's pass over the assignment, under the plain key, does not
+// stand for.
+func TestGroupsAreRecordedMissingWhenTheirWorkIsDue(t *testing.T) {
+	f := setup(t, 3)
+	yuki, ken, third := f.Students[0], f.Students[1], f.Students[2]
+	call := func(name string, args m) pipeline.Outcome {
+		t.Helper()
+		args["course_id"] = f.Course
+		out := f.MustCall(f.Sato, name, args, "k-"+uuid.NewString())
+		if out.Status != domain.StatusExecuted {
+			t.Fatalf("%s: %+v", name, out)
+		}
+		return out
+	}
+	set := testkit.Result[tools.IDOut](t, call("group_set.create", m{"name": "Projects"})).ID
+	groups := testkit.Result[tools.GroupCreateOut](t, call("group.create", m{"set_id": set, "groups": []m{{"name": "Team A"}, {"name": "Team B"}}})).GroupIDs
+	call("group.set_members", m{"set_id": set, "placements": []m{
+		{"student_member_id": yuki.Member, "group_id": groups[0]}, {"student_member_id": ken.Member, "group_id": groups[0]}}})
+	due := f.now.Add(time.Hour)
+	call("assignment.update", m{"assignment_id": f.HW4, "group_set_id": set, "due_at": due})
+
+	// The release before swept it already, under the plain key, writing
+	// nothing: that does not stand for this release's sweep.
+	f.now = due.Add(time.Minute)
+	plain := "job:submission.mark_missing:" + f.HW4.String() + ":" + fmt.Sprint(due.Unix())
+	f.Exec(`INSERT INTO action (actor_id, course_id, action_type, target_type, target_id, payload_hash, idempotency_key, authz_result, status, executed_at, result)
+		VALUES ($1, $2, 'submission.mark_missing', 'assignment', $3, repeat('0', 64), $4, 'autonomous', 'executed', now(), '{"done": true, "missing": 0}')`,
+		f.system, f.Course, f.HW4, plain)
+	rep := f.sweep(t)
+	if rep.AssignmentsClosed != 1 || rep.SubmissionsMissing != 1 {
+		t.Fatalf("%+v, want HW4 closed and Team A recorded missing", rep)
+	}
+	if n := f.Count(`SELECT count(*) FROM action WHERE idempotency_key = $1`, plain+":groups"); n != 1 {
+		t.Fatalf("%d sweeps under the groups' key", n)
+	}
+	if n := f.Count(`SELECT count(*) FROM submission WHERE assignment_id = $1 AND group_id = $2 AND state = 'missing'`, f.HW4, groups[0]); n != 1 {
+		t.Fatal("Team A was not recorded missing")
+	}
+	if n := f.Count(`SELECT count(*) FROM submission WHERE assignment_id = $1 AND (group_id = $2 OR student_member_id IS NOT NULL)`, f.HW4, groups[1]); n != 0 {
+		t.Fatal("an empty group, or a student in none, was recorded missing")
+	}
+	if n := f.Count(`SELECT count(*) FROM submission_member WHERE assignment_id = $1 AND added_how = 'missing' AND member_id IN ($2, $3)`,
+		f.HW4, yuki.Member, ken.Member); n != 2 {
+		t.Fatalf("Team A's missing record is for %d of its members", n)
+	}
+	if n := f.Count(`SELECT count(*) FROM event WHERE type = 'submission.missing' AND assignment_id = $1`, f.HW4); n != 2 {
+		t.Fatalf("%d submission.missing events, want one for each of Team A's members", n)
+	}
+	if n := f.Count(`SELECT count(*) FROM submission WHERE assignment_id = $1 AND student_member_id = $2`, f.HW4, third.Member); n != 0 {
+		t.Fatal("a student in no group was recorded missing")
+	}
+	// Nothing is swept twice; late work takes the group's row over.
+	if rep := f.sweep(t); rep.AssignmentsClosed != 0 {
+		t.Fatalf("swept again: %+v", rep)
+	}
+	late := f.MustCall(yuki.Actor, "submission.create", m{"course_id": f.Course, "assignment_id": f.HW4, "body": "Sorry, late"}, "late")
+	if late.Status != domain.StatusExecuted {
+		t.Fatalf("Yuki's late work: %+v", late)
+	}
+	if n := f.Count(`SELECT count(*) FROM submission_member WHERE assignment_id = $1`, f.HW4); n != 0 {
+		t.Fatal("the row taken over is still whose it was missing for")
+	}
+}
+
 // An archived course refuses every write, the sweeps' as much as anyone's: a
 // seat that expires and a proposal that goes stale in one are left as they
 // are, and swept once the course is opened again.

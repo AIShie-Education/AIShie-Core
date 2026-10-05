@@ -40,7 +40,9 @@ course
  ├ course_join_link (a way in, as a student, for whoever holds its token)
  ├ grade_component (tree; root = course total)
  ├ document ── document_version ── document_version_text (its file, transcribed)
- ├ assignment ── submission
+ ├ group_set ── course_group ── group_membership (who was in which group when)
+ ├ assignment ── submission ── submission_member (whose work it is)
+ │                          └─ group_grade (a group's work, graded once)
  ├ assignment_deletion (an assignment deleted for good, and how much went with it)
  ├ action
  ├ grade
@@ -623,6 +625,11 @@ the nearest one, and the choice is recorded here so that it is a decision and no
 | Finding whom to seat by their whole email or login ID, or whom an actor id names (`member.lookup_actor`) | `perm_member_manage` | whoever seats members has to name them; it lists nobody |
 | Giving a student a temporary password (`member.reset_password`) | `perm_member_manage` at `autonomous`, and by a person | whoever seats the students gives one back the account they seated; never by proposal or under review, since the password is shown to whoever the call returns to, and never to an agent (§2.2, Resetting a student's password) |
 | Unpublishing an assignment nobody has started (`assignment.unpublish`) | `perm_assignment_write` | the undo of publishing it |
+| Forming groups (`group_set.create`, `.update`, `group.create`, `.update`, `.set_members`, `.split`) | `perm_assignment_write` | groups exist for group work and are set up by whoever sets it; a group grants nothing, so it is not `member_manage` (§2.5a) |
+| Signing oneself up to a group (`group.sign_up`) | `perm_submission_write`, scoped to the student | it is how a student comes to hand group work in, at their level for handing work in |
+| Reading group sets (`group_set.list`, `.get`) | `perm_document_read`; members' names with `perm_member_read`, within student scope, or one's own groupmates | the most basic permission a seated member holds; people who hand work in together know each other's names |
+| Correcting whose work a group's submission is (`submission.set_members`) | `perm_grade_submit` | as `set_lateness`: with whom a student handed work in is not theirs to declare |
+| Adjusting one member's grade from a group grade (`grade.adjust`) | `perm_grade_submit` for a draft; the lower of it and `perm_grade_post` for a posted grade | as entering a draft, and as a regrade (§2.7, A group's grade) |
 | Deleting an assignment for good, with its work, files and grades (`assignment.delete`), and counting first what would go (`assignment.delete_preview`) | `perm_assignment_write`, reaching every student whose work or total it changes; one that anyone has started on, by a person | whoever sets the work removes it, at their level for it; it takes students' work and rewrites their totals, as moving graded work out of the grade does; an agent deletes only what nobody has started on (§2.5, An assignment is deleted for good) |
 | Deciding, reviewing and reading one's own agent's actions (`action.decide`, `.review`, `.get`), and the queues of them (`action.list_proposed`, `.list_pending_review`) | `perm_action_decide`, or owning the agent | an owner decides and reviews their agent's action where they could have done it themselves (§2.6), which needs no `perm_action_decide`; without it they reach their own agents' actions alone, and anything else is denied as it is to anyone without it |
 | Taking back one's own proposal, or one's own agent's, while nobody has decided it (`action.withdraw`) | `perm_document_read` | the most basic permission a seated member holds; that the proposal is the caller's own, or their own agent's, is what decides, as `action.list_mine` shows only the caller's own |
@@ -1420,16 +1427,41 @@ Revoking the runtime's credential gives back what it had claimed, that claim not
 ```
 assignment(id, course_id→course, component_id null→grade_component, title,
            instructions_document_id null→document, rubric_document_id null→document,
-           points_possible, due_at null, published_at null, created_at,
+           points_possible, due_at null, published_at null, created_at, group_set_id null,
            unique(id, course_id))
+    composite FK (course_id, group_set_id) → group_set(course_id, id)
+    trigger: group_set_id changes only while no submission names it (assignment_group_set_fixed)
 
-submission(id, assignment_id, course_id, student_member_id, attempt = 1, body null,
-           instructions_version_id null→document_version,
+submission(id, assignment_id, course_id, student_member_id null, group_id null, attempt = 1,
+           body null, instructions_version_id null→document_version,
            state [draft|submitted|late|missing], submitted_at null, created_at,
+           revision = 1, revised_at null, revised_by_member_id null, submitted_by_member_id null,
            unique(assignment_id, student_member_id, attempt),
+           unique(assignment_id, group_id, attempt),
            unique(id, student_member_id))
     composite FK (assignment_id, course_id)     → assignment(id, course_id)
     composite FK (course_id, student_member_id) → course_member(course_id, id)
+    composite FKs (course_id, group_id) → course_group(course_id, id),
+                  (course_id, revised_by_member_id | submitted_by_member_id) → course_member
+    check: exactly one of student_member_id and group_id (submission_one_owner)
+    trigger: whose it is, its assignment and course never change (submission_owner_fixed);
+             a group's goes only to an assignment naming the group's set, a student's only to
+             one naming none, a student's 'missing' row for a group assignment passed over,
+             unwritten (submission_fits_assignment); a draft's body changed counts a revision
+             and dates it (submission_draft_revised)
+
+submission_member(submission_id→submission ON DELETE CASCADE, member_id, course_id,
+                  assignment_id, group_id null, added_at,
+                  added_how [own|hand_in|missing|corrected], added_by_member_id null,
+                  primary key (submission_id, member_id))
+    composite FKs (course_id, member_id | added_by_member_id) → course_member(course_id, id)
+    trigger (submission_member_guarded): course, assignment and group copied from the
+             submission; a student's submission's one row is its student, written with it by
+             the database (submission_member_own); a group's are written only once it is not
+             a draft, never for a student another group's work for the assignment names; a row
+             never changes; a group's goes while its submission is a draft again, by a
+             correction that says so, or with its assignment; a student's only with its
+             assignment
 
 assignment_deletion(assignment_id pk, course_id→course, title, was_published,
                     action_id unique→action, deleted_by_actor_id→actor, deleted_by_member_id,
@@ -1444,7 +1476,16 @@ blob_deletion(storage_key pk, course_id→course, queued_by_action_id→action, 
 
 `course_id` on `submission` is denormalised so the two composite keys make "the assignment and
 the submitting member belong to the same course" a database fact. That the member is a
-*student* is an application check.
+*student* is an application check. A submission is a student's (`student_member_id`) or, on a
+group assignment, a group's (`group_id`): A group's work, below.
+
+**Whose work a submission is** is `submission_member`, which every submission has: a student's
+own submission's one row is its student, written with it by the database whichever release
+writes it; a group's are its members as it was handed in or recorded missing, frozen then. Every
+grade on a submission is given to one of them (§2.7). The students of a submission
+(`submission_students()`) are its student, for a student's own; for a group's draft, the group's
+members now (`live_group_members()`, §2.5a); for a group's work handed in or missing, its rows.
+Every scope check and list filter about a submission, its files and its events goes through it.
 
 **Publishing can be taken back until anyone starts.** `assignment.unpublish` returns an assignment
 published by mistake to where it was, while it has no submission of any kind: a draft, a hand-in,
@@ -1459,6 +1500,102 @@ was asked for: `submitted_at`, lateness and the pinned instructions are as of th
 the draft as it was then, and is refused on approval if the draft has changed in the meantime,
 even by an edit that was waiting for approval ahead of it: a hand-in is to be proposed once any
 change to its draft that waits for approval has been decided.
+
+**A group's work.** An assignment that names a group set (`group_set_id`, §2.5a) is a group
+assignment: each group of the set hands one piece of work in per attempt, a submission owned by
+the group, and every rule of attempts, freezing, lateness, takeover and files holds of it as of
+a student's. Which set it names is given by `assignment.create` and `assignment.update`
+(`group_set_id`, `clear_group_set`), a set of the course not archived (`set_archived`), and
+changes only while the assignment has no submission of any kind, a draft or a `missing` row
+included (`assignment_has_work`): work already there belongs to a student or to a group, and
+changing the kind would leave it the other kind. `assignment.update` holds the assignment FOR
+UPDATE as it changes it, which every writer of a submission's key share waits for, and the
+database holds the rule whichever release writes (`assignment_group_set_fixed`,
+`submission_fits_assignment`). `assignment.get` says the caller's group in the set
+(`my_group`), or, for a student's own agent, its student's.
+
+- **Starting it.** `submission.create` on a group assignment starts the group's work: the group
+  named (`group_id`), or the group in the set of the student named, or of the caller. A student
+  in no group of the set is refused `no_group`, saying the set, whether its sign-up is open and
+  until when; the teacher's remedy is to place them (a group of one is a group). One open draft
+  per group (`errOpenDraft`, naming it). Late work takes the group's `missing` row over unless a
+  grade is entered or proposed for it, as a student's does: it is a draft again, and its member
+  rows go, written anew at the next hand-in. `group_id` on an individual assignment is refused
+  `not_a_group_assignment`. It takes the group FOR SHARE, as a hand-in does, and works out the
+  group, and whether the caller reaches its members, again under it: a student moved out while the
+  call was being made starts nothing in the group they left (`group_changed`, or
+  `student_out_of_scope` for a group named); a placement or a split that comes after finds the
+  work there (`group_has_work`, `kept`).
+- **Writing it together.** A group's draft is read and written by its members now: one who
+  leaves the group stops, one who joins starts. Each change of its text counts a revision
+  (`revision`, `revised_at`, `revised_by_member_id`), counted by the database
+  (`submission_draft_revised`), and an edit names the revision it was made over
+  (`submission.update_draft`'s `base_revision`, required on a group's draft,
+  `base_revision_required`): a stale one is refused `draft_changed`, saying the revision now,
+  when and by whom, so that nobody's text is silently lost and no lock is held across requests.
+  On a student's own draft it is optional. An edit, and a file added to the draft, archived,
+  renamed or brought back, hold the group FOR SHARE and then the submission, as a hand-in does,
+  and ask the caller's scope again of the group's members under them: a member moved out while
+  the call was being made writes nothing of the group's work (`student_out_of_scope`).
+- **Handing it in.** Any member hands it in. The hand-in takes, in order, the caller's seat, the
+  assignment KEY SHARE, the group FOR SHARE (so that a move of one of its members and a hand-in
+  are one after the other), the submission FOR UPDATE, and the assignment's work lock
+  (`pg_advisory_xact_lock(1095324503, hashtext(assignment_id))`, "AISW"), which every writer of a
+  group's work's members takes. It writes a row (`hand_in`) for each member of the group now,
+  leaving out, and naming in `left_out`, any whom another group's work for the assignment names
+  already: a student is part of one group's work for an assignment, so that the gradebook has one
+  piece of work per student per assignment, as before. `left_out` gives each such member's
+  `member_id`, which `members` leaving them out says already, and the other work's
+  `submission_id` only where the caller (for a proposal, the proposer) may read that work, as
+  `submission.get` reaches it (What each member sees): a member who hands in is not told which
+  work of another group names a member left out, nor its id, which, a UUIDv7, says when it was
+  made. The action's result keeps what the caller was told. A group with nobody to hand in for is
+  refused `group_empty`. It records who handed it in (`submitted_by_member_id`; for a proposal,
+  the proposer). A proposal of it records the group's members then, and approving it is refused
+  if they have changed (`members_changed`). Its caller's scope is asked again of the group's
+  members under these locks: a member moved out meanwhile hands nothing in
+  (`student_out_of_scope`).
+- **Attempts** are the group's, as a student's are. The gradebook takes, per student, the live
+  posted grade on the highest attempt that has one, unchanged: a student's grades on one
+  assignment are all on one group's attempts.
+- **Correcting whose work it is** (`submission.set_members`, gated by `perm_grade_submit` as
+  correcting lateness is): a student added to a group's work handed in or missing — the student
+  the teacher forgot to place gets the group's grade without the group handing in again, from
+  `grade.submit` while the group's grade is a draft and from `grade.regrade` once it is posted —
+  whom no other group's work for the assignment names (`part_of_other_work`); a member with no
+  grade entered or proposed on it taken off (`member_graded`; the grade's key holds it too); at
+  least one member stays (`group_empty`). It reaches every member before and after, and says
+  itself to the database (`aishie.correcting_submission`) so that the guard lets the rows go.
+- **Late and missing, per group.** Lateness is the hand-in's; `submission.set_lateness`
+  corrects it for the group, reaching every member. The due sweep gives each group of the set
+  with members and no submission row a `missing` row for its members then (`missing`), under
+  the work lock, leaving out any another group's work names; a group left with nobody gets none.
+  Its key for a group assignment ends `:groups`, so that the release before's pass over the
+  assignment, which writes nothing there, does not stand for it. `submission.record_missing`
+  does the same for one group (`group_id`); naming a student on a group assignment is refused
+  (`group_assignment`). A student in no group is recorded nothing; the roster says `no_group`.
+- **Leaving.** A member who leaves the group loses its draft and keeps what was handed in, and
+  their grade from it. One whose seat is removed: the draft goes on without them; their part
+  in work handed in, and their grades, stay.
+- **Files.** A group's submitted files are documents of its submission, as a student's: read by
+  whoever reads the work, written by any member while it is a draft, frozen once it is handed in.
+- **What each member sees.** `submission.get` and `.list` say a group's work's `group_id`,
+  `group_name` and `members` (names to the work's own members and to readers of the member list),
+  `submitted_by_member_id` and the draft's revision, and leave `student_member_id` out. A member
+  reads the group's draft and every attempt they are part of, and nothing else of the group's:
+  not attempts handed in before they joined, so that a student who switches groups does not read
+  the work of the group they came to. `submission.roster` gives each student their group and
+  the state of the work they are part of, or their group's draft, `no_group` for a student in
+  none, and, on its first page, each group of the set with a member the caller reaches, and where
+  its latest attempt stands of those the caller may read: one of whose students their scope
+  reaches, as for reading it, so that a member is shown the group's draft and the attempts they
+  are part of, and a group with none `not_started`.
+
+Scope reaches a group's work when it reaches **any** of its students, for reading and writing
+it (§3, `AnyStudentMemberIDs`): each member's own seat, listed for themselves, reaches the
+group's work, and a student's own agent what its student does. Grading it, correcting its
+lateness or its members, or recording it missing reaches **every** one of them, since what is
+done lands on each.
 
 **An assignment is deleted for good.** Whoever writes assignments (`perm_assignment_write`)
 deletes one, whatever has become of it: the assignment, every submission to it of every attempt
@@ -1478,6 +1615,13 @@ each telling its proposer by `action.cancelled` as any cancellation does; the po
 counted in are worked out again without it, as a change to the scheme works them out (§2.7); and
 what the action log holds of what was done to it is emptied (§2.6). A seat that was listed for it
 alone reaches no assignment from then on: it fails closed.
+
+A group assignment goes the same way: its groups' work is its submissions, whose each was
+(`submission_member`) goes with it, and so do the group grades given on them (§2.7) with their
+feedback files; its group set, groups and memberships are the course's and stay. A group's
+attempt counts once in `submissions`, each member's grade in `grades`, and a group grade's
+feedback files in `files`; the deletion reaches every member of every work and every member now
+of a group with a draft.
 
 It is two tools. `assignment.delete_preview` reads what would go, counted, naming no person —
 `submissions` (`handed_in`, `drafts`, `missing`), `grades` (`posted`), `files` (those handed in
@@ -1543,6 +1687,129 @@ made afterwards is (`deleted`), never with a fault: handing in a draft, grading,
 `events.Flush` finding an assignment it names gone (`ShareAssignments` says which it held). A
 proposal about it made while it was being deleted waits with no target, and is cancelled
 `target_gone` when anyone decides it.
+
+### 2.5a Groups
+
+```
+group_set(id, course_id→course, name, description null, signup_open = false,
+          signup_closes_at null, archived_at null, created_by_member_id, created_at, updated_at,
+          unique(course_id, id))
+    composite FK (course_id, created_by_member_id) → course_member(course_id, id)
+    unique(course_id, lower(name)) where archived_at is null
+    check: name 1..100 characters, trimmed, one line;  description ≤ 2000 characters
+    trigger: its course never changes; none is deleted (group_set_kept)
+
+course_group(id, course_id, set_id, name, capacity null, archived_at null,
+             created_by_member_id, created_at, unique(course_id, id), unique(set_id, id))
+    composite FKs (course_id, set_id) → group_set(course_id, id),
+                  (course_id, created_by_member_id) → course_member(course_id, id)
+    unique(set_id, lower(name)) where archived_at is null
+    check: name 1..100 characters, trimmed, one line;  capacity 1..500
+    trigger: its course and set never change; none is deleted (course_group_kept)
+
+group_membership(id, course_id, set_id, group_id, member_id,
+                 joined_at, joined_by_member_id, joined_how [assigned|split|signup],
+                 joined_action_id→action,
+                 left_at null, left_by_member_id null,
+                 left_how null [moved|unassigned|split|left|switched], left_action_id null→action)
+    composite FKs (set_id, group_id) → course_group(set_id, id),
+                  (course_id, set_id) → group_set(course_id, id),
+                  (course_id, member_id | joined_by_member_id | left_by_member_id) → course_member
+    unique(set_id, member_id) where left_at is null
+    check: the four left_ columns all set or none;  left_at ≥ joined_at
+    trigger: never deleted; only the left_ columns change, once (group_membership_kept)
+```
+
+A course keeps **group sets** (分組: project groups, lab groups), each holding **groups**; a group
+assignment names one set, and one set serves any number of assignments. `course_group`, not
+`group`, which is a reserved word. Sets and groups are archived, never deleted: an archived set
+is hidden from new assignments and its sign-up closed, and the assignments using it go on
+working; a group is archived only while nobody is in it (`group_not_empty`) and it has no work
+(`group_has_work`). Names are unique, whatever their case, among those not archived
+(`name_taken`).
+
+**Memberships are history.** One row for each stay of a student in a group: when, by whom, how
+(`assigned`, `split`, `signup`) and by which action it began, and when, by whom, how (`moved`,
+`unassigned`, `split`, `left`, `switched`) and by which action it ended; never deleted, and ended
+once. Moving a student is two rows, the old stay ended and a new one begun, in one action. A
+student is in at most one group of a set at a time.
+
+**Who counts as a group's member** is worked out as it is asked, never stored:
+`live_group_members(group_id)`, a stay not ended, of a seat whose roster role is student, not
+removed and not past its expiry. A paused student is still a member. Removing a seat or changing
+its role needs no second write, and the release before, which knows no groups, cannot leave a
+stale count. Reading the role here is reading the roster, as the due sweep does; nothing
+authorizes on it. A student removed and seated again has a new seat, in no group until placed.
+Only a student's seat is placed or signs up (`not_a_student`).
+
+**Forming groups** is `perm_assignment_write`'s (§2.2), three ways:
+
+- **By hand.** `group.set_members {set_id, placements: [{student_member_id, group_id?}],
+  affects_work?}`: each student named goes to the group given, or out of every group of the
+  set; all or none. Capacity does not bind the teacher: the result names any group now over it
+  (`over_capacity`); capacity is what sign-up is held to. A placement that moves a student out
+  of, or into, a group with work of any kind (a draft included) for an assignment of the set is
+  refused unless the call says `affects_work`, naming each such work (`group_has_work`, `work:
+  [{group_id, assignment_id, submission_id, state}]`), so that a page shows what will happen and
+  calls again; a proposal records `affects_work` as given, and approving it is refused if work
+  has come since that it did not acknowledge. It reaches every student named.
+- **By a random split.** `group.split {set_id, by: size|count, n, from: unassigned|all, seed?,
+  name_prefix?, capacity?}`. From `unassigned`, the course's students in no group of the set are
+  dealt; from `all`, every group of the set with no work for an assignment of the set (no
+  submission row of any kind) is emptied first (`split`), and every student not in a group with
+  work is dealt. A group with work is never touched: it keeps its members and is named in the
+  result (`kept`, `has_work`). The groups that take students are the set's not archived and not
+  kept. By `count`, groups are made until the set has `n` not archived, kept ones counting; by
+  `size`, until there are ⌈(M + U) / n⌉ taking students, M their members after emptying and U the
+  students to deal, and no group is dealt past `n`. New groups are called `name_prefix` (`Group `
+  by default) and the lowest number not in use, with `capacity` if given. The deal (package
+  `groupsplit`): the students in seat order (their ids, UUID v7), shuffled by Fisher–Yates from
+  the last index down, each index drawn uniformly by rejection sampling from successive
+  `Uint64()`s of a ChaCha8 generator (C2SP chacha8rand) seeded with the SHA-256 of
+  `"aishie.group.split.v1\x00"` and the seed; then each student in turn to the eligible group
+  with the fewest members, the oldest first among equals (`created_at`, then id), a group at its
+  capacity, or at `n` by size, not eligible. It depends on the seed, the students and the groups
+  alone, so a front end can work out the same deal to preview it, and a test pins it. The seed
+  is 1..64 printable ASCII characters, made up (twelve base32 characters) and returned when not
+  given, and recorded in a proposal, so that approving it deals as proposed. The deal is worked
+  out whole first, and refused if anyone would have nowhere to go (`no_room`). It reaches every
+  student of the course.
+- **By students signing themselves up.** `group.sign_up {set_id, group_id?,
+  student_member_id?}`, gated by `perm_submission_write` and scoped to the student: the caller, a
+  student's own agent's student, or the student named, joins the group, switches to it from
+  theirs (`switched`), or, with no group named, leaves theirs (`left`). Only while the set is not
+  archived (`set_archived`), its sign-up is open and `signup_closes_at` is not past
+  (`signup_closed`: after that it is the teacher's), to a group not archived (`group_archived`)
+  below its capacity (`group_full`), and never out of or into a group that has work handed in or
+  recorded missing for an assignment of the set (`your_group_has_work`, `group_has_work`):
+  self-service never changes who did handed-in work. Such a refusal names (`work`), of that work,
+  what the caller may read, as `submission.get` reaches it (§2.5, What each member sees): a
+  student is told why, and shown nothing of another group's work, nor of their own group's
+  handed in before they joined. Sign-up is the set's to open and close;
+  capacity is each group's, and setting it to the group's size closes that group alone. A
+  student's agent signs up by proposal, which its student confirms.
+
+Every write to a set's memberships takes the set FOR SHARE (placing, signing up) or FOR UPDATE (a
+split, `group_set.update`), then the groups it touches FOR UPDATE in id order, then counts; a
+write to a group's work (starting it, an edit, a file, a hand-in) takes its group FOR SHARE (§2.5,
+A group's work).
+
+**Reading them.** `group_set.list` and `.get` (`perm_document_read`) give each set's groups
+(name, capacity, size, archived), whether students may sign up now and why not (`joinable`,
+`signup_closed`, `set_archived`, `course_archived`), the assignments using it (unpublished ones
+to those who write assignments), and the caller's group (`my_group_id`). Members' names, and how
+many students are in no group, come to those who read the member list, for the students their
+scope reaches; a student is shown their own group's members by name. `group_set.get` adds the
+students in no group, each group's latest work for each assignment of the set (to those who read
+submissions or the member list, for groups their scope reaches, and of the work they may read, as
+`submission.roster` gives it: §2.5, What each member sees), and, asked for, every stay
+(`include_history`).
+
+**News.** `group_set.created`, `.updated`, `group.created` and `.updated` belong to no student,
+and are for whoever reads the course. `group.member_added` (`{set_id, group_id, how,
+from_group_id?}`) and `group.member_removed` (`{set_id, group_id, how}`) are filed under the
+student, for those who read the member list or submissions; a split writes one for each student
+it places, which a feed reader groups by `action_id`.
 
 ### 2.6 Activity
 
@@ -1835,14 +2102,32 @@ grade(id, student_member_id→course_member,
       superseded_by null→grade, created_at,
       override_score null, override_reason null, override_by_member_id null→course_member,
       overridden_at null,
+      group_grade_id null, adjust_kind null [replace|delta], adjust_points null,
+      adjust_reason null, adjust_by_member_id null→course_member,
       unique(id, student_member_id))
-    composite FK (submission_id, student_member_id) → submission(id, student_member_id)
+    composite FK (submission_id, student_member_id) → submission_member(submission_id, member_id)
     composite FK (superseded_by, student_member_id) → grade(id, student_member_id)  deferred
+    composite FK (group_grade_id, submission_id) → group_grade(id, submission_id)
     check: exactly one of submission_id, component_id;  an override: all four override
-           columns, on a computed total, not negative, a reason of 1..500 characters
+           columns, on a computed total, not negative, a reason of 1..500 characters;
+           an adjustment: a kind exactly when points, only on a grade from a group grade,
+           replace or delta with a reason of 1..500 characters and who made it, a replaced
+           score not negative
 
-    unique(submission_id)                    where posted_at is not null and superseded_by is null
+    unique(submission_id, student_member_id) where posted_at is not null and superseded_by is null
     unique(component_id, student_member_id)  where posted_at is not null and superseded_by is null
+
+group_grade(id, course_id, submission_id→submission, score, out_of, allow_extra = false,
+            feedback null, breakdown jsonb null, rubric_version_id null→document_version,
+            grader_member_id, created_by_action_id→action, created_at,
+            unique(id, submission_id))
+    composite FK (course_id, grader_member_id) → course_member(course_id, id)
+    check: score ≥ 0;  out_of ≥ 0
+    trigger: only of a group's work handed in or recorded missing, in its course; kept as
+             written; deleted only with its assignment deleted for good (group_grade_kept)
+
+document(..., group_grade_id null→group_grade)
+    check: kind = 'feedback' ⇔ exactly one of grade_id and group_grade_id
 ```
 
 A grade is for exactly one target: a submission, or a component for a student. The same table
@@ -1887,6 +2172,69 @@ serves HW3, the midterm, the assignments bucket and the course total.
   whose working still names it loses its line.
 - **Every grade names the action that created it.** When a student disputes an agent's mark,
   `created_by_action_id` is the whole query: which agent, which membership, who approved.
+
+**A group's grade.** A group's work (§2.5) is graded once: a **group grade**, the shared record
+of what the group was given, by whom, by which action, with its feedback, breakdown, rubric
+version and feedback files; and each member of the work is given an ordinary `grade` row from it
+(`group_grade_id`), with the group grade's feedback, breakdown and rubric copied, so that every
+reader of a grade, the gradebook and totals work as before. Draft, posted, superseded, final,
+regrade history and totals are all on these rows, per student; a member is graded for the work
+whatever has happened to their group or seat since, as work handed in by a student made TA is.
+
+A member's score from group score G is G, unless the grader adjusted it: `replace` p gives p,
+`delta` d gives G + d (refused below zero, `adjusted_below_zero`, and above the points possible
+unless the group grade allows extra, `adjusted_above_points`). An adjustment is recorded with
+its reason and who made it, so that it is clear who was adjusted, why and by whom, and is carried
+from the member's previous live grade on the same work (their draft, or their posted grade)
+whenever their grade is written again, until a call changes it (`kind: none` takes it away): a
+regrade never quietly drops a decision.
+
+- `grade.submit` on a group's work (`adjustments?: [{student_member_id, kind, points?,
+  reason?}]`, refused on a student's own work, `not_a_group_assignment`) writes one group grade
+  and a draft for every member of the work, each replacing that member's earlier draft, and
+  returns `group_grade_id` and `member_grades`. A member named who is not of the work is refused
+  (`not_a_member_of_work`). Its feedback files are the group grade's. A proposal of it records
+  the work's members and every member's adjustment as it will be written; approving it is
+  refused if the members have changed (`members_changed`), and by a newer draft, as ever. Once a
+  grade on the work is posted it is refused (`group_grade_posted`): a draft beside a posted grade
+  could never be posted, and would hold up posting the assignment; the posted grades are changed
+  by `grade.regrade`, or one member's by `grade.adjust`. `grade.post` locks the grades it posts,
+  not the work, so the call asks again of each member once it has replaced their drafts, waiting
+  for any call that held one: a grade of theirs still live then was posted meanwhile
+  (`group_grade_posted`), or is a draft written meanwhile by `grade.adjust` (`grades_changed`),
+  whose adjustment the call did not carry; either refuses it, and it writes nothing.
+- `grade.post` is unchanged: it posts each member's draft, per student, and writes each member's
+  totals; one live posted grade per student on a piece of work.
+- `grade.regrade` of a member's grade from a group grade regrades the group's as a whole: a new
+  group grade, and a new posted grade for each member whose live posted grade came from the old
+  one, adjustments carried unless named, and for each member of the work with no grade on it, one
+  added since it was graded (`submission.set_members`), told by `grade.posted`; refused while any
+  grade from the old one is still a draft (`group_grade_partly_posted`: post them first). It
+  reaches every member. Feedback files given are the new group grade's; the old ones stay with
+  the old. A proposal of it records the members it writes, every member's adjustment as it will
+  be written and the grades it replaces (`replaces_grades`); approving it is refused if the
+  members have changed (`members_changed`), or if one of those grades has been replaced since
+  (`grades_changed`), by an adjustment or otherwise, which approving it would write away.
+- `grade.adjust {grade_id, kind, points?, reason?}` changes one member's adjustment on a live
+  grade from a group grade (`not_from_a_group_grade` otherwise): a draft gets a new draft in its
+  place (gated as `grade.submit`), a posted grade a new posted grade, the old superseded and the
+  member's totals written again (gated as a regrade). Its gate is any of `grade_submit` and
+  `grade_post`, the grade naming which governs, as the call finds it before it takes the grade's
+  lock: a draft posted after that is refused (`posted_meanwhile`), the call having been decided
+  as a draft's, and called again is decided as a regrade. Events `grade.created` or
+  `grade.regraded`, with `{replaces, group_grade_id, adjusted: true}`.
+- A change of what the work is worth (`existing_grades`, §2.3) carries a group's work as a
+  whole: `rescale` writes each live group grade again, its score in proportion (four decimal
+  places) and its feedback files moved to it, and each member's grade from it again, pointing to
+  it, a `replace` or `delta` in proportion; `keep_scores` is refused if the group's score, or a
+  member's, would be above the new points.
+- `grade.get` and `.list` add `group` to a member's grade: `{group_grade_id, group_id,
+  group_name, score, adjustment: {kind, points, reason, by_member_id}}`, the score the group's
+  and the adjustment the member's own, its reason included; who made it is for those who grade.
+  A member reads only their own grade, never another member's score or adjustment. A group
+  grade's feedback files come with each member's grade (`feedback_files`), and are read by those
+  who grade, and by a member while their own grade from it is posted and live; withdrawn by
+  archiving, which once a grade from it is posted needs `perm_grade_post`, as for any feedback.
 
 ### 2.8 Conversations
 
@@ -2696,6 +3044,9 @@ authorize(actor, course, action_type, target) → autonomy_level
 4. if the target belongs to a student:
       member.student_scope = 'all', or that student ∈ member_student_scope; else denied
       a delegate: its principal's likewise
+   if it belongs to several students together, a group's work read or written:
+      member.student_scope = 'all', or at least one of them ∈ member_student_scope
+      a delegate: its principal's likewise, at least one
 5. if the target belongs to an assignment: same with assignment_scope
 6. return level
 ```
@@ -2724,6 +3075,16 @@ a grader listed for HW3 alone could read the class's midterm. Posting or regradi
 other assignment counts in the course total, until it is undone, and undoing it is such a
 target as well. So is a change of what graded work is worth or where it counts, which rewrites
 the totals of every student who has one (§2.3).
+
+Step 4 has a case of its own for a group's work (§2.5). A target that belongs to several students
+together — a group's draft, its work handed in, their files, a group grade's feedback file — is
+within scope, for reading or writing it, when the seat reaches **any** of them
+(`Target.AnyStudentMemberIDs`), and, for a delegate, its principal any of them too; none reaches
+nobody but a seat whose scope is `all`. That is what lets each member's own seat, listed for
+themselves, reach the group's work, and a student's own agent what its student does. Grading it,
+correcting its lateness or its members, and recording it missing land on each of them, and so
+reach **every** one of them, as a batch of students does. List queries filter the same way in
+SQL, through `submission_students()`.
 
 Steps 1–3 run before the target is looked up, and the lookup happens only for a caller who
 passed them. A non-member probing ids gets the same recorded denial whether or not the id
@@ -2767,9 +3128,9 @@ respondent's `conversation_answer` decides is who is shown its text.
 | Rule | Mechanism |
 |---|---|
 | A submission's assignment and member are in the same course | composite FKs on `submission` |
-| A submission grade is for the student who submitted | composite FK on `grade` |
+| A submission grade is for someone whose work it is | composite FK on `grade` to `submission_member` |
 | A grade is superseded only by a grade of the same student | deferred composite FK |
-| At most one live grade per submission, per (component, student) | partial unique indexes |
+| At most one live posted grade per (submission, student), per (component, student) | partial unique indexes |
 | One live membership per actor per course | partial unique index |
 | One root component per course | partial unique index |
 | Preset names are unique among built-ins and within a department | partial unique indexes |
@@ -2797,7 +3158,16 @@ respondent's `conversation_answer` decides is who is shown its text.
 | An override of a total is on a computed grade, not negative, and says who, when and why | CHECKs on `grade` |
 | A submitted submission never changes, and no submission is deleted but with its assignment | trigger |
 | Owner columns match `document.kind`; SSO rows carry an identity | CHECKs |
-| A document's kind, course and submission never change; a feedback file on a submission's grade moves only to another grade on that submission, and one on a total only to another total | trigger `document_kept` |
+| A document's kind, course and submission never change; a feedback file on a submission's grade moves only to another grade on that submission, one on a total only to another total, and one on a group grade only to another group grade on that submission | trigger `document_kept` |
+| A set and a group stay in their course (and set), and none is deleted; names are unique among those not archived, whatever their case | triggers `group_set_kept`, `course_group_kept`, `*_no_truncate`, partial unique indexes |
+| A membership is never deleted, and changes only by being ended, once, saying by whom, how and by which action; a student is in one group of a set at a time, a member of its course | trigger `group_membership_kept`, CHECKs, partial unique index `group_membership_one_live`, composite FKs |
+| An assignment's set is of its course, and changes only while no submission names it | composite FK, trigger `assignment_group_set_fixed` |
+| A submission is a student's or a group's, never both; whose it is, its assignment and course never change; a group's goes only to an assignment of its set, a student's only to one naming none | CHECK `submission_one_owner`, triggers `submission_owner_fixed`, `submission_fits_assignment` |
+| A draft's body changed counts a revision | trigger `submission_draft_revised` |
+| Whose work a submission is: a student's is its student from the moment it is written; a group's is written only once handed in or missing, of nobody another group's work for the assignment names, never changed, deleted only while a draft again, by a correction that says so, or with its assignment | triggers `submission_member_own`, `submission_member_guarded`, primary key |
+| A group grade is of a group's work handed in or missing, in its course, kept as written, deleted only with its assignment; a grade from it is on the same submission | trigger `group_grade_kept`, composite FK |
+| An adjustment says what it is, by how much, why and who, on a grade from a group grade | CHECKs on `grade` |
+| A feedback file belongs to one grade or one group grade | CHECK `document_owner_one` |
 | An identity provider's client secret is kept sealed, never in the clear, and its hint is four characters of it at most; its id never changes | CHECKs `sso_provider_secret_sealed`, `sso_provider_secret_hint_valid`, trigger `sso_provider_id_fixed` |
 | Emails are unique regardless of case | unique index on `lower(email)` |
 | Login IDs are unique regardless of case; 1..64 of `[0-9A-Za-z._-]`, so never an `@` or a space; only a person has one | unique index `actor_login_id_key` on `lower(login_id)`, CHECKs `actor_login_id_valid`, `actor_login_id_is_a_persons` |
@@ -2850,7 +3220,20 @@ respondent's `conversation_answer` decides is who is shown its text.
 
 **Enforced by the application.** Each is a place a bug can hide, and each needs a test.
 
-- `authorize()` itself, including the scope checks in steps 4–5.
+- `authorize()` itself, including the scope checks in steps 4–5, and the any-of scope of a
+  group's work with its SQL filters (`submission_students()`).
+- Group work (§2.5, §2.5a, §2.7): who counts as a member (`live_group_members()`, read by every
+  check); one group's work per student per assignment, under the assignment's work lock; the
+  split's deal (golden seeds, package `groupsplit`); sign-up's capacity and deadline, under the
+  groups' locks; placing with `affects_work`; every write to a group's work under its group's
+  lock, the writer's reach of its members asked again there; base revisions; the freeze at
+  hand-in and `left_out`; missing per group and the sweep's `:groups` key; carrying adjustments;
+  a group's regrade, the members it gives a grade and the grades its proposal replaces, and
+  `grade.adjust` held to the permissions it was decided under; no new group grade beside a
+  posted one, nor beside a draft posted or adjusted while it was entered; rescaling group grades;
+  and that no member of one group, through any read, refusal, hand-in's result or the feed,
+  learns anything of another group's work, grades or membership, nor of their own group's work
+  handed in before they joined.
 - An identity provider's client secret is sealed before it is written, and in no answer, action
   or log line; a sign-in goes through the provider its state names, as it is now, and one
   switched off signs nobody in; the operator's provider wins over a site's of its name; linking
@@ -3248,6 +3631,24 @@ garbage in the grades, full record in the log. If he asks for changes instead, s
 the note in its own actions, and proposes again naming the proposal it revises, for Sato to
 decide as at step 3.
 
+**A group graded, and one member adjusted.** The term project is a group assignment of the
+Projects set; Team A is Yuki, Ken and Aoi, and Ken has handed its report in, for the three of
+them (three rows of `submission_member`, `hand_in`).
+
+1. Sato calls `grade.submit` on Team A's submission: 80, feedback, and an adjustment of Ken's,
+   `delta` −10, "Missed two meetings". One `group_grade` (80, out of 100) is written, and a draft
+   `grade` for each member from it: Yuki 80, Aoi 80, Ken 70, his row carrying `adjust_kind
+   delta`, `adjust_points −10`, the reason and Sato's seat. Each is told by a `grade.created`
+   filed under their own seat.
+2. Sato posts the assignment: three `grade.posted` events, each under its member, and each
+   member's totals.
+3. Ken reads his grade: 70, the group's 80, and the adjustment and its reason; not who made it,
+   which is for those who grade, and not Yuki's or Aoi's grade, which are theirs.
+4. Aoi wrote most of the report: `grade.adjust` on her posted grade, `replace` 90, gives her a new
+   posted grade, the old one superseded, and writes her totals again.
+5. A recount: `grade.regrade` on any member's grade, 84, writes a new group grade and a new posted
+   grade for each of the three, the adjustments carried: Yuki 84, Ken 74, Aoi 90.
+
 ## 6. Deliberately out of scope for v1
 
 - **Discussion.** Course-wide threads and posts (`discussion_thread`, `discussion_post`),
@@ -3286,6 +3687,11 @@ decide as at step 3.
 - **Pushing an answer as it is written.** An answer's draft (§2.8) reaches a reader that
   long-polls the conversation, by the same wake-up as a message; nothing is pushed over a
   stream of its own (server-sent events, WebSocket), and a draft is in no feed.
+- **Group work beyond one group grade, adjusted.** Peer evaluation of a group's members (a later
+  release, on top of §2.5a); a private note to one member without adjusting their score (the
+  shared feedback is the group's, an adjustment's reason the member's); groups as a scope for
+  staff (a TA listed for one group): staff scope stays per student; copying group sets with a
+  course; and group conversations: a conversation stays one person and an agent (§2.8).
 - **Agents that belong to no one person.** An agent is owned by a person or by nobody; a course's
   or a department's own agent is seated as an ordinary member, or as its instructor's delegate
   (`course_tutor`). Agents do not own agents, and a delegate brings in no delegate of its own.

@@ -236,9 +236,14 @@ func (r *Runner) Sweep(ctx context.Context) (Report, error) {
 	}
 	for _, a := range due {
 		// The same key the query looks for; see ListAssignmentsNewlyPastDue.
+		// A group assignment's ends ":groups".
 		key := "job:submission.mark_missing:" + a.ID.String() + ":" + strconv.FormatInt(a.DueAt.Unix(), 10)
+		groups := a.GroupSetID != nil
+		if groups {
+			key += ":groups"
+		}
 		out, err := r.pl.InvokeSystem(ctx, r.system, tools.ToolSubmissionMarkMissing,
-			tools.MarkMissingIn{CourseID: a.CourseID, AssignmentID: a.ID, DueAt: *a.DueAt}, key)
+			tools.MarkMissingIn{CourseID: a.CourseID, AssignmentID: a.ID, DueAt: *a.DueAt, Groups: groups}, key)
 		if r.did(out, err, "submission.mark_missing", a.ID) {
 			rep.AssignmentsClosed++
 			var res tools.MarkMissingOut

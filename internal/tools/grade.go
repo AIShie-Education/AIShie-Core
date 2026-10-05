@@ -24,7 +24,7 @@ import (
 )
 
 func gradeTools(d Deps) []tool.Tool {
-	return []tool.Tool{gradeSubmit(d), gradePost(), gradeRegrade(d), gradebookGet(),
+	return []tool.Tool{gradeSubmit(d), gradePost(), gradeRegrade(d), gradeAdjust(), gradebookGet(),
 		gradeOverrideTotal(), gradeClearOverride(), gradeCommentTotal(), gradeUndoUngradedAsZero()}
 }
 
@@ -146,20 +146,30 @@ type GradeSubmitIn struct {
 	// longer what it was.
 	ForMissing *bool `json:"for_missing,omitempty" jsonschema:"whether the grade is for a 'missing' placeholder, nothing handed in; filled in when the grade is proposed, and the grade is refused if late work has since taken the placeholder's place"`
 	GradeContent
+	// A group's work.
+	Adjustments []AdjustmentIn `json:"adjustments,omitempty" jsonschema:"a group's work: members whose grade differs from the group's — a score of their own (replace) or plus or minus (delta), each with a reason — or none, taking away one carried from their earlier grade. Each member's adjustment is otherwise carried from their earlier grade on the work. A proposal records every member's, as it will be written"`
+	Members     []uuid.UUID    `json:"members,omitzero" jsonschema:"a group's work: whose work it is, its members; if given, they must be. A proposal records them, and is refused on approval if they have changed (members_changed)"`
 }
 
 type GradeSubmitOut struct {
-	GradeID uuid.UUID `json:"grade_id"`
+	GradeID      uuid.UUID        `json:"grade_id,omitzero" jsonschema:"the grade written; absent for a group's work, whose members' grades are in member_grades"`
+	GroupGradeID *uuid.UUID       `json:"group_grade_id,omitempty" jsonschema:"a group's work: the group grade, the shared record of what the group was given"`
+	MemberGrades []MemberGradeOut `json:"member_grades,omitempty" jsonschema:"a group's work: each member's draft grade from it, with their score and adjustment"`
 }
 
 // gradeSubject is what a grade is for: a submission, or a component for a
-// student. Exactly one of submission and component is set.
+// student. Exactly one of submission and component is set. A group's work
+// has no one student: members are whose work it is.
 type gradeSubject struct {
 	student    uuid.UUID
+	members    []uuid.UUID
 	submission *dbq.GetSubmissionInCourseRow
 	assignment *dbq.GetAssignmentInCourseRow
 	component  *dbq.GetComponentInCourseRow
 }
+
+// group says whether s is a group's work.
+func (s gradeSubject) group() bool { return s.submission != nil && s.submission.GroupID != nil }
 
 func (s gradeSubject) pointsPossible() decimal.Decimal {
 	if s.assignment != nil {
@@ -170,6 +180,10 @@ func (s gradeSubject) pointsPossible() decimal.Decimal {
 
 func (s gradeSubject) target(courseID uuid.UUID) tool.Target {
 	t := tool.Target{CourseID: courseID, Scope: authz.Target{StudentMemberIDs: []uuid.UUID{s.student}}}
+	if s.group() {
+		// A grade lands on each member: every one of them.
+		t.Scope.StudentMemberIDs = s.members
+	}
 	if s.submission != nil {
 		t.Type, t.ID = "submission", &s.submission.ID
 		t.Scope.AssignmentIDs = []uuid.UUID{s.assignment.ID}
@@ -209,7 +223,13 @@ func loadSubject(ctx context.Context, q dbq.Querier, courseID uuid.UUID, submiss
 		if err != nil {
 			return s, goneIfNoRows(ctx, q, courseID, sub.AssignmentID, err)
 		}
-		s.student, s.submission, s.assignment = sub.StudentMemberID, &sub, &a
+		s.submission, s.assignment = &sub, &a
+		if sub.StudentMemberID != nil {
+			s.student = *sub.StudentMemberID
+			s.members = []uuid.UUID{s.student}
+		} else if s.members, err = workStudents(ctx, q, sub.ID); err != nil {
+			return s, err
+		}
 
 	default:
 		if studentID == nil {
@@ -403,7 +423,14 @@ func gradeSubmit(d Deps) tool.Tool {
 		Name: "grade.submit",
 		Description: "Write a draft grade for a submission, or for a student on a directly graded component. " +
 			"A draft is not visible to the student until it is posted with grade.post. " +
-			"A new draft replaces any earlier draft for the same work.",
+			"A new draft replaces any earlier draft for the same work. A group's work is graded once: a group grade, the " +
+			"shared record with its feedback and files, and a draft for each member of the work given from it, the group's " +
+			"score unless the member is adjusted (adjustments: a score of their own, or plus or minus, each with a reason), " +
+			"an adjustment carried from their earlier grade otherwise. Each member's draft is posted with grade.post, and " +
+			"changed alone with grade.adjust. Once a grade on a group's work is posted, a new group grade for it is refused " +
+			"(group_grade_posted): it is changed with grade.regrade, which also gives a member added to the work since a " +
+			"grade from it. A member's draft posted while the call is being made refuses it the same way, and one " +
+			"adjusted meanwhile refuses it as grades_changed: look again, and call again.",
 		Kind: tool.Write,
 		Gate: tool.Gate{Perms: []domain.Perm{domain.PermGradeSubmit}},
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/grades"},
@@ -418,6 +445,12 @@ func gradeSubmit(d Deps) tool.Tool {
 		Check: func(in GradeSubmitIn) error {
 			if in.ForMissing != nil && in.SubmissionID == nil {
 				return apperr.Invalid("for_missing is for a grade on a submission")
+			}
+			if (len(in.Adjustments) > 0 || in.Members != nil) && in.SubmissionID == nil {
+				return errNotAGroupAssignment
+			}
+			if err := checkAdjustments(in.Adjustments); err != nil {
+				return err
 			}
 			return in.check()
 		},
@@ -436,7 +469,10 @@ func gradeSubmit(d Deps) tool.Tool {
 			}
 			// Validate cannot tell an approval from a call: Execute holds a
 			// call's no_rubric to the rubric in force.
-			_, err = checkContent(ctx, q, s, in.GradeContent, true)
+			if _, err = checkContent(ctx, q, s, in.GradeContent, true); err != nil {
+				return err
+			}
+			_, err = in.memberAdjustments(ctx, q, s, m.ID)
 			return err
 		},
 		// A draft entered while the proposal waited has been in front of
@@ -448,7 +484,7 @@ func gradeSubmit(d Deps) tool.Tool {
 			}
 			return noNewerDraft(ctx, q, s, proposedAt)
 		},
-		Pin: func(ctx context.Context, q dbq.Querier, _ *domain.Member, now time.Time, in GradeSubmitIn) (GradeSubmitIn, error) {
+		Pin: func(ctx context.Context, q dbq.Querier, m *domain.Member, now time.Time, in GradeSubmitIn) (GradeSubmitIn, error) {
 			if err := checkUploadAge(ctx, d, now, in.uploads()...); err != nil {
 				return in, err
 			}
@@ -460,7 +496,21 @@ func gradeSubmit(d Deps) tool.Tool {
 				forMissing := s.submission.State == stateMissing
 				in.ForMissing = &forMissing
 			}
-			return in, pinContent(ctx, q, s, &in.GradeContent)
+			if err := pinContent(ctx, q, s, &in.GradeContent); err != nil {
+				return in, err
+			}
+			if s.group() {
+				// Whose work it is, and each member's adjustment as it will
+				// be written, carried ones named: approving it writes what
+				// was proposed.
+				adjs, err := in.memberAdjustments(ctx, q, s, m.ID)
+				if err != nil {
+					return in, err
+				}
+				in.Members = sortedMembers(s.members)
+				in.Adjustments = pinnedAdjustments(in.Members, adjs)
+			}
+			return in, nil
 		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in GradeSubmitIn) (GradeSubmitOut, error) {
 			s, err := load(ctx, ec.Q, in)
@@ -492,9 +542,13 @@ func gradeSubmit(d Deps) tool.Tool {
 					return GradeSubmitOut{}, err
 				}
 			}
+			if s.group() {
+				return in.gradeGroupWork(ctx, d, ec, s, rubric)
+			}
 			id := ids.New()
 			if s.submission != nil {
-				err = ec.Q.SupersedeSubmissionDrafts(ctx, dbq.SupersedeSubmissionDraftsParams{NewID: &id, SubmissionID: &s.submission.ID})
+				err = ec.Q.SupersedeSubmissionDrafts(ctx, dbq.SupersedeSubmissionDraftsParams{NewID: &id, SubmissionID: &s.submission.ID,
+					StudentMemberID: s.student})
 			} else {
 				err = ec.Q.SupersedeComponentDrafts(ctx, dbq.SupersedeComponentDraftsParams{NewID: &id, ComponentID: &s.component.ID, StudentMemberID: s.student})
 			}
@@ -912,11 +966,12 @@ func postScope(rows []dbq.GetGradesInCourseRow, final bool) authz.Target {
 func checkPostable(ctx context.Context, q dbq.Querier, rows []dbq.GetGradesInCourseRow) error {
 	targets := map[string]uuid.UUID{}
 	for _, g := range rows {
-		// Two drafts for one piece of work in one batch: whichever is
-		// posted second would collide with the first. Said plainly instead.
+		// Two drafts for one student's piece of work in one batch: whichever
+		// is posted second would collide with the first. Said plainly
+		// instead. A group's work has one for each member.
 		key := g.StudentMemberID.String()
 		if g.SubmissionID != nil {
-			key = "s:" + g.SubmissionID.String()
+			key += ":s:" + g.SubmissionID.String()
 		} else if g.ComponentID != nil {
 			key += ":c:" + g.ComponentID.String()
 		}
@@ -935,7 +990,7 @@ func checkPostable(ctx context.Context, q dbq.Querier, rows []dbq.GetGradesInCou
 		var exists bool
 		var err error
 		if g.SubmissionID != nil {
-			exists, err = q.LiveSubmissionGradeExists(ctx, g.SubmissionID)
+			exists, err = q.LiveSubmissionGradeExists(ctx, dbq.LiveSubmissionGradeExistsParams{SubmissionID: g.SubmissionID, StudentMemberID: g.StudentMemberID})
 		} else {
 			exists, err = q.LiveComponentGradeExists(ctx, dbq.LiveComponentGradeExistsParams{ComponentID: g.ComponentID, StudentMemberID: g.StudentMemberID})
 		}
@@ -958,12 +1013,115 @@ type GradeRegradeIn struct {
 	GradeID uuid.UUID `json:"grade_id" jsonschema:"the posted grade to replace"`
 	GradeContent
 	TreatUngradedAsZero bool `json:"treat_ungraded_as_zero,omitempty"`
+	// A member's grade from a group grade regrades the group's.
+	Adjustments    []AdjustmentIn `json:"adjustments,omitempty" jsonschema:"a member's grade from a group grade: members whose new grade differs from the group's, as in grade.submit; each other member's adjustment is carried from their grade. A proposal records every member's, as it will be written"`
+	Members        []uuid.UUID    `json:"members,omitzero" jsonschema:"a member's grade from a group grade: the members whose grades it writes, those whose grade came from the group grade and any added to the work since with none on it; if given, they must be. A proposal records them, and is refused on approval if they have changed (members_changed)"`
+	ReplacesGrades []uuid.UUID    `json:"replaces_grades,omitzero" jsonschema:"a member's grade from a group grade: the posted grades it replaces, each member's from the group grade, as they are when the call is made; if given, they must be. A proposal records them, and is refused on approval if one has been replaced since, by an adjustment or otherwise (grades_changed)"`
 }
 
 type GradeRegradeOut struct {
-	GradeID   uuid.UUID `json:"grade_id" jsonschema:"the new grade"`
-	Replaces  uuid.UUID `json:"replaces"`
-	Snapshots int       `json:"snapshots"`
+	GradeID      uuid.UUID        `json:"grade_id" jsonschema:"the new grade"`
+	Replaces     uuid.UUID        `json:"replaces"`
+	Snapshots    int              `json:"snapshots"`
+	GroupGradeID *uuid.UUID       `json:"group_grade_id,omitempty" jsonschema:"a member's grade from a group grade: the group's new grade"`
+	MemberGrades []MemberGradeOut `json:"member_grades,omitempty" jsonschema:"a member's grade from a group grade: each member's new posted grade from it"`
+}
+
+// groupRegrade is what regrading a member's grade from a group grade writes
+// again: the posted grades given from that group grade, and a grade for each
+// member added to the work since with none on it, each with its adjustment
+// as it will be written.
+type groupRegrade struct {
+	from   []dbq.ListLiveGradesFromGroupGradeRow
+	writes []memberWrite
+}
+
+// replaced are the grades it replaces: every one given from the group grade.
+func (r groupRegrade) replaced() []uuid.UUID {
+	out := make([]uuid.UUID, len(r.from))
+	for i, f := range r.from {
+		out[i] = f.ID
+	}
+	return out
+}
+
+// errGradesChanged refuses approving a regrade of a group's grade once a
+// grade it was proposed to replace has been replaced meanwhile, by an
+// adjustment or otherwise: the proposal pinned each member's adjustment as
+// it was then, and approving it would write over what was decided since.
+var errGradesChanged = apperr.Conflicts("a member's grade has changed since this was proposed, by an adjustment or otherwise; "+
+	"look again, and propose it again").With("reason", ReasonGradesChanged)
+
+// students are the members whose grades it writes again.
+func (r groupRegrade) students() []uuid.UUID {
+	out := make([]uuid.UUID, len(r.writes))
+	for i, w := range r.writes {
+		out[i] = w.student
+	}
+	return out
+}
+
+// regradeOfGroup works out regrading the group grade g was given from, as in
+// asks, by by: refused while a grade from it is still a draft, for an
+// adjustment of a member it does not write, for a score out of bounds, and,
+// where in names the members or the grades it replaces, when they are not
+// those it writes and replaces. It writes a posted grade for each member
+// whose grade came from g's group grade, and for each member of the work
+// (s.members) with no grade on it, one added since it was graded
+// (submission.set_members): the student the teacher forgot to place gets
+// the group's grade too.
+func (in GradeRegradeIn) regradeOfGroup(ctx context.Context, q dbq.Querier, g dbq.GetGradesInCourseRow, s gradeSubject, by uuid.UUID) (groupRegrade, error) {
+	var r groupRegrade
+	var err error
+	if r.from, err = q.ListLiveGradesFromGroupGrade(ctx, g.GroupGradeID); err != nil {
+		return r, err
+	}
+	carried := map[uuid.UUID]adjustment{}
+	replaces := map[uuid.UUID]uuid.UUID{}
+	var members []uuid.UUID
+	for _, f := range r.from {
+		if f.PostedAt == nil {
+			return r, apperr.Precondition("a grade from this group grade is still a draft; post it first, then regrade the group's").
+				With("reason", ReasonGroupGradePartlyPosted).With("grade_id", f.ID)
+		}
+		members = append(members, f.StudentMemberID)
+		replaces[f.StudentMemberID] = f.ID
+		carried[f.StudentMemberID] = adjustmentOf(f.AdjustKind, f.AdjustPoints, f.AdjustReason, f.AdjustByMemberID)
+	}
+	if in.ReplacesGrades != nil && !sameMembers(in.ReplacesGrades, r.replaced()) {
+		return r, errGradesChanged
+	}
+	live, err := q.ListLiveMemberGrades(ctx, &s.submission.ID)
+	if err != nil {
+		return r, err
+	}
+	graded := map[uuid.UUID]bool{}
+	for _, l := range live {
+		graded[l.StudentMemberID] = true
+	}
+	for _, m := range s.members {
+		if !graded[m] {
+			members = append(members, m)
+		}
+	}
+	if in.Members != nil && !sameMembers(in.Members, members) {
+		return r, errMembersChanged
+	}
+	adjs, err := adjustmentsFor(members, carried, in.Adjustments, by)
+	if err != nil {
+		return r, err
+	}
+	if err := checkMemberScores(in.Score, adjs, s.pointsPossible(), in.AllowExtra); err != nil {
+		return r, err
+	}
+	for _, m := range sortedMembers(members) {
+		w := memberWrite{student: m, adj: adjs[m]}
+		if old, ok := replaces[m]; ok {
+			w.replaces = &old
+		}
+		r.writes = append(r.writes, w)
+	}
+	return r, nil
 }
 
 func gradeRegrade(d Deps) tool.Tool {
@@ -981,9 +1139,13 @@ func gradeRegrade(d Deps) tool.Tool {
 			student = &g.StudentMemberID
 		}
 		s, err := loadSubject(ctx, q, in.CourseID, g.SubmissionID, g.ComponentID, student)
+		if err == nil && g.GroupGradeID == nil {
+			// A grade of its own, on a group's work or not: the member's alone.
+			s.student, s.members = g.StudentMemberID, []uuid.UUID{g.StudentMemberID}
+		}
 		return g, s, err
 	}
-	check := func(g dbq.GetGradesInCourseRow) error {
+	check := func(g dbq.GetGradesInCourseRow, in GradeRegradeIn) error {
 		switch {
 		case g.Origin != "entered":
 			return apperr.Precondition("a computed total is not regraded; regrade what is beneath it, or override the total with grade.override_total")
@@ -991,20 +1153,32 @@ func gradeRegrade(d Deps) tool.Tool {
 			return apperr.Precondition("the grade is still a draft; submit a new draft instead")
 		case g.SupersededBy != nil:
 			return apperr.Conflicts("the grade has already been replaced")
+		case g.GroupGradeID == nil && (len(in.Adjustments) > 0 || in.Members != nil || in.ReplacesGrades != nil):
+			return errNotAGroupAssignment
 		}
 		return nil
 	}
 	return tool.Define(tool.Spec[GradeRegradeIn, GradeRegradeOut]{
 		Name: "grade.regrade",
 		Description: "Replace a posted grade. The old grade is kept and marked superseded, the new one is posted " +
-			"at once, and the student's totals are written down again if they changed.",
+			"at once, and the student's totals are written down again if they changed. A member's grade given from a " +
+			"group grade regrades the group's as a whole: a new group grade, and a new posted grade for each member whose " +
+			"grade came from the old one, adjustments carried unless named, and for each member added to the work since " +
+			"with no grade on it; refused while any grade from it is still a draft (group_grade_partly_posted). It " +
+			"reaches every member then. A proposal of it records the grades it replaces, and is refused on approval if one " +
+			"has been replaced since (grades_changed). One member alone is changed with grade.adjust.",
 		Kind: tool.Write,
 		// Regrading writes a grade and makes it visible in one step, so it
 		// takes both permissions and runs at the lower of the two levels.
 		Gate: tool.Gate{Perms: []domain.Perm{domain.PermGradeSubmit, domain.PermGradePost}},
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/grades/{grade_id}/regrade"},
 
-		Check: func(in GradeRegradeIn) error { return in.check() },
+		Check: func(in GradeRegradeIn) error {
+			if err := checkAdjustments(in.Adjustments); err != nil {
+				return err
+			}
+			return in.check()
+		},
 		Resolve: func(ctx context.Context, q dbq.Querier, in GradeRegradeIn) (tool.Target, error) {
 			g, s, err := load(ctx, q, in)
 			if err != nil {
@@ -1024,7 +1198,7 @@ func gradeRegrade(d Deps) tool.Tool {
 			if err != nil {
 				return err
 			}
-			if err := check(g); err != nil {
+			if err := check(g, in); err != nil {
 				return err
 			}
 			// As for grade.submit: Execute holds a call's no_rubric to the
@@ -1032,17 +1206,38 @@ func gradeRegrade(d Deps) tool.Tool {
 			if _, err = checkContent(ctx, q, s, in.GradeContent, true); err != nil {
 				return err
 			}
+			if g.GroupGradeID != nil {
+				if _, err := in.regradeOfGroup(ctx, q, g, s, m.ID); err != nil {
+					return err
+				}
+			}
 			return checkFeedbackFiles(ctx, d, q, m, in.CourseID, in.FeedbackFiles)
 		},
-		Pin: func(ctx context.Context, q dbq.Querier, _ *domain.Member, now time.Time, in GradeRegradeIn) (GradeRegradeIn, error) {
+		Pin: func(ctx context.Context, q dbq.Querier, m *domain.Member, now time.Time, in GradeRegradeIn) (GradeRegradeIn, error) {
 			if err := checkUploadAge(ctx, d, now, in.uploads()...); err != nil {
 				return in, err
 			}
-			_, s, err := load(ctx, q, in)
+			g, s, err := load(ctx, q, in)
 			if err != nil {
 				return in, err
 			}
-			return in, pinContent(ctx, q, s, &in.GradeContent)
+			if err := pinContent(ctx, q, s, &in.GradeContent); err != nil {
+				return in, err
+			}
+			if g.GroupGradeID != nil {
+				r, err := in.regradeOfGroup(ctx, q, g, s, m.ID)
+				if err != nil {
+					return in, err
+				}
+				adjs := map[uuid.UUID]adjustment{}
+				for _, w := range r.writes {
+					adjs[w.student] = w.adj
+				}
+				in.Members = r.students()
+				in.Adjustments = pinnedAdjustments(in.Members, adjs)
+				in.ReplacesGrades = r.replaced()
+			}
+			return in, nil
 		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in GradeRegradeIn) (GradeRegradeOut, error) {
 			// What the work is worth is held still first, as grade.submit
@@ -1063,12 +1258,15 @@ func gradeRegrade(d Deps) tool.Tool {
 			if err != nil {
 				return GradeRegradeOut{}, err
 			}
-			if err := check(old); err != nil {
+			if err := check(old, in); err != nil {
 				return GradeRegradeOut{}, err
 			}
 			rubric, err := checkContent(ctx, ec.Q, s, in.GradeContent, ec.Approved)
 			if err != nil {
 				return GradeRegradeOut{}, err
+			}
+			if old.GroupGradeID != nil {
+				return in.regradeGroup(ctx, d, ec, old, s, rubric)
 			}
 			breakdown, err := breakdownJSON(in.Breakdown)
 			if err != nil {
@@ -1109,6 +1307,36 @@ func gradeRegrade(d Deps) tool.Tool {
 			return GradeRegradeOut{GradeID: id, Replaces: old.ID, Snapshots: snaps}, err
 		},
 	})
+}
+
+// regradeGroup is grade.regrade of a member's grade old, given from a group
+// grade, under the locks: the group grade written again, and every posted
+// grade from the old one, each member's totals with it.
+func (in GradeRegradeIn) regradeGroup(ctx context.Context, d Deps, ec *tool.ExecCtx, old dbq.GetGradesInCourseRow, s gradeSubject, rubric *uuid.UUID) (GradeRegradeOut, error) {
+	r, err := in.regradeOfGroup(ctx, ec.Q, old, s, ec.Member.ID)
+	if err != nil {
+		return GradeRegradeOut{}, err
+	}
+	// Every member it writes again, as they are now.
+	if reason, err := authz.CheckScope(ctx, ec.Q, ec.Member, authz.Target{StudentMemberIDs: r.students()}); err != nil {
+		return GradeRegradeOut{}, err
+	} else if reason != authz.ReasonNone {
+		return GradeRegradeOut{}, apperr.Forbid("a member whose grade it writes again is outside your scope").With("reason", string(reason))
+	}
+	gg, grades, err := writeGroupGrade(ctx, d, ec, in.CourseID, s, in.GradeContent, rubric, r.writes, true, ec.Now)
+	if err != nil {
+		return GradeRegradeOut{}, err
+	}
+	out := GradeRegradeOut{Replaces: old.ID, GroupGradeID: &gg, MemberGrades: grades}
+	changed := map[uuid.UUID][]uuid.UUID{}
+	for _, g := range grades {
+		changed[g.StudentMemberID] = []uuid.UUID{s.changedItem()}
+		if g.StudentMemberID == old.StudentMemberID {
+			out.GradeID = g.GradeID
+		}
+	}
+	out.Snapshots, err = snapshot(ctx, ec, in.CourseID, changed, gradecalc.Policy{UngradedAsZero: in.TreatUngradedAsZero})
+	return out, err
 }
 
 // ---------------------------------------------------------------------------

@@ -1,13 +1,13 @@
 -- Lookups are always "in this course": an id from another course is not found.
 
 -- name: GetSubmissionInCourse :one
-SELECT id, assignment_id, course_id, student_member_id, attempt, state, submitted_at
+SELECT id, assignment_id, course_id, student_member_id, group_id, attempt, state, submitted_at
 FROM submission
 WHERE id = $1 AND course_id = $2;
 
 -- name: GetAssignmentInCourse :one
 SELECT id, course_id, component_id, title, instructions_document_id, rubric_document_id,
-       points_possible, due_at, published_at
+       points_possible, due_at, published_at, group_set_id
 FROM assignment
 WHERE id = $1 AND course_id = $2;
 
@@ -38,13 +38,18 @@ SELECT document_id FROM document_version WHERE id = $1;
 -- name: InsertGrade :exec
 INSERT INTO grade (id, student_member_id, submission_id, component_id, origin, score, feedback, breakdown,
                    rubric_version_id, grader_member_id, created_by_action_id, posted_at, posted_by_member_id, created_at,
-                   override_score, override_reason, override_by_member_id, overridden_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18);
+                   override_score, override_reason, override_by_member_id, overridden_at,
+                   group_grade_id, adjust_kind, adjust_points, adjust_reason, adjust_by_member_id)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18,
+        sqlc.narg(group_grade_id), sqlc.narg(adjust_kind), sqlc.narg(adjust_points), sqlc.narg(adjust_reason),
+        sqlc.narg(adjust_by_member_id));
 
 -- name: SupersedeSubmissionDrafts :exec
--- A new draft replaces earlier drafts for the same submission.
+-- A new draft replaces the student's earlier drafts for the same submission:
+-- on a group's work, each member's by that member's new one.
 UPDATE grade SET superseded_by = sqlc.arg(new_id)
-WHERE submission_id = sqlc.arg(submission_id) AND posted_at IS NULL AND superseded_by IS NULL;
+WHERE submission_id = sqlc.arg(submission_id) AND student_member_id = sqlc.arg(student_member_id)
+  AND posted_at IS NULL AND superseded_by IS NULL;
 
 -- name: SupersedeComponentDrafts :exec
 UPDATE grade SET superseded_by = sqlc.arg(new_id)
@@ -59,7 +64,7 @@ WHERE id = sqlc.arg(id) AND superseded_by IS NULL;
 -- Grades by id, with the assignment each belongs to (null for a component
 -- grade). A grade's course is its student's course.
 SELECT g.id, g.student_member_id, g.submission_id, g.component_id, g.origin, g.score,
-       g.posted_at, g.superseded_by, s.assignment_id
+       g.posted_at, g.superseded_by, s.assignment_id, g.group_grade_id
 FROM grade g
 JOIN course_member m ON m.id = g.student_member_id
 LEFT JOIN submission s ON s.id = g.submission_id
@@ -84,9 +89,11 @@ WHERE s.assignment_id = $1 AND s.course_id = $2
 ORDER BY g.id;
 
 -- name: LiveSubmissionGradeExists :one
+-- The student's live posted grade on the work: one per student, on a
+-- group's work one per member.
 SELECT EXISTS (
     SELECT 1 FROM grade
-    WHERE submission_id = $1 AND posted_at IS NOT NULL AND superseded_by IS NULL
+    WHERE submission_id = $1 AND student_member_id = $2 AND posted_at IS NOT NULL AND superseded_by IS NULL
 );
 
 -- name: LiveComponentGradeExists :one
@@ -168,7 +175,8 @@ ORDER BY 1;
 -- Every live grade entered on the assignment's submissions, draft or posted,
 -- held in id order, as grade.post holds the drafts it posts.
 SELECT g.id, g.student_member_id, g.submission_id, g.component_id, g.score, g.feedback, g.breakdown,
-       g.rubric_version_id, g.posted_at
+       g.rubric_version_id, g.posted_at, g.group_grade_id, g.adjust_kind, g.adjust_points, g.adjust_reason,
+       g.adjust_by_member_id
 FROM grade g
 JOIN submission s ON s.id = g.submission_id
 WHERE s.assignment_id = $1 AND g.origin = 'entered' AND g.superseded_by IS NULL
@@ -188,7 +196,8 @@ ORDER BY g.id;
 -- name: LockLiveEnteredGradesOfComponent :many
 -- Every live grade entered directly on the component, draft or posted.
 SELECT g.id, g.student_member_id, g.submission_id, g.component_id, g.score, g.feedback, g.breakdown,
-       g.rubric_version_id, g.posted_at
+       g.rubric_version_id, g.posted_at, g.group_grade_id, g.adjust_kind, g.adjust_points, g.adjust_reason,
+       g.adjust_by_member_id
 FROM grade g
 WHERE g.component_id = $1 AND g.origin = 'entered' AND g.superseded_by IS NULL
 ORDER BY g.id
@@ -215,7 +224,7 @@ UPDATE document SET grade_id = sqlc.arg(new_grade_id) WHERE grade_id = sqlc.arg(
 -- and holds the next one off until the grade is there for its check to find.
 -- Graders of the same assignment do not wait for one another.
 SELECT id, course_id, component_id, title, instructions_document_id, rubric_document_id,
-       points_possible, due_at, published_at
+       points_possible, due_at, published_at, group_set_id
 FROM assignment
 WHERE id = $1 AND course_id = $2
 FOR SHARE;
@@ -288,15 +297,105 @@ WHERE student_member_id = $1 AND component_id IS NOT NULL
 
 -- name: SubmissionHasGrades :one
 -- A grade entered, or proposed and not yet decided: either way, one is on its
--- way for exactly this work.
+-- way for exactly this work. A group grade is entered with its members'.
 SELECT EXISTS (
-    SELECT 1 FROM grade WHERE submission_id = $1
+    SELECT 1 FROM grade g WHERE g.submission_id = sqlc.narg(submission_id)::uuid
     UNION ALL
-    SELECT 1 FROM action
-    WHERE target_type = 'submission' AND target_id = $1
-      AND action_type = 'grade.submit' AND status = 'proposed'
+    SELECT 1 FROM group_grade gg WHERE gg.submission_id = sqlc.narg(submission_id)::uuid
+    UNION ALL
+    SELECT 1 FROM action x
+    WHERE x.target_type = 'submission' AND x.target_id = sqlc.narg(submission_id)::uuid
+      AND x.action_type = 'grade.submit' AND x.status = 'proposed'
 );
 
 -- name: ComponentHasLivePostedGrades :one
 -- Any origin: an entered grade, or a total written down when it was a parent.
 SELECT EXISTS (SELECT 1 FROM grade WHERE component_id = $1 AND posted_at IS NOT NULL AND superseded_by IS NULL);
+
+-- Group grades ---------------------------------------------------------------
+
+-- name: InsertGroupGrade :exec
+-- What a group's work was given, as a group: kept as written
+-- (group_grade_kept), its course the submission's.
+INSERT INTO group_grade (id, course_id, submission_id, score, out_of, allow_extra, feedback, breakdown, rubric_version_id,
+                         grader_member_id, created_by_action_id, created_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12);
+
+-- name: GetGroupGrade :one
+SELECT * FROM group_grade WHERE id = $1 AND course_id = $2;
+
+-- name: ListLiveMemberGrades :many
+-- Every live grade on the work, a draft or posted, the newest first: what a
+-- member's next grade from a group grade carries its adjustment on from.
+SELECT g.id, g.student_member_id, g.score, g.posted_at, g.group_grade_id, g.adjust_kind, g.adjust_points,
+       g.adjust_reason, g.adjust_by_member_id, g.created_at
+FROM grade g
+WHERE g.submission_id = $1 AND g.origin = 'entered' AND g.superseded_by IS NULL
+ORDER BY g.student_member_id, g.posted_at NULLS FIRST, g.created_at DESC, g.id DESC;
+
+-- name: ListLiveGradesOfMemberOnWork :many
+-- The student's live grades on the work, a draft or posted, one posted
+-- first. A group grade entered asks it of each member once their drafts are
+-- superseded, before their new one is written: a grade live then came in,
+-- or was posted, while it waited for their drafts.
+SELECT g.id, g.posted_at
+FROM grade g
+WHERE g.submission_id = $1 AND g.student_member_id = $2 AND g.origin = 'entered' AND g.superseded_by IS NULL
+ORDER BY g.posted_at NULLS LAST, g.id;
+
+-- name: ListLiveGradesFromGroupGrade :many
+-- Every live grade given from a group grade, a draft or posted, held in id
+-- order: what regrading the group's grade writes again.
+SELECT g.id, g.student_member_id, g.score, g.posted_at, g.adjust_kind, g.adjust_points, g.adjust_reason,
+       g.adjust_by_member_id
+FROM grade g
+WHERE g.group_grade_id = $1 AND g.superseded_by IS NULL
+ORDER BY g.id
+FOR UPDATE;
+
+-- name: ListGroupGradeDocuments :many
+-- A group grade's feedback files, in their order.
+SELECT id, title FROM document WHERE group_grade_id = $1 AND kind = 'feedback' AND status = 'active'
+ORDER BY sort_order, id;
+
+-- name: MoveGroupGradeFeedbackFiles :exec
+-- A group grade's feedback files go with it when it is written again without
+-- being graded again: a score rescaled.
+UPDATE document SET group_grade_id = sqlc.arg(new_group_grade_id)
+WHERE group_grade_id = sqlc.arg(old_group_grade_id) AND kind = 'feedback';
+
+-- name: LivePostedGradeFromGroupGradeFor :one
+-- Whether one of the students has a live posted grade given from the group
+-- grade: what lets a member read its feedback files.
+SELECT EXISTS (
+    SELECT 1 FROM grade
+    WHERE group_grade_id = sqlc.arg(group_grade_id) AND student_member_id = ANY(sqlc.arg(student_ids)::uuid[])
+      AND posted_at IS NOT NULL AND superseded_by IS NULL
+);
+
+-- name: StudentsPostedFromGroupGrade :many
+-- The students with a live posted grade given from the group grade.
+SELECT student_member_id FROM grade
+WHERE group_grade_id = $1 AND posted_at IS NOT NULL AND superseded_by IS NULL
+ORDER BY 1;
+
+-- name: GroupGradeHasPostedGrade :one
+-- Whether any grade given from the group grade has been posted: its
+-- feedback is then a release, and changing it needs grade_post.
+SELECT EXISTS (SELECT 1 FROM grade WHERE group_grade_id = $1 AND posted_at IS NOT NULL);
+
+-- name: GroupGradeIsLive :one
+-- Whether a grade given from the group grade is live, a draft or posted:
+-- one regraded since is the history of the one that replaced it.
+SELECT EXISTS (SELECT 1 FROM grade WHERE group_grade_id = $1 AND superseded_by IS NULL);
+
+-- name: ListLiveGroupGradesOfAssignment :many
+-- The group grades of the assignment's work that a live grade is given
+-- from, a draft or posted: what a change of its points carries with the
+-- members' grades.
+SELECT gg.*
+FROM group_grade gg
+JOIN submission s ON s.id = gg.submission_id
+WHERE s.assignment_id = $1
+  AND EXISTS (SELECT 1 FROM grade g WHERE g.group_grade_id = gg.id AND g.superseded_by IS NULL)
+ORDER BY gg.id;

@@ -97,9 +97,39 @@ func (q *Queries) GetMemberForSweep(ctx context.Context, id uuid.UUID) (GetMembe
 	return i, err
 }
 
+const insertGroupMissingSubmission = `-- name: InsertGroupMissingSubmission :execrows
+INSERT INTO submission (id, assignment_id, course_id, group_id, attempt, state, created_at)
+VALUES ($1, $2, $3, $5::uuid, 1, 'missing', $4)
+ON CONFLICT (assignment_id, group_id, attempt) WHERE group_id IS NOT NULL DO NOTHING
+`
+
+type InsertGroupMissingSubmissionParams struct {
+	ID           uuid.UUID
+	AssignmentID uuid.UUID
+	CourseID     uuid.UUID
+	CreatedAt    time.Time
+	GroupID      uuid.UUID
+}
+
+// A group's 'missing' row, its first attempt; whose it is is written next
+// (InsertSubmissionMembers, missing).
+func (q *Queries) InsertGroupMissingSubmission(ctx context.Context, arg InsertGroupMissingSubmissionParams) (int64, error) {
+	result, err := q.db.Exec(ctx, insertGroupMissingSubmission,
+		arg.ID,
+		arg.AssignmentID,
+		arg.CourseID,
+		arg.CreatedAt,
+		arg.GroupID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const insertMissingSubmission = `-- name: InsertMissingSubmission :execrows
 INSERT INTO submission (id, assignment_id, course_id, student_member_id, attempt, state, created_at)
-VALUES ($1, $2, $3, $4, 1, 'missing', $5)
+VALUES ($1, $2, $3, $5::uuid, 1, 'missing', $4)
 ON CONFLICT (assignment_id, student_member_id, attempt) DO NOTHING
 `
 
@@ -107,17 +137,19 @@ type InsertMissingSubmissionParams struct {
 	ID              uuid.UUID
 	AssignmentID    uuid.UUID
 	CourseID        uuid.UUID
-	StudentMemberID uuid.UUID
 	CreatedAt       time.Time
+	StudentMemberID uuid.UUID
 }
 
+// A student's; for a group assignment the database passes it over
+// (submission_fits_assignment), and nothing is written.
 func (q *Queries) InsertMissingSubmission(ctx context.Context, arg InsertMissingSubmissionParams) (int64, error) {
 	result, err := q.db.Exec(ctx, insertMissingSubmission,
 		arg.ID,
 		arg.AssignmentID,
 		arg.CourseID,
-		arg.StudentMemberID,
 		arg.CreatedAt,
+		arg.StudentMemberID,
 	)
 	if err != nil {
 		return 0, err
@@ -126,7 +158,7 @@ func (q *Queries) InsertMissingSubmission(ctx context.Context, arg InsertMissing
 }
 
 const listAssignmentsNewlyPastDue = `-- name: ListAssignmentsNewlyPastDue :many
-SELECT a.id, a.course_id, a.due_at
+SELECT a.id, a.course_id, a.due_at, a.group_set_id
 FROM assignment a
 JOIN course c ON c.id = a.course_id
 WHERE a.published_at IS NOT NULL AND a.due_at IS NOT NULL AND a.due_at <= $1
@@ -136,7 +168,8 @@ WHERE a.published_at IS NOT NULL AND a.due_at IS NOT NULL AND a.due_at <= $1
         WHERE x.actor_id = $2
           -- floor, as Go's time.Unix() does; a plain ::bigint cast rounds, and
           -- a due date with a fractional second would then be swept every tick.
-          AND x.idempotency_key = 'job:submission.mark_missing:' || a.id::text || ':' || floor(extract(epoch FROM a.due_at))::bigint::text)
+          AND x.idempotency_key = 'job:submission.mark_missing:' || a.id::text || ':' || floor(extract(epoch FROM a.due_at))::bigint::text
+                                  || CASE WHEN a.group_set_id IS NOT NULL THEN ':groups' ELSE '' END)
 ORDER BY a.due_at
 LIMIT $3
 `
@@ -148,15 +181,20 @@ type ListAssignmentsNewlyPastDueParams struct {
 }
 
 type ListAssignmentsNewlyPastDueRow struct {
-	ID       uuid.UUID
-	CourseID uuid.UUID
-	DueAt    *time.Time
+	ID         uuid.UUID
+	CourseID   uuid.UUID
+	DueAt      *time.Time
+	GroupSetID *uuid.UUID
 }
 
 // Published assignments of open courses whose due date has passed and which
 // have not been swept for that due date yet. The sweep's own action row is
 // the marker: its idempotency key names the assignment and the due date, so
-// moving a due date later makes the assignment due for a sweep again.
+// moving a due date later makes the assignment due for a sweep again. A group
+// assignment's key ends ':groups': the release before 0031 sweeps it under
+// the plain key and records nothing there (its students' 'missing' rows are
+// passed over, submission_fits_assignment), and that must not stand for this
+// release's sweep, which records its groups'.
 func (q *Queries) ListAssignmentsNewlyPastDue(ctx context.Context, arg ListAssignmentsNewlyPastDueParams) ([]ListAssignmentsNewlyPastDueRow, error) {
 	rows, err := q.db.Query(ctx, listAssignmentsNewlyPastDue, arg.Now, arg.SystemActorID, arg.MaxRows)
 	if err != nil {
@@ -166,7 +204,12 @@ func (q *Queries) ListAssignmentsNewlyPastDue(ctx context.Context, arg ListAssig
 	var items []ListAssignmentsNewlyPastDueRow
 	for rows.Next() {
 		var i ListAssignmentsNewlyPastDueRow
-		if err := rows.Scan(&i.ID, &i.CourseID, &i.DueAt); err != nil {
+		if err := rows.Scan(
+			&i.ID,
+			&i.CourseID,
+			&i.DueAt,
+			&i.GroupSetID,
+		); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -212,6 +255,42 @@ func (q *Queries) ListExpiredMembers(ctx context.Context, arg ListExpiredMembers
 			return nil, err
 		}
 		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listGroupsWithoutSubmission = `-- name: ListGroupsWithoutSubmission :many
+SELECT g.id
+FROM course_group g
+WHERE g.set_id = $1 AND g.archived_at IS NULL
+  AND NOT EXISTS (SELECT 1 FROM submission s WHERE s.assignment_id = $2 AND s.group_id = g.id)
+ORDER BY g.id
+`
+
+type ListGroupsWithoutSubmissionParams struct {
+	SetID        uuid.UUID
+	AssignmentID uuid.UUID
+}
+
+// The groups of the assignment's set, not archived, with no submission row
+// at all for it: not a draft, not a hand-in, not an earlier 'missing'. One
+// with no live member is listed too, for the caller to pass over.
+func (q *Queries) ListGroupsWithoutSubmission(ctx context.Context, arg ListGroupsWithoutSubmissionParams) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, listGroupsWithoutSubmission, arg.SetID, arg.AssignmentID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err

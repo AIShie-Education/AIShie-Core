@@ -67,8 +67,12 @@ LIMIT sqlc.arg(max_rows);
 -- Published assignments of open courses whose due date has passed and which
 -- have not been swept for that due date yet. The sweep's own action row is
 -- the marker: its idempotency key names the assignment and the due date, so
--- moving a due date later makes the assignment due for a sweep again.
-SELECT a.id, a.course_id, a.due_at
+-- moving a due date later makes the assignment due for a sweep again. A group
+-- assignment's key ends ':groups': the release before 0031 sweeps it under
+-- the plain key and records nothing there (its students' 'missing' rows are
+-- passed over, submission_fits_assignment), and that must not stand for this
+-- release's sweep, which records its groups'.
+SELECT a.id, a.course_id, a.due_at, a.group_set_id
 FROM assignment a
 JOIN course c ON c.id = a.course_id
 WHERE a.published_at IS NOT NULL AND a.due_at IS NOT NULL AND a.due_at <= sqlc.arg(now)
@@ -78,7 +82,8 @@ WHERE a.published_at IS NOT NULL AND a.due_at IS NOT NULL AND a.due_at <= sqlc.a
         WHERE x.actor_id = sqlc.arg(system_actor_id)
           -- floor, as Go's time.Unix() does; a plain ::bigint cast rounds, and
           -- a due date with a fractional second would then be swept every tick.
-          AND x.idempotency_key = 'job:submission.mark_missing:' || a.id::text || ':' || floor(extract(epoch FROM a.due_at))::bigint::text)
+          AND x.idempotency_key = 'job:submission.mark_missing:' || a.id::text || ':' || floor(extract(epoch FROM a.due_at))::bigint::text
+                                  || CASE WHEN a.group_set_id IS NOT NULL THEN ':groups' ELSE '' END)
 ORDER BY a.due_at
 LIMIT sqlc.arg(max_rows);
 
@@ -94,9 +99,28 @@ WHERE m.course_id = $1 AND m.role = 'student' AND m.status <> 'removed'
 ORDER BY m.id;
 
 -- name: InsertMissingSubmission :execrows
+-- A student's; for a group assignment the database passes it over
+-- (submission_fits_assignment), and nothing is written.
 INSERT INTO submission (id, assignment_id, course_id, student_member_id, attempt, state, created_at)
-VALUES ($1, $2, $3, $4, 1, 'missing', $5)
+VALUES ($1, $2, $3, sqlc.arg(student_member_id)::uuid, 1, 'missing', $4)
 ON CONFLICT (assignment_id, student_member_id, attempt) DO NOTHING;
+
+-- name: ListGroupsWithoutSubmission :many
+-- The groups of the assignment's set, not archived, with no submission row
+-- at all for it: not a draft, not a hand-in, not an earlier 'missing'. One
+-- with no live member is listed too, for the caller to pass over.
+SELECT g.id
+FROM course_group g
+WHERE g.set_id = sqlc.arg(set_id) AND g.archived_at IS NULL
+  AND NOT EXISTS (SELECT 1 FROM submission s WHERE s.assignment_id = sqlc.arg(assignment_id) AND s.group_id = g.id)
+ORDER BY g.id;
+
+-- name: InsertGroupMissingSubmission :execrows
+-- A group's 'missing' row, its first attempt; whose it is is written next
+-- (InsertSubmissionMembers, missing).
+INSERT INTO submission (id, assignment_id, course_id, group_id, attempt, state, created_at)
+VALUES ($1, $2, $3, sqlc.arg(group_id)::uuid, 1, 'missing', $4)
+ON CONFLICT (assignment_id, group_id, attempt) WHERE group_id IS NOT NULL DO NOTHING;
 
 -- name: GetActionForUpdate :one
 SELECT * FROM action WHERE id = $1 FOR UPDATE;

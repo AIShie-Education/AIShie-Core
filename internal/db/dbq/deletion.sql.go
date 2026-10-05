@@ -160,10 +160,25 @@ func (q *Queries) DeleteGradesOfAssignment(ctx context.Context, assignmentID uui
 	return result.RowsAffected(), nil
 }
 
+const deleteGroupGradesOfAssignment = `-- name: DeleteGroupGradesOfAssignment :execrows
+DELETE FROM group_grade WHERE submission_id IN (SELECT s.id FROM submission s WHERE s.assignment_id = $1)
+`
+
+// Every group grade given on a group's submission to it, once the grades
+// given from them have gone (group_grade_kept).
+func (q *Queries) DeleteGroupGradesOfAssignment(ctx context.Context, assignmentID uuid.UUID) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteGroupGradesOfAssignment, assignmentID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const deleteSubmissionsOfAssignment = `-- name: DeleteSubmissionsOfAssignment :execrows
 DELETE FROM submission WHERE assignment_id = $1
 `
 
+// Whose work each was (submission_member) goes with it, by cascade.
 func (q *Queries) DeleteSubmissionsOfAssignment(ctx context.Context, assignmentID uuid.UUID) (int64, error) {
 	result, err := q.db.Exec(ctx, deleteSubmissionsOfAssignment, assignmentID)
 	if err != nil {
@@ -257,6 +272,8 @@ WITH RECURSIVE about (id) AS (
   UNION
     SELECT g.id FROM grade g JOIN submission s ON s.id = g.submission_id WHERE s.assignment_id = $1::uuid
   UNION
+    SELECT gg.id FROM group_grade gg JOIN submission s ON s.id = gg.submission_id WHERE s.assignment_id = $1::uuid
+  UNION
     SELECT unnest($2::uuid[])
 ), named (id) AS (
     SELECT id::text FROM about
@@ -269,11 +286,13 @@ WITH RECURSIVE about (id) AS (
            OR a.payload->>'submission_id' IN (SELECT id FROM named)
            OR a.payload->>'grade_id' IN (SELECT id FROM named)
            OR a.payload->>'document_id' IN (SELECT id FROM named)
+           OR a.payload->>'group_grade_id' IN (SELECT id FROM named)
            OR (jsonb_typeof(a.result) = 'object'
                AND (a.result->>'id' IN (SELECT id FROM named)
                     OR a.result->>'submission_id' IN (SELECT id FROM named)
                     OR a.result->>'grade_id' IN (SELECT id FROM named)
-                    OR a.result->>'document_id' IN (SELECT id FROM named))))
+                    OR a.result->>'document_id' IN (SELECT id FROM named)
+                    OR a.result->>'group_grade_id' IN (SELECT id FROM named))))
   UNION
     SELECT d.id
     FROM action d
@@ -442,12 +461,16 @@ WHERE (d.kind = 'submission'
    OR (d.kind = 'feedback'
        AND d.grade_id IN (SELECT g.id FROM grade g JOIN submission s ON s.id = g.submission_id
                           WHERE s.assignment_id = $1))
+   OR (d.kind = 'feedback'
+       AND d.group_grade_id IN (SELECT gg.id FROM group_grade gg JOIN submission s ON s.id = gg.submission_id
+                                WHERE s.assignment_id = $1))
 ORDER BY d.id
 `
 
 // The submitted files of every submission to the assignment, and the
-// feedback files of every grade given on them, superseded ones included, in
-// id order: deleted with it, and the only documents that are.
+// feedback files of every grade and group grade given on them, superseded
+// ones included, in id order: deleted with it, and the only documents that
+// are.
 func (q *Queries) ListOwnedDocumentsOfAssignment(ctx context.Context, assignmentID uuid.UUID) ([]uuid.UUID, error) {
 	rows, err := q.db.Query(ctx, listOwnedDocumentsOfAssignment, assignmentID)
 	if err != nil {
@@ -469,11 +492,16 @@ func (q *Queries) ListOwnedDocumentsOfAssignment(ctx context.Context, assignment
 }
 
 const listStudentsWithSubmissionsTo = `-- name: ListStudentsWithSubmissionsTo :many
-SELECT DISTINCT s.student_member_id FROM submission s WHERE s.assignment_id = $1 ORDER BY 1
+SELECT DISTINCT st.member_id::uuid AS member_id
+FROM submission s, submission_students(s.id) AS st(member_id)
+WHERE s.assignment_id = $1
+ORDER BY 1
 `
 
 // The students with a submission row of any kind for the assignment: whose
-// work its deletion takes.
+// work its deletion takes. A group's work is its students'
+// (submission_students): every member of work handed in or recorded
+// missing, and every member now of a group with a draft.
 func (q *Queries) ListStudentsWithSubmissionsTo(ctx context.Context, assignmentID uuid.UUID) ([]uuid.UUID, error) {
 	rows, err := q.db.Query(ctx, listStudentsWithSubmissionsTo, assignmentID)
 	if err != nil {
@@ -482,11 +510,11 @@ func (q *Queries) ListStudentsWithSubmissionsTo(ctx context.Context, assignmentI
 	defer rows.Close()
 	var items []uuid.UUID
 	for rows.Next() {
-		var student_member_id uuid.UUID
-		if err := rows.Scan(&student_member_id); err != nil {
+		var member_id uuid.UUID
+		if err := rows.Scan(&member_id); err != nil {
 			return nil, err
 		}
-		items = append(items, student_member_id)
+		items = append(items, member_id)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -497,7 +525,7 @@ func (q *Queries) ListStudentsWithSubmissionsTo(ctx context.Context, assignmentI
 const lockAssignmentForDelete = `-- name: LockAssignmentForDelete :one
 
 SELECT id, course_id, component_id, title, instructions_document_id, rubric_document_id,
-       points_possible, due_at, published_at
+       points_possible, due_at, published_at, group_set_id
 FROM assignment
 WHERE id = $1 AND course_id = $2
 FOR UPDATE
@@ -518,6 +546,7 @@ type LockAssignmentForDeleteRow struct {
 	PointsPossible         decimal.Decimal
 	DueAt                  *time.Time
 	PublishedAt            *time.Time
+	GroupSetID             *uuid.UUID
 }
 
 // Deleting an assignment for good (docs/schema.md §2.5, An assignment is
@@ -547,6 +576,7 @@ func (q *Queries) LockAssignmentForDelete(ctx context.Context, arg LockAssignmen
 		&i.PointsPossible,
 		&i.DueAt,
 		&i.PublishedAt,
+		&i.GroupSetID,
 	)
 	return i, err
 }
@@ -564,6 +594,37 @@ FOR UPDATE OF g
 // included, held in id order, after the submissions.
 func (q *Queries) LockGradesOfAssignment(ctx context.Context, assignmentID uuid.UUID) ([]uuid.UUID, error) {
 	rows, err := q.db.Query(ctx, lockGradesOfAssignment, assignmentID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const lockGroupGradesOfAssignment = `-- name: LockGroupGradesOfAssignment :many
+SELECT gg.id
+FROM group_grade gg
+JOIN submission s ON s.id = gg.submission_id
+WHERE s.assignment_id = $1
+ORDER BY gg.id
+FOR UPDATE OF gg
+`
+
+// Every group grade given on a group's submission to the assignment, held in
+// id order, after the grades.
+func (q *Queries) LockGroupGradesOfAssignment(ctx context.Context, assignmentID uuid.UUID) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, lockGroupGradesOfAssignment, assignmentID)
 	if err != nil {
 		return nil, err
 	}

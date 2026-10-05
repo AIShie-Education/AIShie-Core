@@ -17,10 +17,14 @@ const getGradeFull = `-- name: GetGradeFull :one
 SELECT g.id, g.student_member_id, g.submission_id, g.component_id, s.assignment_id, g.origin, g.score,
        g.feedback, g.breakdown, g.rubric_version_id, g.grader_member_id, g.created_by_action_id,
        g.posted_at, g.posted_by_member_id, g.superseded_by, g.created_at,
-       g.override_score, g.override_reason, g.override_by_member_id, g.overridden_at
+       g.override_score, g.override_reason, g.override_by_member_id, g.overridden_at,
+       g.group_grade_id, g.adjust_kind, g.adjust_points, g.adjust_reason, g.adjust_by_member_id,
+       s.group_id, cg.name AS group_name, gg.score AS group_score
 FROM grade g
 JOIN course_member sm ON sm.id = g.student_member_id
 LEFT JOIN submission s ON s.id = g.submission_id
+LEFT JOIN course_group cg ON cg.id = s.group_id
+LEFT JOIN group_grade gg ON gg.id = g.group_grade_id
 WHERE g.id = $1 AND sm.course_id = $2
 `
 
@@ -50,6 +54,14 @@ type GetGradeFullRow struct {
 	OverrideReason     *string
 	OverrideByMemberID *uuid.UUID
 	OverriddenAt       *time.Time
+	GroupGradeID       *uuid.UUID
+	AdjustKind         *string
+	AdjustPoints       decimal.NullDecimal
+	AdjustReason       *string
+	AdjustByMemberID   *uuid.UUID
+	GroupID            *uuid.UUID
+	GroupName          *string
+	GroupScore         decimal.NullDecimal
 }
 
 func (q *Queries) GetGradeFull(ctx context.Context, arg GetGradeFullParams) (GetGradeFullRow, error) {
@@ -76,6 +88,14 @@ func (q *Queries) GetGradeFull(ctx context.Context, arg GetGradeFullParams) (Get
 		&i.OverrideReason,
 		&i.OverrideByMemberID,
 		&i.OverriddenAt,
+		&i.GroupGradeID,
+		&i.AdjustKind,
+		&i.AdjustPoints,
+		&i.AdjustReason,
+		&i.AdjustByMemberID,
+		&i.GroupID,
+		&i.GroupName,
+		&i.GroupScore,
 	)
 	return i, err
 }
@@ -192,10 +212,14 @@ const listGrades = `-- name: ListGrades :many
 SELECT g.id, g.student_member_id, g.submission_id, g.component_id, s.assignment_id, g.origin, g.score,
        g.feedback, g.breakdown, g.rubric_version_id, g.grader_member_id, g.created_by_action_id,
        g.posted_at, g.posted_by_member_id, g.superseded_by, g.created_at,
-       g.override_score, g.override_reason, g.override_by_member_id, g.overridden_at
+       g.override_score, g.override_reason, g.override_by_member_id, g.overridden_at,
+       g.group_grade_id, g.adjust_kind, g.adjust_points, g.adjust_reason, g.adjust_by_member_id,
+       s.group_id, cg.name AS group_name, gg.score AS group_score
 FROM grade g
 JOIN course_member sm ON sm.id = g.student_member_id
 LEFT JOIN submission s ON s.id = g.submission_id
+LEFT JOIN course_group cg ON cg.id = s.group_id
+LEFT JOIN group_grade gg ON gg.id = g.group_grade_id
 WHERE sm.course_id = $1 AND g.id > $2
   AND ($3::uuid IS NULL OR g.student_member_id = $3)
   AND ($4::uuid IS NULL OR s.assignment_id = $4)
@@ -249,6 +273,14 @@ type ListGradesRow struct {
 	OverrideReason     *string
 	OverrideByMemberID *uuid.UUID
 	OverriddenAt       *time.Time
+	GroupGradeID       *uuid.UUID
+	AdjustKind         *string
+	AdjustPoints       decimal.NullDecimal
+	AdjustReason       *string
+	AdjustByMemberID   *uuid.UUID
+	GroupID            *uuid.UUID
+	GroupName          *string
+	GroupScore         decimal.NullDecimal
 }
 
 // Scope in SQL. Two more rules ride along:
@@ -299,6 +331,14 @@ func (q *Queries) ListGrades(ctx context.Context, arg ListGradesParams) ([]ListG
 			&i.OverrideReason,
 			&i.OverrideByMemberID,
 			&i.OverriddenAt,
+			&i.GroupGradeID,
+			&i.AdjustKind,
+			&i.AdjustPoints,
+			&i.AdjustReason,
+			&i.AdjustByMemberID,
+			&i.GroupID,
+			&i.GroupName,
+			&i.GroupScore,
 		); err != nil {
 			return nil, err
 		}
