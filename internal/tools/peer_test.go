@@ -3,6 +3,7 @@ package tools_test
 import (
 	"encoding/json"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -193,7 +194,7 @@ func TestAPeerFormIsSetOnAGroupAssignment(t *testing.T) {
 
 	// Yuki's task: the Team, whom she evaluates, open; a sheet of ratings.
 	task := w.peerForm(t, b.yuki).Task
-	if task == nil || task.GroupID != w.team || !task.InCircle || len(task.Circle) != 4 || len(task.ToEvaluate) != 3 ||
+	if task == nil || task.GroupID != w.team || len(task.Circle) != 4 || len(task.ToEvaluate) != 3 ||
 		slices.Contains(task.ToEvaluate, b.yukiM) || task.Window.State != "open" || task.Sheet != nil {
 		t.Fatalf("Yuki's task: %+v", task)
 	}
@@ -398,6 +399,51 @@ func TestAGroupsMembersEvaluateEachOther(t *testing.T) {
 	b.refusedAs(t, b.sato, "peer_review.results", m{"course_id": b.course, "assignment_id": w.hw, "group_id": lab}, apperr.NotFound, "")
 }
 
+// A student who joins a group after its work was handed in is in its group
+// and not its circle, and peer evaluation tells them nothing of that work, as
+// no other read does: no task, so neither who was on it, one of whom has
+// left since, nor, by its window, that it was handed in. One who left
+// evaluates still in the circle of the work they were on.
+func TestAJoinerAfterTheHandInIsToldNothingOfTheWork(t *testing.T) {
+	w := buildPeerGroups(t)
+	b := w.built
+	w.shareForm(t, time.Now().Add(time.Hour))
+	w.handIn(t, b.ken, "The Team's report")
+	// Ren leaves the Team for the Duo, and Hana the Duo for the Team.
+	b.place(t, w.set, true, w.renM, w.duo, w.hanaM, w.team)
+	for _, g := range b.setView(t, w.hana, w.set, false).Groups {
+		if g.ID == w.team && len(g.Work) != 0 {
+			t.Fatalf("Hana is shown the Team's work: %+v", g.Work)
+		}
+	}
+
+	bot := b.agent(t, w.hana, "Hana's helper")
+	b.delegate(t, w.hana, bot, m{})
+	for _, reader := range []uuid.UUID{w.hana, bot} {
+		got := w.peerForm(t, reader)
+		raw, err := json.Marshal(got)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Form == nil || got.Task != nil {
+			t.Fatalf("Hana's peer form, as %s reads it: %s", reader, raw)
+		}
+		for _, on := range []uuid.UUID{b.yukiM, b.kenM, w.aoiM, w.renM} {
+			if strings.Contains(string(raw), on.String()) {
+				t.Fatalf("%s is named to Hana: %s", on, raw)
+			}
+		}
+	}
+	b.refusedAs(t, w.hana, "peer_review.submit", w.sheetArgs(b.yukiM, 40, b.kenM, 30, w.aoiM, 30), apperr.FailedPrecondition, tools.ReasonNotInCircle)
+
+	// Ren evaluates the Team he handed the work in with.
+	if task := w.peerForm(t, w.ren).Task; task == nil || task.GroupID != w.team || len(task.Circle) != 4 || len(task.ToEvaluate) != 3 ||
+		task.Window.State != "open" {
+		t.Fatalf("Ren's task: %+v", task)
+	}
+	w.sheet(t, w.ren, b.yukiM, 40, b.kenM, 30, w.aoiM, 30)
+}
+
 // Counted, peer evaluation moves each member's grade from the group's at the
 // form's weight, once the window has closed: the design's example. A
 // grader's own adjustment wins; a regrade and a rescale work it out again;
@@ -535,9 +581,131 @@ func TestPeerEvaluationCountsInGrades(t *testing.T) {
 			t.Fatalf("%s's grade rescaled: %+v", who, g)
 		}
 	}
-	// At a weight of 0 it counts in nothing.
+	// At a weight of 0 it counts in nothing: counted again, each peer
+	// adjustment is taken away, the posted grades regraded to the group's
+	// score; then there is nothing to count.
 	w.setForm(t, m{"kind": "share", "opens": "on_hand_in", "closes_at": time.Now().Add(-time.Minute), "weight": 0})
+	out = testkit.Result[tools.GradeApplyPeerOut](t, b.do(t, b.sato, "grade.apply_peer", apply))
+	if len(out.Written) != 4 || out.Snapshots == 0 {
+		t.Fatalf("counted at a weight of 0: %+v", out)
+	}
+	for _, wr := range out.Written {
+		if !wr.Posted || wr.Adjustment != nil || !wr.Score.Equal(dec("45")) {
+			t.Fatalf("written at a weight of 0: %+v", wr)
+		}
+	}
 	b.refusedAs(t, b.sato, "grade.apply_peer", apply, apperr.FailedPrecondition, tools.ReasonPeerNotCounted)
+}
+
+// Peer evaluation that no longer counts, switched off or at a weight of 0,
+// is taken out of every grade it moved by counting it again: a draft as a
+// draft, a posted grade posted, the totals with them, by proposal each grade
+// recorded with no factor. A later write of one member's grade then leaves
+// the group's grades on one footing.
+func TestPeerEvaluationThatNoLongerCountsIsTakenOutOfGrades(t *testing.T) {
+	w := buildPeerGroups(t)
+	b := w.built
+	w.shareForm(t, time.Now().Add(time.Hour))
+	work := w.handIn(t, b.ken, "The Team's report")
+	w.designSheets(t)
+	w.closeForm(t)
+	apply := m{"course_id": b.course, "assignment_id": w.hw}
+	form := func(args m) tools.PeerFormView {
+		args["kind"], args["opens"], args["closes_at"] = "share", "on_hand_in", time.Now().Add(-time.Minute)
+		return w.setForm(t, args)
+	}
+	counted := map[uuid.UUID]string{b.yukiM: "83.2", b.kenM: "81.6", w.aoiM: "81.6", w.renM: "73.6"}
+	even := map[uuid.UUID]string{b.yukiM: "80", b.kenM: "80", w.aoiM: "80", w.renM: "80"}
+	// written checks what counting it wrote: every member of the Team, at
+	// want, posted or not, a peer adjustment or none.
+	written := func(out tools.GradeApplyPeerOut, want map[uuid.UUID]string, posted, peer bool) {
+		t.Helper()
+		if len(out.Written) != len(want) || (out.Snapshots > 0) != posted {
+			t.Fatalf("written: %+v", out)
+		}
+		for _, wr := range out.Written {
+			if !wr.Score.Equal(dec(want[wr.StudentMemberID])) || wr.Posted != posted || (wr.Adjustment != nil) != peer ||
+				(peer && wr.Adjustment.Kind != "peer") {
+				t.Fatalf("written for %s: %+v %+v", wr.StudentMemberID, wr, wr.Adjustment)
+			}
+		}
+	}
+	// own is what each member of the Team reads of their own grade.
+	own := func(want map[uuid.UUID]string, peer bool) {
+		t.Helper()
+		for actor, member := range map[uuid.UUID]uuid.UUID{b.yuki: b.yukiM, b.ken: b.kenM, w.aoi: w.aoiM, w.ren: w.renM} {
+			g := testkit.Result[tools.GradeListOut](t, b.do(t, actor, "grade.list", m{"course_id": b.course, "assignment_id": w.hw})).Grades
+			if len(g) != 1 || !g[0].Score.Equal(dec(want[member])) || g[0].Group == nil || !g[0].Group.Score.Equal(dec("80")) ||
+				(g[0].Group.Adjustment != nil) != peer {
+				t.Fatalf("%s's grade as they read it: %+v", member, g)
+			}
+		}
+	}
+
+	// Graded once it has closed: each draft moved by peer evaluation.
+	graded := testkit.Result[tools.GradeSubmitOut](t, b.do(t, b.sato, "grade.submit", m{"course_id": b.course, "submission_id": work, "score": 80}))
+	if graded.Peer != "counted" || len(graded.MemberGrades) != 4 {
+		t.Fatalf("graded: %+v", graded)
+	}
+	// At a weight of 0 the drafts stay as they are until it is counted
+	// again; then each is written as a draft at the group's score.
+	form(m{"weight": 0})
+	written(testkit.Result[tools.GradeApplyPeerOut](t, b.do(t, b.sato, "grade.apply_peer", apply)), even, false, false)
+	b.refusedAs(t, b.sato, "grade.apply_peer", apply, apperr.FailedPrecondition, tools.ReasonPeerNotCounted)
+	// Counted again at 20 %, and posted.
+	form(m{"weight": 20})
+	written(testkit.Result[tools.GradeApplyPeerOut](t, b.do(t, b.sato, "grade.apply_peer", apply)), counted, false, true)
+	b.do(t, b.sato, "grade.post", apply)
+	own(counted, true)
+
+	// Switched off, it tells students it counts in nothing, and their grades
+	// say so once it is counted again; Mei, who enters and posts grades by
+	// proposal, proposes it, each grade recorded with no factor.
+	if f := form(m{"weight": 20, "enabled": false}); slices.Contains(f.StudentsSee, "own_adjustment") {
+		t.Fatalf("switched off: %+v", f)
+	}
+	own(counted, true)
+	mei := b.person(t, "Mei", "")
+	b.do(t, b.sato, "member.add", m{"course_id": b.course, "actor_id": mei, "preset": "ta",
+		"perms": m{"grade_submit": "confirm_required", "grade_post": "confirm_required"}})
+	proposed := b.MustCall(mei, "grade.apply_peer", apply, "mei-off")
+	if proposed.Status != domain.StatusProposed {
+		t.Fatalf("Mei taking it away: %+v", proposed)
+	}
+	var payload tools.GradeApplyPeerIn
+	var raw []byte
+	if err := b.Pool.QueryRow(t.Context(), `SELECT payload FROM action WHERE id = $1`, proposed.ActionID).Scan(&raw); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil || payload.FormVersion == nil || *payload.FormVersion != w.version || len(payload.Grades) != 4 {
+		t.Fatalf("the proposal records %s: %v", raw, err)
+	}
+	for _, g := range payload.Grades {
+		if g.Factor != nil {
+			t.Fatalf("a factor recorded for a peer adjustment taken away: %+v", g)
+		}
+	}
+	res := testkit.Result[pipeline.DecideOut](t, b.do(t, b.sato, "action.decide", m{"course_id": b.course, "action_id": proposed.ActionID, "decision": "approve"}))
+	var off tools.GradeApplyPeerOut
+	if err := json.Unmarshal(res.Result, &off); res.Outcome != domain.StatusExecuted || err != nil {
+		t.Fatalf("approved: %+v %v", res, err)
+	}
+	written(off, even, true, false)
+	own(even, false)
+	b.refusedAs(t, b.sato, "grade.apply_peer", apply, apperr.FailedPrecondition, tools.ReasonPeerNotCounted)
+
+	// Ren's grade written again alone gives him what the rest of the Team
+	// has: the group's score, peer evaluation counting in nobody's.
+	var ren uuid.UUID
+	if err := b.Pool.QueryRow(t.Context(), `SELECT id FROM grade WHERE submission_id = $1 AND student_member_id = $2 AND superseded_by IS NULL`,
+		work, w.renM).Scan(&ren); err != nil {
+		t.Fatal(err)
+	}
+	if adj := testkit.Result[tools.GradeAdjustOut](t, b.do(t, b.sato, "grade.adjust", m{"course_id": b.course, "grade_id": ren,
+		"kind": "none"})); adj.Changed || !adj.Score.Equal(dec("80")) || adj.Adjustment != nil {
+		t.Fatalf("Ren's grade written again: %+v", adj)
+	}
+	own(even, false)
 }
 
 // A peer evaluation is a person's: a student's own agent, which works on her
@@ -552,7 +720,7 @@ func TestAnAgentWritesNoPeerEvaluation(t *testing.T) {
 	seat := b.delegate(t, b.yuki, bot, m{})
 	b.do(t, b.sato, "member.update_perms", m{"course_id": b.course, "member_id": seat, "perms": m{"submission_write": "confirm_required"}})
 
-	if task := w.peerForm(t, bot).Task; task == nil || task.GroupID != w.team || !task.InCircle || len(task.ToEvaluate) != 3 {
+	if task := w.peerForm(t, bot).Task; task == nil || task.GroupID != w.team || len(task.ToEvaluate) != 3 {
 		t.Fatalf("Yuki's task as her agent reads it: %+v", task)
 	}
 	out := b.MustCall(bot, "peer_review.submit", w.sheetArgs(b.kenM, 40, w.aoiM, 40, w.renM, 20), "bot-sheet")

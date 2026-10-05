@@ -533,7 +533,6 @@ type OwnAverage struct {
 type PeerTask struct {
 	GroupID    uuid.UUID      `json:"group_id"`
 	GroupName  string         `json:"group_name"`
-	InCircle   bool           `json:"in_circle" jsonschema:"whether the student evaluates here: one who joined the group after its work was handed in does not"`
 	Circle     []CircleMember `json:"circle" jsonschema:"who evaluates whom: the members of the group's latest work handed in or recorded missing, or, with none, its members now"`
 	ToEvaluate []uuid.UUID    `json:"to_evaluate" jsonschema:"whom the student's sheet covers, exactly: every other member of the circle, and themselves with self-evaluation on"`
 	Window     PeerWindow     `json:"window"`
@@ -543,7 +542,7 @@ type PeerTask struct {
 
 type PeerFormGetOut struct {
 	Form *PeerFormView `json:"form" jsonschema:"null when the assignment has none"`
-	Task *PeerTask     `json:"task,omitempty" jsonschema:"for a student in a group of the assignment's set, or a student's own agent: the student's part"`
+	Task *PeerTask     `json:"task,omitempty" jsonschema:"for a student in a group's circle, or a student's own agent: the student's part. Absent for one in none, such as one who joined their group after its work was handed in, who is told nothing of that work"`
 }
 
 func peerFormGet() tool.Tool {
@@ -553,8 +552,9 @@ func peerFormGet() tool.Tool {
 			"splitting 100 points), the window, the weight it counts at in each member's grade, and who sees what: those who " +
 			"grade read every sheet with who wrote it, as does the action log; a student reads their own sheet, their own " +
 			"average once it closes if the form shares it, and their own grade's adjustment where it counts, never another's " +
-			"sheet, what was said of them, or who rated them. For a student in a group of the assignment's set (or a student's " +
-			"own agent), their task: the circle, whom they evaluate, the window's state, their current sheet.",
+			"sheet, what was said of them, or who rated them. For a student in a group's circle (or a student's own agent), " +
+			"their task: the circle, whom they evaluate, the window's state, their current sheet; one who joined their group " +
+			"after its work was handed in has none, and is told nothing of that work.",
 		Kind: tool.Read, Gate: tool.Gate{Perms: []domain.Perm{domain.PermDocumentRead}},
 		HTTP: tool.Route{Method: "GET", Pattern: "/v1/courses/{course_id}/assignments/{assignment_id}/peer-form"},
 		Resolve: func(ctx context.Context, q dbq.Querier, in AssignmentIDIn) (tool.Target, error) {
@@ -588,32 +588,30 @@ func peerFormGet() tool.Tool {
 }
 
 // peerTask is the caller's own part in peer evaluation, or a student's own
-// agent's student's: nil for anyone in no group of the set.
+// agent's student's: nil for anyone in no circle. One who joined their group
+// after its work was handed in is in its group and not its circle, and is
+// told nothing of that work, as a member is shown none of it (§2.5, What each
+// member sees): not who was on it, some of whom may have left since, nor,
+// through the window, that it was handed in.
 func peerTask(ctx context.Context, rc *tool.ReadCtx, a dbq.GetAssignmentInCourseRow, f dbq.PeerForm) (*PeerTask, error) {
 	self := selfOf(rc.Member)
 	c, in, err := circleFor(ctx, rc.Q, a, self)
-	if err != nil || c == nil {
+	if err != nil || c == nil || !in {
 		return nil, err
 	}
 	g, err := loadGroup(ctx, rc.Q, a.CourseID, c.group)
 	if err != nil {
 		return nil, err
 	}
-	t := &PeerTask{GroupID: g.ID, GroupName: g.Name, InCircle: in, Circle: []CircleMember{}, ToEvaluate: []uuid.UUID{},
+	t := &PeerTask{GroupID: g.ID, GroupName: g.Name, Circle: []CircleMember{}, ToEvaluate: toEvaluate(f, c.members, self),
 		Window: viewWindow(f, c.handedIn, rc.Now)}
-	if len(c.members) > 0 {
-		names, err := rc.Q.NamesOfMembers(ctx, c.members)
-		if err != nil {
-			return nil, err
-		}
-		for _, n := range names {
-			t.Circle = append(t.Circle, CircleMember{MemberID: n.ID, DisplayName: n.DisplayName})
-		}
+	names, err := rc.Q.NamesOfMembers(ctx, c.members)
+	if err != nil {
+		return nil, err
 	}
-	if !in {
-		return t, nil
+	for _, n := range names {
+		t.Circle = append(t.Circle, CircleMember{MemberID: n.ID, DisplayName: n.DisplayName})
 	}
-	t.ToEvaluate = toEvaluate(f, c.members, self)
 	sheets, err := currentSheets(ctx, rc.Q, a.ID, []uuid.UUID{self})
 	if err != nil {
 		return nil, err
@@ -659,7 +657,7 @@ func toEvaluate(f dbq.PeerForm, members []uuid.UUID, rater uuid.UUID) []uuid.UUI
 type PeerFormSetIn struct {
 	tool.InCourse
 	AssignmentID      uuid.UUID       `json:"assignment_id" jsonschema:"a group assignment"`
-	Enabled           *bool           `json:"enabled,omitempty" jsonschema:"false stops new sheets and stops it counting, keeping what was written; true if omitted on a new form, and as it was on a form there is"`
+	Enabled           *bool           `json:"enabled,omitempty" jsonschema:"false stops new sheets and stops it counting, keeping what was written; grade.apply_peer then takes away the peer adjustments counted before. True if omitted on a new form, and as it was on a form there is"`
 	Kind              string          `json:"kind" jsonschema:"rating: each member rated on each criterion, a whole number on the scale; share: each rater splits 100 points among those they evaluate"`
 	Criteria          []PeerCriterion `json:"criteria,omitempty" jsonschema:"rating: 1 to 10 criteria"`
 	ScaleMin          *int32          `json:"scale_min,omitempty" jsonschema:"rating: 0 or 1"`
@@ -668,7 +666,7 @@ type PeerFormSetIn struct {
 	Opens             string          `json:"opens" jsonschema:"on_hand_in: for each group once it has handed work in; at: at opens_at"`
 	OpensAt           *time.Time      `json:"opens_at,omitempty" jsonschema:"with opens at; before closes_at"`
 	ClosesAt          time.Time       `json:"closes_at" jsonschema:"when no more sheets are written, for every group; what counts in grades is worked out once it has passed"`
-	Weight            int32           `json:"weight" jsonschema:"0 to 100: the percentage of each member's grade what they received moves; 0 for reference only. A change rewrites no grade until grade.apply_peer"`
+	Weight            int32           `json:"weight" jsonschema:"0 to 100: the percentage of each member's grade what they received moves; 0 for reference only. A change rewrites no grade until grade.apply_peer, which at 0 takes away the peer adjustments counted before"`
 	ShareWithStudents *string         `json:"share_with_students,omitempty" jsonschema:"none, or own_average: after it closes a member reads their own average from two peers or more; none if omitted on a new form, and as it was on a form there is"`
 	Version           *int32          `json:"version,omitempty" jsonschema:"the version you read (peer_form.get), 0 for none: the change is made only over it (version_mismatch). Omitted, only a new form is made. Over REST the If-Match header may carry it. A proposal records it"`
 }

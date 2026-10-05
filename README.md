@@ -85,7 +85,8 @@ In place so far:
   kept; those who grade read every sheet and each member's factor against
   an even share, with flags; counted at the form's weight once the window
   closes, it moves each member's grade from the group's, a grader's own
-  adjustment winning; only people write one, and no student reads another's
+  adjustment winning, and switched off or at a weight of 0 it is taken out
+  of every grade again; only people write one, and no student reads another's
   sheet, what was said of them or who rated them, only their own average
   where the form shares it;
 - an assignment deleted for good by whoever writes assignments, once they
@@ -128,7 +129,8 @@ their own grade, the team's and their adjustment, and nothing of another's;
 the team evaluates its members' contribution, a sheet of another team
 refused and the results the instructor's alone, and once it closes peer
 evaluation moves a member's grade while the instructor's own adjustment of
-the other stays; and a random split by a seed deals the same pairs twice; a student with no
+the other stays, and, switched off, is taken out of it again; and a random
+split by a seed deals the same pairs twice; a student with no
 email registers through another with her student
 number as her login ID and signs in with it, is given a temporary password by
 the instructor when she forgets hers, and sets her own before anything else,

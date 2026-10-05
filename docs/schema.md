@@ -1866,8 +1866,8 @@ since refused `version_mismatch`, with `current_version`); a proposal records th
 what it leaves as it was. Once a sheet is written its kind, criteria, scale and self-evaluation
 are fixed (`form_in_use`, and `peer_form_shape_fixed` whichever release writes): a sheet is read
 against the shape it was written to. Its dates, weight and sharing change; `enabled: false`
-stops new sheets and stops it counting, and keeps what was written. A change rewrites no grade
-(`grade.apply_peer` does). An assignment with a form enabled is not made individual work
+stops new sheets and stops it counting, and keeps what was written. A change rewrites no grade:
+`grade.apply_peer` does, and takes every peer adjustment away once the form no longer counts. An assignment with a form enabled is not made individual work
 (`peer_form_exists`): switch the form off first. Its news is `peer_form.updated`, filed under
 the assignment, for those who write assignments.
 
@@ -1881,7 +1881,9 @@ work that is not a draft (handed in or recorded missing, `submission_member`), o
 its members now less those another group's work for the assignment names. A student evaluates
 in the circle of a group whose work names them, or else of their group of the set now; one who
 joined a group after its work was handed in is in its group and not its circle
-(`not_in_circle`). Every member of a circle evaluates every other, and themselves with
+(`not_in_circle`), and is told nothing of that work through peer evaluation, as through any read
+(§2.5, What each member sees): `peer_form.get` gives them no task, so neither who was on it,
+some of whom may have left since, nor, by its window, that it was handed in. Every member of a circle evaluates every other, and themselves with
 self-evaluation; a sheet covers exactly those (`sheet_incomplete`), a rater's own entry only
 with self-evaluation (`self_evaluation_off`), each a rating of every criterion on the scale
 (`bad_rating`) or a share, the shares adding up to exactly 100 (`bad_share_total`).
@@ -1901,7 +1903,7 @@ of it now.
 **Who reads what.** To a student a sheet is anonymous and private: they read their own current
 sheet (`peer_form.get`'s `task`), never another's, nor what was said of them, nor who rated them.
 `peer_form.get` (`perm_document_read`, the assignment visible to them) gives everyone the form,
-and a student in a group of the set, or a student's own agent, their task: the group, its circle
+and a student in a circle, or a student's own agent, their task: the group, its circle
 by name, whom they evaluate (`to_evaluate`), the window, their current sheet, and, where the
 form shares it, after it closes, their own average from two peers or more (`own_average`: the
 average on each criterion, or, for a share form, what they received against an even share as a
@@ -1970,10 +1972,13 @@ decision wins over the form's. A rescale works a peer adjustment out again from 
 factor, at its recorded weight. `grade.apply_peer` (the lower of `perm_grade_submit` and
 `perm_grade_post`, as a regrade) writes again, at once, every live grade of the assignment given
 from a group grade whose peer adjustment would change — after the window closes, or the weight
-changes — a draft as a draft and a posted grade posted, the old superseded and the member's
-totals written again (`grade.created` or `grade.regraded`, `{replaces, group_grade_id, peer:
-true}`); refused while the window is open (`window_open`) or when the form does not count
-(`peer_not_counted`). It reaches every member whose grade it writes. A proposal of it records
+changes; and, once the form no longer counts (switched off, or a weight of 0), every one with a
+peer adjustment, which is taken away, the member given the group's score, so that no grade is
+left moved by a form that counts in nothing and a later write of one member's grade leaves the
+group on one footing — a draft as a draft and a posted grade posted, the old superseded and the
+member's totals written again (`grade.created` or `grade.regraded`, `{replaces, group_grade_id,
+peer: true}`); refused while the window is open (`window_open`), or when the form does not count
+and no grade has a peer adjustment (`peer_not_counted`). It reaches every member whose grade it writes. A proposal of it records
 the form's version and each grade it writes with the member's factor, and approving it is
 refused if any has changed since (`grades_changed`). A member learns their own result through
 their grade — the group's score, their own score and the weight are theirs to see — and never
@@ -3427,9 +3432,11 @@ respondent's `conversation_answer` decides is who is shown its text.
   its shares adding up to 100; `people_only`; the factor, worked out exactly and given to ten
   places, the score rounded once and held to its bounds, and the flags (golden examples, package
   `peercalc`); a grader's adjustment winning over peer evaluation's, which is never carried;
-  what `grade.apply_peer` writes again, and a proposal's factors; and that no student, through
-  any read or the feed, reads another's sheet, what was said of them or who rated them, and
-  their own average only from two peers or more once the window has closed.
+  what `grade.apply_peer` writes again, peer adjustments taken away once the form no longer
+  counts, and a proposal's factors; and that no student, through any read or the feed, reads
+  another's sheet, what was said of them or who rated them, and their own average only from two
+  peers or more once the window has closed, and one who joined their group after its work was
+  handed in learns nothing of that work through peer evaluation.
 - An identity provider's client secret is sealed before it is written, and in no answer, action
   or log line; a sign-in goes through the provider its state names, as it is now, and one
   switched off signs nobody in; the operator's provider wins over a site's of its name; linking

@@ -53,7 +53,8 @@
 # the team's score and their adjustment, and nothing of another's; the team
 # evaluates its members' contribution, a sheet of another team refused and
 # the results his alone, and, once it closes, peer evaluation moves a
-# member's grade while his own adjustment of the other stays; and a
+# member's grade while his own adjustment of the other stays, and, switched
+# off, is taken out of it again; and a
 # random split by a seed deals the same pairs twice. Then a student
 # with no email registers through another link with her student number as
 # her login ID, and signs in with it; forgets her password, and he gives her
@@ -1168,7 +1169,7 @@ call 200 GET "$C/events?since_seq=0&limit=500" "$AOI"
 [ "$(json "$WORK/body" 'sorted(set(e["type"] for e in d["result"]["events"] if e["type"] in ("group.member_added", "submission.submitted", "grade.posted") and e.get("assignment_id") in (None, "'"$PROJECT"'")))')" = \
   "['grade.posted', 'group.member_added', 'submission.submitted']" ] || fail "Aoi's feed of her team: $(cat "$WORK/body")"
 
-step "Sato adds peer evaluation to the term project, members rating themselves too, counted at 20 %; Yuki and Aoi split 100 points between them, Hana's sheet of Team 1 refused; nobody but Sato reads the results; closed and counted, Aoi's grade moves and Yuki's own adjustment stays"
+step "Sato adds peer evaluation to the term project, members rating themselves too, counted at 20 %; Yuki and Aoi split 100 points between them, Hana's sheet of Team 1 refused; nobody but Sato reads the results; closed and counted, Aoi's grade moves and Yuki's own adjustment stays; switched off and counted again, Aoi's grade is the team's again"
 PEER_FORM="{\"kind\":\"share\",\"self_evaluation\":true,\"opens\":\"on_hand_in\",\"closes_at\":\"$DEADLINE\",\"weight\":20,\"share_with_students\":\"own_average\"}"
 call 200 POST "$C/assignments/$PROJECT/peer-form" "$SATO" "$PEER_FORM"
 [ "$(json "$WORK/body" 'd["result"]["version"], d["result"]["students_see"]')" = "1 ['own_sheet', 'own_average', 'own_adjustment']" ] ||
@@ -1202,7 +1203,15 @@ call 200 GET "$C/grades?assignment_id=$PROJECT" "$AOI"
 call 200 GET "$C/grades?assignment_id=$PROJECT" "$YUKI"
 [ "$(json "$WORK/body" '[(g["score"], g["group"]["adjustment"]["kind"]) for g in d["result"]["grades"]]')" = "[(95, 'delta')]" ] ||
   fail "Yuki's grade, Sato's adjustment: $(cat "$WORK/body")"
-echo "  Aoi 89.1, peer evaluation moving the team's 90 by -0.9; Yuki's 95 Sato's"
+IF_MATCH='"2"' call 200 POST "$C/assignments/$PROJECT/peer-form" "$SATO" "{\"kind\":\"share\",\"opens\":\"on_hand_in\",\"closes_at\":\"$PAST\",\"weight\":20,\"enabled\":false}"
+call 200 POST "$C/assignments/$PROJECT/apply-peer" "$SATO"
+[ "$(json "$WORK/body" '[(w["student_member_id"], w["score"], w["posted"], "adjustment" in w) for w in d["result"]["written"]]')" = "[('$AOI_M', 90, True, False)]" ] ||
+  fail "taking it away: $(cat "$WORK/body")"
+call 200 GET "$C/grades?assignment_id=$PROJECT" "$AOI"
+[ "$(json "$WORK/body" '[(g["score"], g["group"].get("adjustment")) for g in d["result"]["grades"]]')" = "[(90, None)]" ] || fail "Aoi's grade switched off: $(cat "$WORK/body")"
+call 422 POST "$C/assignments/$PROJECT/apply-peer" "$SATO"
+[ "$(reason)" = peer_not_counted ] || fail "counting it again switched off: $(cat "$WORK/body")"
+echo "  Aoi 89.1, peer evaluation moving the team's 90 by -0.9; Yuki's 95 Sato's; switched off, Aoi 90 again"
 
 step "Sato splits the class at random into lab pairs: the seed deals them, and the same seed in another set deals the same pairs"
 pairs() { # NAME → PAIRS, the pairs dealt

@@ -23,14 +23,16 @@ import (
 // written while the form counts and its window has closed (grade.submit,
 // .regrade, .adjust, a rescale); grade.apply_peer writes again, at once,
 // every live grade of an assignment whose peer adjustment would change: after
-// the window closes, or the weight changes.
+// the window closes, or the weight changes; and, once the form no longer
+// counts (switched off, or a weight of 0), it takes every peer adjustment
+// counted before away, so that no grade is left moved by it.
 
 // PinnedFactor is a grade counting peer evaluation writes again, and the
 // member's factor: what a proposal of it records.
 type PinnedFactor struct {
 	GradeID         uuid.UUID        `json:"grade_id"`
 	StudentMemberID uuid.UUID        `json:"student_member_id"`
-	Factor          *decimal.Decimal `json:"factor,omitempty" jsonschema:"absent: the member's peer adjustment taken away, nobody having rated them"`
+	Factor          *decimal.Decimal `json:"factor,omitempty" jsonschema:"absent: the member's peer adjustment taken away, nobody having rated them or the form no longer counting"`
 }
 
 type GradeApplyPeerIn struct {
@@ -76,12 +78,16 @@ func (w peerWrite) factor() *decimal.Decimal {
 // peerPlan is what counting peer evaluation on form f writes again of
 // assignment a's grades: every live grade given from a group grade whose
 // peer adjustment, worked out now, differs from the one it has, but one a
-// grader adjusted, whose adjustment wins.
+// grader adjusted, whose adjustment wins. On a form that does not count
+// (switched off, or a weight of 0) a peer adjustment worked out now is none:
+// every one counted before is taken away, the member given the group's
+// score.
 func peerPlan(ctx context.Context, q dbq.Querier, a dbq.GetAssignmentInCourseRow, f dbq.PeerForm) ([]peerWrite, error) {
 	rows, err := q.ListLiveGradesFromGroupGrades(ctx, a.ID)
 	if err != nil {
 		return nil, err
 	}
+	counting := formCounts(&f)
 	counts := map[uuid.UUID]peerCount{}
 	var out []peerWrite
 	for _, g := range rows {
@@ -89,14 +95,17 @@ func peerPlan(ctx context.Context, q dbq.Querier, a dbq.GetAssignmentInCourseRow
 		if !now.manual().none() {
 			continue
 		}
-		pc, ok := counts[g.GroupID]
-		if !ok {
-			if pc, err = countFor(ctx, q, f, g.GroupID); err != nil {
-				return nil, err
+		next := adjustment{}
+		if counting {
+			pc, ok := counts[g.GroupID]
+			if !ok {
+				if pc, err = countFor(ctx, q, f, g.GroupID); err != nil {
+					return nil, err
+				}
+				counts[g.GroupID] = pc
 			}
-			counts[g.GroupID] = pc
+			next = pc.adjust(g.StudentMemberID, adjustment{}, g.GroupScore, a.PointsPossible, g.AllowExtra)
 		}
-		next := pc.adjust(g.StudentMemberID, adjustment{}, g.GroupScore, a.PointsPossible, g.AllowExtra)
 		score, err := memberScore(g.GroupScore, next, a.PointsPossible, g.AllowExtra)
 		if err != nil {
 			return nil, err
@@ -109,20 +118,27 @@ func peerPlan(ctx context.Context, q dbq.Querier, a dbq.GetAssignmentInCourseRow
 	return out, nil
 }
 
-// counted refuses counting peer evaluation on f, at now: no form, one that
-// does not count, or one whose window is open.
-func counted(f *dbq.PeerForm, now time.Time) error {
+// countable refuses counting peer evaluation on f, at now, before what it
+// writes is worked out: no form, or one that counts whose window is open.
+func countable(f *dbq.PeerForm, now time.Time) error {
 	switch {
 	case f == nil:
 		return errNoPeerForm()
-	case !formCounts(f):
-		return apperr.Precondition("the peer form does not count in grades: it is switched off, or its weight is 0").
-			With("reason", ReasonPeerNotCounted)
-	case !formClosed(*f, now):
+	case formCounts(f) && !formClosed(*f, now):
 		return apperr.Precondition("peer evaluation is open until %s; it counts once it has closed", f.ClosesAt.Format(time.RFC3339)).
 			With("reason", ReasonWindowOpen).With("closes_at", f.ClosesAt)
 	}
 	return nil
+}
+
+// takesAway refuses plan on f, a form that does not count, when it writes
+// nothing: no grade has a peer adjustment to take away.
+func takesAway(f dbq.PeerForm, plan []peerWrite) error {
+	if formCounts(&f) || len(plan) > 0 {
+		return nil
+	}
+	return apperr.Precondition("the peer form does not count in grades (it is switched off, or its weight is 0), and no grade has a peer adjustment to take away").
+		With("reason", ReasonPeerNotCounted)
 }
 
 // errPeerGradesChanged refuses approving grade.apply_peer once a grade it
@@ -177,8 +193,10 @@ func gradeApplyPeer() tool.Tool {
 			"adjustment would change is written again — a draft as a draft, a posted grade posted, the old kept and the " +
 			"member's totals written again — with what the member received, against an even share, moving their score from " +
 			"the group's at the form's weight. A grader's own adjustment (replace or delta) is left as it is: it wins. For " +
-			"after the window closes, or the weight changes; refused while it is open (window_open), or when the form does " +
-			"not count (peer_not_counted: switched off, or a weight of 0). Gated as a regrade, the lower of grade_submit and " +
+			"after the window closes, or the weight changes; and, once the form no longer counts (switched off, or a weight " +
+			"of 0), to take every peer adjustment counted before away, each member given the group's score. Refused while " +
+			"the window is open (window_open), or when the form does not count and no grade has a peer adjustment " +
+			"(peer_not_counted). Gated as a regrade, the lower of grade_submit and " +
 			"grade_post; it reaches every member whose grade it writes. A proposal records each member's factor, and approving " +
 			"it is refused if a grade it would replace, or the form, has changed since (grades_changed).",
 		Kind: tool.Write, Gate: tool.Gate{Perms: []domain.Perm{domain.PermGradeSubmit, domain.PermGradePost}},
@@ -195,7 +213,7 @@ func gradeApplyPeer() tool.Tool {
 				return t, err
 			}
 			a, f, err := load(ctx, q, in)
-			if err != nil || !formCounts(f) {
+			if err != nil || f == nil {
 				return t, err
 			}
 			plan, err := peerPlan(ctx, q, a, *f)
@@ -203,11 +221,18 @@ func gradeApplyPeer() tool.Tool {
 			return t, err
 		},
 		Validate: func(ctx context.Context, q dbq.Querier, _ *domain.Member, now time.Time, in GradeApplyPeerIn) error {
-			_, f, err := load(ctx, q, in)
+			a, f, err := load(ctx, q, in)
 			if err != nil {
 				return err
 			}
-			return counted(f, now)
+			if err := countable(f, now); err != nil || formCounts(f) {
+				return err
+			}
+			plan, err := peerPlan(ctx, q, a, *f)
+			if err != nil {
+				return err
+			}
+			return takesAway(*f, plan)
 		},
 		Pin: func(ctx context.Context, q dbq.Querier, _ *domain.Member, _ time.Time, in GradeApplyPeerIn) (GradeApplyPeerIn, error) {
 			a, f, err := load(ctx, q, in)
@@ -219,6 +244,9 @@ func gradeApplyPeer() tool.Tool {
 			}
 			plan, err := peerPlan(ctx, q, a, *f)
 			if err != nil {
+				return in, err
+			}
+			if err := takesAway(*f, plan); err != nil {
 				return in, err
 			}
 			if len(plan) == 0 {
@@ -244,7 +272,7 @@ func gradeApplyPeer() tool.Tool {
 			if err != nil {
 				return GradeApplyPeerOut{}, err
 			}
-			if err := counted(f, ec.Now); err != nil {
+			if err := countable(f, ec.Now); err != nil {
 				return GradeApplyPeerOut{}, err
 			}
 			rows, err := ec.Q.ListLiveGradesFromGroupGrades(ctx, a.ID)
@@ -260,6 +288,9 @@ func gradeApplyPeer() tool.Tool {
 			}
 			plan, err := peerPlan(ctx, ec.Q, a, *f)
 			if err != nil {
+				return GradeApplyPeerOut{}, err
+			}
+			if err := takesAway(*f, plan); err != nil {
 				return GradeApplyPeerOut{}, err
 			}
 			for _, w := range plan {
