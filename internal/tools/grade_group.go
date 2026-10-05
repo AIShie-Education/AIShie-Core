@@ -420,7 +420,7 @@ func writeGroupGrade(ctx context.Context, d Deps, ec *tool.ExecCtx, courseID uui
 				return uuid.Nil, nil, "", err
 			}
 			if err := noGradeLeft(ctx, ec.Q, s.submission.ID, w.student); err != nil {
-				return uuid.Nil, nil, err
+				return uuid.Nil, nil, "", err
 			}
 		}
 		row := dbq.InsertGradeParams{ID: id, StudentMemberID: w.student, SubmissionID: &s.submission.ID, Origin: "entered", Score: score,
