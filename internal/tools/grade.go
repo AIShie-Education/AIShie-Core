@@ -429,7 +429,8 @@ func gradeSubmit(d Deps) tool.Tool {
 			"an adjustment carried from their earlier grade otherwise. Each member's draft is posted with grade.post, and " +
 			"changed alone with grade.adjust. Once a grade on a group's work is posted, a new group grade for it is refused " +
 			"(group_grade_posted): it is changed with grade.regrade, which also gives a member added to the work since a " +
-			"grade from it.",
+			"grade from it. A member's draft posted while the call is being made refuses it the same way, and one " +
+			"adjusted meanwhile refuses it as grades_changed: look again, and call again.",
 		Kind: tool.Write,
 		Gate: tool.Gate{Perms: []domain.Perm{domain.PermGradeSubmit}},
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/grades"},

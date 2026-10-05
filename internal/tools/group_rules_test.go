@@ -648,3 +648,133 @@ func TestAStudentAddedAfterPostingIsGivenTheGroupsGrade(t *testing.T) {
 		t.Fatalf("posting the assignment: %+v", posted)
 	}
 }
+
+// A group grade entered while a member's draft is replaced or posted waits
+// for that call, and is then refused, writing nothing: written, it would
+// leave the member a draft beside the one written meanwhile, or beside
+// their posted grade, where it could never be posted and would hold up
+// posting the assignment, with nothing to clear it. Yuki's draft is
+// adjusted while Tomo enters Team A's grade (grades_changed); then Team A's
+// drafts are posted while he enters it again, the post held once it has
+// posted them, on the lock of the first of its students' totals
+// (group_grade_posted).
+func TestAGroupGradeEnteredWhileAMembersDraftChangesIsRefused(t *testing.T) {
+	w := buildTwoGroups(t)
+	b := w.built
+	tomo := b.person(t, "Tomo", "")
+	b.do(t, b.sato, "member.add", m{"course_id": b.course, "actor_id": tomo, "preset": "ta"})
+	live := func() (drafts, posted int) {
+		t.Helper()
+		if err := b.Pool.QueryRow(t.Context(), `SELECT count(*) FILTER (WHERE posted_at IS NULL), count(*) FILTER (WHERE posted_at IS NOT NULL)
+			FROM grade WHERE submission_id = $1 AND superseded_by IS NULL`, w.workA).Scan(&drafts, &posted); err != nil {
+			t.Fatal(err)
+		}
+		return drafts, posted
+	}
+	enter := func(key string) <-chan callResult {
+		return b.inFlight(tomo, "grade.submit", m{"course_id": b.course, "submission_id": w.workA, "score": 90}, key)
+	}
+
+	// Yuki's draft adjusted as grade.adjust writes it: replaced by one from
+	// the same group grade, held until Tomo's call waits for it.
+	adjusted := uuid.New()
+	release := heldBy(t, b, `WITH old AS (UPDATE grade SET superseded_by = $2 WHERE id = $1 RETURNING *)
+		INSERT INTO grade (id, student_member_id, submission_id, origin, score, feedback, grader_member_id, created_by_action_id,
+		                   group_grade_id, adjust_kind, adjust_points, adjust_reason, adjust_by_member_id)
+		SELECT $2, student_member_id, submission_id, origin, 95, feedback, grader_member_id, created_by_action_id,
+		       group_grade_id, 'replace', 95, 'Did the most', grader_member_id
+		FROM old`, w.yukiGrade, adjusted)
+	entering := enter("enter-while-adjusted")
+	b.waitingFor(t, 1, entering)
+	release()
+	if out := settled(t, entering); out.Status != domain.StatusFailed || out.Error == nil ||
+		out.Error.Details["reason"] != tools.ReasonGradesChanged {
+		t.Fatalf("Tomo's group grade, entered while Yuki's draft was adjusted: %+v", out)
+	}
+	if drafts, posted := live(); drafts != 2 || posted != 0 {
+		t.Fatalf("Team A's work after the refusal: %d live drafts, %d posted; want Yuki's adjusted one and Ken's", drafts, posted)
+	}
+
+	// A post takes its students in the order of their ids (see snapshot),
+	// each under the lock on their totals (LockStudentTotals).
+	first := b.yukiM
+	if b.kenM.String() < first.String() {
+		first = b.kenM
+	}
+	release = heldBy(t, b, `SELECT pg_advisory_xact_lock(hashtextextended('totals:' || $1::uuid::text || ':' || $2::uuid::text, 0))`, b.course, first)
+	posting := b.inFlight(b.sato, "grade.post", m{"course_id": b.course, "grade_ids": []uuid.UUID{adjusted, w.kenGrade}}, "post-team-a")
+	b.waitingFor(t, 1, posting)
+	entering = enter("enter-while-posted")
+	b.waitingFor(t, 2, posting, entering)
+	release()
+	if out := settled(t, posting); out.Status != domain.StatusExecuted {
+		t.Fatalf("the post of Team A's drafts: %+v", out)
+	}
+	if out := settled(t, entering); out.Status != domain.StatusFailed || out.Error == nil ||
+		out.Error.Details["reason"] != tools.ReasonGroupGradePosted {
+		t.Fatalf("Tomo's group grade, entered while Team A's drafts were posted: %+v", out)
+	}
+	if drafts, posted := live(); drafts != 0 || posted != 2 {
+		t.Fatalf("Team A's work after the refusal: %d live drafts, %d posted; want its two posted alone", drafts, posted)
+	}
+	if n := b.Count(`SELECT count(*) FROM group_grade WHERE submission_id = $1`, w.workA); n != 1 {
+		t.Fatalf("%d group grades on Team A's work, want the first alone", n)
+	}
+	// Nothing holds up posting the assignment: Team B's draft goes out.
+	out := testkit.Result[tools.GradePostOut](t, b.do(t, b.sato, "grade.post", m{"course_id": b.course, "assignment_id": w.hw}))
+	if !slices.Equal(out.Posted, w.gradesB) {
+		t.Fatalf("posting the assignment: %v, want Team B's %v", out.Posted, w.gradesB)
+	}
+}
+
+// A sign-up refused for work handed in says why, and names of that work only
+// what the caller may read (§2.5, What each member sees): Hana, asking to
+// join Team A, and Mio, placed in it after it handed in and asking to leave,
+// are shown nothing of it, as submission.get refuses it them, and Aoi,
+// asking to switch to it, only her own group's; Yuki, who handed it in, and
+// Sato, asking for Mio, are shown it.
+func TestASignUpRefusedForHandedInWorkNamesOnlyWhatTheCallerReads(t *testing.T) {
+	w := buildTwoGroups(t)
+	b := w.built
+	actors, s := b.seatStudents(t, "Mio", "Hana")
+	b.place(t, w.set, true, s["Mio"], w.teamA)
+	b.do(t, b.sato, "group_set.update", m{"course_id": b.course, "set_id": w.set, "signup_open": true})
+	b.refusedAs(t, actors["Mio"], "submission.get", m{"course_id": b.course, "submission_id": w.workA}, apperr.Forbidden, "student_out_of_scope")
+
+	for _, c := range []struct {
+		who   string
+		actor uuid.UUID
+		args  m
+		why   string
+		shown []uuid.UUID
+	}{
+		{"Hana joining Team A", actors["Hana"], m{"group_id": w.teamA}, tools.ReasonGroupHasWork, nil},
+		{"Mio leaving Team A", actors["Mio"], m{}, tools.ReasonYourGroupHasWork, nil},
+		{"Aoi switching to Team A", w.aoi, m{"group_id": w.teamA}, tools.ReasonYourGroupHasWork, []uuid.UUID{w.workB}},
+		{"Yuki leaving Team A", b.yuki, m{}, tools.ReasonYourGroupHasWork, []uuid.UUID{w.workA}},
+		{"Sato taking Mio out of Team A", b.sato, m{"student_member_id": s["Mio"]}, tools.ReasonYourGroupHasWork, []uuid.UUID{w.workA}},
+	} {
+		c.args["course_id"], c.args["set_id"] = b.course, w.set
+		e := b.refusedAs(t, c.actor, "group.sign_up", c.args, apperr.FailedPrecondition, c.why)
+		raw, err := json.Marshal(e.Details)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var details struct {
+			Work []tools.WorkDetail `json:"work"`
+		}
+		if err := json.Unmarshal(raw, &details); err != nil {
+			t.Fatal(err)
+		}
+		var shown []uuid.UUID
+		for _, wk := range details.Work {
+			shown = append(shown, wk.SubmissionID)
+		}
+		if !slices.Equal(shown, c.shown) {
+			t.Errorf("%s is refused naming %v, want %v: %s", c.who, shown, c.shown, raw)
+		}
+		if c.shown == nil && strings.Contains(string(raw), w.workA.String()) {
+			t.Errorf("%s is shown Team A's work: %s", c.who, raw)
+		}
+	}
+}

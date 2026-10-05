@@ -1777,7 +1777,10 @@ Only a student's seat is placed or signs up (`not_a_student`).
   (`signup_closed`: after that it is the teacher's), to a group not archived (`group_archived`)
   below its capacity (`group_full`), and never out of or into a group that has work handed in or
   recorded missing for an assignment of the set (`your_group_has_work`, `group_has_work`):
-  self-service never changes who did handed-in work. Sign-up is the set's to open and close;
+  self-service never changes who did handed-in work. Such a refusal names (`work`), of that work,
+  what the caller may read, as `submission.get` reaches it (§2.5, What each member sees): a
+  student is told why, and shown nothing of another group's work, nor of their own group's
+  handed in before they joined. Sign-up is the set's to open and close;
   capacity is each group's, and setting it to the group's size closes that group alone. A
   student's agent signs up by proposal, which its student confirms.
 
@@ -2190,7 +2193,11 @@ regrade never quietly drops a decision.
   refused if the members have changed (`members_changed`), and by a newer draft, as ever. Once a
   grade on the work is posted it is refused (`group_grade_posted`): a draft beside a posted grade
   could never be posted, and would hold up posting the assignment; the posted grades are changed
-  by `grade.regrade`, or one member's by `grade.adjust`.
+  by `grade.regrade`, or one member's by `grade.adjust`. `grade.post` locks the grades it posts,
+  not the work, so the call asks again of each member once it has replaced their drafts, waiting
+  for any call that held one: a grade of theirs still live then was posted meanwhile
+  (`group_grade_posted`), or is a draft written meanwhile by `grade.adjust` (`grades_changed`),
+  whose adjustment the call did not carry; either refuses it, and it writes nothing.
 - `grade.post` is unchanged: it posts each member's draft, per student, and writes each member's
   totals; one live posted grade per student on a piece of work.
 - `grade.regrade` of a member's grade from a group grade regrades the group's as a whole: a new
@@ -3218,9 +3225,10 @@ respondent's `conversation_answer` decides is who is shown its text.
   hand-in and `left_out`; missing per group and the sweep's `:groups` key; carrying adjustments;
   a group's regrade, the members it gives a grade and the grades its proposal replaces, and
   `grade.adjust` held to the permissions it was decided under; no new group grade beside a
-  posted one; rescaling group grades; and that no member of one group, through any read or the
-  feed, learns anything of another group's work, grades or membership, nor of their own group's
-  work handed in before they joined.
+  posted one, nor beside a draft posted or adjusted while it was entered; rescaling group grades;
+  and that no member of one group, through any read, refusal or the feed, learns anything of
+  another group's work, grades or membership, nor of their own group's work handed in before they
+  joined.
 - An identity provider's client secret is sealed before it is written, and in no answer, action
   or log line; a sign-in goes through the provider its state names, as it is now, and one
   switched off signs nobody in; the operator's provider wins over a site's of its name; linking

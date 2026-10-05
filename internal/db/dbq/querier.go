@@ -816,6 +816,11 @@ type Querier interface {
 	// Every live grade given from a group grade, a draft or posted, held in id
 	// order: what regrading the group's grade writes again.
 	ListLiveGradesFromGroupGrade(ctx context.Context, groupGradeID *uuid.UUID) ([]ListLiveGradesFromGroupGradeRow, error)
+	// The student's live grades on the work, a draft or posted, one posted
+	// first. A group grade entered asks it of each member once their drafts are
+	// superseded, before their new one is written: a grade live then came in,
+	// or was posted, while it waited for their drafts.
+	ListLiveGradesOfMemberOnWork(ctx context.Context, arg ListLiveGradesOfMemberOnWorkParams) ([]ListLiveGradesOfMemberOnWorkRow, error)
 	// The group grades of the assignment's work that a live grade is given
 	// from, a draft or posted: what a change of its points carries with the
 	// members' grades.

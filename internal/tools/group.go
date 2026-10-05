@@ -1051,9 +1051,14 @@ func groupWork(ctx context.Context, q dbq.Querier, groups []uuid.UUID, handedIn 
 	return out, nil
 }
 
-// errGroupHasWork refuses, saying why and naming each work.
+// errGroupHasWork refuses, saying why and naming each work given: none at
+// all for a caller who may read none of it.
 func errGroupHasWork(reason, msg string, work []WorkDetail) error {
-	return apperr.Precondition("%s", msg).With("reason", reason).With("work", work)
+	e := apperr.Precondition("%s", msg).With("reason", reason)
+	if len(work) > 0 {
+		e = e.With("work", work)
+	}
+	return e
 }
 
 const (
@@ -1659,8 +1664,9 @@ func groupSignUp() tool.Tool {
 			"their group, or, with no group_id, leaves their group. Only while the set's sign-up is open and before its " +
 			"deadline (signup_closed), to a group below its capacity (group_full), and never out of or into a group that " +
 			"has handed work in for an assignment of the set (your_group_has_work, group_has_work): who did handed-in " +
-			"work is the teacher's to change. A student's own agent signs up for its student by proposal, which the " +
-			"student confirms.",
+			"work is the teacher's to change. Such a refusal names, of that work, what the caller may read: a student " +
+			"is shown nothing of another group's, nor of their own group's handed in before they joined. A student's " +
+			"own agent signs up for its student by proposal, which the student confirms.",
 		Kind: tool.Write, Gate: writeSubmissions,
 		HTTP: tool.Route{Method: "POST", Pattern: "/v1/courses/{course_id}/group-sets/{set_id}/sign-up"},
 		Resolve: func(ctx context.Context, q dbq.Querier, in GroupSignUpIn) (tool.Target, error) {
@@ -1681,7 +1687,7 @@ func groupSignUp() tool.Tool {
 			if err != nil {
 				return err
 			}
-			_, err = in.plan(ctx, q, s, student, now, false)
+			_, err = in.plan(ctx, q, m, s, student, now, false)
 			return err
 		},
 		Execute: func(ctx context.Context, ec *tool.ExecCtx, in GroupSignUpIn) (GroupSignUpOut, error) {
@@ -1693,7 +1699,7 @@ func groupSignUp() tool.Tool {
 			if err != nil {
 				return GroupSignUpOut{}, err
 			}
-			mv, err := in.plan(ctx, ec.Q, s, student, ec.Now, true)
+			mv, err := in.plan(ctx, ec.Q, ec.Member, s, student, ec.Now, true)
 			if err != nil {
 				return GroupSignUpOut{}, err
 			}
@@ -1708,10 +1714,10 @@ func groupSignUp() tool.Tool {
 	})
 }
 
-// plan works out student's sign-up to set s as of now, nil when there is
-// nothing to do, refusing what sign-up may not do. lock takes the groups
-// left and joined FOR UPDATE, in id order, and counts under it.
-func (in GroupSignUpIn) plan(ctx context.Context, q dbq.Querier, s dbq.GroupSet, student uuid.UUID, now time.Time, lock bool) (*move, error) {
+// plan works out student's sign-up to set s as of now, made by m, nil when
+// there is nothing to do, refusing what sign-up may not do. lock takes the
+// groups left and joined FOR UPDATE, in id order, and counts under it.
+func (in GroupSignUpIn) plan(ctx context.Context, q dbq.Querier, m *domain.Member, s dbq.GroupSet, student uuid.UUID, now time.Time, lock bool) (*move, error) {
 	if s.ArchivedAt != nil {
 		return nil, errSetArchived()
 	}
@@ -1760,19 +1766,49 @@ func (in GroupSignUpIn) plan(ctx context.Context, q dbq.Querier, s dbq.GroupSet,
 			return nil, apperr.Precondition("the group is full").With("reason", ReasonGroupFull).With("capacity", *g.Capacity)
 		}
 	}
-	if mv.from != nil {
-		if work, err := groupWork(ctx, q, []uuid.UUID{*mv.from}, true); err != nil {
-			return nil, err
-		} else if len(work) > 0 {
-			return nil, errGroupHasWork(ReasonYourGroupHasWork, msgYourGroupWork, work)
+	// Out of a group, or into one, that has handed work in: refused,
+	// naming of that work what the caller may read.
+	for _, c := range []struct {
+		group       *uuid.UUID
+		reason, msg string
+	}{{mv.from, ReasonYourGroupHasWork, msgYourGroupWork}, {mv.to, ReasonGroupHasWork, msgTargetGroupWork}} {
+		if c.group == nil {
+			continue
 		}
-	}
-	if mv.to != nil {
-		if work, err := groupWork(ctx, q, []uuid.UUID{*mv.to}, true); err != nil {
+		work, err := groupWork(ctx, q, []uuid.UUID{*c.group}, true)
+		if err != nil {
 			return nil, err
-		} else if len(work) > 0 {
-			return nil, errGroupHasWork(ReasonGroupHasWork, msgTargetGroupWork, work)
 		}
+		if len(work) == 0 {
+			continue
+		}
+		if work, err = readableWork(ctx, q, m, work); err != nil {
+			return nil, err
+		}
+		return nil, errGroupHasWork(c.reason, c.msg, work)
 	}
 	return &mv, nil
+}
+
+// readableWork is the work of a refusal that m may read, as submission.get
+// reaches it (workScope): a student is told that their group, or the one
+// they asked for, has work handed in, and shown nothing of another group's
+// work, nor of their own group's handed in before they joined (§2.5, What
+// each member sees).
+func readableWork(ctx context.Context, q dbq.Querier, m *domain.Member, work []WorkDetail) ([]WorkDetail, error) {
+	var out []WorkDetail
+	for _, w := range work {
+		students, err := workStudents(ctx, q, w.SubmissionID)
+		if err != nil {
+			return nil, err
+		}
+		t := authz.AnyOf(students)
+		t.AssignmentIDs = []uuid.UUID{w.AssignmentID}
+		if reason, err := authz.CheckScope(ctx, q, m, t); err != nil {
+			return nil, err
+		} else if reason == authz.ReasonNone {
+			out = append(out, w)
+		}
+	}
+	return out, nil
 }
