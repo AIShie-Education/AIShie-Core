@@ -1169,7 +1169,7 @@ call 200 GET "$C/events?since_seq=0&limit=500" "$AOI"
 [ "$(json "$WORK/body" 'sorted(set(e["type"] for e in d["result"]["events"] if e["type"] in ("group.member_added", "submission.submitted", "grade.posted") and e.get("assignment_id") in (None, "'"$PROJECT"'")))')" = \
   "['grade.posted', 'group.member_added', 'submission.submitted']" ] || fail "Aoi's feed of her team: $(cat "$WORK/body")"
 
-step "Sato adds peer evaluation to the term project, members rating themselves too, counted at 20 %; Yuki and Aoi split 100 points between them, Hana's sheet of Team 1 refused; nobody but Sato reads the results; closed and counted, Aoi's grade moves and Yuki's own adjustment stays; switched off and counted again, Aoi's grade is the team's again"
+step "Sato adds peer evaluation to the term project, members rating themselves too, counted at 20 %; Yuki and Aoi split 100 points between them, Hana's sheet of Team 1 refused; nobody but Sato reads the results, nor learns from the form that a sheet has been written; closed and counted, Aoi's grade moves and Yuki's own adjustment stays; switched off and counted again, Aoi's grade is the team's again"
 PEER_FORM="{\"kind\":\"share\",\"self_evaluation\":true,\"opens\":\"on_hand_in\",\"closes_at\":\"$DEADLINE\",\"weight\":20,\"share_with_students\":\"own_average\"}"
 call 200 POST "$C/assignments/$PROJECT/peer-form" "$SATO" "$PEER_FORM"
 [ "$(json "$WORK/body" 'd["result"]["version"], d["result"]["students_see"]')" = "1 ['own_sheet', 'own_average', 'own_adjustment']" ] ||
@@ -1184,6 +1184,10 @@ call 200 POST "$C/assignments/$PROJECT/peer-reviews" "$AOI" "{\"entries\":[{\"st
 call 200 GET "$C/assignments/$PROJECT/peer-form" "$YUKI"
 [ "$(json "$WORK/body" 'len(d["result"]["task"]["sheet"]["entries"]), "rater_name" in d["result"]["task"]["sheet"], "own_average" in d["result"]["task"]')" = "2 False False" ] ||
   fail "Yuki's own sheet as she reads it: $(cat "$WORK/body")"
+call 200 GET "$C/assignments/$PROJECT/peer-form" "$HANA"
+[ "$(json "$WORK/body" '"in_use" in d["result"]["form"]')" = False ] || fail "Hana is told whether a sheet has been written: $(cat "$WORK/body")"
+call 200 GET "$C/assignments/$PROJECT/peer-form" "$SATO"
+[ "$(json "$WORK/body" 'd["result"]["form"]["in_use"]')" = True ] || fail "the form in use, as Sato reads it: $(cat "$WORK/body")"
 call 403 GET "$C/assignments/$PROJECT/peer-results" "$YUKI"
 call 200 GET "$C/assignments/$PROJECT/peer-results" "$SATO"
 [ "$(json "$WORK/body" '[sorted((m["display_name"], m["factor"]) for m in g["members"]) for g in d["result"]["groups"] if g["group_id"] == "'"$TEAM1"'"]')" = \

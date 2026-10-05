@@ -163,7 +163,7 @@ func TestAPeerFormIsSetOnAGroupAssignment(t *testing.T) {
 
 	// Made: version 1, saying who sees what.
 	f := w.setForm(t, m{"kind": "share", "opens": "on_hand_in", "closes_at": soon, "weight": 20})
-	if f.Version != 1 || !f.Enabled || f.InUse || f.ShareWithStudents != "none" || f.SelfEvaluation ||
+	if f.Version != 1 || !f.Enabled || f.InUse == nil || *f.InUse || f.ShareWithStudents != "none" || f.SelfEvaluation ||
 		!slices.Equal(f.VisibleTo, []string{"graders", "action_record"}) || !slices.Equal(f.StudentsSee, []string{"own_sheet", "own_adjustment"}) {
 		t.Fatalf("the form made: %+v", f)
 	}
@@ -224,7 +224,7 @@ func TestAPeerFormIsSetOnAGroupAssignment(t *testing.T) {
 	f = w.setForm(t, m{"kind": "rating", "criteria": []m{{"key": "effort", "label": "Effort"}, {"key": "quality",
 		"label": "Quality of work", "description": "What it adds to the report", "weight": 2}}, "scale_min": 1, "scale_max": 5,
 		"opens": "at", "opens_at": f.OpensAt, "closes_at": soon.Add(time.Hour), "weight": 30})
-	if f.Version != 3 || !f.InUse || f.Weight != 30 {
+	if f.Version != 3 || f.InUse == nil || !*f.InUse || f.Weight != 30 {
 		t.Fatalf("the form's dates and weight changed: %+v", f)
 	}
 	var shape string
@@ -425,7 +425,7 @@ func TestAJoinerAfterTheHandInIsToldNothingOfTheWork(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got.Form == nil || got.Task != nil {
+		if got.Form == nil || got.Task != nil || got.Form.InUse != nil {
 			t.Fatalf("Hana's peer form, as %s reads it: %s", reader, raw)
 		}
 		for _, on := range []uuid.UUID{b.yukiM, b.kenM, w.aoiM, w.renM} {
@@ -442,6 +442,76 @@ func TestAJoinerAfterTheHandInIsToldNothingOfTheWork(t *testing.T) {
 		t.Fatalf("Ren's task: %+v", task)
 	}
 	w.sheet(t, w.ren, b.yukiM, 40, b.kenM, 30, w.aoiM, 30)
+}
+
+// Whether a sheet has been written on the form (in_use) is told to those who
+// write assignments or grade, and to no student, nor their own agent, nor the
+// tutor: on a form that opens on hand-in a sheet is written only once its
+// group has handed in, so it would tell the Duo, which has handed nothing
+// in, that the Team has. What Hana reads of the form, and her agent, is the
+// same before the Team hands in as after one of its members writes a sheet.
+func TestThePeerFormTellsNoGroupThatAnotherHasHandedIn(t *testing.T) {
+	w := buildPeerGroups(t)
+	b := w.built
+	w.shareForm(t, time.Now().Add(time.Hour))
+	bot := b.agent(t, w.hana, "Hana's helper")
+	b.delegate(t, w.hana, bot, m{})
+	mei := b.person(t, "Mei", "")
+	b.do(t, b.sato, "member.add", m{"course_id": b.course, "actor_id": mei, "preset": "ta"})
+
+	raw := func(actor uuid.UUID) string {
+		t.Helper()
+		got, err := json.Marshal(w.peerForm(t, actor))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(got)
+	}
+	inUse := func(actor uuid.UUID) *bool {
+		t.Helper()
+		return w.peerForm(t, actor).Form.InUse
+	}
+	students := []uuid.UUID{w.hana, bot, w.mio, b.yuki, b.ken, b.tutor}
+	before := map[uuid.UUID]string{}
+	for _, who := range students {
+		before[who] = raw(who)
+		if strings.Contains(before[who], "in_use") {
+			t.Fatalf("%s is told whether the form is in use: %s", who, before[who])
+		}
+	}
+	for _, who := range []uuid.UUID{b.sato, mei} {
+		if got := inUse(who); got == nil || *got {
+			t.Fatalf("the form before any sheet, as %s reads it: %v", who, got)
+		}
+	}
+
+	// The Team hands in, and Yuki writes a sheet: the Duo's window is still
+	// not open, and nothing the Duo reads of the form has changed.
+	w.handIn(t, b.ken, "The Team's report")
+	w.sheet(t, b.yuki, b.kenM, 40, w.aoiM, 40, w.renM, 20)
+	for _, who := range []uuid.UUID{w.hana, bot, w.mio} {
+		if after := raw(who); after != before[who] {
+			t.Fatalf("what %s reads of the form changed once the Team handed in:\nbefore %s\nafter  %s", who, before[who], after)
+		}
+	}
+	if task := w.peerForm(t, w.hana).Task; task == nil || task.GroupID != w.duo || task.Window.State != "not_open" {
+		t.Fatalf("Hana's task: %+v", task)
+	}
+	// Nor is the Team, whose own sheet it is, or the tutor, told.
+	for _, who := range []uuid.UUID{b.yuki, b.ken, b.tutor} {
+		if got := raw(who); strings.Contains(got, "in_use") {
+			t.Fatalf("%s is told whether the form is in use: %s", who, got)
+		}
+	}
+	// Sato, who would change its shape, and the TA, who grades, are.
+	for _, who := range []uuid.UUID{b.sato, mei} {
+		if got := inUse(who); got == nil || !*got {
+			t.Fatalf("the form once Yuki wrote a sheet, as %s reads it: %v", who, got)
+		}
+	}
+	if r := w.results(t, mei, nil); r.Form.InUse == nil || !*r.Form.InUse {
+		t.Fatalf("the form in the TA's results: %+v", r.Form)
+	}
 }
 
 // Counted, peer evaluation moves each member's grade from the group's at the

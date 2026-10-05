@@ -112,14 +112,16 @@ type PeerFormView struct {
 	Weight            int32           `json:"weight" jsonschema:"the percentage of each member's grade what they received moves; 0: reference only"`
 	ShareWithStudents string          `json:"share_with_students" jsonschema:"none, or own_average: after it closes, a member reads their own average from two peers or more, never a comment"`
 	Version           int32           `json:"version" jsonschema:"changed by every change: peer_form.set is made over it"`
-	InUse             bool            `json:"in_use" jsonschema:"a sheet has been written: its kind, criteria, scale and self-evaluation no longer change"`
+	InUse             *bool           `json:"in_use,omitempty" jsonschema:"to those who write assignments or grade: a sheet has been written, so its kind, criteria, scale and self-evaluation no longer change (form_in_use). Absent for anyone else, a student or their own agent included: on a form that opens on hand-in it would tell one group that another has handed in"`
 	// What the form tells everyone of who sees what (docs/schema.md §2.5b).
 	VisibleTo   []string  `json:"visible_to" jsonschema:"who reads every sheet, with who wrote it: graders, those who grade; action_record, those who decide actions, in the action log"`
 	StudentsSee []string  `json:"students_see" jsonschema:"what a student reads: own_sheet, their own current sheet; own_average, their own average once it closes; own_adjustment, their own grade's peer adjustment, where it counts. Never another's sheet, what was said of them, or who rated them"`
 	UpdatedAt   time.Time `json:"updated_at"`
 }
 
-func viewPeerForm(f dbq.PeerForm, inUse bool) (PeerFormView, error) {
+// viewPeerForm is form f as it is shown, inUse nil for a reader who is not
+// told whether a sheet has been written (seesWhetherInUse).
+func viewPeerForm(f dbq.PeerForm, inUse *bool) (PeerFormView, error) {
 	v := PeerFormView{AssignmentID: f.AssignmentID, Enabled: f.Enabled, Kind: f.Kind, ScaleMin: f.ScaleMin, ScaleMax: f.ScaleMax,
 		SelfEvaluation: f.SelfEvaluation, Opens: f.Opens, OpensAt: f.OpensAt, ClosesAt: f.ClosesAt, Weight: f.Weight,
 		ShareWithStudents: f.ShareWithStudents, Version: f.Version, InUse: inUse, UpdatedAt: f.UpdatedAt,
@@ -136,6 +138,29 @@ func viewPeerForm(f dbq.PeerForm, inUse bool) (PeerFormView, error) {
 		v.StudentsSee = append(v.StudentsSee, "own_adjustment")
 	}
 	return v, nil
+}
+
+// seesWhetherInUse says whether m is told whether a sheet has been written on
+// a form (in_use): those who write assignments, whose change of its shape
+// form_in_use refuses, and those who grade, who read every sheet. Not a
+// student, nor their own agent, which holds no more than they do: on a form
+// that opens on hand-in a sheet is written only once its group has handed
+// in, so a member of a group that has not would learn that another group has
+// handed in, and one of its members written a sheet (§2.5, What each member
+// sees).
+func seesWhetherInUse(m *domain.Member) bool {
+	return m.Perm(domain.PermAssignmentWrite).Allowed() || m.Perm(domain.PermGradeSubmit).Allowed() ||
+		m.Perm(domain.PermGradePost).Allowed()
+}
+
+// formInUse is whether a sheet names the assignment's form, as viewPeerForm
+// takes it.
+func formInUse(ctx context.Context, q dbq.Querier, assignment uuid.UUID) (*bool, error) {
+	inUse, err := q.PeerFormInUse(ctx, assignment)
+	if err != nil {
+		return nil, err
+	}
+	return &inUse, nil
 }
 
 // calcForm is what peercalc needs of a form.
@@ -554,7 +579,9 @@ func peerFormGet() tool.Tool {
 			"average once it closes if the form shares it, and their own grade's adjustment where it counts, never another's " +
 			"sheet, what was said of them, or who rated them. For a student in a group's circle (or a student's own agent), " +
 			"their task: the circle, whom they evaluate, the window's state, their current sheet; one who joined their group " +
-			"after its work was handed in has none, and is told nothing of that work.",
+			"after its work was handed in has none, and is told nothing of that work. Whether a sheet has been written " +
+			"(in_use) is told only to those who write assignments or grade, since it would tell a group that another has " +
+			"handed in.",
 		Kind: tool.Read, Gate: tool.Gate{Perms: []domain.Perm{domain.PermDocumentRead}},
 		HTTP: tool.Route{Method: "GET", Pattern: "/v1/courses/{course_id}/assignments/{assignment_id}/peer-form"},
 		Resolve: func(ctx context.Context, q dbq.Querier, in AssignmentIDIn) (tool.Target, error) {
@@ -572,9 +599,11 @@ func peerFormGet() tool.Tool {
 			if err != nil || f == nil {
 				return PeerFormGetOut{}, err
 			}
-			inUse, err := rc.Q.PeerFormInUse(ctx, a.ID)
-			if err != nil {
-				return PeerFormGetOut{}, err
+			var inUse *bool
+			if seesWhetherInUse(rc.Member) {
+				if inUse, err = formInUse(ctx, rc.Q, a.ID); err != nil {
+					return PeerFormGetOut{}, err
+				}
 			}
 			v, err := viewPeerForm(*f, inUse)
 			if err != nil {
@@ -901,7 +930,7 @@ func peerFormSet() tool.Tool {
 					AssignmentID: &a.ID, Payload: map[string]any{"created": now == nil, "changed": changed, "enabled": f.Enabled,
 						"version": f.Version}})
 			}
-			inUse, err := ec.Q.PeerFormInUse(ctx, a.ID)
+			inUse, err := formInUse(ctx, ec.Q, a.ID)
 			if err != nil {
 				return PeerFormView{}, err
 			}

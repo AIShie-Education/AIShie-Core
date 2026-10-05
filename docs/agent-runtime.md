@@ -973,8 +973,10 @@ for `assignment_delete_preview`, which counts what deleting an assignment
 would take and names no person; `document_read` for `group_set_list` and
 `group_set_get`, which name a set's members to whoever may read the member
 list, within their scope, and to a student their own group's;
-`document_read` for `peer_form_get`, a group assignment's peer form and, for a
-student's own agent, its student's part in it; any of `grade_submit` and
+`document_read` for `peer_form_get`, a group assignment's peer form (whether a
+sheet has been written on it, `in_use`, only to an agent that writes
+assignments or grades) and, for a student's own agent, its student's part in
+it; any of `grade_submit` and
 `grade_post` for `peer_review_results`, every sheet of the groups whose circle
 the caller's scope reaches wholly, for those who grade. `peer_review_submit` is
 never an agent's: Core refuses every agent (`people_only`), so the runtime

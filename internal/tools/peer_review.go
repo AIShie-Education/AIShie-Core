@@ -438,7 +438,7 @@ func peerReviewResults() tool.Tool {
 			if f == nil {
 				return PeerResultsOut{}, errNoPeerForm()
 			}
-			inUse, err := rc.Q.PeerFormInUse(ctx, a.ID)
+			inUse, err := formInUse(ctx, rc.Q, a.ID)
 			if err != nil {
 				return PeerResultsOut{}, err
 			}

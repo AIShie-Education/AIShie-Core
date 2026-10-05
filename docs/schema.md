@@ -1911,7 +1911,12 @@ of it now.
 **Who reads what.** To a student a sheet is anonymous and private: they read their own current
 sheet (`peer_form.get`'s `task`), never another's, nor what was said of them, nor who rated them.
 `peer_form.get` (`perm_document_read`, the assignment visible to them) gives everyone the form,
-and a student in a circle, or a student's own agent, their task: the group, its circle
+but whether a sheet has been written on it (`in_use`, what `form_in_use` refuses over) only to
+those who write assignments or grade (`perm_assignment_write`, or either of `perm_grade_submit`
+and `perm_grade_post`, who read it in `peer_review.results` too): on a form that opens on
+hand-in a sheet is written only once its group has handed in, so it would tell a member of a
+group that has not, or their own agent, that another group has. A student in a circle, or a
+student's own agent, is given their task: the group, its circle
 by name, whom they evaluate (`to_evaluate`), the window, their current sheet, and, where the
 form shares it, after it closes, their own average from two peers or more (`own_average`: the
 average on each criterion, or, for a share form, what they received against an even share as a
@@ -3449,7 +3454,8 @@ respondent's `conversation_answer` decides is who is shown its text.
   counts, and a proposal's factors; and that no student, through any read or the feed, reads
   another's sheet, what was said of them or who rated them, and their own average only from two
   peers or more once the window has closed, and one who joined their group after its work was
-  handed in learns nothing of that work through peer evaluation.
+  handed in learns nothing of that work through peer evaluation, nor any student, from the form,
+  that a sheet has been written (`in_use`), and so that another group has handed in.
 - An identity provider's client secret is sealed before it is written, and in no answer, action
   or log line; a sign-in goes through the provider its state names, as it is now, and one
   switched off signs nobody in; the operator's provider wins over a site's of its name; linking
