@@ -30,6 +30,10 @@ type Querier interface {
 	AnsweredSince(ctx context.Context, arg AnsweredSinceParams) (bool, error)
 	// Any row at all: a draft, a hand-in, a 'missing' placeholder.
 	AssignmentHasSubmissions(ctx context.Context, assignmentID uuid.UUID) (bool, error)
+	// Says, for this transaction, that whose work the submission is is being
+	// corrected (submission.set_members): submission_member_guarded lets its
+	// rows go, which the grade's foreign key still holds while a grade names one.
+	BeginMemberCorrection(ctx context.Context, submissionID uuid.UUID) error
 	CancelProposal(ctx context.Context, arg CancelProposalParams) (int64, error)
 	// Up to max_rows renditions waiting, or whose claim has lapsed, claimed for
 	// the caller until claimed_until: what was queued as its file was recorded
@@ -120,6 +124,14 @@ type Querier interface {
 	// next one. A service holds service credentials and nothing else
 	// (credential_fits_actor_kind).
 	CredentialLive(ctx context.Context, arg CredentialLiveParams) (bool, error)
+	// The group of the set a student counts as a member of now, if any.
+	CurrentGroupOf(ctx context.Context, arg CurrentGroupOfParams) (CurrentGroupOfRow, error)
+	// A student's stay in a group of the set that has not ended, whether or not
+	// they count as a member now.
+	CurrentMembership(ctx context.Context, arg CurrentMembershipParams) (CurrentMembershipRow, error)
+	// A group's 'missing' row taken over by late work, a draft again: whose it
+	// is is its group's members now, until it is handed in.
+	DeleteAllSubmissionMembers(ctx context.Context, submissionID uuid.UUID) error
 	DeleteAssignment(ctx context.Context, arg DeleteAssignmentParams) (int64, error)
 	// A seat listed for the assignment alone now reaches no assignment: it
 	// fails closed.
@@ -141,6 +153,9 @@ type Querier interface {
 	// superseded grades together: the key from a grade to the one that replaced
 	// it is checked at commit.
 	DeleteGradesOfAssignment(ctx context.Context, assignmentID uuid.UUID) (int64, error)
+	// Every group grade given on a group's submission to it, once the grades
+	// given from them have gone (group_grade_kept).
+	DeleteGroupGradesOfAssignment(ctx context.Context, assignmentID uuid.UUID) (int64, error)
 	DeleteMemory(ctx context.Context, arg DeleteMemoryParams) (int64, error)
 	DeleteSSOProvider(ctx context.Context, arg DeleteSSOProviderParams) (int64, error)
 	// The sweep: drafts nobody has written for a while, which reads leave out
@@ -150,6 +165,10 @@ type Querier interface {
 	// says nothing the action log does not, so it is the one kind of row that is
 	// actually deleted.
 	DeleteStaleSessions(ctx context.Context, expiredBefore *time.Time) (int64, error)
+	// Of a group's submission: its rows while it is a draft again, or those a
+	// correction takes off (BeginMemberCorrection).
+	DeleteSubmissionMembers(ctx context.Context, arg DeleteSubmissionMembersParams) (int64, error)
+	// Whose work each was (submission_member) goes with it, by cascade.
 	DeleteSubmissionsOfAssignment(ctx context.Context, assignmentID uuid.UUID) (int64, error)
 	// The appointment through which actor administers dept: one at dept, or the
 	// nearest above it. No row: they do not.
@@ -179,6 +198,8 @@ type Querier interface {
 	// for any such call in flight, and every call after it finds the appointment
 	// ended.
 	EndAppointment(ctx context.Context, arg EndAppointmentParams) (int64, error)
+	EndMemberCorrection(ctx context.Context) error
+	EndMembership(ctx context.Context, arg EndMembershipParams) (int64, error)
 	// Whether the actor, or anyone of the same party (SameParty), had a hand in
 	// escalating the action, from any seat: made the review that escalated it,
 	// or approved that review, or confirmed that approval, and so on up. An
@@ -324,7 +345,9 @@ type Querier interface {
 	GetDocumentPublishedVersion(ctx context.Context, id uuid.UUID) (*uuid.UUID, error)
 	GetDocumentVersionOwner(ctx context.Context, id uuid.UUID) (uuid.UUID, error)
 	// A document and, when it is owned, whose it is: a submitted file belongs to
-	// its submission's student and assignment; a feedback file to its grade's.
+	// its submission's student and assignment, or its group's (submission_group,
+	// whose students submission_students says); a feedback file to its grade's,
+	// or to its group grade's work (group_grade_submission).
 	GetDocumentWithOwner(ctx context.Context, arg GetDocumentWithOwnerParams) (GetDocumentWithOwnerRow, error)
 	// The draft of a conversation, if there is one: written since fresh_after,
 	// and not the end of its attempt.
@@ -336,6 +359,10 @@ type Querier interface {
 	// Grades by id, with the assignment each belongs to (null for a component
 	// grade). A grade's course is its student's course.
 	GetGradesInCourse(ctx context.Context, arg GetGradesInCourseParams) ([]GetGradesInCourseRow, error)
+	// A group of the course, with its size now.
+	GetGroup(ctx context.Context, arg GetGroupParams) (GetGroupRow, error)
+	GetGroupGrade(ctx context.Context, arg GetGroupGradeParams) (GroupGrade, error)
+	GetGroupSet(ctx context.Context, arg GetGroupSetParams) (GroupSet, error)
 	// An invitation, found by its prefix before its hash is checked, and locked:
 	// it is used once, and two tries at it take turns. Revoked and expired rows
 	// are returned too, as GetCredentialByPrefix returns them. The actor comes
@@ -405,12 +432,12 @@ type Querier interface {
 	// changes, so it may be read before anything is locked.
 	GetSeatPrincipal(ctx context.Context, id uuid.UUID) (*uuid.UUID, error)
 	GetServiceActor(ctx context.Context, serviceScope *string) (GetServiceActorRow, error)
-	GetSubmissionFull(ctx context.Context, arg GetSubmissionFullParams) (Submission, error)
+	GetSubmissionFull(ctx context.Context, arg GetSubmissionFullParams) (GetSubmissionFullRow, error)
 	// GetSubmissionFull, locked until the transaction ends, so that what
 	// submission.submit checks is what it hands in: an edit to the draft, or a
 	// file added to it or archived from it, meanwhile waits, and then finds it
 	// handed in.
-	GetSubmissionFullForUpdate(ctx context.Context, arg GetSubmissionFullForUpdateParams) (Submission, error)
+	GetSubmissionFullForUpdate(ctx context.Context, arg GetSubmissionFullForUpdateParams) (GetSubmissionFullForUpdateRow, error)
 	// Lookups are always "in this course": an id from another course is not found.
 	GetSubmissionInCourse(ctx context.Context, arg GetSubmissionInCourseParams) (GetSubmissionInCourseRow, error)
 	GetSystemActor(ctx context.Context) (uuid.UUID, error)
@@ -426,6 +453,21 @@ type Querier interface {
 	// Who edited it comes with their name.
 	GetTextView(ctx context.Context, arg GetTextViewParams) (GetTextViewRow, error)
 	GetVersionOfDocument(ctx context.Context, arg GetVersionOfDocumentParams) (DocumentVersion, error)
+	// A grade proposed for the submission and not yet decided.
+	GradeProposedOnSubmission(ctx context.Context, targetID *uuid.UUID) (bool, error)
+	// Whether any grade given from the group grade has been posted: its
+	// feedback is then a release, and changing it needs grade_post.
+	GroupGradeHasPostedGrade(ctx context.Context, groupGradeID *uuid.UUID) (bool, error)
+	// Whether a grade given from the group grade is live, a draft or posted:
+	// one regraded since is the history of the one that replaced it.
+	GroupGradeIsLive(ctx context.Context, groupGradeID *uuid.UUID) (bool, error)
+	// Another group of the set, not archived, by the same name in any case.
+	GroupNameTaken(ctx context.Context, arg GroupNameTakenParams) (bool, error)
+	// Another set of the course, not archived, by the same name in any case.
+	GroupSetNameTaken(ctx context.Context, arg GroupSetNameTakenParams) (bool, error)
+	// Of these groups, those with work handed in (not a draft) for an assignment
+	// of their set, with it: sign-up never changes who did handed-in work.
+	GroupsWithHandedInWork(ctx context.Context, groupIds []uuid.UUID) ([]GroupsWithHandedInWorkRow, error)
 	// Whether an actor already has a live identity at a provider.
 	HasLiveSSOLinkAt(ctx context.Context, arg HasLiveSSOLinkAtParams) (bool, error)
 	// Whether other is the department itself or beneath it.
@@ -480,8 +522,27 @@ type Querier interface {
 	InsertDocumentVersionFile(ctx context.Context, arg InsertDocumentVersionFileParams) error
 	InsertEvent(ctx context.Context, arg InsertEventParams) (int64, error)
 	InsertGrade(ctx context.Context, arg InsertGradeParams) error
+	// Groups ---------------------------------------------------------------------
+	InsertGroup(ctx context.Context, arg InsertGroupParams) error
+	// Group grades ---------------------------------------------------------------
+	// What a group's work was given, as a group: kept as written
+	// (group_grade_kept), its course the submission's.
+	InsertGroupGrade(ctx context.Context, arg InsertGroupGradeParams) error
+	// A group's 'missing' row, its first attempt; whose it is is written next
+	// (InsertSubmissionMembers, missing).
+	InsertGroupMissingSubmission(ctx context.Context, arg InsertGroupMissingSubmissionParams) (int64, error)
+	// Group sets, their groups and memberships (docs/schema.md §2.5a, Groups).
+	// Who counts as a group's member is live_group_members(), migration 0031:
+	// a stay not ended, of a seat that is a student's, not removed and not past
+	// its expiry. Every count, list and check here goes through it.
+	// Sets -----------------------------------------------------------------------
+	InsertGroupSet(ctx context.Context, arg InsertGroupSetParams) error
+	// A group's draft: whose work it is is the group's members now, until it is
+	// handed in (submission_students).
+	InsertGroupSubmission(ctx context.Context, arg InsertGroupSubmissionParams) error
 	InsertJoinLink(ctx context.Context, arg InsertJoinLinkParams) error
 	InsertMember(ctx context.Context, arg InsertMemberParams) error
+	InsertMembership(ctx context.Context, arg InsertMembershipParams) error
 	// A new entry, unless the same text is already live in its bucket: then no
 	// row comes back, and GetMemoryByHash finds the one that is there.
 	InsertMemory(ctx context.Context, arg InsertMemoryParams) (uuid.UUID, error)
@@ -490,6 +551,8 @@ type Querier interface {
 	// one is named, is named with the source's version, which holds it to
 	// that version's files.
 	InsertMessageSource(ctx context.Context, arg InsertMessageSourceParams) error
+	// A student's; for a group assignment the database passes it over
+	// (submission_fits_assignment), and nothing is written.
 	InsertMissingSubmission(ctx context.Context, arg InsertMissingSubmissionParams) (int64, error)
 	InsertPreset(ctx context.Context, arg InsertPresetParams) error
 	// A person who registers through a join link: their email and their login
@@ -511,7 +574,13 @@ type Querier interface {
 	// The service for a scope, made the first time a credential is issued for
 	// it, by whoever issues it; there is one for each scope.
 	InsertServiceActor(ctx context.Context, arg InsertServiceActorParams) error
+	// A student's draft. Its row of submission_member, its student, is written
+	// with it by the database (submission_member_own).
 	InsertSubmission(ctx context.Context, arg InsertSubmissionParams) error
+	// Rows of whose work a group's submission is, as it was handed in, recorded
+	// missing or corrected. course_id, assignment_id and group_id are the
+	// submission's, which submission_member_guarded writes.
+	InsertSubmissionMembers(ctx context.Context, arg InsertSubmissionMembersParams) error
 	// A password someone else set for its person, who must change it before
 	// anything else (member.reset_password): marked must_change, saying who set
 	// it, as the CHECK credential_must_change_is_an_issued_password holds.
@@ -580,8 +649,15 @@ type Querier interface {
 	// Published assignments of open courses whose due date has passed and which
 	// have not been swept for that due date yet. The sweep's own action row is
 	// the marker: its idempotency key names the assignment and the due date, so
-	// moving a due date later makes the assignment due for a sweep again.
+	// moving a due date later makes the assignment due for a sweep again. A group
+	// assignment's key ends ':groups': the release before 0031 sweeps it under
+	// the plain key and records nothing there (its students' 'missing' rows are
+	// passed over, submission_fits_assignment), and that must not stand for this
+	// release's sweep, which records its groups'.
 	ListAssignmentsNewlyPastDue(ctx context.Context, arg ListAssignmentsNewlyPastDueParams) ([]ListAssignmentsNewlyPastDueRow, error)
+	// The assignments using each of the sets, within the caller's assignment
+	// scope; one not published only for whoever may see it.
+	ListAssignmentsOfSets(ctx context.Context, arg ListAssignmentsOfSetsParams) ([]ListAssignmentsOfSetsRow, error)
 	// What gradecalc needs -------------------------------------------------------
 	ListComponents(ctx context.Context, courseID uuid.UUID) ([]ListComponentsRow, error)
 	// The conversations a member may list, paged by id: those it opened, those
@@ -612,6 +688,8 @@ type Querier interface {
 	// Never the hash. The issuer's name comes with the row, for an administrator
 	// telling one token from another.
 	ListCredentialsForActor(ctx context.Context, actorID uuid.UUID) ([]ListCredentialsForActorRow, error)
+	// The stays of these students in groups of the set that have not ended.
+	ListCurrentMemberships(ctx context.Context, arg ListCurrentMembershipsParams) ([]ListCurrentMembershipsRow, error)
 	// The proposals of its owner's to seat an agent as their delegate that wait
 	// for a decision. Only the owner's: nobody else may ask to seat it.
 	ListDelegateRequestsFor(ctx context.Context, targetID *uuid.UUID) ([]ListDelegateRequestsForRow, error)
@@ -677,6 +755,25 @@ type Querier interface {
 	//   * a grade on a component belongs to no single assignment, so a member
 	//     limited to listed assignments does not see it at all.
 	ListGrades(ctx context.Context, arg ListGradesParams) ([]ListGradesRow, error)
+	// ListAssignmentRoster for a group assignment: each student with their
+	// group in its set now, if any; the latest attempt of the work they are part
+	// of (a group's handed in or recorded missing, which names them); and their
+	// group's open draft, if it has one.
+	ListGroupAssignmentRoster(ctx context.Context, arg ListGroupAssignmentRosterParams) ([]ListGroupAssignmentRosterRow, error)
+	// A group grade's feedback files, in their order.
+	ListGroupGradeDocuments(ctx context.Context, groupGradeID *uuid.UUID) ([]ListGroupGradeDocumentsRow, error)
+	ListGroupSets(ctx context.Context, arg ListGroupSetsParams) ([]GroupSet, error)
+	// LockGroupSubmissionsOf, not locked.
+	ListGroupSubmissionsOf(ctx context.Context, arg ListGroupSubmissionsOfParams) ([]ListGroupSubmissionsOfRow, error)
+	// The groups of the sets, with their sizes now, the oldest first.
+	ListGroupsOfSets(ctx context.Context, setIds []uuid.UUID) ([]ListGroupsOfSetsRow, error)
+	// The set's groups not archived, each with its latest attempt at the
+	// assignment, if any, the oldest group first.
+	ListGroupsWithLatestWork(ctx context.Context, arg ListGroupsWithLatestWorkParams) ([]ListGroupsWithLatestWorkRow, error)
+	// The groups of the assignment's set, not archived, with no submission row
+	// at all for it: not a draft, not a hand-in, not an earlier 'missing'. One
+	// with no live member is listed too, for the caller to pass over.
+	ListGroupsWithoutSubmission(ctx context.Context, arg ListGroupsWithoutSubmissionParams) ([]uuid.UUID, error)
 	// Open conversations addressed to a seat in which the opener spoke last,
 	// the opener's newest message is not retracted, and no answer of the seat's
 	// to that message waits for a decision, the longest waiting first, after a
@@ -712,16 +809,40 @@ type Querier interface {
 	// LockLiveEnteredGradesOfComponent's grades, by their scores, without the
 	// lock, as ListLiveEnteredGradeScoresOfAssignment.
 	ListLiveEnteredGradeScoresOfComponent(ctx context.Context, componentID *uuid.UUID) ([]ListLiveEnteredGradeScoresOfComponentRow, error)
+	// Every live grade given from a group grade, a draft or posted, held in id
+	// order: what regrading the group's grade writes again.
+	ListLiveGradesFromGroupGrade(ctx context.Context, groupGradeID *uuid.UUID) ([]ListLiveGradesFromGroupGradeRow, error)
+	// The group grades of the assignment's work that a live grade is given
+	// from, a draft or posted: what a change of its points carries with the
+	// members' grades.
+	ListLiveGroupGradesOfAssignment(ctx context.Context, assignmentID uuid.UUID) ([]GroupGrade, error)
+	// Every live grade on the work, a draft or posted, the newest first: what a
+	// member's next grade from a group grade carries its adjustment on from.
+	ListLiveMemberGrades(ctx context.Context, submissionID *uuid.UUID) ([]ListLiveMemberGradesRow, error)
+	// Members --------------------------------------------------------------------
+	// Who is in each of the groups now, with their names, and when and how they
+	// joined: those the reader's student scope reaches (a delegate's
+	// principal's too), "all" for a reader who is shown them all.
+	ListLiveMembersOfGroups(ctx context.Context, arg ListLiveMembersOfGroupsParams) ([]ListLiveMembersOfGroupsRow, error)
+	// Every stay in a group of the set that counts now: a live member's.
+	ListLiveMembershipsOfSet(ctx context.Context, setID uuid.UUID) ([]ListLiveMembershipsOfSetRow, error)
 	// LockLiveSeatsByRole without the lock: the seats a member.update_perms_bulk
 	// made now would change, each of which it is held to before it is carried
 	// out, proposed or approved.
 	ListLiveSeatsByRole(ctx context.Context, arg ListLiveSeatsByRoleParams) ([]uuid.UUID, error)
 	ListLiveServiceCredentials(ctx context.Context, arg ListLiveServiceCredentialsParams) ([]uuid.UUID, error)
+	// The course's students now: a seat whose roster role is student, not
+	// removed and not past its expiry, as live_group_members counts them, with
+	// their names, in id order (UUID v7: seat order).
+	ListLiveStudents(ctx context.Context, courseID uuid.UUID) ([]ListLiveStudentsRow, error)
 	// Where the student has a total written down.
 	ListLiveTotalComponents(ctx context.Context, studentMemberID uuid.UUID) ([]*uuid.UUID, error)
 	// The student's totals a person has overridden, and with what, out of 100.
 	ListLiveTotalOverrides(ctx context.Context, studentMemberID uuid.UUID) ([]ListLiveTotalOverridesRow, error)
 	ListMembers(ctx context.Context, arg ListMembersParams) ([]ListMembersRow, error)
+	// Every stay in a group of the set, ended or not, the newest first, with the
+	// student's name.
+	ListMembershipHistory(ctx context.Context, setID uuid.UUID) ([]ListMembershipHistoryRow, error)
 	ListMembershipsForActor(ctx context.Context, actorID uuid.UUID) ([]ListMembershipsForActorRow, error)
 	// A page of one bucket in one status, by id: newest first, after the last
 	// id seen, or oldest first.
@@ -771,8 +892,9 @@ type Querier interface {
 	// its other half: a change to one is a change to all three.
 	ListOrphanedSeats(ctx context.Context, arg ListOrphanedSeatsParams) ([]ListOrphanedSeatsRow, error)
 	// The submitted files of every submission to the assignment, and the
-	// feedback files of every grade given on them, superseded ones included, in
-	// id order: deleted with it, and the only documents that are.
+	// feedback files of every grade and group grade given on them, superseded
+	// ones included, in id order: deleted with it, and the only documents that
+	// are.
 	ListOwnedDocumentsOfAssignment(ctx context.Context, assignmentID uuid.UUID) ([]uuid.UUID, error)
 	ListPendingReviewActions(ctx context.Context, arg ListPendingReviewActionsParams) ([]Action, error)
 	// The review queue likewise: their own agents' actions under review.
@@ -842,6 +964,9 @@ type Querier interface {
 	ListStaleProposals(ctx context.Context, arg ListStaleProposalsParams) ([]ListStaleProposalsRow, error)
 	ListStudentScope(ctx context.Context, memberID uuid.UUID) ([]uuid.UUID, error)
 	ListStudentScopesOf(ctx context.Context, memberIds []uuid.UUID) ([]MemberStudentScope, error)
+	// What the roster says of these seats of the course: placing and signing up
+	// take a student's seat, live, alone.
+	ListStudentSeats(ctx context.Context, arg ListStudentSeatsParams) ([]ListStudentSeatsRow, error)
 	// The students of the course with a total written down counting ungraded
 	// work as zero.
 	ListStudentsCountedAsZero(ctx context.Context, courseID uuid.UUID) ([]uuid.UUID, error)
@@ -853,7 +978,9 @@ type Querier interface {
 	// Every student of the course who has a total written down.
 	ListStudentsWithLiveTotals(ctx context.Context, courseID uuid.UUID) ([]uuid.UUID, error)
 	// The students with a submission row of any kind for the assignment: whose
-	// work its deletion takes.
+	// work its deletion takes. A group's work is its students'
+	// (submission_students): every member of work handed in or recorded
+	// missing, and every member now of a group with a draft.
 	ListStudentsWithSubmissionsTo(ctx context.Context, assignmentID uuid.UUID) ([]uuid.UUID, error)
 	// Current students of the course with no submission row at all for the
 	// assignment: not a draft, not a hand-in, not an earlier 'missing'. A paused
@@ -861,6 +988,13 @@ type Querier interface {
 	// come back to this due date.
 	ListStudentsWithoutSubmission(ctx context.Context, arg ListStudentsWithoutSubmissionParams) ([]uuid.UUID, error)
 	ListSubmissionDocuments(ctx context.Context, submissionID *uuid.UUID) ([]ListSubmissionDocumentsRow, error)
+	// Whose work a submission is, as its rows say, with their names and how each
+	// came to be part of it.
+	ListSubmissionMembers(ctx context.Context, submissionID uuid.UUID) ([]ListSubmissionMembersRow, error)
+	// Scope in SQL: a submission is within it when the seat reaches one of its
+	// students (submission_students), and, for a delegate, its principal one of
+	// them too. student_member_id finds the work a student is part of: their
+	// own, or a group's, which for a group's draft is its members now.
 	ListSubmissions(ctx context.Context, arg ListSubmissionsParams) ([]ListSubmissionsRow, error)
 	// LockSubmissionsOf, not locked: what a tool's Validate reads of a
 	// student's attempts before a proposal is queued, which the tool reads again
@@ -870,6 +1004,9 @@ type Querier interface {
 	// The text versions of the files of a document's versions, without their
 	// text.
 	ListTextViews(ctx context.Context, documentID uuid.UUID) ([]ListTextViewsRow, error)
+	// The course's students now in no group of the set, within the caller's
+	// student scope (a delegate's principal's too), with their names.
+	ListUnassignedStudents(ctx context.Context, arg ListUnassignedStudentsParams) ([]ListUnassignedStudentsRow, error)
 	// A version's files, in order.
 	ListVersionFiles(ctx context.Context, versionID uuid.UUID) ([]DocumentVersionFile, error)
 	// The text versions of a version's files, without their text.
@@ -878,9 +1015,20 @@ type Querier interface {
 	// The versions of a document not purged yet, and the files each holds, in
 	// order.
 	ListVersionsToPurge(ctx context.Context, documentID uuid.UUID) ([]ListVersionsToPurgeRow, error)
+	// Work -----------------------------------------------------------------------
+	// Every submission of the groups to an assignment of their set, any state,
+	// a draft included, the latest attempt first for each assignment.
+	ListWorkOfGroups(ctx context.Context, groupIds []uuid.UUID) ([]ListWorkOfGroupsRow, error)
 	LiveAppointment(ctx context.Context, arg LiveAppointmentParams) (DepartmentAdmin, error)
 	LiveComponentGradeExists(ctx context.Context, arg LiveComponentGradeExistsParams) (bool, error)
-	LiveSubmissionGradeExists(ctx context.Context, submissionID *uuid.UUID) (bool, error)
+	// A group's members now, in id order.
+	LiveMembersOf(ctx context.Context, groupID uuid.UUID) ([]uuid.UUID, error)
+	// Whether one of the students has a live posted grade given from the group
+	// grade: what lets a member read its feedback files.
+	LivePostedGradeFromGroupGradeFor(ctx context.Context, arg LivePostedGradeFromGroupGradeForParams) (bool, error)
+	// The student's live posted grade on the work: one per student, on a
+	// group's work one per member.
+	LiveSubmissionGradeExists(ctx context.Context, arg LiveSubmissionGradeExistsParams) (bool, error)
 	// The person whose password is being reset, for the rest of the reset,
 	// before anything about them is looked at. NO KEY UPDATE, as
 	// LockOwnerForAgents, not UPDATE: every action row naming them holds KEY
@@ -907,6 +1055,13 @@ type Querier interface {
 	// (ShareAssignmentForGrading); and an update's or a publish's NO KEY UPDATE.
 	// It is the first lock the deletion takes after its caller's seat.
 	LockAssignmentForDelete(ctx context.Context, arg LockAssignmentForDeleteParams) (LockAssignmentForDeleteRow, error)
+	// GetAssignmentInCourseForUpdate, FOR UPDATE rather than NO KEY UPDATE, for an
+	// update that changes which set it names: it holds off the KEY SHARE that a
+	// new submission's foreign key takes, and that GetAssignmentForSubmission and
+	// submission_fits_assignment take before they read the set, so that no work
+	// of the other kind is started while it changes, as LockAssignmentForUnpublish
+	// holds off work while an assignment is taken back.
+	LockAssignmentForGroupSet(ctx context.Context, arg LockAssignmentForGroupSetParams) (LockAssignmentForGroupSetRow, error)
 	// FOR UPDATE, not the NO KEY UPDATE of an ordinary update: it conflicts with
 	// the KEY SHARE that inserting a submission takes, and that
 	// GetAssignmentForSubmission takes before it checks that the assignment is
@@ -978,6 +1133,16 @@ type Querier interface {
 	// Every grade given on a submission to the assignment, superseded ones
 	// included, held in id order, after the submissions.
 	LockGradesOfAssignment(ctx context.Context, assignmentID uuid.UUID) ([]uuid.UUID, error)
+	// Every group grade given on a group's submission to the assignment, held in
+	// id order, after the grades.
+	LockGroupGradesOfAssignment(ctx context.Context, assignmentID uuid.UUID) ([]uuid.UUID, error)
+	// A set, held FOR UPDATE: a split, and group_set.update.
+	LockGroupSet(ctx context.Context, arg LockGroupSetParams) (GroupSet, error)
+	// All of one group's attempts at one assignment, locked, newest first.
+	LockGroupSubmissionsOf(ctx context.Context, arg LockGroupSubmissionsOfParams) ([]LockGroupSubmissionsOfRow, error)
+	// Groups of a set, held FOR UPDATE in id order, with their sizes as they
+	// stand once held: placing students, signing up, splitting, archiving.
+	LockGroups(ctx context.Context, arg LockGroupsParams) ([]LockGroupsRow, error)
 	// Calls with one key take turns from the start, before anything else is
 	// locked. A retry of a call still in flight waits here holding nothing, and
 	// then finds the first call's row; without this it would wait for that row
@@ -1068,6 +1233,11 @@ type Querier interface {
 	LockText(ctx context.Context, arg LockTextParams) (DocumentVersionText, error)
 	// The text version a call of the service's is about, by its file, held.
 	LockTextForService(ctx context.Context, arg LockTextForServiceParams) (DocumentVersionText, error)
+	// Whose work a submission is ---------------------------------------------------
+	// Every write of whose work a group's submission is takes it — a hand-in, a
+	// 'missing' record, a correction, the due sweep — so that one student comes
+	// to be part of one group's work for an assignment: 1095324503 is "AISW".
+	LockWorkMembersOfAssignment(ctx context.Context, assignmentID uuid.UUID) error
 	LoginIDTaken(ctx context.Context, lower string) (bool, error)
 	LoginIDTakenByAnother(ctx context.Context, arg LoginIDTakenByAnotherParams) (bool, error)
 	// The one person or agent a whole email address belongs to, or the one
@@ -1088,6 +1258,8 @@ type Querier interface {
 	// forward to it, and never back.
 	MarkConversationRead(ctx context.Context, arg MarkConversationReadParams) (int32, error)
 	MaxVersionSeq(ctx context.Context, documentID uuid.UUID) (int32, error)
+	// Of these students, those a grade on the submission names, any state.
+	MemberGradedOnSubmission(ctx context.Context, arg MemberGradedOnSubmissionParams) ([]uuid.UUID, error)
 	// Whether an agent's owner lets it keep memory: no row is yes.
 	MemoryEnabled(ctx context.Context, holderActorID uuid.UUID) (bool, error)
 	MessageRetracted(ctx context.Context, messageID uuid.UUID) (bool, error)
@@ -1095,8 +1267,12 @@ type Querier interface {
 	// A grade's feedback files go with it when it is written again without
 	// being graded again: a total worked out anew, a score rescaled.
 	MoveFeedbackFiles(ctx context.Context, arg MoveFeedbackFilesParams) error
+	// A group grade's feedback files go with it when it is written again without
+	// being graded again: a score rescaled.
+	MoveGroupGradeFeedbackFiles(ctx context.Context, arg MoveGroupGradeFeedbackFilesParams) error
 	// The departments an actor is appointed to administer now.
 	MyAppointments(ctx context.Context, actorID uuid.UUID) ([]MyAppointmentsRow, error)
+	NamesOfMembers(ctx context.Context, ids []uuid.UUID) ([]NamesOfMembersRow, error)
 	NewestComponentDraftAt(ctx context.Context, arg NewestComponentDraftAtParams) (time.Time, error)
 	NewestSubmissionDraftAt(ctx context.Context, submissionID *uuid.UUID) (time.Time, error)
 	// Where a provider added without a position goes: after every other.
@@ -1110,6 +1286,9 @@ type Querier interface {
 	// two participants. The nil UUID stands for none. Each is a few hundred
 	// bytes, well under the 8000 a notification may carry.
 	NotifyWake(ctx context.Context, arg NotifyWakeParams) error
+	// Of these students, those another group's work for the assignment names,
+	// with that work: a student is part of one group's work for an assignment.
+	OtherWorkNaming(ctx context.Context, arg OtherWorkNamingParams) ([]OtherWorkNamingRow, error)
 	// Whether the actor owns an agent that holds, or held, a seat in the
 	// course: whose queues of their own agents' actions they may read there.
 	OwnsAgentSeatedIn(ctx context.Context, arg OwnsAgentSeatedInParams) (bool, error)
@@ -1246,11 +1425,16 @@ type Querier interface {
 	// change to all three.
 	SeatOrphaned(ctx context.Context, arg SeatOrphanedParams) (bool, error)
 	SetActionReview(ctx context.Context, arg SetActionReviewParams) (int64, error)
+	// Which set it names: only while no submission names it
+	// (assignment_group_set_fixed), and only by a call holding it FOR UPDATE
+	// (LockAssignmentForGroupSet).
+	SetAssignmentGroupSet(ctx context.Context, arg SetAssignmentGroupSetParams) error
 	SetComponentParent(ctx context.Context, arg SetComponentParentParams) error
 	SetCourseDept(ctx context.Context, arg SetCourseDeptParams) error
 	SetCourseStatus(ctx context.Context, arg SetCourseStatusParams) (int64, error)
 	SetDepartmentParent(ctx context.Context, arg SetDepartmentParentParams) error
 	SetDocumentStatus(ctx context.Context, arg SetDocumentStatusParams) (int64, error)
+	SetHasAssignments(ctx context.Context, groupSetID *uuid.UUID) (bool, error)
 	SetMemberExpiry(ctx context.Context, arg SetMemberExpiryParams) error
 	SetMemberPerms(ctx context.Context, arg SetMemberPermsParams) error
 	// A fact of the roster; nothing that authorizes reads it.
@@ -1281,6 +1465,14 @@ type Querier interface {
 	// (document.purge), which locks it FOR UPDATE, waits, or is waited for and
 	// seen.
 	ShareDocumentInCourse(ctx context.Context, arg ShareDocumentInCourseParams) (ShareDocumentInCourseRow, error)
+	// The group whose work is handed in, held FOR SHARE: a move of one of its
+	// members (FOR UPDATE) and a hand-in are one after the other.
+	ShareGroup(ctx context.Context, arg ShareGroupParams) (ShareGroupRow, error)
+	// A set, held FOR SHARE to the end of the call: placing students and signing
+	// up take it so, and then the groups they touch FOR UPDATE, so that a split
+	// or a change of the set's sign-up (FOR UPDATE) is one after the other with
+	// them, never interleaved.
+	ShareGroupSet(ctx context.Context, arg ShareGroupSetParams) (GroupSet, error)
 	// KEY SHARE on the given seats, in id order: what taking them before some
 	// other lock looks like, where that lock would otherwise be held while one of
 	// them is waited for. A delegate's seat and its principal's are not taken
@@ -1310,16 +1502,24 @@ type Querier interface {
 	// token must not bring a deleted file back.
 	StorageKeyInUse(ctx context.Context, storageKey *string) (bool, error)
 	StudentCountedAsZero(ctx context.Context, studentMemberID uuid.UUID) (bool, error)
+	// Of these students, those a seat's list of students names.
+	StudentsInListedScope(ctx context.Context, arg StudentsInListedScopeParams) ([]uuid.UUID, error)
+	// The students with a live posted grade given from the group grade.
+	StudentsPostedFromGroupGrade(ctx context.Context, groupGradeID *uuid.UUID) ([]uuid.UUID, error)
 	// A grade entered, or proposed and not yet decided: either way, one is on its
-	// way for exactly this work.
+	// way for exactly this work. A group grade is entered with its members'.
 	SubmissionHasGrades(ctx context.Context, submissionID *uuid.UUID) (bool, error)
+	// The students of a submission (submission_students): its student; a
+	// group's draft's members now; a group's work's rows.
+	SubmissionStudents(ctx context.Context, submissionID uuid.UUID) ([]uuid.UUID, error)
 	SubmitSubmission(ctx context.Context, arg SubmitSubmissionParams) (int64, error)
 	// How many levels the department and what is beneath it take up: 1 for one
 	// with nothing beneath it.
 	SubtreeHeight(ctx context.Context, deptID uuid.UUID) (int32, error)
 	SupersedeComponentDrafts(ctx context.Context, arg SupersedeComponentDraftsParams) error
 	SupersedeGrade(ctx context.Context, arg SupersedeGradeParams) (int64, error)
-	// A new draft replaces earlier drafts for the same submission.
+	// A new draft replaces the student's earlier drafts for the same submission:
+	// on a group's work, each member's by that member's new one.
 	SupersedeSubmissionDrafts(ctx context.Context, arg SupersedeSubmissionDraftsParams) error
 	// An administrator's suspension. It is made over an active actor, or over
 	// one its owner has suspended, which it then takes over: from then on it is
@@ -1352,6 +1552,8 @@ type Querier interface {
 	UpdateComponent(ctx context.Context, arg UpdateComponentParams) error
 	UpdateCourse(ctx context.Context, arg UpdateCourseParams) error
 	UpdateDocumentDetails(ctx context.Context, arg UpdateDocumentDetailsParams) error
+	UpdateGroup(ctx context.Context, arg UpdateGroupParams) error
+	UpdateGroupSet(ctx context.Context, arg UpdateGroupSetParams) error
 	// A change to an entry's text, tags or pin, which moves its version on.
 	// Given a version, only that version is changed: no row comes back if it
 	// has moved on since (0 changes whatever it is).
@@ -1362,10 +1564,14 @@ type Querier interface {
 	// Writes every field over the version its writer read, and moves the version
 	// on; no row comes back when the version moved on first.
 	UpdateSSOProvider(ctx context.Context, arg UpdateSSOProviderParams) (int32, error)
-	UpdateSubmissionDraft(ctx context.Context, arg UpdateSubmissionDraftParams) (int64, error)
+	// A draft's new text, written by whom and when. The database counts the
+	// revision (submission_draft_revised); none comes back when it is no
+	// longer a draft.
+	UpdateSubmissionDraft(ctx context.Context, arg UpdateSubmissionDraftParams) (int32, error)
 	// Is this version the one some submission within the member's scope was
 	// submitted under? Then that member may read it even after the instructions
-	// have moved on: it is what they, or their student, were told.
+	// have moved on: it is what they, or their student, were told. A group's
+	// work is within scope through any of its students (submission_students).
 	VersionPinnedInScope(ctx context.Context, arg VersionPinnedInScopeParams) (bool, error)
 }
 

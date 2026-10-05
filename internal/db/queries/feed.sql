@@ -7,10 +7,14 @@
 SELECT g.id, g.student_member_id, g.submission_id, g.component_id, s.assignment_id, g.origin, g.score,
        g.feedback, g.breakdown, g.rubric_version_id, g.grader_member_id, g.created_by_action_id,
        g.posted_at, g.posted_by_member_id, g.superseded_by, g.created_at,
-       g.override_score, g.override_reason, g.override_by_member_id, g.overridden_at
+       g.override_score, g.override_reason, g.override_by_member_id, g.overridden_at,
+       g.group_grade_id, g.adjust_kind, g.adjust_points, g.adjust_reason, g.adjust_by_member_id,
+       s.group_id, cg.name AS group_name, gg.score AS group_score
 FROM grade g
 JOIN course_member sm ON sm.id = g.student_member_id
 LEFT JOIN submission s ON s.id = g.submission_id
+LEFT JOIN course_group cg ON cg.id = s.group_id
+LEFT JOIN group_grade gg ON gg.id = g.group_grade_id
 WHERE sm.course_id = $1 AND g.id > sqlc.arg(after)
   AND (sqlc.narg(student_member_id)::uuid IS NULL OR g.student_member_id = sqlc.narg(student_member_id))
   AND (sqlc.narg(assignment_id)::uuid IS NULL OR s.assignment_id = sqlc.narg(assignment_id))
@@ -31,10 +35,14 @@ LIMIT sqlc.arg(max_rows);
 SELECT g.id, g.student_member_id, g.submission_id, g.component_id, s.assignment_id, g.origin, g.score,
        g.feedback, g.breakdown, g.rubric_version_id, g.grader_member_id, g.created_by_action_id,
        g.posted_at, g.posted_by_member_id, g.superseded_by, g.created_at,
-       g.override_score, g.override_reason, g.override_by_member_id, g.overridden_at
+       g.override_score, g.override_reason, g.override_by_member_id, g.overridden_at,
+       g.group_grade_id, g.adjust_kind, g.adjust_points, g.adjust_reason, g.adjust_by_member_id,
+       s.group_id, cg.name AS group_name, gg.score AS group_score
 FROM grade g
 JOIN course_member sm ON sm.id = g.student_member_id
 LEFT JOIN submission s ON s.id = g.submission_id
+LEFT JOIN course_group cg ON cg.id = s.group_id
+LEFT JOIN group_grade gg ON gg.id = g.group_grade_id
 WHERE g.id = $1 AND sm.course_id = $2;
 
 -- name: ListEvents :many

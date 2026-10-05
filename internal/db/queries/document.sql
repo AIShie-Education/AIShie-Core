@@ -1,6 +1,6 @@
 -- name: InsertDocument :exec
-INSERT INTO document (id, course_id, kind, title, submission_id, grade_id, sort_order, created_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8);
+INSERT INTO document (id, course_id, kind, title, submission_id, grade_id, sort_order, created_at, group_grade_id)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, sqlc.narg(group_grade_id));
 
 -- name: InsertDocumentVersion :exec
 -- Its files are written with it, in its transaction (InsertDocumentVersionFile).
@@ -28,7 +28,9 @@ SELECT * FROM document_version_file WHERE id = $1 AND document_id = $2;
 
 -- name: GetDocumentWithOwner :one
 -- A document and, when it is owned, whose it is: a submitted file belongs to
--- its submission's student and assignment; a feedback file to its grade's.
+-- its submission's student and assignment, or its group's (submission_group,
+-- whose students submission_students says); a feedback file to its grade's,
+-- or to its group grade's work (group_grade_submission).
 SELECT d.id, d.course_id, d.kind, d.title, d.submission_id, d.grade_id, d.published_version_id,
        d.sort_order, d.status, d.created_at, d.purged_at, d.purged_by_actor_id, d.purge_reason,
        s.student_member_id  AS submission_student,
@@ -36,11 +38,17 @@ SELECT d.id, d.course_id, d.kind, d.title, d.submission_id, d.grade_id, d.publis
        g.student_member_id  AS grade_student,
        gs.assignment_id     AS grade_assignment,
        g.posted_at          AS grade_posted_at,
-       g.superseded_by      AS grade_superseded_by
+       g.superseded_by      AS grade_superseded_by,
+       s.group_id           AS submission_group,
+       d.group_grade_id,
+       gg.submission_id     AS group_grade_submission,
+       ggs.assignment_id    AS group_grade_assignment
 FROM document d
-LEFT JOIN submission s  ON s.id = d.submission_id
-LEFT JOIN grade g       ON g.id = d.grade_id
-LEFT JOIN submission gs ON gs.id = g.submission_id
+LEFT JOIN submission s    ON s.id = d.submission_id
+LEFT JOIN grade g         ON g.id = d.grade_id
+LEFT JOIN submission gs   ON gs.id = g.submission_id
+LEFT JOIN group_grade gg  ON gg.id = d.group_grade_id
+LEFT JOIN submission ggs  ON ggs.id = gg.submission_id
 WHERE d.id = $1 AND d.course_id = $2;
 
 -- name: LockDocument :exec
@@ -153,16 +161,19 @@ SELECT id, title, status, created_at FROM document WHERE grade_id = $1 AND statu
 -- name: VersionPinnedInScope :one
 -- Is this version the one some submission within the member's scope was
 -- submitted under? Then that member may read it even after the instructions
--- have moved on: it is what they, or their student, were told.
+-- have moved on: it is what they, or their student, were told. A group's
+-- work is within scope through any of its students (submission_students).
 SELECT EXISTS (
     SELECT 1 FROM submission s
     WHERE s.instructions_version_id = sqlc.arg(version_id)
       AND (sqlc.arg(student_all)::bool OR EXISTS (
-            SELECT 1 FROM member_student_scope x WHERE x.member_id = sqlc.arg(member_id) AND x.student_member_id = s.student_member_id))
+            SELECT 1 FROM submission_students(s.id) st(member_id)
+            JOIN member_student_scope x ON x.student_member_id = st.member_id WHERE x.member_id = sqlc.arg(member_id)))
       AND (sqlc.arg(assignment_all)::bool OR EXISTS (
             SELECT 1 FROM member_assignment_scope y WHERE y.member_id = sqlc.arg(member_id) AND y.assignment_id = s.assignment_id))
       AND (sqlc.arg(principal_student_all)::bool OR EXISTS (
-            SELECT 1 FROM member_student_scope px WHERE px.member_id = sqlc.arg(principal_id) AND px.student_member_id = s.student_member_id))
+            SELECT 1 FROM submission_students(s.id) pt(member_id)
+            JOIN member_student_scope px ON px.student_member_id = pt.member_id WHERE px.member_id = sqlc.arg(principal_id)))
       AND (sqlc.arg(principal_assignment_all)::bool OR EXISTS (
             SELECT 1 FROM member_assignment_scope py WHERE py.member_id = sqlc.arg(principal_id) AND py.assignment_id = s.assignment_id))
 );

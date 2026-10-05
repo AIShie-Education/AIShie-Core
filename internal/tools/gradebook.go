@@ -356,19 +356,74 @@ func rescaledScore(score, from, to decimal.Decimal) decimal.Decimal {
 // units. The breakdown is the grader's working against the rubric, and is
 // kept as it was. A score the conversion leaves as it was (a 0) is left
 // alone. Work that was worth nothing has nothing to rescale from.
+//
+// A group's work is carried the same way, as a whole: each group grade a live
+// grade is given from is written again, its score in proportion and its
+// feedback files moved to it, and each member's grade from it written again
+// pointing to it, a replace or delta adjustment in proportion too; keep_scores
+// is refused if the group's score, or a member's, would be above the new
+// points.
 func rebase(ctx context.Context, ec *tool.ExecCtx, courseID uuid.UUID, assignmentID *uuid.UUID,
 	grades []dbq.LockLiveEnteredGradesOfAssignmentRow, from, to decimal.Decimal, how string) (int, error) {
 	scores := make([]gradeScore, len(grades))
 	for i, g := range grades {
 		scores[i] = gradeScore{id: g.ID, score: g.Score}
 	}
+	var groups []dbq.GroupGrade
+	if assignmentID != nil {
+		var err error
+		if groups, err = ec.Q.ListLiveGroupGradesOfAssignment(ctx, *assignmentID); err != nil {
+			return 0, err
+		}
+		for _, gg := range groups {
+			scores = append(scores, gradeScore{id: gg.ID, score: gg.Score})
+		}
+	}
 	if err := rebaseRefusal(scores, from, to, how); err != nil || how == existingKeepScores {
 		return 0, err
+	}
+	// Each group grade written again, if its work's scores move.
+	moved := map[uuid.UUID]uuid.UUID{} // old group grade → new
+	newScore := map[uuid.UUID]decimal.Decimal{}
+	for _, gg := range groups {
+		score := rescaledScore(gg.Score, from, to)
+		same := score.Equal(gg.Score)
+		for _, g := range grades {
+			if g.GroupGradeID != nil && *g.GroupGradeID == gg.ID && g.AdjustPoints.Valid &&
+				!rescaledScore(g.AdjustPoints.Decimal, from, to).Equal(g.AdjustPoints.Decimal) {
+				same = false
+			}
+		}
+		if same {
+			continue
+		}
+		id := ids.New()
+		if err := ec.Q.InsertGroupGrade(ctx, dbq.InsertGroupGradeParams{ID: id, CourseID: courseID, SubmissionID: gg.SubmissionID,
+			Score: score, OutOf: to, AllowExtra: gg.AllowExtra, Feedback: gg.Feedback, Breakdown: gg.Breakdown,
+			RubricVersionID: gg.RubricVersionID, GraderMemberID: ec.Member.ID, CreatedByActionID: ec.ActionID, CreatedAt: ec.Now}); err != nil {
+			return 0, err
+		}
+		if err := ec.Q.MoveGroupGradeFeedbackFiles(ctx, dbq.MoveGroupGradeFeedbackFilesParams{OldGroupGradeID: &gg.ID, NewGroupGradeID: &id}); err != nil {
+			return 0, err
+		}
+		moved[gg.ID], newScore[gg.ID] = id, score
 	}
 	written := 0
 	for _, g := range grades {
 		score := rescaledScore(g.Score, from, to)
-		if score.Equal(g.Score) {
+		var groupGrade *uuid.UUID
+		adj := adjustmentOf(g.AdjustKind, g.AdjustPoints, g.AdjustReason, g.AdjustByMemberID)
+		if g.GroupGradeID != nil {
+			newGroupGrade, ok := moved[*g.GroupGradeID]
+			if !ok {
+				continue
+			}
+			groupGrade = &newGroupGrade
+			if !adj.none() {
+				adj.points = rescaledScore(adj.points, from, to)
+			}
+			score = rescaledMemberScore(newScore[*g.GroupGradeID], adj)
+		} else if score.Equal(g.Score) {
 			continue
 		}
 		id := ids.New()
@@ -385,8 +440,9 @@ func rebase(ctx context.Context, ec *tool.ExecCtx, courseID uuid.UUID, assignmen
 		row := dbq.InsertGradeParams{
 			ID: id, StudentMemberID: g.StudentMemberID, SubmissionID: g.SubmissionID, ComponentID: g.ComponentID,
 			Origin: "entered", Score: score, Feedback: g.Feedback, Breakdown: g.Breakdown, RubricVersionID: g.RubricVersionID,
-			GraderMemberID: ec.Member.ID, CreatedByActionID: ec.ActionID, CreatedAt: ec.Now,
+			GraderMemberID: ec.Member.ID, CreatedByActionID: ec.ActionID, CreatedAt: ec.Now, GroupGradeID: groupGrade,
 		}
+		adj.columns(&row)
 		typ := events.GradeCreated
 		if g.PostedAt != nil {
 			row.PostedAt, row.PostedByMemberID = &ec.Now, &ec.Member.ID
@@ -399,12 +455,29 @@ func rebase(ctx context.Context, ec *tool.ExecCtx, courseID uuid.UUID, assignmen
 			return 0, err
 		}
 		student := g.StudentMemberID
+		payload := map[string]any{"replaces": g.ID, "rescaled": true}
+		if groupGrade != nil {
+			payload["group_grade_id"] = *groupGrade
+		}
 		ec.Emit(events.Event{Type: typ, CourseID: &courseID, SubjectType: "grade", SubjectID: &id,
-			StudentMemberID: &student, AssignmentID: assignmentID,
-			Payload: map[string]any{"replaces": g.ID, "rescaled": true}})
+			StudentMemberID: &student, AssignmentID: assignmentID, Payload: payload})
 		written++
 	}
 	return written, nil
+}
+
+// rescaledMemberScore is a member's score from a rescaled group score g and
+// their rescaled adjustment: in proportion, as their score was, and never
+// below zero. Its bounds were held when it was given, and proportion keeps
+// them but for the rounding of a ten-thousandth.
+func rescaledMemberScore(g decimal.Decimal, a adjustment) decimal.Decimal {
+	switch a.kind {
+	case adjustReplace:
+		return a.points
+	case adjustDelta:
+		return decimal.Max(g.Add(a.points), decimal.Zero)
+	}
+	return g
 }
 
 // gradedStudents are the students the grades are of.

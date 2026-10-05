@@ -201,11 +201,15 @@ type MarkMissingIn struct {
 	// DueAt is the due date the sweep saw. If it has moved since, there is
 	// nothing to do yet.
 	DueAt time.Time `json:"due_at"`
+	// Groups is whether the sweep saw a group assignment, whose key says
+	// so: if it has become the other kind since, there is nothing to do
+	// under this key.
+	Groups bool `json:"groups,omitempty"`
 }
 
 type MarkMissingOut struct {
 	Done    bool `json:"done"`
-	Missing int  `json:"missing" jsonschema:"students marked as having handed in nothing"`
+	Missing int  `json:"missing" jsonschema:"students marked as having handed in nothing; on a group assignment, groups"`
 }
 
 func submissionMarkMissing() tool.Tool {
@@ -213,7 +217,8 @@ func submissionMarkMissing() tool.Tool {
 		Name: ToolSubmissionMarkMissing,
 		Description: "When an assignment's due date passes: record that it has, and give every current student who has " +
 			"handed in nothing a 'missing' submission, so that the gap is a row a grader can see and grade. Late work " +
-			"takes the missing row over, unless a grade has been entered or proposed for it.",
+			"takes the missing row over, unless a grade has been entered or proposed for it. On a group assignment, every " +
+			"group of its set with members and no submission gets one, for its members.",
 		Kind: tool.Write, Internal: true,
 		Resolve: func(ctx context.Context, q dbq.Querier, in MarkMissingIn) (tool.Target, error) {
 			return tool.Target{CourseID: in.CourseID, Type: "assignment", ID: &in.AssignmentID}, nil
@@ -226,11 +231,14 @@ func submissionMarkMissing() tool.Tool {
 			if err != nil {
 				return MarkMissingOut{}, err
 			}
-			if a.PublishedAt == nil || a.DueAt == nil || !a.DueAt.Equal(in.DueAt) || a.DueAt.After(ec.Now) {
+			if a.PublishedAt == nil || a.DueAt == nil || !a.DueAt.Equal(in.DueAt) || a.DueAt.After(ec.Now) || (a.GroupSetID != nil) != in.Groups {
 				return MarkMissingOut{}, ErrSweepMoot
 			}
 			ec.Emit(events.Event{Type: EventAssignmentDuePassed, CourseID: &in.CourseID, SubjectType: "assignment",
 				SubjectID: &a.ID, AssignmentID: &a.ID})
+			if a.GroupSetID != nil {
+				return markGroupsMissing(ctx, ec, dbq.GetAssignmentInCourseRow(a))
+			}
 
 			students, err := ec.Q.ListStudentsWithoutSubmission(ctx, dbq.ListStudentsWithoutSubmissionParams{CourseID: in.CourseID, AssignmentID: a.ID})
 			if err != nil {
@@ -255,4 +263,27 @@ func submissionMarkMissing() tool.Tool {
 			return out, nil
 		},
 	})
+}
+
+// markGroupsMissing is the sweep on group assignment a: each group of its
+// set, not archived, with no submission row, is given a 'missing' row for
+// its members now, less those another group's work for a names; a group
+// left with nobody gets none. Students in no group get nothing: the roster
+// says they are in none.
+func markGroupsMissing(ctx context.Context, ec *tool.ExecCtx, a dbq.GetAssignmentInCourseRow) (MarkMissingOut, error) {
+	groups, err := ec.Q.ListGroupsWithoutSubmission(ctx, dbq.ListGroupsWithoutSubmissionParams{SetID: *a.GroupSetID, AssignmentID: a.ID})
+	if err != nil {
+		return MarkMissingOut{}, err
+	}
+	out := MarkMissingOut{Done: true}
+	for _, g := range groups {
+		id, err := writeGroupMissing(ctx, ec, a, g)
+		if err != nil {
+			return MarkMissingOut{}, err
+		}
+		if id != nil {
+			out.Missing++
+		}
+	}
+	return out, nil
 }

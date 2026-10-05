@@ -66,13 +66,13 @@ func assignmentDeleteTools(d Deps) []tool.Tool {
 // DeletionCounts is what goes with an assignment, counted: what the preview
 // shows, and what assignment.delete is given back (confirm).
 type DeletionCounts struct {
-	Submissions int `json:"submissions" jsonschema:"every submission to it: every attempt and state, handed in, a draft, or recorded as missing"`
+	Submissions int `json:"submissions" jsonschema:"every submission to it: every attempt and state, handed in, a draft, or recorded as missing; a group's work counts once"`
 	HandedIn    int `json:"handed_in" jsonschema:"of those, handed in, on time or late"`
 	Drafts      int `json:"drafts" jsonschema:"of those, drafts"`
 	Missing     int `json:"missing" jsonschema:"of those, recorded as missing"`
-	Grades      int `json:"grades" jsonschema:"live grades given on them, drafts and posted; the history of each goes with it and is not counted"`
+	Grades      int `json:"grades" jsonschema:"live grades given on them, drafts and posted, each member's of a group's work; the history of each goes with it and is not counted"`
 	Posted      int `json:"posted" jsonschema:"of those, posted"`
-	Files       int `json:"files" jsonschema:"files deleted from storage: those handed in and given as feedback, every version's; their PDF renditions go too and are not counted. The instructions' and the rubric's are not among them: those stay in the course"`
+	Files       int `json:"files" jsonschema:"files deleted from storage: those handed in and given as feedback, a group grade's among them, every version's; their PDF renditions go too and are not counted. The instructions' and the rubric's are not among them: those stay in the course"`
 	Proposals   int `json:"proposals" jsonschema:"proposals about it waiting for a decision, which are cancelled"`
 	Totals      int `json:"totals" jsonschema:"students whose posted totals are worked out again without it, the change recorded"`
 }
@@ -382,9 +382,10 @@ func assignmentDelete(d Deps) tool.Tool {
 // deleteAssignment carries assignment.delete out, in the call's
 // transaction. The locks come in one order: the caller's seat (taken by
 // the pipeline), the assignment FOR UPDATE, its submissions and then the
-// grades given on them in id order, every submitted and feedback file
-// deleted with it in id order, and each student's totals as they are
-// written again. It reaches no other document: its instructions and rubric
+// grades given on them in id order, and the group grades, every submitted
+// and feedback file deleted with it in id order, and each student's totals
+// as they are written again. A group's work goes as a student's does, whose
+// it was (submission_member) with it; its group, the course's, stays. It reaches no other document: its instructions and rubric
 // are neither locked, read for what they hold, nor changed.
 func deleteAssignment(ctx context.Context, d Deps, ec *tool.ExecCtx, in AssignmentDeleteIn) (AssignmentDeleteOut, error) {
 	q := ec.Q
@@ -397,6 +398,9 @@ func deleteAssignment(ctx context.Context, d Deps, ec *tool.ExecCtx, in Assignme
 		return AssignmentDeleteOut{}, err
 	}
 	if _, err := q.LockGradesOfAssignment(ctx, a.ID); err != nil {
+		return AssignmentDeleteOut{}, err
+	}
+	if _, err := q.LockGroupGradesOfAssignment(ctx, a.ID); err != nil {
 		return AssignmentDeleteOut{}, err
 	}
 	// Which files are the work's cannot change under the locks above; each
@@ -509,6 +513,9 @@ func deleteAssignment(ctx context.Context, d Deps, ec *tool.ExecCtx, in Assignme
 		}
 	}
 	if _, err := q.DeleteGradesOfAssignment(ctx, a.ID); err != nil {
+		return AssignmentDeleteOut{}, err
+	}
+	if _, err := q.DeleteGroupGradesOfAssignment(ctx, a.ID); err != nil {
 		return AssignmentDeleteOut{}, err
 	}
 	if _, err := q.DeleteSubmissionsOfAssignment(ctx, a.ID); err != nil {

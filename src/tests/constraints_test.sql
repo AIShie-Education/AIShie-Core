@@ -2593,6 +2593,350 @@ SELECT pg_temp.fails('its last error says something, in at most 500 characters',
 SELECT pg_temp.fails('and its attempts are never below zero', '23514', $q$
     UPDATE blob_deletion SET attempts = -1 WHERE storage_key = 'k/30fd01' $q$);
 
+-- Group work (migration 0031) ---------------------------------------------------
+-- 3101 Mio, a student, and 3151 her seat in A · 31b1 Sato's actions
+-- 3105 Projects (A) · 3106 Labs (A) · 3107 a set of B's
+-- 3111 Team A, 3112 Team B (Projects) · 3113 Lab 1 (Labs) · 3114 B's group
+-- 31a1 Project, a group assignment of Projects · 31a2 Essay, Yuki's own
+-- 31d1 Team A's work · 31d2 Team B's · 31d3 Yuki's essay
+-- 31e1 Team A's group grade · 31f1..31f4 the members' grades
+SELECT pg_temp.ok('sets, groups and their members, in a course', $q$
+    INSERT INTO actor (id, kind, display_name, created_by_actor_id) VALUES ('00000000-0000-0000-0000-000000003101', 'human', 'Mio', '00000000-0000-0000-0000-000000000031');
+    INSERT INTO course_member (id, course_id, actor_id, role, added_by_actor_id, student_scope, assignment_scope)
+    VALUES ('00000000-0000-0000-0000-000000003151', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000003101', 'student', '00000000-0000-0000-0000-000000000034', 'listed', 'all');
+    INSERT INTO action (id, actor_id, course_id, member_id, action_type, target_type, idempotency_key, authz_result, status, executed_at)
+    VALUES ('00000000-0000-0000-0000-0000000031b1', '00000000-0000-0000-0000-000000000034', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000000051', 'group.set_members', 'group_set', 'k-31b1', 'autonomous', 'executed', now());
+    INSERT INTO group_set (id, course_id, name, description, created_by_member_id) VALUES
+        ('00000000-0000-0000-0000-000000003105', '00000000-0000-0000-0000-000000000041', 'Projects', 'Term project teams', '00000000-0000-0000-0000-000000000051'),
+        ('00000000-0000-0000-0000-000000003106', '00000000-0000-0000-0000-000000000041', 'Labs', NULL, '00000000-0000-0000-0000-000000000051');
+    INSERT INTO group_set (id, course_id, name, created_by_member_id) VALUES ('00000000-0000-0000-0000-000000003107', '00000000-0000-0000-0000-000000000042', 'Projects', '00000000-0000-0000-0000-000000000055');
+    INSERT INTO course_group (id, course_id, set_id, name, capacity, created_by_member_id) VALUES
+        ('00000000-0000-0000-0000-000000003111', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000003105', 'Team A', 3, '00000000-0000-0000-0000-000000000051'),
+        ('00000000-0000-0000-0000-000000003112', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000003105', 'Team B', NULL, '00000000-0000-0000-0000-000000000051'),
+        ('00000000-0000-0000-0000-000000003113', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000003106', 'Lab 1', NULL, '00000000-0000-0000-0000-000000000051'),
+        ('00000000-0000-0000-0000-000000003114', '00000000-0000-0000-0000-000000000042', '00000000-0000-0000-0000-000000003107', 'Team A', NULL, '00000000-0000-0000-0000-000000000055');
+    INSERT INTO group_membership (id, course_id, set_id, group_id, member_id, joined_at, joined_by_member_id, joined_how, joined_action_id) VALUES
+        ('00000000-0000-0000-0000-000000003121', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000003105', '00000000-0000-0000-0000-000000003111', '00000000-0000-0000-0000-000000000052', now(), '00000000-0000-0000-0000-000000000051', 'assigned', '00000000-0000-0000-0000-0000000031b1'),
+        ('00000000-0000-0000-0000-000000003122', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000003105', '00000000-0000-0000-0000-000000003111', '00000000-0000-0000-0000-000000003151', now(), '00000000-0000-0000-0000-000000000051', 'split', '00000000-0000-0000-0000-0000000031b1'),
+        ('00000000-0000-0000-0000-000000003123', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000003105', '00000000-0000-0000-0000-000000003112', '00000000-0000-0000-0000-000000000058', now(), '00000000-0000-0000-0000-000000000051', 'signup', '00000000-0000-0000-0000-0000000031b1') $q$);
+SELECT pg_temp.fails('a set''s name says something', '23514', $q$
+    INSERT INTO group_set (course_id, name, created_by_member_id) VALUES ('00000000-0000-0000-0000-000000000041', '', '00000000-0000-0000-0000-000000000051') $q$);
+SELECT pg_temp.fails('trimmed', '23514', $q$
+    INSERT INTO group_set (course_id, name, created_by_member_id) VALUES ('00000000-0000-0000-0000-000000000041', ' Labs ', '00000000-0000-0000-0000-000000000051') $q$);
+SELECT pg_temp.fails('on one line', '23514', $q$
+    INSERT INTO group_set (course_id, name, created_by_member_id) VALUES ('00000000-0000-0000-0000-000000000041', E'Labs\nand more', '00000000-0000-0000-0000-000000000051') $q$);
+SELECT pg_temp.fails('in at most 100 characters', '23514', $q$
+    INSERT INTO group_set (course_id, name, created_by_member_id) VALUES ('00000000-0000-0000-0000-000000000041', repeat('x', 101), '00000000-0000-0000-0000-000000000051') $q$);
+SELECT pg_temp.fails('and its description in at most 2000', '23514', $q$
+    INSERT INTO group_set (course_id, name, description, created_by_member_id) VALUES ('00000000-0000-0000-0000-000000000041', 'Long', repeat('x', 2001), '00000000-0000-0000-0000-000000000051') $q$);
+SELECT pg_temp.fails('a set''s name is unique in its course among those not archived, whatever its case', '23505', $q$
+    INSERT INTO group_set (course_id, name, created_by_member_id) VALUES ('00000000-0000-0000-0000-000000000041', 'PROJECTS', '00000000-0000-0000-0000-000000000051') $q$);
+SELECT pg_temp.ok('but an archived set''s name is free', $q$
+    INSERT INTO group_set (id, course_id, name, archived_at, created_by_member_id) VALUES ('00000000-0000-0000-0000-000000003108', '00000000-0000-0000-0000-000000000041', 'Projects', now(), '00000000-0000-0000-0000-000000000051') $q$);
+SELECT pg_temp.fails('a set is made from a seat of its course', '23503', $q$
+    INSERT INTO group_set (course_id, name, created_by_member_id) VALUES ('00000000-0000-0000-0000-000000000041', 'Elsewhere', '00000000-0000-0000-0000-000000000055') $q$);
+SELECT pg_temp.fails('a set stays in its course', '23001', $q$
+    UPDATE group_set SET course_id = '00000000-0000-0000-0000-000000000042' WHERE id = '00000000-0000-0000-0000-000000003105' $q$);
+SELECT pg_temp.ok('and is renamed, opened for sign-up and archived', $q$
+    UPDATE group_set SET name = 'Projects 2026', signup_open = true, signup_closes_at = now() + interval '1 day' WHERE id = '00000000-0000-0000-0000-000000003106';
+    UPDATE group_set SET name = 'Labs', signup_open = false WHERE id = '00000000-0000-0000-0000-000000003106' $q$);
+SELECT pg_temp.fails('a set is never deleted', '23001', $q$
+    DELETE FROM group_set WHERE id = '00000000-0000-0000-0000-000000003108' $q$);
+SELECT pg_temp.fails('nor truncated', '23001', $q$
+    TRUNCATE group_set CASCADE $q$);
+SELECT pg_temp.fails('a group is of a set of its course', '23503', $q$
+    INSERT INTO course_group (course_id, set_id, name, created_by_member_id) VALUES ('00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000003107', 'Stray', '00000000-0000-0000-0000-000000000051') $q$);
+SELECT pg_temp.fails('its capacity is at least one', '23514', $q$
+    INSERT INTO course_group (course_id, set_id, name, capacity, created_by_member_id) VALUES ('00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000003105', 'Team C', 0, '00000000-0000-0000-0000-000000000051') $q$);
+SELECT pg_temp.fails('and at most 500', '23514', $q$
+    INSERT INTO course_group (course_id, set_id, name, capacity, created_by_member_id) VALUES ('00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000003105', 'Team C', 501, '00000000-0000-0000-0000-000000000051') $q$);
+SELECT pg_temp.fails('its name is unique in its set among those not archived', '23505', $q$
+    INSERT INTO course_group (course_id, set_id, name, created_by_member_id) VALUES ('00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000003105', 'team a', '00000000-0000-0000-0000-000000000051') $q$);
+SELECT pg_temp.fails('a group stays in its set', '23001', $q$
+    UPDATE course_group SET set_id = '00000000-0000-0000-0000-000000003106' WHERE id = '00000000-0000-0000-0000-000000003111' $q$);
+SELECT pg_temp.fails('a group is never deleted', '23001', $q$
+    DELETE FROM course_group WHERE id = '00000000-0000-0000-0000-000000003113' $q$);
+SELECT pg_temp.fails('nor truncated', '23001', $q$
+    TRUNCATE course_group CASCADE $q$);
+SELECT pg_temp.fails('a student is in one group of a set at a time', '23505', $q$
+    INSERT INTO group_membership (course_id, set_id, group_id, member_id, joined_at, joined_by_member_id, joined_how, joined_action_id)
+    VALUES ('00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000003105', '00000000-0000-0000-0000-000000003112', '00000000-0000-0000-0000-000000000052', now(), '00000000-0000-0000-0000-000000000051', 'assigned', '00000000-0000-0000-0000-0000000031b1') $q$);
+SELECT pg_temp.ok('and in a group of each set', $q$
+    INSERT INTO group_membership (id, course_id, set_id, group_id, member_id, joined_at, joined_by_member_id, joined_how, joined_action_id)
+    VALUES ('00000000-0000-0000-0000-000000003124', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000003106', '00000000-0000-0000-0000-000000003113', '00000000-0000-0000-0000-000000000052', now(), '00000000-0000-0000-0000-000000000051', 'assigned', '00000000-0000-0000-0000-0000000031b1') $q$);
+SELECT pg_temp.fails('a member of another course is in no group of this one', '23503', $q$
+    INSERT INTO group_membership (course_id, set_id, group_id, member_id, joined_at, joined_by_member_id, joined_how, joined_action_id)
+    VALUES ('00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000003106', '00000000-0000-0000-0000-000000003113', '00000000-0000-0000-0000-000000000054', now(), '00000000-0000-0000-0000-000000000051', 'assigned', '00000000-0000-0000-0000-0000000031b1') $q$);
+SELECT pg_temp.fails('a stay is in a group of its set', '23503', $q$
+    INSERT INTO group_membership (course_id, set_id, group_id, member_id, joined_at, joined_by_member_id, joined_how, joined_action_id)
+    VALUES ('00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000003106', '00000000-0000-0000-0000-000000003111', '00000000-0000-0000-0000-000000000058', now(), '00000000-0000-0000-0000-000000000051', 'assigned', '00000000-0000-0000-0000-0000000031b1') $q$);
+SELECT pg_temp.fails('it says how it began', '23514', $q$
+    INSERT INTO group_membership (course_id, set_id, group_id, member_id, joined_at, joined_by_member_id, joined_how, joined_action_id)
+    VALUES ('00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000003106', '00000000-0000-0000-0000-000000003113', '00000000-0000-0000-0000-000000000058', now(), '00000000-0000-0000-0000-000000000051', 'volunteered', '00000000-0000-0000-0000-0000000031b1') $q$);
+SELECT pg_temp.fails('it ends saying when, by whom, how and by which action, together', '23514', $q$
+    UPDATE group_membership SET left_at = now(), left_how = 'moved' WHERE id = '00000000-0000-0000-0000-000000003124' $q$);
+SELECT pg_temp.fails('and never before it began', '23514', $q$
+    UPDATE group_membership SET left_at = joined_at - interval '1 day', left_by_member_id = '00000000-0000-0000-0000-000000000051', left_how = 'moved', left_action_id = '00000000-0000-0000-0000-0000000031b1'
+    WHERE id = '00000000-0000-0000-0000-000000003124' $q$);
+SELECT pg_temp.ok('a stay ends once', $q$
+    UPDATE group_membership SET left_at = now(), left_by_member_id = '00000000-0000-0000-0000-000000000051', left_how = 'unassigned', left_action_id = '00000000-0000-0000-0000-0000000031b1' WHERE id = '00000000-0000-0000-0000-000000003124' $q$);
+SELECT pg_temp.fails('and stays ended', '23001', $q$
+    UPDATE group_membership SET left_at = now() + interval '1 hour' WHERE id = '00000000-0000-0000-0000-000000003124' $q$);
+SELECT pg_temp.fails('nothing else of it changes', '23001', $q$
+    UPDATE group_membership SET joined_how = 'signup' WHERE id = '00000000-0000-0000-0000-000000003121' $q$);
+SELECT pg_temp.fails('nor is it deleted', '23001', $q$
+    DELETE FROM group_membership WHERE id = '00000000-0000-0000-0000-000000003124' $q$);
+SELECT pg_temp.fails('nor truncated', '23001', $q$
+    TRUNCATE group_membership $q$);
+SELECT pg_temp.ok('a group''s members are its students now: a seat no longer a student''s, removed or past its expiry is none', $q$
+    DO $chk$
+    BEGIN
+        IF (SELECT array_agg(x ORDER BY x) FROM live_group_members('00000000-0000-0000-0000-000000003111') x) <> ARRAY['00000000-0000-0000-0000-000000000052', '00000000-0000-0000-0000-000000003151']::uuid[] THEN
+            RAISE EXCEPTION 'Team A''s members: %', (SELECT array_agg(x) FROM live_group_members('00000000-0000-0000-0000-000000003111') x);
+        END IF;
+        UPDATE course_member SET role = 'ta' WHERE id = '00000000-0000-0000-0000-000000003151';
+        IF EXISTS (SELECT 1 FROM live_group_members('00000000-0000-0000-0000-000000003111') x WHERE x = '00000000-0000-0000-0000-000000003151') THEN
+            RAISE EXCEPTION 'a TA counts as a member';
+        END IF;
+        UPDATE course_member SET role = 'student', expires_at = now() - interval '1 minute' WHERE id = '00000000-0000-0000-0000-000000003151';
+        IF EXISTS (SELECT 1 FROM live_group_members('00000000-0000-0000-0000-000000003111') x WHERE x = '00000000-0000-0000-0000-000000003151') THEN
+            RAISE EXCEPTION 'an expired seat counts as a member';
+        END IF;
+        UPDATE course_member SET expires_at = NULL, status = 'paused' WHERE id = '00000000-0000-0000-0000-000000003151';
+        IF NOT EXISTS (SELECT 1 FROM live_group_members('00000000-0000-0000-0000-000000003111') x WHERE x = '00000000-0000-0000-0000-000000003151') THEN
+            RAISE EXCEPTION 'a paused student does not count as a member';
+        END IF;
+        UPDATE course_member SET status = 'active' WHERE id = '00000000-0000-0000-0000-000000003151';
+    END $chk$ $q$);
+SELECT pg_temp.ok('an assignment of the course names a set of the course', $q$
+    INSERT INTO assignment (id, course_id, component_id, title, points_possible, published_at, group_set_id) VALUES
+        ('00000000-0000-0000-0000-0000000031a1', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000000062', 'Project', 100, now(), '00000000-0000-0000-0000-000000003105'),
+        ('00000000-0000-0000-0000-0000000031a2', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000000062', 'Essay', 10, now(), NULL) $q$);
+SELECT pg_temp.fails('never another course''s set', '23503', $q$
+    INSERT INTO assignment (course_id, title, points_possible, group_set_id) VALUES ('00000000-0000-0000-0000-000000000041', 'Stray', 10, '00000000-0000-0000-0000-000000003107') $q$);
+SELECT pg_temp.ok('a group''s draft of a group assignment, and a student''s of her own', $q$
+    INSERT INTO submission (id, assignment_id, course_id, group_id, body) VALUES ('00000000-0000-0000-0000-0000000031d1', '00000000-0000-0000-0000-0000000031a1', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000003111', 'Our plan');
+    INSERT INTO submission (id, assignment_id, course_id, group_id, body) VALUES ('00000000-0000-0000-0000-0000000031d2', '00000000-0000-0000-0000-0000000031a1', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000003112', 'Ours');
+    INSERT INTO submission (id, assignment_id, course_id, student_member_id, body) VALUES ('00000000-0000-0000-0000-0000000031d3', '00000000-0000-0000-0000-0000000031a2', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000000052', 'My essay') $q$);
+SELECT pg_temp.fails('one draft per attempt for a group, as for a student', '23505', $q$
+    INSERT INTO submission (assignment_id, course_id, group_id) VALUES ('00000000-0000-0000-0000-0000000031a1', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000003111') $q$);
+SELECT pg_temp.fails('a submission is a student''s or a group''s, not both', '23514', $q$
+    INSERT INTO submission (assignment_id, course_id, group_id, student_member_id, attempt) VALUES ('00000000-0000-0000-0000-0000000031a1', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000003111', '00000000-0000-0000-0000-000000000052', 2) $q$);
+SELECT pg_temp.fails('nor neither''s', '23514', $q$
+    INSERT INTO submission (assignment_id, course_id, attempt) VALUES ('00000000-0000-0000-0000-0000000031a2', '00000000-0000-0000-0000-000000000041', 2) $q$);
+SELECT pg_temp.fails('a group''s work goes to no assignment of no set', '23514', $q$
+    INSERT INTO submission (assignment_id, course_id, group_id) VALUES ('00000000-0000-0000-0000-0000000031a2', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000003111') $q$);
+SELECT pg_temp.fails('nor to one of another set', '23514', $q$
+    INSERT INTO submission (assignment_id, course_id, group_id) VALUES ('00000000-0000-0000-0000-0000000031a1', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000003113') $q$);
+SELECT pg_temp.fails('nor another course''s group', '23514', $q$
+    INSERT INTO submission (assignment_id, course_id, group_id) VALUES ('00000000-0000-0000-0000-0000000031a1', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000003114') $q$);
+SELECT pg_temp.fails('a student''s own work goes to no group assignment', '23514', $q$
+    INSERT INTO submission (assignment_id, course_id, student_member_id) VALUES ('00000000-0000-0000-0000-0000000031a1', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000000052') $q$);
+SELECT pg_temp.ok('and a student''s missing row there, the release before''s, is passed over, unwritten', $q$
+    DO $chk$
+    DECLARE
+        n int;
+    BEGIN
+        INSERT INTO submission (assignment_id, course_id, student_member_id, attempt, state) VALUES ('00000000-0000-0000-0000-0000000031a1', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000000058', 1, 'missing');
+        GET DIAGNOSTICS n = ROW_COUNT;
+        IF n <> 0 OR EXISTS (SELECT 1 FROM submission WHERE assignment_id = '00000000-0000-0000-0000-0000000031a1' AND student_member_id IS NOT NULL) THEN
+            RAISE EXCEPTION 'a student''s missing row was written to a group assignment';
+        END IF;
+    END $chk$ $q$);
+SELECT pg_temp.fails('whose a submission is never changes', '23001', $q$
+    UPDATE submission SET group_id = '00000000-0000-0000-0000-000000003112' WHERE id = '00000000-0000-0000-0000-0000000031d1' $q$);
+SELECT pg_temp.fails('nor which assignment it is of', '23001', $q$
+    UPDATE submission SET assignment_id = '00000000-0000-0000-0000-000000000071' WHERE id = '00000000-0000-0000-0000-0000000031d3' $q$);
+SELECT pg_temp.fails('an assignment''s set no longer changes once a submission names it', '23001', $q$
+    UPDATE assignment SET group_set_id = NULL WHERE id = '00000000-0000-0000-0000-0000000031a1' $q$);
+SELECT pg_temp.fails('nor is an assignment with work made a group one', '23001', $q$
+    UPDATE assignment SET group_set_id = '00000000-0000-0000-0000-000000003105' WHERE id = '00000000-0000-0000-0000-0000000031a2' $q$);
+SELECT pg_temp.ok('a draft''s text changed counts a revision, and dates it', $q$
+    UPDATE submission SET body = 'Our plan, and its method', revised_by_member_id = '00000000-0000-0000-0000-000000003151' WHERE id = '00000000-0000-0000-0000-0000000031d1';
+    DO $chk$
+    BEGIN
+        IF (SELECT revision FROM submission WHERE id = '00000000-0000-0000-0000-0000000031d1') <> 2 OR (SELECT revised_at FROM submission WHERE id = '00000000-0000-0000-0000-0000000031d1') IS NULL THEN
+            RAISE EXCEPTION 'the revision: %', (SELECT revision FROM submission WHERE id = '00000000-0000-0000-0000-0000000031d1');
+        END IF;
+        UPDATE submission SET state = state WHERE id = '00000000-0000-0000-0000-0000000031d1';
+        IF (SELECT revision FROM submission WHERE id = '00000000-0000-0000-0000-0000000031d1') <> 2 THEN
+            RAISE EXCEPTION 'a change of nothing counted a revision';
+        END IF;
+    END $chk$ $q$);
+SELECT pg_temp.fails('who revised a draft is a seat of its course', '23503', $q$
+    UPDATE submission SET body = 'x', revised_by_member_id = '00000000-0000-0000-0000-000000000055' WHERE id = '00000000-0000-0000-0000-0000000031d1' $q$);
+SELECT pg_temp.ok('a student''s submission is hers, written with it', $q$
+    DO $chk$
+    BEGIN
+        IF NOT EXISTS (SELECT 1 FROM submission_member WHERE submission_id = '00000000-0000-0000-0000-0000000031d3' AND member_id = '00000000-0000-0000-0000-000000000052' AND added_how = 'own'
+                       AND assignment_id = '00000000-0000-0000-0000-0000000031a2' AND course_id = '00000000-0000-0000-0000-000000000041' AND group_id IS NULL) THEN
+            RAISE EXCEPTION 'Yuki''s essay has no row of hers';
+        END IF;
+    END $chk$ $q$);
+SELECT pg_temp.fails('and nobody else''s', '23514', $q$
+    INSERT INTO submission_member (submission_id, member_id, course_id, assignment_id, added_at, added_how)
+    VALUES ('00000000-0000-0000-0000-0000000031d3', '00000000-0000-0000-0000-000000000058', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-0000000031a2', now(), 'own') $q$);
+SELECT pg_temp.fails('a group''s draft is its members'' now: no row is written for it', '23514', $q$
+    INSERT INTO submission_member (submission_id, member_id, course_id, assignment_id, added_at, added_how)
+    VALUES ('00000000-0000-0000-0000-0000000031d1', '00000000-0000-0000-0000-000000000052', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-0000000031a1', now(), 'hand_in') $q$);
+SELECT pg_temp.ok('handed in, a group''s work is its members'' as it was handed in, its course, assignment and group copied', $q$
+    UPDATE submission SET state = 'submitted', submitted_at = now(), submitted_by_member_id = '00000000-0000-0000-0000-000000000052' WHERE id = '00000000-0000-0000-0000-0000000031d1';
+    INSERT INTO submission_member (submission_id, member_id, course_id, assignment_id, added_at, added_how, added_by_member_id) VALUES
+        ('00000000-0000-0000-0000-0000000031d1', '00000000-0000-0000-0000-000000000052', '00000000-0000-0000-0000-000000000042', '00000000-0000-0000-0000-000000000071', now(), 'hand_in', '00000000-0000-0000-0000-000000000052'),
+        ('00000000-0000-0000-0000-0000000031d1', '00000000-0000-0000-0000-000000003151', '00000000-0000-0000-0000-000000000042', '00000000-0000-0000-0000-000000000071', now(), 'hand_in', '00000000-0000-0000-0000-000000000052');
+    DO $chk$
+    BEGIN
+        IF (SELECT count(*) FROM submission_member WHERE submission_id = '00000000-0000-0000-0000-0000000031d1' AND course_id = '00000000-0000-0000-0000-000000000041' AND assignment_id = '00000000-0000-0000-0000-0000000031a1' AND group_id = '00000000-0000-0000-0000-000000003111') <> 2 THEN
+            RAISE EXCEPTION 'whose Team A''s work is was not written from the submission';
+        END IF;
+    END $chk$ $q$);
+SELECT pg_temp.fails('none of a group''s is one student''s own', '23514', $q$
+    UPDATE submission SET state = 'submitted', submitted_at = now() WHERE id = '00000000-0000-0000-0000-0000000031d2';
+    INSERT INTO submission_member (submission_id, member_id, course_id, assignment_id, added_at, added_how)
+    VALUES ('00000000-0000-0000-0000-0000000031d2', '00000000-0000-0000-0000-000000000058', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-0000000031a1', now(), 'own') $q$);
+SELECT pg_temp.fails('a student is part of one group''s work for an assignment', '23514', $q$
+    UPDATE submission SET state = 'submitted', submitted_at = now() WHERE id = '00000000-0000-0000-0000-0000000031d2';
+    INSERT INTO submission_member (submission_id, member_id, course_id, assignment_id, added_at, added_how)
+    VALUES ('00000000-0000-0000-0000-0000000031d2', '00000000-0000-0000-0000-000000000052', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-0000000031a1', now(), 'corrected') $q$);
+SELECT pg_temp.fails('it says how they came to be part of it', '23514', $q$
+    UPDATE submission SET state = 'submitted', submitted_at = now() WHERE id = '00000000-0000-0000-0000-0000000031d2';
+    INSERT INTO submission_member (submission_id, member_id, course_id, assignment_id, added_at, added_how)
+    VALUES ('00000000-0000-0000-0000-0000000031d2', '00000000-0000-0000-0000-000000000058', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-0000000031a1', now(), 'volunteered') $q$);
+SELECT pg_temp.ok('Team B''s, handed in for Ken', $q$
+    UPDATE submission SET state = 'submitted', submitted_at = now() WHERE id = '00000000-0000-0000-0000-0000000031d2';
+    INSERT INTO submission_member (submission_id, member_id, course_id, assignment_id, added_at, added_how)
+    VALUES ('00000000-0000-0000-0000-0000000031d2', '00000000-0000-0000-0000-000000000058', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-0000000031a1', now(), 'hand_in') $q$);
+SELECT pg_temp.fails('a row of it never changes', '23001', $q$
+    UPDATE submission_member SET added_how = 'corrected' WHERE submission_id = '00000000-0000-0000-0000-0000000031d1' AND member_id = '00000000-0000-0000-0000-000000000052' $q$);
+SELECT pg_temp.fails('nor goes, handed in', '23001', $q$
+    DELETE FROM submission_member WHERE submission_id = '00000000-0000-0000-0000-0000000031d1' AND member_id = '00000000-0000-0000-0000-000000003151' $q$);
+SELECT pg_temp.fails('nor a student''s own, ever', '23001', $q$
+    SELECT set_config('aishie.correcting_submission', '00000000-0000-0000-0000-0000000031d3'::text, true);
+    DELETE FROM submission_member WHERE submission_id = '00000000-0000-0000-0000-0000000031d3' $q$);
+SELECT pg_temp.ok('but by a correction of whose work it is, which says so', $q$
+    SELECT set_config('aishie.correcting_submission', '00000000-0000-0000-0000-0000000031d1'::text, true);
+    DELETE FROM submission_member WHERE submission_id = '00000000-0000-0000-0000-0000000031d1' AND member_id = '00000000-0000-0000-0000-000000003151';
+    SELECT set_config('aishie.correcting_submission', '', true);
+    INSERT INTO submission_member (submission_id, member_id, course_id, assignment_id, added_at, added_how, added_by_member_id)
+    VALUES ('00000000-0000-0000-0000-0000000031d1', '00000000-0000-0000-0000-000000003151', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-0000000031a1', now(), 'corrected', '00000000-0000-0000-0000-000000000051') $q$);
+SELECT pg_temp.fails('a correction of one work opens no other', '23001', $q$
+    SELECT set_config('aishie.correcting_submission', '00000000-0000-0000-0000-0000000031d2'::text, true);
+    DELETE FROM submission_member WHERE submission_id = '00000000-0000-0000-0000-0000000031d1' AND member_id = '00000000-0000-0000-0000-000000003151' $q$);
+SELECT pg_temp.fails('nor is it truncated', '23001', $q$
+    TRUNCATE submission_member CASCADE $q$);
+SELECT pg_temp.fails('a grade on a group''s work is given to one of its members', '23503', $q$
+    INSERT INTO grade (student_member_id, submission_id, origin, score, grader_member_id, created_by_action_id)
+    VALUES ('00000000-0000-0000-0000-000000000058', '00000000-0000-0000-0000-0000000031d1', 'entered', 80, '00000000-0000-0000-0000-000000000051', '00000000-0000-0000-0000-0000000031b1') $q$);
+SELECT pg_temp.fails('a group grade is given to a group''s work handed in, not a student''s', '23514', $q$
+    INSERT INTO group_grade (id, course_id, submission_id, score, out_of, grader_member_id, created_by_action_id)
+    VALUES ('00000000-0000-0000-0000-0000000031e9', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-0000000031d3', 8, 10, '00000000-0000-0000-0000-000000000051', '00000000-0000-0000-0000-0000000031b1') $q$);
+SELECT pg_temp.ok('Team A''s group grade, in its submission''s course, and its members'' grades from it, one adjusted', $q$
+    INSERT INTO group_grade (id, course_id, submission_id, score, out_of, feedback, grader_member_id, created_by_action_id)
+    VALUES ('00000000-0000-0000-0000-0000000031e1', '00000000-0000-0000-0000-000000000042', '00000000-0000-0000-0000-0000000031d1', 80, 100, 'Clear.', '00000000-0000-0000-0000-000000000051', '00000000-0000-0000-0000-0000000031b1');
+    INSERT INTO grade (id, student_member_id, submission_id, origin, score, grader_member_id, created_by_action_id, posted_at,
+                       posted_by_member_id, group_grade_id, adjust_kind, adjust_points, adjust_reason, adjust_by_member_id) VALUES
+        ('00000000-0000-0000-0000-0000000031f1', '00000000-0000-0000-0000-000000000052', '00000000-0000-0000-0000-0000000031d1', 'entered', 80, '00000000-0000-0000-0000-000000000051', '00000000-0000-0000-0000-0000000031b1', now(), '00000000-0000-0000-0000-000000000051', '00000000-0000-0000-0000-0000000031e1', NULL, NULL, NULL, NULL),
+        ('00000000-0000-0000-0000-0000000031f2', '00000000-0000-0000-0000-000000003151', '00000000-0000-0000-0000-0000000031d1', 'entered', 70, '00000000-0000-0000-0000-000000000051', '00000000-0000-0000-0000-0000000031b1', now(), '00000000-0000-0000-0000-000000000051', '00000000-0000-0000-0000-0000000031e1', 'delta', -10, 'Missed two meetings', '00000000-0000-0000-0000-000000000051');
+    DO $chk$
+    BEGIN
+        IF (SELECT course_id FROM group_grade WHERE id = '00000000-0000-0000-0000-0000000031e1') <> '00000000-0000-0000-0000-000000000041' THEN
+            RAISE EXCEPTION 'the group grade is not of its submission''s course';
+        END IF;
+    END $chk$;
+    SET CONSTRAINTS ALL IMMEDIATE;
+    SET CONSTRAINTS ALL DEFERRED $q$);
+SELECT pg_temp.fails('one live posted grade per member of the work', '23505', $q$
+    INSERT INTO grade (student_member_id, submission_id, origin, score, grader_member_id, created_by_action_id, posted_at, posted_by_member_id)
+    VALUES ('00000000-0000-0000-0000-000000000052', '00000000-0000-0000-0000-0000000031d1', 'entered', 81, '00000000-0000-0000-0000-000000000051', '00000000-0000-0000-0000-0000000031b1', now(), '00000000-0000-0000-0000-000000000051') $q$);
+SELECT pg_temp.fails('a group grade is of a group''s work handed in, not a draft', '23514', $q$
+    INSERT INTO submission (id, assignment_id, course_id, group_id, attempt) VALUES ('00000000-0000-0000-0000-0000000031d4', '00000000-0000-0000-0000-0000000031a1', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000003111', 2);
+    INSERT INTO group_grade (course_id, submission_id, score, out_of, grader_member_id, created_by_action_id)
+    VALUES ('00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-0000000031d4', 1, 100, '00000000-0000-0000-0000-000000000051', '00000000-0000-0000-0000-0000000031b1') $q$);
+SELECT pg_temp.fails('its score is not below zero', '23514', $q$
+    INSERT INTO group_grade (course_id, submission_id, score, out_of, grader_member_id, created_by_action_id)
+    VALUES ('00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-0000000031d2', -1, 100, '00000000-0000-0000-0000-000000000051', '00000000-0000-0000-0000-0000000031b1') $q$);
+SELECT pg_temp.fails('a group grade is kept as written', '23001', $q$
+    UPDATE group_grade SET score = 90 WHERE id = '00000000-0000-0000-0000-0000000031e1' $q$);
+SELECT pg_temp.fails('and is not deleted', '23001', $q$
+    DELETE FROM group_grade WHERE id = '00000000-0000-0000-0000-0000000031e1' $q$);
+SELECT pg_temp.fails('nor truncated', '23001', $q$
+    TRUNCATE group_grade CASCADE $q$);
+SELECT pg_temp.fails('a grade from a group grade is on its submission', '23503', $q$
+    INSERT INTO grade (student_member_id, submission_id, origin, score, grader_member_id, created_by_action_id, group_grade_id)
+    VALUES ('00000000-0000-0000-0000-000000000058', '00000000-0000-0000-0000-0000000031d2', 'entered', 80, '00000000-0000-0000-0000-000000000051', '00000000-0000-0000-0000-0000000031b1', '00000000-0000-0000-0000-0000000031e1') $q$);
+SELECT pg_temp.fails('an adjustment is replace or delta', '23514', $q$
+    INSERT INTO grade (student_member_id, submission_id, origin, score, grader_member_id, created_by_action_id, group_grade_id,
+                       adjust_kind, adjust_points, adjust_reason, adjust_by_member_id)
+    VALUES ('00000000-0000-0000-0000-000000000052', '00000000-0000-0000-0000-0000000031d1', 'entered', 85, '00000000-0000-0000-0000-000000000051', '00000000-0000-0000-0000-0000000031b1', '00000000-0000-0000-0000-0000000031e1', 'bonus', 5, 'Led it', '00000000-0000-0000-0000-000000000051') $q$);
+SELECT pg_temp.fails('it says why', '23514', $q$
+    INSERT INTO grade (student_member_id, submission_id, origin, score, grader_member_id, created_by_action_id, group_grade_id,
+                       adjust_kind, adjust_points, adjust_by_member_id)
+    VALUES ('00000000-0000-0000-0000-000000000052', '00000000-0000-0000-0000-0000000031d1', 'entered', 85, '00000000-0000-0000-0000-000000000051', '00000000-0000-0000-0000-0000000031b1', '00000000-0000-0000-0000-0000000031e1', 'delta', 5, '00000000-0000-0000-0000-000000000051') $q$);
+SELECT pg_temp.fails('in at most 500 characters', '23514', $q$
+    INSERT INTO grade (student_member_id, submission_id, origin, score, grader_member_id, created_by_action_id, group_grade_id,
+                       adjust_kind, adjust_points, adjust_reason, adjust_by_member_id)
+    VALUES ('00000000-0000-0000-0000-000000000052', '00000000-0000-0000-0000-0000000031d1', 'entered', 85, '00000000-0000-0000-0000-000000000051', '00000000-0000-0000-0000-0000000031b1', '00000000-0000-0000-0000-0000000031e1', 'delta', 5, repeat('x', 501), '00000000-0000-0000-0000-000000000051') $q$);
+SELECT pg_temp.fails('and who made it', '23514', $q$
+    INSERT INTO grade (student_member_id, submission_id, origin, score, grader_member_id, created_by_action_id, group_grade_id,
+                       adjust_kind, adjust_points, adjust_reason)
+    VALUES ('00000000-0000-0000-0000-000000000052', '00000000-0000-0000-0000-0000000031d1', 'entered', 85, '00000000-0000-0000-0000-000000000051', '00000000-0000-0000-0000-0000000031b1', '00000000-0000-0000-0000-0000000031e1', 'delta', 5, 'Led it') $q$);
+SELECT pg_temp.fails('by how much', '23514', $q$
+    INSERT INTO grade (student_member_id, submission_id, origin, score, grader_member_id, created_by_action_id, group_grade_id,
+                       adjust_kind, adjust_reason, adjust_by_member_id)
+    VALUES ('00000000-0000-0000-0000-000000000052', '00000000-0000-0000-0000-0000000031d1', 'entered', 85, '00000000-0000-0000-0000-000000000051', '00000000-0000-0000-0000-0000000031b1', '00000000-0000-0000-0000-0000000031e1', 'delta', 'Led it', '00000000-0000-0000-0000-000000000051') $q$);
+SELECT pg_temp.fails('a replaced score is not below zero', '23514', $q$
+    INSERT INTO grade (student_member_id, submission_id, origin, score, grader_member_id, created_by_action_id, group_grade_id,
+                       adjust_kind, adjust_points, adjust_reason, adjust_by_member_id)
+    VALUES ('00000000-0000-0000-0000-000000000052', '00000000-0000-0000-0000-0000000031d1', 'entered', 0, '00000000-0000-0000-0000-000000000051', '00000000-0000-0000-0000-0000000031b1', '00000000-0000-0000-0000-0000000031e1', 'replace', -1, 'Absent', '00000000-0000-0000-0000-000000000051') $q$);
+SELECT pg_temp.fails('an adjustment is of a grade from a group grade', '23514', $q$
+    INSERT INTO grade (student_member_id, submission_id, origin, score, grader_member_id, created_by_action_id,
+                       adjust_kind, adjust_points, adjust_reason, adjust_by_member_id)
+    VALUES ('00000000-0000-0000-0000-000000000052', '00000000-0000-0000-0000-0000000031d3', 'entered', 9, '00000000-0000-0000-0000-000000000051', '00000000-0000-0000-0000-0000000031b1', 'delta', 1, 'Neat', '00000000-0000-0000-0000-000000000051') $q$);
+SELECT pg_temp.fails('and no reason stands alone', '23514', $q$
+    INSERT INTO grade (student_member_id, submission_id, origin, score, grader_member_id, created_by_action_id, group_grade_id, adjust_reason)
+    VALUES ('00000000-0000-0000-0000-000000000052', '00000000-0000-0000-0000-0000000031d1', 'entered', 80, '00000000-0000-0000-0000-000000000051', '00000000-0000-0000-0000-0000000031b1', '00000000-0000-0000-0000-0000000031e1', 'Why not') $q$);
+SELECT pg_temp.fails('a group grade is given to a submission''s grade, never a component''s', '23514', $q$
+    INSERT INTO grade (student_member_id, component_id, origin, score, grader_member_id, created_by_action_id, group_grade_id)
+    VALUES ('00000000-0000-0000-0000-000000000052', '00000000-0000-0000-0000-000000000064', 'entered', 80, '00000000-0000-0000-0000-000000000051', '00000000-0000-0000-0000-0000000031b1', '00000000-0000-0000-0000-0000000031e1') $q$);
+SELECT pg_temp.ok('a group grade''s feedback file', $q$
+    INSERT INTO group_grade (id, course_id, submission_id, score, out_of, grader_member_id, created_by_action_id)
+    VALUES ('00000000-0000-0000-0000-0000000031e2', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-0000000031d1', 82, 100, '00000000-0000-0000-0000-000000000051', '00000000-0000-0000-0000-0000000031b1'),
+           ('00000000-0000-0000-0000-0000000031e3', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-0000000031d2', 60, 100, '00000000-0000-0000-0000-000000000051', '00000000-0000-0000-0000-0000000031b1');
+    INSERT INTO document (id, course_id, kind, title, group_grade_id) VALUES ('00000000-0000-0000-0000-000000003131', '00000000-0000-0000-0000-000000000041', 'feedback', 'Marked report', '00000000-0000-0000-0000-0000000031e1') $q$);
+SELECT pg_temp.fails('a feedback file is a grade''s or a group grade''s, not both', '23514', $q$
+    INSERT INTO document (course_id, kind, title, grade_id, group_grade_id) VALUES ('00000000-0000-0000-0000-000000000041', 'feedback', 'x', '00000000-0000-0000-0000-0000000031f1', '00000000-0000-0000-0000-0000000031e1') $q$);
+SELECT pg_temp.fails('and material is neither''s', '23514', $q$
+    INSERT INTO document (course_id, kind, title, group_grade_id) VALUES ('00000000-0000-0000-0000-000000000041', 'material', 'x', '00000000-0000-0000-0000-0000000031e1') $q$);
+SELECT pg_temp.fails('a group grade''s feedback goes to no group grade on other work', '23001', $q$
+    UPDATE document SET group_grade_id = '00000000-0000-0000-0000-0000000031e3' WHERE id = '00000000-0000-0000-0000-000000003131' $q$);
+SELECT pg_temp.fails('nor to a grade', '23001', $q$
+    UPDATE document SET group_grade_id = NULL, grade_id = '00000000-0000-0000-0000-0000000031f1' WHERE id = '00000000-0000-0000-0000-000000003131' $q$);
+SELECT pg_temp.ok('but to the group grade that replaces its own, on the same work', $q$
+    UPDATE document SET group_grade_id = '00000000-0000-0000-0000-0000000031e2' WHERE id = '00000000-0000-0000-0000-000000003131' $q$);
+SELECT pg_temp.ok('a group assignment deleted for good takes its groups'' work, whose it was, its group grades and their files; the groups stay', $q$
+    INSERT INTO action (id, actor_id, course_id, member_id, action_type, target_type, target_id, idempotency_key, authz_result, status, executed_at)
+    VALUES ('00000000-0000-0000-0000-0000000031b2', '00000000-0000-0000-0000-000000000034', '00000000-0000-0000-0000-000000000041', '00000000-0000-0000-0000-000000000051', 'assignment.delete', 'assignment', '00000000-0000-0000-0000-0000000031a1', 'k-31b2', 'autonomous', 'executed', now());
+    INSERT INTO assignment_deletion (assignment_id, course_id, title, was_published, action_id, deleted_by_actor_id,
+                                     deleted_by_member_id, deleted_at, submissions, grades, files, proposals, totals)
+    VALUES ('00000000-0000-0000-0000-0000000031a1', '00000000-0000-0000-0000-000000000041', 'Project', true, '00000000-0000-0000-0000-0000000031b2', '00000000-0000-0000-0000-000000000034', '00000000-0000-0000-0000-000000000051', now(), 3, 2, 0, 0, 0);
+    DELETE FROM document WHERE id = '00000000-0000-0000-0000-000000003131';
+    DELETE FROM grade WHERE submission_id IN (SELECT id FROM submission WHERE assignment_id = '00000000-0000-0000-0000-0000000031a1');
+    DELETE FROM group_grade WHERE submission_id IN (SELECT id FROM submission WHERE assignment_id = '00000000-0000-0000-0000-0000000031a1');
+    DELETE FROM submission WHERE assignment_id = '00000000-0000-0000-0000-0000000031a1';
+    DELETE FROM assignment WHERE id = '00000000-0000-0000-0000-0000000031a1';
+    SET CONSTRAINTS ALL IMMEDIATE;
+    SET CONSTRAINTS ALL DEFERRED;
+    DO $chk$
+    BEGIN
+        IF EXISTS (SELECT 1 FROM submission_member WHERE assignment_id = '00000000-0000-0000-0000-0000000031a1') OR EXISTS (SELECT 1 FROM group_grade WHERE id = '00000000-0000-0000-0000-0000000031e1') THEN
+            RAISE EXCEPTION 'the group assignment''s work is still there';
+        END IF;
+        IF (SELECT count(*) FROM course_group WHERE set_id = '00000000-0000-0000-0000-000000003105') <> 2
+           OR (SELECT count(*) FROM group_membership WHERE set_id = '00000000-0000-0000-0000-000000003105' AND left_at IS NULL) <> 3 THEN
+            RAISE EXCEPTION 'the groups went with it';
+        END IF;
+    END $chk$ $q$);
+
 \o
 ROLLBACK;
 \echo 'All checks passed.'

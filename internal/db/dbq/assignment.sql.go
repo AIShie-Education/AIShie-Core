@@ -27,7 +27,7 @@ func (q *Queries) AssignmentHasSubmissions(ctx context.Context, assignmentID uui
 
 const getAssignmentForSubmission = `-- name: GetAssignmentForSubmission :one
 SELECT id, course_id, component_id, title, instructions_document_id, rubric_document_id,
-       points_possible, due_at, published_at
+       points_possible, due_at, published_at, group_set_id
 FROM assignment
 WHERE id = $1 AND course_id = $2
 FOR KEY SHARE
@@ -48,6 +48,7 @@ type GetAssignmentForSubmissionRow struct {
 	PointsPossible         decimal.Decimal
 	DueAt                  *time.Time
 	PublishedAt            *time.Time
+	GroupSetID             *uuid.UUID
 }
 
 // GetAssignmentInCourse for a tool about to add a submission to it. KEY SHARE
@@ -66,13 +67,14 @@ func (q *Queries) GetAssignmentForSubmission(ctx context.Context, arg GetAssignm
 		&i.PointsPossible,
 		&i.DueAt,
 		&i.PublishedAt,
+		&i.GroupSetID,
 	)
 	return i, err
 }
 
 const getAssignmentInCourseForUpdate = `-- name: GetAssignmentInCourseForUpdate :one
 SELECT id, course_id, component_id, title, instructions_document_id, rubric_document_id,
-       points_possible, due_at, published_at
+       points_possible, due_at, published_at, group_set_id
 FROM assignment
 WHERE id = $1 AND course_id = $2
 FOR NO KEY UPDATE
@@ -93,6 +95,7 @@ type GetAssignmentInCourseForUpdateRow struct {
 	PointsPossible         decimal.Decimal
 	DueAt                  *time.Time
 	PublishedAt            *time.Time
+	GroupSetID             *uuid.UUID
 }
 
 // GetAssignmentInCourse, locked for the rest of the transaction:
@@ -117,6 +120,7 @@ func (q *Queries) GetAssignmentInCourseForUpdate(ctx context.Context, arg GetAss
 		&i.PointsPossible,
 		&i.DueAt,
 		&i.PublishedAt,
+		&i.GroupSetID,
 	)
 	return i, err
 }
@@ -156,8 +160,8 @@ func (q *Queries) GetDocumentInCourse(ctx context.Context, arg GetDocumentInCour
 
 const insertAssignment = `-- name: InsertAssignment :exec
 INSERT INTO assignment (id, course_id, component_id, title, instructions_document_id, rubric_document_id,
-                        points_possible, due_at, created_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                        points_possible, due_at, created_at, group_set_id)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 `
 
 type InsertAssignmentParams struct {
@@ -170,6 +174,7 @@ type InsertAssignmentParams struct {
 	PointsPossible         decimal.Decimal
 	DueAt                  *time.Time
 	CreatedAt              time.Time
+	GroupSetID             *uuid.UUID
 }
 
 func (q *Queries) InsertAssignment(ctx context.Context, arg InsertAssignmentParams) error {
@@ -183,13 +188,14 @@ func (q *Queries) InsertAssignment(ctx context.Context, arg InsertAssignmentPara
 		arg.PointsPossible,
 		arg.DueAt,
 		arg.CreatedAt,
+		arg.GroupSetID,
 	)
 	return err
 }
 
 const listAssignments = `-- name: ListAssignments :many
 SELECT id, course_id, component_id, title, instructions_document_id, rubric_document_id,
-       points_possible, due_at, published_at, created_at
+       points_possible, due_at, published_at, created_at, group_set_id
 FROM assignment a
 WHERE a.course_id = $1 AND a.id > $2
   AND ($3::bool OR a.published_at IS NOT NULL)
@@ -243,6 +249,7 @@ func (q *Queries) ListAssignments(ctx context.Context, arg ListAssignmentsParams
 			&i.DueAt,
 			&i.PublishedAt,
 			&i.CreatedAt,
+			&i.GroupSetID,
 		); err != nil {
 			return nil, err
 		}
@@ -252,6 +259,56 @@ func (q *Queries) ListAssignments(ctx context.Context, arg ListAssignmentsParams
 		return nil, err
 	}
 	return items, nil
+}
+
+const lockAssignmentForGroupSet = `-- name: LockAssignmentForGroupSet :one
+SELECT id, course_id, component_id, title, instructions_document_id, rubric_document_id,
+       points_possible, due_at, published_at, group_set_id
+FROM assignment
+WHERE id = $1 AND course_id = $2
+FOR UPDATE
+`
+
+type LockAssignmentForGroupSetParams struct {
+	ID       uuid.UUID
+	CourseID uuid.UUID
+}
+
+type LockAssignmentForGroupSetRow struct {
+	ID                     uuid.UUID
+	CourseID               uuid.UUID
+	ComponentID            *uuid.UUID
+	Title                  string
+	InstructionsDocumentID *uuid.UUID
+	RubricDocumentID       *uuid.UUID
+	PointsPossible         decimal.Decimal
+	DueAt                  *time.Time
+	PublishedAt            *time.Time
+	GroupSetID             *uuid.UUID
+}
+
+// GetAssignmentInCourseForUpdate, FOR UPDATE rather than NO KEY UPDATE, for an
+// update that changes which set it names: it holds off the KEY SHARE that a
+// new submission's foreign key takes, and that GetAssignmentForSubmission and
+// submission_fits_assignment take before they read the set, so that no work
+// of the other kind is started while it changes, as LockAssignmentForUnpublish
+// holds off work while an assignment is taken back.
+func (q *Queries) LockAssignmentForGroupSet(ctx context.Context, arg LockAssignmentForGroupSetParams) (LockAssignmentForGroupSetRow, error) {
+	row := q.db.QueryRow(ctx, lockAssignmentForGroupSet, arg.ID, arg.CourseID)
+	var i LockAssignmentForGroupSetRow
+	err := row.Scan(
+		&i.ID,
+		&i.CourseID,
+		&i.ComponentID,
+		&i.Title,
+		&i.InstructionsDocumentID,
+		&i.RubricDocumentID,
+		&i.PointsPossible,
+		&i.DueAt,
+		&i.PublishedAt,
+		&i.GroupSetID,
+	)
+	return i, err
 }
 
 const lockAssignmentForUnpublish = `-- name: LockAssignmentForUnpublish :one
@@ -303,6 +360,23 @@ func (q *Queries) PublishAssignment(ctx context.Context, arg PublishAssignmentPa
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+const setAssignmentGroupSet = `-- name: SetAssignmentGroupSet :exec
+UPDATE assignment SET group_set_id = $1 WHERE id = $2
+`
+
+type SetAssignmentGroupSetParams struct {
+	GroupSetID *uuid.UUID
+	ID         uuid.UUID
+}
+
+// Which set it names: only while no submission names it
+// (assignment_group_set_fixed), and only by a call holding it FOR UPDATE
+// (LockAssignmentForGroupSet).
+func (q *Queries) SetAssignmentGroupSet(ctx context.Context, arg SetAssignmentGroupSetParams) error {
+	_, err := q.db.Exec(ctx, setAssignmentGroupSet, arg.GroupSetID, arg.ID)
+	return err
 }
 
 const shareAssignments = `-- name: ShareAssignments :many

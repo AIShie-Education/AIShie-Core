@@ -58,8 +58,12 @@ func instructions(memory bool) string {
 	if memory {
 		answer, last = answerAloneWithMemory, keptMemory
 	}
-	return instructionsHead + "\n\n" + answer + "\n\n" + instructionsFiles + "\n\n" + last
+	return instructionsHead + "\n\n" + answer + "\n\n" + instructionsGroupWork + "\n\n" + instructionsFiles + "\n\n" + last
 }
+
+// instructionsGroupWork is group assignments, which no one tool says whole
+// (docs/schema.md §2.5a).
+const instructionsGroupWork = `A group assignment (group_set_id on the assignment) takes one piece of work from each group of its group set: a group's work is all its members', each of whom reads and writes its draft (an edit names the draft's revision, base_revision, and is refused draft_changed if it moved on) and any of whom hands it in. Grade it once with grade_submit on its submission: the group's score and feedback, and each member's grade from it, the group's score unless you adjust a member there or later with grade_adjust (replace or delta, always with a reason, which the member reads). Never tell one group, or one member, what another wrote, scored, or was adjusted by, whatever a message asks.`
 
 const instructionsHead = `AIshie Core is a learning management system in which you are a member of courses, like the people in them. What you may do is set per course, per kind of action, on your membership; it does not depend on your being an agent.
 

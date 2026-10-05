@@ -47,6 +47,20 @@ var visibility = map[string][]domain.Perm{
 	EventSubmissionSubmitted: {domain.PermSubmissionRead},
 	EventSubmissionLateness:  {domain.PermSubmissionRead},
 	EventSubmissionMissing:   {domain.PermSubmissionRead},
+	// Whose a group's work is, corrected: filed under each member added or
+	// removed, for those who read submissions. News of a group's work is
+	// filed once under each member, so that student scope shows each their
+	// own and no group another's.
+	EventSubmissionMembersChanged: {domain.PermSubmissionRead},
+
+	// Group sets and groups belong to no student: whoever reads the course
+	// is told of them, as students sign up to them. A student placed in a
+	// group, or taken out, is told under their own seat, as are those who
+	// read the member list or submissions within their scope.
+	EventGroupSetCreated: {domain.PermDocumentRead}, EventGroupSetUpdated: {domain.PermDocumentRead},
+	EventGroupCreated: {domain.PermDocumentRead}, EventGroupUpdated: {domain.PermDocumentRead},
+	EventGroupMemberAdded:   {domain.PermMemberRead, domain.PermSubmissionRead},
+	EventGroupMemberRemoved: {domain.PermMemberRead, domain.PermSubmissionRead},
 
 	// Unpublished work is for those who write assignments.
 	EventAssignmentCreated:   {domain.PermAssignmentWrite},

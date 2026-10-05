@@ -12,6 +12,8 @@
 //	4. if the target belongs to a student: member.student_scope = 'all', or
 //	   that student ∈ member_student_scope; else denied
 //	   a delegate: its principal's scope too
+//	   a group's work, which belongs to its students together, for reading
+//	   and writing it: at least one of them ∈ member_student_scope
 //	5. if the target belongs to an assignment: same with assignment_scope
 //	6. return level
 //
@@ -89,13 +91,29 @@ func deny(r Reason, m *domain.Member) Decision {
 // every one must be in scope.
 type Target struct {
 	StudentMemberIDs []uuid.UUID
-	AssignmentIDs    []uuid.UUID
+	// AnyStudents marks a target that belongs to several students together
+	// — a group's work, its files — for those who read or write it: it is
+	// within scope when the seat reaches at least one of
+	// AnyStudentMemberIDs, and, for a delegate, its principal at least one
+	// too. A seat whose student scope is all reaches it whoever they are, or
+	// if there are none; a listed seat only through one of them, and so not
+	// at all when there are none. Grading it is a StudentMemberIDs target
+	// instead: a grade lands on every one of them.
+	AnyStudents         bool
+	AnyStudentMemberIDs []uuid.UUID
+	AssignmentIDs       []uuid.UUID
 	// SpansAssignments marks a target that belongs to a student but to no
 	// single assignment: a grade on a component, a course total. A member
 	// limited to listed assignments may not touch it. Without this, a grader
 	// listed for HW3 alone could read the whole class's midterm, because a
 	// target naming no assignment would skip step 5 entirely.
 	SpansAssignments bool
+}
+
+// AnyOf is a target that belongs to students together, a group's work, for
+// reading or writing it (Target.AnyStudents).
+func AnyOf(students []uuid.UUID) Target {
+	return Target{AnyStudents: true, AnyStudentMemberIDs: students}
 }
 
 // Evaluate is steps 1–3 with everything already loaded. It is pure, so the
@@ -287,6 +305,19 @@ func checkOwnScope(ctx context.Context, q dbq.Querier, m *domain.Member, t Targe
 			return "", fmt.Errorf("student scope: %w", err)
 		}
 		if int(n) != len(students) {
+			return ReasonStudentScope, nil
+		}
+	}
+	if t.AnyStudents && m.StudentScope != domain.ScopeAll {
+		students := distinct(t.AnyStudentMemberIDs)
+		if len(students) == 0 {
+			return ReasonStudentScope, nil
+		}
+		n, err := q.CountStudentsInScope(ctx, dbq.CountStudentsInScopeParams{MemberID: m.ID, StudentMemberIds: students})
+		if err != nil {
+			return "", fmt.Errorf("student scope: %w", err)
+		}
+		if n == 0 {
 			return ReasonStudentScope, nil
 		}
 	}

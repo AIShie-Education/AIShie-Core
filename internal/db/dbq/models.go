@@ -113,6 +113,7 @@ type Assignment struct {
 	DueAt                  *time.Time
 	PublishedAt            *time.Time
 	CreatedAt              time.Time
+	GroupSetID             *uuid.UUID
 }
 
 type AssignmentDeletion struct {
@@ -242,6 +243,17 @@ type Course struct {
 	CreatedAt          time.Time
 }
 
+type CourseGroup struct {
+	ID                uuid.UUID
+	CourseID          uuid.UUID
+	SetID             uuid.UUID
+	Name              string
+	Capacity          *int32
+	ArchivedAt        *time.Time
+	CreatedByMemberID uuid.UUID
+	CreatedAt         time.Time
+}
+
 type CourseJoinLink struct {
 	ID                  uuid.UUID
 	CourseID            uuid.UUID
@@ -342,6 +354,7 @@ type Document struct {
 	PurgedAt           *time.Time
 	PurgedByActorID    *uuid.UUID
 	PurgeReason        *string
+	GroupGradeID       *uuid.UUID
 }
 
 type DocumentVersion struct {
@@ -451,6 +464,11 @@ type Grade struct {
 	OverrideReason     *string
 	OverrideByMemberID *uuid.UUID
 	OverriddenAt       *time.Time
+	GroupGradeID       *uuid.UUID
+	AdjustKind         *string
+	AdjustPoints       decimal.NullDecimal
+	AdjustReason       *string
+	AdjustByMemberID   *uuid.UUID
 }
 
 type GradeComponent struct {
@@ -463,6 +481,50 @@ type GradeComponent struct {
 	PointsPossible decimal.NullDecimal
 	SortOrder      int32
 	CreatedAt      time.Time
+}
+
+type GroupGrade struct {
+	ID                uuid.UUID
+	CourseID          uuid.UUID
+	SubmissionID      uuid.UUID
+	Score             decimal.Decimal
+	OutOf             decimal.Decimal
+	AllowExtra        bool
+	Feedback          *string
+	Breakdown         []byte
+	RubricVersionID   *uuid.UUID
+	GraderMemberID    uuid.UUID
+	CreatedByActionID uuid.UUID
+	CreatedAt         time.Time
+}
+
+type GroupMembership struct {
+	ID               uuid.UUID
+	CourseID         uuid.UUID
+	SetID            uuid.UUID
+	GroupID          uuid.UUID
+	MemberID         uuid.UUID
+	JoinedAt         time.Time
+	JoinedByMemberID uuid.UUID
+	JoinedHow        string
+	JoinedActionID   uuid.UUID
+	LeftAt           *time.Time
+	LeftByMemberID   *uuid.UUID
+	LeftHow          *string
+	LeftActionID     *uuid.UUID
+}
+
+type GroupSet struct {
+	ID                uuid.UUID
+	CourseID          uuid.UUID
+	Name              string
+	Description       *string
+	SignupOpen        bool
+	SignupClosesAt    *time.Time
+	ArchivedAt        *time.Time
+	CreatedByMemberID uuid.UUID
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
 }
 
 type MemberAssignmentScope struct {
@@ -574,13 +636,29 @@ type Submission struct {
 	ID                    uuid.UUID
 	AssignmentID          uuid.UUID
 	CourseID              uuid.UUID
-	StudentMemberID       uuid.UUID
+	StudentMemberID       *uuid.UUID
 	Attempt               int32
 	Body                  *string
 	InstructionsVersionID *uuid.UUID
 	State                 string
 	SubmittedAt           *time.Time
 	CreatedAt             time.Time
+	GroupID               *uuid.UUID
+	Revision              int32
+	RevisedAt             *time.Time
+	RevisedByMemberID     *uuid.UUID
+	SubmittedByMemberID   *uuid.UUID
+}
+
+type SubmissionMember struct {
+	SubmissionID    uuid.UUID
+	MemberID        uuid.UUID
+	CourseID        uuid.UUID
+	AssignmentID    uuid.UUID
+	GroupID         *uuid.UUID
+	AddedAt         time.Time
+	AddedHow        string
+	AddedByMemberID *uuid.UUID
 }
 
 type Term struct {

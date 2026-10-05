@@ -657,3 +657,105 @@ func TestAgentHostingBackfillsAndKeepsThePreviousReleaseWorking(t *testing.T) {
 		t.Fatalf("up again:\n got %s\nwant %s", got, want)
 	}
 }
+
+// Migration 0031's down refuses while any submission is a group's: the
+// schema before cannot hold a group's work, and a down migration does not
+// delete students' work. It changes nothing, and leaves the version marked
+// dirty one below, which `migrate force` puts back; once the group
+// assignment is deleted for good, it goes down, and up again.
+func TestGroupWorkKeepsMigration0031FromGoingDown(t *testing.T) {
+	pool, url := testdb.NewEmpty(t)
+	ctx := context.Background()
+	m, err := db.NewMigrator(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	if err := m.Up(); err != nil {
+		t.Fatalf("up: %v", err)
+	}
+	latest, err := db.LatestEmbedded()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if latest != 31 {
+		// Only the newest migration's down is run here.
+		t.Skipf("the newest migration is %d, not 0031", latest)
+	}
+	exec := func(sql string, args ...any) {
+		t.Helper()
+		if _, err := pool.Exec(ctx, sql, args...); err != nil {
+			t.Fatalf("%v\n%s", err, sql)
+		}
+	}
+	exec(`INSERT INTO actor (id, kind, display_name) VALUES ($1, 'human', 'Lin'), ($2, 'human', 'Wei')`, seatID(1), seatID(2))
+	exec(`INSERT INTO term (id, name, starts_on, ends_on) VALUES ($1, 'T', '2026-09-01', '2026-12-20')`, seatID(3))
+	exec(`INSERT INTO department (id, name) VALUES ($1, 'D')`, seatID(4))
+	exec(`INSERT INTO course (id, dept_id, term_id, code, title, created_by_actor_id) VALUES ($1, $2, $3, 'C', 'C', $4)`,
+		seatID(5), seatID(4), seatID(3), seatID(1))
+	exec(`INSERT INTO course_member (id, course_id, actor_id, role, added_by_actor_id, student_scope, assignment_scope) VALUES
+		($1, $3, $4, 'instructor', $4, 'all', 'all'), ($2, $3, $5, 'student', $4, 'listed', 'all')`,
+		seatID(11), seatID(12), seatID(5), seatID(1), seatID(2))
+	exec(`INSERT INTO action (id, actor_id, course_id, member_id, action_type, target_type, payload_hash, idempotency_key, authz_result, status,
+			executed_at)
+		VALUES ($1, $2, $3, $4, 'group.set_members', 'group_set', repeat('0', 64), 'k', 'autonomous', 'executed', now()),
+		       ($5, $2, $3, $4, 'assignment.delete', 'assignment', repeat('0', 64), 'k2', 'autonomous', 'executed', now())`,
+		seatID(21), seatID(1), seatID(5), seatID(11), seatID(22))
+	exec(`INSERT INTO group_set (id, course_id, name, created_by_member_id) VALUES ($1, $2, 'Projects', $3)`, seatID(31), seatID(5), seatID(11))
+	exec(`INSERT INTO course_group (id, course_id, set_id, name, created_by_member_id) VALUES ($1, $2, $3, 'Team', $4)`,
+		seatID(32), seatID(5), seatID(31), seatID(11))
+	exec(`INSERT INTO group_membership (course_id, set_id, group_id, member_id, joined_at, joined_by_member_id, joined_how, joined_action_id)
+		VALUES ($1, $2, $3, $4, now(), $5, 'assigned', $6)`, seatID(5), seatID(31), seatID(32), seatID(12), seatID(11), seatID(21))
+	exec(`INSERT INTO assignment (id, course_id, title, points_possible, published_at, group_set_id) VALUES ($1, $2, 'Project', 10, now(), $3)`,
+		seatID(41), seatID(5), seatID(31))
+	exec(`INSERT INTO submission (id, assignment_id, course_id, group_id, body) VALUES ($1, $2, $3, $4, 'Our draft')`,
+		seatID(51), seatID(41), seatID(5), seatID(32))
+
+	err = m.Steps(-1)
+	if err == nil || !strings.Contains(err.Error(), "group work exists") {
+		t.Fatalf("down over a group's work: %v", err)
+	}
+	var tables int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public'
+		AND table_name IN ('group_set', 'submission_member')`).Scan(&tables); err != nil || tables != 2 {
+		t.Fatalf("the refused down changed the schema: %d %v", tables, err)
+	}
+	// Its connection is left in the failed transaction: a new one reads the
+	// version, as `migrate version` would.
+	m.Close()
+	if m, err = db.NewMigrator(url); err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	if version, dirty, err := m.Version(); err != nil || !dirty || version != 30 {
+		t.Fatalf("after the refused down: version %d, dirty %v, %v", version, dirty, err)
+	}
+	if err := m.Force(31); err != nil {
+		t.Fatal(err)
+	}
+	// The group assignment deleted for good, as assignment.delete deletes it.
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, sql := range []string{
+		`INSERT INTO assignment_deletion (assignment_id, course_id, title, was_published, action_id, deleted_by_actor_id,
+			deleted_by_member_id, deleted_at, submissions, grades, files, proposals, totals)
+		 VALUES ('` + seatID(41) + `', '` + seatID(5) + `', 'Project', true, '` + seatID(22) + `', '` + seatID(1) + `', '` + seatID(11) + `', now(), 1, 0, 0, 0, 0)`,
+		`DELETE FROM submission WHERE assignment_id = '` + seatID(41) + `'`,
+		`DELETE FROM assignment WHERE id = '` + seatID(41) + `'`,
+	} {
+		if _, err := tx.Exec(ctx, sql); err != nil {
+			t.Fatalf("%v\n%s", err, sql)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Steps(-1); err != nil {
+		t.Fatalf("down once the group work is gone: %v", err)
+	}
+	if err := m.Up(); err != nil {
+		t.Fatalf("up again: %v", err)
+	}
+}

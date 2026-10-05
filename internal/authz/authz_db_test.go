@@ -88,6 +88,10 @@ func (c *cs101) checks() []check {
 	batch := authz.Target{StudentMemberIDs: []uuid.UUID{c.yukiM, c.kenM, c.yukiM}, AssignmentIDs: []uuid.UUID{c.hw3, c.hw3}}
 	none := authz.Target{}
 	yukiMidterm := authz.Target{StudentMemberIDs: []uuid.UUID{c.yukiM}, SpansAssignments: true}
+	// A group's work: Yuki's and Ken's together, for reading or writing it.
+	theirs := authz.AnyOf([]uuid.UUID{c.yukiM, c.kenM})
+	kensGroup := authz.AnyOf([]uuid.UUID{c.kenM})
+	nobodys := authz.AnyOf(nil)
 
 	return []check{
 		// step 1
@@ -111,6 +115,13 @@ func (c *cs101) checks() []check {
 		{"tutor cannot read an unlisted student's work", c.tutor, c.course, domain.PermSubmissionRead, false, ken, domain.Denied, authz.ReasonStudentScope},
 		{"a batch is in scope only if all of it is", c.tutor, c.course, domain.PermSubmissionRead, false, both, domain.Denied, authz.ReasonStudentScope},
 		{"listed with nothing listed means nobody", c.nobodyYet, c.course, domain.PermSubmissionRead, false, yuki, domain.Denied, authz.ReasonStudentScope},
+		// step 4, a group's work: any one of its students is enough
+		{"a student reaches her group's work", c.yuki, c.course, domain.PermSubmissionWrite, true, theirs, domain.Autonomous, ""},
+		{"and not another group's", c.yuki, c.course, domain.PermSubmissionRead, false, kensGroup, domain.Denied, authz.ReasonStudentScope},
+		{"a tutor listed for one member reads the group's work", c.tutor, c.course, domain.PermSubmissionRead, false, theirs, domain.Autonomous, ""},
+		{"a group of nobody is nobody's to a listed seat", c.yuki, c.course, domain.PermSubmissionRead, false, nobodys, domain.Denied, authz.ReasonStudentScope},
+		{"and the whole class's to a seat that reaches it", c.sato, c.course, domain.PermSubmissionRead, false, nobodys, domain.Autonomous, ""},
+		{"listed for nobody, no group's work", c.nobodyYet, c.course, domain.PermSubmissionRead, false, theirs, domain.Denied, authz.ReasonStudentScope},
 		// step 5
 		{"grader proposes for the listed assignment", c.grader, c.course, domain.PermGradeSubmit, true, yukiHW3, domain.ConfirmRequired, ""},
 		{"grader cannot touch an unlisted assignment", c.grader, c.course, domain.PermGradeSubmit, true, yukiHW4, domain.Denied, authz.ReasonAssignmentScope},
@@ -354,10 +365,13 @@ func TestADelegateHoldsNoMoreThanItsPrincipal(t *testing.T) {
 		}
 	}()
 	expect("not another student's", domain.PermSubmissionRead, false, ken, domain.Denied, authz.ReasonStudentScope)
+	expect("its principal's group's work", domain.PermSubmissionRead, false, authz.AnyOf([]uuid.UUID{c.yukiM, c.kenM}), domain.Autonomous, "")
+	expect("not another group's", domain.PermSubmissionRead, false, authz.AnyOf([]uuid.UUID{c.kenM}), domain.Denied, authz.ReasonStudentScope)
 	// Its own row widened behind everyone's back, as the previous release
 	// could: still no further than its principal.
 	w.Exec(`UPDATE course_member SET student_scope = 'all', perm_grade_submit = 'autonomous', perm_member_manage = 'autonomous' WHERE id = $1`, d)
 	expect("its principal's reach caps its own", domain.PermSubmissionRead, false, ken, domain.Denied, authz.ReasonStudentScope)
+	expect("a group's work too", domain.PermSubmissionRead, false, authz.AnyOf([]uuid.UUID{c.kenM}), domain.Denied, authz.ReasonStudentScope)
 	expect("its principal's level caps its own", domain.PermGradeSubmit, true, yuki, domain.Denied, authz.ReasonPermDenied)
 	expect("it never manages the course", domain.PermMemberManage, true, authz.Target{}, domain.Denied, authz.ReasonPermDenied)
 	w.Exec(`UPDATE course_member SET perm_submission_read = 'confirm_required' WHERE id = $1`, c.yukiM)

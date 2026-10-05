@@ -1,7 +1,7 @@
 -- name: InsertAssignment :exec
 INSERT INTO assignment (id, course_id, component_id, title, instructions_document_id, rubric_document_id,
-                        points_possible, due_at, created_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9);
+                        points_possible, due_at, created_at, group_set_id)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, sqlc.narg(group_set_id));
 
 -- name: GetAssignmentInCourseForUpdate :one
 -- GetAssignmentInCourse, locked for the rest of the transaction:
@@ -14,7 +14,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9);
 -- assignment lock the row FOR SHARE (ShareAssignmentForGrading), so they queue
 -- behind an update, including while the update waits for the tree lock.
 SELECT id, course_id, component_id, title, instructions_document_id, rubric_document_id,
-       points_possible, due_at, published_at
+       points_possible, due_at, published_at, group_set_id
 FROM assignment
 WHERE id = $1 AND course_id = $2
 FOR NO KEY UPDATE;
@@ -24,6 +24,25 @@ UPDATE assignment
 SET component_id = $2, title = $3, instructions_document_id = $4, rubric_document_id = $5,
     points_possible = $6, due_at = $7
 WHERE id = $1;
+
+-- name: SetAssignmentGroupSet :exec
+-- Which set it names: only while no submission names it
+-- (assignment_group_set_fixed), and only by a call holding it FOR UPDATE
+-- (LockAssignmentForGroupSet).
+UPDATE assignment SET group_set_id = sqlc.narg(group_set_id) WHERE id = sqlc.arg(id);
+
+-- name: LockAssignmentForGroupSet :one
+-- GetAssignmentInCourseForUpdate, FOR UPDATE rather than NO KEY UPDATE, for an
+-- update that changes which set it names: it holds off the KEY SHARE that a
+-- new submission's foreign key takes, and that GetAssignmentForSubmission and
+-- submission_fits_assignment take before they read the set, so that no work
+-- of the other kind is started while it changes, as LockAssignmentForUnpublish
+-- holds off work while an assignment is taken back.
+SELECT id, course_id, component_id, title, instructions_document_id, rubric_document_id,
+       points_possible, due_at, published_at, group_set_id
+FROM assignment
+WHERE id = $1 AND course_id = $2
+FOR UPDATE;
 
 -- name: PublishAssignment :execrows
 UPDATE assignment SET published_at = $2 WHERE id = $1 AND published_at IS NULL;
@@ -65,7 +84,7 @@ UPDATE assignment SET published_at = NULL WHERE id = $1 AND published_at IS NOT 
 -- holds up nothing but LockAssignmentForUnpublish, which it waits for; then
 -- the assignment is read as that left it.
 SELECT id, course_id, component_id, title, instructions_document_id, rubric_document_id,
-       points_possible, due_at, published_at
+       points_possible, due_at, published_at, group_set_id
 FROM assignment
 WHERE id = $1 AND course_id = $2
 FOR KEY SHARE;
@@ -85,7 +104,7 @@ SELECT id, kind, purged_at FROM document WHERE id = $1 AND course_id = $2 FOR KE
 -- Scope is applied here, not afterwards, a delegate's principal's included. A
 -- member who may not write assignments sees only published ones.
 SELECT id, course_id, component_id, title, instructions_document_id, rubric_document_id,
-       points_possible, due_at, published_at, created_at
+       points_possible, due_at, published_at, created_at, group_set_id
 FROM assignment a
 WHERE a.course_id = $1 AND a.id > sqlc.arg(after)
   AND (sqlc.arg(include_unpublished)::bool OR a.published_at IS NOT NULL)

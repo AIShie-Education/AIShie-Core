@@ -499,7 +499,7 @@ func TestAStudentBringsHerAgentInWithApproval(t *testing.T) {
 
 	// It reads Yuki's work, and nobody else's.
 	subs := testkit.Result[tools.SubmissionListOut](t, b.do(t, bot, "submission.list", m{"course_id": b.course})).Submissions
-	if len(subs) != 1 || subs[0].StudentMemberID != b.yukiM {
+	if len(subs) != 1 || subs[0].StudentMemberID == nil || *subs[0].StudentMemberID != b.yukiM {
 		t.Fatalf("what Yuki's agent reads: %+v", subs)
 	}
 	// And knows what it is.
@@ -738,7 +738,7 @@ func TestADelegateSeesNoMoreThanItsPrincipal(t *testing.T) {
 		t.Helper()
 		out := map[uuid.UUID]int{}
 		for _, s := range testkit.Result[tools.SubmissionListOut](t, b.do(t, bot, "submission.list", m{"course_id": b.course})).Submissions {
-			out[s.StudentMemberID]++
+			out[*s.StudentMemberID]++
 		}
 		for _, g := range testkit.Result[tools.GradeListOut](t, b.do(t, bot, "grade.list", m{"course_id": b.course})).Grades {
 			out[g.StudentMemberID]++

@@ -63,7 +63,7 @@ func TestRetryReplaysTheStoredOutcome(t *testing.T) {
 	if !again.Replayed || again.Status != domain.StatusExecuted || *again.ActionID != *first.ActionID {
 		t.Fatalf("retry: %+v", again)
 	}
-	if a, b := testkit.Result[tools.GradeSubmitOut](t, first), testkit.Result[tools.GradeSubmitOut](t, again); a != b {
+	if a, b := testkit.Result[tools.GradeSubmitOut](t, first), testkit.Result[tools.GradeSubmitOut](t, again); a.GradeID != b.GradeID {
 		t.Fatalf("retry returned %v, first call returned %v", b, a)
 	}
 	if n := c.Count(`SELECT count(*) FROM grade`); n != 1 {
