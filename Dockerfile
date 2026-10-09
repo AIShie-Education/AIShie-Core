@@ -2,7 +2,7 @@
 
 # Compile on the build machine's own architecture and cross-compile for the
 # target, which keeps multi-arch builds fast (no emulation for the Go step).
-FROM --platform=$BUILDPLATFORM golang:1.27 AS build
+FROM --platform=$BUILDPLATFORM golang:1.27.2 AS build
 ARG TARGETOS
 ARG TARGETARCH
 ARG VERSION=dev
