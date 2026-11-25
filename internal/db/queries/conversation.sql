@@ -265,7 +265,7 @@ LIMIT sqlc.arg(max_rows);
 -- what it could accept: every student's own agent answers, and only its
 -- principal. Unpaged: what is left is a course's agents, and the caller's
 -- own agents, a handful; max_rows bounds them anyway.
-SELECT m.id, a.display_name, a.kind, coalesce(a.hosting, '')::text AS hosting, m.role, m.principal_member_id,
+SELECT m.id, a.id AS actor_id, a.display_name, a.kind, coalesce(a.hosting, '')::text AS hosting, m.role, m.principal_member_id,
        m.answers_course, own.display_name AS owner_name, seen.last_used_at AS last_seen_at
 FROM course_member m
 JOIN actor a ON a.id = m.actor_id

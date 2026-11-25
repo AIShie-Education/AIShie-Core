@@ -926,7 +926,7 @@ func (q *Queries) ListMyConversations(ctx context.Context, arg ListMyConversatio
 }
 
 const listRespondentCandidates = `-- name: ListRespondentCandidates :many
-SELECT m.id, a.display_name, a.kind, coalesce(a.hosting, '')::text AS hosting, m.role, m.principal_member_id,
+SELECT m.id, a.id AS actor_id, a.display_name, a.kind, coalesce(a.hosting, '')::text AS hosting, m.role, m.principal_member_id,
        m.answers_course, own.display_name AS owner_name, seen.last_used_at AS last_seen_at
 FROM course_member m
 JOIN actor a ON a.id = m.actor_id
@@ -960,6 +960,7 @@ type ListRespondentCandidatesParams struct {
 
 type ListRespondentCandidatesRow struct {
 	ID                uuid.UUID
+	ActorID           uuid.UUID
 	DisplayName       string
 	Kind              string
 	Hosting           string
@@ -999,6 +1000,7 @@ func (q *Queries) ListRespondentCandidates(ctx context.Context, arg ListResponde
 		var i ListRespondentCandidatesRow
 		if err := rows.Scan(
 			&i.ID,
+			&i.ActorID,
 			&i.DisplayName,
 			&i.Kind,
 			&i.Hosting,

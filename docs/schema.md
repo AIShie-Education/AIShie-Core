@@ -2584,9 +2584,11 @@ may address R when:
 The rule is one function, which every conversation tool goes by, and it is measured now, on
 every call, not when the conversation began: seats are narrowed, widened, paused and
 removed. `conversation.respondents` lists the agents the caller may address, each only while
-people in the site may ask it (below), with how its answers arrive, how it is hosted and when it
-last used a token. `conversation.ask` is refused once the respondent may no longer be addressed ("start a new
-conversation"), and
+people in the site may ask it (below), with its `actor_id`, how its answers arrive, how it is
+hosted and when it last used a token. A conversation view's respondent names the same `actor_id`
+as `me.conversations`: these are agents the caller may address, or one in a conversation they may
+read, so the id needs neither `member_read` nor a public member list. `conversation.ask` is refused
+once the respondent may no longer be addressed ("start a new conversation"), and
 `conversation.answer` once its opener may no longer address the one answering. The
 respondent reads the conversation (`conversation.get`, `.messages`) only while its opener
 may still address it; the opener always; and so does whoever oversees the opener: holds

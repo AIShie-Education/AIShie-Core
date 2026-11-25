@@ -1372,6 +1372,7 @@ type ConversationParty struct {
 
 type ConversationRespondent struct {
 	ConversationParty
+	ActorID            uuid.UUID  `json:"actor_id" jsonschema:"the agent asked, the same actor id me.conversations names; available to anyone who may read the conversation"`
 	Role               string     `json:"role" jsonschema:"roster fact, for display"`
 	SeatStatus         string     `json:"seat_status" jsonschema:"active, paused, removed or expired"`
 	IsDelegateOfOpener bool       `json:"is_delegate_of_opener" jsonschema:"the opener's own agent"`
@@ -1401,8 +1402,7 @@ type ConversationView struct {
 	// Unread is said by conversation.list and conversation.get to one who
 	// takes part in it, of the other's messages (withUnread).
 	Unread *bool `json:"unread,omitempty" jsonschema:"in conversation.list and conversation.get, when you take part in it: whether the other participant has written, and not retracted, anything since you last marked it read (conversation.mark_read); absent otherwise"`
-	// respondentActor is the respondent's actor, for me.conversations,
-	// which names it; the other views do not.
+	// respondentActor is also kept here for me.conversations' existing shape.
 	respondentActor uuid.UUID
 }
 
@@ -1434,6 +1434,7 @@ func conversationViews(ctx context.Context, q dbq.Querier, now time.Time, list [
 			Opener:          ConversationParty{MemberID: r.OpenerMemberID, DisplayName: r.OpenerName, Kind: r.OpenerKind},
 			Respondent: ConversationRespondent{
 				ConversationParty: ConversationParty{MemberID: r.RespondentMemberID, DisplayName: r.RespondentName, Kind: r.RespondentKind},
+				ActorID:           r.RespondentActorID,
 				Role:              r.RespondentRole, SeatStatus: seatStatus(r.RespondentStatus, r.RespondentExpiresAt, now),
 				IsDelegateOfOpener: r.RespondentPrincipalMemberID != nil && *r.RespondentPrincipalMemberID == r.OpenerMemberID,
 				OwnerName:          r.RespondentOwnerName, LastSeenAt: r.RespondentLastSeenAt, AnswerLevel: domain.Denied.String(),
@@ -1505,6 +1506,7 @@ func seatStatus(status string, expires *time.Time, now time.Time) string {
 // RespondentView is an agent the caller may address.
 type RespondentView struct {
 	MemberID      uuid.UUID  `json:"member_id"`
+	ActorID       uuid.UUID  `json:"actor_id" jsonschema:"the agent's actor id, for the runtime's agent endpoints; this list contains only agents you may address"`
 	DisplayName   string     `json:"display_name"`
 	Kind          string     `json:"kind" jsonschema:"agent: a person is nobody's respondent; for display only"`
 	Hosting       string     `json:"hosting" jsonschema:"runtime: the site's own agent runtime runs it; only a runtime agent is asked in the site"`
@@ -1574,7 +1576,7 @@ func conversationRespondents() tool.Tool {
 				if why != "" {
 					continue
 				}
-				out.Respondents = append(out.Respondents, RespondentView{MemberID: r.ID, DisplayName: r.DisplayName, Kind: r.Kind,
+				out.Respondents = append(out.Respondents, RespondentView{MemberID: r.ID, ActorID: r.ActorID, DisplayName: r.DisplayName, Kind: r.Kind,
 					Hosting: r.Hosting, Role: r.Role, IsMyDelegate: r.PrincipalMemberID != nil && *r.PrincipalMemberID == rc.Member.ID,
 					OwnerName: r.OwnerName, AnswerLevel: seat.Perm(domain.PermConversationAnswer).String(), LastSeenAt: r.LastSeenAt,
 					AnswersCourse: seat.AnswersOthers()})

@@ -1,6 +1,7 @@
 package tools_test
 
 import (
+	"encoding/json"
 	"regexp"
 	"strings"
 	"testing"
@@ -45,6 +46,24 @@ func TestCatalogueIsWellFormed(t *testing.T) {
 		}
 		if tl.Gate.CourseScoped() && !strings.Contains(tl.HTTP.Pattern, "/courses/{course_id}") {
 			t.Errorf("%s: a course-scoped tool's route must carry the course", tl.Name)
+		}
+	}
+}
+
+func TestRespondentActorIDIsInTheCatalogue(t *testing.T) {
+	c := testkit.NewCS101(t, 0)
+	for _, name := range []string{"conversation.respondents", "conversation.get", "conversation.list", "conversation.inbox", "me.conversations"} {
+		tl, ok := c.P.Registry().Get(name)
+		if !ok {
+			t.Errorf("%s is not registered", name)
+			continue
+		}
+		raw, err := json.Marshal(tl.OutputSchema)
+		if err != nil {
+			t.Fatalf("%s's output schema: %v", name, err)
+		}
+		if !strings.Contains(string(raw), `"actor_id"`) {
+			t.Errorf("%s's output schema does not describe respondent actor_id: %s", name, raw)
 		}
 	}
 }
