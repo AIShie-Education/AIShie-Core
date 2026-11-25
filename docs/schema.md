@@ -483,6 +483,12 @@ host, and is then issued its token:
 - `agent_runtime.check_owner {actor_id, agent_id}`, a read: whether that person owns that agent
   (`owns`), and, if they do, the agent as `agent_runtime.agent` says it; of anyone else's agent,
   nobody's, or an id that is no agent's, `owns: false` and nothing else.
+- `agent_runtime.check_ask {actor_id, agent_id, course_id}`, a read: `may_ask`, and
+  nothing else, for whether that person may ask that agent in that course now. It
+  applies `conversation.ask`'s caller permission, course and seat liveness, agent
+  kind, hosting and live-token, and addressing rules to a hypothetical open
+  conversation without creating one, or a message or action. Any refusal or
+  unknown id is `false`, with no reason; no model or provider is revealed.
 - `agent_runtime.agent {agent_id}`, a read: the agent as the runtime hosts it: `hosting`, its
   `status` and its owner's (`owner_actor_id`, `owner_name`, `owner_status`), `live_seats`,
   whether the runtime may host it now (`hostable`, else `reason`: `not_runtime_hosted`,
@@ -3704,7 +3710,9 @@ respondent's `conversation_answer` decides is who is shown its text.
   issuing one goes through); the runtime is issued one for a runtime agent alone, active, whose
   owner is active, under a lock on the agent.
 - The agent runtime's tools are its own (`tool.Gate.Service`), and `agent_runtime.check_owner`
-  says nothing of an agent but to its owner's check.
+  says nothing of an agent but to its owner's check. `agent_runtime.check_ask` answers only
+  `may_ask`, using the same caller and addressing rules as `conversation.ask`; every refusal or
+  unknown id is the same `false`, and it writes nothing.
 - `member.update_perms_bulk` changes every seat of the role but the caller's, each through the
   rule for one seat, all or none.
 - A seat's role changes by `member.set_role` alone, which changes nothing else on the seat,

@@ -384,6 +384,7 @@ func TestOnlyTheSiteRuntimeCallsItsTools(t *testing.T) {
 	calls := map[string]m{
 		"agent_runtime.agent":        {"agent_id": tutor},
 		"agent_runtime.check_owner":  {"actor_id": b.sato, "agent_id": tutor},
+		"agent_runtime.check_ask":    {"actor_id": b.yuki, "agent_id": b.tutor, "course_id": b.course},
 		"agent_runtime.issue_token":  {"agent_id": tutor},
 		"agent_runtime.revoke_token": {"agent_id": tutor},
 	}
@@ -430,6 +431,11 @@ func TestOnlyTheSiteRuntimeCallsItsTools(t *testing.T) {
 	out, err := b.CallWith(b.AsRuntime(), "agent_runtime.issue_token", m{"agent_id": tutor}, "revoked")
 	if err != nil || out.Status != domain.StatusDenied || reason(out) != "service_only" {
 		t.Fatalf("with its credential revoked: %+v %v", out, err)
+	}
+	out, err = b.CallWith(b.AsRuntime(), "agent_runtime.check_ask",
+		m{"actor_id": b.yuki, "agent_id": b.tutor, "course_id": b.course}, "")
+	if err != nil || out.Status != domain.StatusDenied || reason(out) != "service_only" {
+		t.Fatalf("check_ask with its credential revoked: %+v %v", out, err)
 	}
 	// The agents' tokens are theirs, and stay.
 	if b.liveRuntimeTokens(tutor) != 1 {

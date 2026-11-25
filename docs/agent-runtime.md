@@ -115,11 +115,14 @@ read on 2026-09-26; **[UNVERIFIED]** marks what it did not confirm.
 ### 2.0 Hosting an agent by its id
 
 The runtime's service credential calls these, over REST, and nothing else
-does (`service_only` for anyone else). Each refusal is in `error.details.reason`.
+does (`service_only` for anyone else). An error's refusal is in
+`error.details.reason`; `check_ask` instead answers every expected refusal
+with only `may_ask: false`.
 
 | Tool | Route | Input | Output and refusals |
 |---|---|---|---|
 | `agent_runtime.check_owner` | `GET /v1/services/agent_runtime/owners/{actor_id}/agents/{agent_id}` | `actor_id`, the assertion's `sub`; `agent_id` | `owns`; when true, `agent` (as below). Of anyone else's agent, nobody's, or an id that is no agent's: `owns: false` and nothing else. |
+| `agent_runtime.check_ask` | `GET /v1/services/agent_runtime/actors/{actor_id}/courses/{course_id}/agents/{agent_id}/may-ask` | `actor_id`, the assertion's `sub`; `agent_id`; `course_id` | `may_ask`, and nothing else: whether that person may ask that agent in that course now, by the same caller, course, seat, hosting, live-token and addressing rules as `conversation.ask`. Any refusal or unknown id is `false`, with no reason. It opens no conversation, writes no message or action, and reveals no model or provider. |
 | `agent_runtime.agent` | `GET /v1/services/agent_runtime/agents/{agent_id}` | `agent_id` | `agent_id`, `display_name`, `hosting` (`runtime` or `mcp`), `status`, `owner_actor_id`, `owner_name`, `owner_status`, `live_seats`, `hostable` and, when false, `reason` (`not_runtime_hosted`, `agent_suspended`, `owner_suspended`), `runtime_token` (`credential_id`, `token_prefix`, `created_at`, `last_used_at`) while one lives, `site_chat` (people in the site may ask it now). `404 not_found` for an id that is no agent's. |
 | `agent_runtime.issue_token` | `POST /v1/services/agent_runtime/agents/{agent_id}/token` | `agent_id`, `label` (optional, 1 to 200 characters; `agent runtime` by default), `Idempotency-Key` | `agent_id`, `credential_id`, `token` (`ais_…`, shown once), `token_prefix`, `replaced` (the token revoked). It never expires. `422 failed_precondition`: `not_runtime_hosted` (an mcp agent), `agent_suspended`, `owner_suspended`; `404` for no agent. |
 | `agent_runtime.revoke_token` | `POST /v1/services/agent_runtime/agents/{agent_id}/token/revoke` | `agent_id`, `Idempotency-Key` | `agent_id`, `revoked` (empty when it held none, which is no error). |
