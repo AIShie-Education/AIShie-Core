@@ -150,6 +150,29 @@ func TestFromEnv(t *testing.T) {
 	}
 }
 
+func TestSchoolTimeZone(t *testing.T) {
+	t.Run("unset leaves the school's clock unspecified", func(t *testing.T) {
+		t.Setenv("SCHOOL_TIME_ZONE", "")
+		c, err := FromEnv()
+		if err != nil || c.SchoolTimeZone != nil {
+			t.Fatalf("%v %+v", err, c.SchoolTimeZone)
+		}
+	})
+	t.Run("an IANA name loads", func(t *testing.T) {
+		t.Setenv("SCHOOL_TIME_ZONE", "Asia/Hong_Kong")
+		c, err := FromEnv()
+		if err != nil || c.SchoolTimeZone == nil || c.SchoolTimeZone.String() != "Asia/Hong_Kong" {
+			t.Fatalf("%v %+v", err, c.SchoolTimeZone)
+		}
+	})
+	t.Run("an unknown name refuses to start", func(t *testing.T) {
+		t.Setenv("SCHOOL_TIME_ZONE", "Mars/Olympus")
+		if _, err := FromEnv(); err == nil || !strings.Contains(err.Error(), "SCHOOL_TIME_ZONE") || !strings.Contains(err.Error(), "Mars/Olympus") {
+			t.Fatalf("accepted, or refused for another reason: %v", err)
+		}
+	})
+}
+
 // OIDC_PROVIDER_NAME is what every identity linked at the operator's
 // provider is recorded under. Unset, it is a placeholder that is a valid
 // provider id; an installation names its own before anyone is linked.

@@ -18,8 +18,8 @@ import (
 	"github.com/AIShie-Education/AIShie-Core/internal/tool"
 )
 
-func meTools() []tool.Tool {
-	return []tool.Tool{meGet(), meMemberships(), meConversations(), credentialList(), credentialIssueToken(),
+func meTools(d Deps) []tool.Tool {
+	return []tool.Tool{meGet(d.SchoolTimeZone), meMemberships(), meConversations(), credentialList(), credentialIssueToken(),
 		credentialSetPassword(), credentialRevoke()}
 }
 
@@ -46,6 +46,7 @@ type MeOut struct {
 	LoginID         *string `json:"login_id,omitempty" jsonschema:"what you sign in with besides your email, if you have one: your student or staff number; only an administrator changes it"`
 	LoginIDVerified *bool   `json:"login_id_verified,omitempty" jsonschema:"with a login ID: false when you gave it registering through a join link, and no administrator has set it since"`
 	Status          string  `json:"status"`
+	TimeZone        *string `json:"time_zone,omitempty" jsonschema:"the school's IANA time zone, such as Asia/Hong_Kong, from SCHOOL_TIME_ZONE; absent when the installation has not set one"`
 	PlatformRole    *string `json:"platform_role,omitempty"`
 	// An agent may always know who answers for it. A service that hosts the
 	// agent compares this with the person who hands it the agent's token.
@@ -67,12 +68,13 @@ type Administered struct {
 	AppointedAt   time.Time `json:"appointed_at"`
 }
 
-func meGet() tool.Tool {
+func meGet(schoolTimeZone *time.Location) tool.Tool {
 	return tool.Define(tool.Spec[Empty, MeOut]{
 		Name: "me.get",
 		Description: "Who the caller is: the actor this credential belongs to, with the email and the login ID (a student " +
 			"or staff number) a person signs in with; for an agent, how it is hosted (runtime or mcp) and, if a person owns " +
-			"it, who; and for a department's administrator, the departments they are appointed to administer.",
+			"it, who; for a department's administrator, the departments they are appointed to administer; and the school's " +
+			"IANA time zone when the installation has set one.",
 		Kind: tool.Read, Gate: self,
 		HTTP:    tool.Route{Method: "GET", Pattern: "/v1/me"},
 		Resolve: noTarget[Empty]("actor"),
@@ -83,6 +85,10 @@ func meGet() tool.Tool {
 			}
 			out := MeOut{ID: a.ID, Kind: a.Kind, DisplayName: a.DisplayName, Email: a.Email, LoginID: a.LoginID, Status: a.Status,
 				PlatformRole: a.PlatformRole, OwnerActorID: a.OwnerActorID, Hosting: a.Hosting}
+			if schoolTimeZone != nil {
+				zone := schoolTimeZone.String()
+				out.TimeZone = &zone
+			}
 			if a.Email != nil {
 				out.EmailVerified = &a.EmailVerified
 			}
