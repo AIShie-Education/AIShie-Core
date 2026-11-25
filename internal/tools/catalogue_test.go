@@ -3,6 +3,7 @@ package tools_test
 import (
 	"encoding/json"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
@@ -65,5 +66,31 @@ func TestRespondentActorIDIsInTheCatalogue(t *testing.T) {
 		if !strings.Contains(string(raw), `"actor_id"`) {
 			t.Errorf("%s's output schema does not describe respondent actor_id: %s", name, raw)
 		}
+	}
+}
+
+func TestCourseGetInstructorsAreInTheCatalogue(t *testing.T) {
+	c := testkit.NewCS101(t, 0)
+	get, ok := c.P.Registry().Get("course.get")
+	if !ok {
+		t.Fatal("course.get is not registered")
+	}
+	if _, ok := get.OutputSchema.Properties["instructors"]; !ok || !slices.Contains(get.OutputSchema.Required, "instructors") {
+		t.Fatalf("course.get must always answer instructors: %+v", get.OutputSchema)
+	}
+	raw, err := json.Marshal(get.OutputSchema)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"display_name"`) || strings.Contains(string(raw), `"actor_id"`) ||
+		strings.Contains(string(raw), `"email"`) || strings.Contains(string(raw), `"login_id"`) {
+		t.Fatalf("course.get's instructor summary is not display names only: %s", raw)
+	}
+	// The administrators' course.list is not silently given an unpopulated
+	// field merely because it shares CourseView.
+	list, _ := c.P.Registry().Get("course.list")
+	raw, err = json.Marshal(list.OutputSchema)
+	if err != nil || strings.Contains(string(raw), `"instructors"`) {
+		t.Fatalf("course.list unexpectedly advertises instructors: %s (%v)", raw, err)
 	}
 }

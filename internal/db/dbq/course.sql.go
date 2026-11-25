@@ -150,6 +150,44 @@ func (q *Queries) InsertCourse(ctx context.Context, arg InsertCourseParams) erro
 	return err
 }
 
+const listCourseInstructors = `-- name: ListCourseInstructors :many
+SELECT a.display_name
+FROM course_member m
+JOIN actor a ON a.id = m.actor_id
+WHERE m.course_id = $1
+  AND m.role = 'instructor' AND a.kind = 'human' AND a.status = 'active'
+  AND m.status = 'active' AND (m.expires_at IS NULL OR m.expires_at > $2::timestamptz)
+ORDER BY a.display_name, m.id
+`
+
+type ListCourseInstructorsParams struct {
+	CourseID uuid.UUID
+	Now      time.Time
+}
+
+// Who teaches a course is a course fact every member may read, not the member
+// list. Only currently active people in the instructor role are shown: TAs,
+// agents, and paused, removed, expired or suspended instructors are not.
+func (q *Queries) ListCourseInstructors(ctx context.Context, arg ListCourseInstructorsParams) ([]string, error) {
+	rows, err := q.db.Query(ctx, listCourseInstructors, arg.CourseID, arg.Now)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []string
+	for rows.Next() {
+		var display_name string
+		if err := rows.Scan(&display_name); err != nil {
+			return nil, err
+		}
+		items = append(items, display_name)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listCourses = `-- name: ListCourses :many
 WITH RECURSIVE mine (id) AS (
     SELECT da.dept_id FROM department_admin da
