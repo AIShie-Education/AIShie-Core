@@ -138,12 +138,14 @@ func TestWhoMayAddressWhom(t *testing.T) {
 			b.do(t, tc.asker, "conversation.open", args)
 		})
 	}
-	// What a respondent says about itself.
+	// An ordinary student needs no member_read to learn the actor id of an
+	// agent she may address: this is the same id me.conversations exposes.
+	b.Exec(`UPDATE course_member SET perm_member_read = 'denied' WHERE id = $1`, b.yukiM)
 	mine := b.respondents(t, b.yuki)
-	if r := mine[c.yukiBot]; !r.IsMyDelegate || r.Kind != "agent" || r.OwnerName == nil || *r.OwnerName != "Yuki" || r.AnswerLevel != "autonomous" {
+	if r := mine[c.yukiBot]; r.ActorID != c.bot || !r.IsMyDelegate || r.Kind != "agent" || r.OwnerName == nil || *r.OwnerName != "Yuki" || r.AnswerLevel != "autonomous" {
 		t.Fatalf("Yuki's own agent, as offered to her: %+v", r)
 	}
-	if r := mine[c.courseTutor]; r.IsMyDelegate || r.OwnerName == nil || *r.OwnerName != "Sato" || r.Role != "assistant" {
+	if r := mine[c.courseTutor]; r.ActorID != b.seatActor(t, c.courseTutor) || r.IsMyDelegate || r.OwnerName == nil || *r.OwnerName != "Sato" || r.Role != "assistant" {
 		t.Fatalf("the course tutor, as offered to Yuki: %+v", r)
 	}
 	// A seat that answers nothing, or has stopped counting, is nobody's to ask.
@@ -158,6 +160,9 @@ func TestWhoMayAddressWhom(t *testing.T) {
 	// And asking needs conversation_ask, answering conversation_answer.
 	if out := b.MustCall(b.grader, "conversation.respondents", m{"course_id": b.course}, ""); out.Status != domain.StatusDenied {
 		t.Fatalf("a grader, who asks nothing, lists respondents: %+v", out)
+	}
+	if out := b.MustCall(b.admin, "conversation.respondents", m{"course_id": b.course}, ""); out.Status != domain.StatusDenied || len(out.Result) != 0 {
+		t.Fatalf("someone without a seat lists respondents: %+v", out)
 	}
 	if out := b.MustCall(b.ken, "conversation.inbox", m{"course_id": b.course}, ""); out.Status != domain.StatusDenied {
 		t.Fatalf("a student, who answers nothing, reads an inbox: %+v", out)
@@ -793,8 +798,12 @@ func TestOverseeingConversations(t *testing.T) {
 	if got := ids(b.listConversations(t, mori, m{})); len(got) != 1 || !got[kens] {
 		t.Fatalf("what Mori sees: %v", got)
 	}
-	if got := ids(b.listConversations(t, b.yuki, m{})); len(got) != 1 || !got[yukis] {
+	yukiViews := b.listConversations(t, b.yuki, m{})
+	if got := ids(yukiViews); len(got) != 1 || !got[yukis] {
 		t.Fatalf("what Yuki sees: %v", got)
+	}
+	if len(yukiViews) != 1 || yukiViews[0].Respondent.ActorID != b.tutor {
+		t.Fatalf("Yuki's conversation does not name the respondent actor: %+v", yukiViews)
 	}
 	if got := ids(b.listConversations(t, b.tutor, m{"as": "respondent"})); len(got) != 1 || !got[yukis] {
 		t.Fatalf("what the tutor is asked: %v", got)
@@ -815,12 +824,12 @@ func TestOverseeingConversations(t *testing.T) {
 	b.try(t, mori, "conversation.get", m{"course_id": b.course, "conversation_id": yukis}, apperr.NotFound)
 	b.try(t, mori, "conversation.retract", m{"course_id": b.course, "message_id": yq}, apperr.Forbidden)
 	if got := b.conversation(t, b.sato, yukis); got.Opener.MemberID != b.yukiM || got.Respondent.MemberID != b.tutorM ||
-		got.Respondent.IsDelegateOfOpener || got.Respondent.SeatStatus != "active" || got.Respondent.Kind != "agent" {
+		got.Respondent.ActorID != b.tutor || got.Respondent.IsDelegateOfOpener || got.Respondent.SeatStatus != "active" || got.Respondent.Kind != "agent" {
 		t.Fatalf("the conversation, as Sato oversees it: %+v", got)
 	}
 	// One's own agent is one's own.
 	own, oq := b.open(t, b.yuki, c.yukiBot, "Summarise my feedback")
-	if got := b.conversation(t, b.yuki, own); !got.Respondent.IsDelegateOfOpener || got.Respondent.OwnerName == nil ||
+	if got := b.conversation(t, b.yuki, own); got.Respondent.ActorID != c.bot || !got.Respondent.IsDelegateOfOpener || got.Respondent.OwnerName == nil ||
 		len(got.VisibleTo) != 4 || got.VisibleTo[0] != tools.VisibleToParticipants || got.VisibleTo[3] != tools.VisibleToAuditExport {
 		t.Fatalf("Yuki's conversation with her agent: %+v", got)
 	}
