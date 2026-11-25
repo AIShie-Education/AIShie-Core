@@ -771,6 +771,56 @@ func checkAsk(ctx context.Context, q dbq.Querier, m, respondent *domain.Member, 
 	return elsewhere
 }
 
+// mayAskInCourse says whether actorID may ask agentID in courseID now, without
+// opening a conversation or writing a message. It applies the same caller gate
+// as conversation.ask (including a temporary password's denial and the write
+// gate's archived-course rule), resolves the respondent's seat in that course,
+// and gives checkAsk the hypothetical open conversation, opened by that seat,
+// whose rules it must pass. An existing conversation's id, body and files are
+// the only parts of conversation.ask that do not apply here.
+//
+// Expected refusals, including unknown ids, all become false: the site's
+// runtime learns nothing beyond may_ask. Database and other internal failures
+// remain errors.
+func mayAskInCourse(ctx context.Context, q dbq.Querier, actorID, agentID, courseID uuid.UUID, now time.Time) (bool, error) {
+	refused := func(err error) (bool, error) {
+		if _, ok := apperr.As(err); ok {
+			return false, nil
+		}
+		return false, err
+	}
+	actor, err := authz.LoadActor(ctx, q, actorID)
+	if err != nil {
+		return refused(err)
+	}
+	if actor.PasswordChangeRequired || authz.Services(actor, "") != authz.ReasonNone {
+		return false, nil
+	}
+	decision, err := authz.ForActor(ctx, q, actorID, courseID, asks.Perms, true, now)
+	if err != nil {
+		return refused(err)
+	}
+	if !decision.Level.Allowed() || decision.Member == nil {
+		return false, nil
+	}
+	seat, err := q.GetLiveMembership(ctx, dbq.GetLiveMembershipParams{CourseID: courseID, ActorID: agentID})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, nil
+		}
+		return false, err
+	}
+	respondent, err := authz.LoadMember(ctx, q, seat.ID)
+	if err != nil {
+		return refused(err)
+	}
+	c := dbq.Conversation{CourseID: courseID, OpenerMemberID: decision.Member.ID, RespondentMemberID: respondent.ID, Status: "open"}
+	if err := checkAsk(ctx, q, decision.Member, respondent, now, c); err != nil {
+		return refused(err)
+	}
+	return true, nil
+}
+
 func conversationAsk(d Deps) tool.Tool {
 	return tool.Define(tool.Spec[ConversationAskIn, MessageIDOut]{
 		Name: "conversation.ask",

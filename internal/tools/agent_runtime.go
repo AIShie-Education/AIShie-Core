@@ -30,8 +30,10 @@ import (
 // the site ask a runtime agent while the token the runtime holds for it
 // lives. Ending the hosting revokes it (agent_runtime.revoke_token).
 //
-// Nothing else is the runtime's here: no course, no seat, no person's work,
-// and no mcp agent, whose tokens are its owner's.
+// Nothing else is the runtime's here: no course, seat or person's work is
+// returned, and no mcp agent, whose tokens are its owner's. check_ask answers only
+// the boolean authorization question the runtime needs, never why it was
+// refused, and never a model or provider.
 
 var agentRuntime = tool.Gate{Service: domain.ServiceAgentRuntime}
 
@@ -45,7 +47,7 @@ const (
 )
 
 func agentRuntimeTools() []tool.Tool {
-	return []tool.Tool{runtimeAgent(), runtimeCheckOwner(), runtimeIssueToken(), runtimeRevokeToken()}
+	return []tool.Tool{runtimeAgent(), runtimeCheckOwner(), runtimeCheckAsk(), runtimeIssueToken(), runtimeRevokeToken()}
 }
 
 // Why the runtime may not host an agent, each as issue_token refuses it and
@@ -194,6 +196,35 @@ func runtimeCheckOwner() tool.Tool {
 			}
 			v := viewRuntimeAgent(a)
 			return RuntimeCheckOwnerOut{Owns: true, Agent: &v}, nil
+		},
+	})
+}
+
+type RuntimeCheckAskIn struct {
+	ActorID  uuid.UUID `json:"actor_id" jsonschema:"the person signed in to the runtime: the sub of the assertion Core made for them"`
+	AgentID  uuid.UUID `json:"agent_id" jsonschema:"the agent they would ask, seated in the course"`
+	CourseID uuid.UUID `json:"course_id" jsonschema:"the course in which they would ask the agent"`
+}
+
+type RuntimeCheckAskOut struct {
+	MayAsk bool `json:"may_ask" jsonschema:"whether that person may ask that agent in that course now, by exactly the rules of conversation.ask; false, and nothing more, for any refusal or unknown id"`
+}
+
+func runtimeCheckAsk() tool.Tool {
+	return tool.Define(tool.Spec[RuntimeCheckAskIn, RuntimeCheckAskOut]{
+		Name: "agent_runtime.check_ask",
+		Description: "For the site's agent runtime alone: whether a person signed in to it may ask an agent in a course " +
+			"now. The runtime knows the person by Core's assertion (its sub). Core applies conversation.ask's caller " +
+			"permission, course and seat liveness, agent kind, hosting and live-token, and addressing rules, without " +
+			"opening a conversation or writing a message. Every refusal, and every unknown actor, agent or course, " +
+			"returns may_ask false with no reason and no other information; in particular no model or provider is " +
+			"revealed. True means the question would be allowed, including one requiring confirmation.",
+		Kind: tool.Read, Gate: agentRuntime,
+		HTTP:    tool.Route{Method: "GET", Pattern: "/v1/services/agent_runtime/actors/{actor_id}/courses/{course_id}/agents/{agent_id}/may-ask"},
+		Resolve: noTarget[RuntimeCheckAskIn]("conversation"),
+		Query: func(ctx context.Context, rc *tool.ReadCtx, in RuntimeCheckAskIn) (RuntimeCheckAskOut, error) {
+			mayAsk, err := mayAskInCourse(ctx, rc.Q, in.ActorID, in.AgentID, in.CourseID, rc.Now)
+			return RuntimeCheckAskOut{MayAsk: mayAsk}, err
 		},
 	})
 }
