@@ -260,6 +260,12 @@ Run all of these as root on the server.
   needs no setting here, and one in a browser or an app's web view gets
   its preflight answered and may read the answers (CORS for any origin,
   without credentials).
+- **The school's time zone:** set `SCHOOL_TIME_ZONE` to an IANA name such as
+  `Asia/Hong_Kong`. Core checks the name at start and gives it to every
+  signed-in caller as `time_zone` in `me.get` (`GET /v1/me`), so the front end
+  can show and choose cut-offs on the school's clock. Left unset, `time_zone`
+  is absent and clients use each reader's own clock, as before. Times stored
+  and returned by Core remain instants; this setting does not change them.
 - **Single sign-on** has two sources (README, Single sign-on). The
   operator's provider is `OIDC_ISSUER`, `OIDC_CLIENT_ID` and
   `OIDC_CLIENT_SECRET` in the env file; administrators see it read-only.

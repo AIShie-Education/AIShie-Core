@@ -28,6 +28,10 @@ type Config struct {
 	DatabaseURL string
 	// HTTPAddr is the listen address for REST and MCP.
 	HTTPAddr string
+	// SchoolTimeZone is the school's IANA time zone (SCHOOL_TIME_ZONE), used
+	// by clients to display and choose times on the school's clock. Nil leaves
+	// clients on each reader's own clock, as before.
+	SchoolTimeZone *time.Location
 	// ShutdownGrace bounds how long in-flight requests get on SIGTERM.
 	ShutdownGrace time.Duration
 	// ProposalTTL is how long a confirm_required proposal may wait for a
@@ -216,6 +220,13 @@ func FromEnv() (Config, error) {
 		DatabaseURL:   env("DATABASE_URL", "postgres:///aishie"),
 		HTTPAddr:      env("HTTP_ADDR", ":8080"),
 		ShutdownGrace: 15 * time.Second,
+	}
+	if v := os.Getenv("SCHOOL_TIME_ZONE"); v != "" {
+		loc, err := time.LoadLocation(v)
+		if err != nil {
+			return Config{}, fmt.Errorf("SCHOOL_TIME_ZONE: %q is not an IANA time zone: %w", v, err)
+		}
+		c.SchoolTimeZone = loc
 	}
 	c.ProposalTTL = 14 * 24 * time.Hour
 	c.SessionTTL = 12 * time.Hour

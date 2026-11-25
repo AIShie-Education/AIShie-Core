@@ -67,6 +67,7 @@ Usage:
 Environment:
   DATABASE_URL      default postgres:///aishie (local unix socket)
   HTTP_ADDR         default :8080
+  SCHOOL_TIME_ZONE  the school's IANA time zone, such as Asia/Hong_Kong; unset, clients use each reader's own
   SHUTDOWN_GRACE    default 15s
   PROPOSAL_TTL      default 336h (14 days); 0 disables expiry
   RATE_LIMIT_PER_MINUTE        default 600 calls per actor per instance; 0 for no limit
@@ -263,7 +264,8 @@ func serve(cfg config.Config) error {
 		Documents:               tools.DocumentLimits{FilesPerVersion: cfg.DocumentMaxFilesPerVersion, VersionBytes: cfg.DocumentMaxVersionBytes},
 		Exports:                 tools.ExportLimits{MaxMessages: cfg.ExportMaxMessages, MaxBytes: cfg.ExportMaxBytes, TTL: cfg.ExportTTL},
 		Renditions:              tools.RenditionLimits{MaxBytes: cfg.RenditionMaxBytes},
-		DisableAgentSelfService: !cfg.AgentSelfService, MaxAgentsPerOwner: cfg.AgentMaxPerOwner, Memory: cfg.Memory})
+		DisableAgentSelfService: !cfg.AgentSelfService, MaxAgentsPerOwner: cfg.AgentMaxPerOwner, Memory: cfg.Memory,
+		SchoolTimeZone: cfg.SchoolTimeZone})
 
 	// The sweeps act as the system actor, which bootstrap creates. Before
 	// bootstrap there is nothing to sweep and nobody to sweep as.

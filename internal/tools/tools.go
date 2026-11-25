@@ -5,6 +5,8 @@
 package tools
 
 import (
+	"time"
+
 	"github.com/google/uuid"
 	"github.com/shopspring/decimal"
 
@@ -26,6 +28,9 @@ type Deps struct {
 	Blob blob.Store
 	// Uploads signs and checks upload tokens.
 	Uploads *blob.Signer
+	// SchoolTimeZone is the school's IANA time zone, given to every caller
+	// by me.get. Nil means the installation has not chosen one.
+	SchoolTimeZone *time.Location
 	// MaxUploadBytes bounds one file.
 	MaxUploadBytes int64
 	// Attachments bounds the files messages of conversations carry; a zero
@@ -89,7 +94,7 @@ func RegisterAll(reg *tool.Registry, d Deps) {
 	if d.Drafts == nil {
 		d.Drafts = ratelimit.New(60*DraftWritesPerSecond, DraftWritesPerSecond)
 	}
-	reg.Register(meTools()...)
+	reg.Register(meTools(d)...)
 	reg.Register(agentTools(d)...)
 	reg.Register(platformTools()...)
 	reg.Register(departmentTools()...)
