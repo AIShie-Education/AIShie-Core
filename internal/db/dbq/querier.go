@@ -699,6 +699,10 @@ type Querier interface {
 	// write assignments they exist only once a published assignment within their
 	// scope refers to them, or a student could read next week's exam by listing.
 	ListCourseDocuments(ctx context.Context, arg ListCourseDocumentsParams) ([]ListCourseDocumentsRow, error)
+	// Who teaches a course is a course fact every member may read, not the member
+	// list. Only currently active people in the instructor role are shown: TAs,
+	// agents, and paused, removed, expired or suspended instructors are not.
+	ListCourseInstructors(ctx context.Context, arg ListCourseInstructorsParams) ([]string, error)
 	// Courses as their administrators see them. platform lists every course;
 	// otherwise, those in the departments actor administers and beneath them.
 	// dept_id is one department; within_dept_id a department and everything

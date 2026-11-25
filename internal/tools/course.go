@@ -51,6 +51,19 @@ type CourseView struct {
 	CreatedAt   time.Time `json:"created_at"`
 }
 
+type CourseInstructor struct {
+	DisplayName string `json:"display_name"`
+}
+
+// CourseGetOut is a course as one of its members reads it. Instructors belong
+// here, rather than in CourseView on the administrators' course.list, because
+// this is the one place a member without member_read gets the public fact of
+// who teaches the course.
+type CourseGetOut struct {
+	CourseView
+	Instructors []CourseInstructor `json:"instructors" jsonschema:"the current instructors' display names, in name order; empty when the course has none. Only this public course fact: no email, login id, actor id or other member details"`
+}
+
 // platformCourse resolves a course for a tool that manages it from outside.
 // The input carries a plain course_id rather than embedding tool.InCourse,
 // because these tools are gated by the administrators gate, not by a seat in
@@ -420,17 +433,30 @@ func courseMove() tool.Tool {
 }
 
 func courseGet() tool.Tool {
-	return tool.Define(tool.Spec[tool.InCourse, CourseView]{
-		Name:        "course.get",
-		Description: "The course itself: code, section, title, description, status. Any member who can read its material may read this.",
-		Kind:        tool.Read, Gate: tool.Gate{Perms: []domain.Perm{domain.PermDocumentRead}},
+	return tool.Define(tool.Spec[tool.InCourse, CourseGetOut]{
+		Name: "course.get",
+		Description: "The course itself: code, section, title, description, status, and its current instructors' display " +
+			"names (instructors), the public course fact of who teaches it, without the member list or their account " +
+			"details. Any member who can read its material may read this, without member_read.",
+		Kind: tool.Read, Gate: tool.Gate{Perms: []domain.Perm{domain.PermDocumentRead}},
 		HTTP: tool.Route{Method: "GET", Pattern: "/v1/courses/{course_id}"},
 		Resolve: func(_ context.Context, _ dbq.Querier, in tool.InCourse) (tool.Target, error) {
 			return tool.Target{CourseID: in.CourseID, Type: "course", ID: &in.CourseID}, nil
 		},
-		Query: func(ctx context.Context, rc *tool.ReadCtx, in tool.InCourse) (CourseView, error) {
+		Query: func(ctx context.Context, rc *tool.ReadCtx, in tool.InCourse) (CourseGetOut, error) {
 			c, err := rc.Q.GetCourse(ctx, in.CourseID)
-			return viewCourse(c), err
+			if err != nil {
+				return CourseGetOut{}, err
+			}
+			names, err := rc.Q.ListCourseInstructors(ctx, dbq.ListCourseInstructorsParams{CourseID: in.CourseID, Now: rc.Now})
+			if err != nil {
+				return CourseGetOut{}, err
+			}
+			out := CourseGetOut{CourseView: viewCourse(c), Instructors: make([]CourseInstructor, 0, len(names))}
+			for _, name := range names {
+				out.Instructors = append(out.Instructors, CourseInstructor{DisplayName: name})
+			}
+			return out, nil
 		},
 	})
 }

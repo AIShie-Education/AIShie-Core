@@ -6,6 +6,18 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, 'draft', $8, $9);
 SELECT id, dept_id, term_id, code, section, title, description, status, created_at
 FROM course WHERE id = $1;
 
+-- name: ListCourseInstructors :many
+-- Who teaches a course is a course fact every member may read, not the member
+-- list. Only currently active people in the instructor role are shown: TAs,
+-- agents, and paused, removed, expired or suspended instructors are not.
+SELECT a.display_name
+FROM course_member m
+JOIN actor a ON a.id = m.actor_id
+WHERE m.course_id = sqlc.arg(course_id)
+  AND m.role = 'instructor' AND a.kind = 'human' AND a.status = 'active'
+  AND m.status = 'active' AND (m.expires_at IS NULL OR m.expires_at > sqlc.arg(now)::timestamptz)
+ORDER BY a.display_name, m.id;
+
 -- name: CourseCodeTaken :one
 SELECT EXISTS (SELECT 1 FROM course WHERE term_id = $1 AND code = $2 AND section = $3);
 

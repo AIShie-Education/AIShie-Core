@@ -660,6 +660,14 @@ the nearest one, and the choice is recorded here so that it is a decision and no
 | A site service's credentials (`service.*`) | `platform_role` | outside every course (§2.1, Services) |
 | The course's title and description, from a seat in it (`course.update_details`) | `perm_member_manage` | its instructors run the course and name it; its code, section, term, department and status stay with its administrators |
 
+`course.get` also answers `instructors`, the public course fact of who teaches it, for the same
+members who may read the course, without `perm_member_read`. Each entry contains only
+`display_name`: no email, login id, actor id or seat id. The list contains people whose roster role
+is `instructor` now, whose seat is active and unexpired and whose account is active; TAs and agents
+are not instructors, and paused, removed, expired or suspended instructors drop out. Names are in
+name order (seat id breaks a tie), and a course with none answers `[]`. This summary never exposes
+the rest of the member list, and does not change the administrators' `course.list` response.
+
 An unposted grade, and a superseded one, is visible only to a member holding `perm_grade_submit`
 or `perm_grade_post`; everyone else sees live posted grades. That is the rule for students,
 stated without asking whether anyone is a student. An unpublished assignment is likewise
