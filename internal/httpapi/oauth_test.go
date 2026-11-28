@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -151,7 +152,7 @@ func TestOAuthTokenRotationAgentOwnerRevocationExpiryAndRateLimit(t *testing.T) 
 	if res.StatusCode != 401 || body["error"] != "invalid_client" || strings.Contains(raw, secret) {
 		t.Fatalf("old secret after rotation: %d %v %s", res.StatusCode, body, raw)
 	}
-	if _, err := f.service.Authenticate(t.Context(), access); err != oauth.ErrInvalidToken {
+	if _, err := f.service.Authenticate(t.Context(), access); !errors.Is(err, oauth.ErrInvalidToken) {
 		t.Fatalf("old token after rotation: %v", err)
 	}
 	res, body, _ = f.token(t, true, id, rotated.ClientSecret, "grant_type=client_credentials")
@@ -161,7 +162,7 @@ func TestOAuthTokenRotationAgentOwnerRevocationExpiryAndRateLimit(t *testing.T) 
 	access = body["access_token"].(string)
 
 	f.c.Exec(`UPDATE actor SET status = 'suspended' WHERE id = $1`, f.c.Sato)
-	if _, err := f.service.Authenticate(t.Context(), access); err != oauth.ErrInvalidToken {
+	if _, err := f.service.Authenticate(t.Context(), access); !errors.Is(err, oauth.ErrInvalidToken) {
 		t.Fatalf("suspended owner token: %v", err)
 	}
 	res, body, _ = f.token(t, true, id, rotated.ClientSecret, "grant_type=client_credentials")
@@ -178,7 +179,7 @@ func TestOAuthTokenRotationAgentOwnerRevocationExpiryAndRateLimit(t *testing.T) 
 	}
 	access = body["access_token"].(string)
 	now = now.Add(10*time.Minute + time.Nanosecond)
-	if _, err := f.service.Authenticate(t.Context(), access); err != oauth.ErrInvalidToken {
+	if _, err := f.service.Authenticate(t.Context(), access); !errors.Is(err, oauth.ErrInvalidToken) {
 		t.Fatalf("expiry: %v", err)
 	}
 

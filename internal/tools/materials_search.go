@@ -126,7 +126,7 @@ func courseMaterialsSearch() tool.Tool {
 			}
 			query := strings.TrimSpace(in.Query)
 			rows, err := rc.Q.SearchMaterialPassages(ctx, dbq.SearchMaterialPassagesParams{
-				Query: memory.QueryTerms(query), OffsetRows: int32((page - 1) * limit), MaxRows: int32(limit + 1),
+				Query: memory.QueryTerms(query), OffsetRows: int32((page - 1) * limit), MaxRows: int32(limit + 1), //nolint:gosec // page and limit are both bounded to 1..20
 				CourseID: in.CourseID, Kinds: kinds, ReadDrafts: rc.Member.Perm(domain.PermDocumentReadDraft).Allowed(),
 				WritesAssignments: canSeeUnpublished(rc.Member), AssignmentAll: rc.Scope.AssignmentAll,
 				MemberID: rc.Scope.MemberID, PrincipalID: rc.Scope.PrincipalID,

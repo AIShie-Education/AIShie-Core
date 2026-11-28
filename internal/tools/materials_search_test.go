@@ -156,7 +156,7 @@ func TestCourseMaterialFileTextIndexAndReadPointer(t *testing.T) {
 		t.Fatalf("the filename was not indexed: %+v", byName.Hits)
 	}
 	readName := strings.ReplaceAll(hit.Read.Tool, "_", ".")
-	read := testkit.Result[tools.DocumentTextOut](t, b.do(t, b.yuki, readName, m(hit.Read.Arguments)))
+	read := testkit.Result[tools.DocumentTextOut](t, b.do(t, b.yuki, readName, hit.Read.Arguments))
 	if read.Part != 1 || read.Text.Body == nil || !strings.Contains(*read.Text.Body, "合併排序") {
 		t.Fatalf("read did not give the passage: %+v", read)
 	}

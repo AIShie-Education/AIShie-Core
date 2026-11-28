@@ -155,7 +155,7 @@ func writeMaterialPassages(ctx context.Context, q dbq.Querier, doc materialDocum
 		}
 		text = doc.title + "\n" + text
 		arg := dbq.InsertMaterialPassageParams{CourseID: doc.courseID, DocumentID: doc.id, VersionID: version, FileID: file,
-			TextSource: source, TextRevision: revision, SectionKind: p.kind, SectionNo: int32(p.section), PartNo: int32(p.part),
+			TextSource: source, TextRevision: revision, SectionKind: p.kind, SectionNo: int32(p.section), PartNo: int32(p.part), //nolint:gosec // bounded by Core's document size limits
 			Content: p.content, SearchText: memory.SearchText(text), UpdatedAt: now}
 		if err := q.InsertMaterialPassage(ctx, arg); err != nil {
 			return written, err
