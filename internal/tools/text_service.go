@@ -412,6 +412,9 @@ func textComplete() tool.Tool {
 			if err != nil {
 				return TextCompleteOut{}, err
 			}
+			if _, err := rebuildMaterialFile(ctx, ec.Q, materialDoc(doc), t.VersionID, t.FileID, ec.Now); err != nil {
+				return TextCompleteOut{}, err
+			}
 			source := textByAI
 			return out, emitTextEvent(ctx, ec, doc, t.VersionID, t.FileID, textDone, &source, out.Revision)
 		},

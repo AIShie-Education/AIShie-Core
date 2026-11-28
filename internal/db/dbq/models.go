@@ -357,6 +357,23 @@ type Document struct {
 	GroupGradeID       *uuid.UUID
 }
 
+type DocumentSearchPassage struct {
+	ID           uuid.UUID
+	CourseID     uuid.UUID
+	DocumentID   uuid.UUID
+	VersionID    uuid.UUID
+	FileID       *uuid.UUID
+	TextSource   string
+	TextRevision int32
+	SectionKind  string
+	SectionNo    int32
+	PartNo       int32
+	Content      string
+	SearchText   string
+	Search       interface{}
+	UpdatedAt    time.Time
+}
+
 type DocumentVersion struct {
 	ID              uuid.UUID
 	DocumentID      uuid.UUID
@@ -581,6 +598,31 @@ type MemoryWriteCount struct {
 	HolderActorID uuid.UUID
 	Hour          time.Time
 	N             int32
+}
+
+type OauthAccessToken struct {
+	ID           uuid.UUID
+	ClientID     uuid.UUID
+	AgentActorID uuid.UUID
+	TokenHash    string
+	Scopes       []string
+	Resource     string
+	CreatedAt    time.Time
+	ExpiresAt    time.Time
+	RevokedAt    *time.Time
+	LastUsedAt   *time.Time
+}
+
+type OauthClient struct {
+	ID               uuid.UUID
+	AgentActorID     uuid.UUID
+	Label            string
+	SecretHash       string
+	Scopes           []string
+	CreatedByActorID *uuid.UUID
+	CreatedAt        time.Time
+	RotatedAt        *time.Time
+	RevokedAt        *time.Time
 }
 
 type PeerForm struct {

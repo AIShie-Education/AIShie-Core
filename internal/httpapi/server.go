@@ -43,6 +43,7 @@ import (
 	"github.com/AIShie-Education/AIShie-Core/internal/authz"
 	"github.com/AIShie-Education/AIShie-Core/internal/blob"
 	"github.com/AIShie-Education/AIShie-Core/internal/domain"
+	"github.com/AIShie-Education/AIShie-Core/internal/oauth"
 	"github.com/AIShie-Education/AIShie-Core/internal/pipeline"
 	"github.com/AIShie-Education/AIShie-Core/internal/ratelimit"
 	"github.com/AIShie-Education/AIShie-Core/internal/signing"
@@ -121,6 +122,14 @@ type Deps struct {
 	// behind notRebound, but not behind their cross-origin guard (below). It
 	// does its own authentication, with the same authenticator.
 	MCP http.Handler
+
+	// OAuth issues Agent-actor Client Credentials tokens for /mcp alone.
+	// PublicURL is their canonical issuer and resource (PUBLIC_URL). Nil OAuth
+	// is filled from Pool. OAuthTokenLimit bounds client-secret guessing; nil
+	// uses SignIns, or a safe per-instance default when that is nil too.
+	OAuth           *oauth.Service
+	PublicURL       string
+	OAuthTokenLimit *ratelimit.Limiter
 }
 
 // MCPPath is where agents connect.
@@ -130,6 +139,15 @@ const MCPPath = "/mcp"
 func NewHandler(d Deps) http.Handler {
 	if d.Log == nil {
 		d.Log = slog.New(slog.DiscardHandler)
+	}
+	if d.OAuth == nil && d.Pool != nil {
+		d.OAuth = oauth.NewService(d.Pool)
+	}
+	if d.OAuthTokenLimit == nil {
+		d.OAuthTokenLimit = d.SignIns
+		if d.OAuthTokenLimit == nil {
+			d.OAuthTokenLimit = ratelimit.New(20, 20)
+		}
 	}
 	s := &server{Deps: d}
 	if s.BodyTimeout <= 0 {
@@ -150,6 +168,11 @@ func NewHandler(d Deps) http.Handler {
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.healthz)
+	if d.OAuth != nil {
+		mux.HandleFunc("GET /.well-known/oauth-authorization-server", s.oauthAuthorizationServer)
+		mux.HandleFunc("GET /.well-known/oauth-protected-resource", s.oauthProtectedResource)
+		mux.HandleFunc("POST /v1/oauth/token", s.oauthToken)
+	}
 
 	if d.Pipeline != nil {
 		mux.HandleFunc("GET "+MethodsPath, s.methods)

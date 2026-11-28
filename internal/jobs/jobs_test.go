@@ -1545,3 +1545,27 @@ func TestAQueuedFileTheStoreRefusesIsAskedAgainLater(t *testing.T) {
 		t.Fatalf("%d files are still queued", n)
 	}
 }
+
+// The ordinary jobs sweep, not a caller's search, restores missing passages.
+func TestMaterialSearchBackfillRunsInTheSweep(t *testing.T) {
+	f := setup(t, 1)
+	made := testkit.Result[tools.DocumentCreateOut](t, f.MustCall(f.Sato, "document.create", m{
+		"course_id": f.Course, "kind": "material", "title": "Backfill", "body_md": "背景回填與合併排序。",
+	}, "material"))
+	if made.VersionID == nil {
+		t.Fatal("no material version")
+	}
+	f.MustCall(f.Sato, "document.publish", m{"course_id": f.Course, "document_id": made.DocumentID,
+		"version_id": *made.VersionID}, "publish")
+	f.Exec(`DELETE FROM document_search_passages WHERE document_id = $1`, made.DocumentID)
+	rep := f.sweep(t)
+	if rep.MaterialPassagesBackfilled == 0 {
+		t.Fatalf("the sweep backfilled nothing: %+v", rep)
+	}
+	if n := f.Count(`SELECT count(*) FROM document_search_passages WHERE document_id = $1 AND text_source = 'body_md'`, made.DocumentID); n != 1 {
+		t.Fatalf("the sweep left %d passages for the body", n)
+	}
+	if rep := f.sweep(t); rep.MaterialPassagesBackfilled != 0 {
+		t.Fatalf("an unchanged index was backfilled again: %+v", rep)
+	}
+}

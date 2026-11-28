@@ -158,6 +158,12 @@ type Querier interface {
 	// Every group grade given on a group's submission to it, once the grades
 	// given from them have gone (group_grade_kept).
 	DeleteGroupGradesOfAssignment(ctx context.Context, assignmentID uuid.UUID) (int64, error)
+	DeleteMaterialBodyPassages(ctx context.Context, versionID uuid.UUID) error
+	// Search and the derived passage index of a course's material, instructions
+	// and rubrics (migration 0033). Search text is made by memory.SearchText in
+	// the application; PostgreSQL needs no extension and no locale-specific lexer.
+	DeleteMaterialDocumentPassages(ctx context.Context, documentID uuid.UUID) (int64, error)
+	DeleteMaterialFilePassages(ctx context.Context, arg DeleteMaterialFilePassagesParams) error
 	DeleteMemory(ctx context.Context, arg DeleteMemoryParams) (int64, error)
 	DeleteSSOProvider(ctx context.Context, arg DeleteSSOProviderParams) (int64, error)
 	// The sweep: drafts nobody has written for a while, which reads leave out
@@ -395,6 +401,8 @@ type Querier interface {
 	// no. A seat past its expiry, or orphaned (SeatOrphaned), is locked by id
 	// before it is removed.
 	GetLiveMembership(ctx context.Context, arg GetLiveMembershipParams) (GetLiveMembershipRow, error)
+	// One file's current completed text, its source, revision and filename.
+	GetMaterialFileText(ctx context.Context, arg GetMaterialFileTextParams) (GetMaterialFileTextRow, error)
 	// By id, removed rows included: re-authorizing a proposal checks the very
 	// membership it was made under, not whatever row the actor holds today.
 	GetMemberForAuthz(ctx context.Context, id uuid.UUID) (GetMemberForAuthzRow, error)
@@ -413,6 +421,10 @@ type Querier interface {
 	GetMemoryByHash(ctx context.Context, arg GetMemoryByHashParams) (GetMemoryByHashRow, error)
 	// The same, locked, by a change to it, which takes its bucket's lock first.
 	GetMemoryForUpdate(ctx context.Context, id uuid.UUID) (GetMemoryForUpdateRow, error)
+	// Every MCP request checks the token, its client and its agent again. Rotation
+	// and revocation mark every outstanding token revoked in the same transaction.
+	GetOAuthAccessTokenByHash(ctx context.Context, tokenHash string) (GetOAuthAccessTokenByHashRow, error)
+	GetOAuthClientForAgent(ctx context.Context, arg GetOAuthClientForAgentParams) (GetOAuthClientForAgentRow, error)
 	// The actor's live password, and whether someone else set it for them to
 	// change (must_change).
 	GetPasswordCredential(ctx context.Context, actorID uuid.UUID) (GetPasswordCredentialRow, error)
@@ -552,6 +564,7 @@ type Querier interface {
 	// handed in (submission_students).
 	InsertGroupSubmission(ctx context.Context, arg InsertGroupSubmissionParams) error
 	InsertJoinLink(ctx context.Context, arg InsertJoinLinkParams) error
+	InsertMaterialPassage(ctx context.Context, arg InsertMaterialPassageParams) error
 	InsertMember(ctx context.Context, arg InsertMemberParams) error
 	InsertMembership(ctx context.Context, arg InsertMembershipParams) error
 	// A new entry, unless the same text is already live in its bucket: then no
@@ -565,6 +578,10 @@ type Querier interface {
 	// A student's; for a group assignment the database passes it over
 	// (submission_fits_assignment), and nothing is written.
 	InsertMissingSubmission(ctx context.Context, arg InsertMissingSubmissionParams) (int64, error)
+	InsertOAuthAccessToken(ctx context.Context, arg InsertOAuthAccessTokenParams) error
+	// Agent-actor OAuth Client Credentials (migration 0034). Lists deliberately
+	// select no secret or token hash; those are needed only by authentication.
+	InsertOAuthClient(ctx context.Context, arg InsertOAuthClientParams) error
 	InsertPeerForm(ctx context.Context, arg InsertPeerFormParams) error
 	InsertPeerReview(ctx context.Context, arg InsertPeerReviewParams) error
 	// Written with its sheet (peer_review_entry_kept), its course the sheet's.
@@ -878,6 +895,16 @@ type Querier interface {
 	ListLiveTotalComponents(ctx context.Context, studentMemberID uuid.UUID) ([]*uuid.UUID, error)
 	// The student's totals a person has overridden, and with what, out of 100.
 	ListLiveTotalOverrides(ctx context.Context, studentMemberID uuid.UUID) ([]ListLiveTotalOverridesRow, error)
+	// Units of indexing that are absent or still at an older text revision. One
+	// unit is a version's own body, or one file's text. Whitespace-only bodies are
+	// deliberately left out, so they are not rediscovered on every sweep. The
+	// caller locks the document and reads the unit again before replacing it.
+	ListMaterialBackfill(ctx context.Context, maxRows int32) ([]ListMaterialBackfillRow, error)
+	// Every version's own text that can be indexed, including the published and
+	// the latest; the search itself chooses the one the reader is shown.
+	ListMaterialDocumentBodies(ctx context.Context, documentID uuid.UUID) ([]ListMaterialDocumentBodiesRow, error)
+	// Every completed file text of every version of a document not purged.
+	ListMaterialDocumentTexts(ctx context.Context, documentID uuid.UUID) ([]ListMaterialDocumentTextsRow, error)
 	ListMembers(ctx context.Context, arg ListMembersParams) ([]ListMembersRow, error)
 	// Every stay in a group of the set, ended or not, the newest first, with the
 	// student's name.
@@ -902,6 +929,7 @@ type Querier interface {
 	// caller's own that count now, which me.conversations works out before
 	// this, as authorization would: nothing here reads anyone else's.
 	ListMyConversations(ctx context.Context, arg ListMyConversationsParams) ([]ListMyConversationsRow, error)
+	ListOAuthClientsForAgent(ctx context.Context, agentActorID uuid.UUID) ([]ListOAuthClientsForAgentRow, error)
 	// Which of these uploads, each given with the course its key names, are
 	// this deployment's and attached to nothing? The course must be one this
 	// database has. document.upload_url, conversation.upload_url and
@@ -1244,6 +1272,10 @@ type Querier interface {
 	// Writes to one bucket are counted one at a time: each takes this before it
 	// counts, to the end of its transaction (memory.LockKey).
 	LockMemoryBucket(ctx context.Context, arg LockMemoryBucketParams) error
+	// Secret verification, token issue, rotation and revocation serialize on the
+	// client row, so a rotation cannot leave a newly issued token valid under the
+	// old secret. Agent kind and standing are checked on every token request.
+	LockOAuthClientForToken(ctx context.Context, id uuid.UUID) (LockOAuthClientForTokenRow, error)
 	// An owner's agents are counted against the limit one creation, or one
 	// reactivation, at a time. NO KEY UPDATE, not UPDATE: the call's own action
 	// row, and every other action row naming the owner, holds KEY SHARE on this
@@ -1440,6 +1472,8 @@ type Querier interface {
 	// set (by it or otherwise), and when the email it was sent to changes.
 	RevokeInvites(ctx context.Context, arg RevokeInvitesParams) error
 	RevokeJoinLink(ctx context.Context, arg RevokeJoinLinkParams) (int64, error)
+	RevokeOAuthAccessTokensForClient(ctx context.Context, arg RevokeOAuthAccessTokensForClientParams) error
+	RevokeOAuthClient(ctx context.Context, arg RevokeOAuthClientParams) (int64, error)
 	RevokePasswordCredentials(ctx context.Context, arg RevokePasswordCredentialsParams) error
 	// Every runtime token of an agent's that is not revoked: one at most.
 	RevokeRuntimeTokens(ctx context.Context, arg RevokeRuntimeTokensParams) ([]uuid.UUID, error)
@@ -1455,6 +1489,7 @@ type Querier interface {
 	// read: a change made meanwhile is left as it is. The secret is the same, so
 	// the version does not move.
 	RewrapSSOSecret(ctx context.Context, arg RewrapSSOSecretParams) (int64, error)
+	RotateOAuthClientSecret(ctx context.Context, arg RotateOAuthClientSecretParams) (int64, error)
 	// Whether an identity has ever been linked at a provider, to anyone, revoked
 	// or not.
 	SSOIdentityKnown(ctx context.Context, arg SSOIdentityKnownParams) (bool, error)
@@ -1467,6 +1502,11 @@ type Querier interface {
 	// Which of the given actors are of one party with the actor (SameParty):
 	// whose actions it neither decides nor reviews.
 	SamePartyAmong(ctx context.Context, arg SamePartyAmongParams) ([]uuid.UUID, error)
+	// The passages of exactly the versions document.get would show this seat.
+	// The document and assignment filters mirror ListCourseDocuments; selecting
+	// the latest version even when it is a purged tombstone mirrors
+	// docReader.versionOf, rather than falling back to an older readable version.
+	SearchMaterialPassages(ctx context.Context, arg SearchMaterialPassagesParams) ([]SearchMaterialPassagesRow, error)
 	// An agent's entries in force in the given buckets, pinned first, then by
 	// how well they match query (a to_tsquery argument, memory.QueryTerms) with
 	// a term for recency that halves at 30 days, so that with no query, or no
@@ -1604,6 +1644,8 @@ type Querier interface {
 	// needed: left to itself, PostgreSQL reads $2 - interval as interval - interval,
 	// and every call fails.
 	TouchCredential(ctx context.Context, arg TouchCredentialParams) error
+	// Best-effort usage accounting, at most one write a minute per token.
+	TouchOAuthAccessToken(ctx context.Context, arg TouchOAuthAccessTokenParams) error
 	TryJobLock(ctx context.Context, key int64) (bool, error)
 	UnpublishAssignment(ctx context.Context, id uuid.UUID) (int64, error)
 	// Of the given conversations, those in which one of the given seats takes

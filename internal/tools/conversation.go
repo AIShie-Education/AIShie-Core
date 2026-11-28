@@ -779,36 +779,37 @@ func checkAsk(ctx context.Context, q dbq.Querier, m, respondent *domain.Member, 
 // whose rules it must pass. An existing conversation's id, body and files are
 // the only parts of conversation.ask that do not apply here.
 //
-// Expected refusals, including unknown ids, all become false: the site's
+// Expected refusals, including unknown ids, all become a nil grant: the site's
 // runtime learns nothing beyond may_ask. Database and other internal failures
-// remain errors.
-func mayAskInCourse(ctx context.Context, q dbq.Querier, actorID, agentID, courseID uuid.UUID, now time.Time) (bool, error) {
-	refused := func(err error) (bool, error) {
+// remain errors. A successful grant carries only the seats read here, their
+// effective levels as authorization sees them, and respondent.AnswersOthers.
+func mayAskInCourse(ctx context.Context, q dbq.Querier, actorID, agentID, courseID uuid.UUID, now time.Time) (*RuntimeAskGrant, error) {
+	refused := func(err error) (*RuntimeAskGrant, error) {
 		if _, ok := apperr.As(err); ok {
-			return false, nil
+			return nil, nil
 		}
-		return false, err
+		return nil, err
 	}
 	actor, err := authz.LoadActor(ctx, q, actorID)
 	if err != nil {
 		return refused(err)
 	}
 	if actor.PasswordChangeRequired || authz.Services(actor, "") != authz.ReasonNone {
-		return false, nil
+		return nil, nil
 	}
 	decision, err := authz.ForActor(ctx, q, actorID, courseID, asks.Perms, true, now)
 	if err != nil {
 		return refused(err)
 	}
 	if !decision.Level.Allowed() || decision.Member == nil {
-		return false, nil
+		return nil, nil
 	}
 	seat, err := q.GetLiveMembership(ctx, dbq.GetLiveMembershipParams{CourseID: courseID, ActorID: agentID})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return false, nil
+			return nil, nil
 		}
-		return false, err
+		return nil, err
 	}
 	respondent, err := authz.LoadMember(ctx, q, seat.ID)
 	if err != nil {
@@ -818,7 +819,15 @@ func mayAskInCourse(ctx context.Context, q dbq.Querier, actorID, agentID, course
 	if err := checkAsk(ctx, q, decision.Member, respondent, now, c); err != nil {
 		return refused(err)
 	}
-	return true, nil
+	return &RuntimeAskGrant{
+		OpenerMemberID:              decision.Member.ID,
+		RespondentMemberID:          respondent.ID,
+		RespondentPrincipalMemberID: respondent.PrincipalID,
+		ConversationAskLevel:        decision.Member.Perm(domain.PermConversationAsk).String(),
+		ActionDecideLevel:           respondent.Perm(domain.PermActionDecide).String(),
+		ConversationAnswerLevel:     respondent.Perm(domain.PermConversationAnswer).String(),
+		AnswersCourse:               respondent.AnswersOthers(),
+	}, nil
 }
 
 func conversationAsk(d Deps) tool.Tool {

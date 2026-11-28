@@ -118,8 +118,9 @@ func (r *Runner) Run(ctx context.Context) {
 		} else if rep.Ran && rep.total() > 0 {
 			r.log.Info("swept", "proposals_expired", rep.ProposalsExpired, "members_expired", rep.MembersExpired, "orphans_removed", rep.OrphansRemoved,
 				"assignments_closed", rep.AssignmentsClosed, "submissions_missing", rep.SubmissionsMissing, "sessions_deleted", rep.SessionsDeleted,
-				"drafts_deleted", rep.DraftsDeleted, "queued_files_deleted", rep.QueuedFilesDeleted,
-				"orphan_files_removed", rep.OrphanFilesRemoved, "export_files_removed", rep.ExportFilesRemoved)
+				"drafts_deleted", rep.DraftsDeleted, "material_passages_backfilled", rep.MaterialPassagesBackfilled,
+				"queued_files_deleted", rep.QueuedFilesDeleted, "orphan_files_removed", rep.OrphanFilesRemoved,
+				"export_files_removed", rep.ExportFilesRemoved)
 		}
 		select {
 		case <-ctx.Done():
@@ -142,6 +143,9 @@ type Report struct {
 	// DraftsDeleted counts answers' drafts nobody has written for
 	// tools.DraftTTL, which reads leave out already.
 	DraftsDeleted int64
+	// MaterialPassagesBackfilled counts passages written for bodies and file
+	// texts that were not indexed, or whose text revision had moved on.
+	MaterialPassagesBackfilled int
 	// QueuedFilesDeleted counts the files deleted from the store that a
 	// deletion queued (blob_deletion): an assignment's, deleted for good.
 	QueuedFilesDeleted int
@@ -153,7 +157,7 @@ type Report struct {
 
 func (r Report) total() int64 {
 	return int64(r.ProposalsExpired+r.MembersExpired+r.OrphansRemoved+r.AssignmentsClosed+r.SubmissionsMissing+r.QueuedFilesDeleted+
-		r.OrphanFilesRemoved+r.ExportFilesRemoved) + r.SessionsDeleted + r.DraftsDeleted
+		r.MaterialPassagesBackfilled+r.OrphanFilesRemoved+r.ExportFilesRemoved) + r.SessionsDeleted + r.DraftsDeleted
 }
 
 // Sweep does one round of everything, if no other instance is doing so.
@@ -261,6 +265,9 @@ func (r *Runner) Sweep(ctx context.Context) (Report, error) {
 	// not: one nobody wrote for a while is gone already to whoever reads it.
 	if rep.DraftsDeleted, err = q.DeleteStaleDrafts(ctx, now.Add(-tools.DraftTTL)); err != nil {
 		return rep, fmt.Errorf("stale drafts: %w", err)
+	}
+	if rep.MaterialPassagesBackfilled, err = tools.BackfillMaterialPassages(ctx, r.pool, r.cfg.Batch, now); err != nil {
+		return rep, fmt.Errorf("material search backfill: %w", err)
 	}
 	if rep.QueuedFilesDeleted, err = r.deleteQueuedFiles(ctx, now); err != nil {
 		return rep, fmt.Errorf("queued files: %w", err)

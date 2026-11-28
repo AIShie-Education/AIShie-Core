@@ -96,6 +96,7 @@ func RegisterAll(reg *tool.Registry, d Deps) {
 	}
 	reg.Register(meTools(d)...)
 	reg.Register(agentTools(d)...)
+	reg.Register(oauthClientTools()...)
 	reg.Register(platformTools()...)
 	reg.Register(departmentTools()...)
 	reg.Register(courseTools()...)
@@ -107,6 +108,7 @@ func RegisterAll(reg *tool.Registry, d Deps) {
 	reg.Register(groupTools()...)
 	reg.Register(submissionTools()...)
 	reg.Register(documentTools(d)...)
+	reg.Register(courseMaterialsSearch())
 	reg.Register(textTools(d)...)
 	reg.Register(serviceTools()...)
 	reg.Register(agentRuntimeTools()...)

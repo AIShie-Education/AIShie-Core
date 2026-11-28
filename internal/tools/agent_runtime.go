@@ -30,10 +30,10 @@ import (
 // the site ask a runtime agent while the token the runtime holds for it
 // lives. Ending the hosting revokes it (agent_runtime.revoke_token).
 //
-// Nothing else is the runtime's here: no course, seat or person's work is
-// returned, and no mcp agent, whose tokens are its owner's. check_ask answers only
-// the boolean authorization question the runtime needs, never why it was
-// refused, and never a model or provider.
+// Nothing else is the runtime's here: no course or person's work is returned,
+// and no mcp agent, whose tokens are its owner's. check_ask says nothing about
+// a refusal; a successful check names only the seats and their effective levels
+// the runtime needs to authorize its own work, and never a model or provider.
 
 var agentRuntime = tool.Gate{Service: domain.ServiceAgentRuntime}
 
@@ -47,7 +47,7 @@ const (
 )
 
 func agentRuntimeTools() []tool.Tool {
-	return []tool.Tool{runtimeAgent(), runtimeCheckOwner(), runtimeCheckAsk(), runtimeIssueToken(), runtimeRevokeToken()}
+	return []tool.Tool{runtimeAgent(), runtimeCheckOwner(), runtimeCheckAsk(), runtimeCheckChatDecision(), runtimeIssueToken(), runtimeRevokeToken()}
 }
 
 // Why the runtime may not host an agent, each as issue_token refuses it and
@@ -206,8 +206,24 @@ type RuntimeCheckAskIn struct {
 	CourseID uuid.UUID `json:"course_id" jsonschema:"the course in which they would ask the agent"`
 }
 
+// RuntimeAskGrant is what the site's runtime needs to carry an allowed ask
+// into its own runner. It is only an authorization result: no conversation or
+// message is opened in Core. The levels are the seats' effective ones, any
+// principal's caps included. In particular, may_ask does not make a
+// confirm_required or pending_review ask immediately executable.
+type RuntimeAskGrant struct {
+	OpenerMemberID              uuid.UUID  `json:"opener_member_id" jsonschema:"the asking person's member id in the course"`
+	RespondentMemberID          uuid.UUID  `json:"respondent_member_id" jsonschema:"the agent's member id in the course, the runner seat's self_member_id"`
+	RespondentPrincipalMemberID *uuid.UUID `json:"respondent_principal_member_id,omitempty" jsonschema:"for an agent seated as a person's delegate, that person's member id in the course"`
+	ConversationAskLevel        string     `json:"conversation_ask_level" jsonschema:"the opener seat's effective conversation_ask level: autonomous, pending_review or confirm_required; the runtime must not treat the latter two as immediate execution"`
+	ActionDecideLevel           string     `json:"action_decide_level" jsonschema:"the respondent seat's effective action_decide level: denied, confirm_required, pending_review or autonomous"`
+	ConversationAnswerLevel     string     `json:"conversation_answer_level" jsonschema:"the respondent seat's effective conversation_answer level, which governs whether its answer is posted at once, reviewed after or confirmed first"`
+	AnswersCourse               bool       `json:"answers_course" jsonschema:"whether the respondent currently answers people other than its principal (respondent.AnswersOthers), not merely its owner alone"`
+}
+
 type RuntimeCheckAskOut struct {
-	MayAsk bool `json:"may_ask" jsonschema:"whether that person may ask that agent in that course now, by exactly the rules of conversation.ask; false, and nothing more, for any refusal or unknown id"`
+	MayAsk bool             `json:"may_ask" jsonschema:"whether that person may ask that agent in that course now, by exactly the rules of conversation.ask; false, and nothing more, for any refusal or unknown id"`
+	Grant  *RuntimeAskGrant `json:"grant,omitempty" jsonschema:"when may_ask is true, the seats, the opener's conversation_ask level, and the respondent's effective levels and answers_course policy the runtime needs; absent on every refusal"`
 }
 
 func runtimeCheckAsk() tool.Tool {
@@ -218,13 +234,15 @@ func runtimeCheckAsk() tool.Tool {
 			"permission, course and seat liveness, agent kind, hosting and live-token, and addressing rules, without " +
 			"opening a conversation or writing a message. Every refusal, and every unknown actor, agent or course, " +
 			"returns may_ask false with no reason and no other information; in particular no model or provider is " +
-			"revealed. True means the question would be allowed, including one requiring confirmation.",
+			"revealed. True means the question is authorized, not necessarily immediately executable, and adds grant: " +
+			"the two seats, the respondent's principal seat if it has one, the opener's effective conversation_ask level, " +
+			"the respondent's effective action_decide and conversation_answer levels, and whether it answers the course.",
 		Kind: tool.Read, Gate: agentRuntime,
 		HTTP:    tool.Route{Method: "GET", Pattern: "/v1/services/agent_runtime/actors/{actor_id}/courses/{course_id}/agents/{agent_id}/may-ask"},
 		Resolve: noTarget[RuntimeCheckAskIn]("conversation"),
 		Query: func(ctx context.Context, rc *tool.ReadCtx, in RuntimeCheckAskIn) (RuntimeCheckAskOut, error) {
-			mayAsk, err := mayAskInCourse(ctx, rc.Q, in.ActorID, in.AgentID, in.CourseID, rc.Now)
-			return RuntimeCheckAskOut{MayAsk: mayAsk}, err
+			grant, err := mayAskInCourse(ctx, rc.Q, in.ActorID, in.AgentID, in.CourseID, rc.Now)
+			return RuntimeCheckAskOut{MayAsk: grant != nil, Grant: grant}, err
 		},
 	})
 }

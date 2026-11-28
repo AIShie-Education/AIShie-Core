@@ -6,15 +6,17 @@
 -- a share form at 10 %, and each one's sheet, with comments; and the group
 -- graded 18 of 20, peer evaluation counted, Wei's grade 0.9 above the
 -- group's and Kai's 0.9 below, posted. Committed, so that the down
--- migration runs over it.
+-- migration runs over it. The up fixture deliberately leaves Kai, Ward teams,
+-- Ward A and its two live memberships in place: reuse them rather than make
+-- another active set with the same name.
 
 \set ON_ERROR_STOP 1
 \set QUIET 1
 BEGIN;
 
--- 1c1 Ward teams · 1c2 Ward A · 174 Handover · 1a1 Ward A's work · 1b1 the
--- placing · 1b2 the grade · 1b3 the sheets · 1e1 the group grade · 1d1 Wei's
--- grade · 1d2 Kai's · 1f1, 1f2 Wei's and Kai's sheets
+-- Up's c1 Ward teams, c2 Ward A and its memberships are reused. 174 Handover ·
+-- 1a1 Ward A's work · 1b1 the placing · 1b2 the grade · 1b3 the sheets ·
+-- 1e1 the group grade · 1d1 Wei's grade · 1d2 Kai's · 1f1, 1f2 their sheets
 INSERT INTO action (id, actor_id, course_id, member_id, action_type, target_type, target_id, payload, payload_hash,
                     idempotency_key, authz_result, status, executed_at) VALUES
     ('00000000-0000-0000-0032-0000000001b1', '00000000-0000-0000-0018-000000000031', '00000000-0000-0000-0018-000000000041',
@@ -26,23 +28,13 @@ INSERT INTO action (id, actor_id, course_id, member_id, action_type, target_type
     ('00000000-0000-0000-0032-0000000001b3', '00000000-0000-0000-0018-000000000033', '00000000-0000-0000-0018-000000000041',
      '00000000-0000-0000-0018-000000000053', 'peer_review.submit', 'assignment', '00000000-0000-0000-0032-000000000174', '{}',
      repeat('0', 64), 'down32-b3', 'autonomous', 'executed', now());
-INSERT INTO group_set (id, course_id, name, created_by_member_id)
-VALUES ('00000000-0000-0000-0032-0000000001c1', '00000000-0000-0000-0018-000000000041', 'Ward teams',
-        '00000000-0000-0000-0018-000000000051');
-INSERT INTO course_group (id, course_id, set_id, name, created_by_member_id)
-VALUES ('00000000-0000-0000-0032-0000000001c2', '00000000-0000-0000-0018-000000000041', '00000000-0000-0000-0032-0000000001c1',
-        'Ward A', '00000000-0000-0000-0018-000000000051');
-INSERT INTO group_membership (course_id, set_id, group_id, member_id, joined_at, joined_by_member_id, joined_how, joined_action_id) VALUES
-    ('00000000-0000-0000-0018-000000000041', '00000000-0000-0000-0032-0000000001c1', '00000000-0000-0000-0032-0000000001c2',
-     '00000000-0000-0000-0018-000000000053', now(), '00000000-0000-0000-0018-000000000051', 'assigned', '00000000-0000-0000-0032-0000000001b1'),
-    ('00000000-0000-0000-0018-000000000041', '00000000-0000-0000-0032-0000000001c1', '00000000-0000-0000-0032-0000000001c2',
-     '00000000-0000-0000-0032-000000000057', now(), '00000000-0000-0000-0018-000000000051', 'assigned', '00000000-0000-0000-0032-0000000001b1');
+-- The set, group and both memberships already exist from tests/up/0032.
 INSERT INTO assignment (id, course_id, title, points_possible, published_at, group_set_id)
 VALUES ('00000000-0000-0000-0032-000000000174', '00000000-0000-0000-0018-000000000041', 'Handover', 20, now(),
-        '00000000-0000-0000-0032-0000000001c1');
+        '00000000-0000-0000-0032-0000000000c1');
 INSERT INTO submission (id, assignment_id, course_id, group_id, body)
 VALUES ('00000000-0000-0000-0032-0000000001a1', '00000000-0000-0000-0032-000000000174', '00000000-0000-0000-0018-000000000041',
-        '00000000-0000-0000-0032-0000000001c2', 'Our handover');
+        '00000000-0000-0000-0032-0000000000c2', 'Our handover');
 UPDATE submission SET state = 'submitted', submitted_at = now(), submitted_by_member_id = '00000000-0000-0000-0032-000000000057'
 WHERE id = '00000000-0000-0000-0032-0000000001a1';
 INSERT INTO submission_member (submission_id, member_id, course_id, assignment_id, added_at, added_how, added_by_member_id) VALUES
@@ -56,10 +48,10 @@ VALUES ('00000000-0000-0000-0032-000000000174', '00000000-0000-0000-0018-0000000
         now() - interval '1 hour', 10, '00000000-0000-0000-0018-000000000051', '00000000-0000-0000-0018-000000000051');
 INSERT INTO peer_review (id, course_id, assignment_id, group_id, rater_member_id, comment, created_by_action_id) VALUES
     ('00000000-0000-0000-0032-0000000001f1', '00000000-0000-0000-0018-000000000041', '00000000-0000-0000-0032-000000000174',
-     '00000000-0000-0000-0032-0000000001c2', '00000000-0000-0000-0018-000000000053', 'Kai was often late.',
+     '00000000-0000-0000-0032-0000000000c2', '00000000-0000-0000-0018-000000000053', 'Kai was often late.',
      '00000000-0000-0000-0032-0000000001b3'),
     ('00000000-0000-0000-0032-0000000001f2', '00000000-0000-0000-0018-000000000041', '00000000-0000-0000-0032-000000000174',
-     '00000000-0000-0000-0032-0000000001c2', '00000000-0000-0000-0032-000000000057', NULL, '00000000-0000-0000-0032-0000000001b3');
+     '00000000-0000-0000-0032-0000000000c2', '00000000-0000-0000-0032-000000000057', NULL, '00000000-0000-0000-0032-0000000001b3');
 INSERT INTO peer_review_entry (review_id, course_id, ratee_member_id, share, comment) VALUES
     ('00000000-0000-0000-0032-0000000001f1', '00000000-0000-0000-0018-000000000041', '00000000-0000-0000-0018-000000000053', 60, NULL),
     ('00000000-0000-0000-0032-0000000001f1', '00000000-0000-0000-0018-000000000041', '00000000-0000-0000-0032-000000000057', 40, 'Late'),

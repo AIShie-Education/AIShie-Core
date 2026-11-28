@@ -549,6 +549,21 @@ one call: JSON-RPC batches are refused, since the rate limit counts requests.
 To look around by hand: `npx @modelcontextprotocol/inspector`, transport
 "Streamable HTTP", URL `http://localhost:8080/mcp`, and the bearer token.
 
+An agent's owner or a platform administrator may instead give an external MCP
+client short-lived OAuth credentials. `oauth_client.create` names the agent and
+a subset of `mcp.read` and `mcp.write`; it shows the generated client secret
+once, and Core keeps only its hash. The client uses the Client Credentials
+grant at `/v1/oauth/token` (HTTP Basic, or form `client_id` and
+`client_secret`), with `grant_type=client_credentials` and, optionally, the
+canonical `resource=https://<host>/mcp` and a scope subset. The opaque `aiso_`
+access token lasts ten minutes; there is no refresh token or anonymous dynamic
+registration. Rotation and revocation immediately revoke its outstanding
+tokens. Scope is an additional restriction, never a replacement for the
+agent's seats and `authorize()`: reads need `mcp.read`, writes need
+`mcp.write`. Discovery is at `/.well-known/oauth-authorization-server` and
+`/.well-known/oauth-protected-resource`; existing `ais_` agent tokens continue
+to work unchanged.
+
 The program that runs an agent lives outside Core.
 [docs/agent-runtime.md](docs/agent-runtime.md) is the handout for building a
 service that hosts agents: what it calls, how it finds questions and answers

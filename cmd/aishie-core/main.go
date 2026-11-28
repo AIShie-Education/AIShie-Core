@@ -28,6 +28,7 @@ import (
 	"github.com/AIShie-Education/AIShie-Core/internal/httpapi"
 	"github.com/AIShie-Education/AIShie-Core/internal/jobs"
 	"github.com/AIShie-Education/AIShie-Core/internal/mcpapi"
+	"github.com/AIShie-Education/AIShie-Core/internal/oauth"
 	"github.com/AIShie-Education/AIShie-Core/internal/pipeline"
 	"github.com/AIShie-Education/AIShie-Core/internal/ratelimit"
 	"github.com/AIShie-Education/AIShie-Core/internal/secrets"
@@ -282,6 +283,7 @@ func serve(cfg config.Config) error {
 	}
 
 	authn := auth.NewAuthenticator(pool, cfg.SessionTTL)
+	oauthService := oauth.NewService(pool)
 	calls := ratelimit.New(cfg.CallsPerMinute, cfg.CallsBurst)
 	asserter, err := newAsserter(pool, cfg)
 	if err != nil {
@@ -290,8 +292,9 @@ func serve(cfg config.Config) error {
 	srv := &http.Server{
 		Addr: cfg.HTTPAddr,
 		Handler: httpapi.NewHandler(httpapi.Deps{
-			Pool: pool, LatestSchema: latest, Pipeline: pl, Log: log,
-			Auth: authn, MCP: mcpapi.NewHandler(mcpapi.Deps{Pipeline: pl, Auth: authn, Log: log, Calls: calls, Memory: cfg.Memory.Enabled}),
+			Pool: pool, LatestSchema: latest, Pipeline: pl, Log: log, PublicURL: cfg.PublicURL, OAuth: oauthService,
+			Auth: authn, MCP: mcpapi.NewHandler(mcpapi.Deps{Pipeline: pl, Auth: authn, Log: log, Calls: calls, Memory: cfg.Memory.Enabled,
+				OAuth: oauthService, PublicURL: cfg.PublicURL}),
 			Calls: calls, SignIns: ratelimit.New(cfg.SignInsPerMinute, cfg.SignInsPerMinute),
 			Registrations: ratelimit.New(cfg.JoinRegistrationsPerMinute, cfg.JoinRegistrationsPerMinute), NoJoinRegistration: !cfg.JoinLinkRegistration,
 			TrustedOrigins: cfg.TrustedOrigins, TrustedProxies: cfg.TrustedProxies,

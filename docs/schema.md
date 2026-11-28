@@ -654,6 +654,7 @@ the nearest one, and the choice is recorded here so that it is a decision and no
 | Course settings, status, department, first instructor | `platform_role`, or an appointment at or above the course's department (§2.10) | outside the course by definition |
 | Purging a document or a version (`document.purge`) | `platform_role`, or an appointment at or above the course's department (§2.10) | removing data is not a seat's to do, and must be possible in an archived course |
 | Reading a version's text version (`document.text`, and `text` in `document.get` and `document.versions`) | what reading the version takes, as `document.get` decides it | it is the version's, as text (§2.4, Text versions) |
+| Searching course materials (`course_materials.search`; MCP `course_materials_search`) | any of `perm_document_read` and `perm_rubric_read`; each kind, version and assignment filtered as `document.list` and `document.get` do | only the published version without draft read, the latest with it, and released instructions and rubrics in the seat's and principal's assignment scope |
 | Writing a text version, or sending it to be transcribed again (`document.text_update`, `.text_retranscribe`) | what writing the document takes: `perm_document_write` for material, instructions and a rubric | it is a change to what the version says, as a new version is |
 | Reading a file's PDF rendition (`rendition` in `document.get`, `document.file`, `document.versions`, `conversation.attachment`, `conversation.messages`) | what reading the file takes, by the same checks | it is the file, as a PDF (§2.4, Renditions) |
 | Sending a failed rendition back to be converted (`document.rendition_retry`; `conversation.rendition_retry`) | what writing the document takes, its kind's permission; for a message's file, `perm_document_read`, and being its message's author or deciding actions for the opener | whoever could put the file there again asks for it to be converted again; a message's, as retracting it (§2.4, Renditions) |
@@ -1319,6 +1320,34 @@ sent to a model for this.
   is told when the text becomes `done` (the service's, or staff's) and when a text is sent back to
   be transcribed, with `version_id`, `file_id`, `status`, `source` and `revision`, never the text,
   so that a runtime drops what it kept and search reads it again.
+
+**Course-material search.** `course_materials.search` (MCP `course_materials_search`) finds passages in
+material, instructions and rubrics, without reading whole documents. Its derived index,
+`document_search_passages` (migration 0033), holds each version's own `body_md` and each completed
+file text (`text_source` `body_md`, `ai` or `staff`), the text revision, its `document.text` part,
+its `body`, `page` or `slide` section and number, the original passage and its normalised search text.
+A version's body is cut at headings and paragraphs, about 1,000 runes at a time. File text is first
+cut by the same `textParts` as `document.text`, so `part_no` is a valid read pointer, and then at
+`## Slide N`, `## Page N` and `## 第 N 頁` headings. The document title and a file's filename are
+included in every passage's search text.
+
+The index uses only PostgreSQL's built-in text search on 13 through 18: `memory.SearchText` writes
+NFKC-normalised, lower-cased words and CJK bigrams; a generated `to_tsvector('simple', search_text)`
+column has a GIN index, and `memory.QueryTerms` supplies the safe `to_tsquery` argument. No extension
+or locale-specific parser is installed. Composite indexes support the course/document/version join
+and the backfill's version/file revision lookup. Results are ranked by `ts_rank_cd`, then course
+order, and paged five at a time by default (at most 20, pages 1 to 20). Every hit includes a cut
+excerpt and a `read` object: `document_get` arguments for a version's body, or `document_text`
+arguments naming the version, file and part. The reader makes that call before relying on an excerpt.
+
+Writing a version indexes its body in the same transaction; completing or editing a file's text
+rebuilds that file's passages. Renaming a document rebuilds its passages; archiving, purging and
+retranscribing remove the affected ones, and unarchiving rebuilds them. Purging a version also has a
+database trigger, so an older release cannot leave its body behind. The ordinary jobs sweep calls
+`BackfillMaterialPassages` for missing bodies and files and for text revisions that have moved on,
+in bounded batches and short transactions. The index holds no permission or role copy: each search
+filters live documents in SQL, with the same kind, publication and member/principal assignment scope
+as `ListCourseDocuments`, and chooses published or latest versions as `docReader.versionOf` does.
 
 **The queue.** The transcription service (§2.1, Services) takes what waits and writes it back:
 
@@ -3898,10 +3927,6 @@ them (three rows of `submission_member`, `hand_in`).
   remove are the v1 controls.
 - **Redis.** The event feed is read from Postgres; `event.seq` is already the cursor a stream
   would use.
-- **Full-text search** of course content. `to_tsvector('simple')` does not segment Chinese or
-  Japanese, so it was dropped rather than shipped broken. Needs `pg_bigm`/PGroonga or
-  application-side segmentation, which memory's search does for itself (§2.9). Text versions
-  (§2.4) are what it would index, and their news says when to index them again.
 - **Transcribing students' files.** A submitted file and a feedback file have no text version:
   sending a student's work to a model the site chose is a decision of its own.
 - **A message's files as text.** Core keeps a message's files and serves them as downloads; it
