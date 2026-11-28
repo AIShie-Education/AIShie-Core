@@ -1,6 +1,7 @@
 package tools_test
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -91,10 +92,10 @@ func TestOAuthClientRotationAndRevocationInvalidateSecretsAndTokens(t *testing.T
 		testkit.Result[tools.OAuthClientSecretOut](t, replay).ClientSecret != "" {
 		t.Fatalf("rotation replay revealed the new secret: %+v", replay)
 	}
-	if _, err := svc.IssueToken(t.Context(), created.Client.ClientID, created.ClientSecret, nil, "", ""); err != oauth.ErrInvalidClient {
+	if _, err := svc.IssueToken(t.Context(), created.Client.ClientID, created.ClientSecret, nil, "", ""); !errors.Is(err, oauth.ErrInvalidClient) {
 		t.Fatalf("old secret after rotation: %v", err)
 	}
-	if _, err := svc.Authenticate(t.Context(), oldToken.Value); err != oauth.ErrInvalidToken {
+	if _, err := svc.Authenticate(t.Context(), oldToken.Value); !errors.Is(err, oauth.ErrInvalidToken) {
 		t.Fatalf("old access token after rotation: %v", err)
 	}
 	newToken, err := svc.IssueToken(t.Context(), created.Client.ClientID, rotated.ClientSecret, nil, "", "")
@@ -103,10 +104,10 @@ func TestOAuthClientRotationAndRevocationInvalidateSecretsAndTokens(t *testing.T
 	}
 
 	b.do(t, b.yuki, "oauth_client.revoke", rotateArgs)
-	if _, err := svc.Authenticate(t.Context(), newToken.Value); err != oauth.ErrInvalidToken {
+	if _, err := svc.Authenticate(t.Context(), newToken.Value); !errors.Is(err, oauth.ErrInvalidToken) {
 		t.Fatalf("access token after client revocation: %v", err)
 	}
-	if _, err := svc.IssueToken(t.Context(), created.Client.ClientID, rotated.ClientSecret, nil, "", ""); err != oauth.ErrInvalidClient {
+	if _, err := svc.IssueToken(t.Context(), created.Client.ClientID, rotated.ClientSecret, nil, "", ""); !errors.Is(err, oauth.ErrInvalidClient) {
 		t.Fatalf("secret after client revocation: %v", err)
 	}
 	b.try(t, b.yuki, "oauth_client.rotate", rotateArgs, apperr.NotFound)
