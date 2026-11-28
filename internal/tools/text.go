@@ -554,6 +554,9 @@ func documentTextUpdate() tool.Tool {
 				EditedByMemberID: &ec.Member.ID, Now: &ec.Now}); err != nil {
 				return DocumentTextChangeOut{}, err
 			}
+			if _, err := rebuildMaterialFile(ctx, ec.Q, materialDoc(st.doc), text.VersionID, text.FileID, ec.Now); err != nil {
+				return DocumentTextChangeOut{}, err
+			}
 			out.Changed = true
 			source := textByStaff
 			return out, emitTextEvent(ctx, ec, st.doc, text.VersionID, text.FileID, textDone, &source, out.Revision)
@@ -603,6 +606,9 @@ func documentTextRetranscribe() tool.Tool {
 				return DocumentTextChangeOut{}, err
 			}
 			out := DocumentTextChangeOut{VersionID: text.VersionID, FileID: text.FileID, Status: textPending, Revision: text.Revision}
+			if err := clearMaterialFile(ctx, ec.Q, text.VersionID, text.FileID); err != nil {
+				return DocumentTextChangeOut{}, err
+			}
 			switch {
 			case st.queued:
 				out.Changed = true

@@ -582,6 +582,12 @@ func insertVersion(ctx context.Context, d Deps, ec *tool.ExecCtx, courseID, docu
 	if err := ec.Q.InsertDocumentVersion(ctx, row); err != nil {
 		return uuid.Nil, nil, err
 	}
+	if courseLevel(kind) && c.BodyMD != nil {
+		doc := materialDocument{courseID: courseID, id: documentID, title: title}
+		if _, err := replaceMaterialBody(ctx, ec.Q, doc, row.ID, c.BodyMD, ec.Now); err != nil {
+			return uuid.Nil, nil, err
+		}
+	}
 	fileIDs, err := insertFiles(ctx, ec, documentID, row.ID, files)
 	if err != nil {
 		return uuid.Nil, nil, err
@@ -1098,6 +1104,11 @@ func documentArchive() tool.Tool {
 			if n == 0 {
 				return OK{}, errArchived
 			}
+			if courseLevel(doc.Kind) {
+				if err := clearMaterialDocument(ctx, ec.Q, doc.ID); err != nil {
+					return OK{}, err
+				}
+			}
 			if err := emitFileEvent(ctx, ec, in.CourseID, doc, EventDocumentArchived, EventSubmissionFileArchived, EventFeedbackFileArchived, nil); err != nil {
 				return OK{}, err
 			}
@@ -1263,6 +1274,13 @@ func documentUpdate() tool.Tool {
 			if err := ec.Q.UpdateDocumentDetails(ctx, dbq.UpdateDocumentDetailsParams{ID: doc.ID, Title: title, SortOrder: order}); err != nil {
 				return DocumentChangeOut{}, err
 			}
+			if title != doc.Title && courseLevel(doc.Kind) && doc.Status == "active" && doc.PurgedAt == nil {
+				indexed := materialDoc(doc)
+				indexed.title = title
+				if _, err := rebuildMaterialDocument(ctx, ec.Q, indexed, ec.Now); err != nil {
+					return DocumentChangeOut{}, err
+				}
+			}
 			payload := map[string]any{"title_changed": title != doc.Title, "sort_order_changed": order != doc.SortOrder}
 			return DocumentChangeOut{Changed: true}, emitFileEvent(ctx, ec, in.CourseID, doc,
 				EventDocumentUpdated, EventSubmissionFileUpdated, EventFeedbackFileUpdated, payload)
@@ -1327,6 +1345,11 @@ func documentUnarchive() tool.Tool {
 			}
 			if n == 0 {
 				return OK{}, errNotArchived
+			}
+			if courseLevel(doc.Kind) {
+				if _, err := rebuildMaterialDocument(ctx, ec.Q, materialDoc(doc), ec.Now); err != nil {
+					return OK{}, err
+				}
 			}
 			return OK{OK: true}, emitFileEvent(ctx, ec, in.CourseID, doc,
 				EventDocumentUnarchived, EventSubmissionFileRestored, EventFeedbackFileRestored, nil)
@@ -1466,6 +1489,9 @@ func documentPurge(d Deps) tool.Tool {
 			} else {
 				if _, err := ec.Q.PurgeDocument(ctx, dbq.PurgeDocumentParams{ID: doc.ID, PurgedAt: &ec.Now, PurgedByActorID: &ec.Actor.ID,
 					PurgeReason: &reason}); err != nil {
+					return DocumentPurgeOut{}, err
+				}
+				if err := clearMaterialDocument(ctx, ec.Q, doc.ID); err != nil {
 					return DocumentPurgeOut{}, err
 				}
 			}

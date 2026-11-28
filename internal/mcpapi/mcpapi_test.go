@@ -721,7 +721,7 @@ func TestToolsListIsTheRegistry(t *testing.T) {
 	if len(listed) != len(exposed) {
 		t.Fatalf("MCP lists %d tools, the registry exposes %d that are not a site service's", len(listed), len(exposed))
 	}
-	for _, name := range []string{"document.text", "document.text_update", "service.issue_credential"} {
+	for _, name := range []string{"course_materials.search", "document.text", "document.text_update", "service.issue_credential"} {
 		if listed[mcpapi.ToolName(name)] == nil {
 			t.Errorf("%s is not offered over MCP", name)
 		}
