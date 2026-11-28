@@ -107,7 +107,7 @@ func TestRuntimeCheckChatDecisionIsReadOnlyAndServiceOnly(t *testing.T) {
 		t.Fatalf("the check_chat_decision declaration: %+v, %v", tl, ok)
 	}
 	const path = "/v1/services/agent_runtime/chat-decisions/check"
-	if tl.HTTP.Method != "POST" || tl.HTTP.Pattern != path {
+	if tl.HTTP.Method != "GET" || tl.HTTP.Pattern != path {
 		t.Fatalf("check_chat_decision's route: %+v", tl.HTTP)
 	}
 	level, hasLevel := tl.OutputSchema.Properties["action_decide_level"]

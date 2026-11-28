@@ -66,7 +66,7 @@ func runtimeCheckChatDecision() tool.Tool {
 			"confirm_required or pending_review judgment for an autonomous one.",
 		Kind:    tool.Read,
 		Gate:    agentRuntime,
-		HTTP:    tool.Route{Method: "POST", Pattern: "/v1/services/agent_runtime/chat-decisions/check"},
+		HTTP:    tool.Route{Method: "GET", Pattern: "/v1/services/agent_runtime/chat-decisions/check"},
 		Resolve: noTarget[RuntimeCheckChatDecisionIn]("conversation"),
 		Query: func(ctx context.Context, rc *tool.ReadCtx, in RuntimeCheckChatDecisionIn) (RuntimeCheckChatDecisionOut, error) {
 			if err := checkRuntimeChatDecisionArgs(in); err != nil {
